@@ -221,6 +221,24 @@ export function copyTargetCards(input: {
   });
 }
 
+const asSentence = (text: string): string => (/[.!?]$/u.test(text) ? text : `${text}.`);
+
+/**
+ * What the dialog says when no card can take the copy: only nodes that have
+ * it (or are offline) is "already on every online node"; otherwise it says
+ * why the others can't, such as a Ryco to update (A23).
+ */
+export function copyNoTargetMessage(title: string, cards: ReadonlyArray<CopyTargetCard>): string {
+  const reasons = new Set<string>();
+  for (const card of cards) {
+    if ((card.state === "outdated" || card.state === "blocked") && card.reason !== null) {
+      reasons.add(asSentence(card.reason));
+    }
+  }
+  if (reasons.size === 0) return `${title} is already on every online node.`;
+  return [`No node can take a copy of ${title} right now.`, ...reasons].join(" ");
+}
+
 /** The destination the dialog starts with: the one asked for, else the first node ready for it. */
 export function initialCopyTarget(
   cards: ReadonlyArray<CopyTargetCard>,

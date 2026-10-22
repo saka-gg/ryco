@@ -168,6 +168,12 @@ export interface ProjectCopyRun {
 export interface StartProjectCopyInput {
   readonly io: ProjectCopyIo;
   /**
+   * The id of a new copy, when the app claimed it before the first record is published (so no
+   * other window resumes a copy this one is starting); minted here otherwise. Ignored with
+   * `resume` and `restartOf`, which keep theirs.
+   */
+  readonly copyId?: string | undefined;
+  /**
    * What to copy. Null resumes `resume` without its plan: the copy can then only follow an
    * import that already started, and otherwise cleans up.
    */
@@ -252,7 +258,7 @@ function initialRecord(input: StartProjectCopyInput): ProjectCopyJobRecord {
   }
   if (plan === null) throw new Error("A project copy needs a plan or a record to resume.");
   return createProjectCopyJobRecord({
-    copyId: io.uuid(),
+    copyId: input.copyId ?? io.uuid(),
     at: io.now(),
     sourceEnvironmentId: plan.source.kind === "export" ? plan.source.environmentId : null,
     sourceProjectId: plan.source.kind === "export" ? plan.source.projectId : null,

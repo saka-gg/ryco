@@ -7,6 +7,7 @@ import {
   decodeProjectCopyJobRecords,
   PROJECT_COPY_FINISHED_RECORD_TTL_MS,
   PROJECT_COPY_JOB_RECORDS_MAX,
+  projectCopyReportOwed,
   projectCopyResumeKind,
   reduceProjectCopyJobRecord,
   upsertProjectCopyJobRecord,
@@ -118,6 +119,72 @@ describe("reduceProjectCopyJobRecord", () => {
       importId: uuid(9),
       projectId: "project-retry",
     });
+  });
+});
+
+describe("Agent Control reports", () => {
+  const agentControl = {
+    environmentId: "env-agent" as EnvironmentId,
+    proposalId: "proposal-1",
+    executorId: uuid(50),
+  };
+
+  it("owes the final report from the finish until the node took it", () => {
+    const running = createProjectCopyJobRecord({
+      copyId: uuid(1),
+      at: 1_000,
+      sourceEnvironmentId: null,
+      sourceProjectId: null,
+      targetEnvironmentId: "env-b" as EnvironmentId,
+      projectId: "project-new" as ProjectId,
+      importId: ProjectImportId.make(uuid(101)),
+      agentControl,
+    });
+    expect(projectCopyReportOwed(running)).toBe(false);
+    // A finished record stays resumable for its report only, not for the copy.
+    const finished = reduceProjectCopyJobRecord(running, {
+      type: "finished",
+      outcome: "completed",
+      at: 1_001,
+    });
+    expect(projectCopyReportOwed(finished)).toBe(true);
+    expect(projectCopyResumeKind(finished)).toBe("none");
+    // Reporting before the end does nothing: there is nothing final to report yet.
+    expect(reduceProjectCopyJobRecord(running, { type: "reported", at: 1_002 })).toBe(running);
+
+    const reported = reduceProjectCopyJobRecord(finished, { type: "reported", at: 1_003 });
+    expect(reported).toMatchObject({ agentControl: { reported: true }, updatedAt: 1_003 });
+    expect(projectCopyReportOwed(reported)).toBe(false);
+    // A copy of the user's own never owes one.
+    expect(
+      projectCopyReportOwed(
+        reduceProjectCopyJobRecord(record(), { type: "finished", outcome: "failed", at: 1_004 }),
+      ),
+    ).toBe(false);
+    // Stored and read back, the flag survives.
+    expect(decodeProjectCopyJobRecords(JSON.parse(JSON.stringify([reported])))).toEqual([reported]);
+  });
+
+  it("keeps a record that owes its report ahead of finished ones when the list is full", () => {
+    const now = 10_000;
+    const owed = reduceProjectCopyJobRecord(
+      { ...record(1, now - 100), agentControl },
+      { type: "finished", outcome: "completed", at: now - 100 },
+    );
+    let records = upsertProjectCopyJobRecord([], owed, now);
+    for (let index = 0; index < PROJECT_COPY_JOB_RECORDS_MAX + 5; index += 1) {
+      records = upsertProjectCopyJobRecord(
+        records,
+        reduceProjectCopyJobRecord(record(10 + index, now), {
+          type: "finished",
+          outcome: "completed",
+          at: now,
+        }),
+        now,
+      );
+    }
+    expect(records).toHaveLength(PROJECT_COPY_JOB_RECORDS_MAX);
+    expect(records.map((entry) => entry.copyId)).toContain(owed.copyId);
   });
 });
 

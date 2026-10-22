@@ -8,6 +8,7 @@ import {
   type StartProjectCopyInput,
 } from "@ryco/client-runtime/projectCopy";
 import {
+  AgentControlRpcError,
   EnvironmentId,
   ProjectId,
   type AgentControlClientExecutorId,
@@ -42,17 +43,20 @@ vi.mock("../../../environments/nodeCatalog", () => ({
 import { getLocalStorageItem, setLocalStorageItem } from "../../../hooks/useLocalStorage";
 import {
   PROJECT_COPY_RECORDS_STORAGE_KEY,
+  PROJECT_COPY_STARTS_STORAGE_KEY,
   resetProjectNodesDialogStoreForTests,
   useProjectNodesDialogStore,
 } from "../projectNodesDialogStore";
 import {
   cancelProjectCopy,
+  holdAgentControlCopyStart,
   registerProjectCopyViewer,
   resetProjectCopyManagerForTests,
   resumeProjectCopies,
   resumeProjectCopy,
   retryProjectCopy,
   runProjectCopyInBackground,
+  setProjectCopyClaimsForTests,
   setProjectCopyRuntimeForTests,
   showProjectCopyProgress,
   startManagedProjectCopy,
@@ -61,6 +65,7 @@ import {
   viewCopiedProject,
   type ProjectCopyRuntime,
 } from "./copyManager";
+import { createWindowProjectCopyClaims, type ProjectCopyClaims } from "./projectCopyClaims";
 import type { WebProjectCopyIo } from "./webProjectCopyIo";
 
 const target = EnvironmentId.make(MINI);
@@ -140,6 +145,10 @@ interface FakeRun {
 function fakeRuntime() {
   const runs: FakeRun[] = [];
   const reports: AgentControlReportClientExecutionInput[] = [];
+  /** What the next report attempts fail with, in order; empty: they arrive. */
+  const reportFailures: unknown[] = [];
+  /** What the target's `listImports` answers; null: it can't be reached. */
+  const targetImports: { current: ProjectImportSnapshot[] | null } = { current: [] };
   const disposed = vi.fn();
   const runtime: ProjectCopyRuntime = {
     startProjectCopy: (input) => {
@@ -156,7 +165,7 @@ function fakeRuntime() {
               importId: ProjectImportId.make(crypto.randomUUID()),
               projectId: newProjectId,
             })
-          : record({ agentControl: input.agentControl ?? null }));
+          : record({ copyId: input.copyId ?? "copy-1", agentControl: input.agentControl ?? null }));
       const run: FakeRun = {
         input,
         cancel: vi.fn<() => void>(),
@@ -185,24 +194,38 @@ function fakeRuntime() {
       };
     },
     projectCopyPlanWithSendFiles: (current) => ({ ...current, title: `${current.title} (files)` }),
-    createIo: () => ({ dispose: disposed }) as unknown as WebProjectCopyIo,
+    createIo: () => ({ dispose: disposed, uuid: () => "copy-1" }) as unknown as WebProjectCopyIo,
     callNodeWithLease: async (_environmentId, call) =>
       call({
         agentControl: {
           reportClientExecution: async (input: AgentControlReportClientExecutionInput) => {
+            const failure = reportFailures.shift();
+            if (failure !== undefined) throw failure;
             reports.push(input);
             return {};
           },
         },
       } as unknown as EnvironmentApi) as never,
+    callNodeToRead: async (_environmentId, call) => {
+      const imports = targetImports.current;
+      if (imports === null) throw new Error("Mac mini is offline");
+      return call({
+        projects: { listImports: async () => ({ imports }) },
+      } as unknown as EnvironmentApi) as never;
+    },
   };
-  return { runtime, runs, reports, disposed };
+  return { runtime, runs, reports, reportFailures, targetImports, disposed };
 }
 
 const storedRecords = () =>
   getLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, Schema.Unknown) as ReadonlyArray<{
     copyId: string;
     stage: string;
+  }> | null;
+
+const storedStarts = () =>
+  getLocalStorageItem(PROJECT_COPY_STARTS_STORAGE_KEY, Schema.Unknown) as ReadonlyArray<{
+    executorId: string;
   }> | null;
 
 const agentControl = {
@@ -216,13 +239,17 @@ let fake: ReturnType<typeof fakeRuntime>;
 beforeEach(() => {
   fake = fakeRuntime();
   setProjectCopyRuntimeForTests(fake.runtime);
+  setProjectCopyClaimsForTests(createWindowProjectCopyClaims());
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   resetProjectCopyManagerForTests();
   resetProjectNodesDialogStoreForTests();
   setProjectCopyRuntimeForTests(null);
+  setProjectCopyClaimsForTests(null);
   setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [], Schema.Unknown);
+  setLocalStorageItem(PROJECT_COPY_STARTS_STORAGE_KEY, [], Schema.Unknown);
   vi.clearAllMocks();
 });
 
@@ -471,6 +498,9 @@ describe("copyManager", () => {
     run.emitRecord(reduceProjectCopyJobRecord(run.record, { type: "import-accepted", at: 3_000 }));
     run.emitRecord(reduceProjectCopyJobRecord(run.record, { type: "import-accepted", at: 3_500 }));
     run.emitProgress({ phase: "done", importSnapshot: snapshot("completed") });
+    run.emitRecord(
+      reduceProjectCopyJobRecord(run.record, { type: "finished", outcome: "completed", at: 4_000 }),
+    );
     run.settle({
       project: {
         environmentId: target,
@@ -567,5 +597,309 @@ describe("copyManager", () => {
       title: "ryco (rebuilt)",
       hasPlan: true,
     });
+  });
+});
+
+/** This window's claims, except the keys in `elsewhere`, which another window holds. */
+function claimsWith(elsewhere: ReadonlySet<string>): ProjectCopyClaims {
+  const here = createWindowProjectCopyClaims();
+  return { tryClaim: async (key) => (elsewhere.has(key) ? null : here.tryClaim(key)) };
+}
+
+describe("copyManager across windows", () => {
+  it("leaves a copy another window runs to that window: no resume and no cleanup", async () => {
+    const upload = record({ copyId: "copy-upload", stage: "upload", updatedAt: Date.now() });
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [upload], Schema.Unknown);
+    const elsewhere = new Set(["copy:copy-upload"]);
+    setProjectCopyClaimsForTests(claimsWith(elsewhere));
+
+    // Without its plan this window would clean the upload up: it must not run at all.
+    await resumeProjectCopies();
+    expect(fake.runs).toHaveLength(0);
+    await expect(resumeProjectCopy("copy-upload")).rejects.toThrow(
+      "This copy is running in another Ryco window.",
+    );
+    expect(fake.runs).toHaveLength(0);
+
+    // That window closed: its claim is gone and this one picks the copy up.
+    elsewhere.clear();
+    await resumeProjectCopy("copy-upload");
+    expect(fake.runs.map((run) => run.input.resume?.copyId)).toEqual(["copy-upload"]);
+  });
+
+  it("resumes a record as storage has it once claimed, not as app start read it", async () => {
+    const importing = record({
+      copyId: "copy-importing",
+      stage: "importing",
+      updatedAt: Date.now(),
+    });
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [importing], Schema.Unknown);
+    const here = createWindowProjectCopyClaims();
+    setProjectCopyClaimsForTests({
+      tryClaim: async (key) => {
+        // The window that ran it finished it, then let go.
+        setLocalStorageItem(
+          PROJECT_COPY_RECORDS_STORAGE_KEY,
+          [{ ...importing, stage: "finished", outcome: "completed" }],
+          Schema.Unknown,
+        );
+        return here.tryClaim(key);
+      },
+    });
+
+    await resumeProjectCopies();
+    expect(fake.runs).toHaveLength(0);
+  });
+
+  it("keeps the records other windows stored when it saves its own", async () => {
+    await startManagedProjectCopy({ plan });
+    // Another window stores its own copy's record meanwhile.
+    const other = record({ copyId: "copy-other", stage: "upload", updatedAt: Date.now() });
+    setLocalStorageItem(
+      PROJECT_COPY_RECORDS_STORAGE_KEY,
+      [...(storedRecords() ?? []), other],
+      Schema.Unknown,
+    );
+    const run = fake.runs[0]!;
+    run.emitRecord(
+      reduceProjectCopyJobRecord(run.record, { type: "import-requested", at: Date.now() }),
+    );
+    expect(
+      storedRecords()
+        ?.map((entry) => entry.copyId)
+        .toSorted(),
+    ).toEqual(["copy-1", "copy-other"]);
+  });
+
+  it("claims a new copy before its first record is stored", async () => {
+    const claimed: string[] = [];
+    const here = createWindowProjectCopyClaims();
+    setProjectCopyClaimsForTests({
+      tryClaim: async (key) => {
+        claimed.push(`${key} with ${storedRecords()?.length ?? 0} records`);
+        return here.tryClaim(key);
+      },
+    });
+    const copy = await startManagedProjectCopy({ plan });
+    expect(claimed).toEqual(["copy:copy-1 with 0 records"]);
+    expect(fake.runs[0]?.input.copyId).toBe(copy.copyId);
+    // Another start of the same id in this window waits for none: it is refused.
+    await expect(resumeProjectCopy(copy.copyId)).resolves.toBeNull();
+  });
+});
+
+describe("Agent Control reports", () => {
+  const finishedRun = (outcome: "completed" | "failed") => {
+    const run = fake.runs[0]!;
+    if (outcome === "failed") {
+      run.emitProgress({
+        phase: "failed",
+        error: { code: "transfer-failed", message: "Mac mini did not answer.", retry: null },
+      });
+    } else {
+      run.emitProgress({ phase: "done", importSnapshot: snapshot("completed") });
+    }
+    // Recent: finished records past their TTL are not kept.
+    run.emitRecord(
+      reduceProjectCopyJobRecord(run.record, { type: "finished", outcome, at: Date.now() }),
+    );
+    return run;
+  };
+  const reported = () =>
+    (storedRecords() as ReadonlyArray<ProjectCopyJobRecord> | null)?.map(
+      (entry) => entry.agentControl?.reported ?? false,
+    );
+
+  it("keeps sending the final report until the node takes it, then marks it reported", async () => {
+    vi.useFakeTimers();
+    const copy = await startManagedProjectCopy({ plan, agentControl });
+    // The answer was lost twice (a relay drop, a node asleep).
+    fake.reportFailures.push(new Error("socket closed"), new Error("socket closed"));
+    finishedRun("failed").settle({});
+    await vi.advanceTimersByTimeAsync(0);
+    // Stored as owing its report before it went out: a reload sends it.
+    expect(reported()).toEqual([false]);
+    expect(fake.reports).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fake.reports).toEqual([]);
+    await vi.advanceTimersByTimeAsync(4_000);
+    const outcome = await copy.done;
+
+    expect(fake.reports).toEqual([
+      expect.objectContaining({ outcome: "failed", error: "Mac mini did not answer." }),
+    ]);
+    expect(reported()).toEqual([true]);
+    expect(outcome.record.agentControl?.reported).toBe(true);
+  });
+
+  it("stops at the node's own refusal", async () => {
+    const copy = await startManagedProjectCopy({ plan, agentControl });
+    fake.reportFailures.push(
+      new AgentControlRpcError({ code: "conflict", message: "This request is failed." }),
+    );
+    finishedRun("failed").settle({});
+    await copy.done;
+    expect(fake.reports).toEqual([]);
+    expect(reported()).toEqual([true]);
+  });
+
+  it("sends a final report a previous session could not, rebuilt from the destination's import", async () => {
+    const owed = record({
+      copyId: "copy-owed",
+      stage: "finished",
+      outcome: "completed",
+      agentControl,
+      updatedAt: Date.now(),
+    });
+    fake.targetImports.current = [
+      {
+        ...snapshot("completed"),
+        importId: owed.importId,
+        projectId: newProjectId,
+        warnings: ["Setup exited with 1."],
+      },
+    ];
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [owed], Schema.Unknown);
+
+    await resumeProjectCopies();
+
+    // Nothing runs again; only the report goes out.
+    expect(fake.runs).toHaveLength(0);
+    expect(fake.reports).toEqual([
+      {
+        proposalId: "proposal-1",
+        executorId: agentControl.executorId,
+        outcome: "completed",
+        importId: owed.importId,
+        result: {
+          targetEnvironmentId: target,
+          projectId: newProjectId,
+          workspaceRoot: "/Users/me/Code/ryco",
+          warnings: ["Setup exited with 1."],
+        },
+      },
+    ]);
+    expect(reported()).toEqual([true]);
+  });
+
+  it("waits for an unreachable destination to tell where a completed copy went", async () => {
+    vi.useFakeTimers();
+    const owed = record({
+      copyId: "copy-owed",
+      stage: "finished",
+      outcome: "completed",
+      agentControl,
+      updatedAt: Date.now(),
+    });
+    fake.targetImports.current = null;
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [owed], Schema.Unknown);
+
+    const resuming = resumeProjectCopies();
+    await vi.advanceTimersByTimeAsync(0);
+    // It never reports a copy that completed as failed just because its node is away.
+    expect(fake.reports).toEqual([]);
+
+    fake.targetImports.current = [
+      { ...snapshot("completed"), importId: owed.importId, projectId: newProjectId },
+    ];
+    await vi.advanceTimersByTimeAsync(2_000);
+    await resuming;
+    expect(fake.reports).toEqual([expect.objectContaining({ outcome: "completed" })]);
+  });
+
+  it("leaves a report another window still delivers to that window", async () => {
+    const owed = record({
+      copyId: "copy-owed",
+      stage: "finished",
+      outcome: "failed",
+      agentControl,
+      updatedAt: Date.now(),
+    });
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [owed], Schema.Unknown);
+    setProjectCopyClaimsForTests(claimsWith(new Set(["copy:copy-owed"])));
+    await resumeProjectCopies();
+    expect(fake.reports).toEqual([]);
+  });
+});
+
+describe("Agent Control approvals", () => {
+  const OTHER_EXECUTOR = "5b7e2c1a-8d3f-4e9b-a6c4-2f1d0e9b8a7c" as AgentControlClientExecutorId;
+
+  it("holds an approval's ids until its copy starts, and reports one that can't start", async () => {
+    const hold = await holdAgentControlCopyStart(agentControl);
+    expect(storedStarts()).toEqual([
+      expect.objectContaining({ executorId: agentControl.executorId }),
+    ]);
+    hold.release();
+    expect(storedStarts()).toEqual([]);
+
+    const failing = await holdAgentControlCopyStart({
+      ...agentControl,
+      executorId: OTHER_EXECUTOR,
+    });
+    failing.reportNotStarted("The copy runtime failed to load.");
+    await vi.waitFor(() => expect(storedStarts()).toEqual([]));
+    expect(fake.reports).toEqual([
+      {
+        proposalId: "proposal-1",
+        executorId: OTHER_EXECUTOR,
+        outcome: "failed",
+        error: "The copy runtime failed to load.",
+      },
+    ]);
+  });
+
+  it("ends a proposal an approval left between its accept and its copy", async () => {
+    setLocalStorageItem(
+      PROJECT_COPY_STARTS_STORAGE_KEY,
+      [{ ...agentControl, createdAt: Date.now() }],
+      Schema.Unknown,
+    );
+    await resumeProjectCopies();
+    expect(fake.reports).toEqual([
+      {
+        proposalId: "proposal-1",
+        executorId: agentControl.executorId,
+        outcome: "failed",
+        error: "The app that approved this request closed before the copy started.",
+      },
+    ]);
+    expect(storedStarts()).toEqual([]);
+  });
+
+  it("drops an approval whose copy did start, without reporting", async () => {
+    setLocalStorageItem(
+      PROJECT_COPY_STARTS_STORAGE_KEY,
+      [{ ...agentControl, createdAt: Date.now() }],
+      Schema.Unknown,
+    );
+    setLocalStorageItem(
+      PROJECT_COPY_RECORDS_STORAGE_KEY,
+      [
+        record({
+          stage: "finished",
+          outcome: "completed",
+          agentControl: { ...agentControl, reported: true },
+          updatedAt: Date.now(),
+        }),
+      ],
+      Schema.Unknown,
+    );
+    await resumeProjectCopies();
+    expect(fake.reports).toEqual([]);
+    expect(storedStarts()).toEqual([]);
+  });
+
+  it("leaves an approval another window is still making alone", async () => {
+    setLocalStorageItem(
+      PROJECT_COPY_STARTS_STORAGE_KEY,
+      [{ ...agentControl, createdAt: Date.now() }],
+      Schema.Unknown,
+    );
+    setProjectCopyClaimsForTests(claimsWith(new Set([`start:${agentControl.executorId}`])));
+    await resumeProjectCopies();
+    expect(fake.reports).toEqual([]);
+    expect(storedStarts()).toHaveLength(1);
   });
 });

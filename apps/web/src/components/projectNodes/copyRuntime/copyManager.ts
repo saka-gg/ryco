@@ -4,9 +4,12 @@
 //          small store (toasts, the copy dialog, the Projects page's Copies
 //          block), persists the ids-only job records, shows the progress and
 //          result toasts, reports Agent Control copies back to the node
-//          their proposal lives on, follows the clones and links the
-//          add-project dialog hands over when it closes, and publishes the
-//          sidebar's badge of the checkouts being copied.
+//          their proposal lives on (until that node answers, after a reload
+//          too), follows the clones and links the add-project dialog hands over
+//          when it closes, and publishes the sidebar's badge of the checkouts
+//          being copied. Every run holds its copy's claim
+//          (`projectCopyClaims`), so with the records shared between windows a
+//          copy is run, resumed, cleaned up or reported by one window only.
 // Layer: Web copy runtime, a module-level singleton loaded on demand. The
 //        coordinator (`@ryco/client-runtime/projectCopy` run/plan) and the
 //        node IO load with the first copy; reading the store and the records
@@ -15,6 +18,7 @@
 import {
   createProjectCopyJobRecord,
   decodeProjectCopyJobRecords,
+  projectCopyReportOwed,
   projectCopyResumeKind,
   reduceProjectCopyJobRecord,
   upsertProjectCopyJobRecord,
@@ -28,16 +32,16 @@ import {
 import {
   AGENT_CONTROL_CLIENT_EXECUTION_WARNINGS_MAX,
   AGENT_CONTROL_ERROR_MESSAGE_MAX_CHARS,
+  AgentControlClientExecutorId,
+  AgentControlProposalId,
+  AgentControlRpcError,
+  EnvironmentId,
   type AgentControlClientExecutionResult,
-  type AgentControlClientExecutorId,
-  type AgentControlProposalId,
-  type AgentControlReportClientExecutionInput,
-  type EnvironmentId,
   type ProjectId,
   type ScopedProjectRef,
 } from "@ryco/contracts";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
-import type { ProjectImportId } from "@ryco/contracts/project-copy";
+import type { ProjectImportId, ProjectImportSnapshot } from "@ryco/contracts/project-copy";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
@@ -48,8 +52,15 @@ import { selectProjectByRef, useStore } from "../../../store";
 import {
   markProjectCopiesActive,
   PROJECT_COPY_RECORDS_STORAGE_KEY,
+  PROJECT_COPY_STARTS_STORAGE_KEY,
   publishProjectCopyBadges,
 } from "../projectNodesDialogStore";
+import {
+  agentControlReportRetryDelayMs,
+  deliverAgentControlReport,
+  type AgentControlReportBody,
+  type AgentControlReportDelivery,
+} from "./agentControlReports";
 import {
   projectCopyPercent,
   projectCopyView,
@@ -61,6 +72,11 @@ import {
   showProjectCopyProgressToast,
   showProjectCopyResultToast,
 } from "./projectCopyToasts";
+import {
+  createProjectCopyClaims,
+  type ProjectCopyClaim,
+  type ProjectCopyClaims,
+} from "./projectCopyClaims";
 import type { WebProjectCopyIo } from "./webProjectCopyIo";
 
 // ── Types ──
@@ -134,8 +150,9 @@ export interface RetryProjectCopyOptions {
 export interface ManagedProjectCopy {
   readonly copyId: string;
   /**
-   * Settles when the copy ends or is detached, after an Agent Control copy's
-   * report went out (or gave up); never rejects.
+   * Settles when the copy ends or is detached, and for an Agent Control copy
+   * once the proposal's node answered its final report (which can take as long
+   * as that node is unreachable); never rejects.
    */
   readonly done: Promise<ProjectCopyOutcome>;
 }
@@ -147,14 +164,19 @@ export type ProjectCopyViewer = (projectRef: ScopedProjectRef) => Promise<void> 
 
 const StoredRecords = Schema.Unknown;
 
-function readStoredRecords(): ReadonlyArray<ProjectCopyJobRecord> {
+/** The stored records as they are now (another window may have written them); null when unreadable. */
+function readStoredRecordsNow(): ReadonlyArray<ProjectCopyJobRecord> | null {
   try {
     return decodeProjectCopyJobRecords(
       getLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, StoredRecords),
     );
   } catch {
-    return [];
+    return null;
   }
+}
+
+function readStoredRecords(): ReadonlyArray<ProjectCopyJobRecord> {
+  return readStoredRecordsNow() ?? [];
 }
 
 function writeStoredRecords(records: ReadonlyArray<ProjectCopyJobRecord>): void {
@@ -169,6 +191,55 @@ export const useProjectCopyStore = create<ProjectCopyStoreState>()(() => ({
   entries: {},
   records: readStoredRecords(),
 }));
+
+/**
+ * The records to change: as storage has them now, since other windows of a
+ * direct or Desktop build write their own copies' records there too; this
+ * window's when storage can't be read.
+ */
+function currentRecords(): ReadonlyArray<ProjectCopyJobRecord> {
+  return readStoredRecordsNow() ?? useProjectCopyStore.getState().records;
+}
+
+function readRecord(copyId: string): ProjectCopyJobRecord | null {
+  return currentRecords().find((record) => record.copyId === copyId) ?? null;
+}
+
+// Another window's changes show here too (the Copies block).
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== null && event.key !== PROJECT_COPY_RECORDS_STORAGE_KEY) return;
+    const records = readStoredRecordsNow();
+    if (records !== null) useProjectCopyStore.setState({ records });
+  });
+}
+
+// ── Claims ──
+
+const RUNNING_HERE = "This copy is already running.";
+const RUNNING_ELSEWHERE = "This copy is running in another Ryco window.";
+
+let claims: ProjectCopyClaims = createProjectCopyClaims();
+/** The claims this window holds, by key; each is released when its run ends. */
+const heldClaims = new Map<string, ProjectCopyClaim>();
+
+const copyClaimKey = (copyId: string) => `copy:${copyId}`;
+const startClaimKey = (executorId: string) => `start:${executorId}`;
+
+/** Claims `key` for this window; null when a run here or in another window holds it. */
+async function claim(key: string): Promise<ProjectCopyClaim | null> {
+  if (heldClaims.has(key)) return null;
+  const claimed = await claims.tryClaim(key);
+  if (claimed === null) return null;
+  const held: ProjectCopyClaim = {
+    release: () => {
+      if (heldClaims.get(key) === held) heldClaims.delete(key);
+      claimed.release();
+    },
+  };
+  heldClaims.set(key, held);
+  return held;
+}
 
 interface LiveCopy {
   readonly run: ProjectCopyRun;
@@ -189,12 +260,9 @@ function patchEntry(copyId: string, patch: Partial<ProjectCopyEntry>): void {
   });
 }
 
+/** Saves one record into the stored list as it is now, so no other window's record is lost. */
 function persistRecord(record: ProjectCopyJobRecord): void {
-  const records = upsertProjectCopyJobRecord(
-    useProjectCopyStore.getState().records,
-    record,
-    Date.now(),
-  );
+  const records = upsertProjectCopyJobRecord(currentRecords(), record, Date.now());
   useProjectCopyStore.setState({ records });
   writeStoredRecords(records);
 }
@@ -250,6 +318,7 @@ export interface ProjectCopyRuntime {
   readonly projectCopyPlanWithSendFiles: Coordinator["projectCopyPlanWithSendFiles"];
   readonly createIo: () => WebProjectCopyIo;
   readonly callNodeWithLease: IoModule["callNodeWithLease"];
+  readonly callNodeToRead: IoModule["callNodeToRead"];
   /** The Agent Control executor's; without it a resumed upload has no plan. */
   readonly rebuildAgentControlPlan?: ProjectCopyPlanRebuilder;
 }
@@ -267,6 +336,7 @@ function loadRuntime(): Promise<ProjectCopyRuntime> {
       projectCopyPlanWithSendFiles: coordinator.projectCopyPlanWithSendFiles,
       createIo: () => io.createWebProjectCopyIo(),
       callNodeWithLease: io.callNodeWithLease,
+      callNodeToRead: io.callNodeToRead,
       // Loaded only when a resumed Agent Control copy needs its plan back.
       rebuildAgentControlPlan: (record, context) =>
         import("../agentControlCopyExecutor").then((executor) =>
@@ -310,56 +380,145 @@ function showResultToast(entry: ProjectCopyEntry): void {
 
 // ── Agent Control reports ──
 
-const REPORT_ATTEMPTS = 5;
-const REPORT_RETRY_BASE_MS = 2_000;
-
 function boundedMessage(message: string): string | null {
   const trimmed = message.trim();
   return trimmed.length === 0 ? null : trimmed.slice(0, AGENT_CONTROL_ERROR_MESSAGE_MAX_CHARS);
 }
 
+const NOT_STARTED = "The copy did not start.";
+const START_INTERRUPTED = "The app that approved this request closed before the copy started.";
+const PROJECT_NOT_FOUND =
+  "The copy finished, but its project could not be found on the destination.";
+
+function isNodeOnline(environmentId: EnvironmentId): boolean {
+  return readNodeCatalogSnapshot().nodes.some(
+    (node) => node.environmentId === environmentId && node.presence === "online",
+  );
+}
+
 /**
- * Reports to the node the proposal lives on. Repeating an outcome returns the
- * node's receipt, so a report retried after a dropped answer is safe.
+ * Waits before the next report attempt: the backoff, or less once the node
+ * comes back online (a reconnect, a node that woke up).
  */
-async function reportToAgentControl(
-  copyId: string,
-  context: ProjectCopyAgentControlContext,
-  report: Omit<AgentControlReportClientExecutionInput, "proposalId" | "executorId">,
+function waitToReportAgain(
+  environmentId: EnvironmentId,
+  attempt: number,
+  signal: AbortSignal | undefined,
 ): Promise<void> {
-  const { callNodeWithLease } = await loadRuntime();
-  const input: AgentControlReportClientExecutionInput = {
-    proposalId: context.proposalId,
-    executorId: context.executorId,
-    ...report,
-  };
-  for (let attempt = 1; ; attempt += 1) {
-    try {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const wasOnline = isNodeOnline(environmentId);
+    let finished = false;
+    let unsubscribe: () => void = () => undefined;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      globalThis.clearTimeout(timer);
+      unsubscribe();
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = globalThis.setTimeout(done, agentControlReportRetryDelayMs(attempt));
+    signal?.addEventListener("abort", done, { once: true });
+    const stop = subscribeNodeCatalog(() => {
+      if (!wasOnline && isNodeOnline(environmentId)) done();
+    });
+    if (finished) stop();
+    else unsubscribe = stop;
+  });
+}
+
+/**
+ * Sends one report to the node the proposal lives on until that node answers
+ * it (or `signal` stops it). Repeating an outcome returns the node's receipt,
+ * so a report sent again after a lost answer is safe. `scopeId` names the hold
+ * on that node (the copy's id, or the executor's for a copy that never started).
+ */
+function deliverReport(
+  scopeId: string,
+  context: ProjectCopyAgentControlContext,
+  build: () => Promise<AgentControlReportBody | null>,
+  signal?: AbortSignal,
+): Promise<AgentControlReportDelivery> {
+  return deliverAgentControlReport({
+    environmentId: context.environmentId,
+    build,
+    send: async (body) => {
+      const { callNodeWithLease } = await loadRuntime();
       await callNodeWithLease(
         context.environmentId,
         (api) => {
           const send = api.agentControl?.reportClientExecution;
-          if (!send) throw new Error("This device can't take the copy's report.");
-          return send(input);
+          if (!send) {
+            throw new AgentControlRpcError({
+              code: "unsupported",
+              message: "This device can't take the copy's report.",
+            });
+          }
+          return send({ proposalId: context.proposalId, executorId: context.executorId, ...body });
         },
-        { copyId },
+        { copyId: scopeId },
       );
-      return;
-    } catch (error) {
-      if (attempt >= REPORT_ATTEMPTS) {
-        console.warn("Reporting a copy to Agent Control failed.", error);
-        return;
-      }
-      await new Promise((resolve) =>
-        globalThis.setTimeout(resolve, REPORT_RETRY_BASE_MS * 2 ** (attempt - 1)),
-      );
-    }
-  }
+    },
+    signal,
+    waitToRetry: waitToReportAgain,
+  });
+}
+
+/** One copy's reports: `started` until the final one replaces it, then the final one. */
+interface CopyReports {
+  /** The target accepted the import; repeated by a resumed run (it extends the node's deadline). */
+  readonly started: (importId: ProjectImportId) => void;
+  /** How the copy ended, until the node answers; marks the record reported then. */
+  readonly final: (build: () => Promise<AgentControlReportBody | null>) => Promise<void>;
+}
+
+function copyReports(copyId: string, context: ProjectCopyAgentControlContext): CopyReports {
+  let startedSent = false;
+  let current: AbortController | null = null;
+  const deliver = (build: () => Promise<AgentControlReportBody | null>) => {
+    // A newer report replaces one still waiting to be tried again.
+    current?.abort();
+    const controller = new AbortController();
+    current = controller;
+    return deliverReport(copyId, context, build, controller.signal);
+  };
+  return {
+    started: (importId) => {
+      if (startedSent) return;
+      startedSent = true;
+      void deliver(async () => ({ outcome: "started", importId }));
+    },
+    final: async (build) => {
+      if ((await deliver(build)) !== "stopped") markReported(copyId);
+    },
+  };
+}
+
+/** The node took (or refused for good) the copy's final report: nothing is owed any more. */
+function markReported(copyId: string): void {
+  const record = readRecord(copyId);
+  if (record === null) return;
+  const reported = reduceProjectCopyJobRecord(record, { type: "reported", at: Date.now() });
+  if (reported === record) return;
+  persistRecord(reported);
+  patchEntry(copyId, { record: reported });
+}
+
+/** What a copy's final report is built from. */
+interface FinalReportFacts {
+  readonly project: ProjectCopyCompletedProject | null;
+  readonly importSnapshot: ProjectImportSnapshot | null;
+  /** Why it failed; null for a cancel, or when the reason is not known. */
+  readonly errorMessage: string | null;
 }
 
 /** The project root on the target, for the report; the node's own project when the copy lost track. */
-function completedWorkspaceRoot(entry: ProjectCopyEntry): string | null {
-  const project = entry.project;
+function completedWorkspaceRoot(facts: FinalReportFacts): string | null {
+  const project = facts.project;
   if (!project) return null;
   return (
     project.workspaceRoot ??
@@ -367,14 +526,14 @@ function completedWorkspaceRoot(entry: ProjectCopyEntry): string | null {
       environmentId: project.environmentId,
       projectId: project.projectId,
     })?.cwd ??
-    entry.progress.importSnapshot?.destinationPath ??
+    facts.importSnapshot?.destinationPath ??
     null
   );
 }
 
-function completedResult(entry: ProjectCopyEntry): AgentControlClientExecutionResult | null {
-  const project = entry.project;
-  const workspaceRoot = completedWorkspaceRoot(entry);
+function completedResult(facts: FinalReportFacts): AgentControlClientExecutionResult | null {
+  const project = facts.project;
+  const workspaceRoot = completedWorkspaceRoot(facts);
   if (!project || workspaceRoot === null) return null;
   return {
     targetEnvironmentId: project.environmentId,
@@ -385,6 +544,65 @@ function completedResult(entry: ProjectCopyEntry): AgentControlClientExecutionRe
       .filter((warning): warning is string => warning !== null)
       .slice(0, AGENT_CONTROL_CLIENT_EXECUTION_WARNINGS_MAX),
   };
+}
+
+/** The final report of a finished record: `completed` with where the project is, else `failed`. */
+function finalReportBody(
+  record: ProjectCopyJobRecord,
+  facts: FinalReportFacts,
+): AgentControlReportBody {
+  const importId = record.importId;
+  if (record.outcome === "completed") {
+    const result = completedResult(facts);
+    return result
+      ? { outcome: "completed", importId, result }
+      : { outcome: "failed", importId, error: PROJECT_NOT_FOUND };
+  }
+  const fallback = record.outcome === "cancelled" ? "The copy was cancelled." : "The copy failed.";
+  return {
+    outcome: "failed",
+    importId,
+    error: boundedMessage(facts.errorMessage ?? fallback) ?? fallback,
+  };
+}
+
+/**
+ * The final report a previous session finished but could not deliver, rebuilt
+ * from the copy's import on its destination (the record keeps ids only). Null
+ * while a completed copy's project can't be placed: its destination did not
+ * answer and this client does not know the project either.
+ */
+async function rebuiltFinalReport(
+  record: ProjectCopyJobRecord,
+): Promise<AgentControlReportBody | null> {
+  let reachable = true;
+  let snapshot: ProjectImportSnapshot | null = null;
+  try {
+    const { callNodeToRead } = await loadRuntime();
+    const listed = await callNodeToRead(
+      record.targetEnvironmentId,
+      async (api) => (await api.projects.listImports?.({})) ?? { imports: [] },
+      { copyId: record.copyId },
+    );
+    snapshot = listed.imports.find((entry) => entry.importId === record.importId) ?? null;
+  } catch {
+    reachable = false;
+  }
+  const facts: FinalReportFacts = {
+    project:
+      record.outcome === "completed"
+        ? {
+            environmentId: record.targetEnvironmentId,
+            projectId: snapshot?.projectId ?? record.projectId,
+            workspaceRoot: null,
+            warnings: snapshot?.warnings ?? [],
+          }
+        : null,
+    importSnapshot: snapshot,
+    errorMessage: snapshot?.error?.message ?? null,
+  };
+  if (record.outcome === "completed" && !reachable && completedResult(facts) === null) return null;
+  return finalReportBody(record, facts);
 }
 
 // ── Running ──
@@ -400,27 +618,54 @@ interface LaunchInput {
   readonly title?: string | null;
   readonly action?: ProjectCopyAction;
   readonly sourceRef?: ScopedProjectRef | null;
+  /**
+   * The copy's claim, when the caller took it first (a resume reads the
+   * record again once it holds it). The run releases it when it ends.
+   */
+  readonly claim?: ProjectCopyClaim | null;
 }
 
+/** Runs a copy under its claim: taken here unless the caller holds it, and held until it ends. */
 async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
-  const runtime = await loadRuntime();
-  // Checked after the last await: from here to `live.set` nothing yields, so
-  // two resumes of one record (app start and the Copies block) never both run.
-  const existingCopyId = (input.resume ?? input.restartOf)?.copyId;
-  if (existingCopyId !== undefined && live.has(existingCopyId)) {
-    throw new Error("This copy is already running.");
+  let runtime: ProjectCopyRuntime;
+  try {
+    runtime = await loadRuntime();
+  } catch (error) {
+    input.claim?.release();
+    throw error;
   }
-  markProjectCopiesActive();
   const io = runtime.createIo();
+  // A new copy's id is minted here and claimed before its first record is
+  // published, so no other window resumes a copy this one is starting.
+  const copyId = (input.resume ?? input.restartOf)?.copyId ?? io.uuid();
+  const claimed = input.claim ?? (live.has(copyId) ? null : await claim(copyClaimKey(copyId)));
+  if (claimed === null) {
+    io.dispose();
+    throw new Error(live.has(copyId) ? RUNNING_HERE : RUNNING_ELSEWHERE);
+  }
+  try {
+    return launchClaimed(input, runtime, io, copyId, claimed);
+  } catch (error) {
+    io.dispose();
+    claimed.release();
+    throw error;
+  }
+}
+
+function launchClaimed(
+  input: LaunchInput,
+  runtime: ProjectCopyRuntime,
+  io: WebProjectCopyIo,
+  copyId: string,
+  claimed: ProjectCopyClaim,
+): ManagedProjectCopy {
+  // The claim makes this a formality; nothing below yields until `live.set`.
+  if (live.has(copyId)) throw new Error(RUNNING_HERE);
+  markProjectCopiesActive();
   const { agentControl, plan } = input;
-  let startedReported = false;
+  const reports = agentControl ? copyReports(copyId, agentControl) : null;
   const reportStarted = (record: ProjectCopyJobRecord) => {
-    if (!agentControl || startedReported || record.stage !== "importing") return;
-    startedReported = true;
-    void reportToAgentControl(record.copyId, agentControl, {
-      outcome: "started",
-      importId: record.importId,
-    });
+    if (reports && record.stage === "importing") reports.started(record.importId);
   };
 
   // The coordinator reports its first record and progress before it returns;
@@ -450,28 +695,21 @@ async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
     refreshToast(progress.copyId);
   };
 
-  let run: ProjectCopyRun;
-  try {
-    run = runtime.startProjectCopy({
-      io,
-      plan,
-      resume: input.resume ?? null,
-      restartOf: input.restartOf ?? null,
-      agentControl,
-      onProgress,
-      onRecord,
-    });
-  } catch (error) {
-    io.dispose();
-    throw error;
-  }
+  const run = runtime.startProjectCopy({
+    io,
+    copyId,
+    plan,
+    resume: input.resume ?? null,
+    restartOf: input.restartOf ?? null,
+    agentControl,
+    onProgress,
+    onRecord,
+  });
   const record = pending.record ?? input.resume ?? null;
-  if (record === null) {
+  if (record === null || run.copyId !== copyId) {
     run.cancel();
-    io.dispose();
     throw new Error("The copy did not start.");
   }
-  const { copyId } = run;
   const progress = run.getProgress();
   const entry: ProjectCopyEntry = {
     copyId,
@@ -499,7 +737,9 @@ async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
   // idempotent and extends the node's deadline.
   reportStarted(record);
 
-  const done = run.done.then((outcome) => finish(copyId, outcome, io));
+  const done = run.done
+    .then((outcome) => finish(copyId, outcome, io, reports))
+    .finally(() => claimed.release());
   return { copyId, done };
 }
 
@@ -507,16 +747,15 @@ async function finish(
   copyId: string,
   outcome: ProjectCopyOutcome,
   io: WebProjectCopyIo,
+  reports: CopyReports | null,
 ): Promise<ProjectCopyOutcome> {
   io.dispose();
   if (live.get(copyId)?.io === io) live.delete(copyId);
-  const before = useProjectCopyStore.getState().entries[copyId];
-  const agentControl = before?.agentControl ?? null;
   let record = outcome.record;
   // An Agent Control copy ends with its report: a failure is final there, so
   // the record is too and a reload does not run it again.
   if (
-    agentControl &&
+    reports &&
     record.stage !== "finished" &&
     (outcome.progress.phase === "failed" || outcome.progress.phase === "cancelled")
   ) {
@@ -526,6 +765,8 @@ async function finish(
       at: Date.now(),
     });
   }
+  // Persisted (still owing its report) before the report goes out, so a
+  // reload sends it if this session can't.
   persistRecord(record);
   patchEntry(copyId, {
     progress: outcome.progress,
@@ -536,40 +777,17 @@ async function finish(
   const entry = useProjectCopyStore.getState().entries[copyId];
   // The copy dialog shows how it ended itself.
   if (entry && !entry.inDialog) showResultToast(entry);
-  if (agentControl && entry) {
-    switch (outcome.progress.phase) {
-      case "done": {
-        const result = completedResult(entry);
-        await reportToAgentControl(
-          copyId,
-          agentControl,
-          result
-            ? { outcome: "completed", importId: record.importId, result }
-            : {
-                outcome: "failed",
-                importId: record.importId,
-                error: "The copy finished, but its project could not be found on the destination.",
-              },
-        );
-        break;
-      }
-      case "failed":
-      case "cancelled":
-        await reportToAgentControl(copyId, agentControl, {
-          outcome: "failed",
-          importId: record.importId,
-          error:
-            boundedMessage(
-              outcome.progress.phase === "cancelled"
-                ? "The copy was cancelled."
-                : (outcome.progress.error?.message ?? "The copy failed."),
-            ) ?? "The copy failed.",
-        });
-        break;
-      default:
-        // Detached: the import runs on and a later follow reports how it ends.
-        break;
-    }
+  // Detached copies are left unfinished: the import runs on and a later follow reports it.
+  if (reports && record.stage === "finished") {
+    const finished = record;
+    const facts: FinalReportFacts = {
+      project: outcome.project,
+      importSnapshot: outcome.progress.importSnapshot,
+      errorMessage:
+        outcome.progress.phase === "failed" ? (outcome.progress.error?.message ?? null) : null,
+    };
+    await reports.final(async () => finalReportBody(finished, facts));
+    record = readRecord(copyId) ?? record;
   }
   return { ...outcome, record };
 }
@@ -606,11 +824,17 @@ export interface TrackProjectImportInput {
  * View"), the Copies block and a reload pick it up like a copy whose upload
  * finished. Nothing runs here but following it.
  */
-export function trackProjectImport(input: TrackProjectImportInput): Promise<ManagedProjectCopy> {
+export async function trackProjectImport(
+  input: TrackProjectImportInput,
+): Promise<ManagedProjectCopy> {
+  const copyId = randomUUID();
+  // Claimed before its record is stored: no other window takes over a fresh id.
+  const claimed = await claim(copyClaimKey(copyId));
+  if (claimed === null) throw new Error(RUNNING_ELSEWHERE);
   const at = Date.now();
   const record = reduceProjectCopyJobRecord(
     createProjectCopyJobRecord({
-      copyId: randomUUID(),
+      copyId,
       at,
       sourceEnvironmentId: null,
       sourceProjectId: null,
@@ -630,6 +854,7 @@ export function trackProjectImport(input: TrackProjectImportInput): Promise<Mana
     title: input.title,
     action: input.action,
     sourceRef: input.sourceRef ?? null,
+    claim: claimed,
   });
 }
 
@@ -708,20 +933,51 @@ export async function retryProjectCopy(
 
 /**
  * Follows (or, with its plan, continues) a copy from its stored record: the
- * Copies block's Resume, and app start.
+ * Copies block's Resume. Fails when another window runs it.
  */
 export async function resumeProjectCopy(copyId: string): Promise<ManagedProjectCopy | null> {
   if (live.has(copyId)) return null;
-  const record = useProjectCopyStore.getState().records.find((entry) => entry.copyId === copyId);
-  if (!record || projectCopyResumeKind(record) === "none") return null;
-  const agentControl = agentControlOf(record);
-  return launch({
-    plan: await planForResume(record, agentControl),
-    resume: record,
-    agentControl,
-    background: true,
-    inDialog: false,
-  });
+  const claimed = await claim(copyClaimKey(copyId));
+  if (claimed === null) {
+    if (live.has(copyId)) return null;
+    throw new Error(RUNNING_ELSEWHERE);
+  }
+  return resumeClaimed(copyId, claimed);
+}
+
+/**
+ * Picks a claimed copy up from its record as storage has it now (another
+ * window may have moved it on before letting go): continues or follows it, or
+ * delivers the final report it still owes. Null when nothing was launched.
+ */
+async function resumeClaimed(
+  copyId: string,
+  claimed: ProjectCopyClaim,
+): Promise<ManagedProjectCopy | null> {
+  let handedOver = false;
+  try {
+    const record = readRecord(copyId);
+    if (record === null || live.has(copyId)) return null;
+    const agentControl = agentControlOf(record);
+    if (projectCopyResumeKind(record) !== "none") {
+      const plan = await planForResume(record, agentControl);
+      handedOver = true;
+      return await launch({
+        plan,
+        resume: record,
+        agentControl,
+        background: true,
+        inDialog: false,
+        claim: claimed,
+      });
+    }
+    if (agentControl !== null && projectCopyReportOwed(record)) {
+      await copyReports(copyId, agentControl).final(() => rebuiltFinalReport(record));
+    }
+    return null;
+  } finally {
+    if (!handedOver) claimed.release();
+  }
 }
 
 /**
@@ -750,33 +1006,161 @@ async function planForResume(
 }
 
 /**
- * Reports an Agent Control copy that was accepted (`executing`) but never
- * started here, so the proposal ends now rather than at its deadline.
+ * Drops a copy's record and entry (the Copies block's dismiss). A copy running
+ * here or in another window is kept; one whose report this window still
+ * delivers is dropped while the delivery goes on from memory.
  */
-export function reportAgentControlCopyNotStarted(
-  context: ProjectCopyAgentControlContext,
-  message: string,
-): Promise<void> {
-  // Holds the node under a copy id of its own: no copy of this proposal exists.
-  return reportToAgentControl(randomUUID(), context, {
-    outcome: "failed",
-    error: boundedMessage(message) ?? "The copy did not start.",
+export function forgetProjectCopy(copyId: string): void {
+  if (live.has(copyId)) return;
+  const drop = () => {
+    plans.delete(copyId);
+    dismissProjectCopyToast(copyId);
+    const records = currentRecords().filter((record) => record.copyId !== copyId);
+    useProjectCopyStore.setState((state) => {
+      const { [copyId]: _forgotten, ...entries } = state.entries;
+      return { entries, records };
+    });
+    writeStoredRecords(records);
+  };
+  if (heldClaims.has(copyClaimKey(copyId))) {
+    drop();
+    return;
+  }
+  void claim(copyClaimKey(copyId)).then((claimed) => {
+    // Another window runs or reports it.
+    if (claimed === null) return;
+    try {
+      drop();
+    } finally {
+      claimed.release();
+    }
   });
 }
 
-/** Drops a copy's record and entry (the Copies block's dismiss); a running copy is kept. */
-export function forgetProjectCopy(copyId: string): void {
-  if (live.has(copyId)) return;
-  plans.delete(copyId);
-  dismissProjectCopyToast(copyId);
-  const records = useProjectCopyStore
-    .getState()
-    .records.filter((record) => record.copyId !== copyId);
-  useProjectCopyStore.setState((state) => {
-    const { [copyId]: _forgotten, ...entries } = state.entries;
-    return { entries, records };
-  });
-  writeStoredRecords(records);
+// ── Agent Control approvals ──
+
+/**
+ * An approval of an Agent Control copy from just before its accept until its
+ * copy runs (whose own record reports from then on). From the accept on, the
+ * node may run the proposal for this client's executor, so every way out ends
+ * it: the copy starts, the node refused the accept, or `reportNotStarted`.
+ */
+export interface AgentControlCopyStartHold {
+  /** The copy started (its record carries the executor now), or nothing was bound to it. */
+  readonly release: () => void;
+  /**
+   * The node may run the proposal for this executor, but its copy can't start:
+   * reports it `failed` until the node answers, then lets go. Returns at once.
+   */
+  readonly reportNotStarted: (message: string) => void;
+}
+
+const StoredStart = Schema.Struct({
+  environmentId: EnvironmentId,
+  proposalId: AgentControlProposalId,
+  executorId: AgentControlClientExecutorId,
+  createdAt: Schema.Number,
+});
+type StoredStart = typeof StoredStart.Type;
+const isStoredStart = Schema.is(StoredStart);
+const StoredStarts = Schema.Unknown;
+
+/** Past a day the proposal's deadline is long gone; such a start is dropped unreported. */
+const START_TTL_MS = 24 * 60 * 60 * 1000;
+
+function readStoredStarts(): ReadonlyArray<StoredStart> {
+  try {
+    const stored = getLocalStorageItem(PROJECT_COPY_STARTS_STORAGE_KEY, StoredStarts);
+    return Array.isArray(stored) ? stored.filter(isStoredStart) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredStarts(starts: ReadonlyArray<StoredStart>): void {
+  try {
+    setLocalStorageItem(PROJECT_COPY_STARTS_STORAGE_KEY, starts, StoredStarts);
+  } catch {
+    // Best effort: this session still settles it.
+  }
+}
+
+function forgetStoredStart(executorId: string): void {
+  const starts = readStoredStarts();
+  const kept = starts.filter((entry) => entry.executorId !== executorId);
+  if (kept.length !== starts.length) writeStoredStarts(kept);
+}
+
+/**
+ * Holds an approval before its accept goes out: its ids (only) are stored and
+ * claimed for this window, so a reload, or another window's start, still ends
+ * a proposal this executor may have been bound to.
+ */
+export async function holdAgentControlCopyStart(
+  context: ProjectCopyAgentControlContext,
+): Promise<AgentControlCopyStartHold> {
+  // A fresh executor id: no other approval holds it.
+  const claimed = await claim(startClaimKey(context.executorId));
+  const now = Date.now();
+  writeStoredStarts([
+    ...readStoredStarts().filter(
+      (entry) => entry.executorId !== context.executorId && now - entry.createdAt <= START_TTL_MS,
+    ),
+    {
+      environmentId: context.environmentId,
+      proposalId: context.proposalId,
+      executorId: context.executorId,
+      createdAt: now,
+    },
+  ]);
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    forgetStoredStart(context.executorId);
+    claimed?.release();
+  };
+  return {
+    release: settle,
+    reportNotStarted: (message) => {
+      if (settled) return;
+      void deliverReport(context.executorId, context, async () => ({
+        outcome: "failed",
+        error: boundedMessage(message) ?? NOT_STARTED,
+      })).then(settle, settle);
+    },
+  };
+}
+
+/**
+ * At app start: an approval a previous session (or a closed window) held when
+ * it ended. Its copy started when a record carries its executor; otherwise the
+ * proposal is reported `failed` (a node that never bound it refuses that).
+ */
+async function settleInterruptedStart(start: StoredStart): Promise<void> {
+  if (Date.now() - start.createdAt > START_TTL_MS) {
+    forgetStoredStart(start.executorId);
+    return;
+  }
+  if (!(await waitForNodes([start.environmentId]))) return;
+  // A window still approving it holds its claim.
+  const claimed = await claim(startClaimKey(start.executorId));
+  if (claimed === null) return;
+  try {
+    if (!readStoredStarts().some((entry) => entry.executorId === start.executorId)) return;
+    const started = currentRecords().some(
+      (record) => record.agentControl?.executorId === start.executorId,
+    );
+    if (!started) {
+      await deliverReport(start.executorId, start, async () => ({
+        outcome: "failed",
+        error: START_INTERRUPTED,
+      }));
+    }
+    forgetStoredStart(start.executorId);
+  } finally {
+    claimed.release();
+  }
 }
 
 function agentControlOf(record: ProjectCopyJobRecord): ProjectCopyAgentControlContext | null {
@@ -817,39 +1201,51 @@ function waitForNodes(environmentIds: ReadonlyArray<EnvironmentId>): Promise<boo
 let resumedAtStart = false;
 
 /**
- * At app start: picks up every unfinished copy from its record, once its nodes
- * are known here. An import that already started is followed to its end (and an
- * Agent Control copy reports how it ended). An upload the app closed during
- * goes on when an Agent Control copy's plan can be rebuilt from its proposal
- * (still `executing`); otherwise it cleans up and fails. Runs once.
+ * At app start, once a record's nodes are known here: picks up every
+ * unfinished copy no other window runs. An import that already started is
+ * followed to its end (and an Agent Control copy reports how it ended). An
+ * upload the app closed during goes on when an Agent Control copy's plan can be
+ * rebuilt from its proposal (still `executing`); otherwise it cleans up and
+ * fails. A final report a previous session could not deliver is sent, and an
+ * approval it left between accept and copy ends its proposal. Runs once.
  */
 export async function resumeProjectCopies(): Promise<void> {
   if (resumedAtStart) return;
   resumedAtStart = true;
   const records = readStoredRecords();
   useProjectCopyStore.setState({ records });
-  await Promise.all(
-    records
-      .filter((record) => projectCopyResumeKind(record) !== "none" && !live.has(record.copyId))
-      .map(async (record) => {
-        const agentControl = agentControlOf(record);
-        const nodes = [record.targetEnvironmentId];
-        if (record.sourceEnvironmentId !== null) nodes.push(record.sourceEnvironmentId);
-        if (agentControl !== null) nodes.push(agentControl.environmentId);
-        if (!(await waitForNodes(nodes))) return;
-        try {
-          await launch({
-            plan: await planForResume(record, agentControl),
-            resume: record,
-            agentControl,
-            background: true,
-            inDialog: false,
-          });
-        } catch (error) {
-          console.warn("Resuming a project copy failed.", error);
-        }
+  await Promise.all([
+    ...records
+      .filter(
+        (record) =>
+          !live.has(record.copyId) &&
+          (projectCopyResumeKind(record) !== "none" || projectCopyReportOwed(record)),
+      )
+      .map(resumeAtStart),
+    ...readStoredStarts().map((start) =>
+      settleInterruptedStart(start).catch((error: unknown) => {
+        console.warn("Settling an interrupted Agent Control approval failed.", error);
       }),
-  );
+    ),
+  ]);
+}
+
+async function resumeAtStart(stale: ProjectCopyJobRecord): Promise<void> {
+  try {
+    const agentControl = agentControlOf(stale);
+    const nodes = [stale.targetEnvironmentId];
+    if (stale.sourceEnvironmentId !== null && projectCopyResumeKind(stale) !== "none") {
+      nodes.push(stale.sourceEnvironmentId);
+    }
+    if (agentControl !== null) nodes.push(agentControl.environmentId);
+    if (!(await waitForNodes(nodes))) return;
+    // A window that runs (or reports) it holds its claim: it stays that window's.
+    const claimed = await claim(copyClaimKey(stale.copyId));
+    if (claimed === null) return;
+    await resumeClaimed(stale.copyId, claimed);
+  } catch (error) {
+    console.warn("Resuming a project copy failed.", error);
+  }
 }
 
 // ── View ──
@@ -931,10 +1327,16 @@ export function setProjectCopyRuntimeForTests(runtime: ProjectCopyRuntime | null
   runtimeLoad = runtime ? Promise.resolve(runtime) : null;
 }
 
+/** Test-only: claims copies through `next` (one with another window's claims, say). */
+export function setProjectCopyClaimsForTests(next: ProjectCopyClaims | null): void {
+  claims = next ?? createProjectCopyClaims();
+}
+
 /** Test-only: no copies, no records, nothing registered. */
 export function resetProjectCopyManagerForTests(): void {
   for (const copy of live.values()) copy.io.dispose();
   live.clear();
+  for (const held of Array.from(heldClaims.values())) held.release();
   plans.clear();
   viewer = null;
   viewerListeners.clear();

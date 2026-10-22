@@ -82,6 +82,11 @@ export const ProjectCopyJobRecord = Schema.Struct({
       environmentId: EnvironmentId,
       proposalId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
       executorId: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+      /**
+       * The proposal's node took the copy's final report (`completed` / `failed`), or answered
+       * that it never will. Until then a finished record still owes it ({@link projectCopyReportOwed}).
+       */
+      reported: Schema.optionalKey(Schema.Boolean),
     }),
   ),
 });
@@ -134,18 +139,31 @@ export type ProjectCopyJobChange =
       readonly importId: ProjectImportId;
       readonly projectId: ProjectId;
     }
-  | { readonly type: "finished"; readonly outcome: ProjectCopyJobOutcome };
+  | { readonly type: "finished"; readonly outcome: ProjectCopyJobOutcome }
+  /** An Agent Control copy's final report was taken (or refused for good) by the proposal's node. */
+  | { readonly type: "reported" };
 
 export type ProjectCopyJobEvent = ProjectCopyJobChange & { readonly at: number };
 
 const advance = (stage: ProjectCopyJobStage, to: ProjectCopyJobStage): ProjectCopyJobStage =>
   STAGE_ORDER[to] > STAGE_ORDER[stage] ? to : stage;
 
-/** Applies one event. A finished record changes only through `restarted`. */
+/**
+ * Applies one event. A finished record changes only through `restarted`, and `reported` applies
+ * only to a finished Agent Control record.
+ */
 export function reduceProjectCopyJobRecord(
   record: ProjectCopyJobRecord,
   event: ProjectCopyJobEvent,
 ): ProjectCopyJobRecord {
+  if (event.type === "reported") {
+    if (!projectCopyReportOwed(record) || record.agentControl === null) return record;
+    return {
+      ...record,
+      updatedAt: Math.max(record.updatedAt, event.at),
+      agentControl: { ...record.agentControl, reported: true },
+    };
+  }
   if (record.stage === "finished" && event.type !== "restarted") return record;
   const touched = { ...record, updatedAt: Math.max(record.updatedAt, event.at) };
   switch (event.type) {
@@ -212,6 +230,18 @@ export function projectCopyResumeKind(record: ProjectCopyJobRecord): ProjectCopy
   }
 }
 
+/**
+ * A finished Agent Control copy whose final report the proposal's node has not taken yet (A1(4)):
+ * the app keeps sending it, after a reload too, until the node takes or refuses it.
+ */
+export function projectCopyReportOwed(record: ProjectCopyJobRecord): boolean {
+  return (
+    record.stage === "finished" &&
+    record.agentControl !== null &&
+    record.agentControl.reported !== true
+  );
+}
+
 export function projectCopyJobTransfer(
   record: ProjectCopyJobRecord,
   purpose: ProjectTransferPurpose,
@@ -219,14 +249,19 @@ export function projectCopyJobTransfer(
   return record.transfers.find((transfer) => transfer.purpose === purpose) ?? null;
 }
 
-/** At most this many records are kept, unfinished ones first. */
+/** At most this many records are kept, the ones still in use first. */
 export const PROJECT_COPY_JOB_RECORDS_MAX = 20;
 /** Finished records are dropped after a week. */
 export const PROJECT_COPY_FINISHED_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Unfinished, or still owing its report: the record is needed until then. */
+const inUse = (record: ProjectCopyJobRecord): boolean =>
+  record.stage !== "finished" || projectCopyReportOwed(record);
+
 /**
  * Replaces the record with the same `copyId` (or adds it), newest first, drops finished records
- * past their TTL and keeps at most {@link PROJECT_COPY_JOB_RECORDS_MAX}.
+ * past their TTL (an owed report too: the node's deadline is long gone by then) and keeps at most
+ * {@link PROJECT_COPY_JOB_RECORDS_MAX}.
  */
 export function upsertProjectCopyJobRecord(
   records: ReadonlyArray<ProjectCopyJobRecord>,
@@ -237,9 +272,7 @@ export function upsertProjectCopyJobRecord(
     (entry) =>
       entry.stage !== "finished" || now - entry.updatedAt <= PROJECT_COPY_FINISHED_RECORD_TTL_MS,
   );
-  const unfinished = merged.filter((entry) => entry.stage !== "finished");
-  const finished = merged.filter((entry) => entry.stage === "finished");
-  return [...unfinished, ...finished]
+  return [...merged.filter(inUse), ...merged.filter((entry) => !inUse(entry))]
     .slice(0, PROJECT_COPY_JOB_RECORDS_MAX)
     .toSorted((left, right) => right.updatedAt - left.updatedAt);
 }

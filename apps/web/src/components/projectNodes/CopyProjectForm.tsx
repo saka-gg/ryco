@@ -60,6 +60,7 @@ import {
   copyFolderNote,
   copyFolderTag,
   copyFooterSummary,
+  copyNoTargetMessage,
   copyPlatformOs,
   copySourceRows,
   copyTargetCards,
@@ -584,6 +585,10 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   };
 
   const noTarget = cards.every((card) => !card.selectable);
+  // "Update Ryco on X", with the node's own update, wherever an outdated node shows (A23).
+  const updateOffers = cards
+    .filter((card) => card.state === "outdated")
+    .map((card) => <NodeUpdateOffer key={card.node.environmentId} node={card.node} />);
   const header = (
     <div className="flex items-center gap-2.5 py-3.5 ps-4 pe-12">
       <DialogTitle className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-[15px] leading-tight">
@@ -619,8 +624,9 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             onChange={() => undefined}
             labelledBy={ids.to}
           />
-          <p className="m-0 text-[13px] text-muted-foreground">
-            {title} is already on every online node.
+          {updateOffers}
+          <p className="m-0 text-[13px] text-muted-foreground" data-testid="copy-no-target">
+            {copyNoTargetMessage(title, cards)}
           </p>
         </div>
         <div className="flex items-center gap-2 border-border border-t px-4 py-[11px]">
@@ -644,8 +650,6 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     targetHome: destination.hints?.homeDirectory ?? null,
     projectTitle: title,
   });
-  const outdated = cards.filter((card) => card.state === "outdated");
-
   return (
     <>
       {header}
@@ -681,9 +685,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             }}
             labelledBy={ids.to}
           />
-          {outdated.map((card) => (
-            <NodeUpdateOffer key={card.node.environmentId} node={card.node} />
-          ))}
+          {updateOffers}
         </CopyField>
         <CopyField label="How" labelId={ids.how}>
           <MethodChoice

@@ -3,11 +3,13 @@
 //          proposals: decides whether this client can run a proposal's copy
 //          against its target, resolves what approving would do there for the
 //          card to show first (the folder, the setup thread's model), and
-//          approving accepts with `executeOnClient`, waits until the node runs
-//          the proposal (`executing`) and runs the copy through
+//          approving accepts with `executeOnClient` (sent again with the same
+//          executor when its answer is lost), waits until the node runs the
+//          proposal (`executing`) and runs the copy through
 //          `copyRuntime/copyManager`, which reports `started` / `completed` /
-//          `failed` to the proposal's node. After a reload it rebuilds the plan
-//          of a copy whose upload was cut off.
+//          `failed` to the proposal's node; an approval whose copy can't start
+//          reports `failed` instead. After a reload it rebuilds the plan of a
+//          copy whose upload was cut off.
 // Layer: Web, loaded on demand by `agent-control/agentControlClientExecutor`
 //        (`useAgentControlClientExecutor`) the first time a card asks whether
 //        it can approve a client-executed proposal, and by the copy runtime
@@ -36,6 +38,7 @@ import {
   type ServerConfig,
 } from "@ryco/contracts";
 import type { ProjectCopyJobRecord, ProjectCopyRunPlan } from "@ryco/client-runtime/projectCopy";
+import { isTagged } from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { isHostedHubMode } from "../../env";
@@ -57,7 +60,9 @@ import type {
   AgentControlClientExecutor,
 } from "../agent-control/agentControlClientExecutor";
 import type { AgentControlCopyResolution } from "./agentControlCopyPlan";
+import { isAgentControlNodeAnswer } from "./copyRuntime/agentControlReports";
 import type {
+  AgentControlCopyStartHold,
   ManagedProjectCopy,
   ProjectCopyAgentControlContext,
   StartProjectCopyOptions,
@@ -104,16 +109,25 @@ export interface AgentControlCopyExecutorDeps {
     onProposal: (proposal: AgentControlProposalView) => void,
   ) => () => void;
   readonly startCopy: (options: StartProjectCopyOptions) => Promise<ManagedProjectCopy>;
-  readonly reportNotStarted: (
+  /**
+   * Holds an approval from before its accept until its copy runs
+   * (`copyManager.holdAgentControlCopyStart`), so a proposal the accept may
+   * have bound to this executor is always ended, after a reload too.
+   */
+  readonly holdCopyStart: (
     context: ProjectCopyAgentControlContext,
-    message: string,
-  ) => Promise<void>;
+  ) => Promise<AgentControlCopyStartHold>;
   readonly uuid: () => string;
   /** How long approving waits for the node to run the proposal. */
   readonly executingTimeoutMs: number;
+  /** The first pause before an accept whose answer did not arrive is sent again; it doubles. */
+  readonly acceptRetryDelayMs: number;
 }
 
 const EXECUTING_TIMEOUT_MS = 30_000;
+const ACCEPT_RETRY_DELAY_MS = 1_000;
+/** Accepts sent with one executor before approving gives up (the node may still have bound it). */
+const ACCEPT_ATTEMPTS = 4;
 
 function appDeps(): AgentControlCopyExecutorDeps {
   return {
@@ -155,13 +169,11 @@ function appDeps(): AgentControlCopyExecutorDeps {
     },
     startCopy: async (options) =>
       (await import("./copyRuntime/copyManager")).startManagedProjectCopy(options),
-    reportNotStarted: async (context, message) =>
-      (await import("./copyRuntime/copyManager")).reportAgentControlCopyNotStarted(
-        context,
-        message,
-      ),
+    holdCopyStart: async (context) =>
+      (await import("./copyRuntime/copyManager")).holdAgentControlCopyStart(context),
     uuid: randomUUID,
     executingTimeoutMs: EXECUTING_TIMEOUT_MS,
+    acceptRetryDelayMs: ACCEPT_RETRY_DELAY_MS,
   };
 }
 
@@ -305,12 +317,59 @@ async function resolveAgentControlCopyWith(
   }
 }
 
+type AgentControlApi = NonNullable<EnvironmentApi["agentControl"]>;
+
+/** The proposal ended (failed, rejected, expired) before its copy could start; nothing runs for it. */
+class AgentControlProposalEndedError extends Error {}
+
+/**
+ * The node judged an accept: its Agent Control answer (except a storage
+ * failure, which may come after the decision committed) or an auth refusal.
+ * Nothing else tells whether the accept arrived.
+ */
+const isDefiniteAcceptAnswer = (error: unknown): boolean =>
+  isAgentControlNodeAnswer(error) || isTagged(error, "AuthRpcError");
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => globalThis.setTimeout(resolve, Math.max(0, ms)));
+
+/**
+ * Accepts with this approval's executor. An answer that did not arrive (a
+ * relay drop, a reconnect) or a storage failure is sent again with the same
+ * executor, through the node's current connection: the node then answers with
+ * the proposal it already bound to it, or finishes binding one a failure left
+ * `approved` (A1(2)). Only the node's own answer, or running out of attempts,
+ * ends it early.
+ */
+async function acceptWithExecutor(
+  deps: AgentControlCopyExecutorDeps,
+  input: {
+    readonly environmentId: EnvironmentId;
+    readonly proposalId: AgentControlProposalId;
+    readonly executorId: AgentControlClientExecutorId;
+    readonly api: AgentControlApi;
+  },
+): Promise<AgentControlProposalReceiptView> {
+  for (let attempt = 1; ; attempt += 1) {
+    const api = deps.readAgentControlApi(input.environmentId) ?? input.api;
+    try {
+      return await api.acceptProposal({
+        proposalId: input.proposalId,
+        executeOnClient: { executorId: input.executorId },
+      });
+    } catch (error) {
+      if (isDefiniteAcceptAnswer(error) || attempt >= ACCEPT_ATTEMPTS) throw error;
+      await sleep(deps.acceptRetryDelayMs * 2 ** (attempt - 1));
+    }
+  }
+}
+
 /**
  * Resolves once the node runs the proposal (`executing`), as its accept
  * receipt or its proposal stream says first. A terminal status fails with the
- * node's reason; after the timeout the node is asked once, and a proposal a
- * crash left `approved` is accepted again with the same executor, which makes
- * the node finish binding it (A1(2)).
+ * node's reason (`AgentControlProposalEndedError`); after the timeout the node
+ * is asked once, and a proposal a crash left `approved` is accepted again with
+ * the same executor, which makes the node finish binding it (A1(2)).
  */
 async function waitForExecuting(
   deps: AgentControlCopyExecutorDeps,
@@ -318,7 +377,7 @@ async function waitForExecuting(
     readonly environmentId: EnvironmentId;
     readonly proposalId: AgentControlProposalId;
     readonly receipt: AgentControlProposalReceiptView;
-    readonly api: NonNullable<EnvironmentApi["agentControl"]>;
+    readonly api: AgentControlApi;
     readonly executorId: AgentControlClientExecutorId;
   },
 ): Promise<void> {
@@ -329,7 +388,7 @@ async function waitForExecuting(
   ): "executing" | Error | null => {
     if (status === "executing") return "executing";
     if (!TERMINAL_STATUSES.has(status)) return null;
-    return new Error(
+    return new AgentControlProposalEndedError(
       result?.outcome === "failed"
         ? result.error.message
         : `The request was ${status} before the copy could start.`,
@@ -359,12 +418,10 @@ async function waitForExecuting(
   }
   if (outcome === null) {
     // The stream said nothing in time: ask the node, finishing a bind a crash cut short.
-    const current = (await input.api.getProposal({ proposalId })).proposal;
+    const api = deps.readAgentControlApi(environmentId) ?? input.api;
+    const current = (await api.getProposal({ proposalId })).proposal;
     if (current?.status === "approved") {
-      const again = await input.api.acceptProposal({
-        proposalId,
-        executeOnClient: { executorId: input.executorId },
-      });
+      const again = await acceptWithExecutor(deps, { ...input, api });
       outcome = settled(again.status, again.result);
     } else if (current) {
       outcome = settled(current.status, current.result);
@@ -497,17 +554,33 @@ export function startAgentControlCopyExecutor(
 
     const api = deps.readAgentControlApi(environmentId);
     if (!api) throw new Error("The agent's device is not connected here.");
+    // One executor for this approval: every accept it sends carries it (A1(2)).
     const executorId = AgentControlClientExecutorId.make(deps.uuid());
-    const receipt = await api.acceptProposal({ proposalId, executeOnClient: { executorId } });
-    await waitForExecuting(deps, { environmentId, proposalId, receipt, api, executorId });
     const context: ProjectCopyAgentControlContext = { environmentId, proposalId, executorId };
+    // From the accept on, the node may run the proposal for this executor, so
+    // the hold makes every way out end it rather than its 2 h deadline.
+    const hold = await deps.holdCopyStart(context);
     try {
+      const receipt = await acceptWithExecutor(deps, {
+        environmentId,
+        proposalId,
+        executorId,
+        api,
+      });
+      await waitForExecuting(deps, { environmentId, proposalId, receipt, api, executorId });
       await deps.startCopy({ plan: resolution.runPlan, agentControl: context });
     } catch (error) {
+      if (isDefiniteAcceptAnswer(error) || error instanceof AgentControlProposalEndedError) {
+        // The node refused the accept, or ended the proposal: nothing runs for this executor.
+        hold.release();
+        throw error;
+      }
       const message = errorMessage(error, "The copy did not start.");
-      await deps.reportNotStarted(context, message);
+      hold.reportNotStarted(message);
       throw new Error(message, { cause: error });
     }
+    // The copy's own record carries the executor now.
+    hold.release();
     setPreview(proposalId, null);
   };
 

@@ -34,7 +34,11 @@ import {
   resetProjectCopyManagerForTests,
   setProjectCopyRuntimeForTests,
 } from "./copyRuntime/copyManager";
-import { callNodeWithLease, createWebProjectCopyIo } from "./copyRuntime/webProjectCopyIo";
+import {
+  callNodeToRead,
+  callNodeWithLease,
+  createWebProjectCopyIo,
+} from "./copyRuntime/webProjectCopyIo";
 import { openAddProject, useProjectNodesDialogStore } from "./projectNodesDialogStore";
 import {
   createFakeNodeApi,
@@ -183,6 +187,7 @@ function createMacMiniApi(serverConfig: ServerConfig) {
       repository: null,
     }),
   );
+  const cancelImport = vi.fn(async (_input: { importId: string }) => current!);
   const base = createMockEnvironmentApi({
     getConfig: async () => serverConfig,
     browse: fake.browse,
@@ -195,13 +200,22 @@ function createMacMiniApi(serverConfig: ServerConfig) {
       ...fake.api.projects,
       importStart,
       subscribeImport,
-      cancelImport: vi.fn(async () => current!),
+      cancelImport,
       listImports: vi.fn(async () => ({ imports: current ? [current] : [] })),
     },
     sourceControl: { cloneRepository },
   } as unknown as EnvironmentApi;
   __setEnvironmentApiOverrideForTests(MINI, api);
-  return { api, importStart, subscribeImport, dispatchCommand, cloneRepository, emit, fake };
+  return {
+    api,
+    importStart,
+    subscribeImport,
+    cancelImport,
+    dispatchCommand,
+    cloneRepository,
+    emit,
+    fake,
+  };
 }
 
 const dialog = () => page.getByTestId("add-project-dialog");
@@ -390,6 +404,7 @@ describe("AddProjectDialog", () => {
         startProjectCopy,
         projectCopyPlanWithSendFiles,
         callNodeWithLease,
+        callNodeToRead,
         createIo: () =>
           createWebProjectCopyIo({
             acquire: async (environmentId) => ({
@@ -441,6 +456,63 @@ describe("AddProjectDialog", () => {
       await expect
         .element(page.getByText("codex is ready on Mac mini"), ELEMENT_WAIT)
         .toBeVisible();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("cancels a clone the node had not answered yet, once it answers", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWith(null),
+    });
+    try {
+      await waitForServerConfigToApply();
+      const mini = createMacMiniApi(
+        addSavedNode({ environmentId: MINI, label: "Mac mini", projectCopy: true }),
+      );
+      // The node starts the job, but its answer is still on the way.
+      let answer: () => void = () => undefined;
+      const answered = new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+      const startOnNode = mini.importStart.getMockImplementation()!;
+      mini.importStart.mockImplementationOnce(async (input) => {
+        const started = await startOnNode(input);
+        await answered;
+        return started;
+      });
+      openAddProject({ environmentId: MINI, mode: "clone" });
+      await expect.element(dialog(), ELEMENT_WAIT).toBeVisible();
+      await dialog()
+        .getByRole("textbox", { name: "Repository to clone" })
+        .fill("git@github.com:openai/codex.git");
+      await userEvent.keyboard("{Enter}");
+      const clone = dialog().getByRole("button", { name: "Clone to Mac mini" });
+      await expect.element(clone, ELEMENT_WAIT).toBeEnabled();
+      await clone.click();
+      await vi.waitFor(() => expect(mini.importStart).toHaveBeenCalledTimes(1));
+      const input = mini.importStart.mock.calls[0]![0];
+      await expect
+        .element(page.getByTestId("add-project-import-steps"), ELEMENT_WAIT)
+        .toMatchTextContent(/Asking Mac mini to start/);
+
+      // Its name gains the spinner's "Loading" while it cancels.
+      const cancel = dialog().getByRole("button", { name: /Cancel$/u });
+      await cancel.click();
+      // Nothing is known to cancel yet: the dialog waits for the node's answer.
+      await expect.element(cancel, ELEMENT_WAIT).toBeDisabled();
+      expect(mini.cancelImport).not.toHaveBeenCalled();
+
+      answer();
+      // The job the node started is cancelled by its id, then the folder step is back.
+      await vi.waitFor(() =>
+        expect(mini.cancelImport).toHaveBeenCalledWith({ importId: input.importId }),
+      );
+      await expect
+        .element(dialog().getByRole("button", { name: "Clone to Mac mini" }), ELEMENT_WAIT)
+        .toBeVisible();
+      expect(mini.subscribeImport).not.toHaveBeenCalled();
     } finally {
       await mounted.cleanup();
     }

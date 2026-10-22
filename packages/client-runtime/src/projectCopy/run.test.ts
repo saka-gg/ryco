@@ -702,6 +702,16 @@ describe("startProjectCopy", () => {
     expect(seen.records.at(-1)).toEqual(outcome.record);
   });
 
+  it("publishes a new copy under the id the app claimed for it", async () => {
+    const { io } = setup();
+    const seen = track();
+    const run = startProjectCopy({ io, plan: plan(), copyId: "copy-claimed", ...seen });
+    expect(run.copyId).toBe("copy-claimed");
+    // The first record the app stores already carries it.
+    expect(seen.records[0]?.copyId).toBe("copy-claimed");
+    await run.done;
+  });
+
   it("resumes a half-finished upload from the target's receivedBytes", async () => {
     const { target, io, source } = setup();
     let appends = 0;

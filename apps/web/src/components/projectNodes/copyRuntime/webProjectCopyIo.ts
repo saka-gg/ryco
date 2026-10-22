@@ -218,6 +218,33 @@ export function createWebProjectCopyIo(
 }
 
 /**
+ * Runs one read against a node outside a copy's own holds (a resumed Agent
+ * Control report reading how the copy's import ended): holds the node only to
+ * follow it, with no mutation lease, runs `call` and releases it.
+ */
+export async function callNodeToRead<T>(
+  environmentId: EnvironmentId,
+  call: (api: EnvironmentApi) => Promise<T>,
+  options: {
+    readonly copyId: string;
+    readonly signal?: AbortSignal;
+    readonly acquire?: WebProjectCopyAcquire;
+  },
+): Promise<T> {
+  const acquire = options.acquire ?? DEFAULT_DEPS.acquire;
+  const node = await acquire(environmentId, {
+    copyId: options.copyId,
+    signal: options.signal ?? new AbortController().signal,
+    purpose: "follow",
+  });
+  try {
+    return await call(node.api);
+  } finally {
+    node.release();
+  }
+}
+
+/**
  * Runs one write against a node outside a copy's own holds (an Agent Control
  * report to the agent's node): acquires it for `copyId`, runs `call` under the
  * lease and releases it. A lease lost before the call went out acquires again,

@@ -20,6 +20,7 @@ import {
   copyProgressSteps,
   copySegmentsText,
   copySourceRows,
+  copyNoTargetMessage,
   copyTargetCards,
   initialCopySource,
   initialCopyTarget,
@@ -102,6 +103,34 @@ describe("From and To", () => {
     ]);
     expect(initialCopyTarget(cards, MINI)).toBe(HETZNER);
     expect(initialCopyTarget(cards, null)).toBe(HETZNER);
+  });
+
+  it("says why no destination can take the copy", () => {
+    const cards = copyTargetCards({
+      nodes: [node(MINI, "Mac mini"), node(GAMING, "Gaming PC", { presence: "offline" })],
+      members: MEMBERS,
+      nowMs: NOW,
+    });
+    // Every online node has it.
+    expect(copyNoTargetMessage("ryco", cards)).toBe("ryco is already on every online node.");
+
+    // The other node runs an older Ryco, or can't be changed from here: not "already on every node".
+    const blocked = copyTargetCards({
+      nodes: [
+        node(MINI, "Mac mini"),
+        node(HETZNER, "Old box", { projectCopySupport: "no" }),
+        node(GAMING, "hetzner-build", {
+          canMutate: false,
+          mutateBlockedReason: "Pair hetzner-build again as its owner",
+        }),
+      ],
+      members: MEMBERS,
+      nowMs: NOW,
+    });
+    expect(blocked.every((card) => !card.selectable)).toBe(true);
+    expect(copyNoTargetMessage("ryco", blocked)).toBe(
+      "No node can take a copy of ryco right now. Update Ryco on Old box to copy here. Pair hetzner-build again as its owner.",
+    );
   });
 
   it("keeps a node that is not connected yet selectable", () => {

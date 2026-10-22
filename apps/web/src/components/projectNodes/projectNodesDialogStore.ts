@@ -280,14 +280,28 @@ export function markProjectCopiesActive(): void {
  */
 export const PROJECT_COPY_RECORDS_STORAGE_KEY = "ryco:project-copies:v1";
 
-/** Whether a session left copy records behind (the copy runtime decides what to resume). */
-export function hasStoredProjectCopyRecords(): boolean {
+/**
+ * Agent Control approvals of a copy that may have bound a proposal to this
+ * client's executor before the copy's own record existed (ids only), so a
+ * reload still ends such a proposal. Kept by the copy runtime.
+ */
+export const PROJECT_COPY_STARTS_STORAGE_KEY = "ryco:project-copy-starts:v1";
+
+const hasStoredEntries = (key: string): boolean => {
   try {
-    const stored = getLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, Schema.Unknown);
+    const stored = getLocalStorageItem(key, Schema.Unknown);
     return Array.isArray(stored) && stored.length > 0;
   } catch {
     return false;
   }
+};
+
+/** Whether a session left copy records behind (the copy runtime decides what to resume). */
+export function hasStoredProjectCopyRecords(): boolean {
+  return (
+    hasStoredEntries(PROJECT_COPY_RECORDS_STORAGE_KEY) ||
+    hasStoredEntries(PROJECT_COPY_STARTS_STORAGE_KEY)
+  );
 }
 
 /** Test-only: both dialogs closed, nothing running. */

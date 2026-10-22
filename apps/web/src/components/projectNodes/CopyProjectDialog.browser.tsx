@@ -323,7 +323,7 @@ function fakeRuntime() {
             projectId: ProjectId.make("project-new"),
           })
         : createProjectCopyJobRecord({
-            copyId: input.resume?.copyId ?? `copy-${runs.length + 1}`,
+            copyId: input.resume?.copyId ?? input.copyId ?? `copy-${runs.length + 1}`,
             at: Date.now(),
             sourceEnvironmentId: LAPTOP,
             sourceProjectId: SOURCE_ID,
@@ -368,8 +368,13 @@ function fakeRuntime() {
       choices: { ...plan.choices, mode: "send-files", bringCommits: false },
       sendFilesFallback: false,
     }),
-    createIo: () => ({ dispose: () => undefined }) as unknown as WebProjectCopyIo,
+    createIo: () =>
+      ({
+        dispose: () => undefined,
+        uuid: () => `copy-${runs.length + 1}`,
+      }) as unknown as WebProjectCopyIo,
     callNodeWithLease: async () => undefined as never,
+    callNodeToRead: async () => undefined as never,
   };
   return { runtime, runs };
 }
@@ -636,6 +641,20 @@ describe("CopyProjectDialog", () => {
         .element(radio(/^Mac mini has it/u))
         .toHaveAttribute("title", "has it · ~/dev/ryco");
       await expect.element(radio(/^hetzner-build/u)).toHaveAttribute("aria-checked", "true");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("says a node needs Ryco updated, not that every node has the project", async () => {
+    const { screen } = await mount({ nodes: nodes({ [HETZNER]: { projectCopySupport: "no" } }) });
+    try {
+      await expect
+        .element(page.getByTestId("copy-no-target"))
+        .toHaveTextContent(
+          "No node can take a copy of ryco right now. Update Ryco on hetzner-build to copy here.",
+        );
+      await expect.element(radio(/^hetzner-build/u)).toBeDisabled();
     } finally {
       await screen.unmount();
     }

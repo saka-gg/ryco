@@ -10,8 +10,11 @@
 //        link through `projects.importStart`; older ones clone with
 //        `sourceControl.cloneRepository` and add with `project.create`. An import
 //        still running when the dialog closes goes on in the copy runtime
-//        (`trackProjectImport`: its toasts, the Copies block, a reload).
+//        (`trackProjectImport`: its toasts, the Copies block, a reload). An
+//        import the user leaves before the node answered `importStart` (Cancel,
+//        Back) is cancelled by its id, since the node may have started it.
 
+import { isProjectCopyRpcError } from "@ryco/client-runtime/projectCopy";
 import type { AcquiredNode, NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import {
@@ -207,6 +210,24 @@ function toastError(title: string, description: string): void {
   toastManager.add(stackedThreadToast({ type: "error", title, description }));
 }
 
+/**
+ * Asks the node to cancel an import by its id. One the node never started
+ * (`not-found`) has nothing left to cancel, and neither has a node without the call.
+ */
+async function cancelImportOnNode(
+  environmentId: EnvironmentId,
+  importId: ProjectImportId,
+): Promise<void> {
+  const cancel = readEnvironmentApi(environmentId)?.projects.cancelImport;
+  if (!cancel) return;
+  try {
+    await cancel({ importId });
+  } catch (error) {
+    if (isProjectCopyRpcError(error) && error.code === "not-found") return;
+    throw error;
+  }
+}
+
 /** `<root>/<relative>` with the root's own separator; the root itself for "". */
 function projectRootIn(repositoryRoot: string, relativeRoot: string): string {
   return relativeRoot
@@ -307,6 +328,8 @@ function AddProjectFlow(props: {
   // The dialog closed (or this open was replaced): a running import is the copy runtime's now.
   const [handedOver, setHandedOver] = useState(false);
   const closedRef = useRef(false);
+  // The import whose Cancel came before the node answered `importStart`: the answer cancels it.
+  const cancelOnAnswerRef = useRef<ProjectImportId | null>(null);
 
   const node = nodes.find((entry) => entry.environmentId === nodeId) ?? null;
   // A node that left the catalog sends the flow back to the node step.
@@ -523,23 +546,67 @@ function AddProjectFlow(props: {
       update({ error: `${node?.label ?? "The node"} is not connected.` });
       return;
     }
+    let snapshot: ProjectImportSnapshot | null = null;
+    let failure: unknown = null;
     try {
       // Idempotent by id: resending after a dropped answer returns the node's job.
-      const snapshot = await start(input);
-      if (closedRef.current) {
-        // Closed while the node answered: the copy runtime follows it from here.
-        if (!isTerminalImport(snapshot)) handOverImport(input, environmentId, snapshot.title);
-        return;
-      }
-      update({ accepted: true, error: null });
-      applyImportSnapshot(snapshot);
+      snapshot = await start(input);
     } catch (error) {
+      failure = error;
+    }
+    if (cancelOnAnswerRef.current === input.importId) {
+      cancelOnAnswerRef.current = null;
+      await cancelAnsweredImport(input, environmentId, snapshot, update);
+      return;
+    }
+    if (snapshot === null) {
       if (closedRef.current) {
-        toastError("Couldn't start on the node", errorMessage(error));
+        toastError("Couldn't start on the node", errorMessage(failure));
         return;
       }
-      update({ error: errorMessage(error) });
+      update({ error: errorMessage(failure) });
+      return;
     }
+    if (closedRef.current) {
+      // Closed while the node answered: the copy runtime follows it from here.
+      if (!isTerminalImport(snapshot)) handOverImport(input, environmentId, snapshot.title);
+      return;
+    }
+    update({ accepted: true, error: null });
+    applyImportSnapshot(snapshot);
+  };
+  /**
+   * Cancel came while the node was still answering `importStart`: the job it
+   * started (or may have started, when the answer failed) is cancelled now, and
+   * the form comes back once the node confirmed. If it can't be cancelled, it
+   * stays followed (here, or by the copy runtime once the dialog closed).
+   */
+  const cancelAnsweredImport = async (
+    input: ProjectImportStartInput,
+    environmentId: EnvironmentId,
+    snapshot: ProjectImportSnapshot | null,
+    update: (patch: Partial<ImportPhase>) => void,
+  ) => {
+    if (snapshot === null || !isTerminalImport(snapshot)) {
+      try {
+        await cancelImportOnNode(environmentId, input.importId);
+      } catch (error) {
+        toastError("Couldn't cancel", errorMessage(error));
+        if (snapshot !== null && closedRef.current) {
+          handOverImport(input, environmentId, snapshot.title);
+        } else if (snapshot !== null) {
+          update({ accepted: true, cancelling: false, error: null });
+          applyImportSnapshot(snapshot);
+        } else {
+          update({ cancelling: false, error: errorMessage(error) });
+        }
+        return;
+      }
+    }
+    if (closedRef.current) return;
+    setPhase((current) =>
+      current.kind === "import" && current.input === input ? { kind: "form" } : current,
+    );
   };
   const startImport = (input: ProjectImportStartInput, added: AddedProject) => {
     setPhase({
@@ -736,15 +803,20 @@ function AddProjectFlow(props: {
     });
   };
   const cancelImport = async () => {
-    if (phase.kind !== "import") return;
-    const cancel = node ? readEnvironmentApi(node.environmentId)?.projects.cancelImport : undefined;
-    if (!phase.accepted || isTerminalImport(phase.snapshot) || !cancel) {
+    if (phase.kind !== "import" || phase.cancelling) return;
+    if (isTerminalImport(phase.snapshot)) {
       setPhase({ kind: "form" });
+      return;
+    }
+    if (!phase.accepted && phase.error === null) {
+      // `importStart` is still out: the node may start the job yet, so its answer cancels it.
+      cancelOnAnswerRef.current = phase.input.importId;
+      setPhase({ ...phase, cancelling: true });
       return;
     }
     setPhase({ ...phase, cancelling: true });
     try {
-      await cancel({ importId: phase.input.importId });
+      await cancelImportOnNode(phase.added.ref.environmentId, phase.input.importId);
       setPhase({ kind: "form" });
     } catch (error) {
       setPhase((current) =>
@@ -752,6 +824,16 @@ function AddProjectFlow(props: {
       );
       toastError("Couldn't cancel", errorMessage(error));
     }
+  };
+  /** Back from an import that failed; one whose start had no answer may still run, so it is cancelled. */
+  const leaveFailedImport = () => {
+    if (phase.kind === "import" && !phase.accepted) {
+      void cancelImportOnNode(phase.added.ref.environmentId, phase.input.importId).catch(
+        (error: unknown) =>
+          console.warn("Cancelling an import the node did not confirm failed.", error),
+      );
+    }
+    setPhase({ kind: "form" });
   };
   /** The copy runtime follows the import from here: its progress toast, the result, a reload. */
   const handOverImport = (
@@ -878,7 +960,7 @@ function AddProjectFlow(props: {
         onCancel={() => void cancelImport()}
         onBackground={runInBackground}
         onRetry={retryImport}
-        onBack={() => setPhase({ kind: "form" })}
+        onBack={leaveFailedImport}
       />
     );
   }

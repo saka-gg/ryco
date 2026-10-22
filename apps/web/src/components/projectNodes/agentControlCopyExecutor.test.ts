@@ -4,8 +4,9 @@ import type {
   NodeCatalogEntry,
   NodeCatalogSnapshot,
 } from "@ryco/client-runtime/state/nodes";
-import type {
-  AgentControlCopyProjectToNodePlan,
+import {
+  AgentControlRpcError,
+  type AgentControlCopyProjectToNodePlan,
   AgentControlProposalId,
   AgentControlProposalReceiptView,
   AgentControlProposalStatus,
@@ -210,6 +211,12 @@ function harness(overrides: Partial<AgentControlCopyExecutorDeps> = {}) {
     for (const follower of followers) follower(next);
   };
   const holds: Array<ReturnType<typeof heldNode>> = [];
+  const hold = {
+    release: vi.fn<() => void>(() => {
+      events.push("release");
+    }),
+    reportNotStarted: vi.fn<(message: string) => void>(),
+  };
   const targetApi = {
     projects: {
       pathHints: vi.fn(async () => hints),
@@ -231,7 +238,7 @@ function harness(overrides: Partial<AgentControlCopyExecutorDeps> = {}) {
     },
   };
   const agentControlApi = {
-    acceptProposal: vi.fn(async () => {
+    acceptProposal: vi.fn(async (_input: unknown): Promise<AgentControlProposalReceiptView> => {
       events.push("accept");
       return receipt("approved");
     }),
@@ -269,15 +276,20 @@ function harness(overrides: Partial<AgentControlCopyExecutorDeps> = {}) {
       events.push("start");
       return { copyId: "copy-1", done: new Promise(() => undefined) } as never;
     }),
-    reportNotStarted: vi.fn(async () => undefined),
+    holdCopyStart: vi.fn(async () => {
+      events.push("hold");
+      return hold;
+    }),
     uuid: () => EXECUTOR_ID,
     executingTimeoutMs: 1_000,
+    acceptRetryDelayMs: 0,
     ...overrides,
   };
   const source = startAgentControlCopyExecutor(deps);
   return {
     source,
     deps,
+    hold,
     events,
     followers,
     holds,
@@ -480,7 +492,9 @@ describe("approve", () => {
     test.setStreamStatus("executing");
     await approving;
 
-    expect(test.events).toEqual(["accept", "executing", "start"]);
+    // The approval was held before anything went out, and let go once the copy ran.
+    expect(test.events).toEqual(["hold", "accept", "executing", "start", "release"]);
+    expect(test.hold.reportNotStarted).not.toHaveBeenCalled();
     // It followed the proposal only while it waited.
     expect(test.followers.size).toBe(0);
     expect(test.deps.startCopy).toHaveBeenCalledWith({
@@ -546,7 +560,9 @@ describe("approve", () => {
       test.source.getExecutor().approve({ environmentId: LAPTOP, proposal: proposal() }),
     ).rejects.toThrow("ryco changed since the agent asked.");
     expect(test.deps.startCopy).not.toHaveBeenCalled();
-    expect(test.deps.reportNotStarted).not.toHaveBeenCalled();
+    // The node ended it: nothing runs for this executor and nothing is left to report.
+    expect(test.hold.reportNotStarted).not.toHaveBeenCalled();
+    expect(test.hold.release).toHaveBeenCalled();
   });
 
   it("reports a copy that was accepted but could not start", async () => {
@@ -560,10 +576,93 @@ describe("approve", () => {
     await expect(
       test.source.getExecutor().approve({ environmentId: LAPTOP, proposal: proposal() }),
     ).rejects.toThrow("The copy runtime failed to load.");
-    expect(test.deps.reportNotStarted).toHaveBeenCalledWith(
-      { environmentId: LAPTOP, proposalId: PROPOSAL, executorId: EXECUTOR_ID },
-      "The copy runtime failed to load.",
+    expect(test.deps.holdCopyStart).toHaveBeenCalledWith({
+      environmentId: LAPTOP,
+      proposalId: PROPOSAL,
+      executorId: EXECUTOR_ID,
+    });
+    expect(test.hold.reportNotStarted).toHaveBeenCalledWith("The copy runtime failed to load.");
+    expect(test.hold.release).not.toHaveBeenCalled();
+  });
+
+  it("accepts again with the same executor when an accept's answer is lost, then runs the copy", async () => {
+    const test = harness();
+    // The node bound the proposal, but the answer never arrived (a relay drop).
+    test.agentControlApi.acceptProposal
+      .mockRejectedValueOnce(new Error("The connection closed."))
+      .mockResolvedValueOnce(receipt("executing"));
+    await loadPreview(test);
+    await test.source.getExecutor().approve({ environmentId: LAPTOP, proposal: proposal() });
+
+    expect(test.agentControlApi.acceptProposal.mock.calls).toEqual([
+      [{ proposalId: PROPOSAL, executeOnClient: { executorId: EXECUTOR_ID } }],
+      [{ proposalId: PROPOSAL, executeOnClient: { executorId: EXECUTOR_ID } }],
+    ]);
+    expect(test.deps.startCopy).toHaveBeenCalledTimes(1);
+    expect(test.hold.reportNotStarted).not.toHaveBeenCalled();
+  });
+
+  it("finishes binding a proposal a storage failure left approved, with the same executor", async () => {
+    const test = harness();
+    test.agentControlApi.acceptProposal
+      .mockRejectedValueOnce(
+        new AgentControlRpcError({ code: "storage", message: "Agent Control storage failed." }),
+      )
+      .mockResolvedValueOnce(receipt("executing"));
+    await loadPreview(test);
+    await test.source.getExecutor().approve({ environmentId: LAPTOP, proposal: proposal() });
+    expect(test.agentControlApi.acceptProposal).toHaveBeenCalledTimes(2);
+    expect(test.deps.startCopy).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends a proposal it may have bound when no accept is answered", async () => {
+    const test = harness();
+    test.agentControlApi.acceptProposal.mockRejectedValue(new Error("The connection closed."));
+    await loadPreview(test);
+    await expect(
+      test.source.getExecutor().approve({ environmentId: LAPTOP, proposal: proposal() }),
+    ).rejects.toThrow("The connection closed.");
+
+    // Every attempt carried the one executor the node may have bound.
+    expect(
+      new Set(test.agentControlApi.acceptProposal.mock.calls.map((call) => JSON.stringify(call))),
+    ).toEqual(
+      new Set([
+        JSON.stringify([{ proposalId: PROPOSAL, executeOnClient: { executorId: EXECUTOR_ID } }]),
+      ]),
     );
+    expect(test.agentControlApi.acceptProposal.mock.calls.length).toBeGreaterThan(1);
+    expect(test.deps.startCopy).not.toHaveBeenCalled();
+    expect(test.hold.reportNotStarted).toHaveBeenCalledWith("The connection closed.");
+    expect(test.hold.release).not.toHaveBeenCalled();
+  });
+
+  it("ends a proposal whose state it can't read after accepting", async () => {
+    const test = harness({ executingTimeoutMs: 10 });
+    test.agentControlApi.getProposal.mockRejectedValueOnce(new Error("The connection closed."));
+    await loadPreview(test);
+    await expect(
+      test.source.getExecutor().approve({ environmentId: LAPTOP, proposal: proposal() }),
+    ).rejects.toThrow("The connection closed.");
+    expect(test.deps.startCopy).not.toHaveBeenCalled();
+    expect(test.hold.reportNotStarted).toHaveBeenCalledWith("The connection closed.");
+  });
+
+  it("lets go when the node refuses the accept: nothing was bound", async () => {
+    const test = harness();
+    test.agentControlApi.acceptProposal.mockRejectedValueOnce(
+      new AgentControlRpcError({
+        code: "conflict",
+        message: "Another app is running this request.",
+      }),
+    );
+    await loadPreview(test);
+    await expect(
+      test.source.getExecutor().approve({ environmentId: LAPTOP, proposal: proposal() }),
+    ).rejects.toThrow("Another app is running this request.");
+    expect(test.agentControlApi.acceptProposal).toHaveBeenCalledTimes(1);
+    expect(test.hold.release).toHaveBeenCalled();
+    expect(test.hold.reportNotStarted).not.toHaveBeenCalled();
   });
 
   it("finishes a bind a crash left at approved once the stream stays quiet", async () => {
