@@ -454,9 +454,19 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
 
+      # On a cold cache every shard downloads Chromium at once, and the
+      # Playwright CDN occasionally fails a request (it once served the wrong
+      # TLS certificate). Retry rather than fail the shard; a completed install
+      # makes the retry a quick no-op.
       - name: Install browser test runtime
         if: ${{ steps.scope.outputs.browser == 'true' }}
-        run: bun run --cwd apps/web test:browser:install
+        run: |
+          for attempt in 1 2 3; do
+            bun run --cwd apps/web test:browser:install && exit 0
+            echo "::warning::Browser runtime install failed (attempt ${attempt} of 3)."
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       # Saved before the suite runs, and only on a cold key. The browser
       # download is already complete here and is independent of the test
