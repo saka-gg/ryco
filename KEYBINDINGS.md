@@ -166,8 +166,9 @@ Currently available context keys:
 Enter in the focused composer is reserved. The **Send shortcut** setting (Settings > General >
 Composer controls) decides when it sends: `enter` always, `mod+enter` for multiline prompts, or
 always `mod+enter`. `shift+enter` adds a new line. While a turn runs, `mod+enter` does the opposite
-of the follow-up setting; where sending needs `mod+enter`, `mod+shift+enter` does instead. Do not
-bind `mod+enter` or `mod+shift+enter` to commands that can fire while the composer is focused.
+of the follow-up setting when the Send shortcut is `enter`; with either `mod+enter` option,
+`mod+enter` is the plain send and `mod+shift+enter` does the opposite. Do not bind `mod+enter` or
+`mod+shift+enter` to commands that can fire while the composer is focused.
 
 The focused composer also keeps these keys, which are not configurable (see
 [docs/user/composer.md](docs/user/composer.md)):

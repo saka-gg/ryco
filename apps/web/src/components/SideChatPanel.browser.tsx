@@ -6,12 +6,16 @@ import {
   ThreadId,
   type ServerProvider,
 } from "@ryco/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { SideChatPanel } from "./SideChatPanel";
+import { replaceClientSettingsSnapshot } from "../hooks/clientSettingsStore";
+import { isMacPlatform } from "../lib/utils";
 import { useSideChatStore } from "../sideChatStore";
+import { useTierOverrideStore } from "../tierOverrideStore";
 
 const mocks = vi.hoisted(() => ({ ask: vi.fn(), cancel: vi.fn(async () => ({})), allowed: true }));
 // The model picker reaches the environment registry; the side chat needs only
@@ -156,6 +160,35 @@ describe("SideChatPanel", () => {
     expect(mocks.ask).toHaveBeenLastCalledWith(
       expect.objectContaining({ history: [{ question: "Why?", answer: "A separate answer" }] }),
     );
+  });
+  it("follows the Send shortcut, also in a phone-tier window with a mouse", async () => {
+    mocks.ask.mockImplementation(async (input) => ({
+      requestId: input.requestId,
+      answer: "Two lines answered",
+    }));
+    // A narrow desktop window: the phone tier with a fine pointer keeps the setting.
+    expect(window.matchMedia("(any-pointer: fine)").matches).toBe(true);
+    useTierOverrideStore.setState({ override: "phone" });
+    replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, sendShortcut: "mod-enter" });
+    try {
+      await mount();
+      const question = page.getByLabelText("Side question");
+      await question.fill("First line");
+      await userEvent.keyboard("{Enter}Second line");
+      await expect.element(question).toHaveValue("First line\nSecond line");
+      expect(mocks.ask).not.toHaveBeenCalled();
+
+      const mod = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+      await userEvent.keyboard(`{${mod}>}{Enter}{/${mod}}`);
+      await expect.element(page.getByText("Two lines answered", { exact: true })).toBeVisible();
+      expect(mocks.ask).toHaveBeenCalledOnce();
+      expect(mocks.ask).toHaveBeenLastCalledWith(
+        expect.objectContaining({ question: "First line\nSecond line" }),
+      );
+    } finally {
+      replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
+      useTierOverrideStore.setState({ override: null });
+    }
   });
   it("minimizes without stopping; cancel restores draft and ignores a late answer", async () => {
     let finish!: (result: { requestId: string; answer: string }) => void;

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  describeFollowUpInversion,
   describeRunningFollowUp,
+  effectiveSendShortcut,
+  followUpInvertShortcutLabel,
   resolveComposerEnter,
   sendRequiresModifier,
 } from "./composerFollowUp";
@@ -33,6 +34,25 @@ describe("sendRequiresModifier", () => {
   });
 });
 
+describe("effectiveSendShortcut", () => {
+  it("keeps Enter sending only on the phone tier without a mouse or trackpad", () => {
+    expect(effectiveSendShortcut("mod-enter", { phoneTier: true, finePointer: false })).toBe(
+      "enter",
+    );
+    // A narrow desktop window is the phone tier too, but it has a keyboard and a pointer.
+    expect(effectiveSendShortcut("mod-enter", { phoneTier: true, finePointer: true })).toBe(
+      "mod-enter",
+    );
+    // A tablet in the desktop layout offers the setting, so it holds.
+    expect(
+      effectiveSendShortcut("mod-enter-multiline", { phoneTier: false, finePointer: false }),
+    ).toBe("mod-enter-multiline");
+    expect(effectiveSendShortcut("mod-enter", { phoneTier: false, finePointer: true })).toBe(
+      "mod-enter",
+    );
+  });
+});
+
 describe("resolveComposerEnter", () => {
   const resolve = (
     sendShortcut: "enter" | "mod-enter-multiline" | "mod-enter",
@@ -41,29 +61,29 @@ describe("resolveComposerEnter", () => {
     platform = MAC,
   ) => resolveComposerEnter({ event: enter(platform, keys), sendShortcut, prompt, platform });
 
-  it("sends with Enter and inverts with Mod+Enter when Enter sends", () => {
+  it("sends with Enter and inverts with Mod+Enter under the Enter setting", () => {
     for (const platform of [MAC, WINDOWS]) {
-      expect(resolve("enter", "hi", {}, platform)).toEqual({ invertFollowUp: false });
-      expect(resolve("enter", "hi", { mod: true }, platform)).toEqual({ invertFollowUp: true });
-      expect(resolve("enter", "hi", { shift: true }, platform)).toBeNull();
-      expect(resolve("enter", "hi", { mod: true, shift: true }, platform)).toBeNull();
-      expect(resolve("mod-enter-multiline", "one line", {}, platform)).toEqual({
-        invertFollowUp: false,
-      });
-      expect(resolve("mod-enter-multiline", "one line", { mod: true }, platform)).toEqual({
-        invertFollowUp: true,
-      });
+      for (const prompt of ["hi", "two\nlines"]) {
+        expect(resolve("enter", prompt, {}, platform)).toEqual({ invertFollowUp: false });
+        expect(resolve("enter", prompt, { mod: true }, platform)).toEqual({
+          invertFollowUp: true,
+        });
+        expect(resolve("enter", prompt, { shift: true }, platform)).toBeNull();
+        expect(resolve("enter", prompt, { mod: true, shift: true }, platform)).toBeNull();
+      }
     }
   });
 
-  it("sends with Mod+Enter and inverts with Mod+Shift+Enter when sending needs Mod+Enter", () => {
+  it("sends with Mod+Enter and inverts with Mod+Shift+Enter under either Mod+Enter option", () => {
     for (const platform of [MAC, WINDOWS]) {
       for (const [sendShortcut, prompt] of [
         ["mod-enter", "one line"],
+        ["mod-enter", "two\nlines"],
+        ["mod-enter-multiline", "one line"],
         ["mod-enter-multiline", "two\nlines"],
       ] as const) {
-        expect(resolve(sendShortcut, prompt, {}, platform)).toBeNull();
         expect(resolve(sendShortcut, prompt, { shift: true }, platform)).toBeNull();
+        // The shortcuts mean the same whatever the prompt's length, so a hint stays right.
         expect(resolve(sendShortcut, prompt, { mod: true }, platform)).toEqual({
           invertFollowUp: false,
         });
@@ -71,6 +91,12 @@ describe("resolveComposerEnter", () => {
           invertFollowUp: true,
         });
       }
+      expect(resolve("mod-enter", "one line", {}, platform)).toBeNull();
+      expect(resolve("mod-enter-multiline", "two\nlines", {}, platform)).toBeNull();
+      // Enter still sends a one-line prompt under the multiline option.
+      expect(resolve("mod-enter-multiline", "one line", {}, platform)).toEqual({
+        invertFollowUp: false,
+      });
     }
   });
 
@@ -90,17 +116,14 @@ describe("resolveComposerEnter", () => {
   });
 });
 
-describe("describeFollowUpInversion", () => {
-  it("names the shortcut the Send shortcut setting leaves for the opposite", () => {
-    expect(describeFollowUpInversion("enter", MAC)).toBe("⌘↵ does the opposite.");
-    expect(describeFollowUpInversion("enter", WINDOWS)).toBe("Ctrl+Enter does the opposite.");
-    expect(describeFollowUpInversion("mod-enter", MAC)).toBe("⇧⌘↵ does the opposite.");
-    expect(describeFollowUpInversion("mod-enter", WINDOWS)).toBe(
-      "Ctrl+Shift+Enter does the opposite.",
-    );
-    expect(describeFollowUpInversion("mod-enter-multiline", MAC)).toBe(
-      "⌘↵ does the opposite, or ⇧⌘↵ in a multiline prompt.",
-    );
+describe("followUpInvertShortcutLabel", () => {
+  it("names one shortcut per Send shortcut setting", () => {
+    expect(followUpInvertShortcutLabel("enter", MAC)).toBe("⌘↵");
+    expect(followUpInvertShortcutLabel("enter", WINDOWS)).toBe("Ctrl+Enter");
+    for (const sendShortcut of ["mod-enter", "mod-enter-multiline"] as const) {
+      expect(followUpInvertShortcutLabel(sendShortcut, MAC)).toBe("⇧⌘↵");
+      expect(followUpInvertShortcutLabel(sendShortcut, WINDOWS)).toBe("Ctrl+Shift+Enter");
+    }
   });
 });
 
@@ -202,7 +225,7 @@ describe("describeRunningFollowUp", () => {
     ).toEqual({ effective: "steer", placeholder: "Steer this turn · ⌘↵ to queue instead" });
   });
 
-  it("names Mod+Shift+Enter when sending needs Mod+Enter", () => {
+  it("names Mod+Shift+Enter under either Mod+Enter option", () => {
     expect(
       describeRunningFollowUp({
         followUpBehavior: "queue",
@@ -231,15 +254,16 @@ describe("describeRunningFollowUp", () => {
         platform: MAC,
       }).placeholder,
     ).toBe("Send a message to decline and redirect · ⇧⌘↵ to queue instead");
-    // The placeholder shows in an empty composer: one line, where Mod+Enter still inverts.
+    // Under the multiline option too: Mod+Enter sends a multiline prompt as it is.
     expect(
       describeRunningFollowUp({
         followUpBehavior: "queue",
         steerUnavailableReason: null,
         surfaceAllowsSteer: true,
+        approvalRedirect: "decline",
         sendShortcut: "mod-enter-multiline",
         platform: MAC,
       }).placeholder,
-    ).toBe("Queue a follow-up · ⌘↵ to steer");
+    ).toBe("Send a message to decline and redirect · ⇧⌘↵ to queue instead");
   });
 });

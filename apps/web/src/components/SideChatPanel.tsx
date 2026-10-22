@@ -34,7 +34,9 @@ import { readMotionDurationMs } from "../lib/perf/motion";
 import { cn, randomUUID } from "../lib/utils";
 import { getCustomModelOptionsByInstance } from "../modelSelection";
 import { deriveProviderInstanceEntries, sortProviderInstanceEntries } from "../providerInstances";
+import { resolveComposerEnter } from "./chat/composerFollowUp";
 import { ProviderModelPicker } from "./chat/ProviderModelPicker";
+import { useSendShortcut } from "./chat/useSendShortcut";
 import { InboxStatusGlyph } from "./inboxSidebar/InboxStatusGlyph";
 import { Button } from "./ui/button";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
@@ -145,6 +147,7 @@ function SideChatSurface({
   open: boolean;
 }) {
   const actions = sideChatStore.getState();
+  const sendShortcut = useSendShortcut();
   const logRef = useRef<HTMLDivElement>(null);
   // Entries present when the panel opened appear in place; later ones rise in.
   const [settledCount] = useState(() => chat.exchanges.length + (chat.pending ? 1 : 0));
@@ -285,10 +288,12 @@ function SideChatSurface({
             value={chat.draft}
             onChange={(event) => actions.setDraft(key, event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                ask();
-              }
+              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+              // The Send shortcut setting decides whether Enter asks or adds a line.
+              const prompt = event.currentTarget.value;
+              if (!resolveComposerEnter({ event, sendShortcut, prompt })) return;
+              event.preventDefault();
+              ask();
             }}
           />
           <div className="flex items-center gap-0.5 px-1.5 pb-1.5">

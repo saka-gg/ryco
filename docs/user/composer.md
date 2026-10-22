@@ -2,27 +2,32 @@
 
 ## Send shortcut
 
-In **Settings > General > Send shortcut**, choose when Enter sends a message on web and desktop.
-`Cmd` below is `Ctrl` on Windows and Linux.
+In **Settings > General > Composer controls > Send shortcut**, choose when Enter sends a message
+on web and desktop. `Cmd` below is `Ctrl` on Windows and Linux.
 
 - **Enter**: Enter sends. This is the default.
 - **⌘↵ for multiline prompts**: Enter sends a one-line prompt. Once the prompt has more than one
   line, Enter adds a new line and `Cmd+Enter` sends.
 - **Always ⌘↵**: Enter always adds a new line and `Cmd+Enter` sends.
 
-`Shift+Enter` always adds a new line. The setting belongs to this browser or app, so each device
-keeps its own. It does not apply to the phone layout of the web app or to the Ryco iPhone app.
+`Shift+Enter` always adds a new line. The setting applies wherever you write a prompt: the chat
+composer, **Ask about this selection**, and the side chat. It belongs to this browser or app, so
+each device keeps its own. On the phone layout of the web app with a touch screen and no mouse or
+trackpad, Enter keeps sending; a narrow desktop window keeps your choice. The Ryco iPhone app has
+no Enter-to-send, so the setting does not apply there.
 
 While the agent works, **Messages sent while a turn runs** chooses whether a message waits in the
-queue or steers the running turn. `Cmd+Enter` does the opposite for one message. Where sending
-needs `Cmd+Enter` (always, or for a multiline prompt), use `Cmd+Shift+Enter` for the opposite
-instead. While a turn runs, the empty composer's hint names the shortcut for a one-line prompt.
+queue or steers the running turn. Another shortcut does the opposite for one message: `Cmd+Enter`
+when the Send shortcut is **Enter**, and `Cmd+Shift+Enter` with either `⌘↵` option, where
+`Cmd+Enter` is the normal send however many lines the prompt has. The composer's hint while a turn
+runs and the setting's description name the shortcut that applies.
 
 ## Chat width
 
-In **Settings > Appearance > Chat width**, choose how wide messages and the composer grow on large
-screens: **Comfortable** (the default), **Wide**, or **Full**, which fills the chat pane. The
-setting belongs to this browser or app. Phone layouts keep the comfortable width.
+In **Settings > Appearance > Interface > Chat width**, choose how wide messages and the composer
+grow on large screens: **Comfortable** (the default), **Wide**, or **Full**, which fills the chat
+pane. The setting belongs to this browser or app. The phone layout keeps the comfortable width and
+does not offer the setting.
 
 ## Large pastes
 

@@ -258,8 +258,9 @@ single approval.
 
 A message you send while a Claude turn runs can steer that turn instead of waiting in the queue.
 Choose the default in Settings → Composer controls → Messages sent while a turn runs: Queue (the
-default) or Steer. While a turn runs, ⌘↵ / Ctrl+Enter does the opposite. Each queued row also has
-a Steer button.
+default) or Steer. While a turn runs, the opposite shortcut sends one message the other way: ⌘↵ /
+Ctrl+Enter, or ⇧⌘↵ / Ctrl+Shift+Enter when your Send shortcut is one of the ⌘↵ options (see
+[Send shortcut](../user/composer.md#send-shortcut)). Each queued row also has a Steer button.
 
 How it works:
 
@@ -271,16 +272,16 @@ How it works:
   (`queued_turn_count > 0`). It never waits on a timer.
 - While Claude waits for an approval, the composer stays usable on desktop and in the app: sending
   a message declines the approval and steers the message into the turn, whatever the setting says
-  (⌘↵ / Ctrl+Enter still queues it and leaves the approval to you). Ryco waits until Claude has
-  taken the decline before it steers, and declines the next tool's approval too when Claude asks
-  again in the same turn. If the decline fails or its delivery is unknown, or the approval appeared
-  just before you sent, nothing is sent and your draft stays.
+  (the opposite shortcut still queues it and leaves the approval to you). Ryco waits until Claude
+  has taken the decline before it steers, and declines the next tool's approval too when Claude
+  asks again in the same turn. If the decline fails or its delivery is unknown, or the approval
+  appeared just before you sent, nothing is sent and your draft stays.
 - A steer that cannot be applied stays in the queue and is sent as the next turn. This happens
   when the turn has already finished, while Claude waits for an approval or an answer, for slash
   commands, and on Claude Code versions without the `interrupt_receipt_v1` capability. A deferral
   never adds an error or a work-log row. A steer sent automatically by the follow-up setting is
-  deferred silently; an explicit steer (the Steer button or ⌘↵ / Ctrl+Enter) shows a "Not
-  steered" notice saying why.
+  deferred silently; an explicit steer (the Steer button or the opposite shortcut) shows a
+  "Not steered" notice saying why.
 - If a steer stops Claude's current request but Claude Code reports no further queued work, the
   turn completes normally rather than as interrupted, so the queue keeps draining. The steered
   message then runs as its own request and its reply appears in a background turn.

@@ -89,16 +89,16 @@ export const DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS: AiFocusRefreshIntervalMs = 60
 /**
  * What Enter does with a message sent while a turn runs: `queue` waits for the turn to finish,
  * `steer` adds it to the running turn when the provider supports steering. Mod+Enter does the
- * opposite.
+ * opposite, or Mod+Shift+Enter when the Send shortcut uses Mod+Enter (`SendShortcut`).
  */
 export const FollowUpBehavior = Schema.Literals(["queue", "steer"]);
 export type FollowUpBehavior = typeof FollowUpBehavior.Type;
 export const DEFAULT_FOLLOW_UP_BEHAVIOR: FollowUpBehavior = "queue";
 
 /**
- * When Enter sends from the web and desktop composer: `enter` always, `mod-enter-multiline` only
+ * When Enter sends from web and desktop prompt inputs: `enter` always, `mod-enter-multiline` only
  * while the prompt is one line (Mod+Enter sends a multiline prompt), `mod-enter` never (Mod+Enter
- * sends). Where sending needs Mod+Enter, the follow-up inversion moves to Mod+Shift+Enter.
+ * sends). Under either Mod+Enter option the follow-up inversion is Mod+Shift+Enter.
  */
 export const SendShortcut = Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]);
 export type SendShortcut = typeof SendShortcut.Type;
