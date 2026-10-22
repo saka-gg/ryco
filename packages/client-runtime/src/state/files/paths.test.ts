@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   normalizeWorkspaceRelativePath,
   relativePathToRouteSegments,
+  resolveWorkspaceRelativePath,
   routeFilePathParam,
   routeLineParam,
   WORKSPACE_FILE_PATH_MAX_LENGTH,
@@ -91,5 +92,42 @@ describe("route params", () => {
     expect(routeLineParam("1.5")).toBeNull();
     expect(routeLineParam("abc")).toBeNull();
     expect(routeLineParam("Infinity")).toBeNull();
+  });
+});
+
+describe("resolveWorkspaceRelativePath", () => {
+  it("relativizes absolute paths under the root and resolves relative ones against it", () => {
+    expect(resolveWorkspaceRelativePath("/repo/project/src/app.ts", "/repo/project")).toBe(
+      "src/app.ts",
+    );
+    expect(resolveWorkspaceRelativePath("/repo/project/src/../lib/a.ts", "/repo/project/")).toBe(
+      "lib/a.ts",
+    );
+    expect(resolveWorkspaceRelativePath("./src/app.ts", "/repo/project")).toBe("src/app.ts");
+    expect(resolveWorkspaceRelativePath("src/app.ts", "/repo/project")).toBe("src/app.ts");
+  });
+
+  it("rejects the root itself, siblings sharing a prefix and escapes", () => {
+    for (const path of [
+      "",
+      "/repo/project",
+      "/repo/project-copy/a.ts",
+      "/etc/passwd",
+      "../secret.ts",
+      "src/../../secret.ts",
+      "//server/share/a.ts",
+      "\\\\server\\share\\a.ts",
+      "/repo/project/a\0.ts",
+    ]) {
+      expect(resolveWorkspaceRelativePath(path, "/repo/project")).toBeNull();
+    }
+    expect(resolveWorkspaceRelativePath("a.ts", "relative/root")).toBeNull();
+  });
+
+  it("compares Windows drive roots without regard to case", () => {
+    expect(resolveWorkspaceRelativePath("C:\\Repo\\Project\\src\\a.ts", "c:\\repo\\project")).toBe(
+      "src/a.ts",
+    );
+    expect(resolveWorkspaceRelativePath("D:\\repo\\project\\a.ts", "c:\\repo\\project")).toBeNull();
   });
 });

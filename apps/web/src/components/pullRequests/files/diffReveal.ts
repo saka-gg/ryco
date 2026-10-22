@@ -1,6 +1,10 @@
 import type { DiffAnnotationSide } from "@ryco/client-runtime/state/pull-request-review";
 
-import { DIFF_SURFACE_BASE_UNSAFE_CSS } from "../../../lib/diffRendering";
+import {
+  DIFF_SURFACE_BASE_UNSAFE_CSS,
+  GUTTER_UTILITY_UNSAFE_CSS,
+  PLAIN_ANNOTATION_UNSAFE_CSS,
+} from "../../../lib/diffRendering";
 import { readMotionDurationMs } from "../../../lib/perf/motion";
 
 /**
@@ -17,19 +21,7 @@ pre,
 [data-file] {
   --diffs-selection-base: color-mix(in srgb, var(--foreground) 55%, var(--background)) !important;
 }
-[data-line-annotation],
-[data-gutter-buffer="annotation"] {
-  --diffs-annotation-bg: var(--diffs-bg) !important;
-}
-[data-line-annotation][data-selected-line],
-[data-gutter-buffer="annotation"][data-selected-line] {
-  --diffs-computed-selected-line-bg: var(--diffs-computed-diff-line-bg) !important;
-}
-[data-utility-button] {
-  background-color: var(--primary) !important;
-  color: var(--primary-foreground) !important;
-}
-[data-line][data-pr-flash="flash"] {
+${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}[data-line][data-pr-flash="flash"] {
   animation: pr-line-flash 1.6s var(--app-motion-ease, ease);
 }
 [data-line][data-pr-flash="ring"] {
@@ -81,10 +73,21 @@ export function findDiffLineElement(
   return column?.querySelector<HTMLElement>(`[data-line="${n}"]`) ?? null;
 }
 
+/** The rendered content row for `line` of a single-file view (no sides). */
+export function findFileLineElement(fileElement: HTMLElement, line: number): HTMLElement | null {
+  return (
+    diffShadowRoot(fileElement)?.querySelector<HTMLElement>(
+      `[data-line="${CSS.escape(String(line))}"]`,
+    ) ?? null
+  );
+}
+
+type RenderedLineRange = { readonly min: number; readonly max: number };
+
 function renderedLineRange(
   fileElement: HTMLElement,
   side: DiffAnnotationSide,
-): { readonly min: number; readonly max: number } | null {
+): RenderedLineRange | null {
   const root = diffShadowRoot(fileElement);
   if (!root) return null;
   const column =
@@ -92,7 +95,10 @@ function renderedLineRange(
     root.querySelector<HTMLElement>(
       side === "additions" ? "code[data-additions]" : "code[data-deletions]",
     );
-  if (!column) return null;
+  return column ? lineRangeWithin(column) : null;
+}
+
+function lineRangeWithin(column: ParentNode): RenderedLineRange | null {
   let min = Number.POSITIVE_INFINITY;
   let max = Number.NEGATIVE_INFINITY;
   for (const element of column.querySelectorAll<HTMLElement>("[data-line]")) {
@@ -124,18 +130,58 @@ export async function revealDiffLine(input: {
   readonly line: number;
   readonly signal: AbortSignal;
 }): Promise<HTMLElement | null> {
-  const { scroller, fileElement, side, line, signal } = input;
+  const { fileElement, side, line } = input;
+  return revealRenderedLine({
+    ...input,
+    find: () => findDiffLineElement(fileElement, side, line),
+    renderedRange: () => renderedLineRange(fileElement, side),
+    // Nothing of the file rendered yet: bring the file itself into view.
+    approach: () => fileElement.scrollIntoView({ block: "start", behavior: "instant" }),
+  });
+}
+
+/**
+ * `revealDiffLine` for a single-file view (the Files panel's viewer and
+ * editor), whose one file fills the scroller.
+ */
+export async function revealFileLine(input: {
+  readonly scroller: HTMLElement;
+  readonly fileElement: HTMLElement;
+  readonly line: number;
+  readonly signal: AbortSignal;
+}): Promise<HTMLElement | null> {
+  const { fileElement, line } = input;
+  return revealRenderedLine({
+    ...input,
+    approach: () => undefined,
+    find: () => findFileLineElement(fileElement, line),
+    renderedRange: () => {
+      const root = diffShadowRoot(fileElement);
+      return root ? lineRangeWithin(root) : null;
+    },
+  });
+}
+
+async function revealRenderedLine(input: {
+  readonly scroller: HTMLElement;
+  readonly line: number;
+  readonly signal: AbortSignal;
+  readonly find: () => HTMLElement | null;
+  readonly renderedRange: () => RenderedLineRange | null;
+  readonly approach: () => void;
+}): Promise<HTMLElement | null> {
+  const { scroller, line, signal, find } = input;
   for (let attempt = 0; attempt < MAX_REVEAL_ATTEMPTS; attempt += 1) {
     if (signal.aborted) return null;
-    const element = findDiffLineElement(fileElement, side, line);
+    const element = find();
     if (element && element.getBoundingClientRect().height > 0) {
       centerInScroller(scroller, element);
       await nextFrame();
-      return signal.aborted ? null : (findDiffLineElement(fileElement, side, line) ?? element);
+      return signal.aborted ? null : (find() ?? element);
     }
-    const range = renderedLineRange(fileElement, side);
+    const range = input.renderedRange();
     if (range === null) {
-      fileElement.scrollIntoView({ block: "start", behavior: "instant" });
+      input.approach();
     } else if (line > range.max) {
       scroller.scrollTop += Math.min(8000, (line - range.max) * ESTIMATED_LINE_HEIGHT);
     } else if (line < range.min) {

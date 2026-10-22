@@ -7,14 +7,28 @@ import { EnvironmentId } from "@ryco/contracts";
 
 const {
   codeToHtmlMock,
+  contextMenuShowMock,
   getSharedHighlighterMock,
   openInPreferredEditorMock,
   readFileBinaryMock,
   readLocalApiMock,
+  workspaceFileOpenerMock,
 } = vi.hoisted(() => {
   const codeToHtmlMock = vi.fn((code: string) => `<pre class="shiki"><code>${code}</code></pre>`);
+  const contextMenuShowMock = vi.fn(
+    async (
+      _items: ReadonlyArray<{ readonly id: string }>,
+      _position?: { x: number; y: number },
+    ): Promise<string | null> => null,
+  );
   return {
     codeToHtmlMock,
+    contextMenuShowMock,
+    // Off a thread route by default: links keep opening the editor.
+    workspaceFileOpenerMock: {
+      canOpen: vi.fn(() => false),
+      open: vi.fn(() => true),
+    },
     getSharedHighlighterMock: vi.fn(async () => ({
       codeToHtml: codeToHtmlMock,
     })),
@@ -28,6 +42,7 @@ const {
     readLocalApiMock: vi.fn(() => ({
       server: { getConfig: vi.fn(async () => ({ availableEditors: ["vscode"] })) },
       shell: { openInEditor: vi.fn(async () => undefined) },
+      contextMenu: { show: contextMenuShowMock },
     })),
   };
 });
@@ -54,6 +69,10 @@ vi.mock("@pierre/diffs", () => ({
   getSharedHighlighter: getSharedHighlighterMock,
 }));
 
+vi.mock("../workspaceFileNavigation", () => ({
+  useWorkspaceFileOpener: () => workspaceFileOpenerMock,
+}));
+
 import ChatMarkdown from "./ChatMarkdown";
 import { resetCodeHighlightQueueForTests } from "./chat/codeHighlightQueue";
 import { syncDocumentPresentationTier } from "../lib/presentationTier";
@@ -61,6 +80,9 @@ import { syncDocumentPresentationTier } from "../lib/presentationTier";
 describe("ChatMarkdown", () => {
   afterEach(() => {
     openInPreferredEditorMock.mockClear();
+    contextMenuShowMock.mockClear();
+    workspaceFileOpenerMock.canOpen.mockReset().mockReturnValue(false);
+    workspaceFileOpenerMock.open.mockReset().mockReturnValue(true);
     readLocalApiMock.mockClear();
     readFileBinaryMock.mockClear();
     getSharedHighlighterMock.mockClear();
@@ -468,4 +490,130 @@ it("resolves delegated result child and origin links within the current environm
   await expect
     .element(screen.getByRole("link", { name: "Open origin" }))
     .toHaveAttribute("href", "/fixture-env/parent");
+});
+
+describe("file links open in Ryco", () => {
+  let stopTier: () => void;
+  beforeEach(async () => {
+    await page.viewport(1024, 768);
+    stopTier = syncDocumentPresentationTier();
+  });
+  afterEach(() => {
+    stopTier();
+    openInPreferredEditorMock.mockClear();
+    contextMenuShowMock.mockClear();
+    workspaceFileOpenerMock.canOpen.mockReset().mockReturnValue(false);
+    workspaceFileOpenerMock.open.mockReset().mockReturnValue(true);
+    document.body.innerHTML = "";
+  });
+
+  it("opens workspace file links in the Files panel at their line", async () => {
+    workspaceFileOpenerMock.canOpen.mockReturnValue(true);
+    const screen = await render(
+      <ChatMarkdown
+        text="See [app.ts](/repo/project/src/app.ts#L12) and [notes](docs/notes.md)."
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      await page.getByRole("link", { name: "app.ts · L12" }).click();
+      expect(workspaceFileOpenerMock.open).toHaveBeenCalledWith({ path: "src/app.ts", line: 12 });
+      await page.getByRole("link", { name: "notes.md" }).click();
+      expect(workspaceFileOpenerMock.open).toHaveBeenLastCalledWith({
+        path: "docs/notes.md",
+        line: undefined,
+      });
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("opens the editor on modifier clicks, outside the workspace and off a thread", async () => {
+    workspaceFileOpenerMock.canOpen.mockReturnValue(true);
+    const screen = await render(
+      <ChatMarkdown
+        text="[app.ts](/repo/project/src/app.ts) [other.ts](/elsewhere/other.ts)"
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      await page.getByRole("link", { name: "app.ts" }).click({ modifiers: ["ControlOrMeta"] });
+      await vi.waitFor(() =>
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(
+          expect.anything(),
+          "/repo/project/src/app.ts",
+        ),
+      );
+      await page.getByRole("link", { name: "other.ts" }).click();
+      await vi.waitFor(() =>
+        expect(openInPreferredEditorMock).toHaveBeenLastCalledWith(
+          expect.anything(),
+          "/elsewhere/other.ts",
+        ),
+      );
+      workspaceFileOpenerMock.canOpen.mockReturnValue(false);
+      await page.getByRole("link", { name: "app.ts" }).click();
+      await vi.waitFor(() => expect(openInPreferredEditorMock).toHaveBeenCalledTimes(3));
+      expect(workspaceFileOpenerMock.open).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("offers Open in Ryco first in the file link menu when the file is in the workspace", async () => {
+    workspaceFileOpenerMock.canOpen.mockReturnValue(true);
+    contextMenuShowMock.mockResolvedValueOnce("open-ryco");
+    const screen = await render(
+      <ChatMarkdown text="[app.ts](/repo/project/src/app.ts#L3)" cwd="/repo/project" />,
+    );
+
+    try {
+      await page.getByRole("link", { name: "app.ts · L3" }).click({ button: "right" });
+      await vi.waitFor(() => expect(contextMenuShowMock).toHaveBeenCalled());
+      expect(contextMenuShowMock.mock.calls[0]?.[0].map((item) => item.id)).toEqual([
+        "open-ryco",
+        "open",
+        "copy-relative",
+        "copy-full",
+      ]);
+      await vi.waitFor(() =>
+        expect(workspaceFileOpenerMock.open).toHaveBeenCalledWith({ path: "src/app.ts", line: 3 }),
+      );
+
+      workspaceFileOpenerMock.canOpen.mockReturnValue(false);
+      await page.getByRole("link", { name: "app.ts · L3" }).click({ button: "right" });
+      await vi.waitFor(() => expect(contextMenuShowMock).toHaveBeenCalledTimes(2));
+      expect(contextMenuShowMock.mock.calls[1]?.[0].map((item) => item.id)).toEqual([
+        "open",
+        "copy-relative",
+        "copy-full",
+      ]);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps the frozen phone tier on the editor", async () => {
+    await page.viewport(390, 844);
+    workspaceFileOpenerMock.canOpen.mockReturnValue(true);
+    const screen = await render(
+      <ChatMarkdown text="[app.ts](/repo/project/src/app.ts)" cwd="/repo/project" />,
+    );
+
+    try {
+      await page.getByRole("link", { name: "app.ts" }).click();
+      await vi.waitFor(() =>
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(
+          expect.anything(),
+          "/repo/project/src/app.ts",
+        ),
+      );
+      expect(workspaceFileOpenerMock.open).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
 });

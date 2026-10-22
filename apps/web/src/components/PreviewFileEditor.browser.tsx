@@ -203,4 +203,66 @@ describe("PreviewFileEditor", () => {
 
     await mounted.unmount();
   });
+
+  it("offers the gutter + on the real editor and keeps note typing out of the file", async () => {
+    const picked = vi.fn();
+    function PickHarness() {
+      const [contents, setContents] = useState("const a = 1;\nconst b = 2;\n");
+      const [open, setOpen] = useState(false);
+      return (
+        <div className="h-[420px]">
+          <PreviewFileEditor
+            cacheKey="preview-editor-gutter-pick-test"
+            className="block min-h-full"
+            contents={contents}
+            filePath="src/app.ts"
+            language="typescript"
+            onChange={setContents}
+            options={{
+              disableFileHeader: true,
+              overflow: "scroll",
+              theme: "pierre-light",
+              themeType: "light",
+              unsafeCSS: PREVIEW_FILE_UNSAFE_CSS,
+              enableGutterUtility: true,
+              onGutterUtilityClick: (range) => {
+                picked(range);
+                setOpen(true);
+              },
+            }}
+            lineAnnotations={open ? [{ lineNumber: 1 }] : []}
+            renderAnnotation={() => <textarea aria-label="Pick note" />}
+            selectedLines={open ? { start: 1, end: 1 } : null}
+          />
+          <output aria-label="Current file contents">{contents}</output>
+        </div>
+      );
+    }
+    const mounted = await render(<PickHarness />);
+    await expect.element(page.getByRole("textbox").first()).toBeInTheDocument();
+
+    const root = document.querySelector("diffs-container")?.shadowRoot;
+    const line = root?.querySelector<HTMLElement>('[data-line="1"]');
+    expect(line).toBeTruthy();
+    await userEvent.hover(line as HTMLElement);
+    let button: HTMLElement | null = null;
+    await vi.waitFor(() => {
+      button = root?.querySelector<HTMLElement>("[data-utility-button]") ?? null;
+      expect(button).not.toBeNull();
+    });
+    await userEvent.click(button as unknown as HTMLElement);
+    await vi.waitFor(() => expect(picked).toHaveBeenCalled());
+    expect(picked.mock.calls[0]?.[0]).toMatchObject({ start: 1, end: 1 });
+
+    const note = page.getByRole("textbox", { name: "Pick note" });
+    await expect.element(note).toBeInTheDocument();
+    await note.click();
+    await userEvent.keyboard("hello");
+    await expect.element(note).toHaveValue("hello");
+    await expect
+      .element(page.getByLabelText("Current file contents"))
+      .toMatchTextContent("const a = 1; const b = 2;");
+
+    await mounted.unmount();
+  });
 });

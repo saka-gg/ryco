@@ -5,7 +5,9 @@ import { DiffLineBlame } from "./DiffLineBlame";
 import { DiffComparisonControls } from "./DiffComparisonControls";
 import { DiffImagePreview } from "./DiffImagePreview";
 import { useComparison } from "../rpc/useComparison";
+import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
+import { formatFileReferenceTitle } from "@ryco/client-runtime/state/composer";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -48,7 +50,12 @@ import {
 import { getOffThreadDiffParser, OFF_THREAD_DIFF_PARSE_MIN_CHARS } from "../lib/diffParseOffThread";
 import { ActiveDiffParser, type RenderablePatch } from "../lib/diffParsing";
 import { useDiffFileNavigation } from "../hooks/useDiffFileNavigation";
-import { DIFF_SURFACE_BASE_UNSAFE_CSS, resolveDiffThemeName } from "../lib/diffRendering";
+import {
+  DIFF_SURFACE_BASE_UNSAFE_CSS,
+  GUTTER_UTILITY_UNSAFE_CSS,
+  PLAIN_ANNOTATION_UNSAFE_CSS,
+  resolveDiffThemeName,
+} from "../lib/diffRendering";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { selectProjectByRef, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
@@ -58,6 +65,14 @@ import { formatShortTimestamp } from "../timestampFormat";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+import {
+  diffFileReference,
+  diffLineSelection,
+  fileLineSelectionRange,
+  fileLineSelectionSide,
+} from "./fileReferences/fileReferenceSelection";
+import { FileReferenceNoteComposer } from "./fileReferences/FileReferenceNoteComposer";
+import { useFileReferencePicker } from "./fileReferences/useFileReferencePicker";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
 import {
   buildDiffSearchIndex,
@@ -108,7 +123,9 @@ const DIFF_PANEL_SEARCH_UNSAFE_CSS = `
 }
 `;
 
-const DIFF_PANEL_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
+// Desktop only: the gutter `+` that adds lines to the chat, and its note row.
+const DIFF_PANEL_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}`;
+const NO_FILE_ANNOTATIONS: DiffLineAnnotation[] = [];
 const DIFF_PANEL_PHONE_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
 
 function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
@@ -433,6 +450,8 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
       : undefined,
   );
   const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd;
+  // "Add to chat" from the gutter; the frozen phone tier does not get it.
+  const fileReferencePicker = useFileReferencePicker(isPhonePresentation ? null : routeThreadRef);
   const gitStatusQuery = useGitStatus({
     environmentId: activeThread?.environmentId ?? null,
     cwd: activeCwd ?? null,
@@ -1528,6 +1547,10 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                       const fileKey = buildFileDiffRenderKey(fileDiff);
                       const themedFileKey = `${fileKey}:${resolvedTheme}`;
                       const collapsed = collapsedDiffFileKeys.has(fileKey);
+                      const filePick =
+                        fileReferencePicker.pick?.fileKey === fileKey
+                          ? fileReferencePicker.pick
+                          : null;
                       return (
                         <div
                           key={themedFileKey}
@@ -1554,6 +1577,38 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                         >
                           <FileDiff
                             fileDiff={fileDiff}
+                            lineAnnotations={
+                              filePick
+                                ? [
+                                    {
+                                      side: fileLineSelectionSide(filePick.selection),
+                                      lineNumber: filePick.selection.lineEnd,
+                                    },
+                                  ]
+                                : NO_FILE_ANNOTATIONS
+                            }
+                            selectedLines={
+                              filePick ? fileLineSelectionRange(filePick.selection) : null
+                            }
+                            renderAnnotation={() =>
+                              filePick ? (
+                                <FileReferenceNoteComposer
+                                  title={formatFileReferenceTitle(filePick.selection)}
+                                  restoreComment={fileReferencePicker.restoreComment}
+                                  onCommentChange={fileReferencePicker.rememberComment}
+                                  onCancel={fileReferencePicker.cancel}
+                                  onAdd={(comment) =>
+                                    fileReferencePicker.add(
+                                      diffFileReference({
+                                        fileDiff,
+                                        selection: filePick.selection,
+                                        comment,
+                                      }),
+                                    )
+                                  }
+                                />
+                              ) : null
+                            }
                             renderHeaderMetadata={() =>
                               reviewingLocal && localScope && localFile ? (
                                 <DiffStagingActions
@@ -1634,6 +1689,16 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                                 ? DIFF_PANEL_PHONE_UNSAFE_CSS
                                 : DIFF_PANEL_UNSAFE_CSS,
                               lineHoverHighlight: "number",
+                              ...(fileReferencePicker.available
+                                ? {
+                                    enableGutterUtility: true,
+                                    onGutterUtilityClick: (range: SelectedLineRange) =>
+                                      fileReferencePicker.open(
+                                        fileKey,
+                                        diffLineSelection(fileDiff, filePath, range),
+                                      ),
+                                  }
+                                : {}),
                               ...(comparing && comparison.data
                                 ? {
                                     onLineClick: (line) => {

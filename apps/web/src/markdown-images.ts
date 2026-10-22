@@ -1,3 +1,5 @@
+import { resolveWorkspaceRelativePath } from "@ryco/client-runtime/state/files";
+
 const SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):/;
 const WINDOWS_ABSOLUTE_PATTERN = /^[A-Za-z]:[\\/]/;
 
@@ -16,25 +18,6 @@ function stripQueryAndFragment(value: string): string {
     .filter((index) => index >= 0)
     .reduce((lowest, index) => Math.min(lowest, index), value.length);
   return value.slice(0, boundary);
-}
-
-function normalizeAbsolutePath(value: string): string | null {
-  const slashPath = value.replaceAll("\\", "/");
-  const drive = slashPath.match(/^([A-Za-z]:)\//)?.[1];
-  const absolute = slashPath.startsWith("/") || drive !== undefined;
-  if (!absolute || slashPath.startsWith("//")) return null;
-
-  const segments: string[] = [];
-  for (const segment of slashPath.slice(drive ? drive.length + 1 : 1).split("/")) {
-    if (segment.length === 0 || segment === ".") continue;
-    if (segment === "..") {
-      if (segments.length === 0) return null;
-      segments.pop();
-      continue;
-    }
-    segments.push(segment);
-  }
-  return `${drive ? `${drive}/` : "/"}${segments.join("/")}`;
 }
 
 function fileUrlPath(source: string): string | null {
@@ -66,27 +49,7 @@ export function resolveMarkdownWorkspaceImagePath(
     scheme === "file" ? fileUrlPath(trimmed) : decodePath(stripQueryAndFragment(trimmed));
   if (!decodedSource) return null;
 
-  const normalizedRoot = normalizeAbsolutePath(cwd);
-  if (!normalizedRoot) return null;
-  const sourceIsAbsolute =
-    decodedSource.startsWith("/") || WINDOWS_ABSOLUTE_PATTERN.test(decodedSource);
-  const candidate = normalizeAbsolutePath(
-    sourceIsAbsolute ? decodedSource : `${normalizedRoot}/${decodedSource}`,
-  );
-  if (!candidate) return null;
-
-  const windows = WINDOWS_ABSOLUTE_PATTERN.test(normalizedRoot);
-  const comparableRoot = windows ? normalizedRoot.toLowerCase() : normalizedRoot;
-  const comparableCandidate = windows ? candidate.toLowerCase() : candidate;
-  if (
-    comparableCandidate === comparableRoot ||
-    !comparableCandidate.startsWith(`${comparableRoot}/`)
-  ) {
-    return null;
-  }
-
-  const relativePath = candidate.slice(normalizedRoot.length + 1);
-  return relativePath.length > 0 ? relativePath : null;
+  return resolveWorkspaceRelativePath(decodedSource, cwd);
 }
 
 export function isSafeRemoteMarkdownImageSource(source: string | undefined): boolean {
