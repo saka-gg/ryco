@@ -2,7 +2,7 @@
 // Purpose: Reveal streamed assistant text at a steady, adaptive cadence so tokens appear
 //          fluidly instead of in the network clumps that land in the store.
 // Layer: Web UI streaming primitive
-// Exports: useSmoothStreamedText, revealBoundary
+// Exports: useSmoothStreamedText, revealBoundary, stepSmoothReveal, createSmoothRevealState
 // Why: Provider deltas reach the store in bursts, so rendering each clump verbatim reads
 //      as choppy. This hook drains the already-delivered buffer on requestAnimationFrame
 //      at a velocity that adapts to the backlog, low-pass-smooths that velocity so there
@@ -26,6 +26,67 @@ const VELOCITY_LERP = 0.15;
 // Clamp per-frame delta so returning from a backgrounded tab (rAF paused) does not dump
 // the whole backlog in a single frame.
 const MAX_FRAME_SECONDS = 0.05;
+// A remainder below this many characters snaps onto the target. Far below one visible
+// character, so the reveal cadence is unchanged, but it lets the loop settle and sleep.
+const SETTLE_REMAINDER_CHARS = 0.001;
+
+/**
+ * Mutable reveal state, owned by the hook through a ref. The stepper mutates it in place
+ * so the rAF loop allocates nothing per frame.
+ */
+export interface SmoothRevealState {
+  /** Revealed character count, accumulated as a float across frames. */
+  shown: number;
+  /** Smoothed reveal velocity in characters per second. */
+  velocity: number;
+  /** Timestamp (ms) of the previous frame; 0 marks the start of a fresh burst. */
+  lastFrameAt: number;
+}
+
+export function createSmoothRevealState(shown: number): SmoothRevealState {
+  return { shown, velocity: 0, lastFrameAt: 0 };
+}
+
+/**
+ * Advances the reveal by one animation frame toward `targetLength`, mutating `state`.
+ *
+ * Returns true while a backlog remains and another frame is needed. Once caught up it
+ * resets the velocity and frame clock and returns false, so the loop sleeps until the
+ * next flush wakes it.
+ */
+export function stepSmoothReveal(
+  state: SmoothRevealState,
+  nowMs: number,
+  targetLength: number,
+): boolean {
+  const previous = state.lastFrameAt;
+  const dt = previous ? Math.min((nowMs - previous) / 1000, MAX_FRAME_SECONDS) : 0;
+  state.lastFrameAt = nowMs;
+
+  if (state.shown > targetLength) {
+    state.shown = targetLength;
+  }
+
+  const backlog = targetLength - state.shown;
+  if (backlog > 0) {
+    const targetVelocity = Math.min(MAX_CHARS_PER_SECOND, backlog / DRAIN_WINDOW_SECONDS);
+    state.velocity += (targetVelocity - state.velocity) * VELOCITY_LERP;
+    const next = Math.min(targetLength, state.shown + state.velocity * dt);
+    // At high refresh rates the damped tail approaches the target without reaching it
+    // until the step drops below float precision, leaving the last character hidden and
+    // rAF running every frame. Settle a sub-character remainder, or a step that no longer
+    // moves the float, onto the target.
+    const stalled = dt > 0 && next === state.shown;
+    state.shown = stalled || targetLength - next < SETTLE_REMAINDER_CHARS ? targetLength : next;
+  }
+
+  if (targetLength - state.shown > 0) {
+    return true;
+  }
+  state.velocity = 0;
+  state.lastFrameAt = 0;
+  return false;
+}
 
 /**
  * Pulls a reveal position back off the seam of a surrogate pair.
@@ -66,15 +127,12 @@ export function useSmoothStreamedText(text: string, isStreaming: boolean): strin
   // Latest full text, mirrored post-commit so the rAF loop always reads the current value
   // without re-subscribing the animation effect on every delta.
   const targetRef = useRef(text);
-  // Revealed character count, accumulated as a float across frames.
-  const shownRef = useRef(text.length);
+  const revealRef = useRef(createSmoothRevealState(text.length));
   // Character count last pushed to React state — guards against redundant setState when the
   // floored count has not advanced.
   const emittedRef = useRef(text.length);
-  const velocityRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const tickRef = useRef<(now: number) => void>(() => undefined);
-  const lastFrameRef = useRef(0);
 
   const cancelFrame = useCallback(() => {
     if (rafRef.current !== null) {
@@ -97,39 +155,18 @@ export function useSmoothStreamedText(text: string, isStreaming: boolean): strin
   // through refs, so a mount-time install stays permanently fresh.
   useEffect(() => {
     tickRef.current = (now: number) => {
-      const previous = lastFrameRef.current;
-      const dt = previous ? Math.min((now - previous) / 1000, MAX_FRAME_SECONDS) : 0;
-      lastFrameRef.current = now;
-
       const target = targetRef.current;
-      const length = target.length;
-      if (shownRef.current > length) {
-        shownRef.current = length;
-      }
+      const pending = stepSmoothReveal(revealRef.current, now, target.length);
 
-      const backlog = length - shownRef.current;
-      if (backlog <= 0) {
-        // Sleep while caught up; the text-update effect wakes the loop on the next flush.
-        velocityRef.current = 0;
-        lastFrameRef.current = 0;
-        return;
-      }
-
-      const targetVelocity = Math.min(MAX_CHARS_PER_SECOND, backlog / DRAIN_WINDOW_SECONDS);
-      velocityRef.current += (targetVelocity - velocityRef.current) * VELOCITY_LERP;
-      shownRef.current = Math.min(length, shownRef.current + velocityRef.current * dt);
-
-      const nextCount = revealBoundary(target, Math.floor(shownRef.current));
+      const nextCount = revealBoundary(target, Math.floor(revealRef.current.shown));
       if (nextCount !== emittedRef.current) {
         emittedRef.current = nextCount;
-        setRevealed(nextCount >= length ? target : target.slice(0, nextCount));
+        setRevealed(nextCount >= target.length ? target : target.slice(0, nextCount));
       }
 
-      if (length - shownRef.current > 0) {
+      // Sleep once caught up; the text-update effect wakes the loop on the next flush.
+      if (pending) {
         scheduleFrame();
-      } else {
-        velocityRef.current = 0;
-        lastFrameRef.current = 0;
       }
     };
   }, [scheduleFrame]);
@@ -141,15 +178,13 @@ export function useSmoothStreamedText(text: string, isStreaming: boolean): strin
 
     if (!animate || !isAppendOnly) {
       cancelFrame();
-      shownRef.current = text.length;
+      revealRef.current = createSmoothRevealState(text.length);
       emittedRef.current = text.length;
-      velocityRef.current = 0;
-      lastFrameRef.current = 0;
       setRevealed(text);
       return;
     }
 
-    if (text.length > shownRef.current) {
+    if (text.length > revealRef.current.shown) {
       scheduleFrame();
     }
   }, [animate, cancelFrame, scheduleFrame, text]);
