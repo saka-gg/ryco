@@ -275,7 +275,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
     Effect.gen(function* () {
       const project = yield* loadProject(projectId);
       const checkout = yield* resolveCheckout(project, checkoutPath);
-      const facts = yield* readRepositoryFacts(git, checkout);
+      const facts = yield* readRepositoryFacts(git, checkout, project.preferredRemoteName ?? null);
       const [pushed, scan] = facts
         ? yield* Effect.all([readPushedState(git, network, facts), scanWorkingTree(git, facts)], {
             concurrency: "unbounded",
@@ -294,8 +294,11 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
               const sanitized = network.sanitizeRemoteUrl(url).trim();
               return sanitized.length > 0 ? [{ name, url: sanitized }] : [];
             }),
-            primaryRemoteName: facts.primary?.remoteName ?? null,
-            canonicalKey: facts.primary ? normalizeGitRemoteUrl(facts.primary.remoteUrl) : null,
+            primaryRemoteName: facts.identityRemote?.remoteName ?? null,
+            cloneRemoteName: facts.cloneRemote?.remoteName ?? null,
+            canonicalKey: facts.identityRemote
+              ? normalizeGitRemoteUrl(facts.identityRemote.remoteUrl)
+              : null,
             isShallow: facts.isShallow,
             hasSubmodules: facts.hasSubmodules,
             usesLfs: facts.usesLfs,
@@ -308,6 +311,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
             isDetached: false,
             remotes: [],
             primaryRemoteName: null,
+            cloneRemoteName: null,
             canonicalKey: null,
             isShallow: false,
             hasSubmodules: false,
@@ -372,7 +376,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       const commits =
         pushed.exclusion === null
           ? estimate("commits-bundle", 0, PROJECT_EXPORT_SKIP_REASON.noCommits)
-          : facts.primary === null
+          : facts.cloneRemote === null
             ? estimate("commits-bundle", 0, PROJECT_EXPORT_SKIP_REASON.noRemote)
             : pushed.state.unpushedCommitCount === 0
               ? estimate("commits-bundle", 0, PROJECT_EXPORT_SKIP_REASON.nothingUnpushed)

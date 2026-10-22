@@ -5,9 +5,11 @@
  * the middle, as the coordinator does: A exports, the client reads A's chunks and uploads them to
  * B, B imports and the client follows the job to its end.
  *
- * The origin is a bare repository served over a fake `ssh` (`git@fakehost:o/r.git`), so the
- * network git path (non-interactive env, batch ssh, ls-remote, clone) is the production one. Only
- * the source-control provider registry is a stub: these remotes have no forge.
+ * A's checkout is a fork: `origin` (`git@fakehost:o/r.git`) is the fork, with a commit the
+ * repository it came from, `upstream` (`git@fakehost:u/r.git`), lacks. Both are bare repositories
+ * served over a fake `ssh`, so the network git path (non-interactive env, batch ssh, ls-remote,
+ * clone) is the production one. Only the source-control provider registry is a stub: these
+ * remotes have no forge.
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -46,6 +48,7 @@ import { ProjectionProjectRepositoryLive } from "../persistence/Layers/Projectio
 import { layerConfig as SqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import { ProjectAvatarStoreLive } from "../project/Layers/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
+import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -72,6 +75,7 @@ const roots = tempRoots();
 afterEach(() => roots.cleanup());
 
 const ORIGIN_URL = "git@fakehost:o/r.git";
+const UPSTREAM_URL = "git@fakehost:u/r.git";
 /** B's view of the origin when it cannot reach it; no https counterpart (a port), no network. */
 const UNREACHABLE_URL = "ssh://git@fakehost:2222/o/r.git";
 const SETUP_SCRIPT: ProjectScript = {
@@ -147,7 +151,10 @@ interface Fixture {
   readonly fakeSsh: string;
 }
 
-/** A bare origin at `git@fakehost:o/r.git` and A's checkout of it, ahead of it and dirty. */
+/**
+ * Bare repositories at `git@fakehost:u/r.git` (upstream) and `git@fakehost:o/r.git` (its fork,
+ * one commit ahead on main), and A's checkout of the fork with both remotes, ahead and dirty.
+ */
 const makeFixture = (): Fixture => {
   const root = realpathSync(roots.make("ryco-xnode-fixture-"));
   const work = initRepository(path.join(root, "work"));
@@ -156,6 +163,9 @@ const makeFixture = (): Fixture => {
     { "README.md": "# App\n", ".gitignore": ".env\nnode_modules/\n", "src/main.ts": "main\n" },
     "first",
   );
+  git(root, "clone", "--quiet", "--bare", "--", work, path.join(root, "u", "r.git"));
+  // The fork's own work on main: on origin, never on upstream.
+  commitFiles(work, { "src/fork.ts": "fork\n" }, "fork only");
   const bare = path.join(root, "o", "r.git");
   git(root, "clone", "--quiet", "--bare", "--", work, bare);
   const { path: fakeSsh } = writeFakeSsh(root);
@@ -165,6 +175,7 @@ const makeFixture = (): Fixture => {
   git(root, "clone", "--quiet", "--", bare, source);
   initRepository(source);
   git(source, "remote", "set-url", "origin", ORIGIN_URL);
+  git(source, "remote", "add", "upstream", UPSTREAM_URL);
   // Two commits only A has, one of them binary.
   git(source, "checkout", "--quiet", "-b", "feature");
   commitFiles(source, { "src/feature.ts": "feature\n" }, "feature one");
@@ -339,6 +350,7 @@ const importInputFrom = (
 ): ProjectImportStartInput => {
   const commits = options.transfers.get("commits-bundle");
   const changes = options.transfers.get("changes-patch");
+  const cloneRemoteName = options.source.kind === "clone" ? options.source.remoteName : null;
   const headOid = exported.repository.headOid as NonNullable<
     NonNullable<ProjectImportStartInput["checkout"]>["headOid"]
   >;
@@ -348,7 +360,10 @@ const importInputFrom = (
     title: exported.settings.title,
     destinationPath: options.destinationPath,
     source: options.source,
-    remotes: exported.repository.remotes.map((remote) => ({ name: remote.name, url: remote.url })),
+    // Every other remote is recreated (upstream too), so B's copy keeps A's identity.
+    remotes: exported.repository.remotes
+      .filter((remote) => remote.name !== cloneRemoteName)
+      .map((remote) => ({ name: remote.name, url: remote.url })),
     commits: commits === undefined ? null : { transferId: commits },
     checkout: { branch: exported.repository.branch, headOid },
     changes:
@@ -401,6 +416,7 @@ const assertSameCheckout = (fixture: Fixture, destination: string) => {
   assert.equal(git(destination, "rev-parse", "HEAD"), git(fixture.source, "rev-parse", "HEAD"));
   assert.equal(git(destination, "symbolic-ref", "--short", "HEAD"), "feature");
   assert.equal(git(destination, "remote", "get-url", "origin"), ORIGIN_URL);
+  assert.equal(git(destination, "remote", "get-url", "upstream"), UPSTREAM_URL);
   for (const relative of COPIED_FILES) {
     assert.deepEqual(
       readFileSync(path.join(destination, relative)),
@@ -413,6 +429,15 @@ const assertSameCheckout = (fixture: Fixture, destination: string) => {
   // The setup command ran in the project root.
   assert.equal(readFileSync(path.join(destination, "setup-ran.txt"), "utf8"), "set up");
 };
+
+/** The repository identity's canonical key of a checkout on a node. */
+const canonicalKeyOf = (node: TestNode, checkout: string) =>
+  node.run(
+    Effect.gen(function* () {
+      const resolver = yield* RepositoryIdentityResolver;
+      return (yield* resolver.resolve(checkout))?.canonicalKey ?? null;
+    }),
+  );
 
 /** B registered the project with A's title, root, prompt, preferred remote and scripts. */
 const assertRegistered = (b: TestNode, input: ProjectImportStartInput, destination: string) =>
@@ -451,7 +476,12 @@ describe("cross-node project copy", () => {
         );
         assert.equal(inspection.repository.branch, "feature");
         assert.equal(inspection.repository.headOid, git(fixture.source, "rev-parse", "HEAD"));
+        // The identity comes from upstream; the copy clones the fork and measures against it.
+        assert.equal(inspection.repository.primaryRemoteName, "upstream");
+        assert.equal(inspection.repository.cloneRemoteName, "origin");
+        assert.equal(inspection.repository.canonicalKey, "fakehost/u/r");
         assert.isFalse(inspection.pushedState.headOnRemote);
+        // The fork's commit is on origin: only A's two feature commits are unpushed.
         assert.equal(inspection.pushedState.unpushedCommitCount, 2);
         assert.include(
           inspection.workingTree.ignoredCandidates.map((candidate) => candidate.path),
@@ -467,7 +497,11 @@ describe("cross-node project copy", () => {
           "changes-patch",
           "commits-bundle",
         ]);
-        assert.deepEqual(exported.repository.remotes, [{ name: "origin", url: ORIGIN_URL }]);
+        assert.deepEqual(exported.repository.remotes, [
+          { name: "origin", url: ORIGIN_URL },
+          { name: "upstream", url: UPSTREAM_URL },
+        ]);
+        assert.equal(exported.repository.cloneRemoteName, "origin");
         assert.deepEqual(exported.settings.scripts, [SETUP_SCRIPT]);
 
         // The client in the middle: A's chunks become B's transfers; then the export goes.
@@ -507,6 +541,9 @@ describe("cross-node project copy", () => {
 
         assertSameCheckout(fixture, destination);
         yield* assertRegistered(b, input, destination);
+        // Same identity on both nodes: the copy groups with A's checkout.
+        assert.equal(yield* canonicalKeyOf(b, destination), "fakehost/u/r");
+        assert.equal(yield* canonicalKeyOf(a, fixture.source), "fakehost/u/r");
 
         // Every upload was claimed by the job and released with it.
         assert.deepEqual(transferFilesOf(b.stateDir), []);

@@ -452,9 +452,10 @@ const copyProjectToB = async (input: {
     branch: fixture.featureBranch,
     headOid: fixture.headOid,
     isDetached: false,
-    // The repository identity's rule: `upstream` before `origin`. The copy clones from it and
-    // recreates `origin` next to it.
+    // The identity's rule is `upstream` before `origin`, so A and B group by upstream. The copy
+    // clones the fork's own `origin` (the project prefers no other) and recreates `upstream`.
     primaryRemoteName: "upstream",
+    cloneRemoteName: "origin",
   });
   expect(inspection.repository.remotes).toContainEqual({ name: "origin", url: fixture.originUrl });
   expect(inspection.pushedState).toMatchObject({ headOnRemote: false, unpushedCommitCount: 1 });
@@ -500,10 +501,11 @@ const copyProjectToB = async (input: {
     const { transfers, chunkCounts } = await uploadArtifacts(exportId, exported.artifacts);
 
     const { repository, settings } = exported;
-    const primaryRemoteName = repository.primaryRemoteName ?? "origin";
-    const primaryRemote = repository.remotes.find((remote) => remote.name === primaryRemoteName);
-    if (primaryRemote === undefined || repository.headOid === null) {
-      throw new Error(`Export has no primary remote or HEAD: ${JSON.stringify(repository)}`);
+    const cloneRemote = repository.remotes.find(
+      (remote) => remote.name === repository.cloneRemoteName,
+    );
+    if (cloneRemote === undefined || repository.headOid === null) {
+      throw new Error(`Export has no clone remote or HEAD: ${JSON.stringify(repository)}`);
     }
     const setupScript = settings.scripts.find((script) => script.runOnWorktreeCreate);
     const commitsTransfer = transfers.get("commits-bundle");
@@ -512,9 +514,9 @@ const copyProjectToB = async (input: {
       ...baseImportInput({
         title: settings.title,
         destinationPath: preview.resolvedPath,
-        source: { kind: "clone", remoteUrl: primaryRemote.url, remoteName: primaryRemoteName },
+        source: { kind: "clone", remoteUrl: cloneRemote.url, remoteName: cloneRemote.name },
       }),
-      remotes: repository.remotes.filter((remote) => remote.name !== primaryRemoteName),
+      remotes: repository.remotes.filter((remote) => remote.name !== cloneRemote.name),
       commits: commitsTransfer === undefined ? null : { transferId: commitsTransfer },
       checkout: { branch: repository.branch, headOid: repository.headOid },
       changes:
@@ -664,14 +666,14 @@ const planCopyWithCoordinator = async (input: {
       sourceCanonicalKey: inspection.repository.canonicalKey,
     },
   );
-  const primary = inspection.repository.remotes.find(
-    (remote) => remote.name === inspection.repository.primaryRemoteName,
+  const cloneRemote = inspection.repository.remotes.find(
+    (remote) => remote.name === inspection.repository.cloneRemoteName,
   );
   const remoteAccess =
-    input.checkRemote && primary !== undefined
+    input.checkRemote && cloneRemote !== undefined
       ? await call(
           "node B checkRemoteAccess",
-          nodeB.client[WS_METHODS.projectsCheckRemoteAccess]({ remoteUrl: primary.url }),
+          nodeB.client[WS_METHODS.projectsCheckRemoteAccess]({ remoteUrl: cloneRemote.url }),
         )
       : null;
   const target: ProjectCopyTargetFacts = {
@@ -850,16 +852,17 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
           throw new Error("A transfer is missing.");
         }
         const { repository } = exported;
-        const primaryRemoteName = repository.primaryRemoteName ?? "origin";
-        const primary = repository.remotes.find((remote) => remote.name === primaryRemoteName);
-        if (primary === undefined) throw new Error("The export has no primary remote.");
+        const cloneRemote = repository.remotes.find(
+          (remote) => remote.name === repository.cloneRemoteName,
+        );
+        if (cloneRemote === undefined) throw new Error("The export has no clone remote.");
         return importOnB({
           ...baseImportInput({
             title: exported.settings.title,
             destinationPath: destination,
-            source: { kind: "clone", remoteUrl: primary.url, remoteName: primaryRemoteName },
+            source: { kind: "clone", remoteUrl: cloneRemote.url, remoteName: cloneRemote.name },
           }),
-          remotes: repository.remotes.filter((remote) => remote.name !== primaryRemoteName),
+          remotes: repository.remotes.filter((remote) => remote.name !== cloneRemote.name),
           commits: { transferId: commits },
           checkout: { branch: repository.branch, headOid: fixture.headOid },
           changes: { transferId: changes, baseOid: fixture.headOid, ignoredPaths: [] },
@@ -916,6 +919,7 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       branch: lan.branch,
       headOid: lan.headOid,
       primaryRemoteName: "origin",
+      cloneRemoteName: "origin",
       remotes: [{ name: "origin", url: lan.originUrl }],
     });
     // A reaches the origin itself, so it knows exactly what is unpushed.
@@ -1184,6 +1188,8 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       expect(copy.options.blockedReason).toBeNull();
       expect(copy.options.defaultMode).toBe("clone");
       expect(copy.options.modes.clone.reachable).toBe(true);
+      // The fork's own remote, not the upstream A's identity comes from.
+      expect(copy.options.modes.clone.remoteUrl).toBe(fixture.originUrl);
       // The changes sit on an unpushed commit, so the commits must come too (A8).
       expect(copy.options.bringCommits.forced).toBe(true);
       expect(copy.options.choices).toMatchObject({
@@ -1214,6 +1220,8 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       expect(await gitOnB(destination, "symbolic-ref", "--short", "HEAD")).toBe(
         fixture.featureBranch,
       );
+      expect(await gitOnB(destination, "remote", "get-url", "origin")).toBe(fixture.originUrl);
+      expect(await gitOnB(destination, "remote", "get-url", "upstream")).toBe(fixture.upstreamUrl);
       expect(statusLines(await gitOutputOnB(destination, ...STATUS_ARGS))).toEqual(
         statusLines(await gitOutputOnA(...STATUS_ARGS)),
       );
@@ -1225,6 +1233,9 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       const project = await waitForProject("B", cloned.outcome.record.projectId);
       expect(project).toMatchObject({ title: fixture.title, workspaceRoot: destination });
       expect(project.scripts).toEqual(fixture.scripts);
+      expect(await canonicalKeyOn("B", cloned.outcome.record.projectId)).toBe(
+        await canonicalKeyOn("A", fixture.projectId),
+      );
       await expectSetupRanIn(destination);
       await expectNoCopyScratch();
 

@@ -111,10 +111,11 @@ With `RYCO_E2E_KEEP=1`, node B's log directory (`server.trace.ndjson`) and its c
 are in `<node A base dir>/userdata/logs`. A failed test prints the tail of both nodes' output.
 
 The fixture: a bare `origin.git` with `main` pushed, a bare `upstream.git` with `main` too (a fork's
-upstream; the repository identity prefers it, so the copy clones from it and recreates `origin`),
-and the workspace on `feature/cross-node`, one commit ahead of the origin, with an unstaged edit to
-`README.md`, an untracked 200 KiB binary (`assets/blob.bin`, larger than one transfer chunk) and an
-ignored `.env`. Every fixture repository has `commit.gpgsign` and `tag.gpgsign` turned off.
+upstream; the repository identity prefers it, so both nodes group by it, while the copy clones the
+fork's own `origin` and recreates `upstream`), and the workspace on `feature/cross-node`, one commit
+ahead of the origin, with an unstaged edit to `README.md`, an untracked 200 KiB binary
+(`assets/blob.bin`, larger than one transfer chunk) and an ignored `.env`. Every fixture repository
+has `commit.gpgsign` and `tag.gpgsign` turned off.
 
 ## Cleanup
 

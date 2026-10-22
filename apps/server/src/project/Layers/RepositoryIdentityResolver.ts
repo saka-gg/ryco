@@ -4,6 +4,7 @@ import {
   detectSourceControlProviderFromGitRemoteUrl,
   normalizeGitRemoteUrl,
 } from "@ryco/shared/git";
+import { pickIdentityRemoteName } from "@ryco/shared/gitRemoteUrl";
 
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../../observability/Metrics.ts";
 import { READ_ONLY_GIT_ENV } from "../../vcs/GitVcsDriver.ts";
@@ -31,23 +32,23 @@ export function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   return remotes;
 }
 
+/** The named remote with its fetch URL; null for no name or a remote without a URL. */
+export function remoteNamed(
+  remotes: ReadonlyMap<string, string>,
+  remoteName: string | null,
+): { readonly remoteName: string; readonly remoteUrl: string } | null {
+  const remoteUrl = remoteName === null ? undefined : remotes.get(remoteName);
+  return remoteName !== null && remoteUrl ? { remoteName, remoteUrl } : null;
+}
+
 /**
- * The remote a repository's identity (and a cross-node copy's clone) comes from: `upstream`, then
- * `origin`, then the first by name.
+ * The remote a repository's identity comes from (`pickIdentityRemoteName`: `upstream`, then
+ * `origin`, then the first by name). A cross-node copy clones from `pickCloneRemoteName` instead.
  */
 export function pickPrimaryRemote(
   remotes: ReadonlyMap<string, string>,
 ): { readonly remoteName: string; readonly remoteUrl: string } | null {
-  for (const preferredRemoteName of ["upstream", "origin"] as const) {
-    const remoteUrl = remotes.get(preferredRemoteName);
-    if (remoteUrl) {
-      return { remoteName: preferredRemoteName, remoteUrl };
-    }
-  }
-
-  const [remoteName, remoteUrl] =
-    [...remotes.entries()].toSorted(([left], [right]) => left.localeCompare(right))[0] ?? [];
-  return remoteName && remoteUrl ? { remoteName, remoteUrl } : null;
+  return remoteNamed(remotes, pickIdentityRemoteName([...remotes.keys()]));
 }
 
 function buildRepositoryIdentity(input: {

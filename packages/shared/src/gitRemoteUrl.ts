@@ -1,12 +1,45 @@
 /**
  * gitRemoteUrl - the pure remote-URL rules of a cross-node project copy, shared by the nodes
- * (which enforce them) and the client (which plans with them before it asks a node): how a URL
- * travels, what a node may clone from and what a copy recreates as a remote, how credentials
- * are stripped from a URL and hidden in free text, the https ↔ ssh alternate, and a clone's
- * default folder name. Nothing here runs git or touches the filesystem.
+ * (which enforce them) and the client (which plans with them before it asks a node): which remote
+ * a repository's identity and a copy's clone come from, how a URL travels, what a node may clone
+ * from and what a copy recreates as a remote, how credentials are stripped from a URL and hidden
+ * in free text, the https ↔ ssh alternate, and a clone's default folder name. Nothing here runs
+ * git or touches the filesystem.
  *
  * @module gitRemoteUrl
  */
+
+/**
+ * The remote a repository's identity comes from (`RepositoryIdentity.locator`, and so its
+ * canonical key): `upstream`, then `origin`, then the first by name. A fork therefore groups
+ * with the repository it was forked from. Null without remotes.
+ */
+export function pickIdentityRemoteName(remoteNames: ReadonlyArray<string>): string | null {
+  for (const name of ["upstream", "origin"] as const) {
+    if (remoteNames.includes(name)) return name;
+  }
+  return (
+    remoteNames
+      .filter((name) => name.length > 0)
+      .toSorted((left, right) => left.localeCompare(right))[0] ?? null
+  );
+}
+
+/**
+ * The remote a cross-node copy clones from, and the one the source measures its unpushed commits
+ * against: the project's preferred remote when the checkout has it, else `origin`, else the
+ * identity remote. Not the identity remote first: a fork's own branches live on `origin`, and a
+ * clone of `upstream` would lack them. The copy recreates the other remotes, so its identity
+ * (and grouping) still matches the source's. Null without remotes.
+ */
+export function pickCloneRemoteName(input: {
+  readonly remoteNames: ReadonlyArray<string>;
+  readonly preferredRemoteName: string | null | undefined;
+}): string | null {
+  const { remoteNames, preferredRemoteName } = input;
+  if (preferredRemoteName && remoteNames.includes(preferredRemoteName)) return preferredRemoteName;
+  return remoteNames.includes("origin") ? "origin" : pickIdentityRemoteName(remoteNames);
+}
 
 /** How a remote URL travels. Only https, http, ssh and scp-style remotes are recreated on a copy. */
 export type GitRemoteUrlKind = "https" | "http" | "ssh" | "scp" | "file" | "local" | "other";

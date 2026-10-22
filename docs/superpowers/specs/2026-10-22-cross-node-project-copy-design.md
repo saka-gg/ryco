@@ -602,6 +602,19 @@ WHY: The spec does not give the mockup's rule ('Same place as on X' / '<path> do
 (1) The selector shows branch, dirty and behind state only from VCS status that is already loaded, and never retains vcs-status or interactive scopes. The hero opens the selector whenever the footer has an action, even with one project, and the work-location row gets an 'also on <nodes>' suffix. (2) Define `ProjectCopyProgress = { copyId; phase: 'acquire' | 'export' | 'upload' | 'import' | 'done' | 'failed' | 'cancelled'; uploadedBytes; totalBytes; importSnapshot: ProjectImportSnapshot | null; canCloseClient: boolean; error: { code; message; retry: 'send-files' | 'resume' | null } | null }` in projectCopy/run.ts. (3) Add a 'Copies' block to the Projects page devices section, built from the local job records plus listImports on nodes that are already connected (never wake a node for it), with View log, Retry, Resume and Discard leftover. (4) 'View' and 'Start a thread on D' open a new-thread draft in the new project on D, through the hosted draft-target controller in hosted mode.
 WHY: Retaining vcs-status scopes is connection demand in hosted mode (hostedConnectionScopes.ts:25-27). The coordinator, dialog, toast, sidebar badge and executor are built in parallel without a shared type. discardImport and leftoverPath have no UI in the spec.
 
+### A37. [major] Clone remote (integration, 2026-10-22; spec lines 41-42, 174-178, A9)
+
+A copy clones from, and the export measures `pushedState` and the A9 exclusion against, the _clone
+remote_: the project's `preferredRemoteName` when the checkout has it, else `origin`, else the
+identity remote (`pickCloneRemoteName` in `@ryco/shared/gitRemoteUrl`; the identity rule is
+`pickIdentityRemoteName` there). The export names it in `ProjectExportRepository.cloneRemoteName`;
+`primaryRemoteName` and `canonicalKey` stay the identity's. A plan for an old source applies the same
+function to the client-side `repositoryIdentity.remotes` and `Project.preferredRemoteName`. The import
+recreates every other remote (`upstream` included), so the copy keeps the source's identity.
+WHY: The identity prefers `upstream`, so a fork's copy cloned the repository it was forked from: the
+fork's own branches were missing on the destination, and unpushed commits were counted against a
+remote the user does not push to.
+
 ---
 
 # Work packages (implementation plan)

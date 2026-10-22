@@ -2,6 +2,7 @@ import type {
   EnvironmentId,
   ProjectId,
   ProjectScript,
+  RepositoryIdentity,
   ServerConfig,
   ServerProvider,
 } from "@ryco/contracts";
@@ -89,6 +90,8 @@ function inspection(overrides: {
   readonly estimates?: Partial<Record<ProjectExportArtifactKind, number | string>>;
   readonly headOnRemote?: boolean;
   readonly remotes?: ReadonlyArray<{ name: string; url: string }>;
+  readonly primaryRemoteName?: string | null;
+  readonly cloneRemoteName?: string | null;
   readonly unpushed?: number;
   readonly changes?: number;
 }): ProjectExportInspection {
@@ -108,7 +111,8 @@ function inspection(overrides: {
       headOid: OID,
       isDetached: false,
       remotes: overrides.remotes ?? [{ name: "origin", url: "git@github.com:ada/app.git" }],
-      primaryRemoteName: "origin",
+      primaryRemoteName: overrides.primaryRemoteName ?? "origin",
+      cloneRemoteName: overrides.cloneRemoteName ?? "origin",
       canonicalKey: "github.com/ada/app",
       isShallow: false,
       hasSubmodules: false,
@@ -329,6 +333,33 @@ describe("planProjectCopyOptions", () => {
     });
   });
 
+  it("clones the remote the source names, not the identity remote", () => {
+    const remotes = [
+      { name: "origin", url: "git@github.com:ada/app.git" },
+      { name: "upstream", url: "https://github.com/org/app.git" },
+    ];
+    // A fork: its identity comes from upstream, its branches live on origin.
+    const fork = planProjectCopyOptions(
+      planning(
+        inspectedSource(
+          inspection({ remotes, primaryRemoteName: "upstream", cloneRemoteName: "origin" }),
+        ),
+      ),
+    );
+    expect(fork.modes.clone).toMatchObject({
+      available: true,
+      remoteUrl: "git@github.com:ada/app.git",
+    });
+    const preferred = planProjectCopyOptions(
+      planning(
+        inspectedSource(
+          inspection({ remotes, primaryRemoteName: "upstream", cloneRemoteName: "upstream" }),
+        ),
+      ),
+    );
+    expect(preferred.modes.clone.remoteUrl).toBe("https://github.com/org/app.git");
+  });
+
   it("disables changes that need commits the copy can't bring", () => {
     const options = planProjectCopyOptions(
       planning(inspectedSource(inspection({ estimates: { "commits-bundle": "over limit" } }))),
@@ -379,7 +410,7 @@ describe("planProjectCopyOptions", () => {
     expect(total.choices.bringCommits).toBe(true);
   });
 
-  it("allows only a clone from origin for a source without project copy (A23)", () => {
+  it("allows only a clone from its remote for a source without project copy (A23)", () => {
     const legacy: ProjectCopySourceFacts = {
       kind: "legacy",
       environmentId: SOURCE,
@@ -438,12 +469,13 @@ describe("planProjectCopyOptions", () => {
       origin: { kind: "user", sourceLabel: "Old laptop", proposalId: null },
     });
     if (!built.ok) throw new Error(built.reason);
+    // The project's preferred remote, not the identity's: it clones upstream, recreates origin.
     expect(built.plan.source).toEqual({
       kind: "clone-only",
       label: "Old laptop",
-      remoteUrl: "https://github.com/ada/mono.git",
-      remoteName: "origin",
-      remotes: [{ name: "upstream", url: "git@github.com:org/mono.git" }],
+      remoteUrl: "git@github.com:org/mono.git",
+      remoteName: "upstream",
+      remotes: [{ name: "origin", url: "https://github.com/ada/mono.git" }],
       relativeRootInRepository: "apps/web",
       settings: {
         scripts: [setupScript],
@@ -461,12 +493,84 @@ describe("planProjectCopyOptions", () => {
       transfers: {},
     });
     expect(input).toMatchObject({
-      source: { kind: "clone", remoteUrl: "https://github.com/ada/mono.git", remoteName: "origin" },
+      source: { kind: "clone", remoteUrl: "git@github.com:org/mono.git", remoteName: "upstream" },
+      remotes: [{ name: "origin", url: "https://github.com/ada/mono.git" }],
       commits: null,
       checkout: null,
       changes: null,
       relativeRootInRepository: "apps/web",
       avatarTransferId: null,
+    });
+  });
+
+  it("clones a legacy fork from origin, and from its only remote when the identity lists none", () => {
+    const legacy = (repositoryIdentity: RepositoryIdentity): ProjectCopySourceFacts => ({
+      kind: "legacy",
+      environmentId: SOURCE,
+      label: "Old laptop",
+      platformOs: "darwin",
+      projectId: "project-old" as ProjectId,
+      project: {
+        title: "Fork",
+        workspaceRoot: "/Users/ada/Code/app",
+        repositoryIdentity,
+        scripts: [],
+        customSystemPrompt: null,
+        // Gone from the checkout: the rule falls back to origin.
+        preferredRemoteName: "gone",
+        projectMetadataDir: ".ryco",
+        hasCustomAvatar: false,
+      },
+    });
+    const planOf = (source: ProjectCopySourceFacts) => {
+      const built = buildProjectCopyRunPlan({
+        planning: planning(source),
+        options: planProjectCopyOptions(planning(source)),
+        target: { environmentId: TARGET, pathSeparator: "/" },
+        setup: null,
+        followUpThread: null,
+        origin: { kind: "user", sourceLabel: "Old laptop", proposalId: null },
+      });
+      if (!built.ok) throw new Error(built.reason);
+      return built.plan.source;
+    };
+
+    const fork = planOf(
+      legacy({
+        canonicalKey: "github.com/org/app",
+        locator: {
+          source: "git-remote",
+          remoteName: "upstream",
+          remoteUrl: "https://github.com/org/app.git",
+        },
+        remotes: [
+          { name: "origin", url: "git@github.com:ada/app.git" },
+          { name: "upstream", url: "https://github.com/org/app.git" },
+        ],
+      }),
+    );
+    expect(fork).toMatchObject({
+      kind: "clone-only",
+      remoteUrl: "git@github.com:ada/app.git",
+      remoteName: "origin",
+      remotes: [{ name: "upstream", url: "https://github.com/org/app.git" }],
+    });
+
+    const locatorOnly = planOf(
+      legacy({
+        canonicalKey: "github.com/org/app",
+        locator: {
+          source: "git-remote",
+          remoteName: "upstream",
+          remoteUrl: "https://github.com/org/app.git",
+        },
+        remotes: [],
+      }),
+    );
+    expect(locatorOnly).toMatchObject({
+      remoteUrl: "https://github.com/org/app.git",
+      remoteName: "upstream",
+      remotes: [],
     });
   });
 
@@ -564,6 +668,7 @@ describe("planProjectCopyOptions", () => {
 
 describe("buildProjectImportStartInput", () => {
   const exportResult = (overrides: Partial<ProjectExportResult> = {}): ProjectExportResult => {
+    // A fork: the identity comes from upstream, the source measured its pushed state on origin.
     const base = inspection({
       remotes: [
         { name: "origin", url: "git@github.com:ada/app.git" },
@@ -571,6 +676,7 @@ describe("buildProjectImportStartInput", () => {
         { name: "nas", url: "file:///Volumes/nas/app.git" },
         { name: "bad name!", url: "https://github.com/x/y.git" },
       ],
+      primaryRemoteName: "upstream",
     });
     return {
       exportId: "00000000-0000-4000-8000-0000000000e1" as ProjectExportResult["exportId"],
@@ -600,6 +706,26 @@ describe("buildProjectImportStartInput", () => {
     return built.plan;
   };
   const importId = ProjectImportId.make("00000000-0000-4000-8000-000000000002");
+
+  it("clones the source's clone remote and recreates the identity remote next to it", () => {
+    const exported = exportResult();
+    const { input } = buildProjectImportStartInput({
+      plan: runPlan({}),
+      importId,
+      projectId: "new-project" as ProjectId,
+      exportResult: {
+        ...exported,
+        repository: { ...exported.repository, cloneRemoteName: "upstream" },
+      },
+      transfers: { "commits-bundle": transfer(1) },
+    });
+    expect(input.source).toEqual({
+      kind: "clone",
+      remoteUrl: "https://github.com/org/app.git",
+      remoteName: "upstream",
+    });
+    expect(input.remotes).toEqual([{ name: "origin", url: "git@github.com:ada/app.git" }]);
+  });
 
   it("pins HEAD, brings commits and changes, and recreates network remotes", () => {
     const plan = runPlan({ bringChanges: true, ignoredPaths: [".env", "secret.txt"] });

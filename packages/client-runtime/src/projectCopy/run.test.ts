@@ -186,6 +186,7 @@ class FakeNode {
               isDetached: false,
               remotes: [{ name: "origin", url: "git@github.com:ada/app.git" }],
               primaryRemoteName: "origin",
+              cloneRemoteName: "origin",
               canonicalKey: "github.com/ada/app",
               isShallow: false,
               hasSubmodules: false,

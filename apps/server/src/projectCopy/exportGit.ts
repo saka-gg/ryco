@@ -1,6 +1,6 @@
 /**
  * The git side of a cross-node project export (ProjectExportLive): what the source repository
- * is, what its primary remote already has, what the working tree holds, and the artifacts built
+ * is, what its clone remote already has, what the working tree holds, and the artifacts built
  * from it (commits bundle, repository bundle, changes patch).
  *
  * Artifact bytes never pass through JS strings: `git bundle create <file>` and `git diff
@@ -21,12 +21,14 @@ import {
   type ProjectExportPushedState,
   type ProjectExportSkippedArtifact,
 } from "@ryco/contracts/project-copy";
+import { pickCloneRemoteName } from "@ryco/shared/gitRemoteUrl";
 import { Effect, Schema } from "effect";
 import type { FileSystem, Path } from "effect";
 
 import {
   parseRemoteFetchUrls,
   pickPrimaryRemote,
+  remoteNamed,
 } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { PORTABLE_PATCH_DIFF_ARGS } from "../vcs/GitIndexReview.ts";
 import { seedIndexFromCheckout } from "../vcs/GitTemporaryIndex.ts";
@@ -36,7 +38,7 @@ import type { GitNetworkShape } from "./Services/GitNetwork.ts";
 export const EXPORT_STEP_TIMEOUT_MS = 10 * 60 * 1000;
 /** Reads of refs, config and the index. */
 const EXPORT_READ_TIMEOUT_MS = 60 * 1000;
-/** `ls-remote` of the primary remote (amendment 9). */
+/** `ls-remote` of the clone remote (amendment 9). */
 const EXPORT_LS_REMOTE_TIMEOUT_MS = 30 * 1000;
 /** Size estimates are best effort: past this they report 0 instead of holding up `inspect`. */
 const EXPORT_ESTIMATE_TIMEOUT_MS = 30 * 1000;
@@ -142,7 +144,7 @@ const lstatOrNull = (filePath: string) => fsp.lstat(filePath).catch(() => null);
 
 // ── Repository facts ──────────────────────────────────────────────────
 
-export interface ExportPrimaryRemote {
+export interface ExportRemote {
   readonly remoteName: string;
   /** As configured (credentials included); only `ls-remote` sees it, never a result. */
   readonly remoteUrl: string;
@@ -162,7 +164,13 @@ export interface ExportRepositoryFacts {
   readonly headOid: string | null;
   /** Fetch URLs by remote name, as configured. */
   readonly remotes: ReadonlyMap<string, string>;
-  readonly primary: ExportPrimaryRemote | null;
+  /** Where the repository's identity (its canonical key) comes from: `upstream` first. */
+  readonly identityRemote: ExportRemote | null;
+  /**
+   * What the copy clones from, and what the pushed state is measured against: the project's
+   * preferred remote, else `origin`, else the identity remote (`pickCloneRemoteName`).
+   */
+  readonly cloneRemote: ExportRemote | null;
   readonly hasSubmodules: boolean;
   readonly usesLfs: boolean;
 }
@@ -188,8 +196,15 @@ const readUsesLfs = (repositoryRoot: string, commonDir: string) =>
     return (await lstatOrNull(nodePath.join(commonDir, "lfs")))?.isDirectory() === true;
   });
 
-/** What git says about the checkout; null when it is not inside a git working tree. */
-export const readRepositoryFacts = (git: ExportGit, checkoutPath: string) =>
+/**
+ * What git says about the checkout; null when it is not inside a git working tree. The project's
+ * preferred remote picks the clone remote when the checkout has it.
+ */
+export const readRepositoryFacts = (
+  git: ExportGit,
+  checkoutPath: string,
+  preferredRemoteName: string | null,
+) =>
   Effect.gen(function* () {
     const operation = "ProjectExport.readRepository";
     const probe = yield* git({
@@ -276,7 +291,11 @@ export const readRepositoryFacts = (git: ExportGit, checkoutPath: string) =>
         : null,
       headOid: OBJECT_ID.test(headOid) ? headOid : null,
       remotes,
-      primary: pickPrimaryRemote(remotes),
+      identityRemote: pickPrimaryRemote(remotes),
+      cloneRemote: remoteNamed(
+        remotes,
+        pickCloneRemoteName({ remoteNames: [...remotes.keys()], preferredRemoteName }),
+      ),
       hasSubmodules,
       usesLfs,
     } satisfies ExportRepositoryFacts;
@@ -286,11 +305,11 @@ export const readRepositoryFacts = (git: ExportGit, checkoutPath: string) =>
 
 /** What the commits bundle and the unpushed count exclude: what the clone source already has. */
 export type ExportExclusion =
-  /** Commits the primary remote advertises (`ls-remote`) that exist here. */
+  /** Commits the clone remote advertises (`ls-remote`) that exist here. */
   | { readonly kind: "advertised"; readonly oids: ReadonlyArray<string> }
-  /** `ls-remote` failed: the primary remote's tracking refs stand in. */
+  /** `ls-remote` failed: the clone remote's tracking refs stand in. */
   | { readonly kind: "remote-tracking"; readonly remoteName: string }
-  /** No primary remote: nothing is excluded. */
+  /** No remote: nothing is excluded. */
   | { readonly kind: "none" };
 
 export interface ExportPushedState {
@@ -357,9 +376,9 @@ const countCommits = (git: ExportGit, cwd: string, exclusion: ExportExclusion) =
 };
 
 /**
- * Measured against the primary remote itself (`ls-remote`), not its tracking refs: those can be
- * stale, and commits that exist only on another remote (a fork) are not on the clone source.
- * When `ls-remote` fails, the primary remote's tracking refs stand in.
+ * Measured against the clone remote itself (`ls-remote`), not its tracking refs: those can be
+ * stale, and commits that exist only on another remote (the fork's upstream, a mirror) are not
+ * on the clone source. When `ls-remote` fails, the clone remote's tracking refs stand in.
  */
 export const readPushedState = (
   git: ExportGit,
@@ -374,7 +393,7 @@ export const readPushedState = (
         exclusion: null,
       } satisfies ExportPushedState;
     }
-    if (facts.primary === null) {
+    if (facts.cloneRemote === null) {
       const exclusion: ExportExclusion = { kind: "none" };
       return {
         state: {
@@ -385,10 +404,10 @@ export const readPushedState = (
         exclusion,
       } satisfies ExportPushedState;
     }
-    const primary = facts.primary;
+    const cloneRemote = facts.cloneRemote;
     const advertised = yield* network
       .lsRemote({
-        remoteUrl: primary.remoteUrl,
+        remoteUrl: cloneRemote.remoteUrl,
         // The repository's own configured remote: a `file://` or local path is fine here.
         allowLocalRemote: true,
         heads: true,
@@ -398,7 +417,7 @@ export const readPushedState = (
       .pipe(
         Effect.map((refs) => ({ ok: true as const, refs })),
         Effect.catch((error) =>
-          Effect.logDebug("project export: ls-remote of the primary remote failed", {
+          Effect.logDebug("project export: ls-remote of the clone remote failed", {
             reason: error.reason,
           }).pipe(Effect.as({ ok: false as const })),
         ),
@@ -413,10 +432,10 @@ export const readPushedState = (
         facts.branch !== null &&
         advertised.refs.some((ref) => ref.ref === `refs/heads/${facts.branch}`)
       ) {
-        upstreamBranch = `${primary.remoteName}/${facts.branch}`;
+        upstreamBranch = `${cloneRemote.remoteName}/${facts.branch}`;
       }
     } else {
-      exclusion = { kind: "remote-tracking", remoteName: primary.remoteName };
+      exclusion = { kind: "remote-tracking", remoteName: cloneRemote.remoteName };
       if (facts.branch !== null) {
         const tracking = yield* git({
           operation: "ProjectExport.trackingBranch",
@@ -426,13 +445,13 @@ export const readPushedState = (
             "--verify",
             "--quiet",
             "--end-of-options",
-            `refs/remotes/${primary.remoteName}/${facts.branch}`,
+            `refs/remotes/${cloneRemote.remoteName}/${facts.branch}`,
           ],
           allowNonZeroExit: true,
           readOnly: true,
           timeoutMs: EXPORT_READ_TIMEOUT_MS,
         });
-        if (tracking.exitCode === 0) upstreamBranch = `${primary.remoteName}/${facts.branch}`;
+        if (tracking.exitCode === 0) upstreamBranch = `${cloneRemote.remoteName}/${facts.branch}`;
       }
     }
     const unpushedCommitCount = yield* countCommits(git, cwd, exclusion);
@@ -602,7 +621,7 @@ const requireSuccess = (step: string, result: ExportGitResult) =>
       );
 
 /**
- * The commits the primary remote lacks, always ending at HEAD: `git bundle create <file> HEAD
+ * The commits the clone remote lacks, always ending at HEAD: `git bundle create <file> HEAD
  * --not <what the remote has>`. Skipped for an unborn HEAD, without a remote, and when nothing
  * is unpushed (git refuses an empty bundle).
  */
@@ -617,7 +636,9 @@ export const buildCommitsBundle = (input: {
     if (facts.headOid === null || pushed.exclusion === null) {
       return skip("commits-bundle", PROJECT_EXPORT_SKIP_REASON.noCommits);
     }
-    if (facts.primary === null) return skip("commits-bundle", PROJECT_EXPORT_SKIP_REASON.noRemote);
+    if (facts.cloneRemote === null) {
+      return skip("commits-bundle", PROJECT_EXPORT_SKIP_REASON.noRemote);
+    }
     if (pushed.state.unpushedCommitCount === 0) {
       return skip("commits-bundle", PROJECT_EXPORT_SKIP_REASON.nothingUnpushed);
     }

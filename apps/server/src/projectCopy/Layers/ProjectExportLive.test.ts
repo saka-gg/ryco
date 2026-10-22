@@ -17,6 +17,7 @@ import {
   ProjectExportId,
   type ProjectExportStartInput,
 } from "@ryco/contracts/project-copy";
+import { normalizeGitRemoteUrl } from "@ryco/shared/git";
 import { Deferred, Effect, Fiber, Layer, Option } from "effect";
 import { TestClock } from "effect/testing";
 
@@ -320,6 +321,7 @@ describe("ProjectExportLive", () => {
             headOid: head,
             isDetached: false,
             primaryRemoteName: "origin",
+            cloneRemoteName: "origin",
             remotes: [{ name: "origin", url }],
             isShallow: false,
           });
@@ -454,36 +456,99 @@ describe("ProjectExportLive", () => {
     ).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("counts commits that only a fork has as unpushed", () => {
+  /**
+   * A fork: `upstream` is the repository it came from, `origin` the fork with one more commit on
+   * main, and one commit on top that is on neither.
+   */
+  const makeFork = (root: string) => {
+    const { source, url: upstreamUrl } = makeRemoteAndClone(root);
+    git(source, "remote", "rename", "origin", "upstream");
+    const fork = path.join(root, "fork.git");
+    git(root, "clone", "-q", "--bare", upstreamUrl, fork);
+    const forkUrl = `file://${fork}`;
+    git(source, "remote", "add", "origin", forkUrl);
+    const pushedToFork = commitFile(source, "fork.txt", "fork\n");
+    git(source, "push", "-q", "origin", "main");
+    const local = commitFile(source, "local.txt", "local\n");
+    return { source, upstreamUrl, forkUrl, pushedToFork, local };
+  };
+
+  it.effect("measures a fork against its own origin, not the upstream its identity names", () => {
     const harness = makeHarness();
     return withFixtureRoot((root) =>
       Effect.gen(function* () {
-        const { source, url } = makeRemoteAndClone(root);
-        // The clone source is `upstream`; `origin` becomes a fork that has more commits.
-        git(source, "remote", "rename", "origin", "upstream");
-        const fork = path.join(root, "fork.git");
-        git(root, "clone", "-q", "--bare", url, fork);
-        git(source, "remote", "add", "origin", `file://${fork}`);
-        const pushedToFork = commitFile(source, "fork.txt", "fork\n");
-        git(source, "push", "-q", "origin", "main");
+        const { source, upstreamUrl, forkUrl, local } = makeFork(root);
         const project = harness.addProject(source);
         const exporter = yield* ProjectExport;
 
         const input = startInput(project.id, { include: { commits: true } });
         const result = yield* exporter.start({ input, channel: "direct" });
-        expect(result.repository.primaryRemoteName).toBe("upstream");
-        expect(result.pushedState).toMatchObject({ headOnRemote: false, unpushedCommitCount: 1 });
+        // The identity (and the copy's grouping) still comes from upstream.
+        expect(result.repository).toMatchObject({
+          primaryRemoteName: "upstream",
+          cloneRemoteName: "origin",
+          canonicalKey: normalizeGitRemoteUrl(upstreamUrl),
+        });
+        // The commit the fork has is pushed; only the one on top is not.
+        expect(result.pushedState).toEqual({
+          headOnRemote: false,
+          upstreamBranch: "origin/main",
+          unpushedCommitCount: 1,
+        });
         const bundleFile = path.join(root, "commits.bundle");
         fs.writeFileSync(
           bundleFile,
           yield* readArtifact(input.exportId, artifactOf(result, "commits-bundle")),
         );
-        expect(fetchCommitsBundle(freshClone(root, url), bundleFile)).toBe(pushedToFork);
+        const dest = freshClone(root, forkUrl);
+        expect(fetchCommitsBundle(dest, bundleFile)).toBe(local);
+        expect(git(dest, "rev-list", "--count", "origin/main..refs/ryco-import/test/head")).toBe(
+          "1",
+        );
       }),
     ).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("falls back to the primary remote's tracking refs when ls-remote fails", () => {
+  it.effect("measures against the project's preferred remote when the checkout has it", () => {
+    const harness = makeHarness();
+    return withFixtureRoot((root) =>
+      Effect.gen(function* () {
+        const { source, upstreamUrl, pushedToFork, local } = makeFork(root);
+        const exporter = yield* ProjectExport;
+
+        const preferred = harness.addProject(source, { preferredRemoteName: "upstream" });
+        const input = startInput(preferred.id, { include: { commits: true } });
+        const result = yield* exporter.start({ input, channel: "direct" });
+        expect(result.repository).toMatchObject({
+          primaryRemoteName: "upstream",
+          cloneRemoteName: "upstream",
+        });
+        expect(result.settings.preferredRemoteName).toBe("upstream");
+        // Upstream lacks the fork's commit too, so the bundle carries both.
+        expect(result.pushedState).toEqual({
+          headOnRemote: false,
+          upstreamBranch: "upstream/main",
+          unpushedCommitCount: 2,
+        });
+        const bundleFile = path.join(root, "commits.bundle");
+        fs.writeFileSync(
+          bundleFile,
+          yield* readArtifact(input.exportId, artifactOf(result, "commits-bundle")),
+        );
+        const dest = freshClone(root, upstreamUrl);
+        expect(fetchCommitsBundle(dest, bundleFile)).toBe(local);
+        expect(git(dest, "rev-parse", "refs/ryco-import/test/head~1")).toBe(pushedToFork);
+
+        // A preferred remote the checkout no longer has: origin, as without a preference.
+        const stale = harness.addProject(source, { preferredRemoteName: "gone" });
+        const inspection = yield* exporter.inspect({ projectId: stale.id });
+        expect(inspection.repository.cloneRemoteName).toBe("origin");
+        expect(inspection.pushedState.unpushedCommitCount).toBe(1);
+      }),
+    ).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("falls back to the clone remote's tracking refs when ls-remote fails", () => {
     const harness = makeHarness();
     return withFixtureRoot((root) =>
       Effect.gen(function* () {

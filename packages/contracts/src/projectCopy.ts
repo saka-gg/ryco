@@ -370,7 +370,14 @@ export const ProjectExportRepository = Schema.Struct({
   headOid: Schema.NullOr(Schema.String),
   isDetached: Schema.Boolean,
   remotes: Schema.Array(ProjectExportRemote),
+  /** The identity remote (`upstream`, then `origin`, then the first); `canonicalKey` is its. */
   primaryRemoteName: Schema.NullOr(Schema.String),
+  /**
+   * The remote a copy clones from and `pushedState` is measured against: the project's preferred
+   * remote when the checkout has it, else `origin`, else the identity remote. A copy recreates
+   * the other remotes, so it keeps the source's identity.
+   */
+  cloneRemoteName: Schema.NullOr(Schema.String),
   canonicalKey: Schema.NullOr(Schema.String),
   isShallow: Schema.Boolean,
   hasSubmodules: Schema.Boolean,
@@ -378,10 +385,10 @@ export const ProjectExportRepository = Schema.Struct({
 });
 export type ProjectExportRepository = typeof ProjectExportRepository.Type;
 
-/** Measured against the primary remote's advertised refs (`ls-remote`). */
+/** Measured against the clone remote's advertised refs (`ls-remote`). */
 export const ProjectExportPushedState = Schema.Struct({
   headOnRemote: Schema.Boolean,
-  /** `origin/feature` when the branch exists on the primary remote. */
+  /** `origin/feature` when the branch exists on the clone remote. */
   upstreamBranch: Schema.NullOr(Schema.String),
   unpushedCommitCount: NonNegativeInt,
 });

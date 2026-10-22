@@ -59,6 +59,7 @@ import {
   classifyRemoteUrl,
   isCloneableRemoteKind,
   isRecreatableRemoteKind,
+  pickCloneRemoteName,
   sanitizeRemoteUrl,
 } from "@ryco/shared/gitRemoteUrl";
 import { createModelSelection } from "@ryco/shared/model";
@@ -502,18 +503,36 @@ interface SourceRemote {
   readonly url: string;
 }
 
-function primaryRemoteOf(source: ProjectCopySourceFacts): SourceRemote | null {
+/** A legacy source's remotes as its identity lists them; older identities name only the locator. */
+function legacyRemotesOf(project: ProjectCopyLegacyProject): ReadonlyArray<SourceRemote> {
+  const identity = project.repositoryIdentity;
+  if (identity === null) return [];
+  const { locator } = identity;
+  const remotes: ReadonlyArray<SourceRemote> = identity.remotes ?? [];
+  return remotes.some((remote) => remote.name === locator.remoteName)
+    ? remotes
+    : [...remotes, { name: locator.remoteName, url: locator.remoteUrl }];
+}
+
+/**
+ * The remote the copy clones from. An inspected source names it (its pushed state is measured
+ * against it); for a legacy source the client applies the same rule, `pickCloneRemoteName`, to
+ * the identity's remotes and the project's preferred remote.
+ */
+function cloneRemoteOf(source: ProjectCopySourceFacts): SourceRemote | null {
   switch (source.kind) {
     case "inspected": {
       const repository = source.inspection.repository;
-      const remote = repository.remotes.find(
-        (entry) => entry.name === repository.primaryRemoteName,
-      );
+      const remote = repository.remotes.find((entry) => entry.name === repository.cloneRemoteName);
       return remote ? { name: remote.name, url: remote.url } : null;
     }
     case "legacy": {
-      const locator = source.project.repositoryIdentity?.locator;
-      return locator ? { name: locator.remoteName, url: locator.remoteUrl } : null;
+      const remotes = legacyRemotesOf(source.project);
+      const name = pickCloneRemoteName({
+        remoteNames: remotes.map((remote) => remote.name),
+        preferredRemoteName: source.project.preferredRemoteName,
+      });
+      return remotes.find((remote) => remote.name === name) ?? null;
     }
     case "repository":
       return { name: "origin", url: source.remoteUrl };
@@ -582,23 +601,23 @@ export function planProjectCopyOptions(
   }
 
   // ── Clone from origin ──
-  const primaryRemote = primaryRemoteOf(source);
-  const primaryKind = primaryRemote ? classifyRemoteUrl(primaryRemote.url) : null;
+  const cloneRemote = cloneRemoteOf(source);
+  const cloneKind = cloneRemote ? classifyRemoteUrl(cloneRemote.url) : null;
   const cloneUnavailableReason =
-    primaryRemote === null || primaryKind === null
+    cloneRemote === null || cloneKind === null
       ? `${title} has no remote.`
-      : primaryKind === "http"
+      : cloneKind === "http"
         ? "Plain http remotes are not cloned; send the files instead."
-        : !isCloneableRemoteKind(primaryKind)
+        : !isCloneableRemoteKind(cloneKind)
           ? "Its remote can only be reached from the source; send the files instead."
           : null;
-  if (primaryRemote === null && source.kind !== "repository") {
+  if (cloneRemote === null && source.kind !== "repository") {
     notes.push(`${title} has no remote, so the copy shows as a separate project.`);
   }
   const clone = {
     available: cloneUnavailableReason === null,
     reason: cloneUnavailableReason,
-    remoteUrl: primaryRemote ? sanitizeRemoteUrl(primaryRemote.url) : null,
+    remoteUrl: cloneRemote ? sanitizeRemoteUrl(cloneRemote.url) : null,
     reachable: target.remoteAccess?.reachable ?? null,
     reachabilityDetail:
       target.remoteAccess && !target.remoteAccess.reachable
@@ -1010,7 +1029,7 @@ export function buildProjectCopyRunPlan(input: {
       checkoutPath: source.checkoutPath,
     };
   } else {
-    const remote = primaryRemoteOf(source);
+    const remote = cloneRemoteOf(source);
     if (remote === null || options.modes.clone.remoteUrl === null) {
       return { ok: false, reason: options.modes.clone.reason ?? "There is no remote to clone." };
     }
@@ -1021,10 +1040,7 @@ export function buildProjectCopyRunPlan(input: {
             label: source.label,
             remoteUrl: options.modes.clone.remoteUrl,
             remoteName: isValidRemoteName(remote.name) ? remote.name : "origin",
-            remotes: recreatedRemotes(
-              source.project.repositoryIdentity?.remotes ?? [],
-              remote.name,
-            ),
+            remotes: recreatedRemotes(legacyRemotesOf(source.project), remote.name),
             relativeRootInRepository: legacyRelativeRoot(source.project),
             settings: legacySettings(source.project),
           }
@@ -1155,8 +1171,9 @@ export function buildProjectImportStartInput(input: {
   } else {
     if (exportResult === null) throw new ProjectCopyPlanError("The source export is missing.");
     const { repository, pushedState, settings } = exportResult;
-    const primary =
-      repository.remotes.find((remote) => remote.name === repository.primaryRemoteName) ?? null;
+    // The remote the source measured its pushed state against: the commits bundle builds on it.
+    const cloneRemote =
+      repository.remotes.find((remote) => remote.name === repository.cloneRemoteName) ?? null;
     let source: ProjectImportSource;
     let cloneRemoteName: string | null = null;
     if (mode === "link") {
@@ -1169,16 +1186,16 @@ export function buildProjectImportStartInput(input: {
       if (!transferId) throw new ProjectCopyPlanError("The repository files were not sent.");
       source = { kind: "repository-bundle", transferId };
     } else {
-      const remoteUrl = primary ? sanitizeRemoteUrl(primary.url) : null;
+      const remoteUrl = cloneRemote ? sanitizeRemoteUrl(cloneRemote.url) : null;
       if (
-        primary === null ||
+        cloneRemote === null ||
         remoteUrl === null ||
         !isCloneableRemoteKind(classifyRemoteUrl(remoteUrl)) ||
         !isValidRemoteUrl(remoteUrl)
       ) {
         throw new ProjectCopyPlanError(`${plan.title} has no remote another node can clone.`);
       }
-      cloneRemoteName = isValidRemoteName(primary.name) ? primary.name : "origin";
+      cloneRemoteName = isValidRemoteName(cloneRemote.name) ? cloneRemote.name : "origin";
       source = { kind: "clone", remoteUrl, remoteName: cloneRemoteName };
     }
     const commitsTransferId = mode === "clone" ? transfers["commits-bundle"] : undefined;

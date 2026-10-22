@@ -5,12 +5,49 @@ import {
   classifyRemoteUrl,
   isCloneableRemoteKind,
   isRecreatableRemoteKind,
+  pickCloneRemoteName,
+  pickIdentityRemoteName,
   redactGitCredentials,
   remoteUrlHasPassword,
   repositoryFolderName,
   sanitizeRemoteUrl,
   sshHostOfRemoteUrl,
 } from "./gitRemoteUrl.ts";
+
+describe("pickIdentityRemoteName", () => {
+  it("prefers upstream, then origin, then the first by name", () => {
+    expect(pickIdentityRemoteName(["origin", "upstream"])).toBe("upstream");
+    expect(pickIdentityRemoteName(["mirror", "origin"])).toBe("origin");
+    expect(pickIdentityRemoteName(["zeta", "backup"])).toBe("backup");
+    expect(pickIdentityRemoteName([])).toBeNull();
+  });
+});
+
+describe("pickCloneRemoteName", () => {
+  it("clones a fork from its own origin, not the upstream its identity comes from", () => {
+    expect(
+      pickCloneRemoteName({ remoteNames: ["upstream", "origin"], preferredRemoteName: null }),
+    ).toBe("origin");
+  });
+
+  it("honours the project's preferred remote when the checkout has it", () => {
+    const remoteNames = ["origin", "upstream", "mirror"];
+    expect(pickCloneRemoteName({ remoteNames, preferredRemoteName: "upstream" })).toBe("upstream");
+    expect(pickCloneRemoteName({ remoteNames, preferredRemoteName: "mirror" })).toBe("mirror");
+    // A preferred remote the checkout no longer has falls back like no preference.
+    expect(pickCloneRemoteName({ remoteNames, preferredRemoteName: "gone" })).toBe("origin");
+  });
+
+  it("falls back to the identity remote without origin", () => {
+    expect(
+      pickCloneRemoteName({ remoteNames: ["mirror", "upstream"], preferredRemoteName: undefined }),
+    ).toBe("upstream");
+    expect(
+      pickCloneRemoteName({ remoteNames: ["zeta", "backup"], preferredRemoteName: null }),
+    ).toBe("backup");
+    expect(pickCloneRemoteName({ remoteNames: [], preferredRemoteName: "origin" })).toBeNull();
+  });
+});
 
 describe("classifyRemoteUrl", () => {
   it("tells the transports apart", () => {
