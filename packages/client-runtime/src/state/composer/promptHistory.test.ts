@@ -9,11 +9,9 @@ import {
   stepPromptHistory,
   type PromptHistoryEntry,
 } from "./promptHistory.ts";
+import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "./planImplementationPrompt.ts";
 import { appendSelectionQuote } from "./selectionQuote.ts";
-import {
-  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
-} from "./sendEngine.ts";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "./sendEngine.ts";
 import {
   appendTerminalContextsToPrompt,
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
