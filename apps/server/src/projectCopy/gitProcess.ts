@@ -11,6 +11,7 @@
  *
  * @module gitProcess
  */
+import { redactGitCredentials } from "@ryco/shared/gitRemoteUrl";
 import { Duration, Effect, Option, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
@@ -18,7 +19,6 @@ import { governChildProcess } from "../processGovernor.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 import { NON_INTERACTIVE_GIT_ENV } from "../vcs/GitVcsDriver.ts";
 import { GitNetworkError } from "./Errors.ts";
-import { redactGitCredentials, tailOfText } from "./remoteUrls.ts";
 import type { ProjectCopyProcessObserver } from "./Services/ProjectCopyProcess.ts";
 
 /** SIGTERM first; a child still alive this long after it gets SIGKILL. */
@@ -29,6 +29,12 @@ const STDERR_TAIL_CHARS = 16 * 1024;
 const MAX_PENDING_STDERR_CHARS = 64 * 1024;
 /** Bound for `detail` and messages built from git's output (`ProjectCopyError.message` cap). */
 export const GIT_DETAIL_MAX_CHARS = 2_000;
+
+/** At most `maxChars` of `text`, trimmed, keeping its end (where git puts the reason). */
+export function tailOfText(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  return trimmed.length <= maxChars ? trimmed : `…${trimmed.slice(-(maxChars - 1)).trimStart()}`;
+}
 
 export interface ProjectCopyGitInput {
   readonly operation: string;

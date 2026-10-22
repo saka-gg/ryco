@@ -7,6 +7,7 @@
  *
  * @module gitCloneAccess
  */
+import { isScpStyleGitUrl } from "@ryco/shared/gitRemoteUrl";
 import { Effect, FileSystem, Path, Result } from "effect";
 import type { PlatformError, Scope } from "effect";
 
@@ -16,11 +17,6 @@ import type { SourceControlProviderRegistryShape } from "./SourceControlProvider
 export const CLONE_REMOTE_URL_EMPTY_DETAIL = "Enter a valid repository URL before cloning.";
 export const CLONE_REMOTE_URL_SYNTAX_DETAIL =
   "Clone URL must use https://, ssh://, or git@host:owner/repo.git syntax.";
-
-/** `user@host:owner/repo.git`, the scp-like ssh syntax. */
-export function isScpStyleGitUrl(input: string): boolean {
-  return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+:[^\s]+$/u.test(input);
-}
 
 /**
  * The trimmed URL when the server clones from it (https, ssh or scp-style); otherwise the reason,

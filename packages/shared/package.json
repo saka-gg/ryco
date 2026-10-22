@@ -158,6 +158,10 @@
       "types": "./src/git.ts",
       "import": "./src/git.ts"
     },
+    "./gitRemoteUrl": {
+      "types": "./src/gitRemoteUrl.ts",
+      "import": "./src/gitRemoteUrl.ts"
+    },
     "./sourceControl": {
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"

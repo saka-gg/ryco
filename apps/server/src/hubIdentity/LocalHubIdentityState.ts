@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { lstat } from "node:fs/promises";
 
 import { canonicalizeHubOrigin, normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
@@ -481,4 +482,32 @@ export async function makeLocalHubIdentityStateStore(
     });
 
   return { readOrCreate, update, reset };
+}
+
+/**
+ * The id the Hub knows this node by (`env_…`, what hosted clients key it by) while it holds an
+ * active enrollment it is not leaving; null when it is not enrolled or the identity cannot be read.
+ * Reads the identity state alone, as `identitySummary({ fingerprint: false })` does: it never
+ * creates the record, takes the writer lock or opens key custody, and leaves a node that never
+ * had a Hub identity untouched.
+ */
+export async function readActiveHubEnvironmentId(statePath: string): Promise<string | null> {
+  try {
+    await lstat(statePath);
+  } catch {
+    return null;
+  }
+  try {
+    const file = await openProtectedStateFile({
+      path: statePath,
+      maxBytes: MAX_STATE_BYTES,
+      fail: (failure) => stateError(FAILURE_CODES[failure]),
+    });
+    const raw = await file.readJson();
+    if (raw === null) return null;
+    const state = parseState(raw);
+    return state.activeNode !== null && state.pendingTeardown === null ? state.environmentId : null;
+  } catch {
+    return null;
+  }
 }

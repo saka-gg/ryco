@@ -55,6 +55,12 @@ import {
   type ProjectTransferId,
 } from "@ryco/contracts/project-copy";
 import { normalizeGitRemoteUrl } from "@ryco/shared/git";
+import {
+  classifyRemoteUrl,
+  isCloneableRemoteKind,
+  isRecreatableRemoteKind,
+  sanitizeRemoteUrl,
+} from "@ryco/shared/gitRemoteUrl";
 import { createModelSelection } from "@ryco/shared/model";
 import * as Schema from "effect/Schema";
 
@@ -64,12 +70,6 @@ import {
   sortProviderInstanceEntries,
 } from "../state/composer/providerInstances.ts";
 import type { ProjectCopyTransport } from "./io.ts";
-import {
-  classifyRemoteUrl,
-  isCloneableRemoteKind,
-  isRecreatableRemoteKind,
-  sanitizeRemoteUrl,
-} from "./remoteUrl.ts";
 
 // ── Node paths ────────────────────────────────────────────────────────
 

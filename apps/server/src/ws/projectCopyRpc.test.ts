@@ -1,24 +1,19 @@
 import { WS_METHODS } from "@ryco/contracts";
 import {
   ProjectExportId,
-  ProjectImportId,
   type ProjectCopyError,
   type ProjectExportStartInput,
 } from "@ryco/contracts/project-copy";
 import { expect, it } from "@effect/vitest";
-import { Effect, Option, Stream } from "effect";
+import { Effect, Option } from "effect";
 
 import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
-import { ProjectCopyServicesLive } from "../projectCopy/Layers/ProjectCopyServices.ts";
-import { GitNetwork } from "../projectCopy/Services/GitNetwork.ts";
-import { NodePaths } from "../projectCopy/Services/NodePaths.ts";
-import {
-  ProjectExport,
-  type ProjectExportShape,
-  type ProjectExportStartRequest,
+import type { NodePathsShape } from "../projectCopy/Services/NodePaths.ts";
+import type {
+  ProjectCopyCallerChannel,
+  ProjectExportShape,
+  ProjectExportStartRequest,
 } from "../projectCopy/Services/ProjectExport.ts";
-import { ProjectImports } from "../projectCopy/Services/ProjectImports.ts";
-import { ProjectTransfers } from "../projectCopy/Services/ProjectTransfers.ts";
 import type { WsRpcContext } from "./context.ts";
 import { makeProjectCopyHandlers, projectCopyCallerChannel } from "./projectCopyRpc.ts";
 import { rpcAccessFor } from "./RpcAccessPolicy.ts";
@@ -33,17 +28,6 @@ const noServices: ProjectCopyServices = {
   projectTransfers: Option.none(),
   projectImports: Option.none(),
 };
-
-/** The services as production provides them now: every one a placeholder. */
-const placeholderServices = Effect.gen(function* () {
-  return {
-    nodePaths: Option.some(yield* NodePaths),
-    gitNetwork: Option.some(yield* GitNetwork),
-    projectExport: Option.some(yield* ProjectExport),
-    projectTransfers: Option.some(yield* ProjectTransfers),
-    projectImports: Option.some(yield* ProjectImports),
-  } satisfies ProjectCopyServices;
-}).pipe(Effect.provide(ProjectCopyServicesLive));
 
 const makeContext = (principal: RpcPrincipal, projectCopy: ProjectCopyServices) => {
   // The production guard: each method's row in the shared access policy.
@@ -95,57 +79,25 @@ const exportInput: ProjectExportStartInput = {
   },
 };
 
-it.effect("answers every project copy call from its placeholder: not available yet", () =>
-  Effect.gen(function* () {
-    const handlers = makeProjectCopyHandlers(makeContext(directOwner, yield* placeholderServices));
-    for (const method of [
-      WS_METHODS.projectsPathHints,
-      WS_METHODS.filesystemSearchDirectories,
-      WS_METHODS.projectsPreviewDestination,
-      WS_METHODS.projectsCheckRemoteAccess,
-      WS_METHODS.projectsExportInspect,
-      WS_METHODS.projectsExportStart,
-      WS_METHODS.projectsExportReadChunk,
-      WS_METHODS.projectsExportDispose,
-      WS_METHODS.projectsTransferBegin,
-      WS_METHODS.projectsTransferAppend,
-      WS_METHODS.projectsTransferCommit,
-      WS_METHODS.projectsTransferAbort,
-      WS_METHODS.projectsImportStart,
-      WS_METHODS.projectsCancelImport,
-      WS_METHODS.projectsListImports,
-      WS_METHODS.projectsDiscardImport,
-    ] as const) {
-      const failure = yield* failureOf(unary(handlers, method)({ exportId: exportInput.exportId }));
-      expect(failure, method).toEqual({
-        tag: "ProjectCopyError",
-        code: "internal",
-        message: "not available yet",
-      });
-    }
-    const subscribe = handlers[WS_METHODS.projectsSubscribeImport] as unknown as (
-      input: unknown,
-    ) => Stream.Stream<unknown, HandlerError>;
-    const streamFailure = yield* failureOf(
-      Stream.runDrain(
-        subscribe({ importId: ProjectImportId.make("00000000-0000-4000-8000-000000000002") }),
-      ),
-    );
-    expect(streamFailure).toEqual({
-      tag: "ProjectCopyError",
-      code: "internal",
-      message: "not available yet",
-    });
-  }),
-);
-
 it.effect("checks access before the service and fails unavailable without one", () =>
   Effect.gen(function* () {
+    let called = 0;
+    const nodePaths = {
+      pathHints: () =>
+        Effect.sync(() => {
+          called += 1;
+          return {} as never;
+        }),
+    } as unknown as NodePathsShape;
     const viewer = makeProjectCopyHandlers(
-      makeContext(relayRpcPrincipal("viewer", "relay-viewer"), yield* placeholderServices),
+      makeContext(relayRpcPrincipal("viewer", "relay-viewer"), {
+        ...noServices,
+        nodePaths: Option.some(nodePaths),
+      }),
     );
     const denied = yield* failureOf(unary(viewer, WS_METHODS.projectsPathHints)({}));
     expect(denied.tag).toBe("AuthRpcError");
+    expect(called).toBe(0);
 
     const bare = makeProjectCopyHandlers(makeContext(directOwner, noServices));
     const missing = yield* failureOf(unary(bare, WS_METHODS.projectsImportStart)({}));
@@ -177,6 +129,33 @@ it.effect("tells the export how the caller's bytes travel", () =>
       "relay-plaintext",
     ]);
     expect(requests[0]?.input).toEqual(exportInput);
+  }),
+);
+
+it.effect("tells the export's chunk reads how the caller's bytes travel", () =>
+  Effect.gen(function* () {
+    const channels: Array<ProjectCopyCallerChannel | undefined> = [];
+    const exporter = {
+      readChunk: (_input: unknown, channel?: ProjectCopyCallerChannel) => {
+        channels.push(channel);
+        return Effect.die("recorded");
+      },
+    } as unknown as ProjectExportShape;
+    const services = { ...noServices, projectExport: Option.some(exporter) };
+    for (const principal of [
+      directOwner,
+      relayRpcPrincipal("owner", "relay-e2ee", undefined, () => true),
+      relayRpcPrincipal("owner", "relay-legacy"),
+    ]) {
+      const handlers = makeProjectCopyHandlers(makeContext(principal, services));
+      yield* unary(
+        handlers,
+        WS_METHODS.projectsExportReadChunk,
+      )({ exportId: exportInput.exportId, artifactId: "artifact", offset: 0, length: 1 }).pipe(
+        Effect.exit,
+      );
+    }
+    expect(channels).toEqual(["direct", "relay-e2ee", "relay-plaintext"]);
   }),
 );
 

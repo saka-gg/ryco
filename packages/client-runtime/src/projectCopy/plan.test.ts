@@ -38,7 +38,6 @@ import {
   type ProjectCopySourceFacts,
   type ProjectCopyTargetFacts,
 } from "./plan.ts";
-import { classifyRemoteUrl, repositoryFolderName, sanitizeRemoteUrl } from "./remoteUrl.ts";
 
 const SOURCE = "env-source" as EnvironmentId;
 const TARGET = "env-target" as EnvironmentId;
@@ -303,25 +302,6 @@ describe("suggestCopyDestination (A35)", () => {
     });
     expect(asked).toEqual(["/home/ada/Code", "/home/ada/Code/app"]);
     expect(suggestion).toMatchObject({ status: "renamed", path: "/home/ada/Code/app-2" });
-  });
-});
-
-describe("remote URLs", () => {
-  it("classifies and strips credentials (A13)", () => {
-    expect(classifyRemoteUrl("git@github.com:ada/app.git")).toBe("scp");
-    expect(classifyRemoteUrl("ssh://git@github.com/ada/app")).toBe("ssh");
-    expect(classifyRemoteUrl("http://intranet/app.git")).toBe("http");
-    expect(classifyRemoteUrl("file:///srv/app.git")).toBe("file");
-    expect(classifyRemoteUrl("/srv/app.git")).toBe("local");
-    expect(classifyRemoteUrl("C:\\repos\\app")).toBe("local");
-    expect(sanitizeRemoteUrl("https://ada:token@github.com/ada/app.git")).toBe(
-      "https://github.com/ada/app.git",
-    );
-    expect(sanitizeRemoteUrl("ssh://git:pw@github.com/ada/app")).toBe(
-      "ssh://git@github.com/ada/app",
-    );
-    expect(sanitizeRemoteUrl("git@github.com:ada/app.git")).toBe("git@github.com:ada/app.git");
-    expect(repositoryFolderName("git@github.com:ada/app.git")).toBe("app");
   });
 });
 

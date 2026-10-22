@@ -14,6 +14,11 @@
 import { lstat } from "node:fs/promises";
 
 import type { GitObjectId, GitRemoteName } from "@ryco/contracts/project-copy";
+import {
+  classifyRemoteUrl,
+  redactGitCredentials,
+  sanitizeRemoteUrl,
+} from "@ryco/shared/gitRemoteUrl";
 import { Effect, FileSystem, Layer, Path } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -22,14 +27,9 @@ import { type GitNetworkError, ProjectImportStepError } from "../Errors.ts";
 import {
   GIT_DETAIL_MAX_CHARS,
   runProjectCopyGit,
+  tailOfText,
   type ProjectCopyGitOutput,
 } from "../gitProcess.ts";
-import {
-  classifyRemoteUrl,
-  redactGitCredentials,
-  sanitizeRemoteUrl,
-  tailOfText,
-} from "../remoteUrls.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import type { ProjectCopyProcessObserver } from "../Services/ProjectCopyProcess.ts";
 import {
@@ -139,6 +139,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
       readonly args: ReadonlyArray<string>;
       readonly timeoutMs?: number;
       readonly env?: Readonly<Record<string, string>>;
+      readonly maxOutputBytes?: number;
       readonly observer?: ProjectCopyProcessObserver | undefined;
     },
   ): Effect.Effect<ProjectCopyGitOutput, ProjectImportStepError> =>
@@ -148,6 +149,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
       args: [...NO_HOOKS, ...input.args],
       env: { ...gitNetwork.env, ...input.env },
       timeoutMs: input.timeoutMs ?? LOCAL_SHORT_TIMEOUT_MS,
+      maxOutputBytes: input.maxOutputBytes,
       observer: input.observer,
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -708,6 +710,18 @@ export const makeProjectImportGit = Effect.gen(function* () {
     readonly remoteName: GitRemoteName | null;
     readonly observer?: ProjectCopyProcessObserver | undefined;
   }) {
+    // Only a checkout whose attributes route files through LFS needs git-lfs (the source may not
+    // know: a plain clone from Agent Control always asks). Any tracked path is enough to tell.
+    const tracked = yield* git("internal", {
+      operation: "lfsPull.tracked",
+      repositoryRoot: input.repositoryRoot,
+      args: ["ls-files", "-z", "--", ":(attr:filter=lfs)"],
+      env: { GIT_LITERAL_PATHSPECS: "0" },
+      maxOutputBytes: 4096,
+    });
+    if (tracked.exitCode === 0 && tracked.stdout.length === 0 && !tracked.stdoutTruncated) {
+      return { status: "not-used" as const };
+    }
     const installed = yield* git("internal", {
       operation: "lfsPull.version",
       repositoryRoot: input.repositoryRoot,

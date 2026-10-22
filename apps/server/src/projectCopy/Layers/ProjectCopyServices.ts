@@ -1,26 +1,28 @@
 import { Layer } from "effect";
 
-import { GitNetworkPlaceholder } from "./GitNetworkPlaceholder.ts";
-import { NodePathsPlaceholder } from "./NodePathsPlaceholder.ts";
-import { ProjectExportPlaceholder } from "./ProjectExportPlaceholder.ts";
-import { ProjectImportGitPlaceholder } from "./ProjectImportGitPlaceholder.ts";
-import { ProjectImportsPlaceholder } from "./ProjectImportsPlaceholder.ts";
-import { ProjectSetupCommandPlaceholder } from "./ProjectSetupCommandPlaceholder.ts";
-import { ProjectTransfersPlaceholder } from "./ProjectTransfersPlaceholder.ts";
+import { GitNetworkLive } from "./GitNetworkLive.ts";
+import { NodePathsLive } from "./NodePathsLive.ts";
+import { ProjectExportLive } from "./ProjectExportLive.ts";
+import { ProjectImportGitLive } from "./ProjectImportGitLive.ts";
+import { ProjectImportsLive } from "./ProjectImportsLive.ts";
+import { ProjectSetupCommandLive } from "./ProjectSetupCommandLive.ts";
+import { ProjectTransfersLive } from "./ProjectTransfersLive.ts";
 
 /**
  * The cross-node project copy services, each beneath the ones that use it: the import job
- * composes the import's git steps, transfers, setup command and node paths; export and the git
- * steps run network git. Each service's live layer replaces its placeholder here.
+ * composes the import's git steps, transfers, setup command, network git and node paths; export
+ * and the import's git steps run network git. Everything else they need (config, persistence,
+ * orchestration, the avatar store, the workspace access policy, the git driver and the
+ * source-control providers) comes from the runtime dependencies beneath them in `server.ts`.
  */
-export const ProjectCopyServicesLive = ProjectImportsPlaceholder.pipe(
+export const ProjectCopyServicesLive = ProjectImportsLive.pipe(
   Layer.provideMerge(
     Layer.mergeAll(
-      ProjectExportPlaceholder,
-      ProjectTransfersPlaceholder,
-      ProjectImportGitPlaceholder,
-      ProjectSetupCommandPlaceholder,
+      ProjectExportLive,
+      ProjectTransfersLive,
+      ProjectImportGitLive,
+      ProjectSetupCommandLive,
     ),
   ),
-  Layer.provideMerge(Layer.mergeAll(GitNetworkPlaceholder, NodePathsPlaceholder)),
+  Layer.provideMerge(Layer.mergeAll(GitNetworkLive, NodePathsLive)),
 );

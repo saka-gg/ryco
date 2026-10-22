@@ -149,10 +149,16 @@ export interface ProjectImportGitShape {
   readonly updateSubmodules: (
     input: ProjectImportGitStepInput,
   ) => Effect.Effect<void, ProjectImportStepError>;
-  /** `git lfs pull`, or `lfs-missing` when git-lfs is not installed on this node. */
+  /**
+   * `git lfs pull` when the checkout tracks files with `filter=lfs`; `not-used` when it tracks
+   * none (nothing runs), `lfs-missing` when it does but git-lfs is not installed on this node.
+   */
   readonly lfsPull: (
     input: ProjectImportGitStepInput & { readonly remoteName: GitRemoteName | null },
-  ) => Effect.Effect<{ readonly status: "pulled" | "lfs-missing" }, ProjectImportStepError>;
+  ) => Effect.Effect<
+    { readonly status: "pulled" | "not-used" | "lfs-missing" },
+    ProjectImportStepError
+  >;
 }
 
 export class ProjectImportGit extends Context.Service<ProjectImportGit, ProjectImportGitShape>()(

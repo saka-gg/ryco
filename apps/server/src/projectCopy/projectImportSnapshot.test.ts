@@ -17,7 +17,6 @@ import {
   projectImportInputDigest,
   projectImportPublishedPath,
   projectImportStagingPath,
-  redactRemoteCredentials,
   renderImportOutputTail,
   settleImportSnapshot,
   withImportStep,
@@ -56,16 +55,16 @@ describe("projectImportSnapshot", () => {
 
   it("redacts passwords and http(s) tokens but keeps ssh usernames", () => {
     assert.equal(
-      redactRemoteCredentials("fatal: https://user:secret@github.com/acme/app.git not found"),
+      boundImportText("fatal: https://user:secret@github.com/acme/app.git not found", ""),
       "fatal: https://***@github.com/acme/app.git not found",
     );
     assert.equal(
-      redactRemoteCredentials("cloning https://ghp_token@github.com/acme/app"),
+      renderImportOutputTail(["cloning https://ghp_token@github.com/acme/app"]),
       "cloning https://***@github.com/acme/app",
     );
     assert.equal(
-      redactRemoteCredentials("ssh://git@github.com/acme/app and git@github.com:acme/app"),
-      "ssh://git@github.com/acme/app and git@github.com:acme/app",
+      boundImportText("ssh://git:pw@github.com/acme/app and git@github.com:acme/app", ""),
+      "ssh://git:***@github.com/acme/app and git@github.com:acme/app",
     );
     assert.equal(boundImportText("   ", "fallback"), "fallback");
     assert.equal(boundImportText("x".repeat(50), "", 10).length, 10);

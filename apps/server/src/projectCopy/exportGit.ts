@@ -11,8 +11,6 @@
  *
  * @module exportGit
  */
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import * as fsp from "node:fs/promises";
 import nodePath from "node:path";
 
@@ -969,18 +967,4 @@ export const estimateRepositoryBundle = (git: ExportGit, cwd: string) =>
       return result.exitCode === 0 ? (kibibytes("size") + kibibytes("size-pack")) * 1024 : 0;
     }),
     Effect.orElseSucceed(() => 0),
-  );
-
-/** Streams the file through sha-256; artifacts are never read whole into memory. */
-export const sha256File = (filePath: string) =>
-  projectCopyIo(
-    "Hashing an export artifact",
-    () =>
-      new Promise<string>((resolve, reject) => {
-        const hash = createHash("sha256");
-        createReadStream(filePath)
-          .on("data", (chunk) => hash.update(chunk))
-          .on("error", reject)
-          .on("end", () => resolve(hash.digest("hex")));
-      }),
   );

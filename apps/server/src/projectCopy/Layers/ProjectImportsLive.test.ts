@@ -56,7 +56,7 @@ import {
   type ProjectSetupCommandResult,
 } from "../Services/ProjectSetupCommand.ts";
 import { ProjectTransfers } from "../Services/ProjectTransfers.ts";
-import { makeProjectImportsLive } from "./ProjectImportsLive.ts";
+import { makeProjectImportsLive, newestAtMostEvery } from "./ProjectImportsLive.ts";
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -429,7 +429,8 @@ const makeHarness = (options: HarnessOptions = {}) => {
     Layer.provideMerge(NodeServices.layer),
   );
 
-  const layer = makeProjectImportsLive({ processes, snapshotThrottleMs: 5 }).pipe(
+  // The tests run on the test clock: no throttle pauses, every change reaches subscribers.
+  const layer = makeProjectImportsLive({ processes, snapshotThrottleMs: 0 }).pipe(
     Layer.provideMerge(dependencies),
   );
   return { state, layer };
@@ -503,6 +504,26 @@ const memoryDatabase = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe("ProjectImportsLive", () => {
+  it.live("hands subscribers at most one snapshot per interval, always the newest", () =>
+    Effect.gen(function* () {
+      // A burst of 200 changes, one a millisecond at most, then a last one after a pause.
+      const source = Stream.range(1, 200).pipe(
+        Stream.rechunk(1),
+        Stream.tap((value) => (value % 20 === 0 ? Effect.sleep("1 millis") : Effect.void)),
+        Stream.concat(Stream.fromEffect(Effect.sleep("150 millis").pipe(Effect.as(201)))),
+      );
+      const seen = Array.from(yield* Stream.runCollect(source.pipe(newestAtMostEvery(50))));
+      // The newest of the burst, then the last change; never a backlog of the others.
+      assert.include(seen, 200);
+      assert.equal(seen.at(-1), 201);
+      assert.isAtMost(seen.length, 6);
+      assert.deepEqual(
+        seen,
+        seen.toSorted((left, right) => left - right),
+      );
+    }),
+  );
+
   it.effect("runs every step, registers the project and copies its settings", () =>
     memoryDatabase(
       Effect.gen(function* () {

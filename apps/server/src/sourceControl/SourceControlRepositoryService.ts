@@ -17,6 +17,7 @@ import {
 } from "@ryco/contracts";
 
 import { ServerConfig } from "../config.ts";
+import { withProjectDestinationReservation } from "../projectCopy/destinationReservation.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import * as GitCloneAccess from "./gitCloneAccess.ts";
@@ -488,8 +489,20 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
       lookupRepository(input).pipe(mapRepositoryError("lookupRepository", input.provider)),
     searchRepositories: (input) =>
       searchRepositories(input).pipe(mapRepositoryError("searchRepositories", input.provider)),
+    // Holds the destination's reservation for the whole clone, so a cross-node import into the
+    // same folder (or a second clone) cannot race it between the empty check and the clone.
     cloneRepository: (input) =>
       cloneRepository(input).pipe(
+        withProjectDestinationReservation({
+          destinationPath: input.destinationPath,
+          holder: "sourceControl.cloneRepository",
+          onReserved: (detail) =>
+            repositoryError({
+              operation: "cloneRepository",
+              provider: input.provider ?? "unknown",
+              detail,
+            }),
+        }),
         mapRepositoryError("cloneRepository", input.provider ?? "unknown"),
       ),
     publishRepository: (input) =>

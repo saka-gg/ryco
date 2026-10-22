@@ -12,8 +12,9 @@
  *
  * `list` merges the live publications by environment id, newest publication winning. Entries
  * naming this node by any of its ids collapse into one entry under its own id, marked
- * `isThisNode` and online. The node knows itself only by its server environment id; a Hub
- * catalog id that a hosted client knows it by is another node as far as the directory can tell.
+ * `isThisNode` and online. Its ids are its server environment id and, while it holds an active
+ * Hub enrollment, the Hub environment id hosted clients key it by (read per `list`, since a Hub
+ * leave or re-enrollment changes it).
  *
  * Loaded once at startup. An unreadable file, or records in it that no longer decode, are
  * dropped with a warning: clients publish again on connect.
@@ -24,7 +25,7 @@ import {
   AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES,
   AgentControlNodeDirectoryEntry,
   type AgentControlNodeDirectoryListEntry,
-  type EnvironmentId,
+  EnvironmentId,
   IsoDateTime,
 } from "@ryco/contracts";
 import { Clock, Effect, FileSystem, Layer, Option, Path, Ref, Schema } from "effect";
@@ -252,19 +253,30 @@ const loadPublications = (filePath: string, nowMs: number) =>
 export interface MakeAgentControlNodeDirectoryOptions {
   readonly filePath: string;
   readonly thisNodeEnvironmentId: EnvironmentId;
-  /** Other ids clients may know this node by. */
-  readonly thisNodeAliases?: ReadonlySet<EnvironmentId>;
+  /** Other ids clients may know this node by, read on every `list`; none by default. */
+  readonly thisNodeAliases?: Effect.Effect<ReadonlySet<EnvironmentId>>;
 }
+
+const NO_ALIASES: ReadonlySet<EnvironmentId> = new Set();
+
+/**
+ * The Hub environment id of this node while it is enrolled, from its Hub identity state. The
+ * identity module loads only when a directory is listed, so a boot never pays for it.
+ */
+const readHubEnvironmentAliases = (statePath: string): Effect.Effect<ReadonlySet<EnvironmentId>> =>
+  Effect.promise(async () => {
+    const { readActiveHubEnvironmentId } =
+      await import("../../hubIdentity/LocalHubIdentityState.ts");
+    const hubEnvironmentId = await readActiveHubEnvironmentId(statePath);
+    return hubEnvironmentId === null ? NO_ALIASES : new Set([EnvironmentId.make(hubEnvironmentId)]);
+  }).pipe(Effect.orElseSucceed(() => NO_ALIASES));
 
 export const makeAgentControlNodeDirectory = Effect.fn("makeAgentControlNodeDirectory")(function* (
   options: MakeAgentControlNodeDirectoryOptions,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const thisNode = {
-    environmentId: options.thisNodeEnvironmentId,
-    aliases: options.thisNodeAliases ?? new Set<EnvironmentId>(),
-  };
+  const readAliases = options.thisNodeAliases ?? Effect.succeed(NO_ALIASES);
   const state = yield* Ref.make(
     yield* loadPublications(options.filePath, yield* Clock.currentTimeMillis),
   );
@@ -309,6 +321,10 @@ export const makeAgentControlNodeDirectory = Effect.fn("makeAgentControlNodeDire
   const list: AgentControlNodeDirectoryShape["list"] = () =>
     Effect.gen(function* () {
       const nowMs = yield* Clock.currentTimeMillis;
+      const thisNode = {
+        environmentId: options.thisNodeEnvironmentId,
+        aliases: yield* readAliases,
+      };
       return { nodes: mergeNodeDirectory(yield* Ref.get(state), { nowMs, thisNode }) };
     });
 
@@ -324,6 +340,7 @@ export const AgentControlNodeDirectoryLive = Layer.effect(
     return yield* makeAgentControlNodeDirectory({
       filePath: path.join(config.stateDir, AGENT_CONTROL_NODE_DIRECTORY_FILE_NAME),
       thisNodeEnvironmentId: yield* environment.getEnvironmentId,
+      thisNodeAliases: readHubEnvironmentAliases(config.hubIdentityStatePath),
     });
   }),
 );

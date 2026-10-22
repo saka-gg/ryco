@@ -964,7 +964,7 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
   });
 });
 
-/** Transfers under the node's state directory; replaces `ProjectTransfersPlaceholder`. */
+/** Transfers under the node's state directory. */
 export const ProjectTransfersLive = Layer.effect(
   ProjectTransfers,
   Effect.gen(function* () {

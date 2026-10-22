@@ -24,7 +24,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import type { GitRemoteUrlKind } from "../../projectCopy/Services/GitNetwork.ts";
+import type { GitRemoteUrlKind } from "@ryco/shared/gitRemoteUrl";
 import { AgentControlNodeDirectoryError } from "../Errors.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import type {

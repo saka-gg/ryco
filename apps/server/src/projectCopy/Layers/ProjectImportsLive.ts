@@ -104,7 +104,7 @@ import {
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import { NodePaths } from "../Services/NodePaths.ts";
 
-/** Output and clone progress reach subscribers at most this often. */
+/** Output and clone progress are published, and subscribers get a snapshot, at most this often. */
 const DEFAULT_SNAPSHOT_THROTTLE_MS = 1_000;
 /** Settled jobs without a leftover are forgotten after this long. */
 const SETTLED_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -113,7 +113,7 @@ const SETUP_SCRIPT_NAME = "Setup";
 export interface ProjectImportsLiveOptions {
   /** Stops the children a crashed process left running; the operating system's by default. */
   readonly processes?: ProjectImportProcessControl | undefined;
-  /** Default 1 s. */
+  /** Default 1 s; 0 publishes and delivers every change at once (tests on a test clock). */
   readonly snapshotThrottleMs?: number | undefined;
 }
 
@@ -965,6 +965,9 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
             .pipe(Effect.result);
           if (pulled._tag === "Success" && pulled.success.status === "pulled") {
             yield* setStep(job, "lfs", { status: "done" });
+          } else if (pulled._tag === "Success" && pulled.success.status === "not-used") {
+            // Asked for (a plain clone cannot know), but the checkout has no LFS files.
+            yield* setStep(job, "lfs", { status: "skipped", detail: "No Git LFS files" });
           } else if (pulled._tag === "Success") {
             yield* setStep(job, "lfs", { status: "skipped", detail: "Git LFS is not installed" });
             yield* warn(
@@ -1485,9 +1488,13 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         Effect.gen(function* () {
           const job = active.get(input.importId);
           if (job !== undefined) {
-            // A slow subscriber skips to the newest snapshot; the stream ends with the terminal one.
+            // Changed snapshots only (each change is a new object), at most one per throttle
+            // interval and always the newest: a slow subscriber never builds a backlog, and a
+            // busy job (half an hour of setup output) costs a relayed subscriber at most one
+            // snapshot a second. The stream ends with the terminal one.
             return SubscriptionRef.changes(job.ref).pipe(
-              Stream.buffer({ capacity: 1, strategy: "sliding" }),
+              Stream.changesWith((left, right) => left === right),
+              newestAtMostEvery(throttleMs),
               Stream.takeUntil((snapshot) => isTerminalImportStatus(snapshot.status)),
             );
           }
@@ -1736,6 +1743,19 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
 
     return ProjectImports.of({ start, get, subscribe, cancel, list, discard, recoverOnStartup });
   });
+
+/**
+ * At most one element per `intervalMs`, the newest winning: the first passes at once; after each
+ * one the stream pauses for the interval, then takes whatever is newest by then.
+ */
+export const newestAtMostEvery =
+  (intervalMs: number) =>
+  <A, E, R>(self: Stream.Stream<A, E, R>): Stream.Stream<A, E, R> => {
+    const newest = self.pipe(Stream.buffer({ capacity: 1, strategy: "sliding" }));
+    if (intervalMs <= 0) return newest;
+    const pause = Stream.fromEffectDrain(Effect.sleep(intervalMs));
+    return newest.pipe(Stream.flatMap((value) => Stream.concat(Stream.succeed(value), pause)));
+  };
 
 /** Renames, retrying the transient EPERM/EBUSY Windows reports while a scanner holds a file. */
 const renameWithRetry = async (from: string, to: string): Promise<void> => {

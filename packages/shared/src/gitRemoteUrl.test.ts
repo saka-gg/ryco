@@ -1,14 +1,16 @@
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   alternateRemoteUrl,
   classifyRemoteUrl,
+  isCloneableRemoteKind,
+  isRecreatableRemoteKind,
   redactGitCredentials,
   remoteUrlHasPassword,
+  repositoryFolderName,
   sanitizeRemoteUrl,
   sshHostOfRemoteUrl,
-  tailOfText,
-} from "./remoteUrls.ts";
+} from "./gitRemoteUrl.ts";
 
 describe("classifyRemoteUrl", () => {
   it("tells the transports apart", () => {
@@ -134,12 +136,20 @@ describe("redactGitCredentials", () => {
   });
 });
 
-describe("tailOfText", () => {
-  it("keeps the end of long text within the bound", () => {
-    expect(tailOfText("  short  ", 10)).toBe("short");
-    const tail = tailOfText(`${"x".repeat(50)}the reason`, 20);
-    expect(tail.length).toBeLessThanOrEqual(20);
-    expect(tail.endsWith("the reason")).toBe(true);
-    expect(tail.startsWith("…")).toBe(true);
+describe("isCloneableRemoteKind / isRecreatableRemoteKind", () => {
+  it("clones over https, ssh and scp, and recreates plain http too", () => {
+    const kinds = ["https", "http", "ssh", "scp", "file", "local", "other"] as const;
+    expect(kinds.filter(isCloneableRemoteKind)).toEqual(["https", "ssh", "scp"]);
+    expect(kinds.filter(isRecreatableRemoteKind)).toEqual(["https", "http", "ssh", "scp"]);
+  });
+});
+
+describe("repositoryFolderName", () => {
+  it("is the last path segment without .git", () => {
+    expect(repositoryFolderName("git@github.com:ada/app.git")).toBe("app");
+    expect(repositoryFolderName("https://github.com/ada/app/")).toBe("app");
+    expect(repositoryFolderName("https://example.com/x/repo.git?ref=main")).toBe("repo");
+    expect(repositoryFolderName("git@host:repo")).toBe("repo");
+    expect(repositoryFolderName("https://github.com/.git")).toBeNull();
   });
 });

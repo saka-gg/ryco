@@ -668,10 +668,36 @@ describe("ProjectImportGitLive", () => {
     }).pipe(Effect.provide(TestLayer)),
   );
 
+  it.live("runs nothing for a checkout without LFS files", () =>
+    Effect.gen(function* () {
+      const importGit = yield* ProjectImportGit;
+      const repository = initRepository(path.join(roots.make("ryco-import-no-lfs-"), "repo"));
+      commitFiles(repository, { "README.md": "plain\n" }, "plain");
+      const result = yield* importGit.lfsPull({ repositoryRoot: repository, remoteName: "origin" });
+      assert.deepStrictEqual(result, { status: "not-used" });
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
   it.live.skipIf(lfsInstalled)("reports a missing git-lfs instead of failing", () =>
     Effect.gen(function* () {
       const importGit = yield* ProjectImportGit;
       const repository = initRepository(path.join(roots.make("ryco-import-lfs-"), "repo"));
+      writeFileSync(
+        path.join(repository, ".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+      );
+      writeFileSync(path.join(repository, "large.bin"), "pointer\n");
+      // Without git-lfs, an identity clean filter stands in for it.
+      const noLfs = [
+        "-c",
+        "filter.lfs.process=",
+        "-c",
+        "filter.lfs.clean=cat",
+        "-c",
+        "filter.lfs.required=false",
+      ];
+      git(repository, ...noLfs, "add", "-A");
+      git(repository, ...noLfs, "commit", "--quiet", "-m", "lfs");
       const result = yield* importGit.lfsPull({ repositoryRoot: repository, remoteName: "origin" });
       assert.deepStrictEqual(result, { status: "lfs-missing" });
     }).pipe(Effect.provide(TestLayer)),

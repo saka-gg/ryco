@@ -16,14 +16,12 @@ import type {
   ProjectCheckRemoteAccessResult,
   ProjectCopyError,
 } from "@ryco/contracts/project-copy";
+import type { GitRemoteUrlKind } from "@ryco/shared/gitRemoteUrl";
 import { Context } from "effect";
 import type { Effect } from "effect";
 
 import type { GitNetworkError } from "../Errors.ts";
 import type { ProjectCopyProcessObserver } from "./ProjectCopyProcess.ts";
-
-/** How a remote URL travels; only https, http, ssh and scp-style remotes are recreated on a copy. */
-export type GitRemoteUrlKind = "https" | "http" | "ssh" | "scp" | "file" | "local" | "other";
 
 export interface GitNetworkCommandInput {
   readonly operation: string;

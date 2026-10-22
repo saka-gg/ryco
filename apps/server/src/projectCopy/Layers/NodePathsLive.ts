@@ -51,6 +51,7 @@ import {
   WorkspaceAccessPolicy,
   type WorkspaceAccessPolicyShape,
 } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
+import { projectDestinationReservationKey } from "../destinationReservation.ts";
 import { type DirectorySearchInput, searchDirectories } from "../directorySearch.ts";
 import {
   NodePaths,
@@ -317,7 +318,8 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
     },
   );
 
-  const judgeProjectDestination: NodePathsShape["judgeProjectDestination"] = Effect.fn(
+  /** The verdict without its reservation key, which costs a few more filesystem reads. */
+  const judgeDestination: NodePathsShape["judgeProjectDestination"] = Effect.fn(
     "NodePaths.judgeProjectDestination",
   )(function* (input) {
     const relative = input.relativeRootInRepository ?? "";
@@ -379,7 +381,7 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
         usable,
         canonicalPath: canonical,
         projectRoot: fields.projectRoot ?? null,
-        reservationKey: usable && canonical !== null ? foldPathCase(canonical, platform) : null,
+        reservationKey: null,
       };
     };
 
@@ -497,8 +499,23 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
     });
   });
 
+  /**
+   * The verdict, a usable one keyed the way the import job and the legacy clone reserve a
+   * destination (`projectDestinationReservationKey`), so all three agree on one definition.
+   */
+  const judgeProjectDestination: NodePathsShape["judgeProjectDestination"] = (input) =>
+    judgeDestination(input).pipe(
+      Effect.flatMap((judged) =>
+        judged.usable && judged.canonicalPath !== null
+          ? projectDestinationReservationKey(judged.canonicalPath).pipe(
+              Effect.map((reservationKey) => ({ ...judged, reservationKey })),
+            )
+          : Effect.succeed(judged),
+      ),
+    );
+
   const previewDestination: NodePathsShape["previewDestination"] = (input) =>
-    judgeProjectDestination({ path: input.path, intent: "create" }).pipe(
+    judgeDestination({ path: input.path, intent: "create" }).pipe(
       Effect.map((judged) => judged.preview),
     );
 

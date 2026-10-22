@@ -24,6 +24,7 @@ import {
   type ProjectImportStatus,
   type ProjectImportStep,
 } from "@ryco/contracts/project-copy";
+import { redactGitCredentials } from "@ryco/shared/gitRemoteUrl";
 import { Schema } from "effect";
 
 import { canonicalJson, sha256Hex } from "../canonicalJson.ts";
@@ -52,22 +53,13 @@ const encodeInput = Schema.encodeSync(ProjectImportStartInput);
 export const projectImportInputDigest = (input: ProjectImportStartInput): string =>
   sha256Hex(`project-import-v1:${canonicalJson(encodeInput(input))}`);
 
-// `scheme://user:password@`, and `http(s)://token@` (a bare http user is usually a token).
-// scp-style `git@host:` and `ssh://git@` usernames stay: they are not secrets.
-const URL_PASSWORD = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]*@/giu;
-const HTTP_USER = /\b(https?:\/\/)[^\s/@:]+@/giu;
-
-/** Hides URL passwords (and http(s) usernames) anywhere in `text`. */
-export const redactRemoteCredentials = (text: string): string =>
-  text.replace(URL_PASSWORD, "$1***@").replace(HTTP_USER, "$1***@");
-
 /** Redacted, trimmed and at most `maxChars` (the start kept); `fallback` when nothing is left. */
 export const boundImportText = (
   text: string,
   fallback: string,
   maxChars: number = PROJECT_IMPORT_MESSAGE_MAX_CHARS,
 ): string => {
-  const redacted = redactRemoteCredentials(text).trim();
+  const redacted = redactGitCredentials(text).trim();
   if (redacted.length === 0) return fallback;
   return redacted.length > maxChars ? `${redacted.slice(0, maxChars - 1).trimEnd()}…` : redacted;
 };
@@ -82,7 +74,7 @@ export const renderImportOutputTail = (lines: ReadonlyArray<string>): string => 
   const kept: Array<string> = [];
   let bytes = 0;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = redactRemoteCredentials(lines[index]!);
+    const line = redactGitCredentials(lines[index]!);
     const size = utf8.encode(line).length + (kept.length > 0 ? 1 : 0);
     if (bytes + size > PROJECT_IMPORT_OUTPUT_TAIL_MAX_BYTES) break;
     kept.unshift(line);
@@ -283,7 +275,7 @@ export const projectImportFollowUpPrompt = (
     "",
     `Note: the setup command \`${setupFailure.command}\` ${status} when this project was copied here.`,
     ...(setupFailure.outputTail.trim().length > 0
-      ? ["Its last output:", "```", redactRemoteCredentials(setupFailure.outputTail), "```"]
+      ? ["Its last output:", "```", redactGitCredentials(setupFailure.outputTail), "```"]
       : []),
   ].join("\n");
   const room = PROVIDER_SEND_TURN_MAX_INPUT_CHARS - prompt.length;

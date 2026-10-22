@@ -24,6 +24,7 @@ import {
   WorkspaceAccessPolicyLayer,
   makeWorkspaceAccessPolicy,
 } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
+import { projectDestinationReservationKey } from "../destinationReservation.ts";
 import { NodePaths } from "../Services/NodePaths.ts";
 import { type NodePathsProject, NodePathsLive, makeNodePaths } from "./NodePathsLive.ts";
 
@@ -256,7 +257,9 @@ describe("judgeProjectDestination", () => {
       usable: true,
       canonicalPath: path.join(scratch, "Real", "App"),
       projectRoot: path.join(scratch, "Real", "App", "packages", "web"),
-      reservationKey: path.join(scratch, "Real", "App").toLowerCase(),
+      reservationKey: await Effect.runPromise(
+        projectDestinationReservationKey(path.join(home, "Code", "Alias", "App")),
+      ),
     });
     expect(judged.preview.resolvedPath).toBe(path.join(home, "Code", "Alias", "App"));
   });
@@ -268,7 +271,10 @@ describe("judgeProjectDestination", () => {
     const paths = await makePaths();
     const link = (relativeRootInRepository: string) =>
       run(paths.judgeProjectDestination({ path: repo, intent: "link", relativeRootInRepository }));
-    expect(await link("")).toMatchObject({ usable: true, reservationKey: repo });
+    expect(await link("")).toMatchObject({
+      usable: true,
+      reservationKey: await Effect.runPromise(projectDestinationReservationKey(repo)),
+    });
     expect(await link("web")).toMatchObject({ usable: true, projectRoot: path.join(repo, "web") });
     // The subfolder the project would be rooted at must exist, inside the repository.
     expect(await link("api")).toMatchObject({ usable: false, reservationKey: null });

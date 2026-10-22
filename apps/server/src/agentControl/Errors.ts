@@ -275,8 +275,8 @@ export class AgentControlClientExecutionError extends Schema.TaggedError<AgentCo
 }
 
 /**
- * The node directory owner clients publish could not be read or stored. `unavailable` until
- * this node keeps one.
+ * The node directory owner clients publish could not be read or stored; `unavailable` when this
+ * node keeps none.
  */
 export class AgentControlNodeDirectoryError extends Schema.TaggedError<AgentControlNodeDirectoryError>()(
   "AgentControlNodeDirectoryError",

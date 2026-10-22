@@ -162,8 +162,9 @@ import { AgentControlProposalStoreLive } from "./agentControl/Layers/AgentContro
 import { AgentControlSessionRegistryLive } from "./agentControl/Layers/AgentControlSessionRegistry.ts";
 import { AgentControlActionValidatorLive } from "./agentControl/Layers/AgentControlActionValidator.ts";
 import { AgentControlExecutionLive } from "./agentControl/Layers/AgentControlExecution.ts";
-import { AgentControlNodeDirectoryPlaceholder } from "./agentControl/Layers/AgentControlNodeDirectoryPlaceholder.ts";
+import { AgentControlNodeDirectoryLive } from "./agentControl/Layers/AgentControlNodeDirectoryLive.ts";
 import { ProjectCopyServicesLive } from "./projectCopy/Layers/ProjectCopyServices.ts";
+import { ProjectImportsStartupRecoveryLive } from "./projectCopy/Layers/ProjectImportsStartupRecovery.ts";
 import { AgentControlProjectPlansLive } from "./agentControl/Layers/AgentControlProjectPlans.ts";
 import { AgentControlExternalIntegrationServiceLive } from "./agentControl/Layers/AgentControlExternalIntegration.ts";
 import { AgentControlExternalTopologyLive } from "./agentControl/Layers/AgentControlExternalTopology.ts";
@@ -659,12 +660,15 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(AgentControlWorkspacesLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
+  // Cross-node imports an earlier process left behind: once commands are admitted, staging
+  // folders of imports that never registered are deleted and pending settings replayed.
+  ProjectImportsStartupRecoveryLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),
 ).pipe(
   // Cross-node project copy (node paths, export, transfers, the import job) and the node
   // directory owner clients publish, beneath the services: the project copy RPCs and Agent
   // Control (its tools, validator and execution) share one instance of each. Topmost, so their
   // layers can use everything provided below.
-  Layer.provideMerge(Layer.mergeAll(ProjectCopyServicesLive, AgentControlNodeDirectoryPlaceholder)),
+  Layer.provideMerge(Layer.mergeAll(ProjectCopyServicesLive, AgentControlNodeDirectoryLive)),
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.
   Layer.provideMerge(ChatFoldersLive),

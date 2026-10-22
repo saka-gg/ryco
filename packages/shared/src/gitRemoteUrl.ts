@@ -1,12 +1,15 @@
 /**
- * remoteUrls - the pure remote-URL rules of a cross-node project copy: how a URL travels, what
- * a copy may write as a remote, the https ↔ ssh alternate, and credential redaction for
- * everything git prints. `GitNetwork` exposes them; nothing here runs git.
+ * gitRemoteUrl - the pure remote-URL rules of a cross-node project copy, shared by the nodes
+ * (which enforce them) and the client (which plans with them before it asks a node): how a URL
+ * travels, what a node may clone from and what a copy recreates as a remote, how credentials
+ * are stripped from a URL and hidden in free text, the https ↔ ssh alternate, and a clone's
+ * default folder name. Nothing here runs git or touches the filesystem.
  *
- * @module remoteUrls
+ * @module gitRemoteUrl
  */
-import { isScpStyleGitUrl } from "../sourceControl/gitCloneAccess.ts";
-import type { GitRemoteUrlKind } from "./Services/GitNetwork.ts";
+
+/** How a remote URL travels. Only https, http, ssh and scp-style remotes are recreated on a copy. */
+export type GitRemoteUrlKind = "https" | "http" | "ssh" | "scp" | "file" | "local" | "other";
 
 const SCHEME_PREFIX = /^([a-z][a-z0-9+.-]*):\/\//i;
 const WINDOWS_DRIVE_PATH = /^[a-z]:[\\/]/i;
@@ -18,6 +21,11 @@ const REPOSITORY_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const SCP_HOST = /^[A-Za-z0-9.-]+$/;
 
 const isHttpScheme = (scheme: string) => scheme === "http" || scheme === "https";
+
+/** `user@host:owner/repo.git`, the scp-like ssh syntax. */
+export function isScpStyleGitUrl(input: string): boolean {
+  return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+:[^\s]+$/u.test(input);
+}
 
 /** How a remote URL travels. Only https, http, ssh and scp-style remotes are recreated on a copy. */
 export function classifyRemoteUrl(remoteUrl: string): GitRemoteUrlKind {
@@ -37,12 +45,20 @@ export function classifyRemoteUrl(remoteUrl: string): GitRemoteUrlKind {
   }
   if (isScpStyleGitUrl(url)) return "scp";
   if (WINDOWS_DRIVE_PATH.test(url) || url.startsWith("\\\\")) return "local";
-  // git reads `host:path` (a colon before any slash) as ssh; this server never does.
+  // git reads `host:path` (a colon before any slash) as ssh; a node never clones from it.
   const colon = url.indexOf(":");
   const slash = url.search(/[\\/]/);
   if (colon !== -1 && (slash === -1 || colon < slash)) return "other";
   return "local";
 }
+
+/** A node clones from it without the source's help: https, ssh or scp-style. */
+export const isCloneableRemoteKind = (kind: GitRemoteUrlKind): boolean =>
+  kind === "https" || kind === "ssh" || kind === "scp";
+
+/** Recreated as a remote on the copy (plain http too, though it is never cloned from). */
+export const isRecreatableRemoteKind = (kind: GitRemoteUrlKind): boolean =>
+  isCloneableRemoteKind(kind) || kind === "http";
 
 /** Whether the URL carries a password (`scheme://user:password@…` or `user:password@host:…`). */
 export function remoteUrlHasPassword(remoteUrl: string): boolean {
@@ -148,8 +164,9 @@ export function sshHostOfRemoteUrl(remoteUrl: string): string | null {
 }
 
 /**
- * Credentials hidden in free text (git's stderr, messages, warnings): the whole user info of an
- * http(s) URL, whose user name is often a token, and the password of any other URL.
+ * Credentials hidden in free text (git's stderr, messages, warnings, output tails): the whole
+ * user info of an http(s) URL, whose user name is often a token, and the password of any other
+ * URL (`ssh://git:***@`). The one redaction every project copy message goes through.
  */
 export function redactGitCredentials(text: string): string {
   if (!text.includes("@")) return text;
@@ -160,8 +177,16 @@ export function redactGitCredentials(text: string): string {
   });
 }
 
-/** At most `maxChars` of `text`, trimmed, keeping its end (where git puts the reason). */
-export function tailOfText(text: string, maxChars: number): string {
-  const trimmed = text.trim();
-  return trimmed.length <= maxChars ? trimmed : `…${trimmed.slice(-(maxChars - 1)).trimStart()}`;
+/**
+ * The folder a clone of `remoteUrl` gets by default: its last path segment without `.git`
+ * (`git@host:owner/repo.git` → `repo`); null when nothing is left. Not yet a safe folder name.
+ */
+export function repositoryFolderName(remoteUrl: string): string | null {
+  const trimmed = remoteUrl
+    .trim()
+    .replace(/[?#].*$/, "")
+    .replace(/[\\/]+$/, "");
+  const segment = trimmed.split(/[\\/:]/).at(-1) ?? "";
+  const name = segment.replace(/\.git$/i, "");
+  return name.length > 0 ? name : null;
 }

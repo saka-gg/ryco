@@ -23,8 +23,8 @@ export const projectCopyCallerChannel = (principal: RpcPrincipal): ProjectCopyCa
 /**
  * Cross-node project copy RPCs: reads and scratch transfers on either node, the durable import
  * job on the destination. Each one passes the access check, then delegates to its service. The
- * node reports `capabilities.projectCopy: false` until those services are implemented, so
- * clients do not call these yet.
+ * export's `start` and `readChunk` learn how the caller's bytes travel, so opted-in ignored files
+ * never cross a plaintext relay.
  */
 export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, ownerStreamEffect, principal, projectCopy } = ctx;
@@ -88,7 +88,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
     [WS_METHODS.projectsExportReadChunk]: (input) =>
       handle(
         WS_METHODS.projectsExportReadChunk,
-        exporter.pipe(Effect.flatMap((source) => source.readChunk(input))),
+        exporter.pipe(
+          Effect.flatMap((source) => source.readChunk(input, projectCopyCallerChannel(principal))),
+        ),
       ),
     [WS_METHODS.projectsExportDispose]: (input) =>
       handle(

@@ -19,11 +19,11 @@ import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 import {
   AgentControlDisabledError,
   AgentControlInvalidTransitionError,
+  AgentControlNodeDirectoryError,
   AgentControlProposalExpiredError,
   AgentControlProposalNotFoundError,
   AgentControlSettingsChangeUnsupportedError,
 } from "../agentControl/Errors.ts";
-import { AgentControlNodeDirectoryPlaceholder } from "../agentControl/Layers/AgentControlNodeDirectoryPlaceholder.ts";
 import {
   AgentControlNodeDirectory,
   type AgentControlNodeDirectoryShape,
@@ -270,11 +270,16 @@ it.effect("hands an owner's node directory to the directory, keyed by its sessio
     expect(result).toEqual({ accepted: 0 });
     expect(published).toEqual([{ publisherKey: "session-owner", nodes: [] }]);
 
-    // Until the node keeps a directory, publishing is refused as unsupported.
-    const placeholder = yield* AgentControlNodeDirectory.pipe(
-      Effect.provide(AgentControlNodeDirectoryPlaceholder),
-    );
-    for (const nodeDirectory of [placeholder, null]) {
+    // A directory that is unavailable, or none at all, refuses publishing as unsupported.
+    const unavailable = () =>
+      Effect.fail(
+        new AgentControlNodeDirectoryError({ reason: "unavailable", detail: "unavailable" }),
+      );
+    const unavailableDirectory = AgentControlNodeDirectory.of({
+      publish: unavailable,
+      list: unavailable,
+    });
+    for (const nodeDirectory of [unavailableDirectory, null]) {
       const refused = yield* Effect.flip(
         getTestHandler(
           makeAgentControlHandlers(makeContext(directOwnerPrincipal, makeService(), nodeDirectory)),

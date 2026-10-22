@@ -114,7 +114,8 @@ it.layer(NodeServices.layer)("AgentControlNodeDirectoryLive", (it) => {
   it.effect("collapses this node's ids into one online entry", () =>
     withDirectory(({ open }) =>
       Effect.gen(function* () {
-        const directory = yield* open({ thisNodeAliases: new Set([THIS_NODE_HUB_ALIAS]) });
+        let aliases: ReadonlySet<EnvironmentId> = new Set([THIS_NODE_HUB_ALIAS]);
+        const directory = yield* open({ thisNodeAliases: Effect.sync(() => aliases) });
         yield* directory.publish({
           publisherKey: "desktop",
           nodes: [entry(THIS_NODE, { label: "Studio", online: false, platformOs: "linux" })],
@@ -135,6 +136,12 @@ it.layer(NodeServices.layer)("AgentControlNodeDirectoryLive", (it) => {
           lastPublishedAt: "2026-10-22T08:00:01.000Z",
         });
         assert.deepStrictEqual(ids(listed.nodes), [THIS_NODE, "b"]);
+
+        // Read on every list: once the node left the Hub, that id is another node's.
+        aliases = new Set();
+        const afterLeave = yield* directory.list();
+        assert.deepStrictEqual(ids(afterLeave.nodes), [THIS_NODE, "b", THIS_NODE_HUB_ALIAS]);
+        assert.isFalse(afterLeave.nodes[2]?.isThisNode);
       }),
     ),
   );
@@ -339,12 +346,57 @@ it.layer(NodeServices.layer)("AgentControlNodeDirectoryLive", (it) => {
       );
       yield* Effect.gen(function* () {
         const directory = yield* AgentControlNodeDirectory;
-        yield* directory.publish({ publisherKey: "owner", nodes: [entry(THIS_NODE)] });
-        assert.isTrue((yield* directory.list()).nodes[0]?.isThisNode);
         const config = yield* ServerConfig;
+        yield* directory.publish({
+          publisherKey: "owner",
+          nodes: [entry(THIS_NODE), entry(THIS_NODE_HUB_ALIAS, { label: "Studio · Hub" })],
+        });
+        // Not enrolled with a Hub: its Hub id is not known to be this node.
+        const before = yield* directory.list();
+        assert.deepStrictEqual(
+          before.nodes.map((node) => [node.environmentId, node.isThisNode]),
+          [
+            [THIS_NODE, true],
+            [THIS_NODE_HUB_ALIAS, false],
+          ],
+        );
         assert.isTrue(
           yield* fs.exists(path.join(config.stateDir, AGENT_CONTROL_NODE_DIRECTORY_FILE_NAME)),
         );
+
+        // Enrolled: the id the Hub knows it by collapses into this node.
+        const hubEnvironmentId = yield* Effect.promise(async () => {
+          const { makeLocalHubIdentityStateStore } =
+            await import("../../hubIdentity/LocalHubIdentityState.ts");
+          const store = await makeLocalHubIdentityStateStore(config.hubIdentityStatePath);
+          await store.readOrCreate();
+          const enrolled = await store.update((state) => ({
+            ...state,
+            revision: state.revision + 1,
+            activeNode: {
+              hubOrigin: "https://hub.example.com",
+              nodeId: `node_${"a".repeat(22)}`,
+              activeKeyId: `nkey_${"b".repeat(22)}`,
+              activeKeySecretName: "node-key.active",
+              cleanupPollingSecretName: null,
+              enrolledAt: 1,
+            },
+          }));
+          return EnvironmentId.make(enrolled.environmentId);
+        });
+        yield* directory.publish({
+          publisherKey: "hosted",
+          nodes: [entry(hubEnvironmentId, { label: "Studio · Hub" })],
+        });
+        const after = yield* directory.list();
+        assert.deepStrictEqual(
+          after.nodes.map((node) => [node.environmentId, node.isThisNode]),
+          [
+            [THIS_NODE, true],
+            [THIS_NODE_HUB_ALIAS, false],
+          ],
+        );
+        assert.strictEqual(after.nodes[0]?.label, "Studio · Hub");
       }).pipe(Effect.provide(layer));
     }).pipe(Effect.scoped),
   );

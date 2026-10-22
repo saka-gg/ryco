@@ -81,9 +81,9 @@ import {
   readPushedState,
   readRepositoryFacts,
   scanWorkingTree,
-  sha256File,
   sumFileSizes,
 } from "../exportGit.ts";
+import { sha256File } from "../fileSha256.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import {
   ProjectExport,
@@ -440,7 +440,8 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
           artifactId: randomBytes(16).toString("base64url"),
           kind,
           byteLength,
-          sha256: yield* sha256File(filePath),
+          // Streamed: artifacts are never read whole into memory.
+          sha256: (yield* io("Hashing an export artifact", () => sha256File(filePath))).sha256,
         },
         filePath,
         carriesIgnoredFiles,

@@ -19,6 +19,15 @@ import {
   type ProjectCheckRemoteAccessInput,
   type ProjectCheckRemoteAccessResult,
 } from "@ryco/contracts/project-copy";
+import {
+  alternateRemoteUrl,
+  classifyRemoteUrl,
+  type GitRemoteUrlKind,
+  redactGitCredentials,
+  remoteUrlHasPassword,
+  sanitizeRemoteUrl,
+  sshHostOfRemoteUrl,
+} from "@ryco/shared/gitRemoteUrl";
 import { Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -33,24 +42,15 @@ import { GitNetworkError, type GitNetworkFailureReason } from "../Errors.ts";
 import {
   GIT_DETAIL_MAX_CHARS,
   runProjectCopyGit,
+  tailOfText,
   type ProjectCopyGitInput,
   type ProjectCopyGitOutput,
 } from "../gitProcess.ts";
-import {
-  alternateRemoteUrl,
-  classifyRemoteUrl,
-  redactGitCredentials,
-  remoteUrlHasPassword,
-  sanitizeRemoteUrl,
-  sshHostOfRemoteUrl,
-  tailOfText,
-} from "../remoteUrls.ts";
 import {
   GitNetwork,
   type GitLsRemoteInput,
   type GitNetworkCommandInput,
   type GitRemoteRef,
-  type GitRemoteUrlKind,
 } from "../Services/GitNetwork.ts";
 
 export const LS_REMOTE_TIMEOUT_MS = 30_000;

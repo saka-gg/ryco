@@ -25,6 +25,7 @@ import {
   type ProjectImportStartInput,
 } from "@ryco/contracts/project-copy";
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
+import { redactGitCredentials, repositoryFolderName } from "@ryco/shared/gitRemoteUrl";
 import { Schema } from "effect";
 
 import { redactAgentControlSecretText } from "./secretRedaction.ts";
@@ -126,16 +127,13 @@ export const agentControlProjectImportInput = (
 
 // ── Bounded text ──────────────────────────────────────────────────────
 
-/** `scheme://user:password@`: the password form A13 redacts from every message. */
-const URL_PASSWORD_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@:]*:[^\s/?#@]*@/giu;
-
 /**
  * Text from another node or a client (errors, warnings) as Agent Control keeps it: tokens and
  * URL credentials redacted, at most `AGENT_CONTROL_ERROR_MESSAGE_MAX_CHARS`, never empty.
  */
 export const boundedProjectCopyText = (text: string | null | undefined, fallback: string) => {
   const redacted = redactAgentControlSecretText(
-    redactDiagnosticText((text ?? "").replace(URL_PASSWORD_PATTERN, "$1[redacted]@")),
+    redactDiagnosticText(redactGitCredentials(text ?? "")),
   ).trim();
   const bounded = redacted.slice(0, AGENT_CONTROL_ERROR_MESSAGE_MAX_CHARS).trim();
   return bounded.length > 0 ? bounded : fallback;
@@ -151,10 +149,7 @@ const isDirectoryName = Schema.is(ProjectCopyDirectoryName);
  * left.
  */
 export const projectCopyFolderNameFromRemote = (remoteUrl: string): string | null => {
-  const withoutQuery = remoteUrl.replace(/[?#].*$/u, "").replace(/[\\/]+$/u, "");
-  const last = withoutQuery.split(/[\\/:]/u).at(-1) ?? "";
-  const name = last
-    .replace(/\.git$/iu, "")
+  const name = (repositoryFolderName(remoteUrl) ?? "")
     .replaceAll(/[^A-Za-z0-9._-]+/gu, "-")
     .replace(/^[^A-Za-z0-9]+/u, "")
     .slice(0, 128);
