@@ -58,11 +58,16 @@ import {
   mergeProjectProviderCommands,
   projectProviderCommandsKey,
   PROMPT_STASH_MAX_ENTRIES,
+  buildPromptHistoryEntries,
   composerTargetKey,
   readProjectProviderCommands,
   resolveApprovalRedirect,
+  stepPromptHistory,
   stripInlineTerminalContextPlaceholders,
   subscribeProjectProviderCommands,
+  type PromptHistoryDirection,
+  type PromptHistoryMessage,
+  type PromptHistoryPosition,
   type PromptStashEntry,
 } from "@ryco/client-runtime/state/composer";
 import { readEnvironmentApi } from "../../environmentApi";
@@ -427,6 +432,12 @@ export interface ChatComposerProps {
   /** The device is shown above the composer (new-thread surface), not in the footer. */
   executionTargetHoisted?: boolean;
 
+  /**
+   * The thread's messages as the timeline shows them, sends not yet confirmed included, for
+   * ArrowUp prompt recall. Read on the keypress: the list changes with every streamed delta.
+   */
+  readPromptHistoryMessages: () => ReadonlyArray<PromptHistoryMessage>;
+
   // Refs the parent needs kept in sync
   promptRef: React.MutableRefObject<string>;
   composerImagesRef: React.MutableRefObject<ComposerImageAttachment[]>;
@@ -600,6 +611,7 @@ export const ChatComposer = memo(
       keybindings,
       terminalOpen,
       gitCwd,
+      readPromptHistoryMessages,
       promptRef,
       composerImagesRef,
       composerTerminalContextsRef,
@@ -984,6 +996,11 @@ export const ChatComposer = memo(
       });
     }, [wantsProjectCommands, gitCwd, selectedInstanceId, environmentId, projectCommandsSupported]);
     const [composerHighlightedItemId, setComposerHighlightedItemId] = useState<string | null>(null);
+    // The ArrowUp recall the composer shows, and whose composer it was made in. Any edit ends it.
+    const promptRecallRef = useRef<{
+      readonly targetKey: string;
+      readonly position: PromptHistoryPosition;
+    } | null>(null);
     const [composerHighlightedSearchKey, setComposerHighlightedSearchKey] = useState<string | null>(
       null,
     );
@@ -1673,6 +1690,11 @@ export const ChatComposer = memo(
         if (promptRef.current.length === 0 && nextPrompt.length > 0) onComposerIntent?.("type");
         promptRef.current = nextPrompt;
         setPrompt(nextPrompt);
+        // Any edit ends prompt recall, even one undone by hand: the text then equals the
+        // recall again, but ArrowDown has to move the caret, not clear the composer.
+        if (promptRecallRef.current?.position.recalled !== nextPrompt) {
+          promptRecallRef.current = null;
+        }
         if (!terminalContextIdListsEqual(composerTerminalContexts, terminalContextIds)) {
           setComposerDraftTerminalContexts(
             composerDraftTarget,
@@ -2002,6 +2024,55 @@ export const ChatComposer = memo(
     );
 
     // ------------------------------------------------------------------
+    // Prompt recall (ArrowUp / ArrowDown)
+    // ------------------------------------------------------------------
+    const promptRecallTargetKey = composerTargetKey(composerDraftTarget);
+
+    const navigatePromptHistory = (
+      direction: PromptHistoryDirection,
+      event: KeyboardEvent,
+    ): boolean => {
+      if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.isComposing) {
+        return false;
+      }
+      // A waiting approval or question owns the composer's keys.
+      if (activePendingApproval !== null || pendingUserInputs.length > 0) return false;
+      // Attachments and contexts make the composer not empty: a recalled prompt would be sent
+      // with them, which is never what ArrowUp meant.
+      if (
+        composerImagesRef.current.length > 0 ||
+        composerTerminalContextsRef.current.length > 0 ||
+        composerSourceControlContexts.length > 0
+      ) {
+        return false;
+      }
+      // The composer outlives thread switches; a recall belongs to the one it was made in.
+      const recall = promptRecallRef.current;
+      const position = recall?.targetKey === promptRecallTargetKey ? recall.position : null;
+      // A typed draft never steps: skip the layout read and the entries for it.
+      if (position === null && promptRef.current.length > 0) return false;
+      const editor = composerEditorRef.current;
+      if (!editor?.isCaretOnVisualEdge(direction === "backward" ? "start" : "end")) return false;
+      const step = stepPromptHistory({
+        direction,
+        entries: buildPromptHistoryEntries(readPromptHistoryMessages()),
+        position,
+        currentPrompt: promptRef.current,
+      });
+      if (!step) return false;
+      promptRecallRef.current = step.position
+        ? { targetKey: promptRecallTargetKey, position: step.position }
+        : null;
+      if (promptRef.current.length === 0 && step.prompt.length > 0) onComposerIntent?.("type");
+      promptRef.current = step.prompt;
+      setComposerDraftPrompt(composerDraftTarget, step.prompt);
+      setComposerCursor(collapseExpandedComposerCursor(step.prompt, step.prompt.length));
+      setComposerTrigger(null);
+      setComposerHighlightedItemId(null);
+      return true;
+    };
+
+    // ------------------------------------------------------------------
     // Callbacks: command key
     // ------------------------------------------------------------------
     const onComposerCommandKey = (
@@ -2035,6 +2106,9 @@ export const ChatComposer = memo(
         // runs the flag is ignored and Enter sends.
         submitComposer(undefined, { invertFollowUp: isFollowUpInvertModifier(event) });
         return true;
+      }
+      if (key === "ArrowUp" || key === "ArrowDown") {
+        return navigatePromptHistory(key === "ArrowUp" ? "backward" : "forward", event);
       }
       return false;
     };
@@ -2093,6 +2167,7 @@ export const ChatComposer = memo(
       removeComposerImage,
       retryComposerFileUpload,
       onComposerPaste,
+      onComposerPasteText,
       onComposerDragEnter,
       onComposerDragOver,
       onComposerDragLeave,
@@ -3100,6 +3175,7 @@ export const ChatComposer = memo(
               onPromptChange={onPromptChange}
               onComposerCommandKey={onComposerCommandKey}
               onComposerPaste={onComposerPaste}
+              onComposerPasteText={onComposerPasteText}
               activePendingProgress={activePendingProgress}
               showPlanFollowUpPrompt={showPlanFollowUpPrompt}
               activeProposedPlan={activeProposedPlan}

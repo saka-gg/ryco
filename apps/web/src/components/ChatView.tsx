@@ -2442,6 +2442,13 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
   }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages]);
+  // Prompt recall reads the messages on the keypress; a prop would re-render the composer on
+  // every streamed delta.
+  const timelineMessagesRef = useRef(timelineMessages);
+  useLayoutEffect(() => {
+    timelineMessagesRef.current = timelineMessages;
+  });
+  const readPromptHistoryMessages = useCallback(() => timelineMessagesRef.current, []);
   const timelineEntryIndexRef = useRef<{
     readonly threadId: ThreadId | null;
     readonly index: ReturnType<typeof createTimelineEntryIndex>;
@@ -6669,6 +6676,7 @@ export default function ChatView(props: ChatViewProps) {
                   keybindings={keybindings}
                   terminalOpen={Boolean(terminalState.terminalOpen)}
                   gitCwd={gitCwd}
+                  readPromptHistoryMessages={readPromptHistoryMessages}
                   executionTargets={executionTargets}
                   executionTargetLocked={executionTargetLocked}
                   executionTargetHoisted={executionTargetHoisted}

@@ -12,6 +12,12 @@ import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ryco/contracts";
+import {
+  PASTED_TEXT_MIME_TYPE,
+  nextPastedTextFileName,
+  resolvePastedTextDisposition,
+  wouldTextPasteExceedInputLimit,
+} from "@ryco/client-runtime/state/composer";
 import { providerSupportsGeneralFileAttachments } from "@ryco/shared/providerCapabilities";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -33,7 +39,7 @@ import { getEnvironmentHttpBaseUrl } from "~/environments/runtime/catalog";
 import { readLocalApi } from "~/localApi";
 import { randomUUID } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
-import type { ComposerPromptEditorHandle } from "../ComposerPromptEditor";
+import type { ComposerPromptEditorHandle, ComposerTextPaste } from "../ComposerPromptEditor";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 const FILE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_FILE_BYTES / (1024 * 1024))}MB`;
@@ -116,6 +122,8 @@ export interface UseComposerImageAttachmentsResult {
   removeComposerImage: (imageId: string) => void;
   retryComposerFileUpload: (imageId: string) => void;
   onComposerPaste: (event: React.ClipboardEvent<HTMLElement>) => void;
+  /** Folds a large text paste into a `pasted-text.txt` attachment; true when it did. */
+  onComposerPasteText: (paste: ComposerTextPaste) => boolean;
   onComposerDragEnter: (event: React.DragEvent<HTMLDivElement>) => void;
   onComposerDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
   onComposerDragLeave: (event: React.DragEvent<HTMLDivElement>) => void;
@@ -466,6 +474,32 @@ export function useComposerImageAttachments(
     [addComposerAttachments],
   );
 
+  const onComposerPasteText = useCallback(
+    (paste: ComposerTextPaste): boolean => {
+      const attachments = composerImagesRef.current;
+      const disposition = resolvePastedTextDisposition({
+        text: paste.text,
+        // A plan question's answer is the editor's text, and a full composer keeps the paste
+        // visible instead of failing it.
+        canAttach:
+          activeThreadId !== null &&
+          pendingUserInputCount === 0 &&
+          attachments.length < PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+        pasteAsText: paste.pasteAsText,
+        wouldExceedInputLimit: wouldTextPasteExceedInputLimit({
+          promptLength: paste.promptLength,
+          selectedLength: paste.selectedLength,
+          pastedLength: paste.text.length,
+        }),
+      });
+      if (disposition === "inline") return false;
+      const name = nextPastedTextFileName(attachments.map((attachment) => attachment.name));
+      void addComposerAttachments([new File([paste.text], name, { type: PASTED_TEXT_MIME_TYPE })]);
+      return true;
+    },
+    [activeThreadId, addComposerAttachments, composerImagesRef, pendingUserInputCount],
+  );
+
   const onComposerDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
@@ -515,6 +549,7 @@ export function useComposerImageAttachments(
     removeComposerImage,
     retryComposerFileUpload,
     onComposerPaste,
+    onComposerPasteText,
     onComposerDragEnter,
     onComposerDragOver,
     onComposerDragLeave,

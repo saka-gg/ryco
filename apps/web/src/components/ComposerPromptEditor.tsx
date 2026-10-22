@@ -5,6 +5,7 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
+import { isPasteAsTextShortcut } from "@ryco/client-runtime/state/composer";
 import { type EnvironmentId, type ServerProviderSkill } from "@ryco/contracts";
 import {
   $applyNodeReplacement,
@@ -22,8 +23,10 @@ import {
   KEY_ARROW_LEFT_COMMAND,
   KEY_ARROW_RIGHT_COMMAND,
   KEY_ARROW_UP_COMMAND,
+  KEY_DOWN_COMMAND,
   KEY_ENTER_COMMAND,
   KEY_TAB_COMMAND,
+  PASTE_COMMAND,
   CLEAR_HISTORY_COMMAND,
   COMMAND_PRIORITY_HIGH,
   KEY_BACKSPACE_COMMAND,
@@ -68,7 +71,7 @@ import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   type TerminalContextDraft,
 } from "~/lib/terminalContext";
-import { cn } from "~/lib/utils";
+import { cn, isMacPlatform } from "~/lib/utils";
 import { basenameOfPath, inferEntryKindFromPath } from "~/pathEntry";
 import {
   COMPOSER_INLINE_CHIP_CLASS_NAME,
@@ -896,6 +899,22 @@ export interface ComposerPromptEditorHandle {
     expandedCursor: number;
     terminalContextIds: string[];
   };
+  /**
+   * Whether the collapsed caret is on the first ("start") or last ("end") visual line, soft
+   * wraps included. Prompt recall takes ArrowUp and ArrowDown only there, so inside multiline
+   * text the arrows still move the caret.
+   */
+  isCaretOnVisualEdge: (edge: "start" | "end") => boolean;
+}
+
+/** A text paste, before the editor inserts it. */
+export interface ComposerTextPaste {
+  readonly text: string;
+  /** The prompt's text length, and how much of it the paste replaces. */
+  readonly promptLength: number;
+  readonly selectedLength: number;
+  /** Pasted with the paste-as-text shortcut (Cmd/Ctrl+Shift+V). */
+  readonly pasteAsText: boolean;
 }
 
 interface ComposerPromptEditorProps {
@@ -935,6 +954,11 @@ interface ComposerPromptEditorProps {
     event: KeyboardEvent,
   ) => boolean;
   onPaste: ClipboardEventHandler<HTMLElement>;
+  /**
+   * Offered every text paste first (file pastes go to `onPaste`). True means it took the
+   * paste, as an attachment, and the editor inserts nothing.
+   */
+  onPasteText?: (paste: ComposerTextPaste) => boolean;
 }
 
 interface ComposerPromptEditorInnerProps extends ComposerPromptEditorProps {
@@ -995,6 +1019,102 @@ function ComposerCommandKeyPlugin(props: {
   }, [editor, props]);
 
   return null;
+}
+
+// The paste event follows its shortcut's keydown: at once in a browser, after the menu round
+// trip in Electron. A paste this long after the shortcut was not made by it.
+const PASTE_AS_TEXT_SHORTCUT_WINDOW_MS = 1_000;
+
+function ComposerTextPastePlugin(props: { onPasteText: (paste: ComposerTextPaste) => boolean }) {
+  const [editor] = useLexicalComposerContext();
+  const onPasteTextRef = useRef(props.onPasteText);
+  useLayoutEffect(() => {
+    onPasteTextRef.current = props.onPasteText;
+  });
+
+  useEffect(() => {
+    let pasteAsTextAt: number | null = null;
+    const unregisterKeyDown = editor.registerCommand(
+      KEY_DOWN_COMMAND,
+      (event) => {
+        pasteAsTextAt = isPasteAsTextShortcut(event, isMacPlatform(navigator.platform))
+          ? event.timeStamp
+          : null;
+        return false;
+      },
+      COMMAND_PRIORITY_HIGH,
+    );
+    const unregisterPaste = editor.registerCommand(
+      PASTE_COMMAND,
+      (event) => {
+        const shortcutAt = pasteAsTextAt;
+        pasteAsTextAt = null;
+        // File pastes go to the composer's `onPaste`.
+        if (!(event instanceof ClipboardEvent) || !event.clipboardData) return false;
+        if (event.clipboardData.files.length > 0) return false;
+        const text = event.clipboardData.getData("text/plain");
+        if (text.length === 0) return false;
+        const selection = $getSelection();
+        const handled = onPasteTextRef.current({
+          text,
+          promptLength: $getRoot().getTextContent().length,
+          selectedLength: $isRangeSelection(selection) ? selection.getTextContent().length : 0,
+          pasteAsText:
+            shortcutAt !== null && event.timeStamp - shortcutAt < PASTE_AS_TEXT_SHORTCUT_WINDOW_MS,
+        });
+        if (handled) event.preventDefault();
+        return handled;
+      },
+      COMMAND_PRIORITY_HIGH,
+    );
+    return () => {
+      unregisterKeyDown();
+      unregisterPaste();
+    };
+  }, [editor]);
+
+  return null;
+}
+
+/**
+ * The client rect of the visual line a collapsed caret is on, as seen from `edge`. A caret at a
+ * soft wrap belongs to two lines and gets a rect for each; the one farther from the edge wins,
+ * so an ambiguous caret never claims the key. Positions without a rect of their own (an empty
+ * line, a caret beside an inline chip) measure the neighbouring character or node instead.
+ */
+function caretLineRect(range: Range, edge: "start" | "end"): DOMRect | null {
+  const rects = Array.from(range.getClientRects()).filter((rect) => rect.height > 0);
+  const collapsedRect = edge === "start" ? rects.at(-1) : rects[0];
+  if (collapsedRect) return collapsedRect;
+
+  const measureCharacter = (node: Text, offset: number): DOMRect | null => {
+    if (node.data.length === 0) return null;
+    const start = Math.max(0, Math.min(offset, node.data.length - 1));
+    const probe = document.createRange();
+    probe.setStart(node, start);
+    probe.setEnd(node, start + 1);
+    return Array.from(probe.getClientRects()).find((rect) => rect.height > 0) ?? null;
+  };
+
+  const container = range.startContainer;
+  if (container instanceof Text) {
+    return measureCharacter(
+      container,
+      edge === "start" ? range.startOffset : range.startOffset - 1,
+    );
+  }
+  if (!(container instanceof HTMLElement)) return null;
+  const before = container.childNodes[range.startOffset - 1];
+  const neighbour = before ?? container.childNodes[range.startOffset];
+  if (neighbour instanceof HTMLElement) {
+    const rect = neighbour.getBoundingClientRect();
+    if (rect.height > 0) return rect;
+  } else if (neighbour instanceof Text) {
+    const rect = measureCharacter(neighbour, neighbour === before ? neighbour.data.length - 1 : 0);
+    if (rect) return rect;
+  }
+  const rect = container.getBoundingClientRect();
+  return rect.height > 0 ? rect : null;
 }
 
 function ComposerInlineTokenArrowPlugin() {
@@ -1441,6 +1561,7 @@ function ComposerPromptEditorInner({
   onChange,
   onCommandKeyDown,
   onPaste,
+  onPasteText,
   historyScope,
   environmentId,
   editorRef,
@@ -1635,8 +1756,38 @@ function ComposerPromptEditorInner({
       },
       insertTextAndFocus,
       readSnapshot,
+      isCaretOnVisualEdge: (edge) => {
+        const snapshot = readSnapshot();
+        if (snapshot.value.length === 0) return true;
+        const text =
+          edge === "start"
+            ? snapshot.value.slice(0, snapshot.expandedCursor)
+            : snapshot.value.slice(snapshot.expandedCursor);
+        if (text.includes("\n")) return false;
+        const rootElement = editor.getRootElement();
+        const selection = window.getSelection();
+        if (
+          !rootElement ||
+          !selection ||
+          !selection.isCollapsed ||
+          selection.rangeCount === 0 ||
+          !selection.anchorNode ||
+          !rootElement.contains(selection.anchorNode)
+        ) {
+          return false;
+        }
+        const caretRect = caretLineRect(selection.getRangeAt(0), edge);
+        if (!caretRect) return false;
+        const edgeElement =
+          edge === "start" ? rootElement.firstElementChild : rootElement.lastElementChild;
+        const edgeRect = (edgeElement ?? rootElement).getBoundingClientRect();
+        const tolerance = caretRect.height / 2;
+        return edge === "start"
+          ? caretRect.top - edgeRect.top < tolerance
+          : edgeRect.bottom - caretRect.bottom < tolerance;
+      },
     }),
-    [focusAt, insertTextAndFocus, readSnapshot],
+    [editor, focusAt, insertTextAndFocus, readSnapshot],
   );
 
   const handleEditorChange = useCallback((editorState: EditorState) => {
@@ -1729,6 +1880,7 @@ function ComposerPromptEditorInner({
         />
         <OnChangePlugin onChange={handleEditorChange} />
         <ComposerCommandKeyPlugin {...(onCommandKeyDown ? { onCommandKeyDown } : {})} />
+        {onPasteText ? <ComposerTextPastePlugin onPasteText={onPasteText} /> : null}
         <ComposerSurroundSelectionPlugin terminalContexts={terminalContexts} skills={skills} />
         <ComposerInlineTokenArrowPlugin />
         <ComposerInlineTokenSelectionNormalizePlugin />
@@ -1759,6 +1911,7 @@ export const ComposerPromptEditor = forwardRef<
     onChange,
     onCommandKeyDown,
     onPaste,
+    onPasteText,
   },
   ref,
 ) {
@@ -1800,6 +1953,7 @@ export const ComposerPromptEditor = forwardRef<
         onRemoveTerminalContext={onRemoveTerminalContext}
         onChange={onChange}
         onPaste={onPaste}
+        {...(onPasteText ? { onPasteText } : {})}
         editorRef={ref}
         {...(onCommandKeyDown ? { onCommandKeyDown } : {})}
         {...(className ? { className } : {})}
