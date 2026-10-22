@@ -10,7 +10,7 @@ import {
   type GitLocalChangesResult,
 } from "@ryco/contracts";
 import { authorizeGitReadWorkspace } from "./GitReadWorkspace.ts";
-import type { GitVcsDriverShape } from "./GitVcsDriver.ts";
+import { INTERNAL_PATCH_DIFF_ARGS, type GitVcsDriverShape } from "./GitVcsDriver.ts";
 
 const LIMIT = 2_000_000;
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -150,21 +150,7 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
       const bytes = yield* readIndex();
       return { ...head, indexIdentity: bytes === null ? "missing" : hash(bytes) };
     });
-  const diffArgs = [
-    "diff",
-    "--patch",
-    "--binary",
-    "--full-index",
-    "--no-color",
-    "--no-ext-diff",
-    "--no-textconv",
-    "--no-renames",
-    "--src-prefix=a/",
-    "--dst-prefix=b/",
-    "--no-relative",
-    "--unified=3",
-    "--submodule=short",
-  ];
+  const diffArgs = [...INTERNAL_PATCH_DIFF_ARGS, "--binary", "--full-index", "--no-renames"];
   const read = () =>
     Effect.scoped(
       Effect.gen(function* () {

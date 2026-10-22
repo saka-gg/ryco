@@ -41,7 +41,10 @@ import {
   parseGitConfigList,
   parseListedRefs,
 } from "./GitVcsDriverCore.ts";
-import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
+import {
+  configureHostileDiffConfig,
+  configureTestGitCommitIdentity,
+} from "./testing/GitTestRepo.ts";
 
 // Observe actual destination-lock acquisition for deterministic pre-mkdir races.
 // Preserve the real semaphore/map behavior; only the get boundary is observable.
@@ -250,6 +253,37 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.instanceOf(error, GitCommandError);
         assert.include(error.detail, "multiple merge bases");
         assert.include(error.detail, "Merge or rebase");
+      }),
+    );
+
+    it.effect("reads commit and range context the same whatever the diff config says", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nsecond\n\nthird\n");
+        yield* git(cwd, ["add", "notes.txt"]);
+        yield* git(cwd, ["commit", "-m", "Add notes"]);
+        yield* git(cwd, ["checkout", "-b", "feature/notes"]);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nSECOND\n\nthird\n");
+        yield* git(cwd, ["commit", "-am", "Shout the second note"]);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nSECOND\n\nthird, edited\n");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const read = Effect.all([
+          driver.prepareCommitContext(cwd),
+          driver.readRangeContext(cwd, initialBranch),
+        ]);
+
+        const clean = yield* read;
+        yield* configureHostileDiffConfig(cwd, git);
+
+        assert.deepStrictEqual(yield* read, clean);
+        const [commitContext, rangeContext] = clean;
+        assert.include(commitContext?.stagedPatch, "diff --git a/notes.txt b/notes.txt\n");
+        assert.include(commitContext?.stagedPatch, "\n \n-third\n+third, edited\n");
+        assert.include(rangeContext.diffPatch, "diff --git a/notes.txt b/notes.txt\n");
+        assert.include(rangeContext.diffPatch, "\n \n-second\n+SECOND\n \n");
+        assert.include(rangeContext.diffSummary, "notes.txt | 2 +-");
+        assert.include(rangeContext.commitSummary, "Shout the second note");
       }),
     );
   });

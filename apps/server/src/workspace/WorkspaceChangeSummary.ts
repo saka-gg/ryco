@@ -21,6 +21,7 @@ import {
 import {
   GitVcsDriver,
   type GitVcsDriverShape,
+  INTERNAL_PATCH_DIFF_ARGS,
   NO_INDEX_REFRESH_DIFF_ARGS,
 } from "../vcs/GitVcsDriver.ts";
 import {
@@ -126,14 +127,7 @@ export function makeWorkspaceChangeSummary(
         [
           readGit(directory, ["status", "--porcelain=v1", "-uall"]),
           readGit(directory, ["diff", "HEAD", "--no-ext-diff", "--no-color", "--stat"]),
-          readGit(directory, [
-            "diff",
-            "HEAD",
-            "--no-ext-diff",
-            "--no-color",
-            "--patch",
-            "--minimal",
-          ]),
+          readGit(directory, [...INTERNAL_PATCH_DIFF_ARGS, "--minimal", "HEAD"]),
           readGit(directory, ["ls-files", "--others", "--exclude-standard"]),
         ],
         { concurrency: "unbounded" },
