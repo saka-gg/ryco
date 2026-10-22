@@ -1,3 +1,5 @@
+import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "@ryco/client-runtime/state/composer";
+
 export function proposedPlanTitle(planMarkdown: string): string | null {
   const heading = planMarkdown.match(/^\s{0,3}#{1,6}\s+(.+)$/m)?.[1]?.trim();
   return heading && heading.length > 0 ? heading : null;
@@ -71,7 +73,7 @@ function sanitizePlanFileSegment(input: string): string {
 }
 
 export function buildPlanImplementationPrompt(planMarkdown: string): string {
-  return `PLEASE IMPLEMENT THIS PLAN:\n${planMarkdown.trim()}`;
+  return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
 }
 
 export function resolvePlanFollowUpSubmission(input: { draftText: string; planMarkdown: string }): {
