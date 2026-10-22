@@ -1915,6 +1915,67 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }),
   );
 
+  it.effect("strips replayable CSI and DCS query traffic while preserving setters", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("prompt ");
+      // DECRQM/DECRPM (ANSI and private modes), XTVERSION, and kitty-keyboard query/reply traffic.
+      process.emitData("\u001b[?2026$p\u001b[?2026;2$y\u001b[4$p\u001b[4;2$y");
+      process.emitData("\u001b[>q\u001b[>0q\u001b[?u\u001b[?31u");
+      // DECRQSS and XTGETTCAP query/reply traffic in 7-bit DCS form.
+      process.emitData("\u001bP$q m\u001b\\\u001bP1$r0m\u001b\\\u001bP0$r\u001b\\");
+      process.emitData("\u001bP+q544e\u001b\\\u001bP1+r544e=1b\u001b\\");
+      // The same DCS traffic in 8-bit form.
+      process.emitData("\u0090$q m\u009c\u00901$r0m\u009c");
+      process.emitData("\u0090+q544e\u009c\u00901+r544e=1b\u009c");
+      // Setters and cursor movement share final bytes with the query families but
+      // change visible terminal state, so they must survive replay. Sixel stays too.
+      process.emitData('\u001b[!p\u001b["p\u001b[4 q\u001b[u\u001b[>1u\u001bPq#0~\u001b\\');
+      process.emitData("done\n");
+
+      yield* manager.close({ threadId: "thread-1" });
+
+      const reopened = yield* manager.open(openInput());
+      assert.equal(
+        reopened.history,
+        'prompt \u001b[!p\u001b["p\u001b[4 q\u001b[u\u001b[>1u\u001bPq#0~\u001b\\done\n',
+      );
+    }),
+  );
+
+  it.effect("strips CSI and DCS query traffic split across output chunks", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("before ");
+      process.emitData("\u001b[?2026$");
+      process.emitData("pafter ");
+      // Split after the introducer, inside the payload, and between ESC and `\` of ST.
+      process.emitData("\u001b");
+      process.emitData("P$q ");
+      process.emitData("m\u001b");
+      process.emitData("\\after ");
+      process.emitData("\u009b?3");
+      process.emitData("1uafter ");
+      process.emitData("\u0090+q544e");
+      process.emitData("\u009cafter\n");
+
+      yield* manager.close({ threadId: "thread-1" });
+
+      const reopened = yield* manager.open(openInput());
+      assert.equal(reopened.history, "before after after after after\n");
+    }),
+  );
+
   it.effect(
     "preserves clear and style control sequences while dropping chunk-split query traffic",
     () =>
