@@ -248,3 +248,19 @@ export class AgentControlDiagnosticsReadError extends Schema.TaggedError<AgentCo
   "AgentControlDiagnosticsReadError",
   { operation: Schema.String },
 ) {}
+
+/**
+ * The node directory owner clients publish could not be read or stored. `unavailable` until
+ * this node keeps one.
+ */
+export class AgentControlNodeDirectoryError extends Schema.TaggedError<AgentControlNodeDirectoryError>()(
+  "AgentControlNodeDirectoryError",
+  {
+    reason: Schema.Literals(["unavailable", "storage"]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}

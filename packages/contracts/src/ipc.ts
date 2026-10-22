@@ -123,13 +123,18 @@ import type {
   WorktreeSetupSubscribeInput,
 } from "./worktreeSetup.ts";
 import type {
+  AgentControlAcceptProposalInput,
   AgentControlDecideProposalInput,
   AgentControlGetProposalInput,
-  AgentControlGetProposalResult,
+  AgentControlGetProposalResultView,
   AgentControlListProposalsInput,
-  AgentControlProposalQueue,
-  AgentControlProposalReceipt,
-  AgentControlProposalStreamEvent,
+  AgentControlProposalQueueView,
+  AgentControlProposalReceiptView,
+  AgentControlProposalStreamEventView,
+  AgentControlPublishNodeDirectoryInput,
+  AgentControlPublishNodeDirectoryResult,
+  AgentControlReportClientExecutionInput,
+  AgentControlReportClientExecutionResult,
   AgentControlExternalIntegrationCreateInput,
   AgentControlExternalIntegrationDeleteResult,
   AgentControlExternalIntegrationIdInput,
@@ -143,6 +148,37 @@ import type {
   AgentControlMcpInstallationMutationResult,
 } from "./agentControl.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
+import type {
+  FilesystemSearchDirectoriesInput,
+  FilesystemSearchDirectoriesResult,
+  NodePathHints,
+  NodePathHintsInput,
+  ProjectCancelImportInput,
+  ProjectCheckRemoteAccessInput,
+  ProjectCheckRemoteAccessResult,
+  ProjectDestinationPreview,
+  ProjectDestinationPreviewInput,
+  ProjectDiscardImportInput,
+  ProjectDiscardImportResult,
+  ProjectExportDisposeInput,
+  ProjectExportInspectInput,
+  ProjectExportInspection,
+  ProjectExportReadChunkInput,
+  ProjectExportReadChunkResult,
+  ProjectExportResult,
+  ProjectExportStartInput,
+  ProjectImportSnapshot,
+  ProjectImportStartInput,
+  ProjectListImportsInput,
+  ProjectListImportsResult,
+  ProjectSubscribeImportInput,
+  ProjectTransferAbortInput,
+  ProjectTransferAppendInput,
+  ProjectTransferBeginInput,
+  ProjectTransferCommitInput,
+  ProjectTransferCommitResult,
+  ProjectTransferProgress,
+} from "./projectCopy.ts";
 import type {
   McpListServersInput,
   McpListServersResult,
@@ -1324,9 +1360,45 @@ export interface EnvironmentApi {
     deleteChatFolder?: (
       input: ProjectsDeleteChatFolderInput,
     ) => Promise<ProjectsDeleteChatFolderResult>;
+    // Cross-node project copy. Absent on transports built without it; call only
+    // when the node advertises `capabilities.projectCopy`.
+    pathHints?: (input: NodePathHintsInput) => Promise<NodePathHints>;
+    previewDestination?: (
+      input: ProjectDestinationPreviewInput,
+    ) => Promise<ProjectDestinationPreview>;
+    checkRemoteAccess?: (
+      input: ProjectCheckRemoteAccessInput,
+    ) => Promise<ProjectCheckRemoteAccessResult>;
+    /** Source side: what a copy would carry, without creating artifacts. */
+    exportInspect?: (input: ProjectExportInspectInput) => Promise<ProjectExportInspection>;
+    exportStart?: (input: ProjectExportStartInput) => Promise<ProjectExportResult>;
+    exportReadChunk?: (input: ProjectExportReadChunkInput) => Promise<ProjectExportReadChunkResult>;
+    exportDispose?: (input: ProjectExportDisposeInput) => Promise<EmptyRpcResult>;
+    /** Destination side: chunked uploads the import claims. */
+    transferBegin?: (input: ProjectTransferBeginInput) => Promise<ProjectTransferProgress>;
+    transferAppend?: (input: ProjectTransferAppendInput) => Promise<ProjectTransferProgress>;
+    transferCommit?: (input: ProjectTransferCommitInput) => Promise<ProjectTransferCommitResult>;
+    transferAbort?: (input: ProjectTransferAbortInput) => Promise<EmptyRpcResult>;
+    importStart?: (input: ProjectImportStartInput) => Promise<ProjectImportSnapshot>;
+    /** The first snapshot is the current one; an unknown import ends the stream (`onError`). */
+    subscribeImport?: (
+      input: ProjectSubscribeImportInput,
+      callback: (snapshot: ProjectImportSnapshot) => void,
+      options?: {
+        onResubscribe?: () => void;
+        onError?: () => void;
+      },
+    ) => () => void;
+    cancelImport?: (input: ProjectCancelImportInput) => Promise<ProjectImportSnapshot>;
+    listImports?: (input: ProjectListImportsInput) => Promise<ProjectListImportsResult>;
+    discardImport?: (input: ProjectDiscardImportInput) => Promise<ProjectDiscardImportResult>;
   };
   filesystem: {
     browse: (input: FilesystemBrowseInput) => Promise<FilesystemBrowseResult>;
+    /** Cross-node project copy; call only when the node advertises `capabilities.projectCopy`. */
+    searchDirectories?: (
+      input: FilesystemSearchDirectoriesInput,
+    ) => Promise<FilesystemSearchDirectoriesResult>;
   };
   sourceControl: {
     lookupRepository: (
@@ -1521,21 +1593,35 @@ export interface EnvironmentApi {
   /** Server-owned worktree notes. Optional so clients can feature-detect older environments. */
   notes?: NotesApi;
   agentControl?: {
-    listProposals: (input: AgentControlListProposalsInput) => Promise<AgentControlProposalQueue>;
-    getProposal: (input: AgentControlGetProposalInput) => Promise<AgentControlGetProposalResult>;
+    // Proposals arrive through the tolerant views: a plan kind this build does not
+    // know decodes as `unsupported`.
+    listProposals: (
+      input: AgentControlListProposalsInput,
+    ) => Promise<AgentControlProposalQueueView>;
+    getProposal: (
+      input: AgentControlGetProposalInput,
+    ) => Promise<AgentControlGetProposalResultView>;
     acceptProposal: (
-      input: AgentControlDecideProposalInput,
-    ) => Promise<AgentControlProposalReceipt>;
+      input: AgentControlAcceptProposalInput,
+    ) => Promise<AgentControlProposalReceiptView>;
     rejectProposal: (
       input: AgentControlDecideProposalInput,
-    ) => Promise<AgentControlProposalReceipt>;
+    ) => Promise<AgentControlProposalReceiptView>;
     subscribeProposals: (
-      callback: (event: AgentControlProposalStreamEvent) => void,
+      callback: (event: AgentControlProposalStreamEventView) => void,
       options?: {
         onResubscribe?: () => void;
         onError?: () => void;
       },
     ) => () => void;
+    /** Cross-node project copy; call only when the node advertises `capabilities.projectCopy`. */
+    publishNodeDirectory?: (
+      input: AgentControlPublishNodeDirectoryInput,
+    ) => Promise<AgentControlPublishNodeDirectoryResult>;
+    /** Reports the outcome of a client-executed proposal this client accepted. */
+    reportClientExecution?: (
+      input: AgentControlReportClientExecutionInput,
+    ) => Promise<AgentControlReportClientExecutionResult>;
     listIntegrations: () => Promise<AgentControlExternalIntegrationListResult>;
     createIntegration: (
       input: AgentControlExternalIntegrationCreateInput,

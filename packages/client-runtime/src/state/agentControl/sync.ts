@@ -1,4 +1,10 @@
-import type { AgentControlProposalStreamEvent, EnvironmentId } from "@ryco/contracts";
+import type {
+  AgentControlProposalStreamEvent,
+  AgentControlProposalStreamEventView,
+  EnvironmentId,
+} from "@ryco/contracts";
+
+import { supportedAgentControlStreamEvent } from "./proposalView.ts";
 
 /**
  * The slice of `EnvironmentApi["agentControl"]` the sync needs. Injected so
@@ -6,7 +12,7 @@ import type { AgentControlProposalStreamEvent, EnvironmentId } from "@ryco/contr
  */
 export interface AgentControlSubscriptionSource {
   readonly subscribeProposals: (
-    callback: (event: AgentControlProposalStreamEvent) => void,
+    callback: (event: AgentControlProposalStreamEventView) => void,
     options?: {
       onResubscribe?: () => void;
       onError?: () => void;
@@ -50,7 +56,8 @@ export function startAgentControlProposalSync(input: {
   const unsubscribe = source.subscribeProposals(
     (event) => {
       if (stopped) return;
-      sink.applyStreamEvent(environmentId, event);
+      const supported = supportedAgentControlStreamEvent(event);
+      if (supported !== null) sink.applyStreamEvent(environmentId, supported);
     },
     {
       onError: () => {

@@ -140,6 +140,7 @@ import Migration0092, {
 import Migration0093, {
   dropUnusedOrchestrationIndexes,
 } from "./Migrations/093_DropUnusedOrchestrationIndexes.ts";
+import Migration0094, { ensureProjectImportsTable } from "./Migrations/094_ProjectImports.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -244,6 +245,7 @@ export const migrationEntries = [
   [91, "GuardedLatestCompletedTurnTrigger", Migration0091],
   [92, "LocalTaskDelegations", Migration0092],
   [93, "DropUnusedOrchestrationIndexes", Migration0093],
+  [94, "ProjectImports", Migration0094],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -603,6 +605,14 @@ export const repairUnusedOrchestrationIndexes = Effect.fn("repairUnusedOrchestra
   },
 );
 
+// Cross-node project import jobs: run 094 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id). One catalog lookup per boot once it exists.
+export const repairProjectImportsTable = Effect.fn("repairProjectImportsTable")(function* () {
+  if (yield* ensureProjectImportsTable) {
+    yield* Effect.log("Repaired project imports table");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -806,6 +816,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       }
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 93) {
         yield* repairUnusedOrchestrationIndexes();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 94) {
+        yield* repairProjectImportsTable();
       }
     }),
   );

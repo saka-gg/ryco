@@ -25,6 +25,7 @@
  * @module AgentControlProposalService
  */
 import type {
+  AgentControlClientExecutorId,
   AgentControlProposal,
   AgentControlPrincipal,
   AgentControlRequestId,
@@ -58,6 +59,14 @@ export interface AgentControlQueueLimitsInput {
 export interface DecideAgentControlProposalRequest {
   readonly proposalId: AgentControlProposalId;
   readonly decidedAt: IsoDateTime;
+}
+
+export interface AcceptAgentControlProposalRequest extends DecideAgentControlProposalRequest {
+  /**
+   * The approving client's executor, for a client-executed kind
+   * (`AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS`); every other kind ignores it.
+   */
+  readonly executeOnClient?: { readonly executorId: AgentControlClientExecutorId } | undefined;
 }
 
 /** Bounded lifecycle receipt for a proposal; see the contract's docs. */
@@ -106,7 +115,7 @@ export interface AgentControlProposalServiceShape {
 
   /** Accept a pending proposal (idempotent when it is already approved). */
   readonly accept: (
-    input: DecideAgentControlProposalRequest,
+    input: AcceptAgentControlProposalRequest,
   ) => Effect.Effect<AgentControlProposalReceipt, AgentControlProposalDecisionError>;
 
   /** Reject a pending proposal (idempotent when it is already rejected). */

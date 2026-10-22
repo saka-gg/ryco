@@ -107,6 +107,8 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       projectSearchEmptyQuery: true,
       cliProxyHubs: true,
       cliProxyCloudflareAccess: true,
+      // Cross-node project copy: its RPCs answer "not available yet" until the services exist.
+      projectCopy: false,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },
   };

@@ -168,6 +168,48 @@ describe("shared RPC access policy", () => {
     }
   });
 
+  it("keeps project copy at the operator tier and never receipted", () => {
+    const reads = [
+      WS_METHODS.projectsPathHints,
+      WS_METHODS.projectsExportInspect,
+      WS_METHODS.filesystemSearchDirectories,
+      WS_METHODS.projectsPreviewDestination,
+      WS_METHODS.projectsCheckRemoteAccess,
+      WS_METHODS.projectsExportReadChunk,
+      WS_METHODS.projectsSubscribeImport,
+      WS_METHODS.projectsListImports,
+    ];
+    // Idempotent by client-minted id or offset, so a dropped one is harmless.
+    const idempotentScratch = [
+      WS_METHODS.projectsExportStart,
+      WS_METHODS.projectsExportDispose,
+      WS_METHODS.projectsTransferBegin,
+      WS_METHODS.projectsTransferAppend,
+      WS_METHODS.projectsTransferCommit,
+      WS_METHODS.projectsTransferAbort,
+    ];
+    const mutations = [
+      WS_METHODS.projectsImportStart,
+      WS_METHODS.projectsCancelImport,
+      WS_METHODS.projectsDiscardImport,
+    ];
+    for (const method of [...reads, ...idempotentScratch, ...mutations]) {
+      expect(rpcAccessFor(method)).toBe("operator");
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(true);
+    }
+    for (const method of [...reads, ...idempotentScratch]) {
+      expect(rpcDeliveryEffectFor(method)).toBe("read");
+    }
+    for (const method of mutations) {
+      expect(rpcDeliveryEffectFor(method)).toBe("mutation");
+    }
+    expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.publishNodeDirectory)).toBe("owner");
+    expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.reportClientExecution)).toBe("owner");
+    expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.publishNodeDirectory)).toBe("read");
+    expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.reportClientExecution)).toBe("mutation");
+  });
+
   it("treats an unclassified method's delivery as uncertain", () => {
     expect(rpcDeliveryEffectFor("server.someFutureMethod")).toBe("mutation");
   });

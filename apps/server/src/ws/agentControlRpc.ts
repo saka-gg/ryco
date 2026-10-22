@@ -6,6 +6,7 @@ import {
 } from "@ryco/contracts";
 import { Effect, Option, Schema, Stream } from "effect";
 
+import type { AgentControlNodeDirectoryError } from "../agentControl/Errors.ts";
 import type { AgentControlProposalDecisionError } from "../agentControl/Services/AgentControlProposalService.ts";
 import type { AgentControlExternalIntegrationServiceError } from "../agentControl/Services/AgentControlExternalIntegration.ts";
 import type { AgentControlExternalInstallationServiceError } from "../agentControl/Services/AgentControlExternalInstallation.ts";
@@ -63,6 +64,19 @@ export const toAgentControlRpcError = (
       });
   }
 };
+
+export const toAgentControlNodeDirectoryRpcError = (
+  error: AgentControlNodeDirectoryError,
+): AgentControlRpcError =>
+  error.reason === "unavailable"
+    ? new AgentControlRpcError({
+        code: "unsupported",
+        message: "This server does not keep a node directory yet.",
+      })
+    : new AgentControlRpcError({
+        code: "storage",
+        message: "The node directory could not be stored.",
+      });
 
 export const toAgentControlExternalRpcError = (
   error: AgentControlExternalIntegrationServiceError,
@@ -143,6 +157,8 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
     agentControlProposals,
     agentControlExternalIntegrations,
     agentControlExternalInstallations,
+    agentControlNodeDirectory,
+    currentSessionId,
     ownerEffect,
     ownerStreamEffect,
   } = ctx;
@@ -196,6 +212,9 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
     });
 
   return defineWsHandlers({
+    // The proposal reads take `planView` (clients that decode the tolerant plan view send
+    // "tolerant"). Nothing is left out for clients without it yet: the validator still refuses
+    // every kind outside `AGENT_CONTROL_LEGACY_PLAN_KINDS`, so no such proposal exists.
     [AGENT_CONTROL_WS_METHODS.listProposals]: (input) =>
       observeRpcEffect(
         AGENT_CONTROL_WS_METHODS.listProposals,
@@ -230,7 +249,11 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
           AGENT_CONTROL_WS_METHODS.acceptProposal,
           withService((service) =>
             service
-              .accept({ proposalId: input.proposalId, decidedAt: new Date().toISOString() })
+              .accept({
+                proposalId: input.proposalId,
+                decidedAt: new Date().toISOString(),
+                executeOnClient: input.executeOnClient,
+              })
               .pipe(Effect.mapError(toAgentControlRpcError)),
           ),
         ),
@@ -261,6 +284,36 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
           ),
         ),
         { "rpc.aggregate": "agent-control" },
+      ),
+    // Owner clients publish the nodes they hold owner on; kept per client session.
+    [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: (input) =>
+      ownerEffect(
+        AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+        Option.match(agentControlNodeDirectory, {
+          onNone: () =>
+            Effect.fail(
+              new AgentControlRpcError({
+                code: "unsupported",
+                message: "This server does not keep a node directory yet.",
+              }),
+            ),
+          onSome: (directory) =>
+            directory
+              .publish({ publisherKey: currentSessionId, nodes: input.nodes })
+              .pipe(Effect.mapError(toAgentControlNodeDirectoryRpcError)),
+        }),
+      ),
+    // Refused until client-executed proposals are implemented; the node does not advertise
+    // `projectCopy` yet, so no client accepts one.
+    [AGENT_CONTROL_WS_METHODS.reportClientExecution]: () =>
+      ownerEffect(
+        AGENT_CONTROL_WS_METHODS.reportClientExecution,
+        Effect.fail(
+          new AgentControlRpcError({
+            code: "unsupported",
+            message: "This server does not run client-executed requests yet.",
+          }),
+        ),
       ),
     [AGENT_CONTROL_WS_METHODS.listIntegrations]: () =>
       ownerEffect(

@@ -57,6 +57,9 @@ export const RPC_ACCESS_POLICY = {
   [AGENT_CONTROL_WS_METHODS.connectMcpInstallation]: "owner",
   [AGENT_CONTROL_WS_METHODS.repairMcpInstallation]: "owner",
   [AGENT_CONTROL_WS_METHODS.disconnectMcpInstallation]: "owner",
+  // Publishes the nodes this owner client knows; reports the outcome of a copy it approved.
+  [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: "owner",
+  [AGENT_CONTROL_WS_METHODS.reportClientExecution]: "owner",
   [WS_METHODS.atlassianDisconnect]: "owner",
   [WS_METHODS.atlassianGetProjectLink]: "owner",
   [WS_METHODS.atlassianListConnections]: "owner",
@@ -134,6 +137,25 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.projectsSearchEntries]: "operator",
   [WS_METHODS.projectsStageFileReference]: "operator",
   [WS_METHODS.projectsWriteFile]: "operator",
+  // Cross-node project copy: node paths and folder search like filesystemBrowse, repository
+  // content like projectsReadFile, and the import creates a project like projectsAdd.
+  [WS_METHODS.projectsPathHints]: "operator",
+  [WS_METHODS.filesystemSearchDirectories]: "operator",
+  [WS_METHODS.projectsPreviewDestination]: "operator",
+  [WS_METHODS.projectsCheckRemoteAccess]: "operator",
+  [WS_METHODS.projectsExportInspect]: "operator",
+  [WS_METHODS.projectsExportStart]: "operator",
+  [WS_METHODS.projectsExportReadChunk]: "operator",
+  [WS_METHODS.projectsExportDispose]: "operator",
+  [WS_METHODS.projectsTransferBegin]: "operator",
+  [WS_METHODS.projectsTransferAppend]: "operator",
+  [WS_METHODS.projectsTransferCommit]: "operator",
+  [WS_METHODS.projectsTransferAbort]: "operator",
+  [WS_METHODS.projectsImportStart]: "operator",
+  [WS_METHODS.projectsSubscribeImport]: "operator",
+  [WS_METHODS.projectsCancelImport]: "operator",
+  [WS_METHODS.projectsListImports]: "operator",
+  [WS_METHODS.projectsDiscardImport]: "operator",
   [WS_METHODS.serverCheckOpinionatedPlugins]: "owner",
   [WS_METHODS.serverDiscoverSourceControl]: "owner",
   [WS_METHODS.serverGetAdvertisedEndpoints]: "viewer",
@@ -324,6 +346,11 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [AGENT_CONTROL_WS_METHODS.connectMcpInstallation]: "mutation",
   [AGENT_CONTROL_WS_METHODS.repairMcpInstallation]: "mutation",
   [AGENT_CONTROL_WS_METHODS.disconnectMcpInstallation]: "mutation",
+  // Idempotent by client-minted id/offset; scratch state expires on its own TTL: a
+  // republish replaces this client's entries. Clients publish on every connect, so a
+  // dropped one must never leave the session delivery-unknown.
+  [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: "read",
+  [AGENT_CONTROL_WS_METHODS.reportClientExecution]: "mutation",
   [WS_METHODS.atlassianDisconnect]: "mutation",
   [WS_METHODS.atlassianGetProjectLink]: "read",
   [WS_METHODS.atlassianListConnections]: "read",
@@ -398,6 +425,30 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.projectsSearchEntries]: "read",
   [WS_METHODS.projectsStageFileReference]: "mutation",
   [WS_METHODS.projectsWriteFile]: "mutation",
+  // Cross-node project copy. Never `receipted`: only orchestration.dispatchCommand is
+  // replayed, so a receipted method a relay drops would be neither tracked nor replayed.
+  [WS_METHODS.projectsPathHints]: "read",
+  [WS_METHODS.filesystemSearchDirectories]: "read",
+  [WS_METHODS.projectsPreviewDestination]: "read",
+  [WS_METHODS.projectsCheckRemoteAccess]: "read",
+  [WS_METHODS.projectsExportInspect]: "read",
+  [WS_METHODS.projectsExportReadChunk]: "read",
+  [WS_METHODS.projectsSubscribeImport]: "read",
+  [WS_METHODS.projectsListImports]: "read",
+  // Idempotent by client-minted id/offset; scratch state expires on its own TTL
+  // (like providerPrewarmSession and vcsPrefetchWorktreeBase). A copy makes about
+  // 1,600 chunk calls, so a dropped one must not leave the session delivery-unknown.
+  [WS_METHODS.projectsExportStart]: "read",
+  [WS_METHODS.projectsExportDispose]: "read",
+  [WS_METHODS.projectsTransferBegin]: "read",
+  [WS_METHODS.projectsTransferAppend]: "read",
+  [WS_METHODS.projectsTransferCommit]: "read",
+  [WS_METHODS.projectsTransferAbort]: "read",
+  // After a dropped importStart the client reads subscribeImport and resends the same
+  // id and input only when the node does not know the import.
+  [WS_METHODS.projectsImportStart]: "mutation",
+  [WS_METHODS.projectsCancelImport]: "mutation",
+  [WS_METHODS.projectsDiscardImport]: "mutation",
   [WS_METHODS.serverCheckOpinionatedPlugins]: "read",
   [WS_METHODS.serverDiscoverSourceControl]: "read",
   [WS_METHODS.serverGetAdvertisedEndpoints]: "read",

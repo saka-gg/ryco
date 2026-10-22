@@ -4,7 +4,10 @@ import {
   type AgentControlProposalStreamEvent,
   type EnvironmentId,
 } from "@ryco/contracts";
-import { isTerminalAgentControlStatus } from "@ryco/client-runtime/state/agentControl";
+import {
+  isTerminalAgentControlStatus,
+  supportedAgentControlProposals,
+} from "@ryco/client-runtime/state/agentControl";
 import { create } from "zustand";
 
 import { readEnvironmentApiForConnection } from "../../../environmentApi";
@@ -138,7 +141,7 @@ export function retainScheduleProposalHistory(environmentId: EnvironmentId): () 
     api.listProposals({ recentLimit: AGENT_CONTROL_QUEUE_RECENT_LIMIT_MAX }).then(
       (queue) => {
         if (readEnvironmentConnection(environmentId)?.client !== client) return;
-        recordScheduleProposals(environmentId, queue.recent);
+        recordScheduleProposals(environmentId, supportedAgentControlProposals(queue.recent));
       },
       // Refused or lost: a later hold may try again; the live queue still feeds it.
       () => seededClients.delete(client),

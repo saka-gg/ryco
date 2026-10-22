@@ -21,8 +21,15 @@ import {
   AgentControlProposalNotFoundError,
   AgentControlSettingsChangeUnsupportedError,
 } from "../agentControl/Errors.ts";
+import { AgentControlNodeDirectoryPlaceholder } from "../agentControl/Layers/AgentControlNodeDirectoryPlaceholder.ts";
+import {
+  AgentControlNodeDirectory,
+  type AgentControlNodeDirectoryShape,
+  type PublishAgentControlNodeDirectoryInput,
+} from "../agentControl/Services/AgentControlNodeDirectory.ts";
 import {
   toAgentControlProposalReceipt,
+  type AcceptAgentControlProposalRequest,
   type AgentControlProposalServiceShape,
 } from "../agentControl/Services/AgentControlProposalService.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
@@ -86,6 +93,7 @@ const makeService = (
 const makeContext = (
   principal: RpcPrincipal,
   service: AgentControlProposalServiceShape | null = makeService(),
+  nodeDirectory: AgentControlNodeDirectoryShape | null = null,
 ) => {
   const withAccess = <A, E, R>(
     access: WsRpcAccess,
@@ -99,6 +107,8 @@ const makeContext = (
     ownerEffect,
     ownerStreamEffect: ownerEffect,
     agentControlProposals: service === null ? Option.none() : Option.some(service),
+    agentControlNodeDirectory: nodeDirectory === null ? Option.none() : Option.some(nodeDirectory),
+    currentSessionId: principal.scopeId,
   } as unknown as WsRpcContext;
 };
 
@@ -206,6 +216,65 @@ it.effect("lets owner sessions list, read, and decide", () =>
     expect(acceptedWith[0]?.proposalId).toBe(proposalId);
     // The server stamps the decision time; clients never supply it.
     expect(Number.isNaN(Date.parse(acceptedWith[0]?.decidedAt ?? ""))).toBe(false);
+  }),
+);
+
+it.effect("passes the approving client's executor to the decision", () =>
+  Effect.gen(function* () {
+    const accepted: Array<AcceptAgentControlProposalRequest> = [];
+    const service = makeService({
+      accept: (input) =>
+        Effect.sync(() => {
+          accepted.push(input);
+          return toAgentControlProposalReceipt({ ...proposal, status: "approved" });
+        }),
+    });
+    const handlers = makeAgentControlHandlers(makeContext(directOwnerPrincipal, service));
+    const accept = getTestHandler<object, AgentControlProposalReceipt>(
+      handlers,
+      AGENT_CONTROL_WS_METHODS.acceptProposal,
+    );
+    const executeOnClient = { executorId: "00000000-0000-4000-8000-000000000003" };
+    yield* accept({ proposalId, executeOnClient });
+    yield* accept({ proposalId });
+    expect(accepted.map((input) => input.executeOnClient)).toEqual([executeOnClient, undefined]);
+  }),
+);
+
+it.effect("hands an owner's node directory to the directory, keyed by its session", () =>
+  Effect.gen(function* () {
+    const published: Array<PublishAgentControlNodeDirectoryInput> = [];
+    const directory: AgentControlNodeDirectoryShape = {
+      publish: (input) =>
+        Effect.sync(() => {
+          published.push(input);
+          return { accepted: input.nodes.length };
+        }),
+      list: () => Effect.succeed({ nodes: [] }),
+    };
+    const handlers = makeAgentControlHandlers(
+      makeContext(directOwnerPrincipal, makeService(), directory),
+    );
+    const result = yield* getTestHandler<object, { accepted: number }>(
+      handlers,
+      AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+    )({ nodes: [] });
+    expect(result).toEqual({ accepted: 0 });
+    expect(published).toEqual([{ publisherKey: "session-owner", nodes: [] }]);
+
+    // Until the node keeps a directory, publishing is refused as unsupported.
+    const placeholder = yield* AgentControlNodeDirectory.pipe(
+      Effect.provide(AgentControlNodeDirectoryPlaceholder),
+    );
+    for (const nodeDirectory of [placeholder, null]) {
+      const refused = yield* Effect.flip(
+        getTestHandler(
+          makeAgentControlHandlers(makeContext(directOwnerPrincipal, makeService(), nodeDirectory)),
+          AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+        )({ nodes: [] }),
+      );
+      expect(refused).toMatchObject({ _tag: "AgentControlRpcError", code: "unsupported" });
+    }
   }),
 );
 

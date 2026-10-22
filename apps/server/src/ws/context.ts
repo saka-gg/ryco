@@ -12,6 +12,12 @@ import { WorkspaceChangeSummary } from "../workspace/WorkspaceChangeSummary.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { ThreadFork } from "../threadFork/Services/ThreadFork.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
+import { AgentControlNodeDirectory } from "../agentControl/Services/AgentControlNodeDirectory.ts";
+import { GitNetwork } from "../projectCopy/Services/GitNetwork.ts";
+import { NodePaths } from "../projectCopy/Services/NodePaths.ts";
+import { ProjectExport } from "../projectCopy/Services/ProjectExport.ts";
+import { ProjectImports } from "../projectCopy/Services/ProjectImports.ts";
+import { ProjectTransfers } from "../projectCopy/Services/ProjectTransfers.ts";
 import {
   Cause,
   DateTime,
@@ -231,6 +237,16 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const agentControlExternalInstallations = yield* Effect.serviceOption(
       AgentControlExternalInstallationService,
     );
+    // Optional for the same route-test reason; production provides the cross-node project copy
+    // services and the node directory beneath the runtime services.
+    const projectCopy = {
+      nodePaths: yield* Effect.serviceOption(NodePaths),
+      gitNetwork: yield* Effect.serviceOption(GitNetwork),
+      projectExport: yield* Effect.serviceOption(ProjectExport),
+      projectTransfers: yield* Effect.serviceOption(ProjectTransfers),
+      projectImports: yield* Effect.serviceOption(ProjectImports),
+    };
+    const agentControlNodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
     const checkpointDiffQuery = yield* CheckpointDiffQuery;
     const keybindings = yield* Keybindings;
     const open = yield* Open;
@@ -1371,6 +1387,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       );
 
     return {
+      principal,
       storageService,
       workspaceLifecycle,
       workspaceChangeSummary,
@@ -1390,6 +1407,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       agentControlProposals,
       agentControlExternalIntegrations,
       agentControlExternalInstallations,
+      agentControlNodeDirectory,
+      projectCopy,
       checkpointDiffQuery,
       keybindings,
       open,

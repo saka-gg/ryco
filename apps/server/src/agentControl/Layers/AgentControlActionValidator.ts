@@ -56,6 +56,15 @@ const handsOverArtifacts = (plan: AgentControlActionPlan) =>
 const startsLocalTaskChats = (plan: AgentControlActionPlan) =>
   plan.kind === "createThreads" && plan.entries.some((entry) => entry.localTaskId !== undefined);
 
+/**
+ * `importProject` and `copyProjectToNode` are refused at every entry until their
+ * validation exists, so they never fall through to another kind's checks.
+ */
+const refuseCrossNodeProjectPlan = (plan: AgentControlActionPlan) =>
+  plan.kind === "importProject" || plan.kind === "copyProjectToNode"
+    ? fail("invalid-plan", "Cross-node project requests are not supported yet.")
+    : Effect.void;
+
 /** Privilege order of runtime modes: lower is less privileged. */
 export const agentControlRuntimeRank: Record<RuntimeMode, number> = {
   "approval-required": 0,
@@ -597,6 +606,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
 
   const validateSubmission: AgentControlActionValidatorShape["validateSubmission"] = (input) =>
     Effect.gen(function* () {
+      yield* refuseCrossNodeProjectPlan(input.plan);
       const { snapshot, providers } = yield* loadState([
         input.session.threadId,
         ...targetThreadIds(input.plan),
@@ -719,6 +729,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   const validateExternalSubmission: AgentControlActionValidatorShape["validateExternalSubmission"] =
     (input) =>
       Effect.gen(function* () {
+        yield* refuseCrossNodeProjectPlan(input.plan);
         if (
           input.plan.kind === "createThreads" &&
           input.plan.entries.some((entry) => entry.returnToOrigin)
@@ -916,6 +927,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
     options,
   ) =>
     Effect.gen(function* () {
+      yield* refuseCrossNodeProjectPlan(proposal.plan);
       if (
         proposal.plan.kind === "createThreads" &&
         proposal.plan.entries.some((entry) => entry.returnToOrigin) &&

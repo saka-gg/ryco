@@ -130,6 +130,14 @@
       "types": "./src/state/nodeUpdate/index.ts",
       "import": "./src/state/nodeUpdate/index.ts"
     },
+    "./state/nodes": {
+      "types": "./src/state/nodes/index.ts",
+      "import": "./src/state/nodes/index.ts"
+    },
+    "./projectCopy": {
+      "types": "./src/projectCopy/index.ts",
+      "import": "./src/projectCopy/index.ts"
+    },
     "./updates": {
       "types": "./src/updates/index.ts",
       "import": "./src/updates/index.ts"

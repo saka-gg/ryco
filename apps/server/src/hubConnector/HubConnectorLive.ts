@@ -659,8 +659,11 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               WsHostedRpcGroup,
               Layer.merge(
                 makeServerWsRpcLayer(
-                  relayRpcPrincipal(effectiveRole, channelId, () =>
-                    e2ee.mode() === "e2ee" ? channelAuthority : { trustSource: "none" },
+                  relayRpcPrincipal(
+                    effectiveRole,
+                    channelId,
+                    () => (e2ee.mode() === "e2ee" ? channelAuthority : { trustSource: "none" }),
+                    () => e2ee.mode() === "e2ee",
                   ),
                 ),
                 makeDeviceWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),

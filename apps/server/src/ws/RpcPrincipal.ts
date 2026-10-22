@@ -31,6 +31,11 @@ export interface RpcPrincipal {
   readonly canManageLocalAccess: boolean;
   /** Relay channels only; see {@link RelayChannelAuthority}. */
   readonly relayAuthority?: () => RelayChannelAuthority;
+  /**
+   * Relay channels only: whether the channel is end-to-end encrypted right now. A legacy
+   * plaintext channel, or one still negotiating, lets the Hub read what crosses it.
+   */
+  readonly relayChannelEncrypted?: () => boolean;
 }
 
 /**
@@ -59,10 +64,12 @@ export const relayRpcPrincipal = (
   effectiveRole: RelayEffectiveRole,
   channelId: string,
   relayAuthority: () => RelayChannelAuthority = () => ({ trustSource: "none" }),
+  relayChannelEncrypted: () => boolean = () => false,
 ): RpcPrincipal => ({
   transport: "relay",
   role: effectiveRole,
   scopeId: channelId,
   canManageLocalAccess: false,
   relayAuthority,
+  relayChannelEncrypted,
 });

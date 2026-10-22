@@ -19,6 +19,7 @@ import {
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadWindowStreamItem,
 } from "@ryco/contracts/orchestration";
+import type { ProjectImportSnapshot } from "@ryco/contracts/project-copy";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import {
   assertUsageContractVersion,
@@ -152,6 +153,27 @@ export interface WsRpcClient {
     readonly promoteChatPreview: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChatPreview>;
     readonly promoteChat: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChat>;
     readonly deleteChatFolder: RpcUnaryMethod<typeof WS_METHODS.projectsDeleteChatFolder>;
+    // Cross-node project copy; nodes advertise them with `capabilities.projectCopy`.
+    readonly pathHints: RpcUnaryMethod<typeof WS_METHODS.projectsPathHints>;
+    readonly previewDestination: RpcUnaryMethod<typeof WS_METHODS.projectsPreviewDestination>;
+    readonly checkRemoteAccess: RpcUnaryMethod<typeof WS_METHODS.projectsCheckRemoteAccess>;
+    readonly exportInspect: RpcUnaryMethod<typeof WS_METHODS.projectsExportInspect>;
+    readonly exportStart: RpcUnaryMethod<typeof WS_METHODS.projectsExportStart>;
+    readonly exportReadChunk: RpcUnaryMethod<typeof WS_METHODS.projectsExportReadChunk>;
+    readonly exportDispose: RpcUnaryMethod<typeof WS_METHODS.projectsExportDispose>;
+    readonly transferBegin: RpcUnaryMethod<typeof WS_METHODS.projectsTransferBegin>;
+    readonly transferAppend: RpcUnaryMethod<typeof WS_METHODS.projectsTransferAppend>;
+    readonly transferCommit: RpcUnaryMethod<typeof WS_METHODS.projectsTransferCommit>;
+    readonly transferAbort: RpcUnaryMethod<typeof WS_METHODS.projectsTransferAbort>;
+    readonly importStart: RpcUnaryMethod<typeof WS_METHODS.projectsImportStart>;
+    readonly subscribeImport: (
+      input: RpcInput<typeof WS_METHODS.projectsSubscribeImport>,
+      listener: (snapshot: ProjectImportSnapshot) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    readonly cancelImport: RpcUnaryMethod<typeof WS_METHODS.projectsCancelImport>;
+    readonly listImports: RpcUnaryMethod<typeof WS_METHODS.projectsListImports>;
+    readonly discardImport: RpcUnaryMethod<typeof WS_METHODS.projectsDiscardImport>;
   };
   readonly sessionImport: {
     readonly sources: RpcUnaryMethod<typeof WS_METHODS.sessionImportSources>;
@@ -162,6 +184,7 @@ export interface WsRpcClient {
   };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
+    readonly searchDirectories: RpcUnaryMethod<typeof WS_METHODS.filesystemSearchDirectories>;
   };
   readonly sourceControl: {
     readonly lookupRepository: RpcUnaryMethod<typeof WS_METHODS.sourceControlLookupRepository>;
@@ -540,6 +563,12 @@ export interface WsRpcClient {
     readonly subscribeProposals: RpcStreamMethod<
       typeof AGENT_CONTROL_WS_METHODS.subscribeProposals
     >;
+    readonly publishNodeDirectory: RpcUnaryMethod<
+      typeof AGENT_CONTROL_WS_METHODS.publishNodeDirectory
+    >;
+    readonly reportClientExecution: RpcUnaryMethod<
+      typeof AGENT_CONTROL_WS_METHODS.reportClientExecution
+    >;
     readonly listIntegrations: RpcUnaryNoArgMethod<
       typeof AGENT_CONTROL_WS_METHODS.listIntegrations
     >;
@@ -620,6 +649,42 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsPromoteChat](input)),
       deleteChatFolder: (input) =>
         transport.request((client) => client[WS_METHODS.projectsDeleteChatFolder](input)),
+      pathHints: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsPathHints](input)),
+      previewDestination: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsPreviewDestination](input)),
+      checkRemoteAccess: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsCheckRemoteAccess](input)),
+      exportInspect: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsExportInspect](input)),
+      exportStart: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsExportStart](input)),
+      exportReadChunk: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsExportReadChunk](input)),
+      exportDispose: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsExportDispose](input)),
+      transferBegin: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsTransferBegin](input)),
+      transferAppend: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsTransferAppend](input)),
+      transferCommit: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsTransferCommit](input)),
+      transferAbort: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsTransferAbort](input)),
+      importStart: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsImportStart](input)),
+      subscribeImport: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.projectsSubscribeImport](input),
+          listener,
+          { ...options, tag: WS_METHODS.projectsSubscribeImport },
+        ),
+      cancelImport: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsCancelImport](input)),
+      listImports: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsListImports](input)),
+      discardImport: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsDiscardImport](input)),
     },
     sessionImport: {
       sources: (input) =>
@@ -633,6 +698,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),
+      searchDirectories: (input) =>
+        transport.request((client) => client[WS_METHODS.filesystemSearchDirectories](input)),
     },
     sourceControl: {
       lookupRepository: (input) =>
@@ -1216,6 +1283,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           (client) => client[AGENT_CONTROL_WS_METHODS.subscribeProposals]({}),
           listener,
           { ...options, tag: AGENT_CONTROL_WS_METHODS.subscribeProposals },
+        ),
+      publishNodeDirectory: (input) =>
+        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.publishNodeDirectory](input)),
+      reportClientExecution: (input) =>
+        transport.request((client) =>
+          client[AGENT_CONTROL_WS_METHODS.reportClientExecution](input),
         ),
       listIntegrations: () =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.listIntegrations]({})),

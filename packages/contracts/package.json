@@ -136,6 +136,11 @@
       "import": "./src/orchestration.ts",
       "require": "./src/orchestration.ts"
     },
+    "./project-copy": {
+      "types": "./src/projectCopy.ts",
+      "import": "./src/projectCopy.ts",
+      "require": "./src/projectCopy.ts"
+    },
     "./provider-instance": {
       "types": "./src/providerInstance.ts",
       "import": "./src/providerInstance.ts",

@@ -585,8 +585,93 @@ function planPresentation(proposal: AgentControlProposal): {
         runtimeLabel: "explicit approval required",
         detailSections: deviceDetails(plan, ["Action: shut down this exact Simulator."]),
       };
+    // Minimal cards until the cross-node approval cards land: the exact plan, the setup
+    // command verbatim, and the follow-up thread's model and runtime.
+    case "importProject":
+      return {
+        actionLabel: "Set up project from repository",
+        targetLabel: plan.title,
+        runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
+        detailSections: [
+          {
+            heading: "Clone and register on this node",
+            lines: [
+              `Repository: ${plan.remoteUrl}`,
+              `Branch: ${plan.branch ?? "the repository's default branch"}`,
+              `Folder: ${plan.destinationPath}`,
+              ...projectSetupLines(plan.setup),
+            ],
+          },
+          ...projectFollowUpSections(plan.followUpThread),
+        ],
+      };
+    case "copyProjectToNode":
+      return {
+        actionLabel: `Copy project to ${plan.target.label}`,
+        targetLabel: plan.source.title,
+        runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
+        detailSections: [
+          {
+            heading: "Copy to another node",
+            lines: [
+              plan.source.kind === "project"
+                ? `Source project: ${plan.source.projectId}`
+                : `Source repository: ${plan.source.remoteUrl}`,
+              `Target node: ${plan.target.label} (${plan.target.environmentId})`,
+              plan.destination.kind === "default"
+                ? "Folder: the target's code directory"
+                : plan.destination.kind === "child-of-default"
+                  ? `Folder: ${plan.destination.name} in the target's code directory`
+                  : `Folder: ${plan.destination.path}`,
+              `Unpushed commits: ${plan.bringCommits ? "copied" : "not copied"}`,
+              `Uncommitted changes: ${plan.bringChanges ? "copied" : "not copied"}`,
+              `Project settings: ${plan.copySettings ? "copied" : "not copied"}`,
+              ...projectSetupLines(plan.setup),
+              "Runs in the Ryco app that approves it, which must be connected to the target node.",
+            ],
+          },
+          ...projectFollowUpSections(plan.followUpThread),
+        ],
+      };
   }
 }
+
+type ProjectFollowUpThread = Extract<
+  AgentControlProposal["plan"],
+  { kind: "importProject" | "copyProjectToNode" }
+>["followUpThread"];
+
+const projectFollowUpRuntimeLabel = (followUp: ProjectFollowUpThread): string | null =>
+  followUp === null ? null : `${followUp.runtimeMode} · ${followUp.envMode}`;
+
+const projectSetupLines = (
+  setup: Extract<AgentControlProposal["plan"], { kind: "importProject" }>["setup"],
+): ReadonlyArray<string> =>
+  setup === null
+    ? ["Setup command: none"]
+    : [
+        `Setup command: ${setup.command}`,
+        ...(setup.saveAsScript ? ["The command is also saved as the project's setup script."] : []),
+      ];
+
+const projectFollowUpSections = (
+  followUp: ProjectFollowUpThread,
+): ReadonlyArray<AgentControlDetailSection> =>
+  followUp === null
+    ? []
+    : [
+        {
+          heading: `Setup thread: ${followUp.title}`,
+          lines: [
+            followUp.modelSelection === null
+              ? "Model: the target's default"
+              : `Model: ${followUp.modelSelection.instanceId} · ${followUp.modelSelection.model}`,
+            `Runtime: ${followUp.runtimeMode} · ${followUp.envMode}`,
+            "The repository's provider hooks and settings run in that thread.",
+            `Prompt: ${followUp.prompt}`,
+          ],
+        },
+      ];
 
 function outcomeLabel(proposal: AgentControlProposal): string | null {
   const result = proposal.result;

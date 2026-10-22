@@ -14,7 +14,10 @@
  *
  *   - `AgentControlActionPlan` is a closed union discriminated by `kind`.
  *     New action kinds are added as new union members; previously persisted
- *     plans keep decoding unchanged.
+ *     plans keep decoding unchanged. On the wire, clients decode proposals
+ *     through `AgentControlPlanView`, which turns a kind they do not know into
+ *     `unsupported`; kinds outside `AGENT_CONTROL_LEGACY_PLAN_KINDS` go only to
+ *     clients that ask for that view.
  *   - Capabilities, risk tags, and error codes are open branded slugs (the
  *     same forward-compatibility posture as `ProviderDriverKind`): payloads
  *     persisted by a newer build must decode on this build. Authorization is
@@ -27,8 +30,11 @@
  */
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 import {
   CommandId,
+  EnvironmentId,
   MessageId,
   IsoDateTime,
   NonNegativeInt,
@@ -38,8 +44,20 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
+  UuidV4,
   rejectExcessProperties,
 } from "./baseSchemas.ts";
+import { ExecutionEnvironmentPlatformOs } from "./environment.ts";
+import {
+  GitBranchName,
+  PortableProjectId,
+  ProjectCopyAbsolutePath,
+  ProjectCopyDestinationPath,
+  ProjectCopyDirectoryName,
+  ProjectCopyRemoteUrl,
+  ProjectImportId,
+  ProjectImportSetup,
+} from "./projectCopy.ts";
 import {
   ModelSelection,
   AgentTokenMode,
@@ -229,6 +247,12 @@ export const AGENT_CONTROL_CAPABILITIES = {
   readLocalTasks: AgentControlCapability.make("local-tasks.read"),
   /** Create, edit, complete, delete (with approval) Tasks and start their chats. */
   manageLocalTasks: AgentControlCapability.make("local-tasks.manage"),
+  /** Clone a repository into a folder on this node and register it as a project. */
+  importProject: AgentControlCapability.make("projects.import"),
+  /** Copy a project or repository to another node, run by the approving client. */
+  copyProjectToNode: AgentControlCapability.make("projects.copy"),
+  /** Read the node directory owner clients publish. */
+  readNodes: AgentControlCapability.make("nodes.read"),
   externalListProjects: AgentControlCapability.make("external.projects.list"),
   externalCreateTask: AgentControlCapability.make("external.tasks.create"),
   externalReadTask: AgentControlCapability.make("external.tasks.read"),
@@ -275,8 +299,55 @@ export const AgentControlActionKind = Schema.Literals([
   "deviceStopRecording",
   "deviceShutdown",
   "deleteLocalTask",
+  "importProject",
+  "copyProjectToNode",
 ]);
 export type AgentControlActionKind = typeof AgentControlActionKind.Type;
+
+/**
+ * The plan kinds every client built before `importProject` and
+ * `copyProjectToNode` can decode. Proposals of any other kind reach only
+ * subscribers that ask for the tolerant plan view (`planView: "tolerant"`).
+ */
+export const AGENT_CONTROL_LEGACY_PLAN_KINDS = [
+  "createThreads",
+  "sendMessage",
+  "interruptThread",
+  "updateThread",
+  "createProject",
+  "updateProject",
+  "removeProject",
+  "workspaceLifecycle",
+  "changeSettings",
+  "createAutomation",
+  "updateAutomation",
+  "cancelAutomation",
+  "automationRun",
+  "deviceBoot",
+  "deviceAttach",
+  "deviceDetach",
+  "deviceInstall",
+  "deviceLaunch",
+  "deviceOpenUrl",
+  "deviceTap",
+  "deviceSwipe",
+  "devicePressButton",
+  "deviceStartRecording",
+  "deviceStopRecording",
+  "deviceShutdown",
+  "deleteLocalTask",
+] as const satisfies ReadonlyArray<AgentControlActionKind>;
+export type AgentControlLegacyPlanKind = (typeof AGENT_CONTROL_LEGACY_PLAN_KINDS)[number];
+
+/**
+ * Executed by the owner client that approves them (`acceptProposal` with
+ * `executeOnClient`), which reports the outcome back; never by the node's executor.
+ */
+export const AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS = [
+  "copyProjectToNode",
+] as const satisfies ReadonlyArray<AgentControlActionKind>;
+export type AgentControlClientExecutedPlanKind =
+  (typeof AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS)[number];
 
 export const AGENT_CONTROL_DEVICE_ACTION_KINDS = [
   "deviceBoot",
@@ -325,6 +396,8 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   deviceStopRecording: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceShutdown: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deleteLocalTask: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+  importProject: AGENT_CONTROL_CAPABILITIES.importProject,
+  copyProjectToNode: AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
 };
 
 export const AGENT_CONTROL_PLAN_VERSION = 1;
@@ -857,6 +930,109 @@ export const AgentControlDeleteLocalTaskPlan = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlDeleteLocalTaskPlan = typeof AgentControlDeleteLocalTaskPlan.Type;
 
+// ── Cross-node project plans ──────────────────────────────────────────
+
+/** A node label as owner clients publish it and approval cards show it. */
+export const AgentControlNodeLabel = TrimmedNonEmptyString.check(Schema.isMaxLength(120));
+export const AgentControlNodeEnvironmentId = EnvironmentId.check(Schema.isMaxLength(128));
+
+const agentControlFollowUpThreadFields = {
+  title: AgentControlTitle,
+  prompt: AgentControlPrompt,
+  /** At most the caller's own runtime mode. */
+  runtimeMode: RuntimeMode,
+  /** `worktree` when the caller is worktree-isolated. */
+  envMode: ThreadEnvMode,
+};
+
+/**
+ * Clones a repository into a folder on this node, registers it as a project and
+ * optionally runs a setup command and starts a thread that finishes setup. The
+ * node executes it; it is always approved by the user.
+ */
+export const AgentControlImportProjectPlan = Schema.Struct({
+  kind: Schema.Literal("importProject"),
+  projectId: PortableProjectId,
+  title: AgentControlTitle,
+  /** Absolute (bounded like `AgentControlWorkspaceRoot`), resolved and previewed when proposed. */
+  destinationPath: ProjectCopyAbsolutePath,
+  remoteUrl: ProjectCopyRemoteUrl,
+  branch: Schema.NullOr(GitBranchName),
+  /** The exact command that will run, shown verbatim on the card. */
+  setup: Schema.NullOr(ProjectImportSetup),
+  followUpThread: Schema.NullOr(
+    Schema.Struct({
+      ...agentControlFollowUpThreadFields,
+      /** Validated against this node's providers. */
+      modelSelection: ModelSelection,
+    }).pipe(rejectExcessProperties),
+  ),
+}).pipe(rejectExcessProperties);
+export type AgentControlImportProjectPlan = typeof AgentControlImportProjectPlan.Type;
+
+export const AgentControlCopyProjectSource = Schema.Union([
+  /** A non-chat project on this node, as it was when the proposal was built. */
+  Schema.Struct({
+    kind: Schema.Literal("project"),
+    projectId: ProjectId,
+    title: AgentControlTitle,
+    expectedUpdatedAt: IsoDateTime,
+  }).pipe(rejectExcessProperties),
+  Schema.Struct({
+    kind: Schema.Literal("repository"),
+    remoteUrl: ProjectCopyRemoteUrl,
+    title: AgentControlTitle,
+  }).pipe(rejectExcessProperties),
+]);
+export type AgentControlCopyProjectSource = typeof AgentControlCopyProjectSource.Type;
+
+/** Another node from the published node directory; never this node. */
+export const AgentControlCopyProjectTarget = Schema.Struct({
+  environmentId: AgentControlNodeEnvironmentId,
+  label: AgentControlNodeLabel,
+}).pipe(rejectExcessProperties);
+export type AgentControlCopyProjectTarget = typeof AgentControlCopyProjectTarget.Type;
+
+/** Resolved on the target by the approving client, from the target's path hints. */
+export const AgentControlCopyProjectDestination = Schema.Union([
+  /** `<defaultProjectDirectory>/<source folder name>`. */
+  Schema.Struct({ kind: Schema.Literal("default") }).pipe(rejectExcessProperties),
+  Schema.Struct({
+    kind: Schema.Literal("child-of-default"),
+    name: ProjectCopyDirectoryName,
+  }).pipe(rejectExcessProperties),
+  Schema.Struct({
+    kind: Schema.Literal("path"),
+    path: ProjectCopyDestinationPath,
+  }).pipe(rejectExcessProperties),
+]);
+export type AgentControlCopyProjectDestination = typeof AgentControlCopyProjectDestination.Type;
+
+/**
+ * Copies a project on this node (or a repository) to another node. The owner
+ * client that approves it runs the copy against the target and reports the
+ * outcome back; this node never executes it.
+ */
+export const AgentControlCopyProjectToNodePlan = Schema.Struct({
+  kind: Schema.Literal("copyProjectToNode"),
+  source: AgentControlCopyProjectSource,
+  target: AgentControlCopyProjectTarget,
+  destination: AgentControlCopyProjectDestination,
+  bringCommits: Schema.Boolean,
+  bringChanges: Schema.Boolean,
+  copySettings: Schema.Boolean,
+  /** The exact command; the client executor refuses to send a different one. */
+  setup: Schema.NullOr(ProjectImportSetup),
+  followUpThread: Schema.NullOr(
+    Schema.Struct({
+      ...agentControlFollowUpThreadFields,
+      /** Null takes the target's default, shown to the user before approval. */
+      modelSelection: Schema.NullOr(ModelSelection),
+    }).pipe(rejectExcessProperties),
+  ),
+}).pipe(rejectExcessProperties);
+export type AgentControlCopyProjectToNodePlan = typeof AgentControlCopyProjectToNodePlan.Type;
+
 export const AgentControlActionPlan = Schema.Union([
   AgentControlCreateThreadsPlan,
   AgentControlSendMessagePlan,
@@ -873,6 +1049,8 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlAutomationRunPlan,
   AgentControlDeviceActionPlan,
   AgentControlDeleteLocalTaskPlan,
+  AgentControlImportProjectPlan,
+  AgentControlCopyProjectToNodePlan,
 ]);
 export type AgentControlActionPlan = typeof AgentControlActionPlan.Type;
 
@@ -909,6 +1087,12 @@ export const AGENT_CONTROL_RISK_TAGS = {
   deviceLifecycle: AgentControlRiskTag.make("device-lifecycle"),
   deviceOpenWorld: AgentControlRiskTag.make("device-open-world"),
   removesLocalTask: AgentControlRiskTag.make("removes-local-task"),
+  /** The action changes another node than the one the agent runs on. */
+  crossNode: AgentControlRiskTag.make("cross-node"),
+  /** A setup command or a follow-up agent thread runs on the destination. */
+  runsCommands: AgentControlRiskTag.make("runs-commands"),
+  /** Unpushed commits or uncommitted changes leave the source node. */
+  copiesWorkspaceContent: AgentControlRiskTag.make("copies-workspace-content"),
 } as const;
 
 /**
@@ -1015,7 +1199,15 @@ export type AgentControlExecutionReceipt = typeof AgentControlExecutionReceipt.T
 export const AgentControlCompletedResult = Schema.Struct({
   outcome: Schema.Literal("completed"),
   createdThreadIds: Schema.optional(Schema.Array(ThreadId)),
+  /** Projects created on this node only. */
   createdProjectIds: Schema.optional(Schema.Array(ProjectId)),
+  /** The project a cross-node copy created on another node. */
+  remoteProject: Schema.optional(
+    Schema.Struct({
+      environmentId: EnvironmentId,
+      projectId: ProjectId,
+    }),
+  ),
   execution: Schema.optional(AgentControlExecutionReceipt),
   detail: Schema.optional(AgentControlResultMessage),
   completedAt: IsoDateTime,
@@ -1126,6 +1318,8 @@ export const AGENT_CONTROL_WS_METHODS = {
   connectMcpInstallation: "agentControl.connectMcpInstallation",
   repairMcpInstallation: "agentControl.repairMcpInstallation",
   disconnectMcpInstallation: "agentControl.disconnectMcpInstallation",
+  publishNodeDirectory: "agentControl.publishNodeDirectory",
+  reportClientExecution: "agentControl.reportClientExecution",
 } as const;
 
 /** Proposals shown in the live approval queue (everything non-terminal). */
@@ -1176,18 +1370,36 @@ export const AgentControlProposalQueue = Schema.Struct({
 });
 export type AgentControlProposalQueue = typeof AgentControlProposalQueue.Type;
 
+/**
+ * Sent by clients that decode proposals through the plan view below. Without it
+ * the server leaves out every proposal whose kind is not in
+ * `AGENT_CONTROL_LEGACY_PLAN_KINDS`, because older clients decode the closed plan
+ * union and drop their whole queue on the first kind they do not know. Older
+ * servers ignore the key.
+ */
+export const AgentControlPlanViewMode = Schema.Literal("tolerant");
+export type AgentControlPlanViewMode = typeof AgentControlPlanViewMode.Type;
+
 export const AgentControlListProposalsInput = Schema.Struct({
   /** Capped server-side at `AGENT_CONTROL_QUEUE_ACTIVE_LIMIT_MAX`. */
   activeLimit: Schema.optional(PositiveInt),
   /** Capped server-side at `AGENT_CONTROL_QUEUE_RECENT_LIMIT_MAX`. */
   recentLimit: Schema.optional(PositiveInt),
+  planView: Schema.optional(AgentControlPlanViewMode),
 });
 export type AgentControlListProposalsInput = typeof AgentControlListProposalsInput.Type;
 
 export const AgentControlGetProposalInput = Schema.Struct({
   proposalId: AgentControlProposalId,
+  /** Without it a proposal of a non-legacy kind reads as `{ proposal: null }`. */
+  planView: Schema.optional(AgentControlPlanViewMode),
 });
 export type AgentControlGetProposalInput = typeof AgentControlGetProposalInput.Type;
+
+export const AgentControlSubscribeProposalsInput = Schema.Struct({
+  planView: Schema.optional(AgentControlPlanViewMode),
+});
+export type AgentControlSubscribeProposalsInput = typeof AgentControlSubscribeProposalsInput.Type;
 
 export const AgentControlGetProposalResult = Schema.Struct({
   proposal: Schema.NullOr(AgentControlProposal),
@@ -1198,6 +1410,170 @@ export const AgentControlDecideProposalInput = Schema.Struct({
   proposalId: AgentControlProposalId,
 });
 export type AgentControlDecideProposalInput = typeof AgentControlDecideProposalInput.Type;
+
+/**
+ * Binds a client-executed proposal to the approving client. The client mints
+ * the id and keeps it; the node stores only its hash and never shows it.
+ */
+export const AgentControlClientExecutorId = UuidV4.pipe(
+  Schema.brand("AgentControlClientExecutorId"),
+);
+export type AgentControlClientExecutorId = typeof AgentControlClientExecutorId.Type;
+
+/**
+ * Accepting a client-executed kind (`AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS`)
+ * requires `executeOnClient`; every other kind ignores it. Re-accepting with the
+ * same executor returns the current receipt, a different one fails `conflict`.
+ */
+export const AgentControlAcceptProposalInput = Schema.Struct({
+  proposalId: AgentControlProposalId,
+  executeOnClient: Schema.optional(
+    Schema.Struct({ executorId: AgentControlClientExecutorId }).pipe(rejectExcessProperties),
+  ),
+});
+export type AgentControlAcceptProposalInput = typeof AgentControlAcceptProposalInput.Type;
+
+// ── Wire-only tolerant views ──────────────────────────────────────────
+//
+// The node keeps `AgentControlProposal`, `AgentControlActionPlan` and
+// `AgentControlActionKind` strict. Only the RPC success schemas of the
+// proposal reads, the stream and the decisions use these views, so a plan kind
+// a client does not know decodes as `unsupported` (rendered as "update Ryco to
+// review this request", Reject only) instead of failing the whole stream.
+
+/** A plan this build cannot decode. It is never accepted from this client. */
+export const AgentControlUnsupportedPlan = Schema.Struct({
+  kind: Schema.Literal("unsupported"),
+  /** The kind the node sent. */
+  originalKind: Schema.String,
+});
+export type AgentControlUnsupportedPlan = typeof AgentControlUnsupportedPlan.Type;
+
+/** Any other `{ kind: string, … }` object, kept only as its kind. */
+const AgentControlUnknownPlan = Schema.StructWithRest(Schema.Struct({ kind: Schema.String }), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]).pipe(
+  Schema.decodeTo(
+    AgentControlUnsupportedPlan,
+    SchemaTransformation.transform({
+      decode: (plan) => ({ kind: "unsupported" as const, originalKind: plan.kind }),
+      encode: (plan) => ({ kind: plan.originalKind }),
+    }),
+  ),
+);
+
+export const AgentControlPlanView = Schema.Union([AgentControlActionPlan, AgentControlUnknownPlan]);
+export type AgentControlPlanView = typeof AgentControlPlanView.Type;
+
+export const AgentControlProposalView = AgentControlProposal.mapFields(
+  Struct.assign({ plan: AgentControlPlanView }),
+);
+export type AgentControlProposalView = typeof AgentControlProposalView.Type;
+
+export const AgentControlProposalReceiptView = AgentControlProposalReceipt.mapFields(
+  Struct.assign({ actionKind: Schema.Union([AgentControlActionKind, Schema.String]) }),
+);
+export type AgentControlProposalReceiptView = typeof AgentControlProposalReceiptView.Type;
+
+export const AgentControlProposalQueueView = Schema.Struct({
+  revision: NonNegativeInt,
+  active: Schema.Array(AgentControlProposalView),
+  recent: Schema.Array(AgentControlProposalView),
+});
+export type AgentControlProposalQueueView = typeof AgentControlProposalQueueView.Type;
+
+export const AgentControlGetProposalResultView = Schema.Struct({
+  proposal: Schema.NullOr(AgentControlProposalView),
+});
+export type AgentControlGetProposalResultView = typeof AgentControlGetProposalResultView.Type;
+
+// ── Client-executed proposals ─────────────────────────────────────────
+
+export const AgentControlClientExecutionOutcome = Schema.Literals([
+  /** The import started on the target; extends the report deadline. */
+  "started",
+  "completed",
+  "failed",
+]);
+export type AgentControlClientExecutionOutcome = typeof AgentControlClientExecutionOutcome.Type;
+
+export const AGENT_CONTROL_CLIENT_EXECUTION_WARNINGS_MAX = 20;
+
+export const AgentControlClientExecutionResult = Schema.Struct({
+  /** Must equal the plan's `target.environmentId`. */
+  targetEnvironmentId: AgentControlNodeEnvironmentId,
+  projectId: ProjectId,
+  workspaceRoot: AgentControlWorkspaceRoot,
+  warnings: Schema.Array(AgentControlResultMessage).check(
+    Schema.isMaxLength(AGENT_CONTROL_CLIENT_EXECUTION_WARNINGS_MAX),
+  ),
+}).pipe(rejectExcessProperties);
+export type AgentControlClientExecutionResult = typeof AgentControlClientExecutionResult.Type;
+
+/**
+ * Accepted only from the executor the proposal was accepted with, while it is
+ * `executing`. Repeating an outcome returns the receipt.
+ */
+export const AgentControlReportClientExecutionInput = Schema.Struct({
+  proposalId: AgentControlProposalId,
+  executorId: AgentControlClientExecutorId,
+  outcome: AgentControlClientExecutionOutcome,
+  importId: Schema.optional(ProjectImportId),
+  result: Schema.optional(Schema.NullOr(AgentControlClientExecutionResult)),
+  /** Credential-redacted by the node before it is stored. */
+  error: Schema.optional(Schema.NullOr(AgentControlResultMessage)),
+}).pipe(rejectExcessProperties);
+export type AgentControlReportClientExecutionInput =
+  typeof AgentControlReportClientExecutionInput.Type;
+
+export const AgentControlReportClientExecutionResult = AgentControlProposalReceiptView;
+export type AgentControlReportClientExecutionResult = AgentControlProposalReceiptView;
+
+// ── Node directory ────────────────────────────────────────────────────
+
+export const AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES = 64;
+
+/** Whether a node implements project copy; `unknown` until a client connected to it. */
+export const AgentControlNodeProjectCopySupport = Schema.Literals(["yes", "no", "unknown"]);
+export type AgentControlNodeProjectCopySupport = typeof AgentControlNodeProjectCopySupport.Type;
+
+/** Non-secret facts about one node an owner client knows; never addresses or credentials. */
+export const AgentControlNodeDirectoryEntry = Schema.Struct({
+  environmentId: AgentControlNodeEnvironmentId,
+  label: AgentControlNodeLabel,
+  platformOs: ExecutionEnvironmentPlatformOs,
+  online: Schema.Boolean,
+  projectCopySupport: AgentControlNodeProjectCopySupport,
+}).pipe(rejectExcessProperties);
+export type AgentControlNodeDirectoryEntry = typeof AgentControlNodeDirectoryEntry.Type;
+
+/** Owner clients publish the nodes they hold owner on, on connect and when that list changes. */
+export const AgentControlPublishNodeDirectoryInput = Schema.Struct({
+  nodes: Schema.Array(AgentControlNodeDirectoryEntry).check(
+    Schema.isMaxLength(AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES),
+  ),
+}).pipe(rejectExcessProperties);
+export type AgentControlPublishNodeDirectoryInput =
+  typeof AgentControlPublishNodeDirectoryInput.Type;
+
+export const AgentControlPublishNodeDirectoryResult = Schema.Struct({
+  accepted: NonNegativeInt,
+});
+export type AgentControlPublishNodeDirectoryResult =
+  typeof AgentControlPublishNodeDirectoryResult.Type;
+
+/** The merged directory as the node serves it; `isThisNode` and the time are the node's. */
+export const AgentControlNodeDirectoryListEntry = Schema.Struct({
+  ...AgentControlNodeDirectoryEntry.fields,
+  isThisNode: Schema.Boolean,
+  lastPublishedAt: IsoDateTime,
+});
+export type AgentControlNodeDirectoryListEntry = typeof AgentControlNodeDirectoryListEntry.Type;
+
+export const AgentControlNodeDirectoryListResult = Schema.Struct({
+  nodes: Schema.Array(AgentControlNodeDirectoryListEntry),
+});
+export type AgentControlNodeDirectoryListResult = typeof AgentControlNodeDirectoryListResult.Type;
 
 export const AgentControlProposalStreamSnapshotEvent = Schema.Struct({
   version: Schema.Literal(1),
@@ -1227,6 +1603,27 @@ export const AgentControlProposalStreamEvent = Schema.Union([
   AgentControlProposalStreamProposalEvent,
 ]);
 export type AgentControlProposalStreamEvent = typeof AgentControlProposalStreamEvent.Type;
+
+export const AgentControlProposalStreamSnapshotEventView =
+  AgentControlProposalStreamSnapshotEvent.mapFields(
+    Struct.assign({ queue: AgentControlProposalQueueView }),
+  );
+export type AgentControlProposalStreamSnapshotEventView =
+  typeof AgentControlProposalStreamSnapshotEventView.Type;
+
+export const AgentControlProposalStreamProposalEventView =
+  AgentControlProposalStreamProposalEvent.mapFields(
+    Struct.assign({ proposal: AgentControlProposalView }),
+  );
+export type AgentControlProposalStreamProposalEventView =
+  typeof AgentControlProposalStreamProposalEventView.Type;
+
+/** What `agentControl.subscribeProposals` sends on the wire. */
+export const AgentControlProposalStreamEventView = Schema.Union([
+  AgentControlProposalStreamSnapshotEventView,
+  AgentControlProposalStreamProposalEventView,
+]);
+export type AgentControlProposalStreamEventView = typeof AgentControlProposalStreamEventView.Type;
 
 /**
  * Bounded RPC failure for the approval surface. Carries only the decision
@@ -1295,6 +1692,20 @@ export const AgentControlOperationResources = Schema.Struct({
 });
 export type AgentControlOperationResources = typeof AgentControlOperationResources.Type;
 
+/**
+ * A client-executed operation's binding to the client that approved it. Only
+ * the executor id's hash is kept, and none of it reaches the proposal stream.
+ */
+export const AgentControlClientExecutionState = Schema.Struct({
+  /** sha-256 hex of the `AgentControlClientExecutorId`. */
+  executorIdHash: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  /** The operation fails when no report arrives by then; `started` extends it. */
+  deadlineAt: IsoDateTime,
+  importId: Schema.NullOr(ProjectImportId),
+  targetEnvironmentId: AgentControlNodeEnvironmentId,
+});
+export type AgentControlClientExecutionState = typeof AgentControlClientExecutionState.Type;
+
 export const AgentControlOperationState = Schema.Struct({
   completedSteps: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(128))).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1327,6 +1738,7 @@ export const AgentControlOperationState = Schema.Struct({
   ),
   note: Schema.optional(AgentControlResultMessage),
   device: Schema.optional(AgentControlDeviceExecutionMetadata),
+  clientExecution: Schema.optional(AgentControlClientExecutionState),
 });
 export type AgentControlOperationState = typeof AgentControlOperationState.Type;
 

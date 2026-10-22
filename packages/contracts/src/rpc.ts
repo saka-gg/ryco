@@ -90,13 +90,19 @@ import * as RpcGroup from "effect/rpc/RpcGroup";
 import { OpenError, OpenInEditorInput } from "./editor.ts";
 import {
   AGENT_CONTROL_WS_METHODS,
+  AgentControlAcceptProposalInput,
   AgentControlDecideProposalInput,
   AgentControlGetProposalInput,
-  AgentControlGetProposalResult,
+  AgentControlGetProposalResultView,
   AgentControlListProposalsInput,
-  AgentControlProposalQueue,
-  AgentControlProposalReceipt,
-  AgentControlProposalStreamEvent,
+  AgentControlProposalQueueView,
+  AgentControlProposalReceiptView,
+  AgentControlProposalStreamEventView,
+  AgentControlPublishNodeDirectoryInput,
+  AgentControlPublishNodeDirectoryResult,
+  AgentControlReportClientExecutionInput,
+  AgentControlReportClientExecutionResult,
+  AgentControlSubscribeProposalsInput,
   AgentControlRpcError,
   AgentControlExternalIntegrationCreateInput,
   AgentControlExternalIntegrationDeleteResult,
@@ -169,6 +175,38 @@ import {
   FilesystemBrowseResult,
   FilesystemBrowseError,
 } from "./filesystem.ts";
+import {
+  FilesystemSearchDirectoriesInput,
+  FilesystemSearchDirectoriesResult,
+  NodePathHints,
+  NodePathHintsInput,
+  ProjectCancelImportInput,
+  ProjectCheckRemoteAccessInput,
+  ProjectCheckRemoteAccessResult,
+  ProjectCopyError,
+  ProjectDestinationPreview,
+  ProjectDestinationPreviewInput,
+  ProjectDiscardImportInput,
+  ProjectDiscardImportResult,
+  ProjectExportDisposeInput,
+  ProjectExportInspectInput,
+  ProjectExportInspection,
+  ProjectExportReadChunkInput,
+  ProjectExportReadChunkResult,
+  ProjectExportResult,
+  ProjectExportStartInput,
+  ProjectImportSnapshot,
+  ProjectImportStartInput,
+  ProjectListImportsInput,
+  ProjectListImportsResult,
+  ProjectSubscribeImportInput,
+  ProjectTransferAbortInput,
+  ProjectTransferAppendInput,
+  ProjectTransferBeginInput,
+  ProjectTransferCommitInput,
+  ProjectTransferCommitResult,
+  ProjectTransferProgress,
+} from "./projectCopy.ts";
 import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
@@ -442,6 +480,25 @@ export const WS_METHODS = {
   projectsReadFileBinary: "projects.readFileBinary",
   projectsWriteFile: "projects.writeFile",
   projectsStageFileReference: "projects.stageFileReference",
+
+  // Cross-node project copy (announced by `capabilities.projectCopy`)
+  projectsPathHints: "projects.pathHints",
+  filesystemSearchDirectories: "filesystem.searchDirectories",
+  projectsPreviewDestination: "projects.previewDestination",
+  projectsCheckRemoteAccess: "projects.checkRemoteAccess",
+  projectsExportInspect: "projects.exportInspect",
+  projectsExportStart: "projects.exportStart",
+  projectsExportReadChunk: "projects.exportReadChunk",
+  projectsExportDispose: "projects.exportDispose",
+  projectsTransferBegin: "projects.transferBegin",
+  projectsTransferAppend: "projects.transferAppend",
+  projectsTransferCommit: "projects.transferCommit",
+  projectsTransferAbort: "projects.transferAbort",
+  projectsImportStart: "projects.importStart",
+  projectsSubscribeImport: "projects.subscribeImport",
+  projectsCancelImport: "projects.cancelImport",
+  projectsListImports: "projects.listImports",
+  projectsDiscardImport: "projects.discardImport",
 
   // Chat attachment methods
   chatAttachmentsCreateFileUpload: "chatAttachments.createFileUpload",
@@ -1775,6 +1832,113 @@ export const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   error: Schema.Union([FilesystemBrowseError, AuthRpcError]),
 });
 
+// Cross-node project copy: reads and scratch transfers on either node, the
+// durable import job on the destination.
+const ProjectCopyRpcError = Schema.Union([ProjectCopyError, AuthRpcError]);
+
+export const WsProjectsPathHintsRpc = Rpc.make(WS_METHODS.projectsPathHints, {
+  payload: NodePathHintsInput,
+  success: NodePathHints,
+  error: ProjectCopyRpcError,
+});
+
+export const WsFilesystemSearchDirectoriesRpc = Rpc.make(WS_METHODS.filesystemSearchDirectories, {
+  payload: FilesystemSearchDirectoriesInput,
+  success: FilesystemSearchDirectoriesResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsPreviewDestinationRpc = Rpc.make(WS_METHODS.projectsPreviewDestination, {
+  payload: ProjectDestinationPreviewInput,
+  success: ProjectDestinationPreview,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsCheckRemoteAccessRpc = Rpc.make(WS_METHODS.projectsCheckRemoteAccess, {
+  payload: ProjectCheckRemoteAccessInput,
+  success: ProjectCheckRemoteAccessResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsExportInspectRpc = Rpc.make(WS_METHODS.projectsExportInspect, {
+  payload: ProjectExportInspectInput,
+  success: ProjectExportInspection,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsExportStartRpc = Rpc.make(WS_METHODS.projectsExportStart, {
+  payload: ProjectExportStartInput,
+  success: ProjectExportResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsExportReadChunkRpc = Rpc.make(WS_METHODS.projectsExportReadChunk, {
+  payload: ProjectExportReadChunkInput,
+  success: ProjectExportReadChunkResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsExportDisposeRpc = Rpc.make(WS_METHODS.projectsExportDispose, {
+  payload: ProjectExportDisposeInput,
+  success: EmptyRpcResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsTransferBeginRpc = Rpc.make(WS_METHODS.projectsTransferBegin, {
+  payload: ProjectTransferBeginInput,
+  success: ProjectTransferProgress,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsTransferAppendRpc = Rpc.make(WS_METHODS.projectsTransferAppend, {
+  payload: ProjectTransferAppendInput,
+  success: ProjectTransferProgress,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsTransferCommitRpc = Rpc.make(WS_METHODS.projectsTransferCommit, {
+  payload: ProjectTransferCommitInput,
+  success: ProjectTransferCommitResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsTransferAbortRpc = Rpc.make(WS_METHODS.projectsTransferAbort, {
+  payload: ProjectTransferAbortInput,
+  success: EmptyRpcResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsImportStartRpc = Rpc.make(WS_METHODS.projectsImportStart, {
+  payload: ProjectImportStartInput,
+  success: ProjectImportSnapshot,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsSubscribeImportRpc = Rpc.make(WS_METHODS.projectsSubscribeImport, {
+  payload: ProjectSubscribeImportInput,
+  success: ProjectImportSnapshot,
+  error: ProjectCopyRpcError,
+  stream: true,
+});
+
+export const WsProjectsCancelImportRpc = Rpc.make(WS_METHODS.projectsCancelImport, {
+  payload: ProjectCancelImportInput,
+  success: ProjectImportSnapshot,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsListImportsRpc = Rpc.make(WS_METHODS.projectsListImports, {
+  payload: ProjectListImportsInput,
+  success: ProjectListImportsResult,
+  error: ProjectCopyRpcError,
+});
+
+export const WsProjectsDiscardImportRpc = Rpc.make(WS_METHODS.projectsDiscardImport, {
+  payload: ProjectDiscardImportInput,
+  success: ProjectDiscardImportResult,
+  error: ProjectCopyRpcError,
+});
+
 export const WsDeviceReadRpc = Rpc.make(DEVICE_WS_METHODS.read, {
   payload: DeviceReadRequest,
   success: DeviceReadResponse,
@@ -2348,37 +2512,57 @@ export const WsAutomationCommandRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.automati
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
+// The proposal reads, the stream and the decisions answer with the tolerant
+// views, so a plan kind this build does not know arrives as `unsupported`.
 export const WsAgentControlListProposalsRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.listProposals, {
   payload: AgentControlListProposalsInput,
-  success: AgentControlProposalQueue,
+  success: AgentControlProposalQueueView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlGetProposalRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.getProposal, {
   payload: AgentControlGetProposalInput,
-  success: AgentControlGetProposalResult,
+  success: AgentControlGetProposalResultView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlAcceptProposalRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.acceptProposal, {
-  payload: AgentControlDecideProposalInput,
-  success: AgentControlProposalReceipt,
+  payload: AgentControlAcceptProposalInput,
+  success: AgentControlProposalReceiptView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlRejectProposalRpc = Rpc.make(AGENT_CONTROL_WS_METHODS.rejectProposal, {
   payload: AgentControlDecideProposalInput,
-  success: AgentControlProposalReceipt,
+  success: AgentControlProposalReceiptView,
   error: Schema.Union([AgentControlRpcError, AuthRpcError]),
 });
 
 export const WsAgentControlSubscribeProposalsRpc = Rpc.make(
   AGENT_CONTROL_WS_METHODS.subscribeProposals,
   {
-    payload: Schema.Struct({}),
-    success: AgentControlProposalStreamEvent,
+    payload: AgentControlSubscribeProposalsInput,
+    success: AgentControlProposalStreamEventView,
     error: Schema.Union([AgentControlRpcError, AuthRpcError]),
     stream: true,
+  },
+);
+
+export const WsAgentControlReportClientExecutionRpc = Rpc.make(
+  AGENT_CONTROL_WS_METHODS.reportClientExecution,
+  {
+    payload: AgentControlReportClientExecutionInput,
+    success: AgentControlReportClientExecutionResult,
+    error: Schema.Union([AgentControlRpcError, AuthRpcError]),
+  },
+);
+
+export const WsAgentControlPublishNodeDirectoryRpc = Rpc.make(
+  AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+  {
+    payload: AgentControlPublishNodeDirectoryInput,
+    success: AgentControlPublishNodeDirectoryResult,
+    error: Schema.Union([AgentControlRpcError, AuthRpcError]),
   },
 );
 
@@ -2601,6 +2785,23 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsChatAttachmentsReadChunkRpc
   | typeof WsShellOpenInEditorRpc
   | typeof WsFilesystemBrowseRpc
+  | typeof WsProjectsPathHintsRpc
+  | typeof WsFilesystemSearchDirectoriesRpc
+  | typeof WsProjectsPreviewDestinationRpc
+  | typeof WsProjectsCheckRemoteAccessRpc
+  | typeof WsProjectsExportInspectRpc
+  | typeof WsProjectsExportStartRpc
+  | typeof WsProjectsExportReadChunkRpc
+  | typeof WsProjectsExportDisposeRpc
+  | typeof WsProjectsTransferBeginRpc
+  | typeof WsProjectsTransferAppendRpc
+  | typeof WsProjectsTransferCommitRpc
+  | typeof WsProjectsTransferAbortRpc
+  | typeof WsProjectsImportStartRpc
+  | typeof WsProjectsSubscribeImportRpc
+  | typeof WsProjectsCancelImportRpc
+  | typeof WsProjectsListImportsRpc
+  | typeof WsProjectsDiscardImportRpc
   | typeof WsSubscribeVcsStatusRpc
   | typeof WsVcsPullRpc
   | typeof WsVcsRefreshStatusRpc
@@ -2663,6 +2864,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsAgentControlAcceptProposalRpc
   | typeof WsAgentControlRejectProposalRpc
   | typeof WsAgentControlSubscribeProposalsRpc
+  | typeof WsAgentControlReportClientExecutionRpc
+  | typeof WsAgentControlPublishNodeDirectoryRpc
   | typeof WsAgentControlListIntegrationsRpc
   | typeof WsAgentControlCreateIntegrationRpc
   | typeof WsAgentControlUpdateIntegrationRpc
@@ -2822,6 +3025,23 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsChatAttachmentsReadChunkRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
+  WsProjectsPathHintsRpc,
+  WsFilesystemSearchDirectoriesRpc,
+  WsProjectsPreviewDestinationRpc,
+  WsProjectsCheckRemoteAccessRpc,
+  WsProjectsExportInspectRpc,
+  WsProjectsExportStartRpc,
+  WsProjectsExportReadChunkRpc,
+  WsProjectsExportDisposeRpc,
+  WsProjectsTransferBeginRpc,
+  WsProjectsTransferAppendRpc,
+  WsProjectsTransferCommitRpc,
+  WsProjectsTransferAbortRpc,
+  WsProjectsImportStartRpc,
+  WsProjectsSubscribeImportRpc,
+  WsProjectsCancelImportRpc,
+  WsProjectsListImportsRpc,
+  WsProjectsDiscardImportRpc,
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
@@ -2884,6 +3104,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsAgentControlAcceptProposalRpc,
   WsAgentControlRejectProposalRpc,
   WsAgentControlSubscribeProposalsRpc,
+  WsAgentControlReportClientExecutionRpc,
+  WsAgentControlPublishNodeDirectoryRpc,
   WsAgentControlListIntegrationsRpc,
   WsAgentControlCreateIntegrationRpc,
   WsAgentControlUpdateIntegrationRpc,

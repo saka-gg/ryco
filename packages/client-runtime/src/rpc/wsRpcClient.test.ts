@@ -4,6 +4,7 @@ import type {
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts";
+import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import { Effect } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -278,4 +279,47 @@ it("routes thread forks to the threads.fork wire method", async () => {
   } as Parameters<typeof client.threads.fork>[0];
   await expect(client.threads.fork(input)).resolves.toMatchObject({ threadId: "fork-thread" });
   expect(fork).toHaveBeenCalledWith(input);
+});
+
+it("routes cross-node project copy calls to their wire methods", async () => {
+  const pathHints = vi.fn(() => Effect.succeed({ homeDirectory: "/home/user" }));
+  const searchDirectories = vi.fn(() => Effect.succeed({ matches: [] }));
+  const transferAppend = vi.fn(() => Effect.succeed({ transferId: "t", receivedBytes: 4 }));
+  const publishNodeDirectory = vi.fn(() => Effect.succeed({ accepted: 0 }));
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(
+        invoke({
+          [WS_METHODS.projectsPathHints]: pathHints,
+          [WS_METHODS.filesystemSearchDirectories]: searchDirectories,
+          [WS_METHODS.projectsTransferAppend]: transferAppend,
+          [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: publishNodeDirectory,
+        }),
+      ),
+    subscribe: vi.fn(() => () => undefined),
+  };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  await client.projects.pathHints({});
+  await client.filesystem.searchDirectories({ query: "app" });
+  const append = { transferId: "t", offset: 0, dataBase64: "AAAA" } as Parameters<
+    typeof client.projects.transferAppend
+  >[0];
+  await expect(client.projects.transferAppend(append)).resolves.toEqual({
+    transferId: "t",
+    receivedBytes: 4,
+  });
+  await client.agentControl.publishNodeDirectory({ nodes: [] });
+  expect(pathHints).toHaveBeenCalledWith({});
+  expect(searchDirectories).toHaveBeenCalledWith({ query: "app" });
+  expect(transferAppend).toHaveBeenCalledWith(append);
+  expect(publishNodeDirectory).toHaveBeenCalledWith({ nodes: [] });
+
+  const listener = vi.fn();
+  const importId = "00000000-0000-4000-8000-000000000000" as Parameters<
+    typeof client.projects.subscribeImport
+  >[0]["importId"];
+  client.projects.subscribeImport({ importId }, listener);
+  expect(transport.subscribe).toHaveBeenCalledWith(expect.any(Function), listener, {
+    tag: WS_METHODS.projectsSubscribeImport,
+  });
 });
