@@ -15,6 +15,11 @@ import type {
   ProjectSelectorList,
 } from "./ProjectSelectorBody";
 import { ProjectFavicon } from "./ProjectFavicon";
+import {
+  clearProjectSelectorOpenRequest,
+  isProjectSelectorOpenRequested,
+  useProjectNodesDialogStore,
+} from "./projectNodes/projectNodesDialogStore";
 import { Combobox, ComboboxInput, ComboboxPopup, ComboboxTrigger } from "./ui/combobox";
 
 /**
@@ -32,6 +37,12 @@ export interface ProjectSwitcherProps {
   readonly draftId: DraftId;
   readonly label: string;
   readonly className?: string;
+  /**
+   * Opens when something asks to show this project in the selector
+   * (`requestProjectSelectorOpen`, the add-project dialog's done step). Only
+   * the new-thread hero's headline instance listens, so one selector opens.
+   */
+  readonly openOnRequest?: boolean;
 }
 
 // The list (logical projects across nodes, node catalog, chips, footer) loads
@@ -79,16 +90,29 @@ export function ProjectSwitcher({
   draftId,
   label,
   className,
+  openOnRequest = false,
 }: ProjectSwitcherProps) {
   const isChatDraft = useComposerDraftStore((store) =>
     isPendingChatDraft(store.draftThreadsByThreadKey[draftId]),
   );
-  const activeProjectSelector = useMemo(
-    () => createProjectSelectorByRef(scopeProjectRef(activeProjectEnvironmentId, activeProjectId)),
+  const activeProjectRef = useMemo(
+    () => scopeProjectRef(activeProjectEnvironmentId, activeProjectId),
     [activeProjectEnvironmentId, activeProjectId],
+  );
+  const activeProjectSelector = useMemo(
+    () => createProjectSelectorByRef(activeProjectRef),
+    [activeProjectRef],
   );
   const activeProject = useStore(activeProjectSelector);
   const [open, setOpen] = useState(false);
+  // "Show in project selector" (the add-project dialog) opens it once, as a
+  // click would; closing it clears the request.
+  const openRequested = useProjectNodesDialogStore(
+    (state) =>
+      openOnRequest &&
+      isProjectSelectorOpenRequested(state.projectSelectorOpenRequest, activeProjectRef),
+  );
+  if (openRequested && !open) setOpen(true);
   const [query, setQuery] = useState("");
   const [list, setList] = useState(NO_LIST);
   const [loadFailed, setLoadFailed] = useState<{ readonly retry: () => void } | null>(null);
@@ -101,10 +125,11 @@ export function ProjectSwitcher({
 
   const close = useCallback(() => {
     setOpen(false);
+    clearProjectSelectorOpenRequest(activeProjectRef);
     setQuery("");
     // The next open loads again (see `useLazyComponentReady`).
     setLoadFailed(null);
-  }, []);
+  }, [activeProjectRef]);
   const handleOpenChange = useCallback(
     (nextOpen: boolean) => {
       if (nextOpen) setOpen(true);

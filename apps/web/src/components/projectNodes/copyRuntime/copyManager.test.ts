@@ -56,6 +56,7 @@ import {
   setProjectCopyRuntimeForTests,
   showProjectCopyProgress,
   startManagedProjectCopy,
+  trackProjectImport,
   useProjectCopyStore,
   viewCopiedProject,
   type ProjectCopyRuntime,
@@ -77,6 +78,14 @@ const plan = {
   },
   target: { environmentId: target, label: "Mac mini", pathSeparator: "/" },
   destinationPath: "/Users/me/Code/ryco",
+  choices: {
+    mode: "clone",
+    bringCommits: false,
+    bringChanges: false,
+    ignoredPaths: [],
+    copySettings: true,
+    copyAvatar: false,
+  },
   sendFilesFallback: true,
 } as unknown as ProjectCopyRunPlan;
 
@@ -218,6 +227,58 @@ afterEach(() => {
 });
 
 describe("copyManager", () => {
+  it("badges the copied checkout's sidebar row while the copy runs outside the dialog", async () => {
+    const copy = await startManagedProjectCopy({ plan, toast: false });
+    const sourceKey = `${source}:project-source`;
+    // The dialog shows it: no badge yet.
+    expect(useProjectNodesDialogStore.getState().copyBadges).toEqual({});
+
+    showProjectCopyProgress(copy.copyId);
+    expect(useProjectNodesDialogStore.getState().copyBadges).toEqual({ [sourceKey]: null });
+    fake.runs[0]!.emitProgress({ phase: "upload", uploadedBytes: 3, totalBytes: 10 });
+    expect(useProjectNodesDialogStore.getState().copyBadges).toEqual({ [sourceKey]: 30 });
+
+    fake.runs[0]!.settle({ progress: progress(copy.copyId, { phase: "done" }) });
+    await copy.done;
+    expect(useProjectNodesDialogStore.getState().copyBadges).toEqual({});
+  });
+
+  it("follows an import the add-project dialog handed over, worded as a clone", async () => {
+    const importId = ProjectImportId.make(crypto.randomUUID());
+    const copy = await trackProjectImport({
+      environmentId: target,
+      importId,
+      projectId: newProjectId,
+      title: "codex",
+      action: "clone",
+    });
+
+    const run = fake.runs[0]!;
+    // Only following: no plan, the record says the node accepted the import.
+    expect(run.input.plan).toBeNull();
+    expect(run.input.resume).toMatchObject({
+      targetEnvironmentId: target,
+      importId,
+      projectId: newProjectId,
+      sourceEnvironmentId: null,
+      stage: "importing",
+    });
+    expect(useProjectCopyStore.getState().entries[copy.copyId]).toMatchObject({
+      title: "codex",
+      action: "clone",
+      background: false,
+      sourceRef: null,
+    });
+    expect(storedRecords()).toEqual([
+      expect.objectContaining({ copyId: copy.copyId, stage: "importing" }),
+    ]);
+    expect(toasts.showProjectCopyProgressToast).toHaveBeenCalledWith(
+      copy.copyId,
+      expect.objectContaining({ title: "Cloning codex to Mac mini" }),
+      expect.anything(),
+    );
+  });
+
   it("starts a copy, keeps its progress in the store and persists its record", async () => {
     const copy = await startManagedProjectCopy({ plan });
 

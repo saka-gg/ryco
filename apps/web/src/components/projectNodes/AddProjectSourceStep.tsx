@@ -30,7 +30,6 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
 import {
   buildRepositorySuggestions,
-  displayNodePath,
   isGitRemoteUrlInput,
   type AddProjectCopySource,
   type AddProjectSourceKind,
@@ -49,6 +48,7 @@ import {
   type AddProjectRemoteSource,
   type ResolvedRemoteRepository,
 } from "./addProjectSources";
+import { displayNodePath } from "./folderPicker.logic";
 import { NodeBadge } from "./NodePicker";
 
 const REPOSITORY_SEARCH_DEBOUNCE_MS = 200;

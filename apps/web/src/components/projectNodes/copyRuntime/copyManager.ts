@@ -3,14 +3,17 @@
 //          retries, cancels and detaches them, keeps each copy's progress in a
 //          small store (toasts, the copy dialog, the Projects page's Copies
 //          block), persists the ids-only job records, shows the progress and
-//          result toasts, and reports Agent Control copies back to the node
-//          their proposal lives on.
+//          result toasts, reports Agent Control copies back to the node
+//          their proposal lives on, follows the clones and links the
+//          add-project dialog hands over when it closes, and publishes the
+//          sidebar's badge of the checkouts being copied.
 // Layer: Web copy runtime, a module-level singleton loaded on demand. The
 //        coordinator (`@ryco/client-runtime/projectCopy` run/plan) and the
 //        node IO load with the first copy; reading the store and the records
 //        does not load them.
 
 import {
+  createProjectCopyJobRecord,
   decodeProjectCopyJobRecords,
   projectCopyResumeKind,
   reduceProjectCopyJobRecord,
@@ -30,8 +33,11 @@ import {
   type AgentControlProposalId,
   type AgentControlReportClientExecutionInput,
   type EnvironmentId,
+  type ProjectId,
   type ScopedProjectRef,
 } from "@ryco/contracts";
+import { scopedProjectKey } from "@ryco/client-runtime/scoped";
+import type { ProjectImportId } from "@ryco/contracts/project-copy";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
@@ -42,8 +48,14 @@ import { selectProjectByRef, useStore } from "../../../store";
 import {
   markProjectCopiesActive,
   PROJECT_COPY_RECORDS_STORAGE_KEY,
+  publishProjectCopyBadges,
 } from "../projectNodesDialogStore";
-import { projectCopyView, type ProjectCopyLabels } from "./projectCopyProgress.logic";
+import {
+  projectCopyPercent,
+  projectCopyView,
+  type ProjectCopyAction,
+  type ProjectCopyLabels,
+} from "./projectCopyProgress.logic";
 import {
   dismissProjectCopyToast,
   showProjectCopyProgressToast,
@@ -87,6 +99,10 @@ export interface ProjectCopyEntry {
   /** The plan is still in memory, so a failure's retry can run here. */
   readonly hasPlan: boolean;
   readonly agentControl: ProjectCopyAgentControlContext | null;
+  /** How the toasts word it: a copy, a clone or a link. */
+  readonly action: ProjectCopyAction;
+  /** The checkout being copied, when known: the sidebar badges its project's row. */
+  readonly sourceRef: ScopedProjectRef | null;
 }
 
 export interface ProjectCopyStoreState {
@@ -106,6 +122,8 @@ export interface StartProjectCopyOptions {
    * either.
    */
   readonly toast?: boolean;
+  /** The checkout the copy starts from, when the plan does not name it (an old source). */
+  readonly sourceRef?: ScopedProjectRef | null;
 }
 
 export interface RetryProjectCopyOptions {
@@ -182,7 +200,25 @@ function persistRecord(record: ProjectCopyJobRecord): void {
 }
 
 function labelsOf(entry: ProjectCopyEntry): ProjectCopyLabels {
-  return { title: entry.title, sourceLabel: entry.sourceLabel, targetLabel: entry.targetLabel };
+  return {
+    title: entry.title,
+    sourceLabel: entry.sourceLabel,
+    targetLabel: entry.targetLabel,
+    action: entry.action,
+  };
+}
+
+/** A plan's wording: linking a checkout, cloning a remote with no source node, else a copy. */
+function actionOfPlan(plan: ProjectCopyRunPlan | null): ProjectCopyAction {
+  if (plan === null) return "copy";
+  if (plan.choices.mode === "link") return "link";
+  return plan.source.kind === "clone-only" && plan.source.label === null ? "clone" : "copy";
+}
+
+function sourceRefOf(record: ProjectCopyJobRecord): ScopedProjectRef | null {
+  return record.sourceEnvironmentId !== null && record.sourceProjectId !== null
+    ? { environmentId: record.sourceEnvironmentId, projectId: record.sourceProjectId }
+    : null;
 }
 
 function nodeLabel(environmentId: EnvironmentId | null): string | null {
@@ -360,6 +396,10 @@ interface LaunchInput {
   readonly agentControl: ProjectCopyAgentControlContext | null;
   readonly background: boolean;
   readonly inDialog: boolean;
+  /** Overrides what the plan (or, without one, the target's import) says. */
+  readonly title?: string | null;
+  readonly action?: ProjectCopyAction;
+  readonly sourceRef?: ScopedProjectRef | null;
 }
 
 async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
@@ -435,7 +475,7 @@ async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
   const progress = run.getProgress();
   const entry: ProjectCopyEntry = {
     copyId,
-    title: plan?.title ?? progress.importSnapshot?.title ?? null,
+    title: input.title ?? plan?.title ?? progress.importSnapshot?.title ?? null,
     sourceLabel: plan?.source.label ?? nodeLabel(record.sourceEnvironmentId),
     targetLabel: plan?.target.label ?? nodeLabel(record.targetEnvironmentId),
     targetEnvironmentId: record.targetEnvironmentId,
@@ -447,6 +487,8 @@ async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
     inDialog: input.inDialog,
     hasPlan: plan !== null,
     agentControl,
+    action: input.action ?? actionOfPlan(plan),
+    sourceRef: input.sourceRef ?? sourceRefOf(record),
   };
   useProjectCopyStore.setState((state) => ({ entries: { ...state.entries, [copyId]: entry } }));
   pending.entryReady = true;
@@ -543,6 +585,51 @@ export function startManagedProjectCopy(
     agentControl: options.agentControl ?? null,
     background: options.toast === false,
     inDialog: options.toast === false,
+    sourceRef: options.sourceRef ?? null,
+  });
+}
+
+/** A clone or link the add-project dialog started on one node, handed over when the dialog closes. */
+export interface TrackProjectImportInput {
+  readonly environmentId: EnvironmentId;
+  readonly importId: ProjectImportId;
+  readonly projectId: ProjectId;
+  readonly title: string;
+  readonly action: Exclude<ProjectCopyAction, "copy">;
+  /** The project a link registers a checkout of (its sidebar row gets the badge). */
+  readonly sourceRef?: ScopedProjectRef | null;
+}
+
+/**
+ * Follows an import the node accepted after the add-project dialog that
+ * started it closed: its progress toast, how it ends ("X is ready on Y ·
+ * View"), the Copies block and a reload pick it up like a copy whose upload
+ * finished. Nothing runs here but following it.
+ */
+export function trackProjectImport(input: TrackProjectImportInput): Promise<ManagedProjectCopy> {
+  const at = Date.now();
+  const record = reduceProjectCopyJobRecord(
+    createProjectCopyJobRecord({
+      copyId: randomUUID(),
+      at,
+      sourceEnvironmentId: null,
+      sourceProjectId: null,
+      targetEnvironmentId: input.environmentId,
+      projectId: input.projectId,
+      importId: input.importId,
+    }),
+    { type: "import-accepted", at },
+  );
+  persistRecord(record);
+  return launch({
+    plan: null,
+    resume: record,
+    agentControl: null,
+    background: false,
+    inDialog: false,
+    title: input.title,
+    action: input.action,
+    sourceRef: input.sourceRef ?? null,
   });
 }
 
@@ -601,6 +688,7 @@ export async function retryProjectCopy(
       agentControl: entry.agentControl,
       background: inDialog,
       inDialog,
+      sourceRef: entry.sourceRef,
     });
   }
   if (retry === "resume") {
@@ -610,6 +698,9 @@ export async function retryProjectCopy(
       agentControl: entry.agentControl,
       background: inDialog,
       inDialog,
+      title: entry.title,
+      action: entry.action,
+      sourceRef: entry.sourceRef,
     });
   }
   return null;
@@ -798,6 +889,24 @@ export async function viewCopiedProject(copyId: string): Promise<void> {
   if (!open) return;
   await open({ environmentId: project.environmentId, projectId: project.projectId });
 }
+
+// ── Sidebar badge ──
+
+/** The running copies the dialog does not show, by the checkout they copy. */
+function copyBadgesOf(
+  entries: Readonly<Record<string, ProjectCopyEntry>>,
+): Readonly<Record<string, number | null>> {
+  const badges: Record<string, number | null> = {};
+  for (const entry of Object.values(entries)) {
+    if (!entry.running || entry.inDialog || entry.sourceRef === null) continue;
+    badges[scopedProjectKey(entry.sourceRef)] = projectCopyPercent(entry.progress);
+  }
+  return badges;
+}
+
+useProjectCopyStore.subscribe((state, previous) => {
+  if (state.entries !== previous.entries) publishProjectCopyBadges(copyBadgesOf(state.entries));
+});
 
 // ── Reading ──
 

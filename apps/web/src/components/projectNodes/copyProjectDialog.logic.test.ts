@@ -21,7 +21,6 @@ import {
   copySegmentsText,
   copySourceRows,
   copyTargetCards,
-  displayRemote,
   initialCopySource,
   initialCopyTarget,
   nodesHeldByCopy,
@@ -229,12 +228,6 @@ describe("the destination folder", () => {
     expect(parentOfNodePath("/ryco")).toBe("/");
     expect(parentOfNodePath("C:\\Code\\ryco")).toBe("C:\\Code");
     expect(parentOfNodePath("C:\\ryco")).toBe("C:\\");
-  });
-
-  it("shows the usual remote forms short", () => {
-    expect(displayRemote("git@github.com:sak0a/ryco.git")).toBe("github.com/sak0a/ryco");
-    expect(displayRemote("https://github.com/sak0a/ryco.git")).toBe("github.com/sak0a/ryco");
-    expect(displayRemote("ssh://git@gitlab.example/x/y")).toBe("gitlab.example/x/y");
   });
 
   it("maps a node's OS for the setup note", () => {

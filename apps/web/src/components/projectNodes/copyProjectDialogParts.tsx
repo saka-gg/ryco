@@ -179,9 +179,14 @@ function StepIcon(props: { readonly status: CopyProgressStep["status"] }) {
 export function CopyProgressStepList(props: {
   readonly steps: ReadonlyArray<CopyProgressStep>;
   readonly className?: string | undefined;
+  /** Defaults to "Copy steps". */
+  readonly "aria-label"?: string | undefined;
 }) {
   return (
-    <ol className={cn("flex flex-col", props.className)} aria-label="Copy steps">
+    <ol
+      className={cn("flex flex-col", props.className)}
+      aria-label={props["aria-label"] ?? "Copy steps"}
+    >
       {props.steps.map((step) => (
         <li
           key={step.id}

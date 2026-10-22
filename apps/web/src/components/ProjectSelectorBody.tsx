@@ -18,7 +18,7 @@ import {
   type RefObject,
 } from "react";
 
-import { useCommandPaletteStore } from "../commandPaletteStore";
+import { openAddProjectWith } from "../commandPaletteStore";
 import {
   buildChatDraftTarget,
   CHAT_PROJECT_LABEL,
@@ -52,8 +52,6 @@ import {
 import { HighlightedText } from "./projectNodes/HighlightedText";
 import { NodeBadge, NodePicker } from "./projectNodes/NodePicker";
 import {
-  addProjectDialogAvailable,
-  openAddProject,
   openCopyProject,
   preloadProjectNodesDialogs,
 } from "./projectNodes/projectNodesDialogStore";
@@ -319,8 +317,7 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
   const openAddProjectFromSelector = useCallback(() => {
     onClose();
     const environmentId = nodeFilter === "none" ? null : nodeFilter;
-    if (addProjectDialogAvailable()) openAddProject(environmentId ? { environmentId } : {});
-    else useCommandPaletteStore.getState().openAddProject();
+    openAddProjectWith(environmentId ? { environmentId } : {});
   }, [nodeFilter, onClose]);
   const copyActiveProject = useCallback(() => {
     onClose();

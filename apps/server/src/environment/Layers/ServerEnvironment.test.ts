@@ -75,8 +75,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.projectSearchEmptyQuery).toBe(true);
       expect(second.capabilities.cliProxyHubs).toBe(true);
       expect(second.capabilities.cliProxyCloudflareAccess).toBe(true);
-      // Announced as off until project copy is implemented, so clients do not call it.
-      expect(second.capabilities.projectCopy).toBe(false);
+      expect(second.capabilities.projectCopy).toBe(true);
     }),
   );
 

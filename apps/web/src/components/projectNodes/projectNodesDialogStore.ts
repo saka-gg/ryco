@@ -1,8 +1,10 @@
 // FILE: projectNodesDialogStore.ts
 // Purpose: Opens the app's one "Add project" dialog and its one "Copy <project>
-//          to another node" dialog from any surface, and records whether a
+//          to another node" dialog from any surface, records whether a
 //          cross-node copy is running this session (its toasts need the
-//          dialogs' surface mounted).
+//          dialogs' surface mounted) and which checkouts it copies (the
+//          sidebar's badge), and carries "Show in project selector" to the
+//          new-thread hero.
 // Layer: Web UI state. The only static piece of the project-nodes feature: the
 //        command palette's store (boot) and the app shell import it. The
 //        dialogs (`ProjectNodesDialogs.tsx`), the copy runtime and the Agent
@@ -84,6 +86,13 @@ export interface ProjectNodesDialogSlot<Request> {
   readonly request: Request | null;
 }
 
+/** "Show in project selector": the new-thread hero showing this project opens its selector. */
+export interface ProjectSelectorOpenRequest {
+  readonly projectRef: ScopedProjectRef;
+  /** `Date.now()` when asked; older requests are dropped (see `takeProjectSelectorOpenRequest`). */
+  readonly requestedAt: number;
+}
+
 export interface ProjectNodesDialogState {
   readonly addProject: ProjectNodesDialogSlot<AddProjectDialogRequest>;
   readonly copyProject: ProjectNodesDialogSlot<CopyProjectDialogRequest>;
@@ -92,15 +101,25 @@ export interface ProjectNodesDialogState {
    * dialogs' surface mounted, which also hosts what the copy's toasts need.
    */
   readonly copiesActive: boolean;
+  readonly projectSelectorOpenRequest: ProjectSelectorOpenRequest | null;
+  /**
+   * Running copies by the checkout they copy (`scopedProjectKey`): the percent
+   * of the part that runs now, null while nothing measures it. The sidebar
+   * badges the project's row with it; the copy runtime publishes it.
+   */
+  readonly copyBadges: Readonly<Record<string, number | null>>;
 }
 
 const CLOSED = { open: false, token: 0, request: null } as const;
+const NO_COPY_BADGES: Readonly<Record<string, number | null>> = {};
 
 /** App-wide state of the project-nodes dialogs; `ProjectNodesDialogs` is their only host. */
 export const useProjectNodesDialogStore = create<ProjectNodesDialogState>()(() => ({
   addProject: CLOSED,
   copyProject: CLOSED,
   copiesActive: false,
+  projectSelectorOpenRequest: null,
+  copyBadges: NO_COPY_BADGES,
 }));
 
 /**
@@ -161,24 +180,91 @@ export function closeCopyProject(): void {
 
 /**
  * A project menu's cross-node actions for one checkout: copy it (the dialog
- * starts from it) and link a copy already on a node (the add-project dialog in
- * link mode, else `openAddProjectFallback`, the palette's add-project views,
- * until that dialog is available). Both preload the dialogs on menu intent.
+ * starts from it) and link a copy already on a node (`openAddProjectWith` in
+ * link mode, passed in by the caller: the add-project dialog where it is
+ * available, else the palette's add-project views). Both preload the dialogs
+ * on menu intent.
  */
 export function crossNodeProjectActions(input: {
   readonly projectRef: ScopedProjectRef;
   readonly origin: CopyProjectDialogOrigin;
-  readonly openAddProjectFallback: () => void;
+  /** `openAddProjectWith` from the command palette's store (which imports this module). */
+  readonly openAddProjectWith: (options: OpenAddProjectOptions) => void;
 }): CrossNodeProjectActions {
   const { projectRef, origin } = input;
   return {
     onCopy: () => openCopyProject({ source: projectRef, origin }),
-    onLink: () => {
-      if (addProjectDialogAvailable()) openAddProject({ mode: "link", projectRef });
-      else input.openAddProjectFallback();
-    },
+    onLink: () => input.openAddProjectWith({ mode: "link", projectRef }),
     onIntent: preloadProjectNodesDialogs,
   };
+}
+
+/** How long a "Show in project selector" request waits for the project's hero to appear. */
+const PROJECT_SELECTOR_OPEN_REQUEST_TTL_MS = 15_000;
+
+/**
+ * Asks the new-thread hero that shows `projectRef` to open its project
+ * selector, e.g. after the add-project dialog opened a draft there. The
+ * request lapses after a few seconds, so a later visit does not open it.
+ */
+export function requestProjectSelectorOpen(projectRef: ScopedProjectRef): void {
+  const request: ProjectSelectorOpenRequest = { projectRef, requestedAt: Date.now() };
+  useProjectNodesDialogStore.setState({ projectSelectorOpenRequest: request });
+  globalThis.setTimeout(() => {
+    if (useProjectNodesDialogStore.getState().projectSelectorOpenRequest === request) {
+      useProjectNodesDialogStore.setState({ projectSelectorOpenRequest: null });
+    }
+  }, PROJECT_SELECTOR_OPEN_REQUEST_TTL_MS);
+}
+
+/** Whether the pending request names `projectRef`. */
+export function isProjectSelectorOpenRequested(
+  request: ProjectSelectorOpenRequest | null,
+  projectRef: ScopedProjectRef,
+): request is ProjectSelectorOpenRequest {
+  return (
+    request !== null &&
+    request.projectRef.environmentId === projectRef.environmentId &&
+    request.projectRef.projectId === projectRef.projectId
+  );
+}
+
+/** The selector of `projectRef` opened or closed on its own: the request is done. */
+export function clearProjectSelectorOpenRequest(projectRef: ScopedProjectRef): void {
+  const request = useProjectNodesDialogStore.getState().projectSelectorOpenRequest;
+  if (isProjectSelectorOpenRequested(request, projectRef)) {
+    useProjectNodesDialogStore.setState({ projectSelectorOpenRequest: null });
+  }
+}
+
+/** The copy runtime publishes its running copies' badges (see `copyBadges`). */
+export function publishProjectCopyBadges(badges: Readonly<Record<string, number | null>>): void {
+  const current = useProjectNodesDialogStore.getState().copyBadges;
+  const keys = Object.keys(badges);
+  if (
+    keys.length === Object.keys(current).length &&
+    keys.every((key) => key in current && current[key] === badges[key])
+  ) {
+    return;
+  }
+  useProjectNodesDialogStore.setState({
+    copyBadges: keys.length === 0 ? NO_COPY_BADGES : badges,
+  });
+}
+
+/**
+ * The badge of a sidebar row that groups `memberKeys` (`scopedProjectKey`s):
+ * a running copy's percent (null while unmeasured), undefined when none runs.
+ */
+export function projectCopyBadgeFor(
+  badges: Readonly<Record<string, number | null>>,
+  memberKeys: ReadonlyArray<string>,
+): number | null | undefined {
+  if (badges === NO_COPY_BADGES) return undefined;
+  for (const key of memberKeys) {
+    if (key in badges) return badges[key] ?? null;
+  }
+  return undefined;
 }
 
 /** The copy runtime calls this when it starts or resumes a copy. */
@@ -210,5 +296,7 @@ export function resetProjectNodesDialogStoreForTests(): void {
     addProject: CLOSED,
     copyProject: CLOSED,
     copiesActive: false,
+    projectSelectorOpenRequest: null,
+    copyBadges: NO_COPY_BADGES,
   });
 }

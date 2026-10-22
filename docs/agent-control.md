@@ -147,7 +147,8 @@ they happen. Standalone integrations have no task tools and cannot start a task'
 ## Projects on other nodes
 
 A node is one machine running Ryco (a laptop, a Mac mini, a server). Nodes never talk to each other:
-the Ryco app the user approves a request in holds connections to both and does the work. These
+the Ryco app the user approves a request in holds connections to both and does the work. (What a
+copy does, from the user's side: [Projects across nodes](features/cross-node-projects.md).) These
 tools are for private sessions only; standalone integrations neither see them nor may propose
 either kind.
 

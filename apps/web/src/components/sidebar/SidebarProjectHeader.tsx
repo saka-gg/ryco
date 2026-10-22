@@ -25,7 +25,11 @@ import { ProjectSettingsMenu } from "./ProjectSettingsMenu";
 import { useHasIntersectedViewport } from "./hooks/useHasIntersectedViewport";
 import { SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE } from "../chat/promoteChatDialogStore";
 import { preloadDraftRoute } from "./threadNavigationIntent";
-import type { CrossNodeProjectActions } from "../projectNodes/projectNodesDialogStore";
+import {
+  projectCopyBadgeFor,
+  useProjectNodesDialogStore,
+  type CrossNodeProjectActions,
+} from "../projectNodes/projectNodesDialogStore";
 
 export function SidebarProjectHeader(props: {
   project: SidebarProjectSnapshot;
@@ -78,9 +82,14 @@ export function SidebarProjectHeader(props: {
     onOpenNewThreadClick,
   } = props;
 
-  const memberProjectKeys = React.useMemo(
-    () => project.memberProjectRefs.map(scopedProjectKey).join(" "),
+  const memberProjectKeyList = React.useMemo(
+    () => project.memberProjectRefs.map(scopedProjectKey),
     [project.memberProjectRefs],
+  );
+  const memberProjectKeys = memberProjectKeyList.join(" ");
+  // A copy of one of the project's checkouts runs in the background: its percent.
+  const copyBadge = useProjectNodesDialogStore((state) =>
+    projectCopyBadgeFor(state.copyBadges, memberProjectKeyList),
   );
   // Icons of projects far below the fold wait until the header nears the
   // viewport (once there, it keeps its icon): a long project list no longer
@@ -135,7 +144,19 @@ export function SidebarProjectHeader(props: {
           <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground/90">
             {project.displayName}
           </span>
-          {project.groupedProjectCount > 1 ? (
+          {copyBadge !== undefined ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-primary/12 px-1.5 py-px text-[10.5px] text-foreground dark:bg-primary/20"
+              title="Copying to another node"
+              data-testid="sidebar-project-copy-badge"
+            >
+              <span
+                aria-hidden
+                className="inline-block size-[9px] animate-spin rounded-full border-[1.5px] border-muted border-t-primary [animation-duration:700ms]"
+              />
+              {copyBadge === null ? "Copying" : `${copyBadge}%`}
+            </span>
+          ) : project.groupedProjectCount > 1 ? (
             <span className="shrink-0 text-[10px] text-muted-foreground/60">
               {project.groupedProjectCount} projects
             </span>

@@ -130,6 +130,7 @@ export function NewThreadHero({
                   appearance="headline"
                   draftId={draftId}
                   label={headline.projectName}
+                  openOnRequest
                 />
               ) : (
                 <span className="text-foreground">{headline.projectName}</span>

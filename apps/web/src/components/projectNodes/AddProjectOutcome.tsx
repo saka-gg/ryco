@@ -9,112 +9,42 @@ import type { ProjectImportSnapshot } from "@ryco/contracts/project-copy";
 import { CheckIcon } from "lucide-react";
 import { useMemo } from "react";
 
-import { cn } from "../../lib/utils";
-import { projectImportStepLabel } from "./copyRuntime/projectCopyProgress.logic";
-import {
-  displayNodePath,
-  importProgressRows,
-  type AddedProjectNodeRow,
-} from "./addProjectDialog.logic";
+import { importProgressSteps, type AddedProjectNodeRow } from "./addProjectDialog.logic";
+import type { CopyProgressStep } from "./copyProjectDialog.logic";
+import { CopyProgressStepList } from "./copyProjectDialogParts";
+import { displayNodePath } from "./folderPicker.logic";
 import { NodeBadge } from "./NodePicker";
-
-/** The overall bar: the import's share done, eased between snapshots. */
-export function ImportProgressBar(props: { readonly percent: number }) {
-  return (
-    <div
-      role="progressbar"
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={props.percent}
-      className="h-1 shrink-0 overflow-hidden rounded-[2px] bg-muted"
-    >
-      <i
-        className="block h-full bg-primary transition-[width] duration-100 ease-linear"
-        style={{ width: `${props.percent}%` }}
-      />
-    </div>
-  );
-}
-
-function StepMarker(props: { readonly status: "done" | "running" | "pending" | "failed" }) {
-  switch (props.status) {
-    case "done":
-      return (
-        <span className="grid size-4 shrink-0 place-items-center rounded-full bg-success text-white">
-          <CheckIcon aria-hidden className="size-2.5" strokeWidth={3} />
-        </span>
-      );
-    case "running":
-      return (
-        <span
-          aria-hidden
-          className="mt-px inline-block size-3.5 animate-spin rounded-full border-2 border-muted border-t-primary [animation-duration:700ms]"
-        />
-      );
-    case "failed":
-      return (
-        <span className="grid size-4 shrink-0 place-items-center rounded-full bg-destructive font-semibold text-[10px] text-white">
-          !
-        </span>
-      );
-    default:
-      return (
-        <span
-          aria-hidden
-          className="mt-px size-3.5 rounded-full border-[1.5px] border-muted-foreground border-dashed opacity-60"
-        />
-      );
-  }
-}
 
 /**
  * The steps the node runs for a clone or link, as they report: done, running
- * (with its bar and last output line), pending, failed.
+ * (with its bar and last output line), pending, failed. Rendered by the copy
+ * dialog's step list, so both dialogs show a node's import the same way.
  */
 export function ImportProgressSteps(props: {
   readonly snapshot: ProjectImportSnapshot | null;
   /** Shown while the node has not answered yet. */
   readonly startingLabel: string;
 }) {
-  const rows = useMemo(
-    () => (props.snapshot ? importProgressRows(props.snapshot) : null),
-    [props.snapshot],
+  const { snapshot, startingLabel } = props;
+  const steps = useMemo<ReadonlyArray<CopyProgressStep>>(
+    () =>
+      snapshot
+        ? importProgressSteps(snapshot)
+        : [
+            {
+              id: "starting",
+              label: [{ text: startingLabel }],
+              status: "running",
+              percent: null,
+              log: null,
+              weight: 1,
+            },
+          ],
+    [snapshot, startingLabel],
   );
   return (
-    <div className="flex flex-col" data-testid="add-project-import-steps">
-      {rows === null ? (
-        <div className="grid grid-cols-[18px_1fr] items-start gap-2.5 px-0.5 py-1.5 text-[12.5px]">
-          <StepMarker status="running" />
-          <div>{props.startingLabel}</div>
-        </div>
-      ) : (
-        rows.map((row) => (
-          <div
-            key={row.id}
-            data-step={row.id}
-            data-status={row.status}
-            className={cn(
-              "grid grid-cols-[18px_1fr] items-start gap-2.5 px-0.5 py-1.5 text-[12.5px]",
-              row.status === "pending" && "text-muted-foreground",
-            )}
-          >
-            <StepMarker status={row.status} />
-            <div className="min-w-0">
-              {projectImportStepLabel(row.id)}
-              {row.status === "running" && row.percent !== null ? (
-                <div className="mt-1.5">
-                  <ImportProgressBar percent={Math.round(row.percent)} />
-                </div>
-              ) : null}
-              {row.log ? (
-                <div className="mt-[3px] truncate font-mono text-[11px] text-muted-foreground">
-                  {row.log}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        ))
-      )}
+    <div data-testid="add-project-import-steps">
+      <CopyProgressStepList steps={steps} aria-label="Import steps" />
     </div>
   );
 }

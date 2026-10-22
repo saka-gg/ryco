@@ -93,6 +93,7 @@ const inspection = {
     isDetached: false,
     remotes: [{ name: "origin", url: "git@github.com:me/ryco.git" }],
     primaryRemoteName: "origin",
+    cloneRemoteName: "origin",
     canonicalKey: "github.com/me/ryco",
     isShallow: false,
     hasSubmodules: false,

@@ -129,4 +129,27 @@ describe("project copy progress", () => {
       description: "Reconnecting to the destination…",
     });
   });
+
+  it("words a clone and a link the add-project dialog handed over as what they are", () => {
+    const clone = { ...labels, sourceLabel: null, action: "clone" as const };
+    expect(
+      projectCopyView(progress({ phase: "import", canCloseClient: true }), clone),
+    ).toMatchObject({ kind: "progress", title: "Cloning ryco to Mac mini" });
+    expect(
+      projectCopyView(
+        progress({
+          phase: "failed",
+          error: { code: "clone-failed", message: "No route.", retry: null },
+        }),
+        clone,
+      ),
+    ).toMatchObject({ title: "Couldn't clone ryco to Mac mini", retryLabel: null });
+    const link = { ...labels, action: "link" as const };
+    expect(
+      projectCopyView(progress({ phase: "cancelled", canCloseClient: true }), link),
+    ).toMatchObject({ title: "Stopped linking ryco", description: "Mac mini cancelled the link." });
+    expect(projectCopyView(progress({ phase: "acquire" }), link).title).toBe(
+      "Linking ryco on Mac mini",
+    );
+  });
 });

@@ -1,15 +1,20 @@
 import { EnvironmentId, ProjectId } from "@ryco/contracts";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { openAddProjectWith, useCommandPaletteStore } from "../../commandPaletteStore";
 import {
   ADD_PROJECT_DIALOG_ENABLED,
   addProjectDialogAvailable,
+  clearProjectSelectorOpenRequest,
   closeAddProject,
   closeCopyProject,
+  isProjectSelectorOpenRequested,
   markProjectCopiesActive,
   openAddProject,
   openCopyProject,
+  projectCopyBadgeFor,
+  publishProjectCopyBadges,
+  requestProjectSelectorOpen,
   resetProjectNodesDialogStoreForTests,
   useProjectNodesDialogStore,
 } from "./projectNodesDialogStore";
@@ -78,5 +83,43 @@ describe("projectNodesDialogStore", () => {
     markProjectCopiesActive();
     markProjectCopiesActive();
     expect(useProjectNodesDialogStore.getState().copiesActive).toBe(true);
+  });
+
+  it("asks one project's selector to open, and lets the request lapse or be cleared", () => {
+    vi.useFakeTimers();
+    try {
+      const other = { ...source, projectId: ProjectId.make("other") };
+      requestProjectSelectorOpen(source);
+      const request = () => useProjectNodesDialogStore.getState().projectSelectorOpenRequest;
+      expect(isProjectSelectorOpenRequested(request(), source)).toBe(true);
+      expect(isProjectSelectorOpenRequested(request(), other)).toBe(false);
+      clearProjectSelectorOpenRequest(other);
+      expect(request()).not.toBeNull();
+      clearProjectSelectorOpenRequest(source);
+      expect(request()).toBeNull();
+
+      requestProjectSelectorOpen(source);
+      vi.advanceTimersByTime(15_001);
+      expect(request()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes copy badges only when they change and finds a row's badge by its members", () => {
+    const badges = { "env-laptop:p": 40, "env-mini:q": null };
+    publishProjectCopyBadges(badges);
+    const published = useProjectNodesDialogStore.getState().copyBadges;
+    expect(published).toBe(badges);
+    publishProjectCopyBadges({ ...badges });
+    expect(useProjectNodesDialogStore.getState().copyBadges).toBe(published);
+
+    expect(projectCopyBadgeFor(published, ["env-x:y", "env-laptop:p"])).toBe(40);
+    expect(projectCopyBadgeFor(published, ["env-mini:q"])).toBeNull();
+    expect(projectCopyBadgeFor(published, ["env-x:y"])).toBeUndefined();
+    publishProjectCopyBadges({});
+    expect(
+      projectCopyBadgeFor(useProjectNodesDialogStore.getState().copyBadges, ["env-laptop:p"]),
+    ).toBeUndefined();
   });
 });

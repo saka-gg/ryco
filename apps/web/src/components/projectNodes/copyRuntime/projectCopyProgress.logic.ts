@@ -8,12 +8,38 @@
 import type { ProjectCopyProgress } from "@ryco/client-runtime/projectCopy";
 import type { ProjectImportSnapshot, ProjectImportStepId } from "@ryco/contracts/project-copy";
 
+/**
+ * What the copy runtime runs: a copy from another node, a clone of a remote (the
+ * add-project dialog, an agent's repository source) or the link of a checkout
+ * that is already there. Only the wording differs.
+ */
+export type ProjectCopyAction = "copy" | "clone" | "link";
+
 export interface ProjectCopyLabels {
   /** The project's name; null while a resumed copy has not heard from the target yet. */
   readonly title: string | null;
   readonly sourceLabel: string | null;
   readonly targetLabel: string | null;
+  /** Defaults to `copy`. */
+  readonly action?: ProjectCopyAction | undefined;
 }
+
+interface ProjectCopyActionWords {
+  /** "Copying" */
+  readonly doing: string;
+  /** "copy" (verb and noun alike) */
+  readonly word: string;
+  /** The preposition before the target: "to", "on". */
+  readonly toTarget: string;
+}
+
+const ACTION_WORDS: Readonly<Record<ProjectCopyAction, ProjectCopyActionWords>> = {
+  copy: { doing: "Copying", word: "copy", toTarget: "to" },
+  clone: { doing: "Cloning", word: "clone", toTarget: "to" },
+  link: { doing: "Linking", word: "link", toTarget: "on" },
+};
+
+const capitalized = (text: string): string => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
 export type ProjectCopyViewKind = "progress" | "done" | "failed" | "cancelled";
 
@@ -48,6 +74,12 @@ const STEP_LABELS: Readonly<Record<ProjectImportStepId, string>> = {
 
 export function projectImportStepLabel(step: ProjectImportStepId): string {
   return STEP_LABELS[step];
+}
+
+/** The last non-empty line of an import's output tail ("Receiving objects 45% (830/1844)"). */
+export function lastOutputLine(outputTail: string): string | null {
+  const lines = outputTail.split(/\r?\n|\r/u).map((line) => line.trim());
+  return lines.findLast((line) => line.length > 0) ?? null;
 }
 
 const MEGABYTE = 1024 * 1024;
@@ -113,7 +145,9 @@ function progressLine(progress: ProjectCopyProgress, labels: ProjectCopyLabels):
         : "Keep Ryco open until the upload finishes.";
     case "import": {
       const step = progress.importSnapshot ? currentImportStep(progress.importSnapshot) : null;
-      const doing = step ? projectImportStepLabel(step.id) : "Starting the copy";
+      const doing = step
+        ? projectImportStepLabel(step.id)
+        : `Starting the ${ACTION_WORDS[labels.action ?? "copy"].word}`;
       return progress.canCloseClient
         ? `${doing}. Runs on ${target}; you can close Ryco.`
         : `${doing}…`;
@@ -131,6 +165,8 @@ export function projectCopyView(
   const title = labels.title ?? progress.importSnapshot?.title ?? null;
   const target = labels.targetLabel ?? "the destination";
   const name = title ?? "The project";
+  const words = ACTION_WORDS[labels.action ?? "copy"];
+  const onTarget = `${words.toTarget} ${target}`;
   switch (progress.phase) {
     case "done":
       return {
@@ -147,8 +183,10 @@ export function projectCopyView(
     case "failed":
       return {
         kind: "failed",
-        title: title ? `Couldn't copy ${title} to ${target}` : `Couldn't copy to ${target}`,
-        description: progress.error?.message ?? "The copy failed.",
+        title: title
+          ? `Couldn't ${words.word} ${title} ${onTarget}`
+          : `Couldn't ${words.word} ${onTarget}`,
+        description: progress.error?.message ?? `The ${words.word} failed.`,
         percent: null,
         keepOpen: false,
         retryLabel:
@@ -161,9 +199,11 @@ export function projectCopyView(
     case "cancelled":
       return {
         kind: "cancelled",
-        title: title ? `Stopped copying ${title}` : "Copy stopped",
+        title: title
+          ? `Stopped ${words.doing.toLowerCase()} ${title}`
+          : `${capitalized(words.word)} stopped`,
         description: progress.canCloseClient
-          ? `${target} cancelled the copy.`
+          ? `${target} cancelled the ${words.word}.`
           : "Nothing was left behind.",
         percent: null,
         keepOpen: false,
@@ -172,7 +212,7 @@ export function projectCopyView(
     default:
       return {
         kind: "progress",
-        title: title ? `Copying ${title} to ${target}` : `Copying to ${target}`,
+        title: title ? `${words.doing} ${title} ${onTarget}` : `${words.doing} ${onTarget}`,
         description: progressLine(progress, labels),
         percent: projectCopyPercent(progress),
         keepOpen: !progress.canCloseClient,

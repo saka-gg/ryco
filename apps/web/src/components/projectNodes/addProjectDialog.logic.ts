@@ -16,11 +16,10 @@ import {
   ProjectImportStartInput,
   type ProjectImportId,
   type ProjectImportSnapshot,
-  type ProjectImportStepId,
 } from "@ryco/contracts/project-copy";
-import { normalizeGitRemoteUrl } from "@ryco/shared/git";
 import {
   classifyRemoteUrl,
+  displayRemoteUrl,
   isCloneableRemoteKind,
   repositoryFolderName,
   sanitizeRemoteUrl,
@@ -28,14 +27,11 @@ import {
 import { isChatProject } from "@ryco/shared/projectKind";
 import * as Schema from "effect/Schema";
 
-import {
-  formatProjectPath,
-  inferHomeDirectory,
-  inferProjectTitleFromPath,
-  isSameFilesystemPath,
-} from "../../lib/projectPaths";
+import { inferProjectTitleFromPath, isSameFilesystemPath } from "../../lib/projectPaths";
 import type { Project } from "../../types";
 import type { AddProjectDialogMode, AddProjectDialogRequest } from "./projectNodesDialogStore";
+import type { CopyProgressStep } from "./copyProjectDialog.logic";
+import { lastOutputLine, projectImportStepLabel } from "./copyRuntime/projectCopyProgress.logic";
 import { formatNodePath, type FolderSelectionStatus } from "./folderPicker.logic";
 import { resolveNodePickerAvailability } from "./nodePicker.logic";
 
@@ -131,11 +127,6 @@ export function addProjectPrimaryLabel(input: {
 
 /* ───────── Status line ───────── */
 
-/** A remote as the status line names it: "github.com/sak0a/ryco" for any of its URL forms. */
-export function remoteDisplayName(remoteUrl: string): string {
-  return normalizeGitRemoteUrl(sanitizeRemoteUrl(remoteUrl)) || remoteUrl;
-}
-
 /**
  * The clone's status line: "Clones <remote> into <path>", flagged when that
  * folder already exists. The folder picker's other states (checking, refused, an
@@ -149,7 +140,7 @@ export function describeCloneDestination(
   if (destination === null) return status;
   const line = [
     { text: "Clones " },
-    { text: remoteDisplayName(input.remoteUrl), path: true },
+    { text: displayRemoteUrl(input.remoteUrl), path: true },
     { text: " into " },
     { text: formatNodePath(destination, input.homeDirectory), path: true },
   ];
@@ -205,11 +196,6 @@ function withSegments(
 }
 
 /* ───────── Projects across nodes ───────── */
-
-/** A path on a node the dialog has no path hints for, home-relative when it looks like one. */
-export function displayNodePath(cwd: string): string {
-  return formatProjectPath(cwd, inferHomeDirectory(cwd));
-}
 
 /** Projects as the dialog reads them: every node's, chats left out by the helpers below. */
 type ProjectLike = Pick<
@@ -436,33 +422,26 @@ export function addedProjectLead(otherNodeLabels: ReadonlyArray<string>): string
 
 /* ───────── Imports ───────── */
 
-export type AddProjectImportRowStatus = "done" | "running" | "pending" | "failed";
-
-export interface AddProjectImportRow {
-  readonly id: ProjectImportStepId;
-  readonly status: AddProjectImportRowStatus;
-  /** The running step's own percent (a clone's objects); null when it reports none. */
-  readonly percent: number | null;
-  /** The running step's last line of output, e.g. "Receiving objects 45% (830/1844)". */
-  readonly log: string | null;
-}
-
-function lastOutputLine(outputTail: string): string | null {
-  const lines = outputTail.split(/[\r\n]+/u).map((line) => line.trim());
-  return lines.findLast((line) => line.length > 0) ?? null;
-}
-
-/** An import's steps as the progress list shows them; skipped steps are left out. */
-export function importProgressRows(snapshot: ProjectImportSnapshot): AddProjectImportRow[] {
+/**
+ * An import's steps as the progress list shows them (the copy dialog's list): skipped steps
+ * left out, the running one with its own percent and last output line.
+ */
+export function importProgressSteps(snapshot: ProjectImportSnapshot): CopyProgressStep[] {
   const tail = lastOutputLine(snapshot.outputTail);
-  return snapshot.steps
-    .filter((step) => step.status !== "skipped")
-    .map((step) => ({
+  const steps: CopyProgressStep[] = [];
+  for (const step of snapshot.steps) {
+    if (step.status === "skipped") continue;
+    const running = step.status === "running";
+    steps.push({
       id: step.id,
-      status: step.status === "skipped" ? "done" : step.status,
-      percent: step.status === "running" ? step.progressPercent : null,
-      log: step.status === "running" ? (step.detail ?? tail) : null,
-    }));
+      label: [{ text: projectImportStepLabel(step.id) }],
+      status: step.status,
+      percent: running ? step.progressPercent : null,
+      log: running ? (step.detail ?? tail) : null,
+      weight: 1,
+    });
+  }
+  return steps;
 }
 
 /** How much of the import ran: finished steps plus the running step's share. */

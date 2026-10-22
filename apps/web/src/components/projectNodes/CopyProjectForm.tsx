@@ -24,6 +24,7 @@ import {
   type ServerConfig,
 } from "@ryco/contracts";
 import { PROJECT_COPY_SETUP_COMMAND_MAX_CHARS } from "@ryco/contracts/project-copy";
+import { displayRemoteUrl } from "@ryco/shared/gitRemoteUrl";
 import { createModelSelection } from "@ryco/shared/model";
 import {
   ArrowRightLeftIcon,
@@ -62,8 +63,6 @@ import {
   copyPlatformOs,
   copySourceRows,
   copyTargetCards,
-  displayRemote,
-  formatCopyPath,
   initialCopySource,
   initialCopyTarget,
   nodesHeldByCopy,
@@ -81,6 +80,7 @@ import {
   CopySegments,
 } from "./copyProjectDialogParts";
 import { FolderPicker } from "./FolderPicker";
+import { displayNodePath } from "./folderPicker.logic";
 import { NodeBadge } from "./NodePicker";
 import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";
 import {
@@ -550,7 +550,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     setStarting(true);
     setStartError(null);
     try {
-      const started = await services.startCopy(built.plan);
+      const started = await services.startCopy(built.plan, sourceRow?.ref ?? null);
       const plan = built.plan;
       props.onStarted({
         copyId: started.copyId,
@@ -635,7 +635,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
 
   const tag = copyFolderTag(suggestion);
   const shownPath =
-    suggestion !== null ? formatCopyPath(suggestion.path, destination.hints?.homeDirectory) : null;
+    suggestion !== null ? displayNodePath(suggestion.path, destination.hints?.homeDirectory) : null;
   const note = copyFolderNote({
     suggestion: checking ? null : suggestion,
     manual: manualPath !== null,
@@ -966,7 +966,7 @@ function MethodChoice(props: {
           clone.reason
         ) : (
           <>
-            {props.remoteUrl ? displayRemote(props.remoteUrl) : "The project's remote"} · full
+            {props.remoteUrl ? displayRemoteUrl(props.remoteUrl) : "The project's remote"} · full
             history. {props.targetLabel} needs Git access.
             {props.remoteCheck === "checking" ? (
               <span className="mt-1 flex items-center gap-1.5" data-testid="copy-remote-check">

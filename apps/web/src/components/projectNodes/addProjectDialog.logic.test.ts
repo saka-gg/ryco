@@ -17,7 +17,7 @@ import {
   describeFolderJoin,
   findRepositoryJoin,
   importOverallPercent,
-  importProgressRows,
+  importProgressSteps,
   isGitRemoteUrlInput,
   resolveAddProjectStart,
 } from "./addProjectDialog.logic";
@@ -481,15 +481,31 @@ describe("imports", () => {
       createdAt: "2026-10-22T12:00:00.000Z",
       updatedAt: "2026-10-22T12:00:01.000Z",
     };
-    expect(importProgressRows(snapshot)).toEqual([
-      { id: "preflight", status: "done", percent: null, log: null },
+    expect(importProgressSteps(snapshot)).toEqual([
+      {
+        id: "preflight",
+        label: [{ text: "Checking the destination" }],
+        status: "done",
+        percent: null,
+        log: null,
+        weight: 1,
+      },
       {
         id: "clone",
+        label: [{ text: "Cloning the repository" }],
         status: "running",
         percent: 50,
         log: "Receiving objects:  50% (920/1840)",
+        weight: 1,
       },
-      { id: "register", status: "pending", percent: null, log: null },
+      {
+        id: "register",
+        label: [{ text: "Adding the project" }],
+        status: "pending",
+        percent: null,
+        log: null,
+        weight: 1,
+      },
     ]);
     expect(importOverallPercent(snapshot)).toBe(50);
     expect(importOverallPercent({ ...snapshot, status: "completed" })).toBe(100);

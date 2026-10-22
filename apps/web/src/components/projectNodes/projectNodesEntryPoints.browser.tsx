@@ -53,11 +53,11 @@ const project = {
   remoteEnvironmentLabels: ["Mac mini"],
 } as unknown as SidebarProjectSnapshot;
 
-function actionsFor(origin: CopyProjectDialogOrigin, fallback = vi.fn()) {
+function actionsFor(origin: CopyProjectDialogOrigin, openAddProjectWith = vi.fn()) {
   return crossNodeProjectActions({
     projectRef: { environmentId: LAPTOP, projectId: PROJECT },
     origin,
-    openAddProjectFallback: fallback,
+    openAddProjectWith,
   });
 }
 
@@ -128,8 +128,7 @@ afterEach(() => {
 
 describe("cross-node entry points", () => {
   it("the kebab offers copy and link and lists the project's nodes", async () => {
-    const fallback = vi.fn();
-    const screen = await render(<Kebab crossNodeActions={actionsFor("kebab", fallback)} />);
+    const screen = await render(<Kebab crossNodeActions={actionsFor("kebab")} />);
     try {
       const copy = page.getByRole("menuitem", { name: /Copy to another node…/u });
       await expect.element(copy).toMatchTextContent("New");
@@ -153,12 +152,18 @@ describe("cross-node entry points", () => {
     }
   });
 
-  it("linking falls back to the palette while the add-project dialog is off", async () => {
-    const fallback = vi.fn();
-    const screen = await render(<Kebab crossNodeActions={actionsFor("kebab", fallback)} />);
+  it("linking opens add project in link mode for the checkout", async () => {
+    const openAddProjectWith = vi.fn();
+    const screen = await render(
+      <Kebab crossNodeActions={actionsFor("kebab", openAddProjectWith)} />,
+    );
     try {
       await page.getByRole("menuitem", { name: "Link a copy that’s already on a node…" }).click();
-      expect(fallback).toHaveBeenCalledTimes(1);
+      expect(openAddProjectWith).toHaveBeenCalledTimes(1);
+      expect(openAddProjectWith).toHaveBeenCalledWith({
+        mode: "link",
+        projectRef: { environmentId: LAPTOP, projectId: PROJECT },
+      });
     } finally {
       await screen.unmount();
     }

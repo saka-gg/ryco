@@ -27,9 +27,14 @@ import type {
   ProjectImportStep,
   ProjectImportStepId,
 } from "@ryco/contracts/project-copy";
+import { displayRemoteUrl } from "@ryco/shared/gitRemoteUrl";
 
-import { formatProjectPath, inferHomeDirectory } from "../projects/projectsModel.logic";
-import { formatCopyTransfer, projectCopyView } from "./copyRuntime/projectCopyProgress.logic";
+import {
+  formatCopyTransfer,
+  lastOutputLine,
+  projectCopyView,
+} from "./copyRuntime/projectCopyProgress.logic";
+import { displayNodePath } from "./folderPicker.logic";
 import { describeNodePresence, nodeOsLabel } from "./nodePicker.logic";
 
 /** Text with its paths and commands marked, so the view sets them in mono. */
@@ -61,11 +66,6 @@ export function copyPlatformOs(os: string | null): ExecutionEnvironmentPlatformO
     default:
       return "unknown";
   }
-}
-
-/** A path as the dialog shows it: home-relative when it sits under `home` (or an inferred home). */
-export function formatCopyPath(path: string, home?: string | null): string {
-  return formatProjectPath(path, home ?? inferHomeDirectory(path));
 }
 
 /* ───────── From: the project's checkouts ───────── */
@@ -137,7 +137,7 @@ export function copySourceRows(input: {
       label,
       node,
       path: member.cwd,
-      displayPath: formatCopyPath(member.cwd),
+      displayPath: displayNodePath(member.cwd),
       selectable: !offline,
       reason: offline ? `${label} is offline` : null,
       offline,
@@ -192,7 +192,7 @@ export function copyTargetCards(input: {
   return input.nodes.map((node) => {
     const checkout = input.members.find((member) => member.environmentId === node.environmentId);
     if (checkout) {
-      const sub = `has it · ${formatCopyPath(checkout.cwd)}`;
+      const sub = `has it · ${displayNodePath(checkout.cwd)}`;
       return { node, state: "has-it", selectable: false, sub, reason: sub };
     }
     if (node.presence === "offline") {
@@ -300,11 +300,11 @@ export function copyFolderNote(input: {
     return { segments: [plain(`Same place as on ${input.sourceLabel}.`)], tone: "muted" };
   }
   const parent = parentOfNodePath(suggestion.takenPath ?? suggestion.path);
-  const shownParent = formatCopyPath(parent, input.targetHome);
+  const shownParent = displayNodePath(parent, input.targetHome);
   if (suggestion.missingMirroredParent !== null) {
     return {
       segments: [
-        mono(formatCopyPath(suggestion.missingMirroredParent, input.targetHome)),
+        mono(displayNodePath(suggestion.missingMirroredParent, input.targetHome)),
         plain(` doesn’t exist on ${targetLabel}, so this uses `),
         mono(shownParent),
         plain(" instead."),
@@ -438,13 +438,13 @@ export function copyImportStepLabel(
   switch (id) {
     case "preflight":
       return context.mode === "link"
-        ? [plain("Check "), mono(formatCopyPath(context.destinationPath, context.targetHome))]
-        : [plain("Create "), mono(formatCopyPath(context.destinationPath, context.targetHome))];
+        ? [plain("Check "), mono(displayNodePath(context.destinationPath, context.targetHome))]
+        : [plain("Create "), mono(displayNodePath(context.destinationPath, context.targetHome))];
     case "clone":
       return context.mode === "send-files"
         ? [plain("Unpack the files")]
         : context.remoteUrl
-          ? [plain("Clone "), mono(displayRemote(context.remoteUrl))]
+          ? [plain("Clone "), mono(displayRemoteUrl(context.remoteUrl))]
           : [plain("Clone the repository")];
     case "remotes":
       return [plain("Add the remotes")];
@@ -481,18 +481,6 @@ export function copyImportStepLabel(
   }
 }
 
-/** "github.com/sak0a/ryco" for the usual remote forms; the URL itself otherwise. */
-export function displayRemote(remoteUrl: string): string {
-  const scp = /^[^@/\s]+@([^:/\s]+):(.+?)(?:\.git)?\/?$/u.exec(remoteUrl);
-  if (scp) return `${scp[1]}/${scp[2]}`;
-  try {
-    const url = new URL(remoteUrl);
-    return `${url.host}${url.pathname.replace(/\.git\/?$/u, "").replace(/\/$/u, "")}`;
-  } catch {
-    return remoteUrl;
-  }
-}
-
 /** The steps the target will run, before it reported any (the import was not started yet). */
 function plannedImportSteps(context: CopyProgressContext): ProjectImportStepId[] {
   if (context.mode === "link") {
@@ -509,14 +497,6 @@ function plannedImportSteps(context: CopyProgressContext): ProjectImportStepId[]
     ...(context.setupCommand ? ["setup" as const] : []),
     ...(context.followUp ? ["follow-up" as const] : []),
   ];
-}
-
-function lastOutputLine(tail: string): string | null {
-  const lines = tail.split(/\r?\n|\r/u).map((line) => line.trim());
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (lines[index]) return lines[index]!;
-  }
-  return null;
 }
 
 function importStepRow(

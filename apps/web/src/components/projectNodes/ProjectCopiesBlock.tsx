@@ -30,13 +30,13 @@ import {
 import { callNodeWithLease } from "./copyRuntime/webProjectCopyIo";
 import {
   copyProgressSteps,
-  formatCopyPath,
   projectCopyRows,
   type CopyProgressContext,
   type NodeImportReport,
   type ProjectCopyRow,
 } from "./copyProjectDialog.logic";
 import { CopyBar, CopyProgressStepList } from "./copyProjectDialogParts";
+import { displayNodePath } from "./folderPicker.logic";
 import { useNodeRead } from "./nodePathQueries";
 import { NodeBadge } from "./NodePicker";
 
@@ -186,7 +186,7 @@ export function ProjectCopiesBlock(props: ProjectCopiesBlockProps) {
         toastManager.add({
           type: "success",
           title: "Leftover removed",
-          description: formatCopyPath(leftover.path),
+          description: displayNodePath(leftover.path),
         });
       } else {
         toastManager.add({

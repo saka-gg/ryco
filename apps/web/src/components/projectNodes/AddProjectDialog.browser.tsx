@@ -5,6 +5,7 @@ import {
   type ServerConfig,
 } from "@ryco/contracts";
 import type { ProjectImportSnapshot, ProjectImportStartInput } from "@ryco/contracts/project-copy";
+import { projectCopyPlanWithSendFiles, startProjectCopy } from "@ryco/client-runtime/projectCopy";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -29,6 +30,11 @@ import {
   waitForServerConfigToApply,
   waitForURL,
 } from "../ChatView.browser.helpers";
+import {
+  resetProjectCopyManagerForTests,
+  setProjectCopyRuntimeForTests,
+} from "./copyRuntime/copyManager";
+import { callNodeWithLease, createWebProjectCopyIo } from "./copyRuntime/webProjectCopyIo";
 import { openAddProject, useProjectNodesDialogStore } from "./projectNodesDialogStore";
 import {
   createFakeNodeApi,
@@ -209,7 +215,11 @@ async function openDialog(): Promise<void> {
 
 describe("AddProjectDialog", () => {
   setupChatViewBrowserSuite();
-  afterEach(unpinSavedEnvironmentStates);
+  afterEach(() => {
+    unpinSavedEnvironmentStates();
+    resetProjectCopyManagerForTests();
+    setProjectCopyRuntimeForTests(null);
+  });
 
   it("lists every node with its state, disables what can't take a project, then asks for the source", async () => {
     const mounted = await mountChatView({
@@ -359,6 +369,78 @@ describe("AddProjectDialog", () => {
         (path) => UUID_ROUTE_RE.test(path),
         "A new thread should open in the cloned project.",
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("hands a clone it runs in the background to the copy runtime, which toasts how it ends", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWith(null),
+    });
+    try {
+      await waitForServerConfigToApply();
+      const mini = createMacMiniApi(
+        addSavedNode({ environmentId: MINI, label: "Mac mini", projectCopy: true }),
+      );
+      // The real coordinator, holding the fake node directly (the suite's saved
+      // node has no credential to reconnect with).
+      setProjectCopyRuntimeForTests({
+        startProjectCopy,
+        projectCopyPlanWithSendFiles,
+        callNodeWithLease,
+        createIo: () =>
+          createWebProjectCopyIo({
+            acquire: async (environmentId) => ({
+              environmentId,
+              api: mini.api,
+              transport: "direct",
+              isCurrent: () => true,
+              isConnected: () => true,
+              withLease: (call) => call(mini.api),
+              release: () => undefined,
+            }),
+          }),
+      });
+      openAddProject({ environmentId: MINI, mode: "clone" });
+      await expect.element(dialog(), ELEMENT_WAIT).toBeVisible();
+      await dialog()
+        .getByRole("textbox", { name: "Repository to clone" })
+        .fill("git@github.com:openai/codex.git");
+      await userEvent.keyboard("{Enter}");
+      const clone = dialog().getByRole("button", { name: "Clone to Mac mini" });
+      await expect.element(clone, ELEMENT_WAIT).toBeEnabled();
+      await clone.click();
+      await vi.waitFor(() => expect(mini.importStart).toHaveBeenCalledTimes(1));
+      const input = mini.importStart.mock.calls[0]![0];
+      await expect
+        .element(
+          dialog().getByText("This keeps running on Mac mini if you close it."),
+          ELEMENT_WAIT,
+        )
+        .toBeVisible();
+
+      await dialog().getByRole("button", { name: "Run in background" }).click();
+      await vi.waitFor(() =>
+        expect(useProjectNodesDialogStore.getState().addProject.open).toBe(false),
+      );
+      // The copy runtime follows the node's import: its progress toast, worded as a clone.
+      await expect
+        .element(page.getByText("Cloning codex to Mac mini").first(), ELEMENT_WAIT)
+        .toBeVisible();
+      expect(mini.importStart).toHaveBeenCalledTimes(1);
+
+      mini.emit(
+        importSnapshot(input, "completed", [
+          { id: "preflight", status: "done", progressPercent: null, detail: null },
+          { id: "clone", status: "done", progressPercent: 100, detail: null },
+          { id: "register", status: "done", progressPercent: null, detail: null },
+        ]),
+      );
+      await expect
+        .element(page.getByText("codex is ready on Mac mini"), ELEMENT_WAIT)
+        .toBeVisible();
     } finally {
       await mounted.cleanup();
     }

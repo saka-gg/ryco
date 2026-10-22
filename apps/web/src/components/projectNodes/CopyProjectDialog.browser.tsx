@@ -177,6 +177,7 @@ function inspection(
       isDetached: false,
       remotes: [{ name: "origin", url: "git@github.com:sak0a/ryco.git" }],
       primaryRemoteName: "origin",
+      cloneRemoteName: "origin",
       canonicalKey: KEY,
       isShallow: false,
       hasSubmodules: false,

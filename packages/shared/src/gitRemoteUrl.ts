@@ -223,3 +223,22 @@ export function repositoryFolderName(remoteUrl: string): string | null {
   const name = segment.replace(/\.git$/i, "");
   return name.length > 0 ? name : null;
 }
+
+/**
+ * A remote as people read it: `host/owner/repo` for the usual URL forms
+ * (`git@github.com:me/ryco.git` and `https://github.com/me/ryco.git` both read
+ * `github.com/me/ryco`), never with user info; the URL itself otherwise.
+ * Case is kept, unlike the repository identity's canonical key.
+ */
+export function displayRemoteUrl(remoteUrl: string): string {
+  const trimmed = remoteUrl.trim();
+  const scp = /^[^@/\s]+@([^:/\s]+):(.+?)(?:\.git)?\/?$/u.exec(trimmed);
+  if (scp) return `${scp[1]}/${scp[2]}`;
+  try {
+    const url = new URL(trimmed);
+    if (!url.host) return trimmed;
+    return `${url.host}${url.pathname.replace(/\.git\/?$/u, "").replace(/\/$/u, "")}`;
+  } catch {
+    return trimmed;
+  }
+}

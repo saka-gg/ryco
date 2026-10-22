@@ -29,6 +29,7 @@ import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import {
   DEFAULT_PROJECT_METADATA_DIR,
   type EnvironmentId,
+  type ScopedProjectRef,
   type ServerConfig,
 } from "@ryco/contracts";
 import type { NodePathHints, ProjectCheckRemoteAccessResult } from "@ryco/contracts/project-copy";
@@ -67,8 +68,14 @@ export interface CopyDialogServices {
   ) => Promise<CopyDialogNodeHold>;
   /** The destination's server config, for the setup agent's providers and default model. */
   readonly readServerConfig: (environmentId: EnvironmentId) => Promise<ServerConfig | null>;
-  /** Starts the copy; the dialog shows its progress (no toast until it hands it over). */
-  readonly startCopy: (plan: ProjectCopyRunPlan) => Promise<{ readonly copyId: string }>;
+  /**
+   * Starts the copy of the checkout `sourceRef`; the dialog shows its progress
+   * (no toast until it hands it over).
+   */
+  readonly startCopy: (
+    plan: ProjectCopyRunPlan,
+    sourceRef: ScopedProjectRef | null,
+  ) => Promise<{ readonly copyId: string }>;
 }
 
 export const DEFAULT_COPY_DIALOG_SERVICES: CopyDialogServices = {
@@ -84,7 +91,7 @@ export const DEFAULT_COPY_DIALOG_SERVICES: CopyDialogServices = {
       io.dispose();
     }
   },
-  startCopy: (plan) => startManagedProjectCopy({ plan, toast: false }),
+  startCopy: (plan, sourceRef) => startManagedProjectCopy({ plan, toast: false, sourceRef }),
 };
 
 /* ───────── Holding a node ───────── */

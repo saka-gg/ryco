@@ -8,7 +8,9 @@
 // Layer: Web UI. Mounted once by `ProjectNodesDialogs` (lazy); opened through
 //        `projectNodesDialogStore.openAddProject`. Nodes that implement project copy clone and
 //        link through `projects.importStart`; older ones clone with
-//        `sourceControl.cloneRepository` and add with `project.create`.
+//        `sourceControl.cloneRepository` and add with `project.create`. An import
+//        still running when the dialog closes goes on in the copy runtime
+//        (`trackProjectImport`: its toasts, the Copies block, a reload).
 
 import type { AcquiredNode, NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
@@ -86,7 +88,8 @@ import {
   type AddProjectStep,
   type AddProjectCopySource,
 } from "./addProjectDialog.logic";
-import { AddedProjectSummary, ImportProgressBar, ImportProgressSteps } from "./AddProjectOutcome";
+import { AddedProjectSummary, ImportProgressSteps } from "./AddProjectOutcome";
+import { CopyBar } from "./copyProjectDialogParts";
 import { AddProjectSourceStep, type AddProjectCloneChoice } from "./AddProjectSourceStep";
 import {
   buildCloneRepositoryInput,
@@ -102,9 +105,11 @@ import { joinNodePath, nodePathLeaf, type FolderSelectionStatus } from "./folder
 import { useNodeEnvironmentApi, useNodePathHints } from "./nodePathQueries";
 import { NodePicker } from "./NodePicker";
 import type { NodePickerExtrasMap } from "./nodePicker.logic";
+import { trackProjectImport } from "./copyRuntime/copyManager";
 import {
   closeAddProject,
   openCopyProject,
+  requestProjectSelectorOpen,
   useProjectNodesDialogStore,
   type AddProjectDialogRequest,
 } from "./projectNodesDialogStore";
@@ -125,7 +130,7 @@ export function AddProjectDialog() {
         data-testid="add-project-dialog"
       >
         {/* Every open starts from a fresh form; the last one stays while the dialog folds. */}
-        <AddProjectFlow key={slot.token} request={slot.request} />
+        <AddProjectFlow key={slot.token} request={slot.request} open={slot.open} />
       </DialogPopup>
     </Dialog>
   );
@@ -254,8 +259,11 @@ function NodePathHintsProbe(props: {
 
 /* ───────── The flow ───────── */
 
-function AddProjectFlow(props: { readonly request: AddProjectDialogRequest | null }) {
-  const { request } = props;
+function AddProjectFlow(props: {
+  readonly request: AddProjectDialogRequest | null;
+  readonly open: boolean;
+}) {
+  const { request, open } = props;
   const nodes = useNodeCatalog();
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
@@ -296,6 +304,9 @@ function AddProjectFlow(props: { readonly request: AddProjectDialogRequest | nul
   const [phase, setPhase] = useState<AddProjectPhase>({ kind: "form" });
   const [pickingNatively, setPickingNatively] = useState(false);
   const [hintsByNode, setHintsByNode] = useState<NodePickerExtrasMap>({});
+  // The dialog closed (or this open was replaced): a running import is the copy runtime's now.
+  const [handedOver, setHandedOver] = useState(false);
+  const closedRef = useRef(false);
 
   const node = nodes.find((entry) => entry.environmentId === nodeId) ?? null;
   // A node that left the catalog sends the flow back to the node step.
@@ -501,21 +512,32 @@ function AddProjectFlow(props: { readonly request: AddProjectDialogRequest | nul
     setPhase((current) => reduceImportSnapshot(current, snapshot));
   }, []);
   const sendImport = async (input: ProjectImportStartInput) => {
-    const start = node ? readEnvironmentApi(node.environmentId)?.projects.importStart : undefined;
+    const environmentId = node?.environmentId ?? null;
+    const start =
+      environmentId === null ? undefined : readEnvironmentApi(environmentId)?.projects.importStart;
     const update = (patch: Partial<ImportPhase>) =>
       setPhase((current) =>
         current.kind === "import" && current.input === input ? { ...current, ...patch } : current,
       );
-    if (!start) {
+    if (!start || environmentId === null) {
       update({ error: `${node?.label ?? "The node"} is not connected.` });
       return;
     }
     try {
       // Idempotent by id: resending after a dropped answer returns the node's job.
       const snapshot = await start(input);
+      if (closedRef.current) {
+        // Closed while the node answered: the copy runtime follows it from here.
+        if (!isTerminalImport(snapshot)) handOverImport(input, environmentId, snapshot.title);
+        return;
+      }
       update({ accepted: true, error: null });
       applyImportSnapshot(snapshot);
     } catch (error) {
+      if (closedRef.current) {
+        toastError("Couldn't start on the node", errorMessage(error));
+        return;
+      }
       update({ error: errorMessage(error) });
     }
   };
@@ -640,7 +662,7 @@ function AddProjectFlow(props: { readonly request: AddProjectDialogRequest | nul
   /* ── Following an import ── */
 
   const followedImportId =
-    phase.kind === "import" && phase.accepted && !isTerminalImport(phase.snapshot)
+    !handedOver && phase.kind === "import" && phase.accepted && !isTerminalImport(phase.snapshot)
       ? phase.input.importId
       : null;
   useEffect(() => {
@@ -683,7 +705,8 @@ function AddProjectFlow(props: { readonly request: AddProjectDialogRequest | nul
     };
   }, [applyImportSnapshot, followedImportId, nodeId]);
   // A clone or link that finished starts a thread in the new project, as adding a folder does.
-  const threadToOpen = phase.kind === "done" && phase.openThread ? phase.added.ref : null;
+  const threadToOpen =
+    !handedOver && phase.kind === "done" && phase.openThread ? phase.added.ref : null;
   const openAddedThread = useEffectEvent((projectRef: ScopedProjectRef) => {
     void startThreadIn(projectRef);
   });
@@ -728,18 +751,43 @@ function AddProjectFlow(props: { readonly request: AddProjectDialogRequest | nul
       toastError("Couldn't cancel", errorMessage(error));
     }
   };
-  const runInBackground = () => {
-    if (phase.kind === "import" && node) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "info",
-          title: `${phase.added.name} keeps going on ${node.label}`,
-          description: "It shows up in your projects when it's done.",
-        }),
-      );
-    }
-    closeAddProject();
+  /** The copy runtime follows the import from here: its progress toast, the result, a reload. */
+  const handOverImport = (
+    input: ProjectImportStartInput,
+    environmentId: EnvironmentId,
+    title: string,
+  ) => {
+    const linking = input.source.kind === "existing-checkout";
+    void trackProjectImport({
+      environmentId,
+      importId: input.importId,
+      projectId: input.projectId,
+      title,
+      action: linking ? "link" : "clone",
+      sourceRef:
+        linking && linkSource ? scopeProjectRef(linkSource.environmentId, linkSource.id) : null,
+    }).catch((error: unknown) => {
+      toastError("Lost track of the import", errorMessage(error));
+    });
   };
+  // Closing the dialog (Run in background, Esc, another open) never stops the import.
+  const leave = useEffectEvent(() => {
+    if (closedRef.current) return;
+    closedRef.current = true;
+    setHandedOver(true);
+    if (phase.kind === "import" && phase.accepted && !isTerminalImport(phase.snapshot)) {
+      handOverImport(phase.input, phase.added.ref.environmentId, phase.added.name);
+    }
+  });
+  // Another open replacing this one unmounts it without closing first.
+  const leaveIfImporting = useEffectEvent(() => {
+    if (phase.kind === "import") leave();
+  });
+  useEffect(() => {
+    if (!open) leave();
+  }, [open]);
+  useEffect(() => () => leaveIfImporting(), []);
+  const runInBackground = () => closeAddProject();
 
   /* ── Native folder picker (the Desktop app's own node) ── */
 
@@ -812,6 +860,8 @@ function AddProjectFlow(props: { readonly request: AddProjectDialogRequest | nul
         projects={projects}
         onShowInSelector={() => {
           closeAddProject();
+          // The new draft's hero opens its project selector once it shows the project.
+          requestProjectSelectorOpen(phase.added.ref);
           void startThreadIn(phase.added.ref);
         }}
       />
@@ -1176,7 +1226,7 @@ function AddProjectImportProgress(props: {
         }
       />
       <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-3.5 text-[13px]">
-        <ImportProgressBar percent={percent} />
+        <CopyBar percent={percent} />
         <ImportProgressSteps
           snapshot={phase.snapshot}
           startingLabel={`Asking ${node.label} to start…`}

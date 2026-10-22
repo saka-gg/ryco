@@ -55,6 +55,22 @@ export function useGitStatus(
   return statusByCwd.get(target.cwd) ?? folderStatus;
 }
 
+/** What `useGitStatus` would report, read outside React (the copy dialog's checkout rows). */
+export function getGitStatusSnapshot(target: GitStatusTarget): GitStatusState {
+  if (!target.cwd) return IDLE_GIT_STATUS;
+  return statusByCwd.get(target.cwd) ?? folderStatus;
+}
+
+/** Watches nothing; `watchedGitStatusCwdsForTests` records the folder as `useGitStatus` does. */
+export function watchGitStatus(
+  target: GitStatusTarget,
+  _client?: unknown,
+  options?: { readonly enabled?: boolean | undefined },
+): () => void {
+  if (target.cwd && options?.enabled !== false) watchedCwds.add(target.cwd);
+  return () => undefined;
+}
+
 export function refreshGitStatus(): Promise<VcsStatusResult | null> {
   return Promise.resolve(null);
 }

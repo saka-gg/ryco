@@ -362,7 +362,9 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       // no file (the dialog store joins boot through the palette's store), but
       // the copy runtime's node catalog is the first lazy importer of
       // `@ryco/shared/environmentIcon` without `EnvironmentMachineIcon`, so
-      // automatic chunking splits their shared chunk in two.
+      // automatic chunking splits their shared chunk in two. With all of the
+      // feature's lazy surfaces the shell's lucide icons drifted into a seventh
+      // chunk (117); `ICON_MERGE_THRESHOLD_BYTES` folds them back (116 / 417.1 KiB).
       maxGzipBytes: 420 * KIB,
       maxFiles: 116,
       forbiddenSources: [

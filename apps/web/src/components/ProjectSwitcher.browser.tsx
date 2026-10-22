@@ -25,6 +25,7 @@ import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/at
 import { NewThreadWorkLocation } from "./chat/NewThreadWorkLocation";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import {
+  requestProjectSelectorOpen,
   resetProjectNodesDialogStoreForTests,
   useProjectNodesDialogStore,
 } from "./projectNodes/projectNodesDialogStore";
@@ -76,7 +77,7 @@ function setStudioOffline() {
   }));
 }
 
-async function renderSelector() {
+async function renderSelector(options: { readonly openOnRequest?: boolean } = {}) {
   await page.viewport(1100, 800);
   const screen = await render(
     <AppAtomRegistryProvider>
@@ -89,6 +90,7 @@ async function renderSelector() {
             appearance="headline"
             draftId={DRAFT_ID}
             label="ryco"
+            openOnRequest={options.openOnRequest ?? false}
           />
           ?
         </h1>
@@ -184,6 +186,23 @@ describe("ProjectSwitcher", () => {
     // Collapsing folds the per-node rows away.
     await page.getByTestId("project-selector-expand").click();
     await expect.poll(() => optionTexts().length).toBe(3);
+  });
+
+  it("opens when the add-project dialog asks to show its project there", async () => {
+    await renderSelector({ openOnRequest: true });
+    // A request for another checkout leaves this selector closed.
+    requestProjectSelectorOpen(scopeProjectRef(STUDIO_ENV, RYCO_STUDIO));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(document.querySelector('[data-testid="project-selector"]')).toBeNull();
+
+    requestProjectSelectorOpen(scopeProjectRef(LOCAL_ENV, RYCO_LOCAL));
+    await expect.element(page.getByTestId("project-selector")).toBeVisible();
+    await expect.poll(() => optionTexts()[0]).toBe("sak0a/ryco2 nodes · ~/Code/ryco");
+
+    // Closing ends the request, so the selector stays closed afterwards.
+    await userEvent.keyboard("{Escape}");
+    await expect.poll(() => document.querySelector('[data-testid="project-selector"]')).toBeNull();
+    expect(useProjectNodesDialogStore.getState().projectSelectorOpenRequest).toBeNull();
   });
 
   it("disables an offline node's checkout with the reason", async () => {
@@ -288,11 +307,12 @@ describe("ProjectSwitcher", () => {
 
     await openSelector();
     await page.getByRole("button", { name: "Add project…" }).click();
-    // Until the add-project dialog is switched on, every entry point opens the palette's views.
-    expect(useCommandPaletteStore.getState()).toMatchObject({
+    // The add-project dialog, not the palette's views, off the phone tier.
+    expect(useProjectNodesDialogStore.getState().addProject).toMatchObject({
       open: true,
-      openIntent: { kind: "add-project" },
+      request: { environmentId: null, mode: null, projectRef: null },
     });
+    expect(useCommandPaletteStore.getState().open).toBe(false);
   });
 
   it("switches to another Hub node's checkout through the hosted draft-target controller", async () => {

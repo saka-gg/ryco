@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   alternateRemoteUrl,
   classifyRemoteUrl,
+  displayRemoteUrl,
   isCloneableRemoteKind,
   isRecreatableRemoteKind,
   pickCloneRemoteName,
@@ -188,5 +189,23 @@ describe("repositoryFolderName", () => {
     expect(repositoryFolderName("https://example.com/x/repo.git?ref=main")).toBe("repo");
     expect(repositoryFolderName("git@host:repo")).toBe("repo");
     expect(repositoryFolderName("https://github.com/.git")).toBeNull();
+  });
+});
+
+describe("displayRemoteUrl", () => {
+  it("reads host/owner/repo for scp, https and ssh URLs", () => {
+    expect(displayRemoteUrl("git@github.com:sak0a/ryco.git")).toBe("github.com/sak0a/ryco");
+    expect(displayRemoteUrl("https://github.com/sak0a/Ryco.git")).toBe("github.com/sak0a/Ryco");
+    expect(displayRemoteUrl("ssh://git@gitlab.example/x/y")).toBe("gitlab.example/x/y");
+  });
+
+  it("never shows user info", () => {
+    expect(displayRemoteUrl("https://me:token@github.com/sak0a/ryco.git")).toBe(
+      "github.com/sak0a/ryco",
+    );
+  });
+
+  it("keeps anything else as typed", () => {
+    expect(displayRemoteUrl(" /srv/git/ryco ")).toBe("/srv/git/ryco");
   });
 });

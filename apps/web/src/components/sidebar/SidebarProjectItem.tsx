@@ -45,7 +45,7 @@ import { useSidebarWorktreeActions } from "./hooks/useSidebarWorktreeActions";
 import { useSidebarProjectContextMenu } from "./hooks/useSidebarProjectContextMenu";
 import { preloadNewWorktreeDialog, useSidebarProjectDialogs } from "./SidebarProjectDialogOwner";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { openAddProjectWith } from "../../commandPaletteStore";
 import {
   crossNodeProjectActions,
   type CopyProjectDialogOrigin,
@@ -372,7 +372,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
       crossNodeProjectActions({
         projectRef: { environmentId: project.environmentId, projectId: project.id },
         origin,
-        openAddProjectFallback: () => useCommandPaletteStore.getState().openAddProject(),
+        openAddProjectWith,
       }),
     [project.environmentId, project.id],
   );

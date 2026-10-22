@@ -15,6 +15,7 @@ import {
   ensureBrowseDirectoryPath,
   formatProjectPath,
   getBrowseParentPath,
+  inferHomeDirectory,
   inferProjectTitleFromPath,
   isSameFilesystemPath,
   normalizeProjectPathForDispatch,
@@ -43,6 +44,15 @@ export function nodePathLeaf(path: string): string {
 /** A path as the picker shows it: home-relative when it sits under the node's home. */
 export function formatNodePath(path: string, homeDirectory: string | null | undefined): string {
   return formatProjectPath(normalizeProjectPathForDispatch(path), homeDirectory);
+}
+
+/**
+ * A path on a node the dialogs may have no path hints for: home-relative under
+ * `homeDirectory` when given, else under the home its layout implies
+ * (`/Users/<name>`, `/home/<name>`, `C:\Users\<name>`).
+ */
+export function displayNodePath(path: string, homeDirectory?: string | null): string {
+  return formatNodePath(path, homeDirectory ?? inferHomeDirectory(path));
 }
 
 function isRootPath(path: string): boolean {
