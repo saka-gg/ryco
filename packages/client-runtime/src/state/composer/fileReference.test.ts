@@ -10,6 +10,7 @@ import {
   normalizeFileReferencePath,
   buildFileReferenceBlock,
   formatFileReferenceLabel,
+  formatFileReferencePreview,
   formatFileReferenceTitle,
   type FileReference,
   type FileReferenceInput,
@@ -156,6 +157,15 @@ describe("labels", () => {
   it("keys references by side, path and range", () => {
     expect(fileReferenceKey(reference())).toBe(fileReferenceKey(reference({ comment: "x" })));
     expect(fileReferenceKey(reference())).not.toBe(fileReferenceKey(reference({ side: "old" })));
+  });
+
+  it("previews the excerpt with right-aligned numbers and marks what it leaves out", () => {
+    const acrossTen = reference({ lineStart: 8, lineEnd: 10, lines: ["a", "b", "c"] });
+    expect(formatFileReferencePreview(acrossTen, 8)).toEqual([" 8 | a", " 9 | b", "10 | c"]);
+    expect(formatFileReferencePreview(acrossTen, 2)).toEqual(["8 | a", "9 | b", "…"]);
+    expect(formatFileReferencePreview({ lineStart: 4, snippet: "", truncated: true }, 8)).toEqual([
+      "…",
+    ]);
   });
 });
 

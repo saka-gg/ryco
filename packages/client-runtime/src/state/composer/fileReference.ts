@@ -337,6 +337,25 @@ export function formatFileReferenceLabel(
   return `${workspaceFileBasename(reference.path)}:${range}`;
 }
 
+/**
+ * The excerpt's first `maxLines` lines numbered for a preview (" 9 | code"),
+ * the numbers right-aligned so the code keeps one column from 9 to 10, and
+ * "…" after them when the preview does not show the whole range.
+ */
+export function formatFileReferencePreview(
+  reference: Pick<FileReference, "lineStart" | "snippet" | "truncated">,
+  maxLines: number,
+): string[] {
+  const lines = reference.snippet.length > 0 ? reference.snippet.split("\n") : [];
+  const shown = lines.slice(0, Math.max(0, maxLines));
+  const width = String(reference.lineStart + Math.max(0, shown.length - 1)).length;
+  const preview = shown.map(
+    (line, index) => `${String(reference.lineStart + index).padStart(width)} | ${line}`,
+  );
+  if (lines.length > shown.length || reference.truncated) preview.push("…");
+  return preview;
+}
+
 function buildEntryLines(reference: FileReference): string[] {
   const lines = [`- ${formatFileReferenceTitle(reference)}:`];
   if (reference.comment) {

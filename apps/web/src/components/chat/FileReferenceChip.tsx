@@ -1,6 +1,7 @@
 import {
   type FileReference,
   formatFileReferenceLabel,
+  formatFileReferencePreview,
   formatFileReferenceTitle,
 } from "@ryco/client-runtime/state/composer";
 import { XIcon } from "lucide-react";
@@ -17,15 +18,6 @@ import { VscodeEntryIcon } from "./VscodeEntryIcon";
 /** Excerpt lines a chip's tooltip shows; the agent receives the whole bounded excerpt. */
 const TOOLTIP_EXCERPT_LINES = 8;
 
-function excerptPreview(reference: FileReference): string[] {
-  const lines = reference.snippet.length > 0 ? reference.snippet.split("\n") : [];
-  const shown = lines
-    .slice(0, TOOLTIP_EXCERPT_LINES)
-    .map((line, index) => `${reference.lineStart + index} | ${line}`);
-  if (lines.length > TOOLTIP_EXCERPT_LINES || reference.truncated) shown.push("…");
-  return shown;
-}
-
 /**
  * Lines of a workspace file handed to the agent ("app.ts:12-18"), in the
  * composer while they wait to be sent (with `onRemove`) and on the sent
@@ -38,7 +30,7 @@ export function FileReferenceChip(props: {
 }) {
   const { reference, onRemove } = props;
   const title = formatFileReferenceTitle(reference);
-  const excerpt = excerptPreview(reference);
+  const excerpt = formatFileReferencePreview(reference, TOOLTIP_EXCERPT_LINES);
   return (
     <Tooltip>
       <TooltipTrigger
