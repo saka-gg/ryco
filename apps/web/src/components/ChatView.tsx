@@ -1,6 +1,6 @@
 import { useAppKeybindings } from "../appKeybindings";
 import { notifyWorktreeSubmoduleSetup } from "./worktrees/worktreeCreationNotifications";
-import { terminalSnippetBroker } from "../terminalSnippetInsertion";
+import { closeThreadTerminal } from "../terminalClose";
 import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
@@ -3256,23 +3256,20 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeThreadRef, storeNewTerminal, terminalCapability.allowed]);
   const closeTerminal = useCallback(
     (terminalId: string) => {
-      const api = readEnvironmentApi(environmentId);
-      if (!activeThreadId || !api || !terminalCapability.allowed) return;
-      const isFinalTerminal = terminalState.terminalIds.length <= 1;
-      if (activeThreadRef)
-        void terminalSnippetBroker
-          .close({ threadRef: activeThreadRef, terminalId }, api.terminal, isFinalTerminal)
-          .catch(() => undefined);
-
-      if (activeThreadRef) {
-        storeCloseTerminal(activeThreadRef, terminalId);
-      }
-      setTerminalFocusRequestId((value) => value + 1);
+      if (!activeThreadId || !activeThreadRef || !terminalCapability.allowed) return;
+      closeThreadTerminal({
+        threadRef: activeThreadRef,
+        terminalId,
+        isFinalTerminal: terminalState.terminalIds.length <= 1,
+        onClosed: () => {
+          storeCloseTerminal(activeThreadRef, terminalId);
+          setTerminalFocusRequestId((value) => value + 1);
+        },
+      });
     },
     [
       activeThreadId,
       activeThreadRef,
-      environmentId,
       storeCloseTerminal,
       terminalState.terminalIds.length,
       terminalCapability.allowed,

@@ -55,6 +55,8 @@ export function createTerminalSnippetBroker() {
       target: Pick<TerminalSnippetTarget, "threadRef" | "terminalId">,
       terminal: EnvironmentApi["terminal"],
       clearHistory: boolean,
+      /** The node honours `requireIdle` writes; see `selectTerminalWriteRequireIdleSupported`. */
+      requireIdleSupported: boolean,
     ) {
       const key = keyFor(target);
       const maySubmit = !pending.has(key) && !pasted.has(key);
@@ -78,7 +80,11 @@ export function createTerminalSnippetBroker() {
         // The ordinary compatibility fallback submits Enter and is unsafe for
         // any pane that could receive a delayed snippet.
         if (!maySubmit || pending.has(key) || pasted.has(key)) throw error;
-        await terminal.write({ ...input, data: "exit\n" }).catch(() => undefined);
+        // It also types into whatever the shell runs: only where the node refuses a busy shell.
+        if (!requireIdleSupported) throw error;
+        await terminal
+          .write({ ...input, data: "exit\n", requireIdle: true })
+          .catch(() => undefined);
       }
     },
     request(target: TerminalSnippetTarget, source: string, isCurrent: () => boolean) {

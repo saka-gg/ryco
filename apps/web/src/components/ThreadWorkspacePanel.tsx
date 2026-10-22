@@ -1,5 +1,5 @@
 import { useAppKeybindings } from "../appKeybindings";
-import { terminalSnippetBroker } from "../terminalSnippetInsertion";
+import { closeThreadTerminal } from "../terminalClose";
 import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -584,16 +584,16 @@ function WorkspaceTerminalPanel() {
   const closeTerminal = useCallback(
     (terminalId: string) => {
       if (!threadRef) return;
-      const api = readEnvironmentApi(threadRef.environmentId);
-      if (!api) return;
-      const isFinalTerminal = terminalState.terminalIds.length <= 1;
-      void terminalSnippetBroker
-        .close({ threadRef, terminalId }, api.terminal, isFinalTerminal)
-        .catch(() => undefined);
-
-      storeCloseTerminal(threadRef, terminalId);
-      storeSetTerminalOpen(threadRef, false);
-      bumpFocusRequestId();
+      closeThreadTerminal({
+        threadRef,
+        terminalId,
+        isFinalTerminal: terminalState.terminalIds.length <= 1,
+        onClosed: () => {
+          storeCloseTerminal(threadRef, terminalId);
+          storeSetTerminalOpen(threadRef, false);
+          bumpFocusRequestId();
+        },
+      });
     },
     [
       bumpFocusRequestId,

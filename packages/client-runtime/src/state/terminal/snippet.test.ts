@@ -1,4 +1,8 @@
-import { TerminalInputRejectedError, type EnvironmentApi } from "@ryco/contracts";
+import {
+  TerminalBusyError,
+  TerminalInputRejectedError,
+  type EnvironmentApi,
+} from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   bracketedTerminalSnippet,
@@ -196,13 +200,13 @@ describe("terminal snippet handoff", () => {
       throw new Error("lost close ACK");
     });
     const terminal = { write, clear, close } as unknown as EnvironmentApi["terminal"];
-    await expect(broker.close(target, terminal, true)).rejects.toThrow("lost close ACK");
+    await expect(broker.close(target, terminal, true, true)).rejects.toThrow("lost close ACK");
     await result;
     expect(write).not.toHaveBeenCalled();
     expect(clear).not.toHaveBeenCalled();
     expect(broker.inputBlocked(target, "epoch")).toBe(true);
     close.mockImplementationOnce(async () => undefined);
-    await broker.close(target, terminal, true);
+    await broker.close(target, terminal, true, true);
     expect(broker.inputBlocked(target, "epoch")).toBe(false);
     expect(write).not.toHaveBeenCalled();
   });
@@ -218,7 +222,12 @@ describe("terminal snippet handoff", () => {
       throw new Error("close failed");
     });
     await expect(
-      broker.close(target, { write, clear, close } as unknown as EnvironmentApi["terminal"], true),
+      broker.close(
+        target,
+        { write, clear, close } as unknown as EnvironmentApi["terminal"],
+        true,
+        true,
+      ),
     ).rejects.toThrow("close failed");
     expect(write).not.toHaveBeenCalled();
     expect(clear).not.toHaveBeenCalled();
@@ -226,6 +235,7 @@ describe("terminal snippet handoff", () => {
   it("retains ordinary terminal closure and its compatibility fallback for panes without snippets", async () => {
     const broker = createTerminalSnippetBroker();
     const calls: string[] = [];
+    const writes: Array<{ data: string; requireIdle?: true }> = [];
     const terminal = {
       clear: async () => {
         calls.push("clear");
@@ -233,16 +243,52 @@ describe("terminal snippet handoff", () => {
       close: async () => {
         calls.push("close");
       },
-      write: async (input: { data: string }) => {
+      write: async (input: { data: string; requireIdle?: true }) => {
+        writes.push(input);
         calls.push(input.data);
       },
     } as unknown as EnvironmentApi["terminal"];
-    await broker.close(target, terminal, true);
+    await broker.close(target, terminal, true, true);
     expect(calls).toEqual(["clear", "close"]);
     terminal.close = async () => {
       throw new Error("ordinary close failure");
     };
-    await broker.close(target, terminal, false);
+    await broker.close(target, terminal, false, true);
     expect(calls).toEqual(["clear", "close", "exit\n"]);
+    expect(writes).toEqual([
+      { threadId: "thread-a", terminalId: "fresh", data: "exit\n", requireIdle: true },
+    ]);
+  });
+  it("lets the node refuse the exit fallback for a busy shell and skips it where it cannot", async () => {
+    const broker = createTerminalSnippetBroker();
+    const write = vi.fn(async () => {
+      throw new TerminalBusyError({
+        threadId: "thread-a",
+        terminalId: "fresh",
+        reason: "running",
+      });
+    });
+    const close = vi.fn(async () => {
+      throw new Error("ordinary close failure");
+    });
+    const terminal = {
+      write,
+      clear: async () => undefined,
+      close,
+    } as unknown as EnvironmentApi["terminal"];
+    // A refused fallback types nothing; the close itself stays best effort.
+    await broker.close(target, terminal, false, true);
+    expect(write).toHaveBeenCalledExactlyOnceWith({
+      threadId: "thread-a",
+      terminalId: "fresh",
+      data: "exit\n",
+      requireIdle: true,
+    });
+    // A node that would drop `requireIdle` gets no keystrokes at all.
+    write.mockClear();
+    await expect(broker.close(target, terminal, false, false)).rejects.toThrow(
+      "ordinary close failure",
+    );
+    expect(write).not.toHaveBeenCalled();
   });
 });

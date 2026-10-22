@@ -12,6 +12,7 @@ import { restoreChatFolder } from "../../project/chatFolderRestore.ts";
 import {
   DEFAULT_TERMINAL_ID,
   PROJECT_RELOCATION_PENDING_MESSAGE,
+  TerminalBusyError,
   TerminalInputRejectedError,
   type DiagnosticsTerminalProcess,
   type TerminalEvent,
@@ -122,6 +123,12 @@ const DEFAULT_SUBPROCESS_DEEP_IDLE_POLL_INTERVAL_MS = 30_000;
  * this long (capped at a quarter of the tick interval).
  */
 const DEFAULT_SUBPROCESS_OUTPUT_QUIET_MS = 250;
+/**
+ * A `requireIdle` write refuses a shell that received input this recently: a command line
+ * submitted just before may not have forked its command yet, so the process table cannot
+ * vouch for it.
+ */
+const REQUIRE_IDLE_INPUT_SETTLE_MS = 500;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_MAX_PENDING_PROCESS_EVENTS = 2_048;
@@ -180,6 +187,8 @@ interface TerminalStartInput {
 interface TerminalSessionState {
   inputEpoch: string;
   hasReceivedInput: boolean;
+  /** Clock time of the last write; meaningful only once `hasReceivedInput` is set. */
+  lastInputAtMs: number;
   threadId: string;
   terminalId: string;
   cwd: string;
@@ -360,6 +369,18 @@ function cleanupProcessHandles(session: TerminalSessionState): void {
   session.unsubscribeData = null;
   session.unsubscribeExit?.();
   session.unsubscribeExit = null;
+}
+
+/** Whether the PTY reported its exit and the drain has yet to apply it. */
+function hasPendingExit(session: TerminalSessionState): boolean {
+  for (
+    let index = session.pendingProcessEventIndex;
+    index < session.pendingProcessEvents.length;
+    index++
+  ) {
+    if (session.pendingProcessEvents[index]?.type === "exit") return true;
+  }
+  return false;
 }
 
 function clearPendingProcessEvents(session: TerminalSessionState): void {
@@ -741,7 +762,15 @@ const snapshotPosixProcessTable = Effect.fn("terminal.snapshotPosixProcessTable"
       stdoutTruncated: result.stdoutTruncated,
     });
   }
-  return parsePosixProcessTable(result.stdout);
+  const table = parsePosixProcessTable(result.stdout);
+  // A real table lists at least `ps` itself; an empty one would read every shell as idle.
+  if (table.childrenByParent.size === 0) {
+    return yield* new TerminalSubprocessCheckError({
+      message: "POSIX process snapshot listed no processes.",
+      command: "ps",
+    });
+  }
+  return table;
 });
 
 const snapshotWindowsProcessTable = Effect.fn("terminal.snapshotWindowsProcessTable")(
@@ -775,7 +804,15 @@ const snapshotWindowsProcessTable = Effect.fn("terminal.snapshotWindowsProcessTa
         stdoutTruncated: result.stdoutTruncated,
       });
     }
-    return parseWindowsProcessTable(result.stdout);
+    const table = parseWindowsProcessTable(result.stdout);
+    // A real table lists at least PowerShell itself; an empty one would read every shell as idle.
+    if (table.childrenByParent.size === 0) {
+      return yield* new TerminalSubprocessCheckError({
+        message: "Windows process snapshot listed no processes.",
+        command: "powershell",
+      });
+    }
+    return table;
   },
 );
 
@@ -2557,6 +2594,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             const session: TerminalSessionState = {
               inputEpoch: randomUUID(),
               hasReceivedInput: false,
+              lastInputAtMs: 0,
               threadId: input.threadId,
               terminalId,
               cwd: input.cwd,
@@ -2679,12 +2717,70 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         }),
       );
 
+    /**
+     * Fails with {@link TerminalBusyError} unless the shell is idle now; the caller holds the
+     * thread lock. A shell without input since it started runs only its startup files, as a
+     * fresh terminal does. Any other shell needs a process-table read requested now: every
+     * input to the thread takes the same lock, so none can land between the read and the
+     * write, and input from just before may not show in the read yet, so it is refused.
+     */
+    const verifySessionIdle = Effect.fn("terminal.verifySessionIdle")(function* (
+      session: TerminalSessionState,
+    ) {
+      const busy = (reason: TerminalBusyError["reason"]) =>
+        new TerminalBusyError({
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          reason,
+        });
+      const pid = session.pid;
+      if (
+        session.status !== "running" ||
+        session.process === null ||
+        pid === null ||
+        hasPendingExit(session)
+      ) {
+        return yield* busy("unverified");
+      }
+      if (!session.hasReceivedInput) return;
+      const checkStartedAtMs = yield* Clock.currentTimeMillis;
+      if (checkStartedAtMs - session.lastInputAtMs < REQUIRE_IDLE_INPUT_SETTLE_MS) {
+        return yield* busy("inputRaced");
+      }
+      // A foreground process other than the one the shell showed while idle is a command.
+      // This also catches `exec vim`, which leaves no child for the table to find.
+      const foreground = readForegroundName(session);
+      if (
+        foreground !== undefined &&
+        session.idleForegroundName !== null &&
+        foreground !== session.idleForegroundName
+      ) {
+        return yield* busy("running");
+      }
+      // Unlike activity polling, a failed read is no evidence of an idle shell.
+      const processTable = yield* processTableSnapshotter([pid]).pipe(
+        Effect.catch((reason) =>
+          Effect.logWarning("failed to snapshot processes to verify an idle terminal", {
+            reason,
+          }).pipe(Effect.andThen(Effect.fail(busy("unverified")))),
+        ),
+      );
+      // An exit the PTY reported during the read is still queued: its drain waits on the lock.
+      if (session.pid !== pid || hasPendingExit(session)) {
+        return yield* busy("unverified");
+      }
+      if ((processTable.childrenByParent.get(pid)?.length ?? 0) > 0) {
+        return yield* busy("running");
+      }
+    });
+
     const write: TerminalManagerShape["write"] = Effect.fn("terminal.write")((input, canCommit) =>
       withThreadLock(
         input.threadId,
         Effect.gen(function* () {
           const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
           const session = yield* requireSession(input.threadId, terminalId);
+          if (input.requireIdle) yield* verifySessionIdle(session);
           const guardIsCurrent = () =>
             !input.guard ||
             ((canCommit?.() ?? false) &&
@@ -2716,6 +2812,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 message: "Terminal changed. Insert the snippet again in the current workspace.",
               });
           }
+          const inputAtMs = yield* Clock.currentTimeMillis;
           // Admission may yield for filesystem IO. Recheck output/session/input
           // evidence and write synchronously afterward; a guarded write does both
           // inside its storage admission, after the path check.
@@ -2736,6 +2833,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 );
               }
               session.hasReceivedInput = true;
+              session.lastInputAtMs = inputAtMs;
               process.write(input.data);
               noteTerminalIo();
               return Effect.void;
@@ -2800,6 +2898,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 session = {
                   inputEpoch: randomUUID(),
                   hasReceivedInput: false,
+                  lastInputAtMs: 0,
                   threadId: input.threadId,
                   terminalId,
                   cwd: input.cwd,
