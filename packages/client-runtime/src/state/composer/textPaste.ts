@@ -33,6 +33,13 @@ export interface PasteShortcutKeyEvent {
 }
 
 /**
+ * How long after the paste-as-text shortcut, or the desktop menu's announcement of it, a paste
+ * still counts as made by it: the paste follows at once in a browser and after an IPC round trip
+ * in Electron.
+ */
+export const PASTE_AS_TEXT_SHORTCUT_WINDOW_MS = 1_000;
+
+/**
  * Cmd+Shift+V on macOS, Ctrl+Shift+V elsewhere: paste as text, never as an attachment. macOS
  * also has Cmd+Option+Shift+V, its Paste and Match Style; Option turns the key into another
  * character there, so that chord is read from the physical key.

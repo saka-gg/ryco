@@ -40,7 +40,11 @@ import { readLocalApi } from "~/localApi";
 import { formatShortcutLabel } from "~/keybindings";
 import { randomUUID } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
-import type { ComposerPromptEditorHandle, ComposerTextPaste } from "../ComposerPromptEditor";
+import type {
+  ComposerPromptEditorHandle,
+  ComposerTextPaste,
+  ComposerTextPasteResult,
+} from "../ComposerPromptEditor";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 const FILE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_FILE_BYTES / (1024 * 1024))}MB`;
@@ -203,8 +207,11 @@ export interface UseComposerImageAttachmentsResult {
   removeComposerImage: (imageId: string) => void;
   retryComposerFileUpload: (imageId: string) => void;
   onComposerPaste: (event: React.ClipboardEvent<HTMLElement>) => void;
-  /** Folds a large text paste into a `pasted-text.txt` attachment; true when it did. */
-  onComposerPasteText: (paste: ComposerTextPaste) => boolean;
+  /**
+   * Folds a large text paste into a `pasted-text.txt` attachment, or refuses one that fits
+   * neither the message's attachments nor the prompt.
+   */
+  onComposerPasteText: (paste: ComposerTextPaste) => ComposerTextPasteResult;
   onComposerDragEnter: (event: React.DragEvent<HTMLDivElement>) => void;
   onComposerDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
   onComposerDragLeave: (event: React.DragEvent<HTMLDivElement>) => void;
@@ -528,7 +535,7 @@ export function useComposerImageAttachments(
   );
 
   const onComposerPasteText = useCallback(
-    (paste: ComposerTextPaste): boolean => {
+    (paste: ComposerTextPaste): ComposerTextPasteResult => {
       const wouldExceedInputLimit = wouldTextPasteExceedInputLimit({
         promptLength: paste.promptLength,
         selectedLength: paste.selectedLength,
@@ -541,7 +548,7 @@ export function useComposerImageAttachments(
         pasteAsText: paste.pasteAsText,
         wouldExceedInputLimit,
       });
-      if (activeThreadId === null || disposition === "inline") return false;
+      if (activeThreadId === null || disposition === "inline") return "inline";
       const attachments = composerImagesRef.current;
       const name = nextPastedTextFileName(attachments.map((attachment) => attachment.name));
       const file = new File([paste.text], name, { type: PASTED_TEXT_MIME_TYPE });
@@ -549,7 +556,7 @@ export function useComposerImageAttachments(
         resolveComposerAttachmentRouting({ fileUploadMaxBytes, selectedProvider, files: [file] })
           .direct.length === 0
       ) {
-        return false;
+        return "inline";
       }
       const plan = planDirectComposerAttachments({
         files: [file],
@@ -561,9 +568,9 @@ export function useComposerImageAttachments(
       });
       if (plan.accepted.length === 0) {
         // No room in this message: a paste the prompt can hold stays text instead.
-        if (!wouldExceedInputLimit) return false;
+        if (!wouldExceedInputLimit) return "inline";
         setThreadError(activeThreadId, plan.error);
-        return true;
+        return "refused";
       }
       addPlannedComposerAttachments(plan.accepted);
       setThreadError(activeThreadId, null);
@@ -573,7 +580,7 @@ export function useComposerImageAttachments(
         description: `Paste with ${pasteAsTextShortcutLabel()} to keep it as text.`,
         data: { hideCopyButton: true },
       });
-      return true;
+      return "attached";
     },
     [
       activeThreadId,

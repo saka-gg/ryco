@@ -1,4 +1,5 @@
 import { stripAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
+import { CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN } from "@ryco/shared/model";
 
 import { stripSelectionQuotes } from "./selectionQuote.ts";
 import {
@@ -37,9 +38,6 @@ export interface PromptHistoryStep {
   readonly prompt: string;
 }
 
-// Matched the way the composer's effort controls read it.
-const CLAUDE_EFFORT_PREFIX_PATTERN = /^Ultrathink:\s*/i;
-
 /**
  * The text the user typed for a sent message, without what the send added to it: attachment
  * path lines, terminal contexts and their inline labels, and quoted assistant text. Mentions,
@@ -49,7 +47,7 @@ const CLAUDE_EFFORT_PREFIX_PATTERN = /^Ultrathink:\s*/i;
  */
 export function recallablePrompt(messageText: string): string {
   const sent = stripAttachmentPathLines(messageText.trim());
-  const effortPrefix = CLAUDE_EFFORT_PREFIX_PATTERN.exec(sent)?.[0] ?? "";
+  const effortPrefix = CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN.exec(sent)?.[0] ?? "";
   const body = sent.slice(effortPrefix.length);
   if (body === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT) return "";
   if (body.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)) return "";

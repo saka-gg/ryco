@@ -1,16 +1,13 @@
-import { isPasteAsTextShortcut } from "@ryco/client-runtime/state/composer";
-import type { DesktopBridge } from "@ryco/contracts";
+import {
+  isPasteAsTextShortcut,
+  PASTE_AS_TEXT_SHORTCUT_WINDOW_MS,
+} from "@ryco/client-runtime/state/composer";
+import { DESKTOP_PASTE_AS_TEXT_MENU_ACTION, type DesktopBridge } from "@ryco/contracts";
 
 import { isMacPlatform } from "./utils";
 
 /** Dispatched on the window just before the desktop app pastes as text, for editors to prepare. */
 export const PASTE_AS_TEXT_EVENT = "ryco:paste-as-text";
-
-/** The desktop Edit menu's Paste as Text. */
-const PASTE_AS_TEXT_MENU_ACTION = "paste-as-text";
-
-// A chord's own paste lands within its keypress; its menu action follows at once.
-const CHORD_PASTE_WINDOW_MS = 1_000;
 
 /**
  * Carries out the desktop Edit menu's Paste as Text: announces it with `PASTE_AS_TEXT_EVENT`,
@@ -37,9 +34,12 @@ export function installDesktopPasteAsText(
   target.addEventListener("keydown", onKeyDown, true);
   target.addEventListener("paste", onPaste, true);
   const unsubscribe = bridge.onMenuAction((action) => {
-    if (action !== PASTE_AS_TEXT_MENU_ACTION) return;
+    if (action !== DESKTOP_PASTE_AS_TEXT_MENU_ACTION) return;
+    // A chord's own paste lands within its keypress; its menu action follows at once.
     const pastedByChord =
-      chordPasted && chordAt !== null && target.performance.now() - chordAt < CHORD_PASTE_WINDOW_MS;
+      chordPasted &&
+      chordAt !== null &&
+      target.performance.now() - chordAt < PASTE_AS_TEXT_SHORTCUT_WINDOW_MS;
     chordAt = null;
     chordPasted = false;
     if (pastedByChord) return;

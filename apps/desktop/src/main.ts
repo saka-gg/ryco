@@ -1,6 +1,6 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
-import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, PASTE_AS_TEXT_MENU_ACTION } from "./editMenu.ts";
+import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
 import {
@@ -32,9 +32,11 @@ import {
   safeStorage,
   session,
   shell,
+  webContents,
 } from "electron";
 import type { MenuItemConstructorOptions, OpenDialogOptions } from "electron";
 import {
+  DESKTOP_PASTE_AS_TEXT_MENU_ACTION,
   EnvironmentId,
   type ClientSettings,
   type DesktopTheme,
@@ -544,6 +546,8 @@ let backendEverReady = false;
 // a renderer can reconnect in place after a backend crash restart; an error page
 // or a half-booted app still needs a fresh load.
 const appShellUsableContents = new WeakSet<Electron.WebContents>();
+// The app's own pages (one per `createWindow`), which load the preload and answer menu actions.
+const appWindowContents = new WeakSet<Electron.WebContents>();
 // The backend child each window's app document was requested from, and when.
 // A load requested when the backend bound its port is not repeated at its
 // readiness (unless it failed or the backend took too long; see
@@ -2520,10 +2524,18 @@ function configureApplicationMenu(): void {
     },
     buildEditMenu({
       mac: process.platform === "darwin",
-      // Only to the window the paste is for: unlike other menu actions, never one opened for it.
-      onPasteAsText: (window) => {
-        if (!(window instanceof BrowserWindow) || window.isDestroyed()) return;
-        window.webContents.send(MENU_ACTION_CHANNEL, PASTE_AS_TEXT_MENU_ACTION);
+      // Only to the page that has focus, as Electron's edit roles do: unlike other menu
+      // actions, never to a window opened for it.
+      onPasteAsText: ({ triggeredByAccelerator }) => {
+        const focused = webContents.getFocusedWebContents();
+        if (!focused || focused.isDestroyed()) return;
+        const target = resolvePasteAsTextTarget({
+          focused: appWindowContents.has(focused) ? "app" : "page",
+          triggeredByAccelerator,
+          mac: process.platform === "darwin",
+        });
+        if (target === "app") focused.send(MENU_ACTION_CHANNEL, DESKTOP_PASTE_AS_TEXT_MENU_ACTION);
+        else if (target === "page") focused.pasteAndMatchStyle();
       },
     }),
     {
@@ -4835,6 +4847,7 @@ function createWindow(): BrowserWindow {
       v8CacheOptions: "bypassHeatCheck",
     },
   });
+  appWindowContents.add(window.webContents);
 
   const quitGuard = createQuitShortcutGuard({
     mode: () => desktopSettings.quitShortcutMode,
