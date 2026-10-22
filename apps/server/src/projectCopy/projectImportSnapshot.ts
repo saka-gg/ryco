@@ -160,9 +160,21 @@ export const currentImportStep = (snapshot: ProjectImportSnapshot): ProjectImpor
   ).id;
 
 /**
+ * The replayed steps a registered job still owes: pending, or running when a crash cut the step
+ * (or its earlier replay) short. Each is idempotent by command id, so it runs again from the start.
+ */
+export const dueReplayedImportSteps = (
+  snapshot: ProjectImportSnapshot,
+): ReadonlyArray<ProjectImportStepId> =>
+  PROJECT_IMPORT_REPLAYED_STEPS.filter((id) => {
+    const status = importStepOf(snapshot, id)?.status;
+    return status === "pending" || status === "running";
+  });
+
+/**
  * Ends a job: a failure fails the step that was running, a cancel or an interruption skips it,
- * and every step still pending is skipped, except `keepPending` (the post-register steps startup
- * recovery replays).
+ * and every step still pending is skipped. `keepPending` (the post-register steps startup
+ * recovery replays) stay pending, and go back to pending when they were running.
  */
 export const settleImportSnapshot = (
   snapshot: ProjectImportSnapshot,
@@ -192,12 +204,15 @@ export const settleImportSnapshot = (
           },
     leftoverPath: outcome.leftoverPath,
     steps: snapshot.steps.map((step) => {
+      const kept = (outcome.keepPending ?? []).includes(step.id);
       if (step.status === "running") {
+        if (kept)
+          return { ...step, status: "pending" as const, progressPercent: null, detail: null };
         return stopped === null
           ? { ...step, status: "failed" as const, progressPercent: null }
           : { ...step, status: "skipped" as const, progressPercent: null, detail: stopped };
       }
-      if (step.status === "pending" && !(outcome.keepPending ?? []).includes(step.id)) {
+      if (step.status === "pending" && !kept) {
         return { ...step, status: "skipped" as const };
       }
       return step;

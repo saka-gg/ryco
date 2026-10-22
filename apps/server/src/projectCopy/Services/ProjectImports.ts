@@ -32,7 +32,8 @@ export interface ProjectImportsShape {
   /**
    * Starts the job, or answers with the existing job's snapshot for the same `importId` and
    * input digest (a different digest fails `conflict`). Claims every referenced transfer and
-   * takes the destination's reservation before it answers; `origin` is display-only.
+   * takes the destination's reservation before it answers; `origin` is display-only. Once the
+   * job exists it runs on when the caller goes away, and a retry with the same id waits for it.
    */
   readonly start: (
     input: ProjectImportStartInput,
@@ -56,7 +57,8 @@ export interface ProjectImportsShape {
   /**
    * Deletes a terminal job's leftover staging directory, only when the job never registered a
    * project (read from the projection), the directory still has the recorded dev and ino, and
-   * no project is rooted at or under it. Otherwise `{ deleted: false, reason }`.
+   * no project is rooted at or under it. A directory already moved to the destination is never
+   * deleted. Otherwise `{ deleted: false, reason }`.
    */
   readonly discard: (
     input: ProjectDiscardImportInput,

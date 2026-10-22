@@ -34,13 +34,20 @@ export const makeProjectAvatarStore = (options: { readonly dataDir: string }) =>
             new ProjectAvatarStoreError(`unsupported content type ${input.contentType}`),
           );
         }
-        const resized = yield* Effect.promise(async () =>
-          (await loadSharp())(input.bytes)
-            .rotate()
-            .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: "inside", withoutEnlargement: true })
-            .png({ quality: 90, compressionLevel: 9 })
-            .toBuffer(),
-        );
+        // Bytes that do not decode (a valid magic header over garbage) and a sharp that cannot
+        // load are the caller's typed error, never a defect.
+        const resized = yield* Effect.tryPromise({
+          try: async () =>
+            (await loadSharp())(input.bytes)
+              .rotate()
+              .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: "inside", withoutEnlargement: true })
+              .png({ quality: 90, compressionLevel: 9 })
+              .toBuffer(),
+          catch: (cause) =>
+            new ProjectAvatarStoreError(
+              `the image could not be processed: ${cause instanceof Error ? cause.message : String(cause)}`,
+            ),
+        });
         const contentHash = createHash("sha256").update(resized).digest("hex");
         yield* fileSystem
           .writeFile(target, resized)

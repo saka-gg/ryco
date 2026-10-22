@@ -8,13 +8,18 @@
  *
  * Ownership: the job creates a staging sibling of the destination with a non-recursive mkdir (the
  * proof that it owns it), records its dev and ino, clones into it and publishes it to the
- * destination by rename right before registering the project. Until the project is registered a
- * failure or cancel deletes that directory, and only when it still has the recorded identity,
- * no project is rooted in it and the projection never saw the job's project. After register
- * nothing is ever deleted.
+ * destination by rename right before registering the project; when registering fails, it moves
+ * it back. Until the project is registered a failure or cancel deletes that directory, only at
+ * its staging path and only when it still has the recorded identity, no project is rooted in it
+ * and the projection never saw the job's project. After register nothing is ever deleted.
+ *
+ * Lifetime: from the moment a job is in `active` it has its fiber in the layer's scope, so it is
+ * recorded, runs and settles whatever happens to the `start` call that made it. Its claimed
+ * transfers go once it settled and no step is left for startup recovery to replay.
  *
  * @module ProjectImportsLive
  */
+import type { BigIntStats } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, rm, rmdir } from "node:fs/promises";
 import path from "node:path";
 
@@ -38,6 +43,7 @@ import {
 import {
   Cause,
   Data,
+  Deferred,
   Effect,
   Exit,
   Fiber,
@@ -75,6 +81,7 @@ import {
   PROJECT_IMPORT_REPLAYED_STEPS,
   boundImportText,
   currentImportStep,
+  dueReplayedImportSteps,
   importStepOf,
   initialProjectImportSnapshot,
   isTerminalImportStatus,
@@ -136,11 +143,17 @@ interface ProjectImportRow {
   readonly registered: number;
 }
 
-/** The directory a job created, wherever it is now: its staging path, or published. */
+/** The directory a job created: its staging path and the identity it was created with. */
 interface OwnedDirectory {
   readonly path: string;
   readonly dev: string;
   readonly ino: string;
+}
+
+/** Where the job's directory is now: at its staging path, or published to the destination. */
+interface LocatedDirectory {
+  readonly path: string;
+  readonly published: boolean;
 }
 
 /** What `project_imports` holds about one job. */
@@ -164,10 +177,16 @@ interface ActiveJob extends JobRecord {
   readonly ref: SubscriptionRef.SubscriptionRef<ProjectImportSnapshot>;
   readonly tail: TerminalOutputTail;
   readonly releaseReservation: () => void;
+  /**
+   * Completes once the job claimed its transfers or settled without them, which is what `start`
+   * answers after; fails when its row could not be written, so the node never knew the job.
+   */
+  readonly admitted: Deferred.Deferred<void, ProjectCopyError>;
   claimed: ReadonlyArray<ClaimedProjectTransfer>;
   cloneUrl: string;
   projectRoot: string | null;
   setupFailure: ProjectImportSetupFailure | null;
+  /** Forked together with the job's entry in `active`; settles the job. */
   fiber: Fiber.Fiber<void> | null;
   cancelRequested: boolean;
   flushScheduled: boolean;
@@ -203,6 +222,12 @@ const errnoOf = (cause: unknown): string | undefined =>
 
 const messageOf = (cause: unknown, fallback: string): string =>
   cause instanceof Error && cause.message.trim().length > 0 ? cause.message : fallback;
+
+const hasIdentity = (info: BigIntStats, owned: OwnedDirectory): boolean =>
+  info.isDirectory() &&
+  !info.isSymbolicLink() &&
+  String(info.dev) === owned.dev &&
+  String(info.ino) === owned.ino;
 
 const sameOrInside = (candidate: string, directory: string): boolean => {
   const fold = (value: string) => {
@@ -328,8 +353,9 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
     const throttleMs = options.snapshotThrottleMs ?? DEFAULT_SNAPSHOT_THROTTLE_MS;
 
     const active = new Map<ProjectImportId, ActiveJob>();
-    // Starts are quick (a judgement, an insert, a claim) and serialized: one importId never
-    // starts twice and reservations are taken in order.
+    // Entering a start is quick (a judgement and a reservation; the job's fiber claims its
+    // transfers) and serialized: one importId never starts twice and reservations are taken in
+    // order.
     const startLock = Semaphore.makeUnsafe(1);
     // Discard and startup recovery delete directories; never two at once.
     const maintenanceLock = Semaphore.makeUnsafe(1);
@@ -504,19 +530,17 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
 
     /** The job's directory where it is now, when it still has the identity it was created with. */
     const locateOwned = (record: JobRecord) =>
-      Effect.promise(async () => {
+      Effect.promise(async (): Promise<LocatedDirectory | null> => {
         const staging = record.staging;
         if (staging === null) return null;
         const published = projectImportPublishedPath(staging.path, record.importId);
-        for (const candidate of published === null ? [staging.path] : [staging.path, published]) {
+        const candidates: ReadonlyArray<LocatedDirectory> = [
+          { path: staging.path, published: false },
+          ...(published === null ? [] : [{ path: published, published: true }]),
+        ];
+        for (const candidate of candidates) {
           try {
-            const info = await lstat(candidate, { bigint: true });
-            if (
-              info.isDirectory() &&
-              !info.isSymbolicLink() &&
-              String(info.dev) === staging.dev &&
-              String(info.ino) === staging.ino
-            ) {
+            if (hasIdentity(await lstat(candidate.path, { bigint: true }), staging)) {
               return candidate;
             }
           } catch {
@@ -525,6 +549,13 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         }
         return null;
       });
+
+    /**
+     * Whether startup recovery still replays a post-register step of the job. Until it did, the
+     * job's claimed transfers stay: the avatar step reads one.
+     */
+    const replayDue = (record: JobRecord) =>
+      record.registered && dueReplayedImportSteps(record.snapshot).length > 0;
 
     const projectRootedIn = (directory: string) =>
       projects.listAll().pipe(
@@ -535,9 +566,10 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
       );
 
     /**
-     * Deletes the job's own directory, only when it never registered a project, the directory
-     * still has its recorded identity and no project is rooted in it. Clears `staging` once
-     * nothing of it is left to delete.
+     * Deletes the job's own directory, only at its staging path, only when it never registered a
+     * project, the directory still has its recorded identity and no project is rooted in it.
+     * Clears `staging` once nothing of it is left to delete; a directory found published to the
+     * destination is let go with a warning on the record's snapshot, never deleted.
      */
     const removeOwned = (record: JobRecord) =>
       Effect.gen(function* () {
@@ -563,7 +595,7 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
           return {
             deleted: false,
             reason: "Could not check whether the import added a project; try again.",
-            leftoverPath: located,
+            leftoverPath: located?.path ?? null,
           };
         }
         if (located === null) {
@@ -574,25 +606,37 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
             leftoverPath: null,
           };
         }
-        if (yield* projectRootedIn(located)) {
+        if (located.published) {
+          // A crash or a failed move back left it at the destination, where dev and ino alone
+          // cannot tell it from a folder the user made there since (inodes are reused): it is
+          // the user's to keep or delete (A15: only the staging path is ever deleted).
+          record.staging = null;
+          const reason = boundImportText(
+            `The copy was already moved to ${located.path} when the import stopped, so Ryco leaves it there; add it as a project or delete it.`,
+            "The copy was already moved to its destination, so Ryco leaves it there.",
+          );
+          record.snapshot = withImportWarning(record.snapshot, reason, new Date().toISOString());
+          return { deleted: false, reason, leftoverPath: null };
+        }
+        if (yield* projectRootedIn(located.path)) {
           record.staging = null;
           return {
             deleted: false,
-            reason: `A project now uses ${located}, so it stays.`,
+            reason: `A project now uses ${located.path}, so it stays.`,
             leftoverPath: null,
           };
         }
         const removed = yield* Effect.tryPromise(() =>
-          rm(located, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 }),
+          rm(located.path, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 }),
         ).pipe(Effect.result);
         if (removed._tag === "Failure") {
           return {
             deleted: false,
             reason: boundImportText(
-              `Could not delete ${located}: ${messageOf(removed.failure.cause, "unknown error")}`,
+              `Could not delete ${located.path}: ${messageOf(removed.failure.cause, "unknown error")}`,
               "Could not delete the folder.",
             ),
-            leftoverPath: located,
+            leftoverPath: located.path,
           };
         }
         record.staging = null;
@@ -602,8 +646,10 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
     // ── Ending a job ──────────────────────────────────────────────────
 
     /**
-     * Settles a job of this process. Before register a failure or cancel deletes its directory;
-     * an interruption (the server stopping) leaves that to startup recovery.
+     * Settles a job of this process, once. Before register a failure or cancel deletes its
+     * directory; an interruption (the server stopping) leaves that to startup recovery. Runs
+     * uninterruptibly (from the job's fiber or the layer's finalizer): a stop or a cancel never
+     * turns the outcome into another one halfway.
      */
     const finish = (
       job: ActiveJob,
@@ -614,37 +660,46 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         readonly step?: ProjectImportStepId | undefined;
       } | null,
     ) =>
-      Effect.gen(function* () {
-        let leftoverPath: string | null = null;
-        if ((status === "failed" || status === "cancelled") && job.staging !== null) {
-          leftoverPath = (yield* removeOwned(job)).leftoverPath;
-        } else if (status === "interrupted" && job.staging !== null && !job.registered) {
-          leftoverPath = yield* locateOwned(job);
-        }
-        const step = error?.step ?? currentImportStep(job.snapshot);
-        job.child = null;
-        job.snapshot = settleImportSnapshot(
-          job.snapshot,
-          {
-            status,
-            error: error === null ? null : { step, code: error.code, message: error.message },
-            leftoverPath,
-            keepPending:
-              status === "interrupted" && job.registered ? PROJECT_IMPORT_REPLAYED_STEPS : [],
-          },
-          new Date().toISOString(),
+      Effect.suspend(() => {
+        if (isTerminalImportStatus(job.snapshot.status)) return Effect.void;
+        return Effect.gen(function* () {
+          let leftoverPath: string | null = null;
+          if ((status === "failed" || status === "cancelled") && job.staging !== null) {
+            leftoverPath = (yield* removeOwned(job)).leftoverPath;
+          } else if (status === "interrupted" && job.staging !== null && !job.registered) {
+            leftoverPath = (yield* locateOwned(job))?.path ?? null;
+          }
+          const step = error?.step ?? currentImportStep(job.snapshot);
+          job.child = null;
+          job.snapshot = settleImportSnapshot(
+            job.snapshot,
+            {
+              status,
+              error: error === null ? null : { step, code: error.code, message: error.message },
+              leftoverPath,
+              keepPending:
+                status === "interrupted" && job.registered ? PROJECT_IMPORT_REPLAYED_STEPS : [],
+            },
+            new Date().toISOString(),
+          );
+          // The claimed files go before the row says the job ended: a crash in between leaves
+          // a running row, whose recovery releases them again.
+          if (!replayDue(job)) yield* transfers.releaseImport(job.importId);
+          yield* persist(job);
+          yield* SubscriptionRef.set(job.ref, job.snapshot);
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              job.releaseReservation();
+              active.delete(job.importId);
+            }),
+          ),
         );
-        yield* persist(job);
-        yield* SubscriptionRef.set(job.ref, job.snapshot);
-        job.releaseReservation();
-        active.delete(job.importId);
-        // An interrupted job's files stay for the post-register steps recovery replays.
-        if (status !== "interrupted") yield* transfers.releaseImport(job.importId);
       });
 
     const settle = (job: ActiveJob, exit: Exit.Exit<void, ImportJobFailure>) =>
       Effect.gen(function* () {
-        if (Exit.isSuccess(exit)) return;
+        if (Exit.isSuccess(exit)) return yield* finish(job, "completed", null);
         const cause = exit.cause;
         if (Cause.hasInterrupts(cause)) {
           if (job.cancelRequested) {
@@ -736,6 +791,23 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         "preflight",
         Effect.gen(function* () {
           const input = job.input;
+          // The uploads move into the job's own directory (verified again) before anything else;
+          // `start` answers once they did. A cancel or a stop may interrupt the verification.
+          job.claimed = yield* transfers
+            .claimForImport({ importId: job.importId, transfers: transferClaims(input) })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new ImportJobFailure({
+                    code: "transfer-missing",
+                    message: boundImportText(
+                      `The uploaded files are not ready: ${error.message}`,
+                      "The uploaded files are not ready.",
+                    ),
+                  }),
+              ),
+            );
+          yield* Deferred.succeed(job.admitted, undefined);
           const existing = yield* projects.getById({ projectId: input.projectId }).pipe(
             Effect.mapError(
               (cause) =>
@@ -1046,9 +1118,114 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         yield* warn(job, warningOf(result.failure));
       });
 
+    /** Re-judges the destination and moves the staging directory onto it. */
+    const publish = (job: ActiveJob) =>
+      Effect.gen(function* () {
+        const input = job.input;
+        const staging = job.staging;
+        if (staging === null) return yield* failWith("internal", "The import's folder is missing.");
+        const recheck = yield* nodePaths
+          .judgeProjectDestination({
+            path: job.destination,
+            intent: "create",
+            relativeRootInRepository: input.relativeRootInRepository,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) => new ImportJobFailure({ code: "register-failed", message: error.message }),
+            ),
+          );
+        if (!recheck.usable) {
+          const refusal = destinationRefusal(input, recheck.preview, false);
+          return yield* failWith(refusal.code, refusal.message);
+        }
+        yield* Effect.tryPromise(async () => {
+          // An empty destination folder (made by the user or the dialog) gives way to the clone.
+          await rmdir(job.destination).catch((error: unknown) => {
+            if (errnoOf(error) !== "ENOENT") throw error;
+          });
+          await renameWithRetry(staging.path, job.destination);
+        }).pipe(
+          Effect.mapError(
+            (error) =>
+              new ImportJobFailure({
+                code: "destination-unavailable",
+                message: `Could not move the repository into ${input.destinationPath}: ${messageOf(error.cause, "unknown error")}`,
+              }),
+          ),
+        );
+        return staging;
+      });
+
     /**
-     * Publishes the repository to the destination (re-judged first) and registers the project.
-     * Runs uninterruptibly: a cancel waits for it, so the project either exists with the record
+     * Moves a published directory back to its staging path after registering it failed, when the
+     * projection shows the project never existed and the destination still has the directory's
+     * identity, so cleanup deletes it there and only there (A15). Otherwise it stays put.
+     */
+    const unpublish = (job: ActiveJob, staging: OwnedDirectory) =>
+      Effect.gen(function* () {
+        if ((yield* registrationOf(job)) !== "never") return;
+        yield* Effect.tryPromise(async () => {
+          if (!hasIdentity(await lstat(job.destination, { bigint: true }), staging)) return;
+          await renameWithRetry(job.destination, staging.path);
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("project import could not move its folder back to staging", {
+              importId: job.importId,
+              cause: messageOf(error.cause, "unknown error"),
+            }),
+          ),
+        );
+      });
+
+    /** Judges the published (or linked) checkout and adds it as the project. */
+    const addProject = (job: ActiveJob) =>
+      Effect.gen(function* () {
+        const input = job.input;
+        const final = yield* nodePaths
+          .judgeProjectDestination({
+            path: job.destination,
+            intent: "link",
+            relativeRootInRepository: input.relativeRootInRepository,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) => new ImportJobFailure({ code: "register-failed", message: error.message }),
+            ),
+          );
+        if (!final.usable || final.projectRoot === null) {
+          const refusal = destinationRefusal(input, final.preview, true);
+          return yield* failWith("register-failed", refusal.message);
+        }
+        const projectRoot = final.projectRoot;
+        yield* engine
+          .dispatch({
+            type: "project.create",
+            commandId: projectImportCommandId(job.importId, "project-create"),
+            projectId: input.projectId,
+            title: input.title,
+            workspaceRoot: projectRoot,
+            projectMetadataDir: input.settings?.projectMetadataDir ?? DEFAULT_PROJECT_METADATA_DIR,
+            createWorkspaceRootIfMissing: false,
+            customSystemPrompt: input.settings?.customSystemPrompt ?? null,
+            createdAt: new Date().toISOString(),
+          })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new ImportJobFailure({
+                  code: "register-failed",
+                  message: `The project could not be added: ${messageOf(error, "orchestration error")}`,
+                }),
+            ),
+          );
+        return projectRoot;
+      });
+
+    /**
+     * Publishes the repository to the destination (re-judged first) and registers the project;
+     * when registering fails, the repository moves back to its staging path. Runs uninterruptibly
+     * (`runJob` is): a cancel waits for it, so the project either exists with the record
      * saying so, or not at all.
      */
     const register = (job: ActiveJob, linking: boolean) =>
@@ -1056,82 +1233,10 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         job,
         "register",
         Effect.gen(function* () {
-          const input = job.input;
-          if (!linking) {
-            const staging = job.staging;
-            if (staging === null)
-              return yield* failWith("internal", "The import's folder is missing.");
-            const recheck = yield* nodePaths
-              .judgeProjectDestination({
-                path: job.destination,
-                intent: "create",
-                relativeRootInRepository: input.relativeRootInRepository,
-              })
-              .pipe(
-                Effect.mapError(
-                  (error) =>
-                    new ImportJobFailure({ code: "register-failed", message: error.message }),
-                ),
-              );
-            if (!recheck.usable) {
-              const refusal = destinationRefusal(input, recheck.preview, false);
-              return yield* failWith(refusal.code, refusal.message);
-            }
-            yield* Effect.tryPromise(async () => {
-              // An empty destination folder (made by the user or the dialog) gives way to the clone.
-              await rmdir(job.destination).catch((error: unknown) => {
-                if (errnoOf(error) !== "ENOENT") throw error;
-              });
-              await renameWithRetry(staging.path, job.destination);
-            }).pipe(
-              Effect.mapError(
-                (error) =>
-                  new ImportJobFailure({
-                    code: "destination-unavailable",
-                    message: `Could not move the repository into ${input.destinationPath}: ${messageOf(error.cause, "unknown error")}`,
-                  }),
-              ),
-            );
-          }
-          const final = yield* nodePaths
-            .judgeProjectDestination({
-              path: job.destination,
-              intent: "link",
-              relativeRootInRepository: input.relativeRootInRepository,
-            })
-            .pipe(
-              Effect.mapError(
-                (error) =>
-                  new ImportJobFailure({ code: "register-failed", message: error.message }),
-              ),
-            );
-          if (!final.usable || final.projectRoot === null) {
-            const refusal = destinationRefusal(input, final.preview, true);
-            return yield* failWith("register-failed", refusal.message);
-          }
-          const projectRoot = final.projectRoot;
-          yield* engine
-            .dispatch({
-              type: "project.create",
-              commandId: projectImportCommandId(job.importId, "project-create"),
-              projectId: input.projectId,
-              title: input.title,
-              workspaceRoot: projectRoot,
-              projectMetadataDir:
-                input.settings?.projectMetadataDir ?? DEFAULT_PROJECT_METADATA_DIR,
-              createWorkspaceRootIfMissing: false,
-              customSystemPrompt: input.settings?.customSystemPrompt ?? null,
-              createdAt: new Date().toISOString(),
-            })
-            .pipe(
-              Effect.mapError(
-                (error) =>
-                  new ImportJobFailure({
-                    code: "register-failed",
-                    message: `The project could not be added: ${messageOf(error, "orchestration error")}`,
-                  }),
-              ),
-            );
+          const published = linking ? null : yield* publish(job);
+          const projectRoot = yield* addProject(job).pipe(
+            Effect.tapError(() => (published === null ? Effect.void : unpublish(job, published))),
+          );
           // From here the folder is the project's: nothing of it is the job's to delete any more.
           job.registered = true;
           job.staging = null;
@@ -1271,36 +1376,65 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         yield* warn(job, `The setup thread was not started: ${result.reason}`);
       });
 
+    /**
+     * The steps. Uninterruptible but for the regions a cancel or a stop may cut short (their
+     * children are killed and awaited), so once the follow-up step ran nothing can interrupt the
+     * job any more and `settle` completes it.
+     */
     const runJob = (job: ActiveJob) =>
       Effect.gen(function* () {
         const linking = job.input.source.kind === "existing-checkout";
-        yield* preflight(job);
-        if (linking) {
-          for (const id of [
-            "clone",
-            "remotes",
-            "commits",
-            "checkout",
-            "changes",
-            "submodules",
-            "lfs",
-          ] as const) {
-            yield* skipStep(job, id, "Links the existing checkout");
-          }
-        } else {
-          yield* repositorySteps(job);
-        }
-        yield* Effect.uninterruptible(
+        yield* Effect.interruptible(
           Effect.gen(function* () {
-            yield* register(job, linking);
-            yield* settingsStep(job);
-            yield* avatarStep(job, claimedPath(job, "avatar"));
+            yield* preflight(job);
+            if (linking) {
+              for (const id of [
+                "clone",
+                "remotes",
+                "commits",
+                "checkout",
+                "changes",
+                "submodules",
+                "lfs",
+              ] as const) {
+                yield* skipStep(job, id, "Links the existing checkout");
+              }
+            } else {
+              yield* repositorySteps(job);
+            }
           }),
         );
-        yield* setupStep(job);
-        yield* Effect.uninterruptible(followUpStep(job));
-        yield* finish(job, "completed", null);
-      });
+        // The project exists with the record saying so, or not at all, and its settings and
+        // avatar follow it.
+        yield* register(job, linking);
+        yield* settingsStep(job);
+        yield* avatarStep(job, claimedPath(job, "avatar"));
+        yield* Effect.interruptible(setupStep(job));
+        yield* followUpStep(job);
+      }).pipe(Effect.uninterruptible);
+
+    /**
+     * The job's fiber, forked uninterruptible into the layer's scope in the same step that puts
+     * the job in `active`: whatever happens to the `start` call (a dropped relay interrupts it),
+     * the job is recorded, runs and settles, and `start` (or its retry) is answered.
+     */
+    const lifecycle = (job: ActiveJob) =>
+      Effect.gen(function* () {
+        const inserted = yield* Effect.exit(insertRow(job));
+        if (Exit.isFailure(inserted)) {
+          active.delete(job.importId);
+          job.releaseReservation();
+          const cause = Cause.squash(inserted.cause);
+          yield* Deferred.fail(
+            job.admitted,
+            messageOf(cause, "").includes("UNIQUE")
+              ? copyError("conflict", projectDestinationReservedMessage(job.input.destinationPath))
+              : internal(cause),
+          );
+          return;
+        }
+        yield* settle(job, yield* Effect.exit(runJob(job)));
+      }).pipe(Effect.ensuring(Deferred.succeed(job.admitted, undefined)));
 
     // ── Service ───────────────────────────────────────────────────────
 
@@ -1358,128 +1492,136 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
           : `${input.relativeRootInRepository} is not a folder inside ${input.destinationPath}.`;
       });
 
-    const start: ProjectImportsShape["start"] = (input) =>
-      startLock.withPermits(1)(
-        Effect.gen(function* () {
-          const digest = projectImportInputDigest(input);
-          const existing = yield* readRow(input.importId);
-          if (Option.isSome(existing)) {
-            if (existing.value.input_digest !== digest) {
-              return yield* copyError(
-                "conflict",
-                "This import id was already used for a different import.",
-              );
-            }
-            const current = yield* snapshotOf(input.importId);
-            if (Option.isSome(current)) return current.value;
-          }
-          yield* validateInput(input);
-          const linking = input.source.kind === "existing-checkout";
-          const judgement = yield* nodePaths.judgeProjectDestination({
-            path: input.destinationPath,
-            intent: linking ? "link" : "create",
-            relativeRootInRepository: input.relativeRootInRepository,
-          });
-          const now = new Date().toISOString();
-          const initial = initialProjectImportSnapshot(input, now);
-          const linkRefusal =
-            judgement.usable && judgement.canonicalPath !== null
-              ? yield* checkLinkTarget(input, {
-                  ...judgement,
-                  canonicalPath: judgement.canonicalPath,
-                })
-              : null;
-          if (!judgement.usable || judgement.canonicalPath === null || linkRefusal !== null) {
-            // An unusable destination is the job's preflight failure, so retries and lists see it.
-            const refusal =
-              linkRefusal === null
-                ? destinationRefusal(input, judgement.preview, linking)
-                : { code: "destination-unavailable" as const, message: linkRefusal };
-            const failed = settleImportSnapshot(
-              withImportStep(initial, "preflight", { status: "running" }, now),
-              { status: "failed", error: { step: "preflight", ...refusal }, leftoverPath: null },
-              now,
-            );
-            yield* insertRow({
-              importId: input.importId,
-              input,
-              digest,
-              destinationKey: judgement.canonicalPath ?? input.destinationPath,
-              snapshot: failed,
-              owned: false,
-              staging: null,
-              registered: false,
-              child: null,
-            }).pipe(Effect.mapError(internal));
-            return failed;
-          }
-          const destination = judgement.canonicalPath;
-          const destinationKey = yield* projectDestinationReservationKey(destination);
-          const releaseReservation = tryReserveProjectDestination(
-            destinationKey,
-            `project import ${input.importId}`,
+    const reusedId = () =>
+      copyError("conflict", "This import id was already used for a different import.");
+
+    /**
+     * What `start` answers with: a settled answer (a known id, a refused destination), or the
+     * running job to wait for. Serialized by `startLock`: one importId never starts twice and
+     * reservations are taken in order.
+     */
+    const enter = (input: ProjectImportStartInput) =>
+      Effect.gen(function* () {
+        const digest = projectImportInputDigest(input);
+        // A job whose caller went away is still running, maybe before its row exists.
+        const running = active.get(input.importId);
+        if (running !== undefined) {
+          if (running.digest !== digest) return yield* reusedId();
+          return { job: running } as const;
+        }
+        const existing = yield* readRow(input.importId);
+        if (Option.isSome(existing)) {
+          if (existing.value.input_digest !== digest) return yield* reusedId();
+          const snapshot = yield* decodeSnapshot(existing.value.snapshot_json).pipe(
+            Effect.mapError(internal),
           );
-          if (releaseReservation === null) {
-            return yield* copyError(
-              "conflict",
-              projectDestinationReservedMessage(input.destinationPath),
-            );
-          }
-          const job: ActiveJob = {
+          return { snapshot } as const;
+        }
+        yield* validateInput(input);
+        const linking = input.source.kind === "existing-checkout";
+        const judgement = yield* nodePaths.judgeProjectDestination({
+          path: input.destinationPath,
+          intent: linking ? "link" : "create",
+          relativeRootInRepository: input.relativeRootInRepository,
+        });
+        const now = new Date().toISOString();
+        const initial = initialProjectImportSnapshot(input, now);
+        const linkRefusal =
+          judgement.usable && judgement.canonicalPath !== null
+            ? yield* checkLinkTarget(input, {
+                ...judgement,
+                canonicalPath: judgement.canonicalPath,
+              })
+            : null;
+        if (!judgement.usable || judgement.canonicalPath === null || linkRefusal !== null) {
+          // An unusable destination is the job's preflight failure, so retries and lists see it.
+          const refusal =
+            linkRefusal === null
+              ? destinationRefusal(input, judgement.preview, linking)
+              : { code: "destination-unavailable" as const, message: linkRefusal };
+          const failed = settleImportSnapshot(
+            withImportStep(initial, "preflight", { status: "running" }, now),
+            { status: "failed", error: { step: "preflight", ...refusal }, leftoverPath: null },
+            now,
+          );
+          yield* insertRow({
             importId: input.importId,
             input,
             digest,
-            destinationKey,
-            snapshot: initial,
+            destinationKey: judgement.canonicalPath ?? input.destinationPath,
+            snapshot: failed,
             owned: false,
             staging: null,
             registered: false,
             child: null,
-            destination,
-            ref: yield* SubscriptionRef.make(initial),
-            tail: new TerminalOutputTail(PROJECT_IMPORT_OUTPUT_TAIL_LINES),
-            releaseReservation,
-            claimed: [],
-            cloneUrl: input.source.kind === "clone" ? input.source.remoteUrl : "",
-            projectRoot: null,
-            setupFailure: null,
-            fiber: null,
-            cancelRequested: false,
-            flushScheduled: false,
-          };
-          // Active before the row exists, so recovery never takes it for an earlier process's.
-          active.set(job.importId, job);
-          const inserted = yield* insertRow(job).pipe(Effect.result);
-          if (inserted._tag === "Failure") {
-            active.delete(job.importId);
-            releaseReservation();
-            const unique = messageOf(inserted.failure, "").includes("UNIQUE");
-            return yield* unique
-              ? copyError("conflict", projectDestinationReservedMessage(input.destinationPath))
-              : internal(inserted.failure);
-          }
-          const claimed = yield* transfers
-            .claimForImport({ importId: job.importId, transfers: transferClaims(input) })
-            .pipe(Effect.result);
-          if (claimed._tag === "Failure") {
-            yield* setStep(job, "preflight", { status: "running" });
-            yield* finish(job, "failed", {
-              code: "transfer-missing",
-              message: `The uploaded files are not ready: ${claimed.failure.message}`,
-            });
-            return job.snapshot;
-          }
-          job.claimed = claimed.success;
-          // The fiber starts uninterruptible and only its steps are interruptible, so a cancel
-          // or a shutdown that arrives before it even ran still settles the job.
-          job.fiber = yield* Effect.interruptible(runJob(job)).pipe(
-            Effect.exit,
-            Effect.flatMap((exit) => settle(job, exit)),
-            Effect.forkIn(layerScope, { uninterruptible: true }),
-          );
-          return job.snapshot;
-        }),
-      );
+          }).pipe(Effect.mapError(internal));
+          return { snapshot: failed } as const;
+        }
+        const destination = judgement.canonicalPath;
+        const destinationKey = yield* projectDestinationReservationKey(destination);
+        const ref = yield* SubscriptionRef.make(initial);
+        const admitted = yield* Deferred.make<void, ProjectCopyError>();
+        // Reserving, entering `active` and forking happen in one uninterruptible step: a held
+        // reservation always belongs to a job in `active`, and that job always has its fiber.
+        return yield* Effect.uninterruptible(
+          Effect.suspend(() => {
+            const releaseReservation = tryReserveProjectDestination(
+              destinationKey,
+              `project import ${input.importId}`,
+            );
+            if (releaseReservation === null) {
+              return Effect.fail(
+                copyError("conflict", projectDestinationReservedMessage(input.destinationPath)),
+              );
+            }
+            const job: ActiveJob = {
+              importId: input.importId,
+              input,
+              digest,
+              destinationKey,
+              snapshot: initial,
+              owned: false,
+              staging: null,
+              registered: false,
+              child: null,
+              destination,
+              ref,
+              tail: new TerminalOutputTail(PROJECT_IMPORT_OUTPUT_TAIL_LINES),
+              releaseReservation,
+              admitted,
+              claimed: [],
+              cloneUrl: input.source.kind === "clone" ? input.source.remoteUrl : "",
+              projectRoot: null,
+              setupFailure: null,
+              fiber: null,
+              cancelRequested: false,
+              flushScheduled: false,
+            };
+            // Active before the row exists, so recovery never takes it for an earlier process's.
+            active.set(job.importId, job);
+            return lifecycle(job).pipe(
+              Effect.forkIn(layerScope, { uninterruptible: true }),
+              Effect.map((fiber) => {
+                job.fiber = fiber;
+                return { job } as const;
+              }),
+            );
+          }),
+        );
+      });
+
+    const start: ProjectImportsShape["start"] = (input) =>
+      startLock
+        .withPermits(1)(enter(input))
+        .pipe(
+          Effect.flatMap((entered) =>
+            "snapshot" in entered
+              ? Effect.succeed(entered.snapshot)
+              : // Outside the lock, and interruptible: when the caller goes away meanwhile (a
+                // dropped relay), the job runs on and a retry with the same id waits for it (A3).
+                Deferred.await(entered.job.admitted).pipe(Effect.map(() => entered.job.snapshot)),
+          ),
+        );
 
     const get: ProjectImportsShape["get"] = (importId) => snapshotOf(importId);
 
@@ -1508,14 +1650,15 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
 
     const cancel: ProjectImportsShape["cancel"] = (input) =>
       Effect.gen(function* () {
-        // A start still in flight finishes first, so its job can be found and cancelled.
+        // A start still entering finishes first, so its job can be found and cancelled.
         yield* startLock.withPermits(1)(Effect.void);
         const job = active.get(input.importId);
         if (job !== undefined) {
           job.cancelRequested = true;
           // Returns once the job settled: its child exited and its folder is gone.
           if (job.fiber !== null) yield* Fiber.interrupt(job.fiber);
-          return job.snapshot;
+          if (isTerminalImportStatus(job.snapshot.status)) return job.snapshot;
+          // Otherwise its row could not even be written: the node does not know it.
         }
         const snapshot = yield* snapshotOf(input.importId);
         if (Option.isNone(snapshot)) {
@@ -1565,8 +1708,9 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
             leftoverPath: removal.leftoverPath,
             updatedAt: new Date().toISOString(),
           };
+          // The files normally went when the job settled; releasing again is a no-op then.
+          if (!replayDue(record)) yield* transfers.releaseImport(record.importId);
           yield* persist(record);
-          if (record.staging === null) yield* transfers.releaseImport(record.importId);
           return { deleted: removal.deleted, reason: removal.reason };
         }),
       );
@@ -1599,8 +1743,9 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
 
     /**
      * Jobs an earlier process left `running`: their children are stopped (only when provably
-     * theirs), and they become `interrupted`. A registered job's settings and avatar stay
-     * pending for the replay; its setup and follow-up thread are skipped with a warning.
+     * theirs), and they become `interrupted`. A registered job's settings and avatar stay (or go
+     * back to) pending for the replay; its setup and follow-up thread are skipped with a warning.
+     * The claimed files of a job with nothing to replay go before its row says interrupted.
      */
     const interruptLeftoverJobs = Effect.gen(function* () {
       const rows = yield* sql<ProjectImportRow>`
@@ -1644,19 +1789,20 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
                 code: "interrupted",
                 message: "Ryco restarted while this import was running.",
               },
-              leftoverPath: record.registered ? null : yield* locateOwned(record),
+              leftoverPath: record.registered ? null : ((yield* locateOwned(record))?.path ?? null),
               keepPending: record.registered ? PROJECT_IMPORT_REPLAYED_STEPS : [],
             },
             now,
           );
+          if (!replayDue(record)) yield* transfers.releaseImport(record.importId);
           yield* persist(record);
         }),
       );
     });
 
     /**
-     * Interrupted jobs: a never-registered one's directory is deleted; a registered one's
-     * pending settings and avatar are replayed (idempotent by command id).
+     * Interrupted jobs: a never-registered one's directory is deleted; a registered one's due
+     * settings and avatar are replayed (idempotent by command id), then its files go.
      */
     const settleInterruptedJobs = Effect.gen(function* () {
       // Only rows with something left: a folder, a child, or a registered project to finish.
@@ -1665,10 +1811,9 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
           AND (staging_path IS NOT NULL OR child_pid IS NOT NULL OR registered = 1)`;
       yield* forEachLeftover(rows, (record) =>
         Effect.gen(function* () {
-          const pendingReplay = PROJECT_IMPORT_REPLAYED_STEPS.some(
-            (id) => importStepOf(record.snapshot, id)?.status === "pending",
-          );
-          if (record.staging === null && !pendingReplay && record.child === null) return;
+          const due = record.registered ? dueReplayedImportSteps(record.snapshot) : [];
+          // Nothing left; its files went when it settled.
+          if (record.staging === null && due.length === 0 && record.child === null) return;
           if (record.child !== null) {
             yield* processes.stopRecordedChild(record.child);
             record.child = null;
@@ -1677,7 +1822,7 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
             const removal = yield* removeOwned(record);
             record.snapshot = { ...record.snapshot, leftoverPath: removal.leftoverPath };
           }
-          if (record.registered && pendingReplay) {
+          if (due.length > 0) {
             const avatarClaims = transferClaims(record.input).filter(
               (claim) => claim.purpose === "avatar",
             );
@@ -1688,16 +1833,15 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
                 : yield* transfers
                     .claimForImport({ importId: record.importId, transfers: avatarClaims })
                     .pipe(Effect.orElseSucceed((): ReadonlyArray<ClaimedProjectTransfer> => []));
-            if (importStepOf(record.snapshot, "settings")?.status === "pending") {
-              yield* settingsStep(record);
-            }
-            if (importStepOf(record.snapshot, "avatar")?.status === "pending") {
+            if (due.includes("settings")) yield* settingsStep(record);
+            if (due.includes("avatar")) {
               yield* avatarStep(record, claimedPath({ claimed }, "avatar"));
             }
           }
+          // Each replayed step saved its outcome, so nothing reads the files any more.
+          yield* transfers.releaseImport(record.importId);
           record.snapshot = { ...record.snapshot, updatedAt: new Date().toISOString() };
           yield* persist(record);
-          if (record.staging === null) yield* transfers.releaseImport(record.importId);
         }),
       );
       // Settled jobs without a leftover are only history after a month.

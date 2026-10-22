@@ -12,6 +12,7 @@ import { Schema } from "effect";
 import {
   boundImportText,
   currentImportStep,
+  dueReplayedImportSteps,
   initialProjectImportSnapshot,
   projectImportFollowUpPrompt,
   projectImportInputDigest,
@@ -105,6 +106,33 @@ describe("projectImportSnapshot", () => {
     assert.equal(interrupted.steps.find((step) => step.id === "clone")?.status, "skipped");
     assert.equal(interrupted.steps.find((step) => step.id === "settings")?.status, "pending");
     assert.equal(interrupted.leftoverPath, "/x");
+  });
+
+  it("puts a kept step a crash cut short back to pending, and owes it to the replay", () => {
+    let snapshot = initialProjectImportSnapshot(input, NOW);
+    for (const id of ["preflight", "clone", "register"] as const) {
+      snapshot = withImportStep(snapshot, id, { status: "done" }, NOW);
+    }
+    snapshot = withImportStep(snapshot, "settings", { status: "running" }, NOW);
+    const interrupted = settleImportSnapshot(
+      snapshot,
+      {
+        status: "interrupted",
+        error: null,
+        leftoverPath: null,
+        keepPending: ["settings", "avatar"],
+      },
+      NOW,
+    );
+    const settings = interrupted.steps.find((step) => step.id === "settings");
+    assert.equal(settings?.status, "pending");
+    assert.isNull(settings?.detail);
+    assert.deepEqual(dueReplayedImportSteps(interrupted), ["settings", "avatar"]);
+
+    // A replay a crash cut short is owed again; a finished one is not.
+    const replaying = withImportStep(interrupted, "avatar", { status: "running" }, NOW);
+    const replayed = withImportStep(replaying, "settings", { status: "done" }, NOW);
+    assert.deepEqual(dueReplayedImportSteps(replayed), ["avatar"]);
   });
 
   it("names the staging sibling and maps it back to its destination", () => {

@@ -15,7 +15,7 @@ import {
   type ProjectImportStepId,
   type ProjectImportStepStatus,
 } from "@ryco/contracts/project-copy";
-import { Deferred, Effect, Layer, Option, Schema, Stream } from "effect";
+import { Deferred, Effect, Fiber, Layer, Option, Schema, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { OrchestrationCommandInvariantError } from "../../orchestration/Errors.ts";
@@ -120,6 +120,10 @@ interface HarnessOptions {
   readonly providerReady?: boolean;
   readonly remoteReachable?: boolean;
   readonly failClaims?: boolean;
+  /** Blocks every claim until opened (the node verifying a large upload); records an interrupt. */
+  readonly claimGate?: Deferred.Deferred<void>;
+  /** Blocks every release until opened (the transfers registry held by another claim). */
+  readonly releaseGate?: Deferred.Deferred<void>;
   readonly failDispatch?: ReadonlyArray<OrchestrationCommand["type"]>;
   /** The cloned repository has a `.gitmodules`, so the (failing) submodule step runs. */
   readonly withSubmodules?: boolean;
@@ -295,24 +299,38 @@ const makeHarness = (options: HarnessOptions = {}) => {
       abort: () => Effect.die("unused"),
       sweep: () => Effect.void,
       claimForImport: (input) =>
-        options.failClaims
-          ? Effect.fail(new ProjectCopyError({ code: "not-found", message: "Transfer expired." }))
-          : Effect.sync(() =>
-              input.transfers.map((claim) => {
-                const directory = path.join(state.transfersDir, input.importId);
-                fs.mkdirSync(directory, { recursive: true });
-                const file = path.join(directory, claim.transferId);
-                const bytes = claim.purpose === "avatar" ? PNG_1X1 : Buffer.from(claim.purpose);
-                fs.writeFileSync(file, bytes);
-                return {
-                  ...claim,
-                  path: file,
-                  byteLength: bytes.length,
-                  sha256: createHash("sha256").update(bytes).digest("hex"),
-                };
-              }),
-            ),
-      releaseImport: (importId) => Effect.sync(() => void state.released.push(importId)),
+        Effect.gen(function* () {
+          if (options.claimGate !== undefined) {
+            state.events.push("claim-waiting");
+            yield* Deferred.await(options.claimGate).pipe(
+              Effect.onInterrupt(() => Effect.sync(() => state.events.push("claim-interrupted"))),
+            );
+          }
+          if (options.failClaims) {
+            return yield* new ProjectCopyError({ code: "not-found", message: "Transfer expired." });
+          }
+          return input.transfers.map((claim) => {
+            const directory = path.join(state.transfersDir, input.importId);
+            fs.mkdirSync(directory, { recursive: true });
+            const file = path.join(directory, claim.transferId);
+            const bytes = claim.purpose === "avatar" ? PNG_1X1 : Buffer.from(claim.purpose);
+            fs.writeFileSync(file, bytes);
+            return {
+              ...claim,
+              path: file,
+              byteLength: bytes.length,
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+            };
+          });
+        }),
+      releaseImport: (importId) =>
+        Effect.gen(function* () {
+          if (options.releaseGate !== undefined) {
+            state.events.push("release-waiting");
+            yield* Deferred.await(options.releaseGate);
+          }
+          state.released.push(importId);
+        }),
     }),
   );
 
@@ -488,6 +506,58 @@ const rowOf = (importId: string) =>
     }>`SELECT status, staging_path, registered, owned, child_pid FROM project_imports
       WHERE import_id = ${importId}`;
     return rows[0];
+  });
+
+/** Waits, on real time, until the harness recorded `event` `count` times. */
+const untilEvent = (harness: Harness, event: string, count = 1) =>
+  Effect.promise(async () => {
+    while (harness.state.events.filter((seen) => seen === event).length < count) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  });
+
+/** Lets a server stop go ahead and opens `gate` a moment later, on real time. */
+const openSoon = (gate: Deferred.Deferred<void>) =>
+  Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20))).pipe(
+    Effect.andThen(Deferred.succeed(gate, undefined)),
+    Effect.forkDetach,
+  );
+
+/**
+ * A row an earlier process left `running` when it crashed: the steps before `running` are done
+ * and `running` is running.
+ */
+const insertLeftoverRow = (
+  input: ProjectImportStartInput,
+  options: {
+    readonly running: ProjectImportStepId;
+    readonly staging?: { readonly path: string; readonly dev: string; readonly ino: string };
+    readonly child?: { readonly pid: number; readonly startedAt: string };
+    readonly registered?: boolean;
+  },
+) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const now = "2026-10-22T00:00:00.000Z";
+    let snapshot = initialProjectImportSnapshot(input, now);
+    for (const step of snapshot.steps) {
+      if (step.id === options.running) break;
+      snapshot = withImportStep(snapshot, step.id, { status: "done" }, now);
+    }
+    snapshot = withImportStep(snapshot, options.running, { status: "running" }, now);
+    const staging = options.staging ?? null;
+    const child = options.child ?? null;
+    yield* sql`INSERT INTO project_imports (import_id, project_id, destination_key,
+        staging_path, staging_dev, staging_ino, status, input_json, input_digest,
+        snapshot_json, owned, child_pid, child_pgid, child_started_at, registered,
+        created_at, updated_at)
+      VALUES (${input.importId}, ${input.projectId}, ${input.destinationPath},
+        ${staging?.path ?? null}, ${staging?.dev ?? null}, ${staging?.ino ?? null}, 'running',
+        ${JSON.stringify(Schema.encodeSync(ProjectImportStartInput)(input))},
+        ${projectImportInputDigest(input)},
+        ${JSON.stringify(Schema.encodeSync(ProjectImportSnapshot)(snapshot))},
+        ${staging === null ? 0 : 1}, ${child?.pid ?? null}, ${child?.pid ?? null},
+        ${child?.startedAt ?? null}, ${options.registered ? 1 : 0}, ${now}, ${now})`;
   });
 
 const followUp = {
@@ -709,10 +779,7 @@ describe("ProjectImportsLive", () => {
               (snapshot) => stepStatus(snapshot, "clone") === "running",
             );
             const staging = projectImportStagingPath(destination, input.importId);
-            yield* Effect.promise(async () => {
-              while (!harness.state.events.includes("clone-waiting"))
-                await new Promise((r) => setTimeout(r, 5));
-            });
+            yield* untilEvent(harness, "clone-waiting");
             assert.isTrue(fs.existsSync(path.join(staging, "README.md")));
             const row = yield* rowOf(input.importId);
             assert.equal(row?.staging_path, staging);
@@ -844,9 +911,13 @@ describe("ProjectImportsLive", () => {
         });
         yield* withImports(harness, (imports) =>
           Effect.gen(function* () {
+            // Answered once the claim failed, as the job's preflight failure.
             const snapshot = yield* imports.start(input);
             assert.equal(snapshot.status, "failed");
             assert.equal(snapshot.error?.code, "transfer-missing");
+            assert.equal(snapshot.error?.step, "preflight");
+            assert.equal(stepStatus(snapshot, "preflight"), "failed");
+            assert.equal((yield* rowOf(input.importId))?.status, "failed");
           }),
         );
       }),
@@ -983,11 +1054,7 @@ describe("ProjectImportsLive", () => {
                 (snapshot) => stepStatus(snapshot, "clone") === "running",
               );
             }
-            yield* Effect.promise(async () => {
-              while (harness.state.events.filter((event) => event === "clone-waiting").length < 2) {
-                await new Promise((resolve) => setTimeout(resolve, 5));
-              }
-            });
+            yield* untilEvent(harness, "clone-waiting", 2);
           }),
         );
         const stagingOne = projectImportStagingPath(path.join(parent, "one"), first.importId);
@@ -1034,7 +1101,6 @@ describe("ProjectImportsLive", () => {
     () =>
       memoryDatabase(
         Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
           const harness = makeHarness({ processes: osProjectImportProcessControl });
           const parent = tempDir("crash");
 
@@ -1083,41 +1149,15 @@ describe("ProjectImportsLive", () => {
             deletedAt: null,
           });
 
-          const insert = (
-            input: ProjectImportStartInput,
-            running: ProjectImportStepId,
-            staging: { readonly path: string; readonly dev: string; readonly ino: string },
-            child: { readonly pid: number; readonly startedAt: string } | null,
-          ) => {
-            const now = "2026-10-22T00:00:00.000Z";
-            let snapshot = initialProjectImportSnapshot(input, now);
-            for (const step of snapshot.steps) {
-              if (step.id === running) break;
-              snapshot = withImportStep(snapshot, step.id, { status: "done" }, now);
-            }
-            snapshot = withImportStep(snapshot, running, { status: "running" }, now);
-            return sql`INSERT INTO project_imports (import_id, project_id, destination_key,
-              staging_path, staging_dev, staging_ino, status, input_json, input_digest,
-              snapshot_json, owned, child_pid, child_pgid, child_started_at, registered,
-              created_at, updated_at)
-            VALUES (${input.importId}, ${input.projectId}, ${input.destinationPath},
-              ${staging.path}, ${staging.dev}, ${staging.ino}, 'running',
-              ${JSON.stringify(Schema.encodeSync(ProjectImportStartInput)(input))},
-              ${projectImportInputDigest(input)},
-              ${JSON.stringify(Schema.encodeSync(ProjectImportSnapshot)(snapshot))}, 1,
-              ${child?.pid ?? null}, ${child?.pid ?? null}, ${child?.startedAt ?? null}, 0,
-              ${now}, ${now})`;
-          };
-          yield* insert(
-            lost,
-            "clone",
-            { path: lostStaging, ...identityOf(lostStaging) },
-            {
-              pid: childPid,
-              startedAt: childStartedAt,
-            },
-          );
-          yield* insert(kept, "register", { path: keptStaging, ...keptIdentity }, null);
+          yield* insertLeftoverRow(lost, {
+            running: "clone",
+            staging: { path: lostStaging, ...identityOf(lostStaging) },
+            child: { pid: childPid, startedAt: childStartedAt },
+          });
+          yield* insertLeftoverRow(kept, {
+            running: "register",
+            staging: { path: keptStaging, ...keptIdentity },
+          });
 
           yield* withImports(harness, (imports) =>
             Effect.gen(function* () {
@@ -1160,5 +1200,263 @@ describe("ProjectImportsLive", () => {
           );
         }),
       ),
+  );
+
+  it.effect("a start whose caller goes away mid-claim leaves a job that still runs", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const claimGate = yield* Deferred.make<void>();
+        const harness = makeHarness({ claimGate });
+        const destination = path.join(tempDir("start-dropped"), "app");
+        const input = makeInput({
+          destinationPath: destination,
+          commits: { transferId: randomUUID() },
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            // The relay drops while the node verifies the uploaded bundle.
+            const caller = yield* imports.start(input).pipe(Effect.forkChild);
+            yield* untilEvent(harness, "claim-waiting");
+            yield* Fiber.interrupt(caller);
+            assert.notInclude(harness.state.events, "claim-interrupted");
+            // A3: the caller asks again with the same id and input and gets the same job.
+            const retry = yield* imports.start(input).pipe(Effect.forkChild);
+            const elsewhere = yield* imports
+              .start(makeInput({ destinationPath: destination }))
+              .pipe(Effect.flip);
+            assert.equal(elsewhere.code, "conflict");
+
+            yield* Deferred.succeed(claimGate, undefined);
+            assert.equal((yield* Fiber.join(retry)).importId, input.importId);
+            const done = yield* settled(imports, input.importId);
+            assert.equal(done.status, "completed");
+            assert.include(harness.state.events, "commits");
+            assert.deepEqual(harness.state.released, [input.importId]);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("cancels a job whose start was interrupted mid-claim and frees its folder", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const claimGate = yield* Deferred.make<void>();
+        const harness = makeHarness({ claimGate });
+        const destination = path.join(tempDir("start-cancelled"), "app");
+        const input = makeInput({
+          destinationPath: destination,
+          commits: { transferId: randomUUID() },
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const caller = yield* imports.start(input).pipe(Effect.forkChild);
+            yield* untilEvent(harness, "claim-waiting");
+            yield* Fiber.interrupt(caller);
+
+            const cancelled = yield* imports.cancel({ importId: input.importId });
+            assert.equal(cancelled.status, "cancelled");
+            assert.equal(cancelled.error?.step, "preflight");
+            assert.include(harness.state.events, "claim-interrupted");
+            assert.deepEqual(harness.state.released, [input.importId]);
+            assert.equal((yield* rowOf(input.importId))?.status, "cancelled");
+
+            // Its destination is free again.
+            yield* Deferred.succeed(claimGate, undefined);
+            const next = makeInput({ destinationPath: destination });
+            yield* imports.start(next);
+            assert.equal((yield* settled(imports, next.importId)).status, "completed");
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("a stop while a finished job releases its files leaves it completed", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const releaseGate = yield* Deferred.make<void>();
+        const harness = makeHarness({ releaseGate });
+        const input = makeInput({
+          destinationPath: path.join(tempDir("stop-completing"), "app"),
+          commits: { transferId: randomUUID() },
+          followUpThread: followUp,
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            yield* imports.start(input);
+            yield* untilEvent(harness, "release-waiting");
+            // The server stops now; the transfers registry frees up a moment later.
+            yield* openSoon(releaseGate);
+          }),
+        );
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(after.status, "completed");
+            assert.isNull(after.error);
+            assert.equal(stepStatus(after, "follow-up"), "done");
+            assert.equal((yield* rowOf(input.importId))?.status, "completed");
+            assert.deepEqual(harness.state.released, [input.importId]);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("a stop during setup releases the files of the registered, interrupted job", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const setupGate = yield* Deferred.make<void>();
+        const harness = makeHarness({ setupGate });
+        const input = makeInput({
+          destinationPath: path.join(tempDir("stop-setup"), "app"),
+          commits: { transferId: randomUUID() },
+          avatarTransferId: randomUUID(),
+          setup: { command: "make setup", saveAsScript: false },
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            yield* imports.start(input);
+            yield* untilEvent(harness, "setup-waiting");
+          }),
+        );
+        assert.include(harness.state.events, "setup-interrupted");
+        assert.deepEqual(harness.state.released, [input.importId]);
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(after.status, "interrupted");
+            assert.equal(stepStatus(after, "avatar"), "done");
+            assert.equal((yield* rowOf(input.importId))?.registered, 1);
+            yield* imports.recoverOnStartup();
+            assert.deepEqual(harness.state.released, [input.importId]);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("a crash during preflight releases the job's files at the next start", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        const input = makeInput({
+          destinationPath: path.join(tempDir("crash-preflight"), "app"),
+          commits: { transferId: randomUUID() },
+          changes: { transferId: randomUUID(), baseOid: HEAD_OID, ignoredPaths: [] },
+        });
+        // Its claim moved the files; it never made a staging folder or registered a project.
+        yield* insertLeftoverRow(input, { running: "preflight" });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(after.status, "interrupted");
+            assert.deepEqual(harness.state.released, [input.importId]);
+            yield* imports.recoverOnStartup();
+            assert.deepEqual(harness.state.released, [input.importId]);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("replays the settings or avatar step a crash cut short, then releases the files", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        const parent = tempDir("crash-replay");
+        const settings = {
+          scripts: [],
+          customSystemPrompt: null,
+          preferredRemoteName: "origin",
+          projectMetadataDir: ".ryco",
+        };
+        // One crashed while saving its settings, the other while copying its avatar.
+        const duringSettings = makeInput({
+          destinationPath: path.join(parent, "one"),
+          settings,
+          avatarTransferId: randomUUID(),
+        });
+        const duringAvatar = makeInput({
+          destinationPath: path.join(parent, "two"),
+          settings,
+          avatarTransferId: randomUUID(),
+        });
+        yield* insertLeftoverRow(duringSettings, { running: "settings", registered: true });
+        yield* insertLeftoverRow(duringAvatar, { running: "avatar", registered: true });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const settingsNow = Option.getOrThrow(yield* imports.get(duringSettings.importId));
+            assert.equal(settingsNow.status, "interrupted");
+            assert.equal(stepStatus(settingsNow, "settings"), "pending");
+            assert.equal(stepStatus(settingsNow, "avatar"), "pending");
+            const avatarNow = Option.getOrThrow(yield* imports.get(duringAvatar.importId));
+            assert.equal(stepStatus(avatarNow, "avatar"), "pending");
+            // The avatar's file stays for the replay.
+            assert.deepEqual(harness.state.released, []);
+
+            yield* imports.recoverOnStartup();
+            const settingsAfter = Option.getOrThrow(yield* imports.get(duringSettings.importId));
+            assert.equal(stepStatus(settingsAfter, "settings"), "done");
+            assert.equal(stepStatus(settingsAfter, "avatar"), "done");
+            const avatarAfter = Option.getOrThrow(yield* imports.get(duringAvatar.importId));
+            assert.equal(stepStatus(avatarAfter, "avatar"), "done");
+            assert.sameMembers(
+              harness.state.commands.map((command) => command.commandId),
+              [
+                projectImportCommandId(duringSettings.importId, "project-settings"),
+                projectImportCommandId(duringSettings.importId, "project-avatar"),
+                projectImportCommandId(duringAvatar.importId, "project-avatar"),
+              ],
+            );
+            assert.sameMembers(harness.state.released, [
+              duringSettings.importId,
+              duringAvatar.importId,
+            ]);
+
+            // Nothing is left to replay.
+            yield* imports.recoverOnStartup();
+            assert.equal(harness.state.commands.length, 3);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("never deletes a folder a crash left published at the destination", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        const destination = path.join(tempDir("crash-published"), "app");
+        const input = makeInput({ destinationPath: destination });
+        const staging = projectImportStagingPath(destination, input.importId);
+        fs.mkdirSync(staging);
+        const identity = identityOf(staging);
+        // The crash hit between publishing the clone and project.create.
+        fs.renameSync(staging, destination);
+        fs.writeFileSync(path.join(destination, "README.md"), "# app");
+        yield* insertLeftoverRow(input, {
+          running: "register",
+          staging: { path: staging, ...identity },
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const interrupted = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(interrupted.status, "interrupted");
+            assert.equal(interrupted.leftoverPath, destination);
+
+            // At the destination, dev and ino cannot tell it from a folder made there since.
+            yield* imports.recoverOnStartup();
+            assert.isTrue(fs.existsSync(path.join(destination, "README.md")));
+            const recovered = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.isNull(recovered.leftoverPath);
+            assert.isTrue(recovered.warnings.some((warning) => warning.includes(destination)));
+            assert.isFalse((yield* imports.discard({ importId: input.importId })).deleted);
+            assert.isTrue(fs.existsSync(path.join(destination, "README.md")));
+          }),
+        );
+      }),
+    ),
   );
 });
