@@ -1,0 +1,9 @@
+#!/bin/sh
+# Fake ssh for the cross-node E2E. With GIT_SSH_COMMAND pointing here and
+# GIT_SSH_VARIANT=simple, git calls `fake-ssh <user@host> <command>`, where the
+# command is `git-upload-pack '<path>'` (or receive-pack). Dropping the host and
+# running the command locally makes `git@fixture.test:/abs/path/origin.git`
+# clone, fetch and push against a bare repository both nodes can see at the same
+# absolute path, without a network or an ssh daemon.
+shift
+exec sh -c "$1"

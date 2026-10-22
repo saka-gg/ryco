@@ -1,0 +1,19 @@
+# Build context exclusions for node.Dockerfile (BuildKit reads
+# <Dockerfile>.dockerignore next to the Dockerfile). The image installs its own
+# dependencies, so host node_modules and build output stay out.
+**/node_modules
+**/dist
+**/.turbo
+output
+dogfood-output
+.git
+**/*.log
+apps/desktop/release
+apps/mobile/ios
+apps/mobile/android
+.claude
+.docs
+marketing
+.cursor
+.vscode
+.plans

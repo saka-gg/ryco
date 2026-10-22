@@ -15,6 +15,10 @@
         "$TURBO_ROOT$/apps/server/package.json",
         "$TURBO_ROOT$/apps/server/src/device/helperSandbox.ts",
         "$TURBO_ROOT$/packages/client-runtime/src/connection/approximateJsonSize.ts",
+        // e2e/cross-node pairs nodes through the CLI's remote client.
+        "$TURBO_ROOT$/apps/server/src/cliRemote/remotes.ts",
+        "$TURBO_ROOT$/apps/server/src/cliRemote/threads.ts",
+        "$TURBO_ROOT$/packages/client-runtime/src/**",
       ],
     },
     "typecheck:fast": {
@@ -25,6 +29,10 @@
         "$TURBO_ROOT$/apps/server/package.json",
         "$TURBO_ROOT$/apps/server/src/device/helperSandbox.ts",
         "$TURBO_ROOT$/packages/client-runtime/src/connection/approximateJsonSize.ts",
+        // e2e/cross-node pairs nodes through the CLI's remote client.
+        "$TURBO_ROOT$/apps/server/src/cliRemote/remotes.ts",
+        "$TURBO_ROOT$/apps/server/src/cliRemote/threads.ts",
+        "$TURBO_ROOT$/packages/client-runtime/src/**",
       ],
     },
   },
