@@ -1,7 +1,15 @@
-import { ProviderDriverKind, type CodexSettings } from "@ryco/contracts";
+import {
+  ProviderDriverKind,
+  type CodexSettings,
+  type ProviderInstanceEnvironment,
+} from "@ryco/contracts";
 import { Effect, FileSystem, Path, Schema } from "effect";
 import * as PlatformError from "effect/PlatformError";
 
+import {
+  mergeProviderInstanceEnvironment,
+  normalizeProviderHomeEnvironment,
+} from "../ProviderInstanceEnvironment.ts";
 import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
 
 export interface CodexHomeLayout {
@@ -64,6 +72,27 @@ export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(functi
     effectiveHomePath,
     continuationKey: `codex:home:${sharedHomePath}`,
   };
+});
+
+/**
+ * The environment and home layout of a Codex provider instance: the instance's variables over the
+ * server's, HOME normalized, and the layout resolved from that environment rather than the
+ * server's. The driver, MCP settings, reset credits and history sources all resolve an instance
+ * through this, so they agree on its homes.
+ */
+export const resolveCodexInstanceLayout = Effect.fn("resolveCodexInstanceLayout")(function* (
+  config: CodexSettings,
+  instanceEnvironment: ProviderInstanceEnvironment | undefined,
+): Effect.fn.Return<
+  { readonly environment: NodeJS.ProcessEnv; readonly layout: CodexHomeLayout },
+  never,
+  Path.Path
+> {
+  const environment = normalizeProviderHomeEnvironment(
+    mergeProviderInstanceEnvironment(instanceEnvironment),
+  );
+  const layout = yield* resolveCodexHomeLayout(config, environment);
+  return { environment, layout };
 });
 
 /**

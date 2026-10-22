@@ -39,10 +39,6 @@ import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import {
-  mergeProviderInstanceEnvironment,
-  normalizeProviderHomeEnvironment,
-} from "../ProviderInstanceEnvironment.ts";
-import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
@@ -54,7 +50,7 @@ import {
   codexContinuationIdentity,
   codexProcessEnvironment,
   materializeCodexShadowHome,
-  resolveCodexHomeLayout,
+  resolveCodexInstanceLayout,
 } from "./CodexHomeLayout.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -151,10 +147,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = normalizeProviderHomeEnvironment(
-        mergeProviderInstanceEnvironment(environment),
+      const { environment: processEnv, layout: homeLayout } = yield* resolveCodexInstanceLayout(
+        config,
+        environment,
       );
-      const homeLayout = yield* resolveCodexHomeLayout(config, processEnv);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,

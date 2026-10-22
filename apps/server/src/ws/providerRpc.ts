@@ -3,15 +3,12 @@ import { resolveProjectPreferences } from "../project/projectPreferences.ts";
 import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
 import {
   codexProcessEnvironment,
-  resolveCodexHomeLayout,
+  resolveCodexInstanceLayout,
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import * as NodePath from "node:path";
 import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
 import { makeAcpRegistryCatalog } from "../provider/acp/AcpRegistryCatalog.ts";
-import {
-  mergeProviderInstanceEnvironment,
-  normalizeProviderHomeEnvironment,
-} from "../provider/ProviderInstanceEnvironment.ts";
+import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   readResourceTelemetryHistory,
   retryResourceTelemetry,
@@ -125,10 +122,10 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
         );
       const codex = yield* Schema.decodeUnknownEffect(CodexSettings)(instance.config ?? {});
       // The home layout and environment the instance's driver starts Codex with.
-      const environment = normalizeProviderHomeEnvironment(
-        mergeProviderInstanceEnvironment(instance.environment),
+      const { environment, layout } = yield* resolveCodexInstanceLayout(
+        codex,
+        instance.environment,
       );
-      const layout = yield* resolveCodexHomeLayout(codex, environment);
       return {
         instanceId,
         binaryPath: codex.binaryPath,

@@ -38,12 +38,11 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import {
   codexProcessEnvironment,
   materializeCodexShadowHome,
-  resolveCodexHomeLayout,
+  resolveCodexInstanceLayout,
   type CodexHomeLayout,
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { loadCodexAppServerModule } from "../provider/codexAppServerModule.ts";
-import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   applyProviderMcpSecretMutations,
   providerMcpSecretPresence,
@@ -584,9 +583,12 @@ export const makeCodexMcpService = Effect.gen(function* () {
       if (!codexSettings.enabled) {
         continue;
       }
-      const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
-        Effect.provideService(Path.Path, pathService),
-      );
+      // Resolved from the instance's environment, exactly as its driver does, so MCP calls use
+      // the instance's homes and materializing never re-points its shadow-home links.
+      const { environment: processEnv, layout } = yield* resolveCodexInstanceLayout(
+        codexSettings,
+        instance.environment,
+      ).pipe(Effect.provideService(Path.Path, pathService));
       const materialized = yield* materializeCodexShadowHome(layout).pipe(
         Effect.provideService(Path.Path, pathService),
         Effect.provideService(FileSystem.FileSystem, fileSystemService),
@@ -648,7 +650,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
         },
         layout,
         codexSettings,
-        processEnv: mergeProviderInstanceEnvironment(instance.environment),
+        processEnv,
       });
     }
 
