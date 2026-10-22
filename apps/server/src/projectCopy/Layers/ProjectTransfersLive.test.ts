@@ -207,6 +207,69 @@ describe("ProjectTransfersLive", () => {
     }),
   );
 
+  it.effect("never takes opted-in ignored files over a relay the Hub can read (A33)", () =>
+    Effect.gen(function* () {
+      const stateDir = makeStateDir();
+      const bytes = randomBytes(PROJECT_COPY_CHUNK_BYTES + 1234);
+      const sensitive = (transferId: ProjectTransferId, carriesIgnoredFiles = true) => ({
+        transferId,
+        purpose: "changes-patch" as const,
+        byteLength: bytes.byteLength,
+        sha256: sha256(bytes),
+        carriesIgnoredFiles,
+      });
+      const transferId = newTransferId();
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const transfers = yield* openStore(stateDir);
+          // Refused before anything exists on disk.
+          const refused = newTransferId();
+          const denied = yield* Effect.flip(transfers.begin(sensitive(refused), "relay-plaintext"));
+          expect(denied.code).toBe("access-denied");
+          expect(listTransfers(stateDir)).toEqual([]);
+
+          yield* transfers.begin(sensitive(transferId), "relay-e2ee");
+          yield* transfers.append(
+            { transferId, offset: 0, dataBase64: chunk(bytes, 0) },
+            "relay-e2ee",
+          );
+        }),
+      );
+
+      // After a restart, a channel that fell back to plaintext still cannot carry the rest.
+      const transfers = yield* openStore(stateDir);
+      const rest = {
+        transferId,
+        offset: PROJECT_COPY_CHUNK_BYTES,
+        dataBase64: chunk(bytes, PROJECT_COPY_CHUNK_BYTES),
+      };
+      expect((yield* Effect.flip(transfers.append(rest, "relay-plaintext"))).code).toBe(
+        "access-denied",
+      );
+      expect(
+        (yield* Effect.flip(transfers.begin(sensitive(transferId), "relay-plaintext"))).code,
+      ).toBe("access-denied");
+      // Its declaration is part of the begin: it cannot be taken back under the same id.
+      expect(
+        (yield* Effect.flip(transfers.begin(sensitive(transferId, false), "relay-plaintext"))).code,
+      ).toBe("conflict");
+      expect((yield* transfers.append(rest, "direct")).receivedBytes).toBe(bytes.byteLength);
+      yield* transfers.commit({ transferId });
+
+      // Bytes without ignored files travel over any channel; calls from the node itself declare none.
+      const plain = newTransferId();
+      yield* transfers.begin(sensitive(plain, false), "relay-plaintext");
+      yield* transfers.append(
+        { transferId: plain, offset: 0, dataBase64: chunk(bytes, 0) },
+        "relay-plaintext",
+      );
+      const internal = newTransferId();
+      yield* transfers.begin(sensitive(internal));
+      yield* transfers.append({ transferId: internal, offset: 0, dataBase64: chunk(bytes, 0) });
+    }),
+  );
+
   it.effect("appends only at receivedBytes and treats rewritten ranges by their bytes", () =>
     Effect.gen(function* () {
       const transfers = yield* openStore(makeStateDir());

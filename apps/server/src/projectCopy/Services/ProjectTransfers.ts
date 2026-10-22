@@ -25,6 +25,8 @@ import type {
 import { Context } from "effect";
 import type { Effect } from "effect";
 
+import type { ProjectCopyCallerChannel } from "../callerChannel.ts";
+
 /** One transfer an import references, with the purpose its field requires. */
 export interface ProjectTransferClaim {
   readonly transferId: ProjectTransferId;
@@ -42,16 +44,24 @@ export interface ClaimedProjectTransfer {
 }
 
 export interface ProjectTransfersShape {
-  /** Idempotent for the same id, purpose, length and digest; a different one fails `conflict`. */
+  /**
+   * Idempotent for the same id, purpose, length, digest and `carriesIgnoredFiles`; a different
+   * one fails `conflict`. With the caller's `channel`, a transfer that carries opted-in ignored
+   * files is refused on `relay-plaintext` (`access-denied`), before anything is stored.
+   */
   readonly begin: (
     input: ProjectTransferBeginInput,
+    channel?: ProjectCopyCallerChannel,
   ) => Effect.Effect<ProjectTransferProgress, ProjectCopyError>;
   /**
    * Appends at `offset == receivedBytes`. A range already written is a no-op when its bytes
-   * match and `conflict` when they differ; a gap fails with the node's `receivedBytes`.
+   * match and `conflict` when they differ; a gap fails with the node's `receivedBytes`. Bytes of
+   * a transfer that carries ignored files are refused on `relay-plaintext`, whatever channel
+   * began it.
    */
   readonly append: (
     input: ProjectTransferAppendInput,
+    channel?: ProjectCopyCallerChannel,
   ) => Effect.Effect<ProjectTransferProgress, ProjectCopyError>;
   /** Verifies length and digest and seals the transfer; later appends fail. Idempotent. */
   readonly commit: (

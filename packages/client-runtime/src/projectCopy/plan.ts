@@ -41,6 +41,7 @@ import {
   type ProjectCheckRemoteAccessResult,
   type ProjectCopyRemote,
   type ProjectDestinationPreview,
+  type ProjectDestinationPreviewInput,
   type ProjectExportArtifactKind,
   type ProjectExportIgnoredCandidate,
   type ProjectExportInclude,
@@ -228,6 +229,10 @@ export function suggestCopyDestination(
   const parentExists =
     mirroredParentPreview?.state === "exists-empty" ||
     mirroredParentPreview?.state === "exists-not-empty";
+  // Only a missing parent is reported as missing; a refused one (`access-denied`, such as a
+  // folder macOS guards, A34) is there, just not used.
+  const parentMissing =
+    mirroredParentPreview?.state === "available" || mirroredParentPreview?.state === "invalid";
   const useMirror = candidate.mirroredParent !== null && parentExists;
   const parent = useMirror
     ? (mirroredParentPreview?.resolvedPath ?? candidate.mirroredParent)
@@ -239,7 +244,9 @@ export function suggestCopyDestination(
         : joinNodePath(parent, [candidate.leaf], separator),
     basis: useMirror ? "same-place" : "default-directory",
     missingMirroredParent:
-      candidate.mirroredParent !== null && !useMirror ? candidate.mirroredParent : null,
+      candidate.mirroredParent !== null && !useMirror && parentMissing
+        ? candidate.mirroredParent
+        : null,
   };
 }
 
@@ -323,22 +330,25 @@ export function judgeCopyDestination(input: {
 /**
  * Previews the candidate parents and the destination through `preview`
  * (`projects.previewDestination` on the target) and judges the result. Null when there is no
- * folder name to use.
+ * folder name to use. Every preview is marked `suggested`: nobody chose these places, so the
+ * target never opens a folder macOS guards for them (A34) and the mirror falls back to the
+ * default directory instead.
  */
 export async function resolveCopyDestination(
   request: CopyDestinationRequest,
   options: {
-    readonly preview: (path: string) => Promise<ProjectDestinationPreview>;
+    readonly preview: (input: ProjectDestinationPreviewInput) => Promise<ProjectDestinationPreview>;
     readonly sourceCanonicalKey: string | null;
   },
 ): Promise<CopyDestinationSuggestion | null> {
   const candidate = copyDestinationCandidate(request);
+  const preview = (path: string) => options.preview({ path, suggested: true });
   const parentPreview =
-    candidate.mirroredParent === null ? null : await options.preview(candidate.mirroredParent);
+    candidate.mirroredParent === null ? null : await preview(candidate.mirroredParent);
   const suggestion = suggestCopyDestination(request, parentPreview);
   if (suggestion.path === null) return null;
   return judgeCopyDestination({
-    preview: await options.preview(suggestion.path),
+    preview: await preview(suggestion.path),
     sourceCanonicalKey: options.sourceCanonicalKey,
     basis: suggestion.basis,
     missingMirroredParent: suggestion.missingMirroredParent,

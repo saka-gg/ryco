@@ -83,11 +83,15 @@ import {
   scanWorkingTree,
   sumFileSizes,
 } from "../exportGit.ts";
+import {
+  ignoredFilesRefused,
+  mayCarryIgnoredFiles,
+  type ProjectCopyCallerChannel,
+} from "../callerChannel.ts";
 import { sha256File } from "../fileSha256.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import {
   ProjectExport,
-  type ProjectCopyCallerChannel,
   type ProjectExportShape,
   type ProjectExportStartRequest,
 } from "../Services/ProjectExport.ts";
@@ -116,10 +120,9 @@ export interface ProjectExportLiveOptions {
 }
 
 interface ExportArtifactFile {
+  /** `carriesIgnoredFiles` when it holds opted-in ignored files, never read over a plaintext relay. */
   readonly artifact: ProjectExportArtifact;
   readonly filePath: string;
-  /** Holds opted-in ignored files (`.env`), never readable over a plaintext relay. */
-  readonly carriesIgnoredFiles: boolean;
 }
 
 interface ExportSource {
@@ -446,9 +449,9 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
           byteLength,
           // Streamed: artifacts are never read whole into memory.
           sha256: (yield* io("Hashing an export artifact", () => sha256File(filePath))).sha256,
+          ...(carriesIgnoredFiles ? { carriesIgnoredFiles: true } : {}),
         },
         filePath,
-        carriesIgnoredFiles,
       };
     });
 
@@ -467,7 +470,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       }
       const skipped: ProjectExportSkippedArtifact[] = [];
       // The Hub could read them on a plaintext relay channel (amendment 33).
-      const ignoredPaths = channel === "relay-plaintext" ? [] : requestedIgnored;
+      const ignoredPaths = mayCarryIgnoredFiles(channel) ? requestedIgnored : [];
       if (ignoredPaths.length < requestedIgnored.length) {
         skipped.push(skippedOf("changes-patch", PROJECT_EXPORT_SKIP_REASON.insecureChannel));
       }
@@ -635,11 +638,8 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
           "This export id was already used for a different export.",
         );
       }
-      if (channel === "relay-plaintext" && existing.carriesIgnoredFiles) {
-        return yield* projectCopyError(
-          "access-denied",
-          "This export carries ignored files, which never travel over an unencrypted relay.",
-        );
+      if (existing.carriesIgnoredFiles && !mayCarryIgnoredFiles(channel)) {
+        return yield* ignoredFilesRefused("This export");
       }
       return yield* answer(existing);
     }
@@ -647,7 +647,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       exportId: input.exportId,
       digest,
       directory,
-      carriesIgnoredFiles: input.include.ignoredPaths.length > 0 && channel !== "relay-plaintext",
+      carriesIgnoredFiles: input.include.ignoredPaths.length > 0 && mayCarryIgnoredFiles(channel),
       done,
       fiber: null,
       ready: null,
@@ -682,11 +682,8 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       }
       const file = entry.ready.artifacts.get(input.artifactId);
       if (!file) return yield* projectCopyError("not-found", "Unknown export artifact.");
-      if (channel === "relay-plaintext" && file.carriesIgnoredFiles) {
-        return yield* projectCopyError(
-          "access-denied",
-          "This artifact carries ignored files, which never travel over an unencrypted relay.",
-        );
+      if (file.artifact.carriesIgnoredFiles === true && !mayCarryIgnoredFiles(channel)) {
+        return yield* ignoredFilesRefused("This artifact");
       }
       const { byteLength } = file.artifact;
       if (input.offset > byteLength) {

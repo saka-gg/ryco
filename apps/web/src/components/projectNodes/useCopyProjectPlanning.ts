@@ -322,18 +322,16 @@ export function useCopyDestination(input: {
       : null,
     request && preview
       ? async () => {
-          const previewPath = (path: string) => preview({ path });
           if (manualParent !== null && leaf !== null) {
             return judgeCopyDestination({
-              preview: await previewPath(joinNodePath(manualParent, [leaf], hints!.pathSeparator)),
+              preview: await preview({
+                path: joinNodePath(manualParent, [leaf], hints!.pathSeparator),
+              }),
               sourceCanonicalKey: canonicalKey,
               basis: "explicit",
             });
           }
-          return resolveCopyDestination(request, {
-            preview: previewPath,
-            sourceCanonicalKey: canonicalKey,
-          });
+          return resolveCopyDestination(request, { preview, sourceCanonicalKey: canonicalKey });
         }
       : null,
     { keepPrevious: false },

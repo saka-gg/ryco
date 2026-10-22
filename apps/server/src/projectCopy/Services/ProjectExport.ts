@@ -22,12 +22,12 @@ import type {
 import { Context } from "effect";
 import type { Effect } from "effect";
 
+import type { ProjectCopyCallerChannel } from "../callerChannel.ts";
+
 /**
- * How the caller's bytes reach this node. On a relay channel in legacy plaintext mode
- * (`relay-plaintext`, also while it is still negotiating) the Hub can read them, so an export
- * for it never carries opted-in ignored files such as `.env` (`skipped: insecure-channel`).
+ * Started over `relay-plaintext`, an export never carries opted-in ignored files such as `.env`
+ * (`skipped: insecure-channel`).
  */
-export type ProjectCopyCallerChannel = "direct" | "relay-e2ee" | "relay-plaintext";
 
 export interface ProjectExportStartRequest {
   readonly input: ProjectExportStartInput;

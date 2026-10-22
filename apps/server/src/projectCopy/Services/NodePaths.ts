@@ -55,6 +55,11 @@ export interface JudgeProjectDestinationInput {
    * to `path/<relativeRootInRepository>`, the root the project will be registered with.
    */
   readonly relativeRootInRepository?: ProjectCopyRelativeRoot | undefined;
+  /**
+   * Suggested by a client, not chosen by the user: on macOS a place in a privacy-guarded home
+   * folder that holds none of the code roots is `access-denied`, judged without opening it.
+   */
+  readonly suggested?: boolean | undefined;
 }
 
 export interface ProjectDestinationJudgement {

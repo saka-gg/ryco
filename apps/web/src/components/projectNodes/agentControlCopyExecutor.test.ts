@@ -391,8 +391,10 @@ describe("previews", () => {
     expect(test.sourceApi.projects.exportInspect).toHaveBeenCalledWith({
       projectId: "project-ryco",
     });
+    // The agent's default destination: a suggestion, never a reason to open a guarded folder.
     expect(test.targetApi.projects.previewDestination).toHaveBeenCalledWith({
       path: "/Users/me/Code/ryco",
+      suggested: true,
     });
     // Both nodes were held only for the reads.
     expect(test.holds.map((hold) => hold.release.mock.calls.length)).toEqual([1, 1]);

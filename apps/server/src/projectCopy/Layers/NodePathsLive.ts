@@ -53,6 +53,7 @@ import {
 } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { projectDestinationReservationKey } from "../destinationReservation.ts";
 import { type DirectorySearchInput, searchDirectories } from "../directorySearch.ts";
+import { privacyGuardedFolderOf } from "../privacyGuardedFolders.ts";
 import {
   NodePaths,
   type NodeCodeRoots,
@@ -74,6 +75,8 @@ const INSIDE_CHATS_DETAIL = "Choose a location outside the chats folder.";
 const UNRESOLVABLE_DETAIL =
   "A folder on that path cannot be read, or a symbolic link on it points nowhere.";
 const EXISTING_PROJECT_DETAIL = "A project on this node already uses this folder.";
+const privacyGuardedDetail = (folder: string) =>
+  `macOS guards ${path.basename(folder)} with a privacy prompt, so Ryco only looks inside it when you choose a folder there.`;
 
 /** The projects this service reads: the live ones, chats included. */
 export type NodePathsProject = Pick<
@@ -124,6 +127,36 @@ const fencedVerdict = (
     : blocker === "project-relocation"
       ? { state: "exists-not-empty", detail: RELOCATION_DETAIL }
       : null;
+
+interface JudgementFields {
+  readonly state: ProjectDestinationState;
+  readonly detail?: string | null;
+  readonly canonical?: string | null;
+  readonly projectRoot?: string | null;
+  readonly existingProjectId?: ProjectDestinationPreview["existingProjectId"];
+  readonly existingRepositoryCanonicalKey?: string | null;
+  readonly suggestedPath?: string | null;
+  readonly usable?: boolean;
+}
+
+/** A verdict on the destination shown as `resolvedPath`, without its reservation key. */
+const judgementAt = (
+  resolvedPath: string,
+  fields: JudgementFields,
+): ProjectDestinationJudgement => ({
+  preview: {
+    resolvedPath,
+    state: fields.state,
+    existingProjectId: fields.existingProjectId ?? null,
+    existingRepositoryCanonicalKey: fields.existingRepositoryCanonicalKey ?? null,
+    suggestedPath: fields.suggestedPath ?? null,
+    detail: fields.detail ?? null,
+  },
+  usable: fields.usable ?? false,
+  canonicalPath: fields.canonical ?? null,
+  projectRoot: fields.projectRoot ?? null,
+  reservationKey: null,
+});
 
 type Leaf =
   | { readonly kind: "missing"; readonly parent: "usable" | "missing" | "read-only" }
@@ -318,11 +351,41 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
     },
   );
 
+  /**
+   * The macOS privacy-guarded home folder `destination` is or lies in, unless it lies in a code
+   * root there or in the default project directory; null otherwise. Reads nothing inside the
+   * folder, and the code roots only for a path in one.
+   */
+  const privacyGuardedDestination = Effect.fn("NodePaths.privacyGuardedDestination")(function* (
+    destination: string,
+  ) {
+    const guardedFolder = (openRoots: ReadonlyArray<string>) =>
+      privacyGuardedFolderOf({ candidate: destination, homeDir: homeDir(), platform, openRoots });
+    if (guardedFolder([]) === null) return null;
+    const roots = yield* resolveCodeRoots();
+    return guardedFolder([
+      roots.defaultProjectDirectory,
+      ...roots.codeRoots.map((root) => root.path),
+    ]);
+  });
+
   /** The verdict without its reservation key, which costs a few more filesystem reads. */
   const judgeDestination: NodePathsShape["judgeProjectDestination"] = Effect.fn(
     "NodePaths.judgeProjectDestination",
   )(function* (input) {
     const relative = input.relativeRootInRepository ?? "";
+    // A place nobody chose, inside a folder macOS guards: judged by its path alone (A34).
+    if (input.suggested === true) {
+      const parsed = parseDestinationPath(input.path, { homeDir: homeDir(), platform });
+      const guarded = parsed === null ? null : yield* privacyGuardedDestination(parsed);
+      if (parsed !== null && guarded !== null) {
+        return judgementAt(parsed, {
+          state: "access-denied",
+          detail: privacyGuardedDetail(guarded),
+        });
+      }
+    }
+
     const chatsRoot = yield* deps.chatsRoot;
     const allowed = (candidate: string) =>
       deps.policy.assertPath({ path: candidate, operation: ACCESS_OPERATION }).pipe(
@@ -357,33 +420,7 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
       return (yield* fenced(canonical)) === null ? candidate : null;
     });
 
-    const judgement = (fields: {
-      readonly state: ProjectDestinationState;
-      readonly detail?: string | null;
-      readonly canonical?: string | null;
-      readonly projectRoot?: string | null;
-      readonly existingProjectId?: ProjectDestinationPreview["existingProjectId"];
-      readonly existingRepositoryCanonicalKey?: string | null;
-      readonly suggestedPath?: string | null;
-      readonly usable?: boolean;
-    }): ProjectDestinationJudgement => {
-      const usable = fields.usable ?? false;
-      const canonical = fields.canonical ?? null;
-      return {
-        preview: {
-          resolvedPath: located.destination,
-          state: fields.state,
-          existingProjectId: fields.existingProjectId ?? null,
-          existingRepositoryCanonicalKey: fields.existingRepositoryCanonicalKey ?? null,
-          suggestedPath: fields.suggestedPath ?? null,
-          detail: fields.detail ?? null,
-        },
-        usable,
-        canonicalPath: canonical,
-        projectRoot: fields.projectRoot ?? null,
-        reservationKey: null,
-      };
-    };
+    const judgement = (fields: JudgementFields) => judgementAt(located.destination, fields);
 
     switch (located.status) {
       case "invalid":
@@ -515,7 +552,7 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
     );
 
   const previewDestination: NodePathsShape["previewDestination"] = (input) =>
-    judgeDestination({ path: input.path, intent: "create" }).pipe(
+    judgeDestination({ path: input.path, intent: "create", suggested: input.suggested }).pipe(
       Effect.map((judged) => judged.preview),
     );
 

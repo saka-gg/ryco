@@ -581,6 +581,27 @@ describe("CopyProjectDialog", () => {
     }
   });
 
+  it("warns that ignored files stay home when the destination is reached through the Hub (A33)", async () => {
+    const { screen } = await mount({
+      nodes: nodes({ [HETZNER]: { transport: "relay" } }),
+      sourceInspection: inspection({ ignored: [".env"] }),
+    });
+    try {
+      // Uncommitted changes come along by default, and with them the ignored files to pick.
+      await expect
+        .element(page.getByTestId("copy-option-changes").getByRole("checkbox"))
+        .toHaveAttribute("aria-checked", "true");
+      await expect.element(page.getByTestId("copy-ignored-files")).toMatchTextContent(".env");
+      await expect
+        .element(page.getByTestId("copy-insecure-note"))
+        .toMatchTextContent(
+          "hetzner-build is reached through the Hub. If that connection isn't end-to-end encrypted",
+        );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("only clones from a source without project copy", async () => {
     const { screen, laptop } = await mount({
       nodes: nodes({ [LAPTOP]: { projectCopySupport: "no" } }),

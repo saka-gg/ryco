@@ -24,7 +24,8 @@ import {
 } from "@ryco/shared/searchRanking";
 import { scoreWorkspaceEntry } from "@ryco/shared/workspaceEntrySearch";
 
-import { foldPathCase } from "../project/projectDestination.ts";
+import { foldPathCase, hasGitEntry } from "../project/projectDestination.ts";
+import { isPrivacyGuardedHomeFolderName } from "./privacyGuardedFolders.ts";
 
 export const DIRECTORY_SEARCH_MAX_DIRECTORIES = 20_000;
 export const DIRECTORY_SEARCH_TIME_BUDGET_MS = 1_500;
@@ -58,20 +59,6 @@ const SKIPPED_DIRECTORY_NAMES: ReadonlySet<string> = new Set([
   ".Trash",
   ".cache",
   "AppData",
-]);
-
-/**
- * Home folders macOS guards with a privacy (TCC) prompt: reading anything inside one asks the
- * user, so an unattended node would prompt or log EPERM. Listed, never opened, unless it is a
- * code root or the query names it.
- */
-const PRIVACY_PROTECTED_HOME_DIRECTORIES: ReadonlySet<string> = new Set([
-  "desktop",
-  "documents",
-  "downloads",
-  "pictures",
-  "movies",
-  "music",
 ]);
 
 /** Leading `@`, `/` (and `.` unless the query asks for hidden folders) carry no meaning. */
@@ -179,13 +166,6 @@ export const readGitBranch = async (repository: string): Promise<string | null> 
   }
 };
 
-/** Whether `<directory>/.git` exists (a directory, or a file for worktrees and submodules). */
-const hasGitEntry = (directory: string): Promise<boolean> =>
-  lstat(path.join(directory, ".git")).then(
-    (entry) => entry.isDirectory() || entry.isFile(),
-    () => false,
-  );
-
 /** Run `task` over `items` with at most `concurrency` in flight; stops early when `stop()`. */
 const forEachBounded = async <T>(
   items: ReadonlyArray<T>,
@@ -216,13 +196,14 @@ export const searchDirectories = async (
   const maxEntries = input.maxEntriesPerDirectory ?? DIRECTORY_SEARCH_MAX_ENTRIES_PER_DIRECTORY;
   const deadline = now() + (input.timeBudgetMs ?? DIRECTORY_SEARCH_TIME_BUDGET_MS);
   const limit = Math.max(0, Math.floor(input.limit));
-  const includeHidden = input.query.trimStart().startsWith(".");
-  const query = normalizeSearchQuery(input.query.replaceAll("\\", "/"), {
+  const homeKey = foldPathCase(path.resolve(input.homeDir), platform);
+  const rawQuery = homeRelativeQuery(input.query, homeKey, platform);
+  const includeHidden = rawQuery.trimStart().startsWith(".");
+  const query = normalizeSearchQuery(rawQuery.replaceAll("\\", "/"), {
     trimLeadingPattern: includeHidden ? HIDDEN_QUERY_LEADING_PATTERN : QUERY_LEADING_PATTERN,
   });
   // A path-like query ranks home-relative paths ("code/ryco"), a plain one root-relative paths.
   const pathQuery = query.includes("/");
-  const homeKey = foldPathCase(path.resolve(input.homeDir), platform);
   const rootKeys = new Set(input.roots.map((root) => foldPathCase(root, platform)));
   const codeRootKeys = new Set(
     (input.codeRoots ?? []).map((root) => foldPathCase(path.resolve(root), platform)),
@@ -249,12 +230,11 @@ export const searchDirectories = async (
    * nor named by a path-like query (`documents/…`). A query that is only its name lists it.
    */
   const isGuarded = (parent: QueuedDirectory, name: string, childPath: string) => {
-    if (platform !== "darwin" || parent.depth !== 0 || !parent.root.isHome) return false;
-    const folded = name.toLowerCase();
+    if (parent.depth !== 0 || !parent.root.isHome) return false;
     return (
-      PRIVACY_PROTECTED_HOME_DIRECTORIES.has(folded) &&
+      isPrivacyGuardedHomeFolderName(name, platform) &&
       !codeRootKeys.has(foldPathCase(childPath, platform)) &&
-      !query.startsWith(`${folded}/`)
+      !query.startsWith(`${name.toLowerCase()}/`)
     );
   };
 
@@ -460,6 +440,21 @@ const candidateOf = (
 
 const joinRankPath = (parent: string, name: string) =>
   parent.length === 0 ? name.toLowerCase() : `${parent}/${name.toLowerCase()}`;
+
+/**
+ * An absolute query at or below home in the home-relative form a path-like query ranks by
+ * (`/Users/me/Code/ryco` → `code/ryco`, like `~/Code/ryco`), a trailing separator kept; any other
+ * query as given. `homeKey` is home resolved and case-folded for `platform`.
+ */
+const homeRelativeQuery = (raw: string, homeKey: string, platform: NodeJS.Platform): string => {
+  const trimmed = raw.trim();
+  if (!path.isAbsolute(trimmed)) return raw;
+  const relative = path.relative(homeKey, foldPathCase(path.resolve(trimmed), platform));
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return raw;
+  }
+  return relative.length > 0 && /[\\/]$/u.test(trimmed) ? `${relative}/` : relative;
+};
 
 /**
  * Where a root's paths start for a path-like query: its path below home (`code` for `~/Code`),

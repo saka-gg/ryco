@@ -217,6 +217,9 @@ class FakeNode {
                       kind,
                       byteLength: artifact.byteLength,
                       sha256: artifact.sha256,
+                      ...(kind === "changes-patch" && input.include.ignoredPaths.length > 0
+                        ? { carriesIgnoredFiles: true }
+                        : {}),
                     },
                   ]
                 : [];
@@ -729,6 +732,54 @@ describe("startProjectCopy", () => {
       )?.transferId,
     });
     expect(startInput?.commits).toBeNull();
+  });
+
+  it("leaves the ignored files out when a node refuses them over a plaintext relay (A33)", async () => {
+    const refusal = () =>
+      rpcError(
+        "access-denied",
+        "This transfer carries ignored files, which never travel over an unencrypted relay.",
+      );
+    const carries = (input: unknown) =>
+      (input as { readonly carriesIgnoredFiles?: boolean }).carriesIgnoredFiles === true;
+    const withEnv = plan({ choices: { ...plan().choices, ignoredPaths: [".env"] } });
+    for (const refusing of ["target", "source"] as const) {
+      const { source, target, io } = setup();
+      if (refusing === "target") {
+        target.before = (method, input) => {
+          if (method === "transferBegin" && carries(input)) throw refusal();
+        };
+      } else {
+        source.before = (method, input) => {
+          const exportId = (input as { readonly exportId?: string }).exportId ?? "";
+          const exported = source.exports.get(exportId);
+          if (
+            method === "exportReadChunk" &&
+            exported?.artifacts.some((artifact) => artifact.carriesIgnoredFiles === true) &&
+            (input as { readonly artifactId: string }).artifactId === "artifact-changes-patch"
+          ) {
+            throw refusal();
+          }
+        };
+      }
+      const outcome = await startProjectCopy({ io, plan: withEnv }).done;
+
+      expect(outcome.progress, refusing).toMatchObject({ phase: "done", error: null });
+      const exports = source.inputs<ProjectExportStartInput>("exportStart");
+      // Made again without them, under a new id; the export holding them is disposed at once.
+      expect(exports.map((input) => input.include.ignoredPaths)).toEqual([[".env"], []]);
+      expect(exports[1]!.exportId).not.toBe(exports[0]!.exportId);
+      expect(source.disposed).toContain(exports[0]!.exportId);
+      // The patch was declared as carrying them, then sent without them.
+      const patchBegins = target
+        .inputs<{ readonly purpose: string }>("transferBegin")
+        .filter((input) => input.purpose === "changes-patch");
+      expect(patchBegins.map(carries)).toEqual([true, false]);
+      expect(outcome.project?.warnings).toContain(
+        `The ignored files were not copied: the connection to ${refusing === "target" ? "Mac mini" : "MacBook"} through the Hub is not end-to-end encrypted.`,
+      );
+      expectReleased(io);
+    }
   });
 
   it("stops before uploading more than a relayed node may carry (A7)", async () => {

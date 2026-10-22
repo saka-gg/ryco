@@ -784,10 +784,12 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
               options={options}
               mode={mode}
               inspection={inspection}
-              sourceLabel={sourceLabel}
-              sourceRelayed={
-                source.facts?.kind === "inspected" && source.facts.transport === "relay"
-              }
+              relayedLabels={[
+                ...(source.facts?.kind === "inspected" && source.facts.transport === "relay"
+                  ? [sourceLabel]
+                  : []),
+                ...(targetFacts.transport === "relay" ? [targetLabel] : []),
+              ]}
               choices={choices}
               onChoices={setChoices}
             />
@@ -1013,8 +1015,8 @@ function CopyOptions(props: {
         { kind: "inspected" }
       >["inspection"]
     | null;
-  readonly sourceLabel: string;
-  readonly sourceRelayed: boolean;
+  /** The copy's nodes reached through the Hub: either one leaves ignored files out (A33). */
+  readonly relayedLabels: ReadonlyArray<string>;
   readonly choices: CopyUserChoices;
   readonly onChoices: (update: (current: CopyUserChoices) => CopyUserChoices) => void;
 }) {
@@ -1114,9 +1116,11 @@ function CopyOptions(props: {
                   </span>
                 </CheckRow>
               ))}
-              {props.sourceRelayed ? (
+              {props.relayedLabels.length > 0 ? (
                 <span className="py-1 text-[11.5px] text-warning" data-testid="copy-insecure-note">
-                  {props.sourceLabel} is reached through the Hub. If that connection isn't
+                  {props.relayedLabels.length === 1
+                    ? `${props.relayedLabels[0]} is reached through the Hub. If that connection isn't`
+                    : `${props.relayedLabels.join(" and ")} are reached through the Hub. If those connections aren't`}{" "}
                   end-to-end encrypted, repository content travels through the Hub unencrypted, so
                   these files are left out.
                 </span>

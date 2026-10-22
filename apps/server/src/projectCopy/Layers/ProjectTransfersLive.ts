@@ -3,9 +3,9 @@
  * a reconnect and `begin` stays idempotent across a restart.
  *
  * Under `<stateDir>`:
- * - `project-transfers/<transferId>.json`: the sidecar `{ purpose, byteLength, sha256, createdAt,
- *   lastAppendAt }`. Written at begin; appends refresh `lastAppendAt` at most once a minute, and
- *   the data file's mtime covers the rest.
+ * - `project-transfers/<transferId>.json`: the sidecar `{ purpose, byteLength, sha256,
+ *   carriesIgnoredFiles, createdAt, lastAppendAt }`. Written at begin; appends refresh
+ *   `lastAppendAt` at most once a minute, and the data file's mtime covers the rest.
  * - `project-transfers/<transferId>.part`: the bytes received so far; `.ready` once committed.
  * - `project-imports/<importId>/<transferId>.<purpose>` with its sidecar beside it: a transfer an
  *   import claimed. It stays there until the job releases it.
@@ -44,6 +44,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import { writeFileStringAtomically } from "../../atomicWrite.ts";
 import { ServerConfig } from "../../config.ts";
+import { ignoredFilesRefused, mayCarryIgnoredFiles } from "../callerChannel.ts";
 import { sha256File } from "../fileSha256.ts";
 import {
   type ClaimedProjectTransfer,
@@ -66,6 +67,7 @@ const TransferSidecar = Schema.Struct({
   purpose: ProjectTransferPurpose,
   byteLength: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_COPY_MAX_ARTIFACT_BYTES)),
   sha256: ProjectCopySha256,
+  carriesIgnoredFiles: Schema.optional(Schema.Boolean),
   createdAt: Schema.String,
   lastAppendAt: Schema.String,
 });
@@ -84,6 +86,8 @@ interface TransferEntry {
   readonly purpose: ProjectTransferPurpose;
   readonly byteLength: number;
   readonly sha256: string;
+  /** Holds opted-in ignored files: never taken over a relay the Hub can read (A33). */
+  readonly carriesIgnoredFiles: boolean;
   readonly createdAt: string;
   state: TransferState;
   receivedBytes: number;
@@ -158,6 +162,7 @@ const sidecarOf = (entry: TransferEntry): TransferSidecar => ({
   purpose: entry.purpose,
   byteLength: entry.byteLength,
   sha256: entry.sha256,
+  carriesIgnoredFiles: entry.carriesIgnoredFiles,
   createdAt: entry.createdAt,
   lastAppendAt: new Date(entry.lastAppendAtMs).toISOString(),
 });
@@ -220,6 +225,7 @@ const recoveredEntry = (input: {
     purpose: input.sidecar.purpose,
     byteLength: input.sidecar.byteLength,
     sha256: input.sidecar.sha256,
+    carriesIgnoredFiles: input.sidecar.carriesIgnoredFiles === true,
     createdAt: input.sidecar.createdAt,
     state: input.state,
     receivedBytes: input.receivedBytes,
@@ -583,11 +589,15 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
         )
       : Effect.fail(transferError("invalid", "A transfer id must be a lowercase version 4 UUID."));
 
-  const begin: ProjectTransfersShape["begin"] = (input) =>
+  const begin: ProjectTransfersShape["begin"] = (input, channel) =>
     withTransfer(input.transferId, (transferId) =>
       Effect.gen(function* () {
         if (!isPurpose(input.purpose) || !isSha256(input.sha256)) {
           return yield* transferError("invalid", "A transfer needs a known purpose and a sha-256.");
+        }
+        const carriesIgnoredFiles = input.carriesIgnoredFiles === true;
+        if (carriesIgnoredFiles && !mayCarryIgnoredFiles(channel)) {
+          return yield* ignoredFilesRefused("This transfer");
         }
         if (!Number.isSafeInteger(input.byteLength) || input.byteLength <= 0) {
           return yield* transferError("invalid", "A transfer's length must be a positive integer.");
@@ -604,11 +614,12 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
           if (
             existing.purpose !== input.purpose ||
             existing.byteLength !== input.byteLength ||
-            existing.sha256 !== input.sha256
+            existing.sha256 !== input.sha256 ||
+            existing.carriesIgnoredFiles !== carriesIgnoredFiles
           ) {
             return yield* transferError(
               "conflict",
-              `Transfer ${transferId} was begun with a different purpose, length or sha-256.`,
+              `Transfer ${transferId} was begun with a different purpose, length, sha-256 or content.`,
             );
           }
           return progressOf(existing);
@@ -627,6 +638,7 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
           purpose: input.purpose,
           byteLength: input.byteLength,
           sha256: input.sha256,
+          carriesIgnoredFiles,
           createdAt: new Date(nowMs).toISOString(),
           state: "open",
           receivedBytes: 0,
@@ -647,11 +659,15 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
       }),
     ).pipe(registry.withPermits(1));
 
-  const append: ProjectTransfersShape["append"] = (input) =>
+  const append: ProjectTransfersShape["append"] = (input, channel) =>
     withTransfer(input.transferId, (transferId) =>
       Effect.gen(function* () {
         const entry = entries.get(transferId);
         if (entry === undefined) return yield* unknownTransfer(transferId);
+        // The channel can change between chunks (a reconnect, a downgrade): asked every time.
+        if (entry.carriesIgnoredFiles && !mayCarryIgnoredFiles(channel)) {
+          return yield* ignoredFilesRefused("This transfer");
+        }
         if (entry.state !== "open") {
           return yield* transferError("conflict", `Transfer ${transferId} is already committed.`);
         }

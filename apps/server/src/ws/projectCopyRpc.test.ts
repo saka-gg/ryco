@@ -8,12 +8,13 @@ import { expect, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 
 import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
+import type { ProjectCopyCallerChannel } from "../projectCopy/callerChannel.ts";
 import type { NodePathsShape } from "../projectCopy/Services/NodePaths.ts";
 import type {
-  ProjectCopyCallerChannel,
   ProjectExportShape,
   ProjectExportStartRequest,
 } from "../projectCopy/Services/ProjectExport.ts";
+import type { ProjectTransfersShape } from "../projectCopy/Services/ProjectTransfers.ts";
 import type { WsRpcContext } from "./context.ts";
 import { makeProjectCopyHandlers, projectCopyCallerChannel } from "./projectCopyRpc.ts";
 import { rpcAccessFor } from "./RpcAccessPolicy.ts";
@@ -156,6 +157,51 @@ it.effect("tells the export's chunk reads how the caller's bytes travel", () =>
       );
     }
     expect(channels).toEqual(["direct", "relay-e2ee", "relay-plaintext"]);
+  }),
+);
+
+it.effect("tells the destination's transfer begins and appends how the caller's bytes travel", () =>
+  Effect.gen(function* () {
+    const channels: Array<[string, ProjectCopyCallerChannel | undefined]> = [];
+    const record = (method: string) => (_input: unknown, channel?: ProjectCopyCallerChannel) => {
+      channels.push([method, channel]);
+      return Effect.die("recorded");
+    };
+    const transfers = {
+      begin: record("begin"),
+      append: record("append"),
+    } as unknown as ProjectTransfersShape;
+    const services = { ...noServices, projectTransfers: Option.some(transfers) };
+    const transferId = "5b6e3f0e-2f5c-4f7e-9c1a-0d7a1c2b3e4f";
+    for (const principal of [
+      directOwner,
+      relayRpcPrincipal("owner", "relay-e2ee", undefined, () => true),
+      relayRpcPrincipal("owner", "relay-legacy"),
+    ]) {
+      const handlers = makeProjectCopyHandlers(makeContext(principal, services));
+      yield* unary(
+        handlers,
+        WS_METHODS.projectsTransferBegin,
+      )({
+        transferId,
+        purpose: "changes-patch",
+        byteLength: 1,
+        sha256: "0".repeat(64),
+        carriesIgnoredFiles: true,
+      }).pipe(Effect.exit);
+      yield* unary(
+        handlers,
+        WS_METHODS.projectsTransferAppend,
+      )({ transferId, offset: 0, dataBase64: "AA==" }).pipe(Effect.exit);
+    }
+    expect(channels).toEqual([
+      ["begin", "direct"],
+      ["append", "direct"],
+      ["begin", "relay-e2ee"],
+      ["append", "relay-e2ee"],
+      ["begin", "relay-plaintext"],
+      ["append", "relay-plaintext"],
+    ]);
   }),
 );
 

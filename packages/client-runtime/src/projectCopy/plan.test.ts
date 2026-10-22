@@ -225,6 +225,23 @@ describe("suggestCopyDestination (A35)", () => {
     });
   });
 
+  it("falls back without calling a refused parent missing (A34)", () => {
+    const suggestion = suggestCopyDestination(
+      request(),
+      preview("/home/ada/Code", { state: "access-denied", detail: "macOS guards Code." }),
+    );
+    expect(suggestion).toEqual({
+      path: "/home/ada/src/app",
+      basis: "default-directory",
+      missingMirroredParent: null,
+    });
+    // A missing grandparent is still missing.
+    expect(
+      suggestCopyDestination(request(), preview("/home/ada/Code", { state: "invalid" }))
+        .missingMirroredParent,
+    ).toBe("/home/ada/Code");
+  });
+
   it("mirrors a macOS path onto a Windows node with its separator", () => {
     const suggestion = suggestCopyDestination(
       request({ destHints: windowsHints }),
@@ -293,18 +310,22 @@ describe("suggestCopyDestination (A35)", () => {
     ).toMatchObject({ status: "blocked", detail: "Outside the root." });
   });
 
-  it("previews the parent, then the destination", async () => {
-    const asked: string[] = [];
+  it("previews the parent, then the destination, both as suggestions", async () => {
+    const asked: Array<{ readonly path: string; readonly suggested?: boolean | undefined }> = [];
     const suggestion = await resolveCopyDestination(request(), {
       sourceCanonicalKey: "github.com/ada/app",
-      preview: async (path) => {
-        asked.push(path);
-        return path === "/home/ada/Code"
-          ? preview(path, { state: "exists-not-empty" })
-          : preview(path, { state: "exists-not-empty", suggestedPath: `${path}-2` });
+      preview: async (input) => {
+        asked.push(input);
+        return input.path === "/home/ada/Code"
+          ? preview(input.path, { state: "exists-not-empty" })
+          : preview(input.path, { state: "exists-not-empty", suggestedPath: `${input.path}-2` });
       },
     });
-    expect(asked).toEqual(["/home/ada/Code", "/home/ada/Code/app"]);
+    // Nobody chose these places: the target must not open a folder macOS guards for them.
+    expect(asked).toEqual([
+      { path: "/home/ada/Code", suggested: true },
+      { path: "/home/ada/Code/app", suggested: true },
+    ]);
     expect(suggestion).toMatchObject({ status: "renamed", path: "/home/ada/Code/app-2" });
   });
 });

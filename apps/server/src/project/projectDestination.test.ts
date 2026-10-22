@@ -91,6 +91,12 @@ describe("firstFreeDestination", () => {
       path.join(scratch, "free-2"),
     );
   });
+
+  it("gives up when the parent cannot be read", async () => {
+    const file = path.join(scratch, "file");
+    await writeFile(file, "not a folder");
+    expect(await firstFreeDestination(path.join(file, "app"))).toBeNull();
+  });
 });
 
 describe("locateDestination", () => {

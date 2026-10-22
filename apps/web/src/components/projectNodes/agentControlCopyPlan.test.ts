@@ -513,7 +513,10 @@ describe("resolveAgentControlCopy", () => {
     });
 
     expect(exportInspect).toHaveBeenCalledWith({ projectId: "project-ryco" });
-    expect(previewDestination).toHaveBeenCalledWith({ path: "/Users/me/Code/ryco" });
+    expect(previewDestination).toHaveBeenCalledWith({
+      path: "/Users/me/Code/ryco",
+      suggested: true,
+    });
     expect(checkRemoteAccess).toHaveBeenCalledWith({ remoteUrl: "git@github.com:me/ryco.git" });
     expect(resolution.ok && resolution.runPlan.destinationPath).toBe("/Users/me/Code/ryco");
     expect(resolution.preview.followUpModel).toBe("Opus 5.5 · Claude");

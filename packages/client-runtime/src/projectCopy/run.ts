@@ -190,6 +190,24 @@ class CopyCancelled extends Error {}
 class CopyDetached extends Error {}
 /** The source no longer has the export (expired after a long pause). */
 class ExportGone extends Error {}
+/**
+ * A node refused an artifact holding opted-in ignored files: its channel is a relay the Hub can
+ * read (A33). The copy goes on without them, as a source on such a channel leaves them out.
+ */
+class IgnoredFilesRefused extends Error {
+  readonly nodeLabel: string;
+
+  constructor(nodeLabel: string) {
+    super(`${nodeLabel} refused the ignored files over an unencrypted connection.`);
+    this.nodeLabel = nodeLabel;
+  }
+}
+
+/** The node's answer to bytes of `artifact` that it refuses for the channel they cross (A33). */
+const refusesIgnoredFiles = (error: unknown, artifact: ProjectExportArtifact): boolean =>
+  artifact.carriesIgnoredFiles === true &&
+  isProjectCopyRpcError(error) &&
+  error.code === "access-denied";
 
 const errorMessage = (error: unknown, fallback: string): string =>
   error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
@@ -259,6 +277,8 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
   };
   const warnings: string[] = [];
   let exportResult: ProjectExportResult | null = null;
+  /** A node refused the opted-in ignored files (A33): export without them from then on. */
+  let leaveOutIgnoredFiles = false;
   const uploadedByPurpose = new Map<ProjectTransferPurpose, number>();
 
   // Cancelling stops the work before the import; detaching (once the import runs on its own)
@@ -433,8 +453,9 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
   const runExport = async (): Promise<ProjectExportResult> => {
     if (source === null || plan === null) throw new Error("No source to export from.");
     emit({ phase: "export" });
-    const include = projectCopyExportInclude(plan);
-    if (include === null) throw new Error("No source to export from.");
+    const planned = projectCopyExportInclude(plan);
+    if (planned === null) throw new Error("No source to export from.");
+    const include = leaveOutIgnoredFiles ? { ...planned, ignoredPaths: [] } : planned;
     for (let attempt = 0; ; attempt += 1) {
       let exportId = record.exportId;
       if (exportId === null) {
@@ -599,6 +620,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
           ) {
             throw new ExportGone();
           }
+          if (refusesIgnoredFiles(error, artifact)) throw new IgnoredFilesRefused(sourceLabel);
           throw error;
         }
         readAhead(true);
@@ -618,6 +640,8 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       }
       return "done";
     } catch (error) {
+      // A refused read became `IgnoredFilesRefused` above: this is the target refusing a chunk.
+      if (refusesIgnoredFiles(error, artifact)) throw new IgnoredFilesRefused(targetLabel);
       if (
         isProjectCopyRpcError(error) &&
         (error.receivedBytes !== undefined ||
@@ -663,10 +687,12 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
               purpose,
               byteLength: artifact.byteLength,
               sha256: artifact.sha256,
+              ...(artifact.carriesIgnoredFiles === true ? { carriesIgnoredFiles: true } : {}),
             }),
           )
         ).receivedBytes;
       } catch (error) {
+        if (refusesIgnoredFiles(error, artifact)) throw new IgnoredFilesRefused(targetLabel);
         // A transfer begun for other bytes (the export was made again): start a new one.
         if (isProjectCopyRpcError(error) && error.code === "conflict" && fresh++ < 2) {
           assignTransfer();
@@ -712,10 +738,14 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
     }
   };
 
-  /** Export, then upload every artifact; an export that expired mid-way is made once more. */
+  /**
+   * Export, then upload every artifact. An export that expired mid-way is made once more; one
+   * whose ignored files a node refused (A33) is made again without them, and disposed at once.
+   */
   const exportAndUpload = async (): Promise<ProjectExportResult | null> => {
     if (source === null) return null;
-    for (let attempt = 0; ; attempt += 1) {
+    let remadeAfterExpiry = false;
+    for (;;) {
       const result = await runExport();
       exportResult = result;
       const warningCount = warnings.length;
@@ -733,17 +763,22 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
         }
         return result;
       } catch (error) {
-        if (!(error instanceof ExportGone) || attempt > 0) {
-          if (error instanceof ExportGone) {
-            throw new CopyFailure(
-              "export-failed",
-              `The export on ${sourceLabel} expired.`,
-              "resume",
-            );
-          }
+        if (error instanceof IgnoredFilesRefused && !leaveOutIgnoredFiles) {
+          leaveOutIgnoredFiles = true;
+          warnings.length = warningCount;
+          warnings.push(ignoredFilesLeftOutWarning(error.nodeLabel));
+          // It holds the ignored files: gone now rather than when it expires.
+          await disposeExport();
+        } else if (error instanceof ExportGone && !remadeAfterExpiry) {
+          remadeAfterExpiry = true;
+          warnings.length = warningCount;
+        } else if (error instanceof ExportGone) {
+          throw new CopyFailure("export-failed", `The export on ${sourceLabel} expired.`, "resume");
+        } else if (error instanceof IgnoredFilesRefused) {
+          throw new CopyFailure("transfer-failed", error.message, null);
+        } else {
           throw error;
         }
-        warnings.length = warningCount;
         dispatch({ type: "export-assigned", exportId: ProjectExportId.make(io.uuid()) });
       }
     }
@@ -1130,6 +1165,9 @@ const ARTIFACT_ORDER: ReadonlyArray<ProjectExportArtifactKind> = [
   "changes-patch",
   "avatar",
 ];
+
+const ignoredFilesLeftOutWarning = (nodeLabel: string) =>
+  `The ignored files were not copied: the connection to ${nodeLabel} through the Hub is not end-to-end encrypted.`;
 
 const SKIPPED_WARNINGS: Record<ProjectExportArtifactKind, (reason: string) => string> = {
   "commits-bundle": (reason) => `Unpushed commits were not copied (${reason}).`,

@@ -658,10 +658,10 @@ const planCopyWithCoordinator = async (input: {
       placement: "mirror",
     },
     {
-      preview: (destinationPath) =>
+      preview: (previewInput) =>
         call(
           "node B previewDestination",
-          nodeB.client[WS_METHODS.projectsPreviewDestination]({ path: destinationPath }),
+          nodeB.client[WS_METHODS.projectsPreviewDestination](previewInput),
         ),
       sourceCanonicalKey: inspection.repository.canonicalKey,
     },

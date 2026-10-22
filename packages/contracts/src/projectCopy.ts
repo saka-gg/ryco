@@ -324,6 +324,12 @@ export type FilesystemSearchDirectoriesResult = typeof FilesystemSearchDirectori
 export const ProjectDestinationPreviewInput = Schema.Struct({
   /** Absolute or `~`-relative; anything else is judged `invalid`, never resolved. */
   path: Schema.String.check(Schema.isMaxLength(PROJECT_COPY_ABSOLUTE_PATH_MAX_CHARS)),
+  /**
+   * The client suggests this place on its own (A35); the user did not choose it. On macOS a
+   * place in a privacy-guarded home folder (Desktop, Documents, Downloads, …) that holds none of
+   * the node's code roots is then judged `access-denied` without being opened (A34).
+   */
+  suggested: Schema.optional(Schema.Boolean),
 }).pipe(rejectExcessProperties);
 export type ProjectDestinationPreviewInput = typeof ProjectDestinationPreviewInput.Type;
 
@@ -507,6 +513,11 @@ export const ProjectExportArtifact = Schema.Struct({
   kind: ProjectExportArtifactKind,
   byteLength: NonNegativeInt,
   sha256: ProjectCopySha256,
+  /**
+   * True when it holds opted-in ignored files (a changes patch with `.env`). Declare it at
+   * `transferBegin`: neither node lets these bytes cross a relay the Hub can read (A33).
+   */
+  carriesIgnoredFiles: Schema.optional(Schema.Boolean),
 });
 export type ProjectExportArtifact = typeof ProjectExportArtifact.Type;
 
@@ -562,6 +573,12 @@ export const ProjectTransferBeginInput = Schema.Struct({
   /** At most `PROJECT_COPY_MAX_ARTIFACT_BYTES` (`PROJECT_COPY_MAX_AVATAR_BYTES` for an avatar). */
   byteLength: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_COPY_MAX_ARTIFACT_BYTES)),
   sha256: ProjectCopySha256,
+  /**
+   * The artifact's `carriesIgnoredFiles`. The node then refuses the transfer's begin and appends
+   * over a relay channel the Hub can read (`access-denied`), as the source refuses to read them
+   * out there (A33). Part of the begin's identity.
+   */
+  carriesIgnoredFiles: Schema.optional(Schema.Boolean),
 }).pipe(rejectExcessProperties);
 export type ProjectTransferBeginInput = typeof ProjectTransferBeginInput.Type;
 

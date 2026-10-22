@@ -85,6 +85,13 @@ export const isDirectoryPath = (target: string): Promise<boolean> =>
     () => false,
   );
 
+/** Whether `<directory>/.git` exists (a directory, or a file for worktrees and submodules). */
+export const hasGitEntry = (directory: string): Promise<boolean> =>
+  lstat(path.join(directory, ".git")).then(
+    (entry) => entry.isDirectory() || entry.isFile(),
+    () => false,
+  );
+
 /** A directory this process may create entries in. */
 export const isWritableDirectory = async (target: string): Promise<boolean> =>
   (await isDirectoryPath(target)) &&
@@ -95,22 +102,28 @@ export const isWritableDirectory = async (target: string): Promise<boolean> =>
 
 /**
  * `base` when nothing is there, else the first free `<base>-2`, `<base>-3`, … up to `-100`.
- * With `skipBase` the search starts at `-2`. Null when every name is taken; an entry that cannot
- * be checked counts as taken.
+ * With `skipBase` the search starts at `-2`. Null when every name is taken, and at the first name
+ * that cannot be checked (an unreadable parent, such as a folder macOS guards): probing on would
+ * only repeat the refusal.
  */
 export const firstFreeDestination = async (
   base: string,
   options: { readonly skipBase?: boolean } = {},
 ): Promise<string | null> => {
-  const free = (candidate: string) =>
-    pathExists(candidate).then(
-      (taken) => !taken,
-      () => false,
-    );
-  if (!options.skipBase && (await free(base))) return base;
-  for (let suffix = 2; suffix <= FREE_DESTINATION_MAX_SUFFIX; suffix += 1) {
-    const candidate = `${base}-${suffix}`;
-    if (await free(candidate)) return candidate;
+  const candidates = [
+    ...(options.skipBase ? [] : [base]),
+    ...Array.from(
+      { length: FREE_DESTINATION_MAX_SUFFIX - 1 },
+      (_, index) => `${base}-${index + 2}`,
+    ),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!(await pathExists(candidate))) return candidate;
+    } catch {
+      // The siblings share one parent: one that cannot be read there hides all of them.
+      return null;
+    }
   }
   return null;
 };

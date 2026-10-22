@@ -9,12 +9,13 @@
  * @module CodeRoots
  */
 import { realpath, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { PROJECT_COPY_MAX_CODE_ROOTS, type NodeCodeRootSource } from "@ryco/contracts/project-copy";
 
 import { expandHomePath } from "../pathExpansion.ts";
-import { foldPathCase } from "./projectDestination.ts";
+import { foldPathCase, hasGitEntry } from "./projectDestination.ts";
 
 /**
  * Home folders people keep code in, in the order a default is picked from. Both `Code` and
@@ -41,6 +42,8 @@ export interface CodeRootsInput {
   /** Workspace roots of the node's live, non-chat projects. */
   readonly projectRoots: ReadonlyArray<string>;
   readonly platform?: NodeJS.Platform | undefined;
+  /** Folders the OS empties, never a code folder; `os.tmpdir()`, `/tmp` and `/var/tmp` by default. */
+  readonly temporaryDirectories?: ReadonlyArray<string> | undefined;
 }
 
 export interface ResolvedCodeRoot {
@@ -53,8 +56,9 @@ export interface ResolvedCodeRoot {
 export interface ResolvedCodeRoots {
   /**
    * The workspace access root when restricted, else the `addProjectBaseDirectory` setting, else
-   * the parent holding at least two of the node's projects, else the first existing well-known
-   * folder, else home.
+   * the folder holding at least two of the node's projects (a monorepo counted once, at the
+   * repository; never inside a working tree or a temporary directory), else the first existing
+   * well-known folder, else home.
    */
   readonly defaultProjectDirectory: string;
   readonly defaultProjectDirectorySource: NodeCodeRootSource;
@@ -65,9 +69,12 @@ export interface ResolvedCodeRoots {
 interface CodeRootCandidate {
   readonly path: string;
   readonly source: NodeCodeRootSource;
-  /** Set for project parents: the projects directly inside it. */
-  readonly projectCount?: number;
+  /** A folder holding projects that may be the default: two or more, and not temporary. */
+  readonly holdsProjects?: boolean;
 }
+
+/** At most this many folders at and above a project root are asked for a `.git` entry. */
+const PLACEMENT_MAX_LEVELS = 32;
 
 export interface ProjectParent {
   readonly path: string;
@@ -75,8 +82,9 @@ export interface ProjectParent {
 }
 
 /**
- * The folders the node's projects sit in, the one holding the most first; ties go to the
- * shorter, then the alphabetically first path, so the answer does not depend on project order.
+ * The folders the given roots sit in (each root counted once per entry), the one holding the
+ * most first; ties go to the shorter, then the alphabetically first path, so the answer does not
+ * depend on project order.
  */
 export const projectParentDirectories = (
   projectRoots: ReadonlyArray<string>,
@@ -153,8 +161,48 @@ const countProjectsBelow = (
 };
 
 /**
+ * Where a project sits among its parent's folders: the outermost git working tree holding its
+ * root, so a monorepo's subfolder projects sit where the repository does, else the root itself.
+ * Inside home only folders below home are asked (a home folder under version control, such as a
+ * dotfiles checkout, does not hold every project), elsewhere folders below the filesystem root.
+ */
+export const projectPlacement = async (
+  projectRoot: string,
+  homeDir: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<string> => {
+  const resolved = path.resolve(projectRoot);
+  const home = path.resolve(homeDir);
+  const stop = foldPathCase(
+    isWithin(home, resolved, platform) ? home : path.parse(resolved).root,
+    platform,
+  );
+  const levels: Array<string> = [];
+  for (
+    let folder = resolved;
+    levels.length < PLACEMENT_MAX_LEVELS &&
+    foldPathCase(folder, platform) !== stop &&
+    path.dirname(folder) !== folder;
+    folder = path.dirname(folder)
+  ) {
+    levels.push(folder);
+  }
+  const marked = await Promise.all(levels.map(hasGitEntry));
+  return levels[marked.lastIndexOf(true)] ?? resolved;
+};
+
+const defaultTemporaryDirectories = (platform: NodeJS.Platform): ReadonlyArray<string> =>
+  platform === "win32" ? [tmpdir()] : [tmpdir(), "/tmp", "/var/tmp"];
+
+/**
  * The node's code roots and its "normal code directory". Reads only the file system (a stat and
- * realpath per candidate, in parallel); the caller supplies the settings and projects.
+ * realpath per candidate, and a `.git` probe per folder between a project and home, in
+ * parallel); the caller supplies the settings and projects.
+ *
+ * A folder holding projects counts each folder in it once: two subfolder projects of a monorepo
+ * are the repository, so the folder holding the repository is where they are, never a folder
+ * inside its working tree (which stays a place to search, ranked last). A temporary directory is
+ * never the default.
  *
  * The default deliberately keeps a configured base directory even when it does not exist yet,
  * as chat promotion always has; the code roots list only existing directories, inside the access
@@ -165,24 +213,66 @@ export const resolveNodeCodeRoots = async (input: CodeRootsInput): Promise<Resol
   const accessRoot =
     input.workspaceAccessRoot === undefined ? undefined : path.resolve(input.workspaceAccessRoot);
   const configured = configuredBaseDirectory(input.addProjectBaseDirectory);
-  const parents = projectParentDirectories(input.projectRoots, platform);
-  const parentCandidate = (parent: ProjectParent): CodeRootCandidate => ({
+  const realpaths = new Map<string, Promise<string | null>>();
+  const realOf = (candidate: string) => {
+    let known = realpaths.get(candidate);
+    if (known === undefined) {
+      known = realDirectory(candidate);
+      realpaths.set(candidate, known);
+    }
+    return known;
+  };
+
+  const roots = input.projectRoots.map((root) => path.resolve(root));
+  const placements = await Promise.all(
+    roots.map((root) => projectPlacement(root, input.homeDir, platform)),
+  );
+  const distinctPlacements = new Map<string, string>();
+  for (const placement of placements) {
+    distinctPlacements.set(foldPathCase(placement, platform), placement);
+  }
+  const parents = projectParentDirectories([...distinctPlacements.values()], platform);
+  // Folders inside a working tree that hold subfolder projects: searched, never the default.
+  const innerParents = projectParentDirectories(
+    roots.filter((root, index) => placements[index] !== root),
+    platform,
+  );
+  const temporaryKeys = new Set(
+    (
+      await Promise.all(
+        (input.temporaryDirectories ?? defaultTemporaryDirectories(platform)).map(realOf),
+      )
+    ).flatMap((real) => (real === null ? [] : [foldPathCase(real, platform)])),
+  );
+  const parentHoldsProjects = await Promise.all(
+    parents.map(async (parent) => {
+      if (parent.projectCount < 2) return false;
+      const real = await realOf(parent.path);
+      return real !== null && !temporaryKeys.has(foldPathCase(real, platform));
+    }),
+  );
+  const parentCandidate = (parent: ProjectParent, holdsProjects = false): CodeRootCandidate => ({
     path: parent.path,
     source: "existing-projects",
-    projectCount: parent.projectCount,
+    holdsProjects,
   });
   const candidates: ReadonlyArray<CodeRootCandidate> = [
     ...(accessRoot === undefined ? [] : [{ path: accessRoot, source: "access-root" as const }]),
     ...(configured === null ? [] : [{ path: configured, source: "setting" as const }]),
-    ...parents.filter((parent) => parent.projectCount >= 2).map(parentCandidate),
+    ...parents.flatMap((parent, index) =>
+      parentHoldsProjects[index] ? [parentCandidate(parent, true)] : [],
+    ),
     ...WELL_KNOWN_CODE_DIRECTORIES.map((name) => ({
       path: path.join(input.homeDir, name),
       source: "well-known" as const,
     })),
-    ...parents.filter((parent) => parent.projectCount < 2).map(parentCandidate),
+    ...parents.flatMap((parent, index) =>
+      parentHoldsProjects[index] ? [] : [parentCandidate(parent)],
+    ),
+    ...innerParents.map((parent) => parentCandidate(parent)),
     { path: path.resolve(input.homeDir), source: "home" as const },
   ];
-  const canonical = await Promise.all(candidates.map((candidate) => realDirectory(candidate.path)));
+  const canonical = await Promise.all(candidates.map((candidate) => realOf(candidate.path)));
   const canonicalAccessRoot = accessRoot === undefined ? undefined : (canonical[0] ?? accessRoot);
 
   const seen = new Set<string>();
@@ -222,9 +312,7 @@ export const resolveNodeCodeRoots = async (input: CodeRootsInput): Promise<Resol
         canonical[index] !== null && isTrimmedPath(candidate.path) && accept(candidate),
     );
   const fallback =
-    firstExisting(
-      (candidate) => candidate.source === "existing-projects" && (candidate.projectCount ?? 0) >= 2,
-    ) ??
+    firstExisting((candidate) => candidate.holdsProjects === true) ??
     firstExisting((candidate) => candidate.source === "well-known") ??
     ({ path: path.resolve(input.homeDir), source: "home" } as const);
   const defaultDirectory =

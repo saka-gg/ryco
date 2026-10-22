@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -214,6 +214,61 @@ describe("previewDestination", () => {
       state: "invalid",
       detail: "Choose a location outside the chats folder.",
     });
+  });
+
+  it("never opens a folder macOS guards for a place nobody chose (A34)", async () => {
+    const documents = path.join(home, "Documents");
+    await mkdir(path.join(documents, "site"), { recursive: true });
+    const suggested = async (raw: string, options: Parameters<typeof makePaths>[0] = {}) =>
+      run(
+        (await makePaths({ platform: "darwin", ...options })).previewDestination({
+          path: raw,
+          suggested: true,
+        }),
+      );
+    // An unreadable Documents shows that nothing inside it is read: only a refusal by name.
+    await chmod(documents, 0o000);
+    try {
+      for (const raw of ["~/Documents", "~/Documents/site", "~/documents/new", documents]) {
+        expect(await suggested(raw), raw).toEqual({
+          resolvedPath: path.resolve(raw.replace(/^~/u, home)),
+          state: "access-denied",
+          existingProjectId: null,
+          existingRepositoryCanonicalKey: null,
+          suggestedPath: null,
+          detail:
+            "macOS guards Documents with a privacy prompt, so Ryco only looks inside it when you choose a folder there.",
+        });
+      }
+      // The user chose it: judged as usual.
+      expect(
+        await run(
+          (await makePaths({ platform: "darwin" })).previewDestination({ path: documents }),
+        ),
+      ).toMatchObject({ state: "exists-not-empty", detail: "That folder cannot be read." });
+      // Other platforms guard nothing; other home folders are not guarded.
+      expect(await suggested("~/Documents", { platform: "linux" })).toMatchObject({
+        state: "exists-not-empty",
+      });
+      expect(await suggested("~/Code/new")).toMatchObject({ state: "available" });
+    } finally {
+      await chmod(documents, 0o755);
+    }
+    // A code root inside it (or the default directory there) is where the node keeps projects.
+    const work = path.join(documents, "work");
+    await mkdir(work);
+    const projects = [project("a", path.join(work, "a")), project("b", path.join(work, "b"))];
+    expect(await suggested("~/Documents/work/new", { projects })).toMatchObject({
+      state: "available",
+    });
+    expect(await suggested("~/Documents/new", { projects })).toMatchObject({
+      state: "access-denied",
+    });
+    expect(
+      await suggested("~/Documents/later/new", {
+        addProjectBaseDirectory: path.join(documents, "later"),
+      }),
+    ).toMatchObject({ state: "invalid" });
   });
 
   it("refuses what the access policy and storage admission refuse", async () => {

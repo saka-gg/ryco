@@ -36,7 +36,8 @@ import { GitNetworkError } from "../Errors.ts";
 import { PROJECT_EXPORT_SKIP_REASON } from "../exportGit.ts";
 import { withProcessEnv, writeFakeSsh } from "../projectCopyGit.fixtures.ts";
 import { GitNetwork, type GitNetworkShape, type GitRemoteRef } from "../Services/GitNetwork.ts";
-import { ProjectExport, type ProjectCopyCallerChannel } from "../Services/ProjectExport.ts";
+import type { ProjectCopyCallerChannel } from "../callerChannel.ts";
+import { ProjectExport } from "../Services/ProjectExport.ts";
 import { GitNetworkLive } from "./GitNetworkLive.ts";
 import { makeProjectExportLive } from "./ProjectExportLive.ts";
 
@@ -742,6 +743,8 @@ describe("ProjectExportLive", () => {
           });
           const result = yield* exporter.start({ input, channel: "direct" });
           const patch = artifactOf(result, "changes-patch");
+          // The client declares it to the destination, which refuses it over a plaintext relay.
+          expect(patch.carriesIgnoredFiles).toBe(true);
           const patchFile = path.join(root, "changes.patch");
           fs.writeFileSync(patchFile, yield* readArtifact(input.exportId, patch));
           const dest = freshClone(root, url);
@@ -776,6 +779,7 @@ describe("ProjectExportLive", () => {
             kind: "changes-patch",
             reason: PROJECT_EXPORT_SKIP_REASON.insecureChannel,
           });
+          expect(artifactOf(plaintext, "changes-patch").carriesIgnoredFiles).toBeUndefined();
           const plainPatch = yield* readArtifact(
             plaintextInput.exportId,
             artifactOf(plaintext, "changes-patch"),

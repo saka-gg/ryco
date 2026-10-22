@@ -44,6 +44,7 @@ import {
   type NodePathHints,
   type ProjectCheckRemoteAccessResult,
   type ProjectDestinationPreview,
+  type ProjectDestinationPreviewInput,
   type ProjectExportInspection,
 } from "@ryco/contracts/project-copy";
 import { getModelDisplayName } from "@ryco/shared/model";
@@ -161,12 +162,12 @@ export async function resolveAgentControlCopyDestination(input: {
   readonly sourceRepository: AgentControlCopySourceRepository | null;
   readonly targetHints: NodePathHints;
   readonly sourceCanonicalKey: string | null;
-  readonly preview: (path: string) => Promise<ProjectDestinationPreview>;
+  readonly preview: (input: ProjectDestinationPreviewInput) => Promise<ProjectDestinationPreview>;
 }): Promise<CopyDestinationSuggestion | null> {
   const where = agentControlCopyDestinationRequest(input);
   if (where.kind === "path") {
     return judgeCopyDestination({
-      preview: await input.preview(where.path),
+      preview: await input.preview({ path: where.path }),
       sourceCanonicalKey: input.sourceCanonicalKey,
     });
   }
@@ -535,7 +536,7 @@ export async function resolveAgentControlCopy(input: {
             },
       targetHints,
       sourceCanonicalKey: sourceFacts === null ? null : projectCopySourceCanonicalKey(sourceFacts),
-      preview: (path) => previewDestination({ path }),
+      preview: previewDestination,
     }),
   ]);
   return planAgentControlCopy({

@@ -191,6 +191,44 @@ describe("searchDirectories", () => {
     expect(outcome.scannedDirectories).toBe(5);
   });
 
+  it("matches an absolute query below home like its ~/ form", async () => {
+    await tree(["Code/ryco", "Other/ryco"]);
+    const code = path.join(home, "Code");
+    expect(
+      relativePaths(await search({ query: path.join(home, "Code", "ryco"), roots: [code, home] })),
+    ).toEqual(relativePaths(await search({ query: "~/Code/ryco", roots: [code, home] })));
+    expect(
+      relativePaths(
+        await search({ query: path.join(home, "Code", "ryco"), roots: [code, home] }),
+      )[0],
+    ).toBe("Code/ryco");
+    // A trailing separator asks for the folder's own folders, as `~/Code/` does.
+    expect(relativePaths(await search({ query: `${code}/`, roots: [code, home] }))).toEqual(
+      relativePaths(await search({ query: "~/Code/", roots: [code, home] })),
+    );
+    expect(relativePaths(await search({ query: `${code}/`, roots: [code, home] }))).toContain(
+      "Code/ryco",
+    );
+    // Compared case-insensitively where the volume is.
+    expect(
+      relativePaths(
+        await search({
+          query: path.join(home, "Code", "ryco").toUpperCase(),
+          roots: [code, home],
+          platform: "darwin",
+        }),
+      )[0],
+    ).toBe("Code/ryco");
+    // A path outside home keeps ranking against the roots' absolute paths.
+    const outside = path.join(scratch, "srv");
+    await mkdir(path.join(outside, "proj"), { recursive: true });
+    expect(
+      (await search({ query: path.join(outside, "proj"), roots: [outside] })).hits.map(
+        (hit) => hit.path,
+      ),
+    ).toEqual([path.join(outside, "proj")]);
+  });
+
   it("lists a nested root's own folder under its parent root without walking it twice", async () => {
     await tree(["Code/app", "Code/app/sub"]);
     const code = path.join(home, "Code");

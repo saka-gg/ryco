@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -93,6 +93,79 @@ describe("resolveNodeCodeRoots", () => {
     expect((await resolve({ projectRoots: projectRoots.slice(1) })).defaultProjectDirectory).toBe(
       path.join(home, "Code"),
     );
+  });
+
+  it("counts a monorepo's subfolder projects as the repository, never its inner folders", async () => {
+    await mkdir(path.join(home, "Code"));
+    const mono = path.join(home, "Code", "mono");
+    await mkdir(path.join(mono, ".git"), { recursive: true });
+    await mkdir(path.join(mono, "packages", "app"), { recursive: true });
+    await mkdir(path.join(mono, "packages", "web"), { recursive: true });
+    await mkdir(path.join(home, "Code", "ryco", ".git"), { recursive: true });
+    const subprojects = [path.join(mono, "packages", "app"), path.join(mono, "packages", "web")];
+
+    // Two subfolder projects of one repository are one folder in ~/Code, beside ryco.
+    const roots = await resolve({
+      projectRoots: [...subprojects, path.join(home, "Code", "ryco")],
+    });
+    expect(roots.defaultProjectDirectory).toBe(path.join(home, "Code"));
+    expect(roots.defaultProjectDirectorySource).toBe("existing-projects");
+    expect(roots.codeRoots[0]).toEqual({
+      path: path.join(home, "Code"),
+      source: "existing-projects",
+      projectCount: 3,
+    });
+    // The repository's inner folder stays a place to search, after the code folders.
+    expect(roots.codeRoots.map((root) => root.path)).toEqual([
+      path.join(home, "Code"),
+      path.join(mono, "packages"),
+      home,
+    ]);
+
+    // Alone they are one folder: no pattern, so the well-known folder is the default.
+    const alone = await resolve({ projectRoots: subprojects });
+    expect(alone.defaultProjectDirectory).toBe(path.join(home, "Code"));
+    expect(alone.defaultProjectDirectorySource).toBe("well-known");
+
+    // A git worktree file marks a working tree too; a nested repository counts as the outer one.
+    const linked = path.join(scratch, "linked");
+    await mkdir(path.join(linked, "tools", "a"), { recursive: true });
+    await mkdir(path.join(linked, "tools", "b", ".git"), { recursive: true });
+    await writeFile(path.join(linked, ".git"), "gitdir: /elsewhere\n");
+    const nested = await resolve({
+      projectRoots: [path.join(linked, "tools", "a"), path.join(linked, "tools", "b")],
+    });
+    expect(nested.defaultProjectDirectory).not.toBe(path.join(linked, "tools"));
+    expect(nested.codeRoots.find((root) => root.path === path.join(linked, "tools"))?.source).toBe(
+      "existing-projects",
+    );
+  });
+
+  it("does not look past home for the repository a project is in", async () => {
+    // A home folder under version control (dotfiles) does not make every project one folder.
+    await mkdir(path.join(home, ".git"));
+    const work = path.join(home, "work");
+    await mkdir(path.join(work, "a"), { recursive: true });
+    await mkdir(path.join(work, "b"), { recursive: true });
+    const roots = await resolve({ projectRoots: [path.join(work, "a"), path.join(work, "b")] });
+    expect(roots.defaultProjectDirectory).toBe(work);
+    expect(roots.defaultProjectDirectorySource).toBe("existing-projects");
+  });
+
+  it("never picks a temporary directory as the code folder", async () => {
+    await mkdir(path.join(home, "Code"));
+    const temporary = path.join(scratch, "tmp");
+    await mkdir(path.join(temporary, "a"), { recursive: true });
+    await mkdir(path.join(temporary, "b"), { recursive: true });
+    const roots = await resolveNodeCodeRoots({
+      workspaceAccessRoot: undefined,
+      addProjectBaseDirectory: "",
+      homeDir: home,
+      projectRoots: [path.join(temporary, "a"), path.join(temporary, "b")],
+      temporaryDirectories: [temporary],
+    });
+    expect(roots.defaultProjectDirectory).toBe(path.join(home, "Code"));
+    expect(roots.codeRoots[0]?.path).toBe(path.join(home, "Code"));
   });
 
   it("skips a projects folder that no longer exists", async () => {

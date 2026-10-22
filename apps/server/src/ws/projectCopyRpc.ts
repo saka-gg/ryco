@@ -3,7 +3,7 @@ import { ProjectCopyError } from "@ryco/contracts/project-copy";
 import { Effect, Option } from "effect";
 
 import { observeRpcEffect, observeRpcStreamEffect } from "../observability/RpcInstrumentation.ts";
-import type { ProjectCopyCallerChannel } from "../projectCopy/Services/ProjectExport.ts";
+import type { ProjectCopyCallerChannel } from "../projectCopy/callerChannel.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 import type { RpcPrincipal } from "./RpcPrincipal.ts";
 
@@ -23,8 +23,8 @@ export const projectCopyCallerChannel = (principal: RpcPrincipal): ProjectCopyCa
 /**
  * Cross-node project copy RPCs: reads and scratch transfers on either node, the durable import
  * job on the destination. Each one passes the access check, then delegates to its service. The
- * export's `start` and `readChunk` learn how the caller's bytes travel, so opted-in ignored files
- * never cross a plaintext relay.
+ * export's `start` and `readChunk` and the transfer's `begin` and `append` learn how the caller's
+ * bytes travel, so opted-in ignored files never cross a plaintext relay on either leg (A33).
  */
 export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, ownerStreamEffect, principal, projectCopy } = ctx;
@@ -103,12 +103,16 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
     [WS_METHODS.projectsTransferBegin]: (input) =>
       handle(
         WS_METHODS.projectsTransferBegin,
-        transfers.pipe(Effect.flatMap((uploads) => uploads.begin(input))),
+        transfers.pipe(
+          Effect.flatMap((uploads) => uploads.begin(input, projectCopyCallerChannel(principal))),
+        ),
       ),
     [WS_METHODS.projectsTransferAppend]: (input) =>
       handle(
         WS_METHODS.projectsTransferAppend,
-        transfers.pipe(Effect.flatMap((uploads) => uploads.append(input))),
+        transfers.pipe(
+          Effect.flatMap((uploads) => uploads.append(input, projectCopyCallerChannel(principal))),
+        ),
       ),
     [WS_METHODS.projectsTransferCommit]: (input) =>
       handle(
