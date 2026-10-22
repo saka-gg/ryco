@@ -19,6 +19,7 @@ import {
   type ChatUnknownAttachment,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { useEvent } from "expo";
 import * as Linking from "expo-linking";
@@ -291,12 +292,13 @@ export function ThreadMessage(props: {
     boldFontFamily: boldFont,
     headingFontSizes: typography.headingFontSizes,
   };
-  // A sent prompt's context blocks show as chips, not as raw text; copying keeps them.
+  // A sent prompt's context blocks show as chips, not as raw text, and its
+  // quotes read as plain quoted lines; copying keeps the text as sent.
   const sentContexts = isUser ? deriveDisplayedUserMessageContext(props.message.text) : null;
   const sentContextCount =
     (sentContexts?.fileReferences.length ?? 0) + (sentContexts?.contexts.length ?? 0);
   const text =
-    (sentContexts ? sentContexts.visibleText : props.message.text) ||
+    (sentContexts ? quoteCitationsToPlainText(sentContexts.visibleText) : props.message.text) ||
     (props.message.streaming ? "…" : "");
   const attachments = props.message.attachments ?? [];
   const hasVideoPlaybackSource = (

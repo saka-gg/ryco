@@ -6,7 +6,7 @@ import {
   type WorkLogEntry,
 } from "../../session-logic";
 import type { AgentPanelModel } from "../../threadWorkspaceViewModel";
-import { deriveDisplayedUserMessageContext } from "../../lib/terminalContext";
+import { deriveDisplayedUserMessage } from "../../lib/userMessageDisplay";
 import {
   isChatFileAttachment,
   isChatImageAttachment,
@@ -542,7 +542,7 @@ export function deriveTimelineMinimapItems(
       id: row.id,
       rowIndex: index,
       userText: compactTimelineMinimapPreview(
-        deriveDisplayedUserMessageContext(row.message.text).visibleText,
+        deriveDisplayedUserMessage(row.message.text).visibleText,
       ),
       assistantText: compactTimelineMinimapPreview(
         resolveFinalAssistantTextForTimelineTurn(rows, index),

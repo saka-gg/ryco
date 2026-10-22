@@ -121,6 +121,10 @@ import { useLongPress } from "~/hooks/useLongPress";
 import { usePresentationTier } from "~/hooks/usePresentationTier";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
+import { QuoteCitationChip } from "./QuoteCitationChip";
+import { QuoteCitationContext } from "./quoteCitationContext";
+import { useQuoteSourceHighlight } from "./useQuoteSourceHighlight";
+import type { NumberedQuoteCitation } from "@ryco/shared/quoteCitations";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   deriveDisplayedUserMessageContext,
@@ -128,6 +132,7 @@ import {
   type ParsedTerminalContextEntry,
 } from "~/lib/terminalContext";
 import { FileReferenceChip } from "./FileReferenceChip";
+import { deriveDisplayedUserMessage } from "~/lib/userMessageDisplay";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ryco/contracts/settings";
@@ -438,6 +443,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
+  useQuoteSourceHighlight(routeThreadKey, timelineViewportElement);
   // Sized like the timeline column, which the Chat width setting widens without a viewport resize.
   const timelineColumnProbeRef = useRef<HTMLDivElement | null>(null);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
@@ -1393,11 +1399,16 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         row.message.role === "user" &&
         (() => {
           const userImages = row.message.attachments ?? [];
-          const displayedUserMessage = deriveDisplayedUserMessageContext(row.message.text);
+          // The frozen phone tier gets nothing new: quotes stay the text as sent.
+          const displayedUserMessage = isPhoneTier
+            ? { ...deriveDisplayedUserMessageContext(row.message.text), quotes: [] }
+            : deriveDisplayedUserMessage(row.message.text);
           const terminalContexts = displayedUserMessage.contexts;
           const fileReferences = displayedUserMessage.fileReferences;
           const hasUserMessageBody =
-            displayedUserMessage.visibleText.trim().length > 0 || terminalContexts.length > 0;
+            displayedUserMessage.visibleText.trim().length > 0 ||
+            terminalContexts.length > 0 ||
+            displayedUserMessage.quotes.length > 0;
           const canRevertAgentWork = typeof row.revertTurnCount === "number";
           return (
             <div className="flex justify-end">
@@ -1429,14 +1440,29 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     </div>
                   ) : null}
                   {hasUserMessageBody && (
-                    <UserMessageBody
-                      cwd={ctx.markdownCwd}
-                      environmentId={ctx.activeThreadEnvironmentId}
-                      text={displayedUserMessage.visibleText}
-                      terminalContexts={terminalContexts}
-                      skills={ctx.skills}
-                      searchHighlight={messageSearchHighlight}
-                    />
+                    <QuoteCitationContext
+                      value={
+                        isPhoneTier
+                          ? null
+                          : {
+                              quotes: displayedUserMessage.quotes,
+                              currentThreadKey: ctx.routeThreadKey,
+                            }
+                      }
+                    >
+                      <UnplacedQuoteCitations
+                        text={displayedUserMessage.visibleText}
+                        quotes={displayedUserMessage.quotes}
+                      />
+                      <UserMessageBody
+                        cwd={ctx.markdownCwd}
+                        environmentId={ctx.activeThreadEnvironmentId}
+                        text={displayedUserMessage.visibleText}
+                        terminalContexts={terminalContexts}
+                        skills={ctx.skills}
+                        searchHighlight={messageSearchHighlight}
+                      />
+                    </QuoteCitationContext>
                   )}
                 </div>
                 <div className="mt-1 flex items-center justify-end gap-2">
@@ -2449,6 +2475,22 @@ const UserMessageTerminalContextInlineLabel = memo(
     return <TerminalContextInlineChip label={props.context.header} tooltipText={tooltipText} />;
   },
 );
+
+/** Quotes whose `[Quote N]` marker is missing from the text lead the message instead. */
+function UnplacedQuoteCitations(props: {
+  text: string;
+  quotes: ReadonlyArray<NumberedQuoteCitation>;
+}) {
+  const unplaced = props.quotes.filter((quote) => !props.text.includes(`[Quote ${quote.number}]`));
+  if (unplaced.length === 0) return null;
+  return (
+    <div className="mb-1 flex flex-wrap gap-1">
+      {unplaced.map((quote) => (
+        <QuoteCitationChip key={quote.number} citation={quote.citation} />
+      ))}
+    </div>
+  );
+}
 
 const UserMessageBody = memo(function UserMessageBody(props: {
   cwd: string | undefined;

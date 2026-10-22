@@ -1744,6 +1744,12 @@ label:has(> select#reasoning-effort) select {
     0 0 0 3px color-mix(in srgb, var(--warning) 18%, transparent);
 }
 
+/* The passage a quote chip jumps to (useQuoteSourceHighlight). */
+::highlight(ryco-quote-source) {
+  background-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  color: inherit;
+}
+
 .chat-markdown blockquote {
   border-left: 2px solid var(--border);
   padding-left: 0.8rem;

@@ -1,6 +1,6 @@
 import type { MessageId } from "@ryco/contracts";
 import type { TimelineEntry } from "../../session-logic";
-import { deriveDisplayedUserMessageContext } from "../../lib/terminalContext";
+import { deriveDisplayedUserMessage } from "../../lib/userMessageDisplay";
 
 export interface ThreadMessageSearchOccurrence {
   id: string;
@@ -33,7 +33,7 @@ export function createThreadMessageSearchMatcher(query: string): RegExp | null {
 
 function searchableMessageText(entry: Extract<TimelineEntry, { kind: "message" }>): string {
   if (entry.message.role === "user") {
-    return deriveDisplayedUserMessageContext(entry.message.text).visibleText;
+    return deriveDisplayedUserMessage(entry.message.text).visibleText;
   }
   return entry.message.text;
 }

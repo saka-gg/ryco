@@ -19,7 +19,7 @@ import {
 } from "../../session-logic";
 import type { ChatMessage } from "../../types";
 import { page, userEvent } from "vite-plus/test/browser";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { useTierOverrideStore } from "../../tierOverrideStore";
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
@@ -130,6 +130,18 @@ import {
 import { __rememberHtmlRenderSourceForTests } from "./useHtmlRenderSource";
 import { useUiStateStore } from "~/uiStateStore";
 import { type EnvironmentState, useStore } from "../../store";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+  withQuoteCitationComment,
+  type QuoteCitation,
+} from "@ryco/shared/quoteCitations";
+import { cssHighlightRegistry } from "~/lib/cssHighlights";
+import { captureTextQuoteSelector } from "~/lib/textQuoteDom";
+import { useQuoteSourceJumpStore } from "../../quoteSourceJumpStore";
+import { useTimelineRevealStore } from "../../timelineRevealStore";
+import { QUOTE_SOURCE_HIGHLIGHT_NAME } from "./useQuoteSourceHighlight";
 
 const THINKING_ENTRIES = [
   {
@@ -2086,6 +2098,278 @@ describe("MessagesTimeline", () => {
           await screen.unmount();
         }
       });
+    });
+  });
+
+  describe("quote citations", () => {
+    const threadKey = "environment-local:thread-1";
+    const passage = "The cache keeps reads fast.";
+    const assistantText = `Some context first.\n\n${passage} Then more detail follows.`;
+
+    const messageEntry = (messageId: string, role: "user" | "assistant", text: string) => ({
+      id: `row-${messageId}`,
+      kind: "message" as const,
+      createdAt: "2026-10-22T12:00:00.000Z",
+      message: {
+        id: MessageId.make(messageId),
+        role,
+        text,
+        createdAt: "2026-10-22T12:00:00.000Z",
+        streaming: false,
+      },
+    });
+
+    const citationOf = (messageId: string, overrides: Partial<QuoteCitation["selector"]> = {}) =>
+      createQuoteCitation({
+        source: {
+          environmentId: EnvironmentId.make("environment-local"),
+          threadId: ThreadId.make("thread-1"),
+        },
+        messageId: MessageId.make(messageId),
+        selector: {
+          exact: passage,
+          prefix: "",
+          suffix: "",
+          start: 0,
+          end: passage.length,
+          ...overrides,
+        },
+      });
+
+    const quoteChips = () => [
+      ...document.querySelectorAll<HTMLButtonElement>("[data-quote-citation-chip]"),
+    ];
+
+    // The desktop tier: the frozen phone tier renders user messages as plain text.
+    let stopTier: () => void = () => undefined;
+    beforeEach(() => {
+      useTierOverrideStore.setState({ override: "desktop" });
+      stopTier = syncDocumentPresentationTier();
+    });
+
+    afterEach(() => {
+      useTierOverrideStore.setState({ override: null });
+      stopTier();
+      useQuoteSourceJumpStore.setState({ active: null, unavailableSourceKeys: new Set() });
+      useTimelineRevealStore.setState({ requestsByThreadKey: {} });
+      cssHighlightRegistry()?.clear();
+    });
+
+    it("shows a sent message's quotes as chips in place of its quote block", async () => {
+      const citation = withQuoteCitationComment(citationOf("assistant-1"), "Why is that?");
+      const sent = expandQuoteCitations(`Compare ${serializeQuoteCitation(citation)} with this.`);
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        const chip = quoteChips()[0]!;
+        expect(chip.textContent).toBe(passage);
+        expect(chip.getAttribute("aria-label")).toBe(
+          `Show quoted text in conversation: ${passage}`,
+        );
+        const bubble = document.querySelector<HTMLElement>(
+          '[data-message-id="user-1"] [data-quote-citation-chip]',
+        )?.parentElement?.parentElement?.parentElement;
+        expect(bubble?.textContent).toContain(`Compare ${passage} with this.`);
+        const userRow = document.querySelector<HTMLElement>('[data-message-id="user-1"]')!;
+        expect(userRow.textContent).not.toContain("assistant_quotes");
+        expect(userRow.textContent).not.toContain("[Quote 1]");
+        expect(userRow.textContent).not.toContain("Why is that?");
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("jumps to the quoted passage and highlights it", async () => {
+      const assistantOnly = [messageEntry("assistant-1", "assistant", assistantText)];
+      const screen = await render(
+        <MessagesTimeline {...buildProps()} timelineEntries={assistantOnly} />,
+      );
+      try {
+        // Capture the selector from the rendered reply, as the selection actions do.
+        const source = await vi.waitFor(() => {
+          const element = document.querySelector<HTMLElement>(
+            '[data-selection-message-id="assistant-1"]',
+          );
+          expect(element).not.toBeNull();
+          return element!;
+        });
+        const walker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
+        let textNode: Text | null = null;
+        while (walker.nextNode()) {
+          if ((walker.currentNode as Text).data.includes(passage)) {
+            textNode = walker.currentNode as Text;
+            break;
+          }
+        }
+        expect(textNode).not.toBeNull();
+        const range = document.createRange();
+        const offset = textNode!.data.indexOf(passage);
+        range.setStart(textNode!, offset);
+        range.setEnd(textNode!, offset + passage.length);
+        const selector = captureTextQuoteSelector(source, range)!;
+        expect(selector).toMatchObject({ exact: passage, prefix: "Some context first. " });
+
+        const citation = citationOf("assistant-1", selector);
+        await screen.rerender(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[
+              ...assistantOnly,
+              messageEntry(
+                "user-1",
+                "user",
+                expandQuoteCitations(serializeQuoteCitation(citation)),
+              ),
+            ]}
+          />,
+        );
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        quoteChips()[0]!.click();
+
+        expect(useTimelineRevealStore.getState().requestsByThreadKey[threadKey]?.messageId).toBe(
+          "assistant-1",
+        );
+        await vi.waitFor(() => {
+          const highlight = cssHighlightRegistry()?.get(QUOTE_SOURCE_HIGHLIGHT_NAME);
+          expect(highlight?.size).toBe(1);
+          const [painted] = [...highlight!] as Range[];
+          expect(painted!.toString()).toBe(passage);
+          expect(source.contains(painted!.startContainer)).toBe(true);
+        });
+        expect(useQuoteSourceJumpStore.getState().active).toBeNull();
+        expect(quoteChips()[0]!.dataset.sourceUnavailable).toBeUndefined();
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("quietly marks a quote whose source can no longer be found", async () => {
+      const gone = citationOf("assistant-removed");
+      const reworded = citationOf("assistant-1", { exact: "A sentence the reply never had." });
+      const sent = expandQuoteCitations(
+        `${serializeQuoteCitation(gone)} and ${serializeQuoteCitation(reworded)}`,
+      );
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(2));
+        const [goneChip, rewordedChip] = quoteChips();
+
+        // The message is still there, the passage is not.
+        rewordedChip!.click();
+        await vi.waitFor(() => expect(quoteChips()[1]!.dataset.sourceUnavailable).toBe("true"));
+        expect(cssHighlightRegistry()?.has(QUOTE_SOURCE_HIGHLIGHT_NAME) ?? false).toBe(false);
+
+        // The message is gone: the reveal settles without showing it.
+        goneChip!.click();
+        const request = useTimelineRevealStore.getState().requestsByThreadKey[threadKey]!;
+        expect(request.messageId).toBe("assistant-removed");
+        useTimelineRevealStore.getState().settle(threadKey, request.requestId);
+        await vi.waitFor(
+          () => {
+            const chip = quoteChips()[0]!;
+            expect(chip.dataset.sourceUnavailable).toBe("true");
+            expect(chip.getAttribute("aria-label")).toBe(
+              `Quoted text, source no longer available: ${passage}`,
+            );
+          },
+          { timeout: 3_000 },
+        );
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("renders quotes as chips in a user message shown as Markdown", async () => {
+      const marked = citationOf("assistant-1");
+      const draft = citationOf("assistant-1", { exact: "Then more detail follows." });
+      const sent = `${expandQuoteCitations(`See ${serializeQuoteCitation(marked)}`).replace(
+        "See [Quote 1]",
+        `See [Quote 1] and ${serializeQuoteCitation(draft)}\n\n\`\`\`ts\nconst x = 1;\n\`\`\``,
+      )}`;
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(quoteChips().map((chip) => chip.textContent)).toEqual([
+            passage,
+            "Then more detail follows.",
+          ]);
+        });
+        const userRow = document.querySelector<HTMLElement>('[data-message-id="user-1"]')!;
+        expect(userRow.querySelector(".chat-markdown")).not.toBeNull();
+        expect(userRow.textContent).not.toContain("ryco-quote:");
+        expect(userRow.textContent).not.toContain("assistant_quotes");
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("leaves the frozen phone tier's messages as sent", async () => {
+      useTierOverrideStore.setState({ override: "phone" });
+      const sent = expandQuoteCitations(`See ${serializeQuoteCitation(citationOf("assistant-1"))}`);
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            messageEntry("assistant-1", "assistant", assistantText),
+            messageEntry("user-1", "user", sent),
+          ]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => {
+          const userRow = document.querySelector<HTMLElement>('[data-message-id="user-1"]');
+          expect(userRow?.textContent).toContain("See [Quote 1]");
+          expect(userRow?.textContent).toContain(`> ${passage}`);
+        });
+        expect(quoteChips()).toHaveLength(0);
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("leaves quote syntax as text in assistant replies", async () => {
+      const token = serializeQuoteCitation(citationOf("assistant-1"));
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[messageEntry("assistant-2", "assistant", `Echo: ${token}`)]}
+        />,
+      );
+      try {
+        const reply = await vi.waitFor(() => {
+          const element = document.querySelector<HTMLElement>('[data-message-id="assistant-2"]');
+          expect(element?.textContent).toContain(`Echo: ${passage}`);
+          return element!;
+        });
+        expect(quoteChips()).toHaveLength(0);
+        expect(reply.querySelector("a")?.getAttribute("href")).toBe("");
+      } finally {
+        await screen.unmount();
+      }
     });
   });
 });

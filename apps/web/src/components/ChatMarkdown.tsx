@@ -12,6 +12,7 @@ import {
 } from "./chat/codeHighlightQueue";
 import { terminalFenceSource } from "../lib/terminalFenceSource";
 import type { EnvironmentId, ServerProviderSkill } from "@ryco/contracts";
+import { isQuoteCitationHref, parseQuoteCitationHref } from "@ryco/shared/quoteCitations";
 import {
   Children,
   type ComponentPropsWithoutRef,
@@ -24,6 +25,7 @@ import {
   useMemo,
   useRef,
   useState,
+  use,
   type ReactNode,
 } from "react";
 import type { Components } from "react-markdown";
@@ -32,6 +34,8 @@ import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
+import { QuoteCitationChip } from "./chat/QuoteCitationChip";
+import { QuoteCitationContext } from "./chat/quoteCitationContext";
 import {
   renderSkillInlineMarkdownChildren,
   type SkillInlineTextSearchHighlight,
@@ -710,9 +714,15 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [markdownFileLinkMetaByHref]);
-  const markdownUrlTransform = useCallback((href: string) => {
-    return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
-  }, []);
+  // Quote links render as chips, and only inside a sent user message.
+  const rendersQuoteCitations = use(QuoteCitationContext) !== null;
+  const markdownUrlTransform = useCallback(
+    (href: string) => {
+      if (rendersQuoteCitations && isQuoteCitationHref(href)) return href;
+      return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
+    },
+    [rendersQuoteCitations],
+  );
   const markdownComponents = useMemo<Components>(
     () => ({
       p({ node: _node, children, ...props }) {
@@ -785,6 +795,9 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
         );
       },
       a({ node: _node, href, ...props }) {
+        const quoteCitation =
+          rendersQuoteCitations && isQuoteCitationHref(href) ? parseQuoteCitationHref(href) : null;
+        if (quoteCitation) return <QuoteCitationChip citation={quoteCitation} />;
         const threadHref = resolveMarkdownThreadHref(href, environmentId);
         if (threadHref)
           return (
@@ -956,6 +969,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       resolvedTheme,
       skills,
       allowTerminalInsertion,
+      rendersQuoteCitations,
     ],
   );
 
