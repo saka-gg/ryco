@@ -321,6 +321,8 @@ export const resolvePromotionParent = async (input: {
   readonly homeDir: string;
   /** The node's live, non-chat project roots; none when the caller cannot read them. */
   readonly projectRoots?: ReadonlyArray<string>;
+  /** Folders the OS empties (`CodeRootsInput.temporaryDirectories`); the OS's own by default. */
+  readonly temporaryDirectories?: ReadonlyArray<string>;
 }): Promise<string> =>
   (await resolveNodeCodeRoots({ ...input, projectRoots: input.projectRoots ?? [] }))
     .defaultProjectDirectory;

@@ -109,6 +109,8 @@ export interface NodePathsDependencies {
   readonly repositoryIdentity: (cwd: string) => Effect.Effect<RepositoryIdentity | null>;
   readonly homeDir?: (() => string) | undefined;
   readonly platform?: NodeJS.Platform | undefined;
+  /** Folders the OS empties (`CodeRootsInput.temporaryDirectories`); the OS's own by default. */
+  readonly temporaryDirectories?: ReadonlyArray<string> | undefined;
   /** Narrower walk budgets, for tests. */
   readonly searchBudget?:
     | Pick<DirectorySearchInput, "maxDirectories" | "timeBudgetMs" | "maxEntriesPerDirectory">
@@ -245,6 +247,7 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
           .filter((project) => !isChatProject(project))
           .map((project) => project.workspaceRoot),
         platform,
+        temporaryDirectories: deps.temporaryDirectories,
       }),
     );
 

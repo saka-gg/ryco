@@ -97,6 +97,8 @@ const makePaths = async (
     repositoryIdentity: (cwd) => Effect.succeed(options.identities?.[cwd] ?? null),
     homeDir: () => home,
     platform: options.platform ?? "linux",
+    // The scratch folder is itself in the OS temporary directory.
+    temporaryDirectories: [],
   });
 };
 

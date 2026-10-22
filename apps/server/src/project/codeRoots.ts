@@ -42,7 +42,10 @@ export interface CodeRootsInput {
   /** Workspace roots of the node's live, non-chat projects. */
   readonly projectRoots: ReadonlyArray<string>;
   readonly platform?: NodeJS.Platform | undefined;
-  /** Folders the OS empties, never a code folder; `os.tmpdir()`, `/tmp` and `/var/tmp` by default. */
+  /**
+   * Folders the OS empties: no folder in them, at any depth, is the default. `os.tmpdir()`,
+   * `/tmp` and `/var/tmp` by default.
+   */
   readonly temporaryDirectories?: ReadonlyArray<string> | undefined;
 }
 
@@ -201,8 +204,8 @@ const defaultTemporaryDirectories = (platform: NodeJS.Platform): ReadonlyArray<s
  *
  * A folder holding projects counts each folder in it once: two subfolder projects of a monorepo
  * are the repository, so the folder holding the repository is where they are, never a folder
- * inside its working tree (which stays a place to search, ranked last). A temporary directory is
- * never the default.
+ * inside its working tree (which stays a place to search, ranked last). A folder in a temporary
+ * directory, at any depth, is never the default either: the OS empties it.
  *
  * The default deliberately keeps a configured base directory even when it does not exist yet,
  * as chat promotion always has; the code roots list only existing directories, inside the access
@@ -237,18 +240,18 @@ export const resolveNodeCodeRoots = async (input: CodeRootsInput): Promise<Resol
     roots.filter((root, index) => placements[index] !== root),
     platform,
   );
-  const temporaryKeys = new Set(
-    (
-      await Promise.all(
-        (input.temporaryDirectories ?? defaultTemporaryDirectories(platform)).map(realOf),
-      )
-    ).flatMap((real) => (real === null ? [] : [foldPathCase(real, platform)])),
-  );
+  const temporaryRoots = (
+    await Promise.all(
+      (input.temporaryDirectories ?? defaultTemporaryDirectories(platform)).map(realOf),
+    )
+  ).filter((real): real is string => real !== null);
   const parentHoldsProjects = await Promise.all(
     parents.map(async (parent) => {
       if (parent.projectCount < 2) return false;
       const real = await realOf(parent.path);
-      return real !== null && !temporaryKeys.has(foldPathCase(real, platform));
+      return (
+        real !== null && !temporaryRoots.some((temporary) => isWithin(temporary, real, platform))
+      );
     }),
   );
   const parentCandidate = (parent: ProjectParent, holdsProjects = false): CodeRootCandidate => ({

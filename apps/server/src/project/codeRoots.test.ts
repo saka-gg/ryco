@@ -24,13 +24,23 @@ const resolve = (input: {
   readonly workspaceAccessRoot?: string;
   readonly addProjectBaseDirectory?: string;
   readonly projectRoots?: ReadonlyArray<string>;
+  readonly temporaryDirectories?: ReadonlyArray<string>;
 }) =>
   resolveNodeCodeRoots({
     workspaceAccessRoot: input.workspaceAccessRoot,
     addProjectBaseDirectory: input.addProjectBaseDirectory ?? "",
     homeDir: home,
     projectRoots: input.projectRoots ?? [],
+    // The scratch folder is itself in the OS temporary directory; tests name theirs explicitly.
+    temporaryDirectories: input.temporaryDirectories ?? [],
   });
+
+/** Two project folders, `a` and `b`, in `folder`; their roots. */
+const projectPair = async (folder: string) => {
+  const roots = [path.join(folder, "a"), path.join(folder, "b")];
+  await Promise.all(roots.map((root) => mkdir(root, { recursive: true })));
+  return roots;
+};
 
 describe("projectParentDirectories", () => {
   it("counts projects per parent, most first, then shorter and alphabetical", () => {
@@ -152,20 +162,51 @@ describe("resolveNodeCodeRoots", () => {
     expect(roots.defaultProjectDirectorySource).toBe("existing-projects");
   });
 
-  it("never picks a temporary directory as the code folder", async () => {
+  it("never picks a folder in a temporary directory as the code folder", async () => {
     await mkdir(path.join(home, "Code"));
     const temporary = path.join(scratch, "tmp");
-    await mkdir(path.join(temporary, "a"), { recursive: true });
-    await mkdir(path.join(temporary, "b"), { recursive: true });
-    const roots = await resolveNodeCodeRoots({
-      workspaceAccessRoot: undefined,
-      addProjectBaseDirectory: "",
-      homeDir: home,
-      projectRoots: [path.join(temporary, "a"), path.join(temporary, "b")],
+    // The temporary directory itself, a scratch folder one level below it, and a mkdtemp-style
+    // folder deeper down: the OS empties them all.
+    for (const folder of [
+      temporary,
+      path.join(temporary, "scratch"),
+      path.join(temporary, "T", "ryco-abc"),
+    ]) {
+      const roots = await resolve({
+        projectRoots: await projectPair(folder),
+        temporaryDirectories: [temporary],
+      });
+      expect(roots.defaultProjectDirectory).toBe(path.join(home, "Code"));
+      expect(roots.defaultProjectDirectorySource).toBe("well-known");
+      expect(roots.codeRoots[0]?.path).toBe(path.join(home, "Code"));
+      // Still a place to search, after the code folders.
+      expect(roots.codeRoots.find((root) => root.path === folder)?.source).toBe(
+        "existing-projects",
+      );
+    }
+
+    // Matched by realpath on both sides, as macOS `/tmp` is `/private/tmp`.
+    const link = path.join(scratch, "tmp-link");
+    await symlink(temporary, link);
+    const throughLink = await resolve({
+      projectRoots: [path.join(link, "scratch", "a"), path.join(link, "scratch", "b")],
       temporaryDirectories: [temporary],
     });
-    expect(roots.defaultProjectDirectory).toBe(path.join(home, "Code"));
-    expect(roots.codeRoots[0]?.path).toBe(path.join(home, "Code"));
+    expect(throughLink.defaultProjectDirectory).toBe(path.join(home, "Code"));
+    const linkedTemporary = await resolve({
+      projectRoots: await projectPair(path.join(temporary, "scratch")),
+      temporaryDirectories: [link],
+    });
+    expect(linkedTemporary.defaultProjectDirectory).toBe(path.join(home, "Code"));
+
+    // A folder whose name merely starts with the temporary directory's is not in it.
+    const beside = path.join(scratch, "tmp-work");
+    const besideRoots = await resolve({
+      projectRoots: await projectPair(beside),
+      temporaryDirectories: [temporary],
+    });
+    expect(besideRoots.defaultProjectDirectory).toBe(beside);
+    expect(besideRoots.defaultProjectDirectorySource).toBe("existing-projects");
   });
 
   it("skips a projects folder that no longer exists", async () => {

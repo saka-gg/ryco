@@ -1159,14 +1159,17 @@ describe("folder helpers", () => {
     // The folder holding two of the node's projects wins over `~/Code`.
     const work = path.join(scratch, "work");
     await mkdir(work);
-    expect(
-      await resolvePromotionParent({
+    const withProjects = (temporaryDirectories?: ReadonlyArray<string>) =>
+      resolvePromotionParent({
         workspaceAccessRoot: undefined,
         addProjectBaseDirectory: "",
         homeDir: home,
         projectRoots: [path.join(work, "a"), path.join(work, "b")],
-      }),
-    ).toBe(work);
+        ...(temporaryDirectories === undefined ? {} : { temporaryDirectories }),
+      });
+    expect(await withProjects([])).toBe(work);
+    // Unless it is in the OS temporary directory, as this scratch folder is: the OS empties it.
+    expect(await withProjects()).toBe(path.join(home, "Code"));
   });
 });
 
