@@ -17,15 +17,20 @@ import { startSelectionChat } from "../lib/selectionChat";
 import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
 import {
   appendSelectionQuote,
+  approvalRedirectRefusalDeclined,
+  approvalRedirectTooSoon,
   checkpointRevertUnsupportedMessage,
   declineApprovalsForRedirect,
   describeApprovalRedirectRefusal,
   pendingApprovalSourceFromStore,
-  planApprovalRedirect,
+  recordApprovalSightings,
   requestProviderSessionPrewarm,
+  resolveApprovalRedirect,
   resolveProviderSessionPrewarmRequest,
   selectProviderSessionPrewarmSupported,
+  type ApprovalRedirect,
   type ApprovalRedirectRefusal,
+  type ApprovalSightings,
   type SubscribedClaudeReviewState,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
@@ -1108,14 +1113,16 @@ export default function ChatView(props: ChatViewProps) {
     toastManager.add(stackedThreadToast({ type: "info", title: reason }));
   }, []);
   /** Says why a send that redirects pending approvals sent nothing; the draft stays. */
-  const notifyApprovalRedirectRefused = useCallback(
-    (refusal: ApprovalRedirectRefusal, error?: string | null) => {
-      toastManager.add(
-        stackedThreadToast({ type: "warning", ...describeApprovalRedirectRefusal(refusal, error) }),
-      );
-    },
-    [],
-  );
+  const notifyApprovalRedirectRefused = useCallback((refusal: ApprovalRedirectRefusal) => {
+    toastManager.add(
+      stackedThreadToast({ type: "warning", ...describeApprovalRedirectRefusal(refusal) }),
+    );
+  }, []);
+  // A redirect that declined approvals but sent nothing: the next send on that turn steers.
+  const [approvalRedirectedTurn, setApprovalRedirectedTurn] = useState<{
+    readonly threadKey: string;
+    readonly turnId: string;
+  } | null>(null);
   const onInterrupt = useCallback(async () => {
     if (mutationUnavailableReason !== null) {
       notifyMutationUnavailable(mutationUnavailableReason);
@@ -2209,6 +2216,16 @@ export default function ChatView(props: ChatViewProps) {
     hasActionableProposedPlan: hasActionableProposedPlan(activeProposedPlan),
   });
   const activePendingApproval = pendingApprovals[0] ?? null;
+  // When each pending approval was first on screen: a send declines only approvals shown long
+  // enough to have been read.
+  const approvalSightingsRef = useRef<ApprovalSightings>(new Map());
+  useLayoutEffect(() => {
+    approvalSightingsRef.current = recordApprovalSightings(
+      approvalSightingsRef.current,
+      pendingApprovals,
+      Date.now(),
+    );
+  }, [pendingApprovals]);
   const { bindLocalDispatch, localDispatchStartedAt, isPreparingWorktree, isSendBusy } =
     useLocalDispatchState({
       threadKey: routeThreadKey,
@@ -5066,46 +5083,65 @@ export default function ChatView(props: ChatViewProps) {
       // Steer = enqueue, then start a steer attempt at once: every failure falls back to the
       // queue. The phone tier is frozen and always queues; slash input never steers.
       const invertFollowUp = options?.invertFollowUp === true;
-      const approvalRedirect = activeThreadRef
-        ? planApprovalRedirect({
-            approvals: approvalsAtSend,
-            runtimeSessionId: activeThread.session?.runtimeSessionId,
-            respondingRequestIds,
-          })
-        : ({ kind: "none" } as const);
+      const activeTurnId = activeThread.session?.activeTurnId ?? null;
+      // The decision the composer showed (`resolveApprovalRedirect`), from the send's snapshot.
+      const approvalRedirect = resolveApprovalRedirect({
+        approvals: approvalsAtSend,
+        runtimeSessionId: activeThread.session?.runtimeSessionId,
+        activeTurnId,
+        respondingRequestIds,
+        steerAllowed:
+          presentationTier !== "phone" &&
+          !hasRetiredProjectMemory(composerSnapshot) &&
+          getSteerEligibility({
+            modelSelection: composerSnapshot.selectedModelSelection,
+            runtimeMode: settingsSnapshot.runtimeMode,
+            interactionMode: settingsSnapshot.interactionMode,
+            tokenMode: settingsSnapshot.tokenMode,
+          }).allowed,
+        questionPending: pendingUserInputs.length > 0,
+        redirectedTurnId:
+          approvalRedirectedTurn?.threadKey === activeThreadKey
+            ? approvalRedirectedTurn.turnId
+            : null,
+      });
       const followUpAction = resolveComposerFollowUpAction({
         turnRunning: phase === "running",
-        // While approvals wait, a send redirects the turn whatever the setting says; the
-        // alternate shortcut still queues and leaves them to be answered.
+        // A redirect steers whatever the setting says; the alternate shortcut still queues and
+        // leaves the approvals to be answered.
         followUpBehavior: approvalRedirect.kind === "none" ? settings.followUpBehavior : "steer",
         invert: invertFollowUp,
         surfaceAllowsSteer: presentationTier !== "phone",
         isSlashCommand: trimmed.startsWith("/"),
       });
-      // A redirect declines only when the message can then steer; otherwise it queues as before.
-      const redirectsApprovals =
-        followUpAction === "steer" &&
-        approvalRedirect.kind !== "none" &&
-        !hasRetiredProjectMemory(composerSnapshot) &&
-        getSteerEligibility({
-          modelSelection: composerSnapshot.selectedModelSelection,
-          runtimeMode: settingsSnapshot.runtimeMode,
-          interactionMode: settingsSnapshot.interactionMode,
-          tokenMode: settingsSnapshot.tokenMode,
-        }).allowed;
+      const redirect: ApprovalRedirect =
+        followUpAction === "steer" ? approvalRedirect : { kind: "none" };
+      const refuseRedirect = (refusal: ApprovalRedirectRefusal) => {
+        notifyApprovalRedirectRefused(refusal);
+        if (
+          redirect.kind === "decline" &&
+          redirect.turnId !== null &&
+          approvalRedirectRefusalDeclined(refusal)
+        ) {
+          setApprovalRedirectedTurn({ threadKey: activeThreadKey, turnId: redirect.turnId });
+        }
+      };
       const preparing = threadSendsPreparing.ref(routeThreadKey);
       if (preparing.current) return;
-      if (redirectsApprovals && approvalRedirect.kind === "blocked") {
-        notifyApprovalRedirectRefused("blocked");
+      if (
+        redirect.kind === "decline" &&
+        approvalRedirectTooSoon(redirect, approvalSightingsRef.current)
+      ) {
+        refuseRedirect({ kind: "just-arrived" });
         return;
       }
       preparing.current = true;
       const composerChangedDuringPreparation = captureComposerContentGuard();
       try {
         if (!(await drainEditorsBeforeSend())) return;
-        if (redirectsApprovals && approvalRedirect.kind === "decline" && activeThreadRef) {
+        if (redirect.kind === "decline" && activeThreadRef) {
           const outcome = await declineApprovalsForRedirect({
-            plan: approvalRedirect,
+            redirect,
             decline: (approval) =>
               submitApprovalDecision(approval.requestId, "decline", approval.approvalIdentity),
             source: pendingApprovalSourceFromStore(
@@ -5114,21 +5150,20 @@ export default function ChatView(props: ChatViewProps) {
             ),
           });
           if (outcome.kind !== "declined") {
-            notifyApprovalRedirectRefused(
-              outcome.kind,
-              outcome.kind === "refused" ? outcome.error : null,
-            );
+            refuseRedirect(outcome);
             return;
           }
           // What goes out must be what the user sent; an edit made meanwhile stays a draft.
           if (composerChangedDuringPreparation()) {
-            notifyApprovalRedirectRefused("draft-changed");
+            refuseRedirect({ kind: "draft-changed", declined: outcome.declined });
             return;
           }
         }
       } finally {
         preparing.current = false;
       }
+      // This send carries the redirect; later ones on the turn follow the setting again.
+      if (redirect.kind !== "none") setApprovalRedirectedTurn(null);
       const queuedMessageId = newMessageId();
       const queuedEntry: QueuedMessage = {
         id: queuedMessageId,
@@ -5146,7 +5181,7 @@ export default function ChatView(props: ChatViewProps) {
         const eligibility = getQueuedSteerEligibility(queuedEntry);
         if (eligibility.allowed) {
           void steerQueuedEntry(queuedEntry, {
-            explicit: invertFollowUp || redirectsApprovals,
+            explicit: invertFollowUp || redirect.kind !== "none",
             prepareEditors: false,
           });
         } else if (invertFollowUp) {
@@ -6613,6 +6648,13 @@ export default function ChatView(props: ChatViewProps) {
                   activePendingDraftAnswers={activePendingDraftAnswers}
                   activePendingQuestionIndex={activePendingQuestionIndex}
                   respondingRequestIds={respondingRequestIds}
+                  activeRuntimeSessionId={activeThread?.session?.runtimeSessionId ?? null}
+                  activeTurnId={activeThread?.session?.activeTurnId ?? null}
+                  approvalRedirectedTurnId={
+                    approvalRedirectedTurn?.threadKey === activeThreadKey
+                      ? approvalRedirectedTurn.turnId
+                      : null
+                  }
                   showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                   activeProposedPlan={activeProposedPlan}
                   activePlan={activePlan as { turnId?: TurnId } | null}

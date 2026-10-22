@@ -5540,8 +5540,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         once: true,
       });
 
-      const decision = yield* Deferred.await(decisionDeferred);
+      const requestedDecision = yield* Deferred.await(decisionDeferred);
       pendingApprovals.delete(requestId);
+      // A request that refused a session-wide grant (a client that predates the flag can still
+      // offer it) is answered, and reported, as one approval.
+      const decision: ProviderApprovalDecision =
+        requestedDecision === "acceptForSession" &&
+        pendingApproval.acceptForSessionOffered === false
+          ? "accept"
+          : requestedDecision;
 
       const resolvedStamp = yield* makeEventStamp();
       yield* offerRuntimeEventForContext(context, {
@@ -5569,12 +5576,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
 
       if (decision === "accept" || decision === "acceptForSession") {
-        // A request that refused a session-wide grant (a client that predates the flag can
-        // still offer it) is answered as one approval.
-        const grantsSession =
-          decision === "acceptForSession" && pendingApproval.acceptForSessionOffered !== false;
         if (
-          grantsSession &&
+          decision === "acceptForSession" &&
           pendingApproval.suggestions?.some((suggestion) => suggestion.type === "setMode")
         ) {
           // The CLI applies the suggested mode itself; the next turn sets its own.
@@ -5583,7 +5586,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return {
           behavior: "allow",
           updatedInput: toolInput,
-          ...(grantsSession && pendingApproval.suggestions
+          ...(decision === "acceptForSession" && pendingApproval.suggestions
             ? {
                 updatedPermissions: [...pendingApproval.suggestions],
               }

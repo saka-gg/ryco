@@ -60,6 +60,7 @@ import {
   PROMPT_STASH_MAX_ENTRIES,
   composerTargetKey,
   readProjectProviderCommands,
+  resolveApprovalRedirect,
   stripInlineTerminalContextPlaceholders,
   subscribeProjectProviderCommands,
   type PromptStashEntry,
@@ -366,6 +367,14 @@ export interface ChatComposerProps {
   activePendingDraftAnswers: Record<string, PendingUserInputDraftAnswer>;
   activePendingQuestionIndex: number;
   respondingRequestIds: ApprovalRequestId[];
+  /**
+   * The session's provider runtime and running turn, and the turn on which an earlier redirect
+   * declined approvals without sending. With the approvals they decide what a send does
+   * (`resolveApprovalRedirect`), so the placeholder and primary action match the send.
+   */
+  activeRuntimeSessionId: string | null;
+  activeTurnId: string | null;
+  approvalRedirectedTurnId: string | null;
 
   // Plan
   showPlanFollowUpPrompt: boolean;
@@ -569,6 +578,9 @@ export const ChatComposer = memo(
       activePendingDraftAnswers,
       activePendingQuestionIndex,
       respondingRequestIds,
+      activeRuntimeSessionId,
+      activeTurnId,
+      approvalRedirectedTurnId,
       showPlanFollowUpPrompt,
       activeProposedPlan,
       planSidebarLabel,
@@ -2027,36 +2039,50 @@ export const ChatComposer = memo(
       return false;
     };
 
-    const runningFollowUp = useMemo(
-      () =>
-        phase === "running"
-          ? describeRunningFollowUp({
-              followUpBehavior: settings.followUpBehavior,
-              steerUnavailableReason: getFollowUpSteerUnavailableReason({
-                modelSelection: selectedModelSelection,
-                runtimeMode,
-                interactionMode,
-                tokenMode,
-              }),
-              surfaceAllowsSteer: followUpSurfaceAllowsSteer,
-              approvalPending: isComposerApprovalState,
-            })
-          : null,
-      [
-        followUpSurfaceAllowsSteer,
-        getFollowUpSteerUnavailableReason,
-        interactionMode,
-        isComposerApprovalState,
-        phase,
+    const runningFollowUp = useMemo(() => {
+      if (phase !== "running") return null;
+      const steerUnavailableReason = getFollowUpSteerUnavailableReason({
+        modelSelection: selectedModelSelection,
         runtimeMode,
-        selectedModelSelection,
-        settings.followUpBehavior,
+        interactionMode,
         tokenMode,
-      ],
-    );
+      });
+      return describeRunningFollowUp({
+        followUpBehavior: settings.followUpBehavior,
+        steerUnavailableReason,
+        surfaceAllowsSteer: followUpSurfaceAllowsSteer,
+        // The same decision the send makes, from the same inputs.
+        approvalRedirect: resolveApprovalRedirect({
+          approvals: pendingApprovals,
+          runtimeSessionId: activeRuntimeSessionId,
+          activeTurnId,
+          respondingRequestIds,
+          steerAllowed: followUpSurfaceAllowsSteer && steerUnavailableReason === null,
+          questionPending: pendingUserInputs.length > 0,
+          redirectedTurnId: approvalRedirectedTurnId,
+        }).kind,
+      });
+    }, [
+      activeRuntimeSessionId,
+      activeTurnId,
+      approvalRedirectedTurnId,
+      followUpSurfaceAllowsSteer,
+      getFollowUpSteerUnavailableReason,
+      interactionMode,
+      pendingApprovals,
+      pendingUserInputs.length,
+      phase,
+      respondingRequestIds,
+      runtimeMode,
+      selectedModelSelection,
+      settings.followUpBehavior,
+      tokenMode,
+    ]);
     const runningFollowUpPlaceholder = runningFollowUp?.placeholder ?? null;
-    // Sending now declines the waiting approval and steers the message into the turn.
-    const sendRedirectsApproval = runningFollowUp?.redirectsApproval === true;
+    // Sending now declines the waiting approvals and steers the message into the turn. Slash
+    // input never steers, so it never redirects either.
+    const sendRedirectsApproval =
+      runningFollowUp?.redirectsApproval === true && !prompt.trimStart().startsWith("/");
 
     // ------------------------------------------------------------------
     // Callbacks: images / file attachments / drag / paste

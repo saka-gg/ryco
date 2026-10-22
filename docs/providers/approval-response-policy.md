@@ -48,16 +48,21 @@ activities and settlements cannot reopen or overwrite the current callback.
 
 A message sent while approvals wait declines them and steers the turn
 (`packages/client-runtime/src/state/composer/approvalRedirect.ts`, shared by web and
-mobile). It is the send path's last step, so local commands, queued-message edits and
-refused drafts never touch approvals, and it only runs when the message can steer;
-otherwise the message queues and the approvals stay. The response states are the
-guard: an approval that is `submitting` or `uncertain` stops the send, and so does a
-decline the node refuses, one that ends `retryable` or `uncertain`, one still in
-flight after 15 seconds, or an approval that arrived meanwhile. Approvals of an ended
-runtime are skipped. Responses and steers run on separate reactor lanes and adapters
-refuse a steer while an approval waits, so the client steers only after every decline
-left the pending list, and only if the draft is unchanged. The draft stays in every
-other case.
+mobile). `resolveApprovalRedirect` is the one decision: the composer's placeholder and
+primary action and the send all read it. It is the send path's last step, so local
+commands, queued-message edits and refused drafts never touch approvals, and it only
+runs when the message can steer. Approvals of an ended runtime are skipped, and while an
+approval is `submitting` or `uncertain` nothing is declined: the message follows the
+follow-up setting and the approvals stay.
+
+Responses and steers run on separate reactor lanes and adapters refuse a steer while an
+approval waits, so the client steers only after every decline left the pending list.
+Approvals the redirected turn opens meanwhile (the next tool of the same batch) are
+declined too. The draft stays, and nothing is sent, when an approval to decline appeared
+less than 750 ms before the send, when the node refuses a decline, when one ends
+`retryable` or `uncertain` or is still in flight after 15 seconds, when an approval of
+another turn arrives, or when the draft changed meanwhile. If declines went through
+before that, the next send on the same turn steers whatever the setting says.
 
 ## Lifecycle integration boundary
 

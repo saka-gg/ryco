@@ -38,6 +38,8 @@ import {
 } from "@ryco/client-runtime/state/side-chat";
 import {
   APPROVAL_REDIRECT_PLACEHOLDER,
+  approvalRedirectRefusalDeclined,
+  approvalRedirectTooSoon,
   declineApprovalsForRedirect,
   deriveProviderSelectionPolicy,
   describeApprovalRedirectRefusal,
@@ -45,12 +47,14 @@ import {
   getProviderSupportsAskMode,
   normalizeInteractionModeForProviderTarget,
   pendingApprovalSourceFromStore,
-  planApprovalRedirect,
+  recordApprovalSightings,
+  resolveApprovalRedirect,
   selectionAllowedAtSendBoundary,
   type ApprovalRedirectRefusal,
+  type ApprovalSightings,
 } from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
-import type { TimelineEntry } from "@ryco/client-runtime/state/session";
+import type { PendingApproval, TimelineEntry } from "@ryco/client-runtime/state/session";
 import {
   buildQueuedMessageSteerCommand,
   collectQueuedMessageSteerOutcomes,
@@ -210,6 +214,7 @@ import {
 } from "./threadTimelineList";
 
 const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
+const NO_PENDING_APPROVALS: PendingApproval[] = [];
 /** How long the message a link opened the thread at stays highlighted. */
 const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
 
@@ -556,9 +561,26 @@ export function ThreadDetailScreen(props: {
   );
   const { worktrees } = useHomeWorkspaceData();
   const environments = useHomeEnvironments();
-  const pendingApprovals = built?.viewModel.pendingApprovals ?? [];
+  const pendingApprovals = built?.viewModel.pendingApprovals ?? NO_PENDING_APPROVALS;
   const pendingUserInputs = built?.viewModel.pendingUserInputs ?? [];
   const optionalUserInputs = built?.viewModel.optionalUserInputs ?? [];
+  // When each pending approval was first on screen: a send declines only approvals shown long
+  // enough to have been read.
+  const approvalSightingsRef = useRef<ApprovalSightings>(new Map());
+  useLayoutEffect(() => {
+    approvalSightingsRef.current = recordApprovalSightings(
+      approvalSightingsRef.current,
+      pendingApprovals,
+      Date.now(),
+    );
+  }, [pendingApprovals]);
+  // A redirect that declined approvals but sent nothing: the next send on that turn steers.
+  const [approvalRedirectedTurn, setApprovalRedirectedTurn] = useState<{
+    readonly threadId: string;
+    readonly turnId: string;
+  } | null>(null);
+  const approvalRedirectedTurnId =
+    approvalRedirectedTurn?.threadId === threadId ? approvalRedirectedTurn.turnId : null;
   // Agent Control proposals share the web runtime state; mobile only syncs
   // while the server-side setting is enabled and renders the same queue.
   const agentControlEnabled = serverConfig?.settings.agentControl.enabled ?? false;
@@ -967,7 +989,12 @@ export function ThreadDetailScreen(props: {
   );
 
   const getSteerEligibility = useCallback(
-    (message: QueuedThreadMessage) => {
+    (
+      message: Pick<
+        QueuedThreadMessage,
+        "modelSelection" | "runtimeMode" | "interactionMode" | "tokenMode"
+      >,
+    ) => {
       if (hasRetiredProjectMemory(message))
         return { allowed: false as const, reason: REMOVED_PROJECT_MEMORY_MESSAGE };
       const activeSelection = thread?.modelSelection;
@@ -1368,52 +1395,64 @@ export function ThreadDetailScreen(props: {
     const deliveryReconciled =
       selectEnvironmentHydratedFromCacheAt(useStore.getState(), environmentId) === null;
     const connected = connectionUiState === "connected" && deliveryReconciled;
-    // A message sent while approvals wait declines the ones on screen and steers the turn. A
-    // turn that also waits on a question could not take the steer, so it queues as before.
-    const approvalRedirect =
-      threadBusy && connected && pendingUserInputs.length === 0
-        ? planApprovalRedirect({
-            approvals: pendingApprovals,
-            runtimeSessionId: currentThread.session?.runtimeSessionId,
-          })
-        : ({ kind: "none" } as const);
-    const refuseRedirect = (refusal: ApprovalRedirectRefusal, error?: string | null) => {
-      const copy = describeApprovalRedirectRefusal(refusal, error);
-      setSendError(`${copy.title}. ${copy.description}`);
-      return "refuse" as const;
-    };
+    // A message sent while approvals wait declines the ones on screen and steers the turn
+    // (`resolveApprovalRedirect`, the decision the placeholder shows). Any other message queues
+    // behind them as before.
+    const approvalsAtSend = pendingApprovals;
     const redirectApprovals = async (message: QueuedThreadMessage) => {
-      // Only a message that can steer redirects; any other one queues behind the approvals.
-      if (approvalRedirect.kind === "none" || !getSteerEligibility(message).allowed) {
-        return "queue" as const;
-      }
-      if (approvalRedirect.kind === "blocked") return refuseRedirect("blocked");
-      const outcome = await declineApprovalsForRedirect({
-        plan: approvalRedirect,
-        decline: (approval) =>
-          respondToThreadApproval({
-            api: ensureEnvironmentApi(environmentId),
-            threadId,
-            requestId: approval.requestId,
-            decision: "decline",
-            approvalIdentity: approval.approvalIdentity,
-          }),
-        source: pendingApprovalSourceFromStore(
-          useStore,
-          (state) => selectThreadByRef(state, scopeThreadRef(environmentId, threadId))?.activities,
-        ),
+      const redirect = resolveApprovalRedirect({
+        approvals: approvalsAtSend,
+        runtimeSessionId: currentThread.session?.runtimeSessionId,
+        activeTurnId: currentThread.session?.activeTurnId,
+        steerAllowed: threadBusy && connected && getSteerEligibility(message).allowed,
+        questionPending: pendingUserInputs.length > 0,
+        redirectedTurnId: approvalRedirectedTurnId,
       });
-      if (outcome.kind !== "declined") {
-        return refuseRedirect(outcome.kind, outcome.kind === "refused" ? outcome.error : null);
+      const refuse = (refusal: ApprovalRedirectRefusal) => {
+        const copy = describeApprovalRedirectRefusal(refusal);
+        setSendError(`${copy.title}. ${copy.description}`);
+        if (
+          redirect.kind === "decline" &&
+          redirect.turnId !== null &&
+          approvalRedirectRefusalDeclined(refusal)
+        ) {
+          setApprovalRedirectedTurn({ threadId, turnId: redirect.turnId });
+        }
+        return "refuse" as const;
+      };
+      if (redirect.kind === "none") return "queue" as const;
+      if (redirect.kind === "decline") {
+        if (approvalRedirectTooSoon(redirect, approvalSightingsRef.current)) {
+          return refuse({ kind: "just-arrived" });
+        }
+        const outcome = await declineApprovalsForRedirect({
+          redirect,
+          decline: (approval) =>
+            respondToThreadApproval({
+              api: ensureEnvironmentApi(environmentId),
+              threadId,
+              requestId: approval.requestId,
+              decision: "decline",
+              approvalIdentity: approval.approvalIdentity,
+            }),
+          source: pendingApprovalSourceFromStore(
+            useStore,
+            (state) =>
+              selectThreadByRef(state, scopeThreadRef(environmentId, threadId))?.activities,
+          ),
+        });
+        if (outcome.kind !== "declined") return refuse(outcome);
+        // The editor is locked while sending, but an attachment can still be removed meanwhile.
+        const current = attachmentsRef.current;
+        if (
+          current.length !== attachments.length ||
+          current.some((attachment, index) => attachment.id !== attachments[index]?.id)
+        ) {
+          return refuse({ kind: "draft-changed", declined: outcome.declined });
+        }
       }
-      // The editor is locked while sending, but an attachment can still be removed meanwhile.
-      const current = attachmentsRef.current;
-      if (
-        current.length !== attachments.length ||
-        current.some((attachment, index) => attachment.id !== attachments[index]?.id)
-      ) {
-        return refuseRedirect("draft-changed");
-      }
+      // This send carries the redirect; later ones on the turn queue again.
+      setApprovalRedirectedTurn(null);
       return "steer" as const;
     };
 
@@ -1647,19 +1686,24 @@ export function ThreadDetailScreen(props: {
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
     agentControlProposals.length > 0;
-  // While approvals wait on a turn that can steer, a send declines them and redirects it.
+  // While approvals wait on a turn this message could steer, a send declines them and
+  // redirects it: the same decision the send makes, from the composer's current selection.
   const sendRedirectsApprovals =
-    thread?.latestTurn?.state === "running" &&
-    pendingUserInputs.length === 0 &&
-    planApprovalRedirect({
+    thread !== undefined &&
+    selectedModelSelection !== null &&
+    resolveApprovalRedirect({
       approvals: pendingApprovals,
       runtimeSessionId: thread.session?.runtimeSessionId,
-    }).kind !== "none" &&
-    providers.find(
-      (provider) =>
-        provider.instanceId ===
-        (thread.session?.providerInstanceId ?? thread.modelSelection?.instanceId),
-    )?.supportsTurnSteering === true;
+      activeTurnId: thread.session?.activeTurnId,
+      steerAllowed: getSteerEligibility({
+        modelSelection: selectedModelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        tokenMode: thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+      }).allowed,
+      questionPending: pendingUserInputs.length > 0,
+      redirectedTurnId: approvalRedirectedTurnId,
+    }).kind === "decline";
 
   return (
     <KeyboardAvoidingView
