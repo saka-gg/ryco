@@ -13,6 +13,8 @@
  * or its still-running first attempt, so it never gets a second thread. A
  * target the node did not create is retried by the draft's next send: a new
  * submission, built from the composer as it is then (`retryModelMultiSelect`).
+ * So is an uncertain one whose retry the node refused, once the user checked
+ * its thread and chose to send it again as new.
  */
 import type {
   AgentTokenMode,
@@ -22,6 +24,7 @@ import type {
   ProviderDriverKind,
   ProviderInteractionMode,
   RuntimeMode,
+  ServerConfig,
 } from "@ryco/contracts";
 import { CommandId, MessageId, ThreadId, type ProjectId } from "@ryco/contracts/base-schemas";
 import { createModelSelection } from "@ryco/shared/model";
@@ -31,6 +34,7 @@ import { RpcRequestRefusedError } from "../../rpc/protocol.ts";
 import { RpcTransportDisposedError } from "../../rpc/wsTransport.ts";
 import { MULTI_MODEL_SEND_MAX_TARGETS, modelMultiSelectKey } from "./modelMultiSelect.ts";
 import { isSetupProviderInstance, type ProviderInstanceEntry } from "./providerInstances.ts";
+import { normalizeInteractionModeForProviderTarget } from "./providerSelectionPolicy.ts";
 import { getComposerProviderState } from "./providerState.ts";
 import {
   buildSendTurnBootstrap,
@@ -100,6 +104,11 @@ export function deriveMultiModelSendMessageId(threadId: ThreadId): MessageId {
 // ---------------------------------------------------------------------------
 // Targets
 // ---------------------------------------------------------------------------
+
+/** Whether a node refuses, rather than falls back from, a first send that requires a worktree. */
+export function supportsMultiModelSend(config: ServerConfig | null | undefined): boolean {
+  return config?.environment.capabilities.requiredWorktreeBootstrap === true;
+}
 
 export type MultiModelSendTargetResolution =
   | {
@@ -173,6 +182,52 @@ export interface MultiModelSendTargetInput {
    * its own upload. Absent, the send's shared (inline) attachments go out.
    */
   readonly turnAttachments?: ReadonlyArray<SendTurnDispatchAttachment> | undefined;
+}
+
+/**
+ * Every chosen model's send, resolved and composed the same way on every
+ * client: each selection checked against the live catalog
+ * (`resolveMultiModelSendTarget`), its interaction mode normalized for its
+ * provider. The client formats the text (`composeText`) as its normal send
+ * does, so every model gets the same message. Throws, with a message for the
+ * user, when a model cannot take the send as asked; nothing is sent yet.
+ */
+export function buildMultiModelSendTargets(input: {
+  readonly selections: ReadonlyArray<ModelSelection>;
+  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly prompt: string;
+  readonly customModelSlugs?: ((entry: ProviderInstanceEntry) => ReadonlyArray<string>) | undefined;
+  readonly interactionMode: ProviderInteractionMode;
+  /** Adjusts the selection a target dispatches (a client's build mode). */
+  readonly dispatchSelection?:
+    | ((entry: ProviderInstanceEntry, selection: ModelSelection) => ModelSelection)
+    | undefined;
+  readonly composeText: (target: {
+    readonly entry: ProviderInstanceEntry;
+    readonly modelSelection: ModelSelection;
+    readonly promptEffort: string | null;
+  }) => string;
+}): ReadonlyArray<MultiModelSendTargetInput> {
+  return input.selections.map((selection) => {
+    const resolved = resolveMultiModelSendTarget({
+      selection,
+      entries: input.entries,
+      prompt: input.prompt,
+      customModelSlugs: input.customModelSlugs,
+    });
+    if (!resolved.ok) throw new Error(resolved.reason);
+    const { entry } = resolved;
+    return {
+      modelSelection:
+        input.dispatchSelection?.(entry, resolved.modelSelection) ?? resolved.modelSelection,
+      outgoingMessageText: input.composeText(resolved),
+      interactionMode: normalizeInteractionModeForProviderTarget(
+        input.interactionMode,
+        entry.snapshot.supportsAskMode ?? false,
+      ),
+      providerDriver: entry.driverKind,
+    };
+  });
 }
 
 export interface MultiModelSendInput {
@@ -335,7 +390,18 @@ export type MultiModelSendTargetStatus =
    * The request may have run. Only an explicit retry sends it again, as the
    * identical command, after the user had the chance to check its thread.
    */
-  | { readonly kind: "uncertain"; readonly message: string };
+  | {
+      readonly kind: "uncertain";
+      readonly message: string;
+      /**
+       * The node's answer when it refused that retry: the identical command
+       * fails on what a first attempt that stopped halfway left (its branch),
+       * so retrying cannot settle the target. Once the user checked its thread,
+       * the way on is sending the model again as a new submission
+       * (`retryModelMultiSelect`, then `release`), or dismissing it.
+       */
+      readonly retryRefusal?: string | undefined;
+    };
 
 export type MultiModelSendFailure = Extract<
   MultiModelSendTargetStatus,
@@ -360,8 +426,9 @@ function errorMessage(error: unknown): string {
  * failed bootstrap deletes the thread it created. Its answer to an uncertain
  * target's retry is not (as for a hosted replay, `isReplayAnswer`): a first
  * send cut off halfway by a node restart leaves its thread and branch, and the
- * identical command then fails on them. Anything else, a lost connection or an
- * unconfirmed hosted replay above all, may have run.
+ * identical command then fails on them. The target stays uncertain with that
+ * answer (`retryRefusal`). Anything else, a lost connection or an unconfirmed
+ * hosted replay above all, may have run.
  */
 export function classifyMultiModelSendFailure(input: {
   readonly error: unknown;
@@ -374,12 +441,14 @@ export function classifyMultiModelSendFailure(input: {
     error instanceof RpcRequestRefusedError ||
     error instanceof RpcTransportDisposedError ||
     hasErrorTag(error, "AuthRpcError");
+  const nodeRefused = hasErrorTag(error, "OrchestrationDispatchCommandError");
   if (input.previous.kind === "uncertain") {
-    return ranNothing || hasErrorTag(error, "OrchestrationDispatchCommandError")
-      ? input.previous
+    if (ranNothing) return input.previous;
+    return nodeRefused
+      ? { ...input.previous, retryRefusal: errorMessage(error) }
       : { kind: "uncertain", message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE };
   }
-  if (ranNothing || hasErrorTag(error, "OrchestrationDispatchCommandError")) {
+  if (ranNothing || nodeRefused) {
     return { kind: "not-created", message: errorMessage(error) };
   }
   return { kind: "uncertain", message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE };
@@ -490,12 +559,19 @@ export interface MultiModelSendTracker {
    * an uncertain one: a target the node answered for is settled.
    */
   readonly reconcile: (turnVisible: MultiModelSendTurnVisible) => void;
+  /**
+   * Stops tracking an uncertain target the user gave up on or sends again as
+   * a new submission: it leaves the snapshot, and nothing sends it again. Not
+   * while it is being sent. True when it was released.
+   */
+  readonly release: (key: string) => boolean;
 }
 
 /**
  * Tracks one submission's targets from plan to outcome. Keep it for as long as
- * one of them is uncertain (outlive the composer's mount), and start a new
- * one, with a new submission id, for the draft's next send.
+ * it is unresolved (`isMultiModelSendUnresolved`; outlive the composer's
+ * mount and the draft's later sends), and start a new one, with a new
+ * submission id, for the draft's next send.
  */
 export function createMultiModelSendTracker(input: MultiModelSendInput): MultiModelSendTracker {
   const plans = planMultiModelSend(input);
@@ -564,7 +640,30 @@ export function createMultiModelSendTracker(input: MultiModelSendInput): MultiMo
       return snapshot;
     },
     reconcile,
+    release: (key) => {
+      const targets = snapshot.targets.filter(
+        (target) => target.plan.key !== key || target.status.kind !== "uncertain",
+      );
+      if (targets.length === snapshot.targets.length) return false;
+      snapshot = { ...snapshot, targets };
+      for (const listener of listeners) listener();
+      return true;
+    },
   };
+}
+
+/**
+ * Whether a send still has a target the user may need: one not confirmed, or
+ * one still going out. Its tracker stays until then, or until the user
+ * dismisses it; a settled one may give way to the draft's next send.
+ */
+export function isMultiModelSendUnresolved(snapshot: MultiModelSendSnapshot): boolean {
+  return snapshot.targets.some(
+    (target) =>
+      target.status.kind === "uncertain" ||
+      target.status.kind === "pending" ||
+      target.status.kind === "dispatching",
+  );
 }
 
 export interface MultiModelSendSummary {

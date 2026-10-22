@@ -86,7 +86,9 @@ The picker button then reads **N models** and the send button shows the count. T
 to go back to one model.
 
 When you send, Ryco asks first: it names the models and the branch every worktree starts from,
-and says whether the project's setup script runs in each. Every model works on the prompt
+and says whether the project's setup script runs in each, as the project's (or the environment's)
+**Run setup script** preference decides; while that preference is not loaded yet, it says the
+script may run. Every model works on the prompt
 separately, so usage adds up. The worktrees start from the draft's branch: from `origin` when the
 draft is set to a new worktree that fetches first, otherwise from the branch's last commit in
 your checkout. Uncommitted changes are not carried over.
@@ -101,10 +103,17 @@ the next prompt, and a notice above it shows each model's outcome:
   models stay selected, so the next send retries just them.
 - **Not confirmed**: the connection dropped before the node answered, so the model may have
   started. Open its thread to check, then **Retry**. A retry sends the same request again and can
-  never create a second thread for that model.
+  never create a second thread for that model. If the environment refuses that retry (for
+  example, the first attempt stopped halfway and left its branch behind), retrying cannot settle
+  it: once you have checked that its thread has no reply, **Send as new** puts your prompt back
+  with only that model selected, so your next send starts it in a new thread.
+
+A notice with a model that isn't confirmed stays until you settle or dismiss it, even when you
+send again from the same draft: the newer notice goes in front, and the older one is behind it.
 
 Comparing needs an environment whose Ryco refuses to start a model outside its own worktree;
 older environments keep one model per send. It is not offered for a task's thread, for a thread
 that starts from a pull request or issue, for chats without a project, or on the phone layout of
-the web app. Goals and Computer Use go to one model, so turn comparing off for them. The notice
-lives in memory: after a reload it is gone, but the threads are in the sidebar.
+the web app, and the native phone app does not offer it yet. Goals and Computer Use go to one
+model, so turn comparing off for them. The notices live in memory: after a reload they are gone,
+but the threads are in the sidebar.

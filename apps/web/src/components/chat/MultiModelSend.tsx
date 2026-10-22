@@ -1,29 +1,41 @@
 // FILE: MultiModelSend.tsx
 // Purpose: The composer's "Compare models" surfaces: the confirmation before a
-//          send starts one thread and worktree per model, and the banner that
-//          reports each model's outcome with Open and Retry.
+//          send starts one thread and worktree per model, and the banners that
+//          report each model's outcome with Open, Retry and Send as new.
 // Layer: Web UI. The send itself is `hooks/executeMultiModelSend.ts`; the
-//        outcomes come from the draft's tracker (`multiModelSendStore`).
+//        outcomes come from the draft's trackers (`multiModelSendStore`).
 
 import {
   captureReviewedSendReadiness,
-  modelMultiSelectKey,
+  describeModelMultiSelectTarget,
   summarizeMultiModelSend,
+  type ModelMultiSelectTargetLabel,
+  type MultiModelSendSnapshot,
   type MultiModelSendTargetState,
   type MultiModelSendTargetStatus,
   type ProviderInstanceEntry,
 } from "@ryco/client-runtime/state/composer";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { EnvironmentId, ModelSelection, ScopedThreadRef, ThreadId } from "@ryco/contracts";
+import type {
+  EnvironmentId,
+  ModelSelection,
+  ProviderInstanceId,
+  ScopedThreadRef,
+  ThreadId,
+} from "@ryco/contracts";
+import type { ModelPresentationOption } from "@ryco/shared/model";
 import { CheckIcon, CircleAlertIcon, CircleHelpIcon, LoaderCircleIcon, XIcon } from "lucide-react";
-import { useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 
 import { paneGrid } from "../../chatPanes.logic";
 import { useChatPanesStore } from "../../chatPanesStore";
 import type { DraftId } from "../../composerDraftStore";
 import { readEnvironmentApi } from "../../environmentApi";
 import { readEnvironmentConnection } from "../../environments/runtime";
-import { MULTI_MODEL_SEND_CONNECTION_CHANGED_MESSAGE } from "../../hooks/executeMultiModelSend";
+import {
+  MULTI_MODEL_SEND_CONNECTION_CHANGED_MESSAGE,
+  type SendMultiModelTargetAsNewResult,
+} from "../../hooks/executeMultiModelSend";
 import { cn } from "../../lib/utils";
 import { selectSidebarThreadSummaryByRef, useStore } from "../../store";
 import {
@@ -39,31 +51,24 @@ import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
-import { getTriggerDisplayModelName } from "./providerIconUtils";
-import { readMultiModelSend, setMultiModelSend, useMultiModelSend } from "./multiModelSendStore";
+import {
+  removeMultiModelSend,
+  useMultiModelSends,
+  type MultiModelSendRecord,
+} from "./multiModelSendStore";
 
 const countOf = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 
-interface TargetLabel {
-  readonly key: string;
-  readonly name: string;
-  readonly entry: ProviderInstanceEntry | undefined;
+/** What names a compared model: the composer's catalog and the models it offers per instance. */
+export interface MultiModelSendCatalog {
+  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly modelOptionsByInstance: ReadonlyMap<
+    ProviderInstanceId,
+    ReadonlyArray<ModelPresentationOption>
+  >;
 }
 
-function describeTarget(
-  selection: Pick<ModelSelection, "instanceId" | "model">,
-  entries: ReadonlyArray<ProviderInstanceEntry>,
-): TargetLabel {
-  const entry = entries.find((candidate) => candidate.instanceId === selection.instanceId);
-  const model = entry?.models.find((candidate) => candidate.slug === selection.model);
-  return {
-    key: modelMultiSelectKey(selection),
-    name: model ? getTriggerDisplayModelName(model) : selection.model,
-    entry,
-  };
-}
-
-function TargetName({ label }: { readonly label: TargetLabel }) {
+function TargetName({ label }: { readonly label: ModelMultiSelectTargetLabel }) {
   return (
     <span className="flex min-w-0 items-center gap-1.5">
       {label.entry ? (
@@ -84,8 +89,16 @@ function TargetName({ label }: { readonly label: TargetLabel }) {
 export interface MultiModelSendConfirmation {
   readonly selections: ReadonlyArray<ModelSelection>;
   readonly baseBranch: string;
-  /** The project has a setup script that runs in a new worktree. */
-  readonly runsSetupScript: boolean;
+  /** Whether the project's setup script runs in each new worktree (`multiModelSendRunsSetupScript`). */
+  readonly runsSetupScript: "yes" | "no" | "maybe";
+}
+
+function setupScriptNote(runs: MultiModelSendConfirmation["runsSetupScript"], count: number) {
+  const where = count === 1 ? "it" : "each";
+  if (runs === "yes") return ` The setup script runs in ${where}.`;
+  if (runs === "maybe")
+    return ` The setup script may run in ${where}, as the project's settings say.`;
+  return "";
 }
 
 /**
@@ -94,7 +107,7 @@ export interface MultiModelSendConfirmation {
  */
 export function MultiModelSendConfirmDialog(props: {
   readonly confirmation: MultiModelSendConfirmation | null;
-  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly catalog: MultiModelSendCatalog;
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
 }) {
@@ -115,14 +128,12 @@ export function MultiModelSendConfirmDialog(props: {
             {count === 1 ? "It starts a new thread" : "Each model starts its own thread"} in a new
             worktree from{" "}
             <span className="font-mono text-foreground">{confirmation?.baseBranch}</span>.
-            {confirmation?.runsSetupScript
-              ? ` The setup script runs in ${count === 1 ? "it" : "each"}.`
-              : ""}
+            {confirmation ? setupScriptNote(confirmation.runsSetupScript, count) : ""}
             {count === 1 ? "" : " Every model works on the prompt separately, so usage adds up."}
           </AlertDialogDescription>
           <ul className="mt-2 grid gap-1.5 text-sm" aria-label="Models">
             {(confirmation?.selections ?? []).map((selection) => {
-              const label = describeTarget(selection, props.entries);
+              const label = describeModelMultiSelectTarget(selection, props.catalog);
               return (
                 <li key={label.key}>
                   <TargetName label={label} />
@@ -154,9 +165,6 @@ function turnVisibleIn(
   );
 }
 
-const subscribeNothing = () => () => {};
-const readNothing = () => null;
-
 function statusText(status: MultiModelSendTargetStatus): string {
   switch (status.kind) {
     case "pending":
@@ -167,7 +175,7 @@ function statusText(status: MultiModelSendTargetStatus): string {
     case "not-created":
       return `Didn't start: ${status.message}`;
     case "uncertain":
-      return "Not confirmed";
+      return status.retryRefusal === undefined ? "Not confirmed" : "Not confirmed, retry refused";
   }
 }
 
@@ -190,46 +198,102 @@ function StatusIcon({ status }: { readonly status: MultiModelSendTargetStatus })
   }
 }
 
-/**
- * The banner for a draft's latest multi-model send: one row per model with its
- * outcome. A started thread opens from its row, and all of them side by side
- * in the split layout (up to four, `paneGrid`). An unconfirmed model offers
- * Open (check it first) and Retry, which sends the identical command again and
- * so can never start a second thread. Returns null without a send.
- */
-export function useMultiModelSendBannerItem(input: {
+const NO_SNAPSHOTS: ReadonlyArray<MultiModelSendSnapshot> = [];
+
+/** Each send's live snapshot, in order; the same array while none of them changed. */
+function useMultiModelSendSnapshots(
+  records: ReadonlyArray<MultiModelSendRecord>,
+): ReadonlyArray<MultiModelSendSnapshot> {
+  const cache = useRef(NO_SNAPSHOTS);
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      const unsubscribes = records.map((record) => record.tracker.subscribe(listener));
+      return () => {
+        for (const unsubscribe of unsubscribes) unsubscribe();
+      };
+    },
+    [records],
+  );
+  const read = useCallback(() => {
+    const next = records.map((record) => record.tracker.read());
+    const previous = cache.current;
+    if (
+      next.length === previous.length &&
+      next.every((snapshot, index) => snapshot === previous[index])
+    ) {
+      return previous;
+    }
+    cache.current = next;
+    return next;
+  }, [records]);
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+interface MultiModelSendBannerInput {
   readonly draftId: DraftId | null;
-  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly catalog: MultiModelSendCatalog;
   readonly dispatchAllowed: boolean;
   /** Opens a thread in this view (the route follows the focused pane). */
   readonly openThread: (ref: ScopedThreadRef) => void;
-}): ComposerBannerStackItem | null {
-  const { draftId, entries, dispatchAllowed, openThread } = input;
-  const record = useMultiModelSend(draftId);
-  const tracker = record?.tracker ?? null;
-  const snapshot = useSyncExternalStore(
-    tracker?.subscribe ?? subscribeNothing,
-    tracker?.read ?? readNothing,
-  );
-  const environmentId = record?.environmentId ?? null;
+  /** `sendMultiModelTargetAsNew` with the composer's deps. */
+  readonly sendAsNew: (
+    record: MultiModelSendRecord,
+    key: string,
+  ) => SendMultiModelTargetAsNewResult;
+}
+
+/**
+ * One banner per multi-model send of the draft that is still worth showing:
+ * the latest one, and every earlier one with a model not confirmed. Each has
+ * one row per model with its outcome. A started thread opens from its row, and
+ * all of them side by side in the split layout (up to four, `paneGrid`). An
+ * unconfirmed model offers Open (check it first) and Retry, which sends the
+ * identical command again and so can never start a second thread; once the
+ * node refused that retry, Send as new puts the prompt back for that model.
+ */
+export function useMultiModelSendBannerItems(
+  input: MultiModelSendBannerInput,
+): ReadonlyArray<ComposerBannerStackItem> {
+  const records = useMultiModelSends(input.draftId);
+  const snapshots = useMultiModelSendSnapshots(records);
   // An unconfirmed model whose turn shows up in the shell has started.
   const uncertainVisible = useStore((state) =>
-    snapshot && environmentId
-      ? snapshot.targets.some(
-          (target) =>
-            target.status.kind === "uncertain" &&
-            turnVisibleIn(state, environmentId, target.plan.threadId),
-        )
-      : false,
+    snapshots.some((snapshot, index) =>
+      snapshot.targets.some(
+        (target) =>
+          target.status.kind === "uncertain" &&
+          turnVisibleIn(state, records[index]!.environmentId, target.plan.threadId),
+      ),
+    ),
   );
   useEffect(() => {
-    if (!uncertainVisible || !tracker || !environmentId) return;
-    tracker.reconcile((target) =>
-      turnVisibleIn(useStore.getState(), environmentId, target.threadId),
-    );
-  }, [environmentId, tracker, uncertainVisible]);
+    if (!uncertainVisible) return;
+    for (const record of records) {
+      record.tracker.reconcile((target) =>
+        turnVisibleIn(useStore.getState(), record.environmentId, target.threadId),
+      );
+    }
+  }, [records, uncertainVisible]);
 
-  if (!draftId || !record || !tracker || !snapshot || !environmentId) return null;
+  const { draftId } = input;
+  if (!draftId) return [];
+  return records.flatMap((record, index) => {
+    const snapshot = snapshots[index];
+    return snapshot && snapshot.targets.length > 0
+      ? [multiModelSendBannerItem({ ...input, draftId, record, snapshot })]
+      : [];
+  });
+}
+
+function multiModelSendBannerItem(
+  input: MultiModelSendBannerInput & {
+    readonly draftId: DraftId;
+    readonly record: MultiModelSendRecord;
+    readonly snapshot: MultiModelSendSnapshot;
+  },
+): ComposerBannerStackItem {
+  const { draftId, record, snapshot, catalog, dispatchAllowed, openThread } = input;
+  const { tracker, environmentId } = record;
   const summary = summarizeMultiModelSend(snapshot);
   const total = snapshot.targets.length;
   const settling = summary.unsettled.length > 0 || record.sending;
@@ -250,10 +314,19 @@ export function useMultiModelSendBannerItem(input: {
           turnVisible: (plan) => turnVisibleIn(useStore.getState(), environmentId, plan.threadId),
         })
       : null;
-    // The tracker keeps the very same status when the retry did not go out or
-    // the node did not take it: say so instead of leaving the click unanswered.
     const status = after?.targets.find((entry) => entry.plan.key === target.plan.key)?.status;
-    if (status === undefined || status === target.status) {
+    if (status?.kind === "uncertain" && status !== target.status && status.retryRefusal) {
+      // The node answered, and sending the same request again cannot help.
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Ryco refused the retry",
+          description: `${status.retryRefusal} Open the thread to check it. If it has no reply, choose Send as new.`,
+        }),
+      );
+    } else if (status === undefined || status === target.status) {
+      // The tracker keeps the very same status when the retry did not go out:
+      // say so instead of leaving the click unanswered.
       toastManager.add(
         stackedThreadToast({
           type: "warning",
@@ -263,6 +336,16 @@ export function useMultiModelSendBannerItem(input: {
         }),
       );
     }
+  };
+  const sendAsNew = (target: MultiModelSendTargetState) => {
+    if (input.sendAsNew(record, target.plan.key) !== "composer-not-empty") return;
+    toastManager.add(
+      stackedThreadToast({
+        type: "info",
+        title: "The composer isn't empty",
+        description: "Send or clear what's in it first, then choose Send as new again.",
+      }),
+    );
   };
   const openSideBySide = () => {
     const root = paneGrid(startedRefs);
@@ -280,7 +363,13 @@ export function useMultiModelSendBannerItem(input: {
     );
   }
   if (summary.uncertain.length > 0) {
-    notes.push("Open a thread that isn't confirmed to check it before you retry.");
+    notes.push(
+      summary.uncertain.some(
+        (target) => target.status.kind === "uncertain" && target.status.retryRefusal,
+      )
+        ? "Open a thread that isn't confirmed to check it. If it has no reply, Send as new puts your prompt back for that model."
+        : "Open a thread that isn't confirmed to check it before you retry.",
+    );
   }
 
   return {
@@ -307,7 +396,7 @@ export function useMultiModelSendBannerItem(input: {
     description: (
       <div className="mt-1 grid gap-1" data-slot="multi-model-send-targets">
         {snapshot.targets.map((target) => {
-          const label = describeTarget(target.plan.modelSelection, entries);
+          const label = describeModelMultiSelectTarget(target.plan.modelSelection, catalog);
           const status = target.status;
           return (
             <div
@@ -320,7 +409,13 @@ export function useMultiModelSendBannerItem(input: {
               <TargetName label={label} />
               <span
                 className="min-w-0 flex-1 truncate text-muted-foreground"
-                title={status.kind === "not-created" ? status.message : undefined}
+                title={
+                  status.kind === "not-created"
+                    ? status.message
+                    : status.kind === "uncertain"
+                      ? status.retryRefusal
+                      : undefined
+                }
               >
                 {statusText(status)}
               </span>
@@ -345,6 +440,17 @@ export function useMultiModelSendBannerItem(input: {
                   Retry
                 </Button>
               ) : null}
+              {status.kind === "uncertain" && status.retryRefusal !== undefined ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={record.sending}
+                  aria-label={`Send ${label.name} as new`}
+                  onClick={() => sendAsNew(target)}
+                >
+                  Send as new
+                </Button>
+              ) : null}
             </div>
           );
         })}
@@ -365,10 +471,7 @@ export function useMultiModelSendBannerItem(input: {
       ? {}
       : {
           dismissLabel: "Dismiss",
-          onDismiss: () => {
-            // A newer send of the draft keeps its own banner.
-            if (readMultiModelSend(draftId)?.tracker === tracker) setMultiModelSend(draftId, null);
-          },
+          onDismiss: () => removeMultiModelSend(draftId, tracker),
         }),
   };
 }

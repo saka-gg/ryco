@@ -2,6 +2,7 @@ import "../../index.css";
 
 import {
   MODEL_MULTI_SELECT_OFF,
+  describeModelMultiSelectTarget,
   retryModelMultiSelect,
   type ModelMultiSelectState,
 } from "@ryco/client-runtime/state/composer";
@@ -171,6 +172,13 @@ async function mountPicker(options: {
             ? {
                 multiSelect: {
                   state,
+                  // As the composer names them.
+                  labels: state.selections.map((selection) =>
+                    describeModelMultiSelectTarget(selection, {
+                      entries: instanceEntries,
+                      modelOptionsByInstance,
+                    }),
+                  ),
                   onChange: (next: ModelMultiSelectState) => {
                     states.push(next);
                     setState(next);

@@ -1,4 +1,7 @@
-import type { ModelMultiSelectState } from "@ryco/client-runtime/state/composer";
+import type {
+  ModelMultiSelectState,
+  ModelMultiSelectTargetLabel,
+} from "@ryco/client-runtime/state/composer";
 
 /**
  * Lets the model picker choose several models for one send ("Compare models":
@@ -9,6 +12,11 @@ import type { ModelMultiSelectState } from "@ryco/client-runtime/state/composer"
  */
 export interface ModelPickerMultiSelect {
   readonly state: ModelMultiSelectState;
+  /**
+   * The selections as every surface names them (`describeModelMultiSelectTarget`),
+   * for the trigger while comparing.
+   */
+  readonly labels: ReadonlyArray<ModelMultiSelectTargetLabel>;
   readonly onChange: (next: ModelMultiSelectState) => void;
   /** Defaults to `MULTI_MODEL_SEND_MAX_TARGETS`. */
   readonly max?: number | undefined;

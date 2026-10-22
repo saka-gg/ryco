@@ -20,7 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   readMultiModelSelection,
-  readMultiModelSend,
+  readMultiModelSends,
   setMultiModelSelection,
   useMultiModelSendStore,
 } from "../components/chat/multiModelSendStore";
@@ -31,8 +31,14 @@ import {
   MULTI_MODEL_SEND_UNSUPPORTED_MESSAGE,
   executeMultiModelSend,
   isMultiModelSendBusy,
+  multiModelSendRunsSetupScript,
+  sendMultiModelTargetAsNew,
   type ExecuteMultiModelSendInput,
 } from "./executeMultiModelSend";
+import {
+  readAndRememberProjectPreferences,
+  resetNewDraftDefaultsCacheForTests,
+} from "./newDraftDefaults";
 import type { SendTurnComposerSnapshot } from "./executeChatSendTurn";
 
 // The connection-generation check needs a live socket; these tests have none.
@@ -200,6 +206,8 @@ function sendInput(
   };
 }
 
+const latestSend = () => readMultiModelSends(DRAFT_ID)[0];
+
 const turnStarts = (commands: ReadonlyArray<DispatchedCommand>) =>
   commands.filter(
     (command): command is Extract<DispatchedCommand, { type: "thread.turn.start" }> =>
@@ -208,6 +216,7 @@ const turnStarts = (commands: ReadonlyArray<DispatchedCommand>) =>
 
 afterEach(() => {
   useMultiModelSendStore.setState({ byDraftId: {} });
+  resetNewDraftDefaultsCacheForTests();
 });
 
 describe("executeMultiModelSend", () => {
@@ -247,7 +256,8 @@ describe("executeMultiModelSend", () => {
     expect(input.refs.promptRef.current).toBe("");
     expect(input.draft.setComposerDraftPrompt).not.toHaveBeenCalled();
     expect(readMultiModelSelection(DRAFT_ID)).toBe(MODEL_MULTI_SELECT_OFF);
-    const record = readMultiModelSend(DRAFT_ID);
+    const record = latestSend();
+    expect(readMultiModelSends(DRAFT_ID)).toHaveLength(1);
     expect(record?.sending).toBe(false);
     expect(record?.tracker.read().targets.map((target) => target.status.kind)).toEqual([
       "started",
@@ -267,7 +277,7 @@ describe("executeMultiModelSend", () => {
 
     await executeMultiModelSend(input);
 
-    const targets = readMultiModelSend(DRAFT_ID)!.tracker.read().targets;
+    const targets = latestSend()!.tracker.read().targets;
     expect(targets.map((target) => target.status)).toEqual([
       { kind: "started" },
       { kind: "not-created", message: "Worktree setup failed." },
@@ -308,7 +318,7 @@ describe("executeMultiModelSend", () => {
     await executeMultiModelSend(input);
 
     expect(
-      readMultiModelSend(DRAFT_ID)!
+      latestSend()!
         .tracker.read()
         .targets.map((target) => target.status.kind),
     ).toEqual(["started", "uncertain"]);
@@ -325,7 +335,7 @@ describe("executeMultiModelSend", () => {
     expect(result).toEqual({ kind: "refused", message: MULTI_MODEL_SEND_UNSUPPORTED_MESSAGE });
     expect(commands).toHaveLength(0);
     expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
-    expect(readMultiModelSend(DRAFT_ID)).toBeNull();
+    expect(readMultiModelSends(DRAFT_ID)).toEqual([]);
     expect(isMultiModelSendBusy(DRAFT_ID)).toBe(false);
   });
 
@@ -383,5 +393,132 @@ describe("executeMultiModelSend", () => {
     await executeMultiModelSend(input);
     expect(input.draft.clearComposerDraftContent).not.toHaveBeenCalled();
     expect(input.refs.promptRef.current).toBe("Fix the flaky test");
+  });
+
+  it("keeps an earlier send with a model not confirmed beside the draft's next sends", async () => {
+    let lose = true;
+    const { api } = makeApi({
+      answer: (command) =>
+        lose &&
+        command.type === "thread.turn.start" &&
+        command.modelSelection?.instanceId === claude
+          ? new Error("Socket closed")
+          : null,
+    });
+    await executeMultiModelSend(sendInput(api));
+    const first = latestSend()!;
+    expect(first.tracker.read().targets.map((target) => target.status.kind)).toEqual([
+      "started",
+      "uncertain",
+    ]);
+    lose = false;
+
+    // The next send does not take the unconfirmed model's place: its thread
+    // id is held nowhere else.
+    await executeMultiModelSend(sendInput(api));
+    const second = latestSend()!;
+    expect(readMultiModelSends(DRAFT_ID)).toEqual([second, first]);
+    expect(second.tracker.read().submissionId).not.toBe(first.tracker.read().submissionId);
+
+    // A settled send gives way to the next one; the unconfirmed one stays.
+    await executeMultiModelSend(sendInput(api));
+    expect(readMultiModelSends(DRAFT_ID)).toEqual([latestSend(), first]);
+    expect(first.tracker.read().targets[1]!.status.kind).toBe("uncertain");
+  });
+
+  it("sends an unconfirmed model again as new once the node refused its retry", async () => {
+    let call = 0;
+    const { api, commands } = makeApi({
+      answer: (command) => {
+        if (command.type !== "thread.turn.start" || command.modelSelection?.instanceId !== claude) {
+          return null;
+        }
+        call += 1;
+        // Lost with the connection, then refused on what that attempt left.
+        return call === 1
+          ? new Error("Socket closed")
+          : new OrchestrationDispatchCommandError({
+              message: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
+            });
+      },
+    });
+    setMultiModelSelection(DRAFT_ID, { enabled: true, selections: [gpt, opus] });
+    const input = sendInput(api);
+    await executeMultiModelSend(input);
+    const record = latestSend()!;
+    const unconfirmed = record.tracker.read().targets[1]!;
+    const deps = { refs: input.refs, composerHandle: input.composerHandle, draft: input.draft };
+    const asNew = () =>
+      sendMultiModelTargetAsNew({ ...deps, draftId: DRAFT_ID, record, key: unconfirmed.plan.key });
+
+    // Not before the node refused the identical retry.
+    expect(asNew()).toBe("unavailable");
+    await record.tracker.retryUncertain(unconfirmed.plan.key, { api, turnVisible: () => false });
+    expect(record.tracker.read().targets[1]!.status).toMatchObject({
+      kind: "uncertain",
+      retryRefusal: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
+    });
+
+    // Never over something the composer holds.
+    input.refs.promptRef.current = "Another prompt";
+    expect(asNew()).toBe("composer-not-empty");
+    expect(record.tracker.read().targets).toHaveLength(2);
+    input.refs.promptRef.current = "";
+
+    expect(asNew()).toBe("restored");
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenCalledWith(DRAFT_ID, "Fix the flaky test");
+    expect(input.draft.setComposerDraftFileReferences).toHaveBeenCalledWith(DRAFT_ID, [
+      fileReference,
+    ]);
+    expect(readMultiModelSelection(DRAFT_ID)).toEqual({
+      enabled: true,
+      selections: [unconfirmed.plan.modelSelection],
+      retry: true,
+    });
+    // It left its send, so it can neither be retried nor sent as new twice.
+    expect(record.tracker.read().targets.map((target) => target.plan.key)).toEqual([
+      record.tracker.read().targets[0]!.plan.key,
+    ]);
+    expect(asNew()).toBe("unavailable");
+    expect(turnStarts(commands)).toHaveLength(3);
+  });
+
+  it("says the setup script runs only where the send's own preference runs it", async () => {
+    const projectId = ProjectId.make("project-1");
+    const preferencesNode = {
+      environment: { capabilities: { requiredWorktreeBootstrap: true, projectPreferences: true } },
+      settings: {},
+    } as unknown as ServerConfig;
+    const runs = (config: ServerConfig | null, hasSetupScript = true) =>
+      multiModelSendRunsSetupScript({
+        hasSetupScript,
+        config,
+        environmentId: ENVIRONMENT_ID,
+        projectId,
+      });
+
+    expect(runs(preferencesNode, false)).toBe("no");
+    // An older node runs it in every new worktree.
+    expect(runs(nodeConfig())).toBe("yes");
+    // The node decides from the project's preference: unknown here until read.
+    expect(runs(preferencesNode)).toBe("maybe");
+    expect(runs(null)).toBe("maybe");
+    const remember = (runSetupScript: boolean) =>
+      readAndRememberProjectPreferences({
+        api: {
+          server: {
+            getProjectPreferences: async () => ({
+              runSetupScript: { value: runSetupScript, source: "project" },
+            }),
+          },
+        } as unknown as EnvironmentApi,
+        environmentId: ENVIRONMENT_ID,
+        config: preferencesNode,
+        projectId,
+      });
+    await remember(false);
+    expect(runs(preferencesNode)).toBe("no");
+    await remember(true);
+    expect(runs(preferencesNode)).toBe("yes");
   });
 });

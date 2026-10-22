@@ -54,6 +54,7 @@ import {
   composerDraftImageDedupKey,
   encodeComposerAttachmentDataUrl,
   ensureProjectProviderCommands,
+  describeModelMultiSelectTarget,
   latestClaudeCacheObservation,
   mergeProjectProviderCommands,
   modelMultiSelectSendBlockReason,
@@ -969,10 +970,16 @@ export const ChatComposer = memo(
         multiModelDraftId
           ? {
               state: multiModelSelection,
+              labels: multiModelSelection.selections.map((selection) =>
+                describeModelMultiSelectTarget(selection, {
+                  entries: providerInstanceEntries,
+                  modelOptionsByInstance,
+                }),
+              ),
               onChange: (next) => setMultiModelSelection(multiModelDraftId, next),
             }
           : undefined,
-      [multiModelDraftId, multiModelSelection],
+      [modelOptionsByInstance, multiModelDraftId, multiModelSelection, providerInstanceEntries],
     );
     const multiModelTargets = modelMultiSelect
       ? resolveModelMultiSelectTargets(modelMultiSelect.state, selectedModelSelection)

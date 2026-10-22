@@ -1,4 +1,7 @@
 import type { ModelSelection, ProviderInstanceId } from "@ryco/contracts";
+import { getModelDisplayName, type ModelPresentationOption } from "@ryco/shared/model";
+
+import type { ProviderInstanceEntry } from "./providerInstances.ts";
 
 // ---------------------------------------------------------------------------
 // Multi-model selection ("Compare models").
@@ -43,6 +46,44 @@ export function modelMultiSelectKey(
   selection: Pick<ModelSelection, "instanceId" | "model">,
 ): string {
   return JSON.stringify([selection.instanceId, selection.model]);
+}
+
+/** A compared model as every surface names it. */
+export interface ModelMultiSelectTargetLabel {
+  /** `modelMultiSelectKey`. */
+  readonly key: string;
+  /** Its short display name, else its slug. */
+  readonly name: string;
+  /** Its instance, while the catalog has it. */
+  readonly entry: ProviderInstanceEntry | undefined;
+}
+
+/**
+ * Names a compared model the same way on the picker's trigger, the send's
+ * confirmation and its outcomes. `modelOptionsByInstance` holds the models a
+ * client offers per instance (custom ones included, under the user's names);
+ * the instance's own catalog is the fallback.
+ */
+export function describeModelMultiSelectTarget(
+  selection: Pick<ModelSelection, "instanceId" | "model">,
+  catalog: {
+    readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+    readonly modelOptionsByInstance?:
+      | ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelPresentationOption>>
+      | undefined;
+  },
+): ModelMultiSelectTargetLabel {
+  const entry = catalog.entries.find((candidate) => candidate.instanceId === selection.instanceId);
+  const model =
+    catalog.modelOptionsByInstance
+      ?.get(selection.instanceId)
+      ?.find((candidate) => candidate.slug === selection.model) ??
+    entry?.models.find((candidate) => candidate.slug === selection.model);
+  return {
+    key: modelMultiSelectKey(selection),
+    name: model ? getModelDisplayName(model, { preferShortName: true }) : selection.model,
+    entry,
+  };
 }
 
 export function isModelMultiSelected(

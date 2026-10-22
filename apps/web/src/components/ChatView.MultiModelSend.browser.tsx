@@ -15,9 +15,10 @@ import { paneLeaves } from "../chatPanes.logic";
 import { useChatPanesStore } from "../chatPanesStore";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import {
+  addMultiModelSend,
   readMultiModelSelection,
+  readMultiModelSends,
   setMultiModelSelection,
-  setMultiModelSend,
   useMultiModelSendStore,
 } from "./chat/multiModelSendStore";
 import {
@@ -147,14 +148,61 @@ const bannerTargets = () =>
     (row) => row.dataset.status,
   );
 
-async function sendThroughConfirmation(): Promise<void> {
+async function sendThroughConfirmation(models = "2 models"): Promise<void> {
   const button = await sendButton();
   await vi.waitFor(() => expect(button.disabled).toBe(false));
   button.click();
   const dialog = await waitForElement(confirmDialog, "The compare confirmation did not open.");
-  expect(dialog.textContent).toContain("Send to 2 models?");
+  expect(dialog.textContent).toContain(`Send to ${models}?`);
   expect(dialog.textContent).toContain("origin/main");
-  await page.getByRole("button", { name: "Send to 2 models", exact: true }).last().click();
+  await page
+    .getByRole("button", { name: `Send to ${models}`, exact: true })
+    .last()
+    .click();
+  await vi.waitFor(() => expect(confirmDialog()).toBeNull());
+}
+
+/**
+ * A send whose Sonnet answer was lost on another connection: GPT started,
+ * Sonnet is not confirmed.
+ */
+async function seedSendWithUnconfirmedSonnet() {
+  const tracker = createMultiModelSendTracker({
+    draftId: DRAFT_ID,
+    submissionId: "submission-1",
+    projectId: PROJECT_ID,
+    projectCwd: "/repo/project",
+    baseBranch: "origin/main",
+    title: "Compare this",
+    runtimeMode: "full-access",
+    tokenMode: "balanced",
+    turnAttachments: [],
+    sourceControlContexts: [],
+    createdAt: NOW_ISO,
+    targets: [GPT, SONNET].map((modelSelection) => ({
+      modelSelection,
+      outgoingMessageText: "Compare this",
+      interactionMode: "default" as const,
+    })),
+  });
+  const lostApi = {
+    orchestration: {
+      dispatchCommand: async (command: { readonly modelSelection?: { instanceId: string } }) => {
+        if (command.modelSelection?.instanceId === "claudeAgent") {
+          throw new Error("Socket closed");
+        }
+        return { sequence: 1 };
+      },
+    },
+  } as unknown as EnvironmentApi;
+  await tracker.send({ api: lostApi });
+  addMultiModelSend(DRAFT_ID, {
+    tracker,
+    environmentId: LOCAL_ENVIRONMENT_ID,
+    sending: false,
+    content: { prompt: "Compare this", images: [], terminalContexts: [], fileReferences: [] },
+  });
+  return tracker;
 }
 
 describe("ChatView compare models (full app)", () => {
@@ -287,39 +335,7 @@ describe("ChatView compare models (full app)", () => {
   it("retries an unconfirmed model with the identical command, so it cannot start twice", async () => {
     const mounted = await mountCompareDraft({});
     try {
-      // A send whose second answer was lost on another connection.
-      const tracker = createMultiModelSendTracker({
-        draftId: DRAFT_ID,
-        submissionId: "submission-1",
-        projectId: PROJECT_ID,
-        projectCwd: "/repo/project",
-        baseBranch: "origin/main",
-        title: "Compare this",
-        runtimeMode: "full-access",
-        tokenMode: "balanced",
-        turnAttachments: [],
-        sourceControlContexts: [],
-        createdAt: NOW_ISO,
-        targets: [GPT, SONNET].map((modelSelection) => ({
-          modelSelection,
-          outgoingMessageText: "Compare this",
-          interactionMode: "default" as const,
-        })),
-      });
-      const lostApi = {
-        orchestration: {
-          dispatchCommand: async (command: {
-            readonly modelSelection?: { instanceId: string };
-          }) => {
-            if (command.modelSelection?.instanceId === "claudeAgent") {
-              throw new Error("Socket closed");
-            }
-            return { sequence: 1 };
-          },
-        },
-      } as unknown as EnvironmentApi;
-      await tracker.send({ api: lostApi });
-      setMultiModelSend(DRAFT_ID, { tracker, environmentId: LOCAL_ENVIRONMENT_ID, sending: false });
+      const tracker = await seedSendWithUnconfirmedSonnet();
       const plan = tracker.read().targets[1]!.plan;
 
       await vi.waitFor(() => expect(bannerTargets()).toEqual(["started", "uncertain"]));
@@ -363,6 +379,75 @@ describe("ChatView compare models (full app)", () => {
       await waitForLayout();
       // One model is enough to retry what did not start.
       expect((await sendButton()).getAttribute("aria-label")).toBe("Send to 1 model");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("lets a model whose retry the node refused be sent again as new", async () => {
+    const mounted = await mountCompareDraft({
+      // The first attempt stopped halfway on the node: the identical command
+      // fails on the branch it left.
+      answer: (request) =>
+        request.modelSelection?.instanceId === "claudeAgent"
+          ? new WsRpcFailure(
+              new OrchestrationDispatchCommandError({
+                message: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
+              }),
+            )
+          : undefined,
+    });
+    try {
+      const tracker = await seedSendWithUnconfirmedSonnet();
+      await vi.waitFor(() => expect(bannerTargets()).toEqual(["started", "uncertain"]));
+      expect(document.querySelector('[aria-label="Send Sonnet 4.6 as new"]')).toBeNull();
+
+      await page.getByRole("button", { name: "Retry Sonnet 4.6", exact: true }).click();
+      await expect.element(page.getByText("Ryco refused the retry")).toBeInTheDocument();
+      expect(bannerTargets()).toEqual(["started", "uncertain"]);
+      await page.getByRole("button", { name: "Send Sonnet 4.6 as new", exact: true }).click();
+
+      // The prompt is back with only that model, as a new send would retry it.
+      await vi.waitFor(() =>
+        expect(useComposerDraftStore.getState().getComposerDraft(DRAFT_ID)?.prompt).toBe(
+          "Compare this",
+        ),
+      );
+      const selection = readMultiModelSelection(DRAFT_ID);
+      expect(selection.retry).toBe(true);
+      expect(selection.selections.map((entry) => entry.model)).toEqual(["claude-sonnet-4-6"]);
+      // The old attempt leaves the notice and is never sent again.
+      await vi.waitFor(() => expect(bannerTargets()).toEqual(["started"]));
+      expect(tracker.read().targets).toHaveLength(1);
+      expect(turnStarts()).toHaveLength(1);
+      await waitForLayout();
+      expect((await sendButton()).getAttribute("aria-label")).toBe("Send to 1 model");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps an unconfirmed model's notice when the draft sends again", async () => {
+    const mounted = await mountCompareDraft({});
+    try {
+      const earlier = await seedSendWithUnconfirmedSonnet();
+      await vi.waitFor(() => expect(bannerTargets()).toEqual(["started", "uncertain"]));
+
+      setMultiModelSelection(DRAFT_ID, { enabled: true, selections: [GPT, SONNET] });
+      useComposerDraftStore.getState().setPrompt(DRAFT_ID, "Compare that");
+      await sendThroughConfirmation();
+      await vi.waitFor(() => expect(turnStarts()).toHaveLength(2), { timeout: 8_000 });
+
+      // The new send's notice leads; the earlier one, with its unconfirmed
+      // model, stays behind it instead of being replaced.
+      await vi.waitFor(() =>
+        expect(bannerTargets()).toEqual(["started", "started", "started", "uncertain"]),
+      );
+      const sends = readMultiModelSends(DRAFT_ID);
+      expect(sends).toHaveLength(2);
+      expect(sends[1]!.tracker).toBe(earlier);
+      expect(document.body.textContent).toContain("Started 2 threads");
+      expect(document.body.textContent).toContain("1 of 2 started");
     } finally {
       await mounted.cleanup();
     }

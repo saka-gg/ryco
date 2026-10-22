@@ -189,20 +189,10 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     setIsMenuOpen(false);
   };
   // The trigger names the compared models instead of the composer's own.
-  const compareSelections =
-    !useSheet && props.multiSelect?.state.enabled ? props.multiSelect.state.selections : null;
-  const compareEntries = (compareSelections ?? []).map((selection) => {
-    const option = props.modelOptionsByInstance
-      .get(selection.instanceId)
-      ?.find((candidate) => candidate.slug === selection.model);
-    return {
-      key: `${selection.instanceId}:${selection.model}`,
-      entry: props.instanceEntries.find((entry) => entry.instanceId === selection.instanceId),
-      name: option ? getTriggerDisplayModelName(option) : selection.model,
-    };
-  });
-  const compareNames = compareEntries.map((selection) => selection.name).join(", ");
-  const traits = useSheet || compareSelections ? null : (props.triggerTraits ?? null);
+  const compareEntries =
+    !useSheet && props.multiSelect?.state.enabled ? props.multiSelect.labels : null;
+  const compareNames = (compareEntries ?? []).map((selection) => selection.name).join(", ");
+  const traits = useSheet || compareEntries ? null : (props.triggerTraits ?? null);
   const multiSelect: ModelPickerMultiSelect | undefined =
     props.multiSelect && !props.disabled ? props.multiSelect : undefined;
 
@@ -227,7 +217,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 
   // The trigger's contents are identical on both tiers — only what the trigger
   // opens differs — so they are built once rather than duplicated.
-  const triggerContent = compareSelections ? (
+  const triggerContent = compareEntries ? (
     <span
       className={cn(
         "flex min-w-0 w-full box-border items-center gap-1.5 overflow-hidden",
@@ -382,7 +372,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             className={triggerButtonClassName}
             disabled={props.disabled}
             title={disabledReasonTitle}
-            {...(compareSelections
+            {...(compareEntries
               ? {
                   "aria-label": compareNames ? `Compare models: ${compareNames}` : "Compare models",
                 }

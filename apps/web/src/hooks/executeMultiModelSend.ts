@@ -9,14 +9,13 @@
  */
 import {
   MODEL_MULTI_SELECT_OFF,
+  buildMultiModelSendTargets,
   captureReviewedSendReadiness,
   createMultiModelSendTracker,
-  normalizeInteractionModeForProviderTarget,
-  resolveMultiModelSendTarget,
   retryModelMultiSelect,
   summarizeMultiModelSend,
+  supportsMultiModelSend,
   type MultiModelSendSnapshot,
-  type MultiModelSendTargetInput,
   type MultiModelSendTracker,
   type ProviderInstanceEntry,
 } from "@ryco/client-runtime/state/composer";
@@ -32,11 +31,13 @@ import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import { resolveBuildModeModelSelection } from "../buildMode";
 import { refreshStaleSourceControlContexts } from "../components/ChatView.logic";
 import {
+  addMultiModelSend,
   finishMultiModelSend,
   readMultiModelSelection,
-  readMultiModelSend,
+  readMultiModelSends,
+  removeMultiModelSend,
   setMultiModelSelection,
-  setMultiModelSend,
+  type MultiModelSendRecord,
 } from "../components/chat/multiModelSendStore";
 import type { DraftId } from "../composerDraftStore";
 import { readEnvironmentConnection } from "../environments/runtime";
@@ -56,13 +57,33 @@ import {
   type SendTurnSettings,
   type SendTurnSourceControlFetcher,
 } from "./executeChatSendTurn";
+import { readRememberedProjectPreferences } from "./newDraftDefaults";
 
 export const MULTI_MODEL_SEND_UNSUPPORTED_MESSAGE =
   "This environment can't start models in separate worktrees yet. Update Ryco on it first.";
 
-/** Whether a node refuses, rather than falls back from, a first send that requires a worktree. */
-export function supportsMultiModelSend(config: ServerConfig | null | undefined): boolean {
-  return config?.environment.capabilities.requiredWorktreeBootstrap === true;
+/**
+ * Whether a send's new worktrees run the project's setup script, as the send
+ * leaves it: a node with project preferences runs it as the project's (or its
+ * own) preference says, an older one always does. "maybe" while that
+ * preference is not known here.
+ */
+export function multiModelSendRunsSetupScript(input: {
+  readonly hasSetupScript: boolean;
+  readonly config: ServerConfig | null | undefined;
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+}): "yes" | "no" | "maybe" {
+  if (!input.hasSetupScript) return "no";
+  if (!input.config) return "maybe";
+  if (input.config.environment.capabilities.projectPreferences !== true) return "yes";
+  const remembered = readRememberedProjectPreferences(
+    input.environmentId,
+    input.projectId,
+    input.config,
+  );
+  if (!remembered) return "maybe";
+  return remembered.runSetupScript.value ? "yes" : "no";
 }
 
 export interface PrepareMultiModelSendInput {
@@ -98,36 +119,30 @@ export async function prepareMultiModelSend(
 ): Promise<MultiModelSendTracker> {
   const { api, composer, settings } = input;
   rejectRetiredProjectMemory(composer);
-  const targets = input.selections.map((selection): MultiModelSendTargetInput => {
-    const resolved = resolveMultiModelSendTarget({
-      selection,
-      entries: input.providerEntries,
-      prompt: composer.prompt,
-      customModelSlugs: input.customModelSlugs,
-    });
-    if (!resolved.ok) throw new Error(resolved.reason);
-    const { entry } = resolved;
-    return {
-      modelSelection: input.enforceBuildMode
-        ? resolveBuildModeModelSelection(entry.driverKind, resolved.modelSelection)
-        : resolved.modelSelection,
-      // The same composition as the composer's own send, formatted for this model.
-      outgoingMessageText: buildOutgoingMessageText({
+  const targets = buildMultiModelSendTargets({
+    selections: input.selections,
+    entries: input.providerEntries,
+    prompt: composer.prompt,
+    customModelSlugs: input.customModelSlugs,
+    interactionMode: settings.interactionMode,
+    ...(input.enforceBuildMode
+      ? {
+          dispatchSelection: (entry: ProviderInstanceEntry, selection: ModelSelection) =>
+            resolveBuildModeModelSelection(entry.driverKind, selection),
+        }
+      : {}),
+    // The same composition as the composer's own send, formatted for this model.
+    composeText: ({ entry, modelSelection, promptEffort }) =>
+      buildOutgoingMessageText({
         composer: {
           ...composer,
           selectedProvider: entry.driverKind,
-          selectedModel: resolved.modelSelection.model,
+          selectedModel: modelSelection.model,
           selectedProviderModels: entry.models,
-          selectedPromptEffort: resolved.promptEffort,
+          selectedPromptEffort: promptEffort,
         },
         formatOutgoingPrompt: input.formatOutgoingPrompt,
       }),
-      interactionMode: normalizeInteractionModeForProviderTarget(
-        settings.interactionMode,
-        entry.snapshot.supportsAskMode ?? false,
-      ),
-      providerDriver: entry.driverKind,
-    };
   });
   // An upload token goes with one command, so streamed files go inline, once
   // per model.
@@ -176,10 +191,8 @@ export async function prepareMultiModelSend(
 export const MULTI_MODEL_SEND_CONNECTION_CHANGED_MESSAGE =
   "The connection changed before this model started. Reconnect and send again.";
 
-export interface ExecuteMultiModelSendInput extends Omit<
-  PrepareMultiModelSendInput,
-  "submissionId"
-> {
+/** The composer a multi-model send clears, and puts a prompt back into. */
+export interface MultiModelSendComposerDeps {
   readonly refs: ComposerContentRefs;
   readonly composerHandle: SendTurnReadComposer;
   readonly draft: Pick<
@@ -193,6 +206,10 @@ export interface ExecuteMultiModelSendInput extends Omit<
     | "setComposerDraftFileReferences"
     | "readComposerDraftContent"
   >;
+}
+
+export interface ExecuteMultiModelSendInput
+  extends Omit<PrepareMultiModelSendInput, "submissionId">, MultiModelSendComposerDeps {
   /** True once the composer changed since `composer` was taken: it then keeps what it holds. */
   readonly composerChanged: () => boolean;
 }
@@ -208,7 +225,7 @@ const preparingDrafts = new Set<DraftId>();
 
 /** Whether the draft is preparing or sending a multi-model send; it sends nothing else meanwhile. */
 export function isMultiModelSendBusy(draftId: DraftId): boolean {
-  return preparingDrafts.has(draftId) || readMultiModelSend(draftId)?.sending === true;
+  return preparingDrafts.has(draftId) || readMultiModelSends(draftId).some((send) => send.sending);
 }
 
 /**
@@ -218,7 +235,8 @@ export function isMultiModelSendBusy(draftId: DraftId): boolean {
  * models the node did not create come back as the selection, with the prompt,
  * so the next send retries only them; after a send without such a model,
  * "Compare models" is off again. An uncertain target is left to an explicit
- * retry (the composer's banner), never sent again here.
+ * retry (the composer's banner), never sent again here, and an earlier send
+ * that still has one keeps its banner beside this one.
  */
 export async function executeMultiModelSend(
   input: ExecuteMultiModelSendInput,
@@ -237,7 +255,18 @@ export async function executeMultiModelSend(
   } finally {
     preparingDrafts.delete(draftId);
   }
-  setMultiModelSend(draftId, { tracker, environmentId, sending: true });
+  // An earlier send with a model not confirmed keeps its own banner.
+  addMultiModelSend(draftId, {
+    tracker,
+    environmentId,
+    sending: true,
+    content: {
+      prompt: composer.promptForRestore ?? composer.prompt,
+      images: composer.images,
+      terminalContexts: composer.sendableTerminalContexts,
+      fileReferences: composer.fileReferences ?? [],
+    },
+  });
 
   const { refs, composerHandle, draft } = input;
   const live = composerHandle.showsSendThread?.() ?? true;
@@ -288,4 +317,49 @@ export async function executeMultiModelSend(
     );
   }
   return { kind: "sent", snapshot };
+}
+
+export type SendMultiModelTargetAsNewResult =
+  /** The prompt is back with that model selected; the target left its send. */
+  | "restored"
+  /** The composer holds something else: nothing changed. */
+  | "composer-not-empty"
+  /** The target is not one the node refused to retry, or the draft is sending. */
+  | "unavailable";
+
+/**
+ * Sends an unconfirmed model again as new, after the node refused its
+ * identical retry (`retryRefusal`) and the user checked its thread. Its prompt
+ * comes back into the empty composer with only that model selected, so the
+ * draft's next send, a new submission after the usual confirmation, starts it
+ * in a new thread. The old target leaves its send, so neither can be retried
+ * twice.
+ */
+export function sendMultiModelTargetAsNew(
+  input: MultiModelSendComposerDeps & {
+    readonly draftId: DraftId;
+    readonly record: MultiModelSendRecord;
+    readonly key: string;
+  },
+): SendMultiModelTargetAsNewResult {
+  const { draftId, record } = input;
+  const target = record.tracker.read().targets.find((entry) => entry.plan.key === input.key);
+  if (
+    isMultiModelSendBusy(draftId) ||
+    target?.status.kind !== "uncertain" ||
+    target.status.retryRefusal === undefined
+  ) {
+    return "unavailable";
+  }
+  const restored = restoreUnsentComposerContent({
+    refs: input.refs,
+    composerHandle: input.composerHandle,
+    draft: input.draft,
+    ...record.content,
+  });
+  if (!restored) return "composer-not-empty";
+  setMultiModelSelection(draftId, retryModelMultiSelect([target.plan.modelSelection]));
+  record.tracker.release(target.plan.key);
+  if (record.tracker.read().targets.length === 0) removeMultiModelSend(draftId, record.tracker);
+  return "restored";
 }

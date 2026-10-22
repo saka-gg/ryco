@@ -6,6 +6,7 @@ import {
   type EnvironmentApi,
   type MessageId,
   type ModelSelection,
+  type ServerConfig,
   type ServerProvider,
   type ThreadId,
 } from "@ryco/contracts";
@@ -16,12 +17,15 @@ import { RpcRequestRefusedError } from "../../rpc/protocol.ts";
 import { modelMultiSelectKey } from "./modelMultiSelect.ts";
 import {
   MULTI_MODEL_SEND_UNCERTAIN_MESSAGE,
+  buildMultiModelSendTargets,
   classifyMultiModelSendFailure,
   createMultiModelSendTracker,
   deriveMultiModelSendThreadId,
+  isMultiModelSendUnresolved,
   planMultiModelSend,
   resolveMultiModelSendTarget,
   summarizeMultiModelSend,
+  supportsMultiModelSend,
   type MultiModelSendInput,
   type MultiModelSendTargetInput,
 } from "./multiModelSend.ts";
@@ -326,6 +330,60 @@ describe("multi-model send — targets", () => {
       }),
     ).toEqual({ ok: false, reason: "claude-via-proxy is not available on Claude." });
   });
+
+  it("composes every target's send the same way on every client", () => {
+    const askCapable = deriveProviderInstanceEntries([
+      { ...providers[0]!, supportsAskMode: true },
+      { ...providers[1]!, enabled: true },
+    ]);
+    const targets = buildMultiModelSendTargets({
+      selections: [
+        createModelSelection(claude, "claude-opus-4-6", [{ id: "effort", value: "max" }]),
+        gpt,
+      ],
+      entries: askCapable,
+      prompt: "Fix it",
+      interactionMode: "ask",
+      composeText: ({ entry, modelSelection, promptEffort }) =>
+        `[${entry.driverKind}/${modelSelection.model}/${promptEffort ?? "-"}] Fix it`,
+    });
+    expect(targets).toEqual([
+      {
+        modelSelection: {
+          instanceId: claude,
+          model: "claude-opus-4-6",
+          options: [{ id: "effort", value: "max" }],
+        },
+        outgoingMessageText: "[claudeAgent/claude-opus-4-6/max] Fix it",
+        interactionMode: "ask",
+        providerDriver: "claudeAgent",
+      },
+      expect.objectContaining({
+        modelSelection: expect.objectContaining({ instanceId: codex, model: "gpt-5" }),
+        // Ask mode only where the provider supports it.
+        interactionMode: "default",
+        providerDriver: "codex",
+      }),
+    ]);
+    // One model that cannot take the send refuses the whole send, by name.
+    expect(() =>
+      buildMultiModelSendTargets({
+        selections: [gpt],
+        entries,
+        prompt: "Fix it",
+        interactionMode: "default",
+        composeText: () => "Fix it",
+      }),
+    ).toThrow("Codex is unavailable.");
+  });
+
+  it("offers comparing only on a node that refuses to run a target outside its worktree", () => {
+    const config = (requiredWorktreeBootstrap: boolean) =>
+      ({ environment: { capabilities: { requiredWorktreeBootstrap } } }) as unknown as ServerConfig;
+    expect(supportsMultiModelSend(config(true))).toBe(true);
+    expect(supportsMultiModelSend(config(false))).toBe(false);
+    expect(supportsMultiModelSend(null)).toBe(false);
+  });
 });
 
 describe("multi-model send — outcomes", () => {
@@ -373,14 +431,23 @@ describe("multi-model send — outcomes", () => {
     const branchExists = new OrchestrationDispatchCommandError({
       message: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
     });
-    expect(
-      classifyMultiModelSendFailure({ error: branchExists, sent: true, previous: uncertain }),
-    ).toBe(uncertain);
+    // It stays uncertain, with the node's answer: sending it again as new is
+    // the user's call.
+    const refusedRetry = classifyMultiModelSendFailure({
+      error: branchExists,
+      sent: true,
+      previous: uncertain,
+    });
+    expect(refusedRetry).toEqual({
+      ...uncertain,
+      retryRefusal: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
+    });
+    // A later retry whose answer is lost again says nothing more than the first.
     expect(
       classifyMultiModelSendFailure({
         error: new Error("Socket closed"),
         sent: true,
-        previous: uncertain,
+        previous: refusedRetry,
       }),
     ).toEqual(uncertain);
   });
@@ -495,12 +562,56 @@ describe("multi-model send — tracker", () => {
     expect(retried.targets[0]!.status).toEqual({
       kind: "uncertain",
       message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE,
+      retryRefusal: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
     });
     // Neither a new send nor the thread the first send left makes it started.
     await tracker.send({ api: node.api });
     tracker.reconcile(noTurns);
     expect(node.commands).toHaveLength(2);
     expect(tracker.read().targets[0]!.status.kind).toBe("uncertain");
+    expect(isMultiModelSendUnresolved(tracker.read())).toBe(true);
+
+    // The user gives up on it (to send it again as new): it leaves the send,
+    // which then has nothing left to resolve, and is never sent again.
+    const listener = { calls: 0 };
+    tracker.subscribe(() => {
+      listener.calls += 1;
+    });
+    expect(tracker.release(key)).toBe(true);
+    expect(listener.calls).toBe(1);
+    expect(tracker.read().targets).toEqual([]);
+    expect(isMultiModelSendUnresolved(tracker.read())).toBe(false);
+    expect(tracker.release(key)).toBe(false);
+    await tracker.retryUncertain(key, { api: node.api, turnVisible: noTurns });
+    expect(node.commands).toHaveLength(2);
+  });
+
+  it("releases only an uncertain target, never one started or being sent", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const node = makeNode();
+    const api = {
+      orchestration: {
+        dispatchCommand: async (command: TurnStart) => {
+          if (command.modelSelection?.model === opus.model) await held;
+          return node.api.orchestration.dispatchCommand(command);
+        },
+      },
+    } as unknown as EnvironmentApi;
+    const tracker = createMultiModelSendTracker(
+      sendInput({ targets: [target(gpt), target(opus)] }),
+    );
+    const sending = tracker.send({ api });
+    await Promise.resolve();
+    expect(isMultiModelSendUnresolved(tracker.read())).toBe(true);
+    expect(tracker.release(modelMultiSelectKey(opus))).toBe(false);
+    release();
+    await sending;
+    expect(tracker.release(modelMultiSelectKey(gpt))).toBe(false);
+    expect(tracker.read().targets).toHaveLength(2);
+    expect(isMultiModelSendUnresolved(tracker.read())).toBe(false);
   });
 
   it("keeps a target uncertain when its retry was refused before it was sent", async () => {

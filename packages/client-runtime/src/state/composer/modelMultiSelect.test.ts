@@ -1,13 +1,15 @@
-import { ProviderInstanceId } from "@ryco/contracts";
-import { createModelSelection } from "@ryco/shared/model";
+import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ryco/contracts";
+import { createModelCapabilities, createModelSelection } from "@ryco/shared/model";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   MODEL_MULTI_SELECT_OFF,
   MULTI_MODEL_SEND_MAX_TARGETS,
+  describeModelMultiSelectTarget,
   disableModelMultiSelect,
   enableModelMultiSelect,
   isModelMultiSelected,
+  modelMultiSelectKey,
   modelMultiSelectMinimum,
   modelMultiSelectSendBlockReason,
   pruneModelMultiSelect,
@@ -15,6 +17,7 @@ import {
   retryModelMultiSelect,
   toggleModelMultiSelect,
 } from "./modelMultiSelect.ts";
+import { deriveProviderInstanceEntries } from "./providerInstances.ts";
 
 const codex = ProviderInstanceId.make("codex");
 const claude = ProviderInstanceId.make("claudeAgent");
@@ -126,5 +129,50 @@ describe("model multi-select", () => {
       selections: [active],
     });
     expect(pruneModelMultiSelect(MODEL_MULTI_SELECT_OFF, () => false)).toBe(MODEL_MULTI_SELECT_OFF);
+  });
+
+  it("names a compared model the same way everywhere, custom models included", () => {
+    const provider: ServerProvider = {
+      instanceId: claude,
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude",
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-22T00:00:00.000Z",
+      models: [
+        {
+          slug: "claude-opus-4-6",
+          name: "Claude Opus 4.6",
+          shortName: "Opus 4.6",
+          isCustom: false,
+          capabilities: createModelCapabilities({ optionDescriptors: [] }),
+        },
+      ],
+      slashCommands: [],
+      skills: [],
+    };
+    const entries = deriveProviderInstanceEntries([provider]);
+    const custom = createModelSelection(claude, "claude-via-proxy");
+    const modelOptionsByInstance = new Map([
+      [claude, [{ slug: "claude-via-proxy", name: "Proxy Opus" }]],
+    ]);
+
+    expect(describeModelMultiSelectTarget(opus, { entries })).toEqual({
+      key: modelMultiSelectKey(opus),
+      name: "Opus 4.6",
+      entry: entries[0],
+    });
+    // The client's own options name a custom model the catalog does not list.
+    expect(describeModelMultiSelectTarget(custom, { entries, modelOptionsByInstance }).name).toBe(
+      "Proxy Opus",
+    );
+    expect(describeModelMultiSelectTarget(custom, { entries }).name).toBe("claude-via-proxy");
+    expect(describeModelMultiSelectTarget(active, { entries })).toMatchObject({
+      name: "gpt-5",
+      entry: undefined,
+    });
   });
 });
