@@ -8,7 +8,8 @@
     "build": "vp build",
     "preview": "vp preview",
     "typecheck": "tsc --noEmit",
-    "test": "vp test run --passWithNoTests",
+    "typecheck:fast": "tsc-rs --noEmit --composite false --declaration false --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo",
+    "test": "vp test run --config vitest.config.ts --passWithNoTests",
     "test:browser": "vp test run --config vitest.browser.config.ts",
     "test:browser:install": "playwright install --with-deps chromium"
   },
@@ -58,6 +59,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@babel/core": "catalog:",
     "@rolldown/plugin-babel": "^0.2.4",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/router-plugin": "^1.168.36",
@@ -68,6 +70,7 @@
     "@vitejs/plugin-react": "^6.1.1",
     "@vitest/browser-playwright": "5.0.3",
     "babel-plugin-react-compiler": "1.0.0",
+    "fast-check": "catalog:",
     "msw": "2.15.0",
     "playwright": "^1.63.0",
     "tailwindcss": "^4.3.3",

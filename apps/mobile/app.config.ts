@@ -151,6 +151,8 @@ const config: ExpoConfig = {
   runtimeVersion: {
     // Fingerprint (not appVersion) so an OTA only reaches binaries whose native
     // project — native deps, config plugins, AND patches/ — matches the update.
+    // Patches count only through fingerprint.config.js: under Bun's store the
+    // fingerprint does not hash native package sources.
     policy: process.env.MOBILE_VERSION_POLICY ?? "fingerprint",
   },
   orientation: "portrait",

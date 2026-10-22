@@ -265,7 +265,10 @@ describe("RelayResponseCompressor", () => {
       { kind: "snapshot-threads", threads: [], pad: "y".repeat(RELAY_MAX_RPC_MESSAGE_BYTES) },
     ]);
     const hugeBytes = encoded(huge);
-    expect(await compressor.encode(huge, hugeBytes, encoded)).toEqual([hugeBytes]);
+    // Identity rather than toEqual, which walks all 4 MiB element by element (~10 s).
+    const sent = await compressor.encode(huge, hugeBytes, encoded);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBe(hugeBytes);
   });
 
   it("compresses only what fits the channel's ceiling together with its frame", async () => {

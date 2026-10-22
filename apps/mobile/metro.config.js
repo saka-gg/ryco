@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { getDefaultConfig } = require("expo/metro-config");
@@ -23,6 +24,21 @@ const resolveShikiDependencyRoot = (packageName) => {
 
   return currentDir;
 };
+
+// Metro keys a cached transform by the file's content, the Babel config files
+// and cacheVersion, but not by the Babel presets and plugins those files load,
+// so a dependency upgrade or a patch to a transform-time package changes output
+// without touching any key. Tie cacheVersion to the lockfile and the patches
+// (bun.lock records only a patch's path) so those start cold, instead of
+// clearing the cache on every start.
+const patchesRoot = path.join(workspaceRoot, "patches");
+const dependencyHash = crypto
+  .createHash("sha256")
+  .update(fs.readFileSync(path.join(workspaceRoot, "bun.lock")));
+for (const name of fs.readdirSync(patchesRoot).toSorted()) {
+  dependencyHash.update(`\0${name}\0`).update(fs.readFileSync(path.join(patchesRoot, name)));
+}
+config.cacheVersion = dependencyHash.digest("hex").slice(0, 16);
 
 config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
 config.resolver = {

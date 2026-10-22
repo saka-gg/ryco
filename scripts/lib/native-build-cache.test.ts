@@ -5,6 +5,8 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,15 +14,14 @@ import { rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
-  assertDesktopBuildArch,
   buildCachedNativeBinary,
-  desktopBuildArch,
   fingerprint,
   nativeBuildEnvironment,
+  publishNativeCacheDirectory,
   sourceTreeFingerprint,
-} from "./native-build-cache.mjs";
+} from "./native-build-cache.ts";
 
-let root;
+let root: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "ryco-native-cache-test-"));
   vi.stubEnv("RYCO_NATIVE_BUILD_CACHE_DIR", join(root, "cache"));
@@ -31,8 +32,10 @@ afterEach(async () => {
 });
 
 function setup() {
-  const build = vi.fn((binary) => writeFileSync(binary, "verified binary"));
-  const validate = vi.fn((binary) => readFileSync(binary, "utf8") === "verified binary");
+  const build = vi.fn((binary: string, _temporary: string) =>
+    writeFileSync(binary, "verified binary"),
+  );
+  const validate = vi.fn((binary: string) => readFileSync(binary, "utf8") === "verified binary");
   const options = {
     name: "fixture",
     key: fingerprint("inputs"),
@@ -44,6 +47,8 @@ function setup() {
   return { options, cache };
 }
 
+const longAgo = new Date("2020-01-01T00:00:00Z");
+
 describe("native build cache", () => {
   it("restores a verified artifact to another worktree without building", () => {
     const { options } = setup();
@@ -52,6 +57,15 @@ describe("native build cache", () => {
     buildCachedNativeBinary(options);
     expect(options.build).toHaveBeenCalledTimes(1);
     expect(readFileSync(options.output, "utf8")).toBe("verified binary");
+  });
+
+  it("refreshes a reused entry so CI pruning keeps it", () => {
+    const { options, cache } = setup();
+    buildCachedNativeBinary(options);
+    utimesSync(cache, longAgo, longAgo);
+    buildCachedNativeBinary(options);
+    expect(options.build).toHaveBeenCalledTimes(1);
+    expect(statSync(cache).mtimeMs).toBeGreaterThan(longAgo.getTime());
   });
 
   it.each([process.platform === "win32" ? "binary.exe" : "binary", "build.json"])(
@@ -100,11 +114,25 @@ describe("native build cache", () => {
     expect(readFileSync(options.output, "utf8")).toBe("verified binary");
   });
 
+  it("refreshes an older competing publication it accepts", () => {
+    const cache = join(root, "cache/artifacts/fixture/key");
+    const temporary = join(root, "cache/artifacts/fixture/.build-pending");
+    for (const directory of [cache, temporary]) {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "artifact"), "verified");
+    }
+    utimesSync(cache, longAgo, longAgo);
+    // The existing entry stays valid, so the rename collision is accepted.
+    publishNativeCacheDirectory(temporary, cache, () => true);
+    expect(readFileSync(join(cache, "artifact"), "utf8")).toBe("verified");
+    expect(statSync(cache).mtimeMs).toBeGreaterThan(longAgo.getTime());
+  });
+
   it.runIf(process.platform === "win32")(
     "executes the staged and cached Windows binary during validation",
     () => {
-      const build = vi.fn((binary) => copyFileSync(process.execPath, binary));
-      const validate = (binary) => {
+      const build = vi.fn((binary: string) => copyFileSync(process.execPath, binary));
+      const validate = (binary: string) => {
         const result = spawnSync(binary, ["--version"], { encoding: "utf8" });
         return result.status === 0 && result.stdout.trim() === process.version;
       };
@@ -142,40 +170,5 @@ describe("native build cache", () => {
     expect(fingerprint(nativeBuildEnvironment())).toBe(original);
     vi.stubEnv("RUSTFLAGS", "-C opt-level=1");
     expect(fingerprint(nativeBuildEnvironment())).not.toBe(original);
-  });
-});
-
-describe("desktop native build architecture", () => {
-  const appleSilicon = /Apple Silicon \(arm64\) only/;
-
-  it("builds macOS helpers for Apple Silicon only", () => {
-    for (const development of [false, true]) {
-      expect(
-        desktopBuildArch({ development, platform: "darwin", hostArch: "arm64", env: {} }),
-      ).toBe("arm64");
-    }
-    // Packaging from an Intel host still targets the arm64 app.
-    expect(desktopBuildArch({ platform: "darwin", hostArch: "x64", env: {} })).toBe("arm64");
-  });
-
-  it.each([
-    { env: { RYCO_DESKTOP_ARCH: "x64" }, hostArch: "arm64", development: false },
-    { env: { RYCO_DESKTOP_ARCH: "universal" }, hostArch: "arm64", development: false },
-    { env: { RYCO_DESKTOP_ARCH: "universal" }, hostArch: "arm64", development: true },
-    // An Intel or Rosetta Node cannot load arm64 helpers into its local Electron.
-    { env: {}, hostArch: "x64", development: true },
-  ])("refuses an Intel or universal macOS request: %j", (options) => {
-    expect(() => desktopBuildArch({ ...options, platform: "darwin" })).toThrow(appleSilicon);
-  });
-
-  it.each(["linux", "win32"])("keeps x64 and arm64 on %s", (platform) => {
-    for (const hostArch of ["x64", "arm64"]) {
-      expect(desktopBuildArch({ platform, hostArch, env: {} })).toBe(hostArch);
-      expect(desktopBuildArch({ development: true, platform, hostArch, env: {} })).toBe(hostArch);
-    }
-    expect(
-      desktopBuildArch({ platform, hostArch: "arm64", env: { RYCO_DESKTOP_ARCH: "x64" } }),
-    ).toBe("x64");
-    expect(() => assertDesktopBuildArch("universal", platform)).toThrow("expected arm64 or x64");
   });
 });

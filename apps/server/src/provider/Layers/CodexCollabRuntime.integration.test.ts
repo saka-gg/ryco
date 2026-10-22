@@ -242,6 +242,8 @@ describe("CodexSessionRuntime collab integration", () => {
         runtimeMode: "full-access",
         tokenMode: "balanced",
         environment: { ...process.env, RYCO_CODEX_COLLAB_SCRIPT: scriptPath },
+        // A's interrupt never settles; any finite deadline proves the bound.
+        collabChildInterruptTimeout: "200 millis",
       });
 
       // Wait for both children's turnStarted signals to be processed before
@@ -333,6 +335,8 @@ describe("CodexSessionRuntime collab integration", () => {
           runtimeMode: "full-access",
           tokenMode: "off",
           environment: { ...process.env, RYCO_CODEX_COLLAB_SCRIPT: scriptPath },
+          // The settlement comes from the polling loop, not from a notification.
+          collabReconcileInterval: "50 millis",
         });
         const idleChild = yield* runtime.events.pipe(
           Stream.filter(

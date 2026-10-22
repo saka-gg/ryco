@@ -77,6 +77,7 @@ import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store"
 import { useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
+import { browserWaitFor } from "../../test/browserWait";
 import {
   resetPointerEmulation,
   parkPointer,
@@ -884,13 +885,10 @@ function serverThreadPath(threadId: ThreadId): string {
 }
 
 async function waitForAppBootstrap(): Promise<void> {
-  await vi.waitFor(
-    () => {
-      expect(getServerConfig()).not.toBeNull();
-      expect(selectBootstrapCompleteForActiveEnvironment(useStore.getState())).toBe(true);
-    },
-    { timeout: 8_000, interval: 16 },
-  );
+  await browserWaitFor(() => {
+    expect(getServerConfig()).not.toBeNull();
+    expect(selectBootstrapCompleteForActiveEnvironment(useStore.getState())).toBe(true);
+  });
 }
 
 async function materializePromotedDraftThreadViaDomainEvent(threadId: ThreadId): Promise<void> {
@@ -1644,16 +1642,10 @@ async function waitForElement<T extends Element>(
   errorMessage: string,
 ): Promise<T> {
   let element: T | null = null;
-  await vi.waitFor(
-    () => {
-      element = query();
-      expect(element, errorMessage).toBeTruthy();
-    },
-    {
-      timeout: 8_000,
-      interval: 16,
-    },
-  );
+  await browserWaitFor(() => {
+    element = query();
+    expect(element, errorMessage).toBeTruthy();
+  });
   if (!element) {
     throw new Error(errorMessage);
   }
@@ -1661,13 +1653,10 @@ async function waitForElement<T extends Element>(
 }
 
 async function clickEnabledButton(button: HTMLButtonElement, errorMessage: string): Promise<void> {
-  await vi.waitFor(
-    () => {
-      expect(button.isConnected, errorMessage).toBe(true);
-      expect(button.disabled, errorMessage).toBe(false);
-    },
-    { timeout: 8_000, interval: 16 },
-  );
+  await browserWaitFor(() => {
+    expect(button.isConnected, errorMessage).toBe(true);
+    expect(button.disabled, errorMessage).toBe(false);
+  });
   button.click();
 }
 
@@ -1677,13 +1666,10 @@ async function waitForURL(
   errorMessage: string,
 ): Promise<string> {
   let pathname = "";
-  await vi.waitFor(
-    () => {
-      pathname = router.state.location.pathname;
-      expect(predicate(pathname), errorMessage).toBe(true);
-    },
-    { timeout: 8_000, interval: 16 },
-  );
+  await browserWaitFor(() => {
+    pathname = router.state.location.pathname;
+    expect(predicate(pathname), errorMessage).toBe(true);
+  });
   return pathname;
 }
 
@@ -1767,14 +1753,11 @@ async function pressComposerUndo(): Promise<void> {
 }
 
 async function waitForComposerText(expectedText: string): Promise<void> {
-  await vi.waitFor(
-    () => {
-      expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "").toBe(
-        expectedText,
-      );
-    },
-    { timeout: 8_000, interval: 16 },
-  );
+  await browserWaitFor(() => {
+    expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "").toBe(
+      expectedText,
+    );
+  });
 }
 
 async function setComposerSelectionByTextOffsets(options: {
@@ -1956,23 +1939,20 @@ async function expectComposerActionsContained(): Promise<void> {
     "Unable to find composer actions container.",
   );
 
-  await vi.waitFor(
-    () => {
-      const footerRect = footer.getBoundingClientRect();
-      const actionButtons = Array.from(actions.querySelectorAll<HTMLButtonElement>("button"));
-      expect(actionButtons.length).toBeGreaterThanOrEqual(1);
+  await browserWaitFor(() => {
+    const footerRect = footer.getBoundingClientRect();
+    const actionButtons = Array.from(actions.querySelectorAll<HTMLButtonElement>("button"));
+    expect(actionButtons.length).toBeGreaterThanOrEqual(1);
 
-      const buttonRects = actionButtons.map((button) => button.getBoundingClientRect());
-      const firstTop = buttonRects[0]?.top ?? 0;
+    const buttonRects = actionButtons.map((button) => button.getBoundingClientRect());
+    const firstTop = buttonRects[0]?.top ?? 0;
 
-      for (const rect of buttonRects) {
-        expect(rect.right).toBeLessThanOrEqual(footerRect.right + 0.5);
-        expect(rect.bottom).toBeLessThanOrEqual(footerRect.bottom + 0.5);
-        expect(Math.abs(rect.top - firstTop)).toBeLessThanOrEqual(1.5);
-      }
-    },
-    { timeout: 8_000, interval: 16 },
-  );
+    for (const rect of buttonRects) {
+      expect(rect.right).toBeLessThanOrEqual(footerRect.right + 0.5);
+      expect(rect.bottom).toBeLessThanOrEqual(footerRect.bottom + 0.5);
+      expect(Math.abs(rect.top - firstTop)).toBeLessThanOrEqual(1.5);
+    }
+  });
 }
 
 async function waitForInteractionModeButton(
@@ -1988,28 +1968,22 @@ async function waitForInteractionModeButton(
 }
 
 async function waitForServerConfigToApply(): Promise<void> {
-  await vi.waitFor(
-    () => {
-      expect(wsRequests.some((request) => request._tag === WS_METHODS.subscribeServerConfig)).toBe(
-        true,
-      );
-    },
-    { timeout: 8_000, interval: 16 },
-  );
+  await browserWaitFor(() => {
+    expect(wsRequests.some((request) => request._tag === WS_METHODS.subscribeServerConfig)).toBe(
+      true,
+    );
+  });
   await waitForLayout();
 }
 
 async function waitForComposerStashBinding(key: string): Promise<void> {
-  await vi.waitFor(
-    () => {
-      expect(
-        getAppKeybindings().some(
-          (binding) => binding.command === "composer.stash" && binding.shortcut.key === key,
-        ),
-      ).toBe(true);
-    },
-    { timeout: 8_000, interval: 16 },
-  );
+  await browserWaitFor(() => {
+    expect(
+      getAppKeybindings().some(
+        (binding) => binding.command === "composer.stash" && binding.shortcut.key === key,
+      ),
+    ).toBe(true);
+  });
   await waitForElement(
     () => document.querySelector('[data-chat-composer-form="true"]'),
     "Unable to find the active composer for the stash shortcut.",

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    // tsconfig.json includes **/*.ts, and a few scripts import these files by
+    // relative path. They are outside the workspace dependencies typecheck:deps
+    // hashes, so they are listed here (the root vitest.config.ts is already a
+    // global dependency). After adding such an import, recheck the list with
+    // `tsc --noEmit --listFilesOnly | grep -v node_modules`.
+    "typecheck": {
+      "inputs": [
+        "$TURBO_EXTENDS$",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/apps/desktop/package.json",
+        "$TURBO_ROOT$/apps/server/package.json",
+        "$TURBO_ROOT$/apps/server/src/device/helperSandbox.ts",
+        "$TURBO_ROOT$/packages/client-runtime/src/connection/approximateJsonSize.ts",
+      ],
+    },
+    "typecheck:fast": {
+      "inputs": [
+        "$TURBO_EXTENDS$",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/apps/desktop/package.json",
+        "$TURBO_ROOT$/apps/server/package.json",
+        "$TURBO_ROOT$/apps/server/src/device/helperSandbox.ts",
+        "$TURBO_ROOT$/packages/client-runtime/src/connection/approximateJsonSize.ts",
+      ],
+    },
+  },
+}

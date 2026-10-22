@@ -1,12 +1,12 @@
 import tailwindcss from "@tailwindcss/vite";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
-import babel from "@rolldown/plugin-babel";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { parseOptInSourcemapEnv, readEnv } from "@ryco/shared/runtimeEnv";
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type UserConfig } from "vite-plus";
 import pkg from "./package.json" with { type: "json" };
-import { ciTestReporting } from "../../scripts/lib/vitestReporting.ts";
+import { ciTestReporting } from "../../vitest.reporting.ts";
 import { createHostedPwaBuildPlugin } from "./src/pwa/buildArtifacts";
 import { createClientModeSeamPlugin } from "./src/clientModeSeams";
 import { createBootFontPreloadPlugin } from "./src/viteBuild/bootFontPreload";
@@ -21,6 +21,11 @@ import {
   resolveWebModulePreloadDependencies,
 } from "./src/viteBuild/modulePreload";
 import { createPrecompressedAssetsPlugin } from "./src/viteBuild/precompressAssets";
+import { resolveReactCompilerCacheDir } from "./src/viteBuild/reactCompilerCache";
+import {
+  createReactCompilerPoolPlugin,
+  type ReactCompilerPoolOptions,
+} from "./src/viteBuild/reactCompilerPool";
 
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 const resolveWebModule = (module: string) => fileURLToPath(new URL(`./${module}`, import.meta.url));
@@ -62,6 +67,29 @@ export const REACT_COMPILER_EXCLUDE = [
   /[\\/]src[\\/]perf[\\/]/,
   /[\\/]src[\\/]pwa[\\/]/,
 ] as const;
+
+/**
+ * The React Compiler's Babel options, in `@rolldown/plugin-babel`'s shape so
+ * the pool's test can run them through both plugins.
+ */
+export function createReactCompilerOptions(): ReactCompilerPoolOptions {
+  return {
+    // The compiler used to visit every TS module pulled from every
+    // workspace package. Keep it on web React source while excluding
+    // generated, worker, test, and deliberately pure logic modules.
+    include: REACT_COMPILER_INCLUDE,
+    exclude: [...REACT_COMPILER_EXCLUDE],
+    // Root-level `vp build` executes from the repository root; keep Babel plugin
+    // resolution anchored to the package that declares the React Compiler plugin.
+    cwd: webRoot,
+    // We need to be explicit about the parser options after moving to @vitejs/plugin-react v6.0.0
+    // This is because the babel plugin only automatically parses typescript and jsx based on relative paths (e.g. "**/*.ts")
+    // whereas the previous version of the plugin parsed all files with a .ts extension.
+    // This is causing our packages/ directory to fail to parse, as they are not relative to the CWD.
+    parserOpts: { plugins: ["typescript", "jsx"] },
+    presets: [reactCompilerPreset()],
+  };
+}
 
 export function shouldEnableHostedPwaBuild(input: {
   readonly clientMode: "hosted-hub" | "standard";
@@ -109,21 +137,8 @@ export function createWebViteConfig(
       }),
       tanstackRouter(),
       react(),
-      babel({
-        // The compiler used to visit every TS module pulled from every
-        // workspace package. Keep it on web React source while excluding
-        // generated, worker, test, and deliberately pure logic modules.
-        include: REACT_COMPILER_INCLUDE,
-        exclude: [...REACT_COMPILER_EXCLUDE],
-        // Root-level `vp build` executes from the repository root; keep Babel plugin
-        // resolution anchored to the package that declares the React Compiler plugin.
-        cwd: webRoot,
-        // We need to be explicit about the parser options after moving to @vitejs/plugin-react v6.0.0
-        // This is because the babel plugin only automatically parses typescript and jsx based on relative paths (e.g. "**/*.ts")
-        // whereas the previous version of the plugin parsed all files with a .ts extension.
-        // This is causing our packages/ directory to fail to parse, as they are not relative to the CWD.
-        parserOpts: { plugins: ["typescript", "jsx"] },
-        presets: [reactCompilerPreset()],
+      createReactCompilerPoolPlugin(createReactCompilerOptions(), {
+        cacheDir: resolveReactCompilerCacheDir(process.env, webRoot),
       }),
       tailwindcss(),
       createBootPreloadPlugin(),
@@ -246,8 +261,15 @@ export function createWebViteConfig(
     test: {
       ...ciTestReporting(),
       // A full web run has several module-heavy suites. Capping workers avoids
-      // multiplying their module graph until the host starts swapping.
-      maxWorkers: process.env.CI ? 2 : 4,
+      // multiplying their module graph until the host starts swapping. Below
+      // the cap, one worker per core: Vitest's default leaves a core to its
+      // main process, which idles here, and 4 workers finished the suite about
+      // 15% sooner than 3 on 4 vCPU.
+      maxWorkers: Math.min(4, availableParallelism()),
+      // Under CI load, CPU-heavy tests that take about 1 s locally have run past
+      // 5 s, so they get 15 s there. Locally, Vitest's 5 s default stays the
+      // budget that makes a hang obvious.
+      testTimeout: process.env.CI ? 15_000 : 5_000,
     },
   };
 }

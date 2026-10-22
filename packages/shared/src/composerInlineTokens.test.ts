@@ -144,8 +144,12 @@ describe("collectComposerInlineTokens", () => {
   });
 
   it("stays fast on unterminated bracket runs", () => {
-    const started = performance.now();
+    // This thread's CPU time, not wall time: a loaded machine deschedules the worker, which
+    // stretches wall time past the budget without any extra work. The capped scan takes about
+    // 40 ms here; rescanning from every bracket would take seconds of CPU.
+    const started = process.threadCpuUsage();
     expect(collectComposerInlineTokens(" [[".repeat(40_000))).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(1_000);
+    const { user, system } = process.threadCpuUsage(started);
+    expect((user + system) / 1_000).toBeLessThan(1_000);
   });
 });

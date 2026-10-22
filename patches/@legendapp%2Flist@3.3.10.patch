@@ -485,15 +485,7 @@ diff --git a/react-native.js b/react-native.js
      estimatedItemSize = 100,
      estimatedListSize,
      extraData,
-@@ -7270,6 +7415,7 @@
-     onLayout: onLayoutProp,
-     onLoad,
-     onMomentumScrollEnd,
-+    onScrollBeginDrag,
-     onRefresh,
-     onScroll: onScrollProp,
-     onScrollBeginDrag,
-@@ -7368,7 +7514,7 @@
+@@ -7368,7 +7513,7 @@
    const combinedRef = useCombinedRef(refScroller, refScrollView);
    const keyExtractor = keyExtractorProp != null ? keyExtractorProp : ((_item, index) => index.toString());
    const stickyHeaderIndices = stickyHeaderIndicesProp;
@@ -502,7 +494,7 @@ diff --git a/react-native.js b/react-native.js
    const previousContentInsetEndAdjustmentRef = React2.useRef(contentInsetEndAdjustmentResolved);
    const alwaysRenderIndices = React2.useMemo(() => {
      const indices = getAlwaysRenderIndices(alwaysRender, dataProp, keyExtractor, anchoredEndSpace == null ? void 0 : anchoredEndSpace.anchorIndex);
-@@ -7515,6 +7661,7 @@
+@@ -7515,6 +7660,7 @@
      contentContainerAlignItems: contentContainerStyle.alignItems,
      contentInset,
      contentInsetEndAdjustment: contentInsetEndAdjustmentResolved,
@@ -510,7 +502,7 @@ diff --git a/react-native.js b/react-native.js
      data: dataProp,
      dataKey,
      dataVersion,
-@@ -7601,6 +7748,13 @@
+@@ -7601,6 +7747,13 @@
        return void 0;
      }
      const resolvedOffset = (_a4 = initialScroll.contentOffset) != null ? _a4 : resolveInitialScrollOffset(ctx, initialScroll);
@@ -524,7 +516,7 @@ diff --git a/react-native.js b/react-native.js
      return usesBootstrapInitialScroll && ((_b2 = state.initialScrollSession) == null ? void 0 : _b2.kind) === "bootstrap" && Platform.OS === "web" ? void 0 : resolvedOffset;
    }, [usesBootstrapInitialScroll]);
    React2.useLayoutEffect(() => {
-@@ -7833,6 +7987,7 @@
+@@ -7833,6 +7986,7 @@
        onScroll: (event) => onScroll(ctx, event),
        onScrollBeginDrag: (event) => {
          var _a4, _b2;
@@ -532,7 +524,7 @@ diff --git a/react-native.js b/react-native.js
          const maintainingScrollAtEnd = state.maintainingScrollAtEnd;
          if (maintainingScrollAtEnd === "animated" || maintainingScrollAtEnd === "instant") {
            cancelImperativeScroll(state);
-@@ -7870,6 +8025,7 @@
+@@ -7870,6 +8024,7 @@
        onLayout,
        onLayoutFooter,
        onMomentumScrollEnd: fns.onMomentumScrollEnd,

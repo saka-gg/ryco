@@ -1,5 +1,5 @@
 {
-  "buildCommand": "turbo build --filter @ryco/web && bun ../../scripts/apply-web-brand-assets.ts production",
+  "buildCommand": "RYCO_REACT_COMPILER_CACHE=off turbo build --filter @ryco/web && bun ../../scripts/apply-web-brand-assets.ts production",
   "installCommand": "bun add -g turbo && bun install --filter '@ryco/contracts' --filter '@ryco/client-runtime' --filter '@ryco/shared' --filter '@ryco/scripts' --filter '@ryco/web'",
   "rewrites": [
     {

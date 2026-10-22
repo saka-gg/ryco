@@ -3,9 +3,24 @@
 ## Task Completion Requirements
 
 - Use the Bun version pinned in `package.json` and install with `bun install --frozen-lockfile`.
-- Validation must be proportional to the size and risk of the change.
-- For small, localized edits, run only focused checks that cover the changed files or affected
-  package. Do not run the full repository test suite, a full build, or unrelated package checks.
+- Validation must be proportional to the size and risk of the change. For small and medium
+  changes:
+  - Iterate with `bun run check`: format check, lint errors and `typecheck:fast` (tsc-rs) for every
+    package, Turbo-cached, so it takes seconds. Fix formatting with `bun fmt`, not `vp check --fix`
+    (its lint autofixes can change semantics).
+  - Finish with `bun run check:changed`. It adds `bun typecheck`, the authoritative TS7 + Effect
+    gate (`typecheck:fast` is only a pre-check and loses when the two disagree), and the tests the
+    change affects: those Vitest's import graph links to it, plus each affected package's tests that
+    read sources from disk. The change is everything since the merge-base with `origin/main`,
+    uncommitted and untracked files included.
+  - Add `--tests=affected` (every test of each affected package) after changing shared test
+    helpers, setup, timing, concurrency, retry or lifecycle code, or when the selection looks too
+    narrow; fixture, snapshot, lockfile, patch and root Vitest config changes escalate on their own.
+    `bun run test:changed` runs only the tests; for one file use
+    `bun run --cwd apps/server test -- src/path/file.test.ts`.
+  - Do not run the full `bun run test` routinely: the server suite alone takes several minutes
+    even with parallel files, it loads a machine other agents share, and CI runs every affected
+    package's tests on each PR. `RYCO_TEST_MAX_WORKERS` caps the server's local workers.
 - Run the full repository backstop only for very large, cross-cutting, or high-risk changes that
   materially affect multiple packages or major runtime boundaries:
 

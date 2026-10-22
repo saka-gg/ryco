@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { E2EE_PREKEY_ROTATION_OVERLAP } from "@ryco/shared/relayE2eeConstants";
 import { deriveE2eeAgreementPublicKey } from "@ryco/shared/relayE2eeKeys";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import { makeNodeContinuityAnchor } from "../hubIdentity/NodeContinuityAnchor.ts";
 import { NODE_E2EE_FAIL_CLOSED_POLICY } from "../hubIdentity/NodeE2eePolicyStore.ts";
@@ -23,6 +23,17 @@ import {
   hubIdentityHoldsKeyMaterial,
   makeHubIdentityRuntime,
 } from "./HubIdentityRuntime.ts";
+
+// Every test root lives in one directory per run: the runtime's default
+// continuity anchor is a sibling of the state directory, so roots made directly
+// in tmpdir() leave anchors in a shared $TMPDIR/anchors that nothing removes,
+// and its ownership check fails there once another user has created it.
+let tempParent = "";
+beforeAll(async () => {
+  tempParent = await mkdtemp(join(tmpdir(), "ryco-hub-identity-test-"));
+});
+afterAll(() => rm(tempParent, { recursive: true, force: true }));
+const makeTempRoot = (prefix: string) => mkdtemp(join(tempParent, prefix));
 
 const nodeId = `node_${"A".repeat(22)}`;
 const activeKeyId = `nkey_${"B".repeat(22)}`;
@@ -107,7 +118,7 @@ async function writeLegacyActiveState(
 
 describe("HubIdentityRuntime", () => {
   it("enrolls, survives restart, and creates a fresh canonical proof without exporting keys", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-runtime-"));
+    const root = await makeTempRoot("ryco-hub-identity-runtime-");
     const store = makeMemoryStore();
     let environmentId = "";
     let challengeRequests = 0;
@@ -212,7 +223,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("re-reads a pending ceremony across a restart and recomputes its fingerprint", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-pending-read-"));
+    const root = await makeTempRoot("ryco-hub-identity-pending-read-");
     const store = makeMemoryStore();
     const fetchImplementation = async (input: string | URL | Request) => {
       if (String(input).endsWith("/api/node/enrollments")) {
@@ -265,7 +276,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("erases every owned secret, mints a fresh EnvironmentId, and is idempotent", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-leave-"));
+    const root = await makeTempRoot("ryco-hub-identity-leave-");
     const store = makeMemoryStore();
     const options = {
       statePath: join(root, "hub-identity.json"),
@@ -318,7 +329,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("erases an identity key still queued for destruction, and drops the queue with it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-leave-queued-"));
+    const root = await makeTempRoot("ryco-hub-identity-leave-queued-");
     const store = makeMemoryStore();
     const statePath = join(root, "hub-identity.json");
     const runtime = await makeHubIdentityRuntime({
@@ -354,7 +365,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("finishes an interrupted leave on the next start, even with the keys already gone", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-leave-resume-"));
+    const root = await makeTempRoot("ryco-hub-identity-leave-resume-");
     const store = makeMemoryStore();
     const statePath = join(root, "hub-identity.json");
     const options = {
@@ -399,7 +410,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("leaves startup's writes to a process that owns the identity when asked to defer", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-deferred-start-"));
+    const root = await makeTempRoot("ryco-hub-identity-deferred-start-");
     const statePath = join(root, "hub-identity.json");
     await writeFile(
       statePath,
@@ -436,7 +447,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("reports key material from state files alone", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-material-"));
+    const root = await makeTempRoot("ryco-hub-identity-material-");
     const fresh = join(root, "fresh", "hub-identity.json");
     await mkdir(dirname(fresh), { recursive: true, mode: 0o700 });
     expect(await hubIdentityHoldsKeyMaterial({ statePath: fresh })).toBe(false);
@@ -449,7 +460,7 @@ describe("HubIdentityRuntime", () => {
   it("builds key custody for an identity-less node without touching the OS store", async () => {
     // A Desktop standby connector builds this runtime on every launch; it must
     // not raise a credential-store prompt before anyone asks to enroll.
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-standby-"));
+    const root = await makeTempRoot("ryco-hub-identity-standby-");
     const touched: string[] = [];
     const osStore = makeMemoryStore("keytar");
     const runtime = await makeHubIdentityRuntime({
@@ -481,7 +492,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("loads the E2EE records while the key store is selected and reports each phase", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-phases-"));
+    const root = await makeTempRoot("ryco-hub-identity-phases-");
     const phases: string[] = [];
     let releaseKeyStore!: () => void;
     const keyStoreHeld = new Promise<void>((resolve) => {
@@ -513,7 +524,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("fails the build when key custody is unavailable, after the record loads settle", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-phases-fail-"));
+    const root = await makeTempRoot("ryco-hub-identity-phases-fail-");
     const statePath = join(root, "state", "hub-identity.json");
     await writeLegacyActiveState(statePath);
     const phases: string[] = [];
@@ -535,7 +546,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("keeps a file-backed identity on files when the OS store later becomes available", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-file-affinity-"));
+    const root = await makeTempRoot("ryco-hub-identity-file-affinity-");
     const fileStore = makeMemoryStore("permissioned-file");
     let initialOsAttempts = 0;
     const options = {
@@ -576,7 +587,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("never falls through from an OS-backed identity to the file store", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-os-affinity-"));
+    const root = await makeTempRoot("ryco-hub-identity-os-affinity-");
     const osStore = makeMemoryStore("keytar");
     const fileStore = makeMemoryStore("permissioned-file");
     const options = {
@@ -615,7 +626,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("requires the explicit fallback permission for a file-backed identity", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-file-permission-"));
+    const root = await makeTempRoot("ryco-hub-identity-file-permission-");
     const fileStore = makeMemoryStore("permissioned-file");
     const options = {
       statePath: join(root, "hub-identity.json"),
@@ -643,7 +654,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("issues, re-signs, and erases the E2EE agreement prekey alongside the identity", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-e2ee-prekey-"));
+    const root = await makeTempRoot("ryco-hub-identity-e2ee-prekey-");
     const statePath = join(root, "hub-identity.json");
     const prekeyStatePath = join(root, "hub-e2ee-prekey.json");
     const store = makeMemoryStore();
@@ -721,7 +732,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("re-issues the prekey when a rotation activates, without waiting for a restart", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-e2ee-rebind-"));
+    const root = await makeTempRoot("ryco-hub-identity-e2ee-rebind-");
     const statePath = join(root, "hub-identity.json");
     const prekeyStatePath = join(root, "hub-e2ee-prekey.json");
     const store = makeMemoryStore();
@@ -771,7 +782,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("keeps one continuity lineage across restarts, and across a leave", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-continuity-"));
+    const root = await makeTempRoot("ryco-hub-identity-continuity-");
     // Laid out the way the connector lays it out: everything the operator
     // restores under one state directory, and the §5.7 anchor outside it.
     const statePath = join(root, "userdata", "hub-identity.json");
@@ -827,7 +838,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("completes a promotion whose certificate was already retained, with the outgoing key gone", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-promotion-retry-"));
+    const root = await makeTempRoot("ryco-hub-identity-promotion-retry-");
     const statePath = join(root, "hub-identity.json");
     const continuityStatePath = join(root, "hub-continuity.json");
     const continuityAnchorPath = join(root, "anchor", "hub-continuity.json");
@@ -896,7 +907,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("reports a chain that reaches no key in custody, rather than throwing", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-lost-key-"));
+    const root = await makeTempRoot("ryco-hub-identity-lost-key-");
     const statePath = join(root, "hub-identity.json");
     const store = makeMemoryStore();
     await makeNodeSigningIdentity(store).generate("node-key.active");
@@ -928,7 +939,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("declines to advertise, rather than minting, when two values claim the lineage", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-continuity-conflict-"));
+    const root = await makeTempRoot("ryco-hub-identity-continuity-conflict-");
     const statePath = join(root, "hub-identity.json");
     const continuityStatePath = join(root, "hub-continuity.json");
     const continuityAnchorPath = join(root, "anchor", "hub-continuity.json");
@@ -981,7 +992,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("starts without E2EE rather than failing when no prekey can be issued", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-e2ee-unserviceable-"));
+    const root = await makeTempRoot("ryco-hub-identity-e2ee-unserviceable-");
     const statePath = join(root, "hub-identity.json");
     const store = makeMemoryStore();
     await makeNodeSigningIdentity(store).generate("node-key.active");
@@ -1011,7 +1022,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("migrates a legacy file identity only when exactly one store owns its keys", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-legacy-file-"));
+    const root = await makeTempRoot("ryco-hub-identity-legacy-file-");
     const statePath = join(root, "hub-identity.json");
     const osStore = makeMemoryStore("keytar");
     const fileStore = makeMemoryStore("permissioned-file");
@@ -1039,7 +1050,7 @@ describe("HubIdentityRuntime", () => {
       ) => Promise<void>,
       staged = false,
     ) => {
-      const root = await mkdtemp(join(tmpdir(), `ryco-hub-identity-legacy-${label}-`));
+      const root = await makeTempRoot(`ryco-hub-identity-legacy-${label}-`);
       const statePath = join(root, "hub-identity.json");
       const osStore = makeMemoryStore("keytar");
       const fileStore = makeMemoryStore("permissioned-file");
@@ -1082,7 +1093,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("bounds a legacy custody inspection failure", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-legacy-locked-"));
+    const root = await makeTempRoot("ryco-hub-identity-legacy-locked-");
     const statePath = join(root, "hub-identity.json");
     const osStore = {
       ...makeMemoryStore("keytar"),
@@ -1103,7 +1114,7 @@ describe("HubIdentityRuntime", () => {
   });
 
   it("fails restart with a bounded error when enrolled key custody is missing", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ryco-hub-identity-missing-"));
+    const root = await makeTempRoot("ryco-hub-identity-missing-");
     const store = makeMemoryStore();
     let environmentId = "";
     const fetchImplementation = async (input: string | URL | Request, init?: RequestInit) => {

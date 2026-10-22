@@ -1,4 +1,4 @@
-import { Effect, Layer, FileSystem, Path } from "effect";
+import { Effect, Layer, FileSystem, Logger, Path } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
@@ -90,8 +90,50 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   );
 }, Layer.unwrap);
 
-export const SqlitePersistenceMemory = SqliteReadClientLayer.layerMain.pipe(
-  Layer.provideMerge(Layer.provideMerge(setup, makeRuntimeSqliteLayer({ filename: ":memory:" }))),
+const memoryPersistence = (sqlite: Layer.Layer<SqlClient.SqlClient, SqlError>) =>
+  SqliteReadClientLayer.layerMain.pipe(Layer.provideMerge(Layer.provideMerge(setup, sqlite)));
+
+/** A new in-memory database that runs every migration itself. */
+export const SqlitePersistenceMemoryFresh = memoryPersistence(
+  makeRuntimeSqliteLayer({ filename: ":memory:" }),
+);
+
+// Tests build in-memory databases by the hundred, and migrating each one costs
+// ~60-180 ms. Under Node, the first build of a process migrates one database and
+// keeps its image; each later build opens a private copy of it (well under a
+// millisecond) and still runs `setup`, whose ledger pass then has nothing to do.
+// `undefined` (Bun, or a `node:sqlite` without images) keeps the fresh path.
+let migratedMemoryImagePromise: Promise<Uint8Array | undefined> | undefined;
+const buildMigratedMemoryImage = Effect.gen(function* () {
+  if (process.versions.bun !== undefined) return undefined;
+  const NodeSqliteClient = yield* Effect.promise(defaultSqliteClientLoaders.node);
+  if (!NodeSqliteClient.supportsDatabaseImages) return undefined;
+  return yield* Effect.gen(function* () {
+    const client = yield* NodeSqliteClient.SqliteClient;
+    return yield* client.export;
+  }).pipe(
+    Effect.provide(Layer.provideMerge(setup, NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+}).pipe(
+  // Built once for every caller, apart from their runtimes: the migration logs
+  // would only be noise there. A failure still fails each build that needs it.
+  Effect.provide(Logger.layer([])),
+);
+const migratedMemoryImage = Effect.promise(
+  () => (migratedMemoryImagePromise ??= Effect.runPromise(buildMigratedMemoryImage)),
+);
+
+/**
+ * A new in-memory database with every migration applied, private to the layer
+ * that builds it.
+ */
+export const SqlitePersistenceMemory = Layer.unwrap(
+  Effect.gen(function* () {
+    const image = yield* migratedMemoryImage;
+    if (image === undefined) return SqlitePersistenceMemoryFresh;
+    const NodeSqliteClient = yield* Effect.promise(defaultSqliteClientLoaders.node);
+    return memoryPersistence(NodeSqliteClient.layer({ filename: ":memory:", image }));
+  }),
 );
 
 export const layerConfig = Layer.unwrap(

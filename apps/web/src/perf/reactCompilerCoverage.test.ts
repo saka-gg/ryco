@@ -98,11 +98,8 @@ interface Babel {
   ) => void;
 }
 
-/** @babel/core is a peer of the build's Babel plugin, not a direct dependency. */
 function loadBabel(): Babel {
-  const requireFromWeb = createRequire(import.meta.url);
-  const requireFromBabelPlugin = createRequire(requireFromWeb.resolve("@rolldown/plugin-babel"));
-  return requireFromBabelPlugin("@babel/core") as Babel;
+  return createRequire(import.meta.url)("@babel/core") as Babel;
 }
 
 const PARSER_OPTIONS = { plugins: ["typescript", "jsx"] };

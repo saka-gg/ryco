@@ -1,8 +1,10 @@
 name: Pull Request Validation
+run-name: PR #${{ github.event.client_payload.pr || inputs['pr-number'] }} (${{ github.event.client_payload.source || 'manual' }})
 
 on:
   # Created by pr-vouch.yml after it has established that the PR author is
-  # trusted. Repository-dispatch workflows execute from the default branch.
+  # trusted, and once more when a PR closes or merges, to stop its validation.
+  # Repository-dispatch workflows execute from the default branch.
   repository_dispatch:
     types: [trusted-pr-validation]
   # Maintainers may deliberately validate an unvouched PR by its number.
@@ -18,29 +20,42 @@ permissions:
   issues: read
   pull-requests: read
 
+# One run per PR: a newer dispatch cancels the run in flight, whose `report`
+# job still runs (`always()`) to settle the status it posted.
 concurrency:
   group: pr-validation-${{ github.event_name == 'workflow_dispatch' && github.event.inputs['pr-number'] || github.event.client_payload.pr }}
   cancel-in-progress: true
 
 jobs:
   # repository_dispatch does not include pull_request data. Fetch one
-  # authoritative PR record here for the trust decision and Turbo inputs.
+  # authoritative PR record here for the trust decision, the exact commit to
+  # test, and Turbo inputs.
   gate:
     name: Gate
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # `statuses: write` posts the start and the refusals of the PR's
+    # ryco/pr-validation status. No job holding it runs PR code.
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
     outputs:
       checkout-ref: ${{ steps.gate.outputs.checkout-ref }}
       affected-base: ${{ steps.gate.outputs.affected-base }}
+      head-sha: ${{ steps.gate.outputs.head-sha }}
+      pr-number: ${{ steps.gate.outputs.pr-number }}
       should-validate: ${{ steps.gate.outputs.should-validate }}
     steps:
       - id: gate
-        name: Check trust and validation scope
+        name: Check trust and resolve the test merge
         uses: actions/github-script@v8
         with:
+          retries: 3
           script: |
             const canonicalRepository = "saka-gg/ryco";
-            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            const { owner, repo } = context.repo;
+            const repository = `${owner}/${repo}`;
             if (repository !== canonicalRepository) {
               core.info(`Skipping validation outside ${canonicalRepository}: ${repository}`);
               core.setOutput("should-validate", "false");
@@ -55,14 +70,26 @@ jobs:
               throw new Error(`Invalid pull request number: ${prNumber}`);
             }
 
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
+            const fetchPullRequest = async () =>
+              (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
+            let pullRequest = await fetchPullRequest();
             if (pullRequest.base.repo?.full_name !== canonicalRepository) {
               core.info(`Skipping PR #${prNumber}; base repository is ${pullRequest.base.repo?.full_name ?? "unknown"}.`);
               core.setOutput("should-validate", "false");
+              return;
+            }
+            // ci.yml validates whatever lands on main. pr-vouch.yml dispatches
+            // once more when a PR closes or merges; that run cancels the one in
+            // flight and stops here.
+            const skipIfClosed = () => {
+              if (pullRequest.state === "open") {
+                return false;
+              }
+              core.info(`Skipping PR #${prNumber}; it is ${pullRequest.merged ? "merged" : pullRequest.state}.`);
+              core.setOutput("should-validate", "false");
+              return true;
+            };
+            if (skipIfClosed()) {
               return;
             }
 
@@ -81,19 +108,89 @@ jobs:
               return;
             }
 
+            // The report job posts how validation ends; this posts its start and
+            // the refusals below, on the head commit the PR page shows.
+            const postStatus = (state, description) =>
+              github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: pullRequest.head.sha,
+                state,
+                context: "ryco/pr-validation",
+                description: description.slice(0, 140),
+                target_url: `${context.serverUrl}/${repository}/actions/runs/${context.runId}`,
+              });
+
+            // Resolve the test merge once and give every job its exact SHA:
+            // refs/pull/N/merge moves with main and the head, is gone once the PR
+            // merges, and keeps an old merge while the PR conflicts. GitHub
+            // reports `mergeable: null` while it recomputes the merge, so wait
+            // for a merge of the current head into the current base tip.
+            let merge;
+            for (let attempt = 1; ; attempt += 1) {
+              if (pullRequest.mergeable === false) {
+                await postStatus("failure", `Conflicts with ${pullRequest.base.ref}; resolve them and push`);
+                core.setFailed(
+                  `PR #${prNumber} conflicts with ${pullRequest.base.ref}, so there is no merge commit to validate. Resolve the conflicts and push.`,
+                );
+                return;
+              }
+              if (pullRequest.mergeable && pullRequest.merge_commit_sha) {
+                const [{ data: commit }, { data: baseRef }] = await Promise.all([
+                  github.rest.git.getCommit({ owner, repo, commit_sha: pullRequest.merge_commit_sha }),
+                  github.rest.git.getRef({ owner, repo, ref: `heads/${pullRequest.base.ref}` }),
+                ]);
+                const parents = commit.parents.map((parent) => parent.sha);
+                if (
+                  parents.length === 2 &&
+                  parents[0] === baseRef.object.sha &&
+                  parents[1] === pullRequest.head.sha
+                ) {
+                  merge = commit;
+                  break;
+                }
+                core.info(
+                  `Test merge ${commit.sha} joins ${parents.join(" + ")}, not ${baseRef.object.sha} + ${pullRequest.head.sha}; waiting for GitHub to update it.`,
+                );
+              }
+              if (attempt === 20) {
+                await postStatus("error", "GitHub has no current test merge; comment /recheck-vouch to retry");
+                core.setFailed(
+                  `GitHub did not produce a merge of head ${pullRequest.head.sha} into the current ${pullRequest.base.ref} (mergeable=${pullRequest.mergeable}, merge_commit_sha=${pullRequest.merge_commit_sha}).`,
+                );
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+              pullRequest = await fetchPullRequest();
+              if (skipIfClosed()) {
+                return;
+              }
+            }
+
             core.info(
               manualApproval && !trusted
                 ? `Validating PR #${prNumber} by manual approval.`
                 : `Validating trusted PR #${prNumber}.`,
             );
-            core.setOutput("checkout-ref", `refs/pull/${prNumber}/merge`);
-            core.setOutput("affected-base", pullRequest.base.sha);
+            core.info(`Test merge ${merge.sha}: head ${pullRequest.head.sha} into ${pullRequest.base.ref} at ${merge.parents[0].sha}.`);
+            core.setOutput("checkout-ref", merge.sha);
+            // Turbo --affected and the scope script diff against the base this
+            // merge was made on. The PR's base.sha can lag main by hundreds of
+            // commits, which pulls all of main's changes into the scope.
+            core.setOutput("affected-base", merge.parents[0].sha);
+            core.setOutput("head-sha", pullRequest.head.sha);
+            core.setOutput("pr-number", String(prNumber));
             core.setOutput("should-validate", "true");
+            await postStatus("pending", `Validating test merge ${merge.sha.slice(0, 7)} into ${pullRequest.base.ref}`);
 
   validate:
     name: Pull Request
     needs: gate
     if: ${{ needs.gate.outputs.should-validate == 'true' }}
+    # Dispatched runs execute on main, so their caches would land in main's
+    # scope, which main CI and releases restore. PR code may read those caches
+    # but must not seed them; the cap applies to the whole called workflow.
+    cache-mode: read
     uses: ./.github/workflows/_validation.yml
     with:
       checkout-ref: ${{ needs.gate.outputs.checkout-ref }}
@@ -103,3 +200,74 @@ jobs:
       run-browser-tests: true
       run-desktop-build: true
       run-release-smoke: true
+
+  # Dispatched runs attach their checks to main's head commit, so this status
+  # is the only validation result the PR page shows. `always()` runs it after
+  # a cancellation too, so no run leaves the Gate's pending status behind.
+  report:
+    name: Report status
+    needs: [gate, validate]
+    if: ${{ always() && needs.gate.outputs.should-validate == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Post the validation result
+        uses: actions/github-script@v8
+        env:
+          RESULT: ${{ needs.validate.result }}
+          HEAD_SHA: ${{ needs.gate.outputs.head-sha }}
+          MERGE_SHA: ${{ needs.gate.outputs.checkout-ref }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr-number }}
+        with:
+          retries: 3
+          script: |
+            const { owner, repo } = context.repo;
+            const { RESULT: result, HEAD_SHA: sha, MERGE_SHA: mergeSha, PR_NUMBER: prNumber } = process.env;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const merge = `test merge ${mergeSha.slice(0, 7)}`;
+            let state;
+            let description;
+            if (result === "success" || result === "failure") {
+              state = result;
+              description = `${result === "success" ? "Passed" : "Failed"} on ${merge}`;
+            } else {
+              // Cancelled or never started. A newer run for the same head (a
+              // /recheck-vouch) may already have replaced this run's pending
+              // status; never overwrite it with this run's cancellation.
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: sha });
+              const latest = combined.statuses.find((status) => status.context === "ryco/pr-validation");
+              if (latest && latest.target_url !== runUrl) {
+                core.info(`Leaving ${sha} to ${latest.target_url} (${latest.state}).`);
+                return;
+              }
+              // pr-vouch.yml stops the run of a closed PR, and a push supersedes
+              // the run of the previous head.
+              const { data: pullRequest } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: Number(prNumber),
+              });
+              state = "error";
+              if (pullRequest.merged) {
+                description = "Stopped: the PR merged first; CI validates main";
+              } else if (pullRequest.state !== "open") {
+                description = "Stopped: the PR was closed";
+              } else if (pullRequest.head.sha !== sha) {
+                description = "Superseded by a newer commit";
+              } else {
+                description = `${result === "cancelled" ? "Cancelled" : "Did not run"} on ${merge}`;
+              }
+            }
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha,
+              state,
+              context: "ryco/pr-validation",
+              description,
+              target_url: runUrl,
+            });
+            core.info(`PR #${prNumber} head ${sha}: ${state} (${description}).`);

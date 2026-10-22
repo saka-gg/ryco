@@ -7,5 +7,5 @@
   "compilerOptions": {
     "lib": ["ESNext", "esnext.disposable", "DOM", "DOM.Iterable"]
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "vitest.config.ts"]
 }

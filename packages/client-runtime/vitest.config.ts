@@ -1,3 +1,14 @@
-// Vitest 5 no longer reads configs from parent directories, so each package
-// opts into the shared workspace test config explicitly.
-export { default } from "../../vitest.config.ts";
+import { defineConfig, mergeConfig } from "vite-plus/test/config";
+
+import baseConfig from "../../vitest.config.ts";
+import { pureAndIsolatedProjects } from "../../vitest.pure-projects.ts";
+import { CLIENT_RUNTIME_PURE_TEST_FILES } from "./test/pureTests.ts";
+
+export default mergeConfig(
+  baseConfig,
+  defineConfig({
+    test: {
+      projects: pureAndIsolatedProjects(import.meta.dirname, CLIENT_RUNTIME_PURE_TEST_FILES),
+    },
+  }),
+);

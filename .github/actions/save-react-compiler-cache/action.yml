@@ -1,0 +1,56 @@
+name: Save React Compiler cache
+description: >
+  Prune the React Compiler transform cache to the entries this job used and
+  save it, when the job compiled anything new.
+
+inputs:
+  key:
+    description: >
+      The key output of restore-react-compiler-cache. Guard the calling step
+      with `if: !cancelled() && steps.<id>.outcome == 'success'`: entries
+      are complete and errors are never cached, so a failed job's are valid.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The runner does not enforce required inputs on composite actions.
+    - name: Check React Compiler cache key
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+      run: |
+        if [ -z "$KEY" ]; then
+          echo "::error::save-react-compiler-cache: key is empty; pass restore-react-compiler-cache's key output."
+          exit 1
+        fi
+
+    # A job that compiled nothing new (all hits, or Turbo restored the web
+    # build) has nothing to add, so it saves nothing. Otherwise drop what this
+    # job did not use, so the cache tracks the current sources instead of
+    # growing commit after commit. A pruning failure only skips the save.
+    - name: Prune React Compiler cache
+      id: prune
+      continue-on-error: true
+      shell: bash
+      run: |
+        dir=apps/web/node_modules/.cache/ryco-react-compiler
+        marker="$RUNNER_TEMP/react-compiler-cache-restored"
+        restored=$(cat "$marker")
+        # Left by killed writers; finished entries are renamed into place.
+        find "$dir" -type f -name '*.tmp' -delete
+        total=$(find "$dir" -type f -name '*.json' | wc -l)
+        used=$(find "$dir" -type f -name '*.json' -newer "$marker" | wc -l)
+        compiled=$((total - restored))
+        echo "React Compiler cache: ${restored} entries restored, $((used - compiled)) reused, ${compiled} compiled."
+        if [ "$compiled" -gt 0 ]; then
+          find "$dir" -type f -name '*.json' ! -newer "$marker" -delete
+          echo "save=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save React Compiler cache
+      if: ${{ steps.prune.outputs.save == 'true' }}
+      uses: actions/cache/save@v5
+      with:
+        path: apps/web/node_modules/.cache/ryco-react-compiler
+        key: ${{ inputs.key }}

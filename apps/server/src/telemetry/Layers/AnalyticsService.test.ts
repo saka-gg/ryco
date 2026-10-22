@@ -276,13 +276,13 @@ it.live("bounds the shutdown flush when the telemetry host is slow", () =>
         RYCO_TELEMETRY_FLUSH_INTERVAL_MS: 60_000,
       }),
     );
-    // A host that takes far longer to answer than shutdown may wait.
+    // A host that never answers. Request handlers run uninterruptibly, so the
+    // wait opts back in: otherwise the test's teardown would wait for it.
     yield* Layer.launch(
       HttpServer.serve(
         Effect.gen(function* () {
           requests += 1;
-          yield* Effect.sleep("3 seconds");
-          return HttpServerResponse.jsonUnsafe({});
+          return yield* Effect.interruptible(Effect.never);
         }),
       ),
     ).pipe(Effect.forkScoped);

@@ -8,6 +8,7 @@ const shared = {
   outDir: "dist-electron",
   sourcemap: buildSourcemap,
   outExtensions: () => ({ js: ".cjs" }),
+  tsconfig: "tsconfig.build.json",
 };
 
 export default defineConfig([
