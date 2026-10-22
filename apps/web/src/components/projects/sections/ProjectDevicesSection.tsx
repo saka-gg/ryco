@@ -5,13 +5,9 @@ import { ArrowRightIcon } from "lucide-react";
 import { useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import { useDeviceName } from "../../../deviceName";
-import { isElectron } from "../../../env";
-import { usePrimaryEnvironmentId } from "../../../environments/primary";
-import { useSavedEnvironmentRegistryStore } from "../../../environments/runtime";
 import { useSettings, useUpdateSettings } from "../../../hooks/useSettings";
+import { useNodeCatalog } from "../../../environments/nodeCatalog";
 import { cn } from "../../../lib/utils";
-import { useDesktopWorkspaceState } from "../../../platform/desktopWorkspace";
 import {
   readProjectGroupingChoice,
   withProjectGroupingChoice,
@@ -177,33 +173,6 @@ function CheckoutRow(props: {
   );
 }
 
-/** Devices this client knows, by environment id, with the labels people recognize. */
-function useKnownDevices(): ReadonlyArray<{
-  readonly environmentId: string;
-  readonly label: string;
-}> {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryName = useDeviceName();
-  const saved = useSavedEnvironmentRegistryStore((state) => state.byId);
-  const desktop = useDesktopWorkspaceState();
-  return useMemo(() => {
-    const devices: Array<{ environmentId: string; label: string }> = [];
-    if (primaryEnvironmentId)
-      devices.push({ environmentId: primaryEnvironmentId, label: primaryName });
-    // The desktop's own Hub alias is this device again; never list it twice.
-    const localAlias = isElectron ? desktop.localEnvironmentId : null;
-    for (const record of Object.values(saved)) {
-      if (record.environmentId !== localAlias)
-        devices.push({ environmentId: record.environmentId, label: record.label });
-    }
-    for (const machine of desktop.machines) {
-      if (machine.environmentId !== localAlias)
-        devices.push({ environmentId: machine.environmentId, label: machine.label });
-    }
-    return devices;
-  }, [desktop.localEnvironmentId, desktop.machines, primaryEnvironmentId, primaryName, saved]);
-}
-
 /**
  * Where the project is checked out, and where not. With several checkouts the
  * rows pick which one the rest of the page edits. Sidebar grouping is a
@@ -212,7 +181,7 @@ function useKnownDevices(): ReadonlyArray<{
 export function ProjectDevicesSection({ member }: ProjectSectionProps) {
   const { nav } = useProjectsPage();
   const { snapshot } = useProjectsSelection();
-  const knownDevices = useKnownDevices();
+  const knownDevices = useNodeCatalog();
   // Only a device whose project list has arrived can be said to lack it;
   // one that is offline or still syncing simply is not known yet.
   const syncedEnvironmentIds = useStore(

@@ -15,6 +15,8 @@ import type {
   WorktreeId,
 } from "@ryco/contracts";
 
+import type { NodeProjectCopySupport, NodeTransport } from "../nodes/types.js";
+
 export type WorkspaceClientTier = "native" | "hosted-web";
 
 /** Native trust is authoritative input, never a synchronous UI classification. */
@@ -35,7 +37,12 @@ export type WorkspaceMachineAccessReason =
   | "identity-conflict"
   | "offline"
   | "role-unknown"
-  | "viewer";
+  | "viewer"
+  /**
+   * A direct session paired with the `client` role: it can work in existing
+   * projects but not add, clone or copy projects there.
+   */
+  | "client-session";
 
 export type WorkspaceCacheDisposition = "available" | "locked-stale" | "purge";
 
@@ -61,6 +68,10 @@ export interface WorkspaceMachineCatalogEntry {
     readonly observedAt: number;
   };
   readonly connectionState: EnvironmentConnectionState;
+  /** How this client reaches the machine while it is connected; null otherwise. */
+  readonly transport: NodeTransport | null;
+  /** Cross-node project copy support; `unknown` until the machine states it. */
+  readonly projectCopySupport: NodeProjectCopySupport;
   readonly deliveryUnknown: boolean;
   readonly revokedAt: number | null;
   readonly removed: boolean;

@@ -295,7 +295,10 @@ import type {
 } from "./auth.ts";
 import type { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { EditorId } from "./editor.ts";
-import type { ExecutionEnvironmentDescriptor } from "./environment.ts";
+import type {
+  ExecutionEnvironmentDescriptor,
+  ExecutionEnvironmentPlatformOs,
+} from "./environment.ts";
 import type { ClientSettings, ServerSettings, ServerSettingsPatch } from "./settings.ts";
 import type {
   DeviceAttachInput,
@@ -596,6 +599,8 @@ export interface DesktopWorkspaceMachineProjection {
   readonly environmentId: EnvironmentId;
   readonly nodeId: string | null;
   readonly label: string;
+  /** As the Hub directory states it; absent when it does not. */
+  readonly platformOs?: ExecutionEnvironmentPlatformOs;
   readonly online: boolean;
   readonly nativeTrust: DesktopWorkspaceNativeTrustState;
   readonly connectionState: "disconnected" | "connecting" | "connected" | "error";
@@ -664,7 +669,8 @@ export type DesktopWorkspaceScopeProjection =
   | { readonly type: "interactive" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
   | { readonly type: "vcs-status"; readonly cwd: string }
-  | { readonly type: "provider-status"; readonly instanceId?: string };
+  | { readonly type: "provider-status"; readonly instanceId?: string }
+  | { readonly type: "project-copy"; readonly copyId: string };
 
 export interface DesktopWorkspaceConnectionCommand {
   readonly action: "connect" | "release";

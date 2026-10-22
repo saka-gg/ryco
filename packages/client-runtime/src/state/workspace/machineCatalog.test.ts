@@ -125,4 +125,47 @@ describe("workspace machine catalog", () => {
         .capabilities,
     ).not.toHaveProperty("threadSettlement");
   });
+
+  it("reads project copy support as unknown until the machine states it", () => {
+    expect(reconcileWorkspaceMachine(input("unstated")).projectCopySupport).toBe("unknown");
+    expect(
+      reconcileWorkspaceMachine(input("copy", { capabilities: { projectCopy: true } }))
+        .projectCopySupport,
+    ).toBe("yes");
+    expect(
+      reconcileWorkspaceMachine(input("older", { capabilities: { projectCopy: false } }))
+        .projectCopySupport,
+    ).toBe("no");
+  });
+
+  it("states the transport only while the machine is connected", () => {
+    expect(
+      reconcileWorkspaceMachine(
+        input("relayed", { transport: "relay", connectionState: "connected" }),
+      ).transport,
+    ).toBe("relay");
+    expect(
+      reconcileWorkspaceMachine(
+        input("connecting", { transport: "relay", connectionState: "connecting" }),
+      ).transport,
+    ).toBeNull();
+    expect(
+      reconcileWorkspaceMachine(input("unstated", { connectionState: "connected" })).transport,
+    ).toBeNull();
+  });
+
+  it("refuses mutation through a direct client session for that reason alone", () => {
+    const client = reconcileWorkspaceMachine(
+      input("client", { effectiveRole: null, directSessionRole: "client" }),
+    );
+    expect(client.canConnect).toBe(true);
+    expect(client.canMutate).toBe(false);
+    expect(client.accessReasons).toEqual(["client-session"]);
+
+    const owner = reconcileWorkspaceMachine(
+      input("owner", { effectiveRole: "owner", directSessionRole: "owner" }),
+    );
+    expect(owner.canMutate).toBe(true);
+    expect(owner.accessReasons).toEqual([]);
+  });
 });

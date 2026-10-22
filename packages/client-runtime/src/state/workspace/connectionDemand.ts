@@ -15,7 +15,13 @@ export type WorkspaceConnectionScope =
   | { readonly type: "interactive" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
   | { readonly type: "vcs-status"; readonly cwd: string }
-  | { readonly type: "provider-status"; readonly instanceId?: string };
+  | { readonly type: "provider-status"; readonly instanceId?: string }
+  /**
+   * A cross-node project copy holding a node: never preemptible, held on the
+   * source until its export is disposed and on the target until the import
+   * has started.
+   */
+  | { readonly type: "project-copy"; readonly copyId: string };
 
 export interface WorkspaceConnectionScopeLease {
   readonly leaseId: string;

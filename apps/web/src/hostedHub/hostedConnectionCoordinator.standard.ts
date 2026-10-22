@@ -7,8 +7,8 @@ import { hostedOnly } from "./hostedOnly";
  * `src/clientModeSeams.ts`). A standard build never starts the hosted workspace
  * coordinator, so its published workspace stays the signed-out snapshot, no
  * node mutation lease is ever granted, and no environment maps to a hosted
- * node. Starting a coordinator, and the demand policy that only a running one
- * consults, are hosted-only. Signatures are pinned to the real module below.
+ * node. Starting a coordinator, the demand policy that only a running one
+ * consults, and acquiring a node through it are hosted-only. Signatures are pinned to the real module below.
  */
 type Hosted = typeof import("./hostedConnectionCoordinator");
 
@@ -42,6 +42,10 @@ export const readHostedWorkspaceState: Hosted["readHostedWorkspaceState"] = () =
 export const useHostedWorkspaceState: Hosted["useHostedWorkspaceState"] = () =>
   SIGNED_OUT_WORKSPACE;
 
+/** The signed-out workspace never changes, so nobody is ever notified. */
+export const subscribeHostedWorkspaceState: Hosted["subscribeHostedWorkspaceState"] = () => () =>
+  undefined;
+
 export const readHostedNodeMutationLease: Hosted["readHostedNodeMutationLease"] = () => null;
 
 export const waitForHostedNodeMutationLease: Hosted["waitForHostedNodeMutationLease"] = () =>
@@ -66,6 +70,9 @@ export const startHostedWorkspaceCoordinator: Hosted["startHostedWorkspaceCoordi
 
 export const createHostedConnectionCoordinator: Hosted["createHostedConnectionCoordinator"] = () =>
   hostedOnly("createHostedConnectionCoordinator");
+
+export const hostedNodeAcquisition: Hosted["hostedNodeAcquisition"] = () =>
+  hostedOnly("hostedNodeAcquisition");
 
 export const hostedNodeRequiresNativeClient: Hosted["hostedNodeRequiresNativeClient"] = () =>
   hostedOnly("hostedNodeRequiresNativeClient");

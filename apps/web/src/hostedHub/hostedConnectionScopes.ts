@@ -27,6 +27,8 @@ function scopeKey(environmentId: EnvironmentId, scope: WorkspaceConnectionScope)
       return JSON.stringify([environmentId, scope.type, scope.cwd]);
     case "provider-status":
       return JSON.stringify([environmentId, scope.type, scope.instanceId ?? null]);
+    case "project-copy":
+      return JSON.stringify([environmentId, scope.type, scope.copyId]);
   }
 }
 

@@ -200,6 +200,16 @@ describe("standard build static import graph", () => {
     ).toEqual([]);
   });
 
+  it("keeps node acquisition and the node directory publisher out of the app shell", () => {
+    // Both load on demand: the copy flows import acquisition, and the shell
+    // mounts the publisher through a hook that imports it lazily once idle.
+    expect(
+      forbiddenChains("components/RootAppShell.tsx", [
+        /^apps\/web\/src\/environments\/(?:acquireNode|nodeDirectoryPublisher)\.ts$/u,
+      ]),
+    ).toEqual([]);
+  });
+
   it("keeps the diff renderer out of the pull requests page until the Files tab", () => {
     expect(
       forbiddenChains("components/pullRequests/PullRequestsPage.tsx", [
