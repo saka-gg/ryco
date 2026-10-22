@@ -94,6 +94,30 @@ describe("goal controls", () => {
     expect(handlers.onStatusChange).toHaveBeenCalledWith("active");
   });
 
+  it("pauses the running clock while hidden and re-reads the wall clock on resume", async () => {
+    let visibilityState: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibilityState,
+    });
+    try {
+      mounted = await render(<ComposerGoalHeader goal={goal} isRunning {...actions()} />);
+      await expect.element(page.getByText("1:00", { exact: true })).toBeVisible();
+
+      visibilityState = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      await expect.element(page.getByText("1:00", { exact: true })).toBeVisible();
+
+      visibilityState = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      // Sooner than the next one-second tick could land.
+      await expect.element(page.getByText("1:01", { exact: true }), { timeout: 500 }).toBeVisible();
+    } finally {
+      Reflect.deleteProperty(document, "visibilityState");
+    }
+  });
+
   it.each(["active", "paused"] as const)(
     "labels %s prompt-only support and does not count idle wall time",
     async (status) => {
