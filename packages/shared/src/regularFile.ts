@@ -1,5 +1,6 @@
 import { constants, type BigIntStats, type Stats } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
+import { constants as osConstants } from "node:os";
 
 // Windows defines neither constant and has no FIFOs at file paths, so both
 // collapse to 0 there.
@@ -15,6 +16,23 @@ const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
  * refused unless it is a regular file before anything reads from it.
  */
 export const REGULAR_FILE_READ_FLAGS = constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK;
+
+// libuv has no name for EOPNOTSUPP, so Node reports it only by number
+// ("Unknown system error -102" on macOS).
+const EOPNOTSUPP = osConstants.errno.EOPNOTSUPP;
+
+/**
+ * Whether open(2) failed because the path is a special file. ENXIO marks a
+ * FIFO opened for writing without a reader and, on Linux, a socket; macOS
+ * refuses a socket with EOPNOTSUPP (open(2) reports it otherwise only for
+ * O_SHLOCK, O_EXLOCK or O_TMPFILE, which are never passed here). Under
+ * O_NOFOLLOW, ELOOP means the path ends in a symbolic link.
+ */
+function isSpecialFileOpenError(error: NodeJS.ErrnoException, noFollow: boolean): boolean {
+  return (
+    error.code === "ENXIO" || error.errno === -EOPNOTSUPP || (noFollow && error.code === "ELOOP")
+  );
+}
 
 /** The path names a FIFO, socket, device, directory or refused link, not a regular file. */
 export class NotRegularFileError extends Error {
@@ -49,9 +67,9 @@ export interface OpenRegularFileOptions {
  * Opens `path` without ever waiting on a special file and returns the
  * descriptor only when it is a regular file. A FIFO opened for reading returns
  * at once and fails the fstat check; opened for writing without a reader it
- * fails with ENXIO. Both, a refused final symbolic link and every other
- * non-regular file reject with NotRegularFileError. The caller closes the
- * returned handle.
+ * fails with ENXIO. Both, a socket, a refused final symbolic link and every
+ * other non-regular file reject with NotRegularFileError. The caller closes
+ * the returned handle.
  */
 export function openRegularFile(
   path: string,
@@ -74,11 +92,7 @@ export async function openRegularFile(
   try {
     handle = await open(path, flags);
   } catch (cause) {
-    // open(2) reports ENXIO only for special files, such as a FIFO opened for
-    // writing without a reader or a socket. Under O_NOFOLLOW, ELOOP means the
-    // path ends in a symbolic link.
-    const code = (cause as NodeJS.ErrnoException).code;
-    if (code === "ENXIO" || (code === "ELOOP" && noFollow !== 0)) {
+    if (isSpecialFileOpenError(cause as NodeJS.ErrnoException, noFollow !== 0)) {
       throw new NotRegularFileError({ cause });
     }
     throw cause;

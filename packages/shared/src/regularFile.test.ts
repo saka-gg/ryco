@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -123,6 +124,24 @@ describe("openRegularFile", () => {
     await expect(
       withinDeadline(fifo, () => openRegularFile(fifo, { write: true })),
     ).rejects.toBeInstanceOf(NotRegularFileError);
+  });
+
+  it.skipIf(!posix)("refuses a Unix socket for reading and for writing", async () => {
+    // Linux fails the open with ENXIO, macOS with an EOPNOTSUPP libuv has no name for.
+    const socketPath = path.join(makeTempDir(), "s.sock");
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    try {
+      await expect(openRegularFile(socketPath)).rejects.toBeInstanceOf(NotRegularFileError);
+      await expect(openRegularFile(socketPath, { write: true })).rejects.toBeInstanceOf(
+        NotRegularFileError,
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it.skipIf(!posix)("keeps the read flags non-blocking on a named pipe", async () => {

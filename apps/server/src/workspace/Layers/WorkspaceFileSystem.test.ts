@@ -1,6 +1,7 @@
 import * as SqlClient from "effect/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import fsPromises from "node:fs/promises";
+import * as NodeNet from "node:net";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
@@ -162,7 +163,7 @@ const failsWithoutWaiting = <A, E, R>(fifoPath: string, operation: Effect.Effect
   );
 
 it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
-  describe.skipIf(process.platform === "win32")("named pipes", () => {
+  describe.skipIf(process.platform === "win32")("named pipes and sockets", () => {
     it.effect("refuses text and image previews without waiting for a writer", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -224,6 +225,33 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
         expect("detail" in error && error.detail).toBe("Only regular files can be opened.");
         const stat = yield* Effect.promise(() => fsPromises.lstat(fifoPath));
         expect(stat.isFIFO()).toBe(true);
+      }),
+    );
+
+    it.effect("refuses a socket preview with the regular-file wording", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const server = yield* Effect.acquireRelease(
+          Effect.callback<NodeNet.Server>((resume) => {
+            const listening = NodeNet.createServer();
+            listening.once("error", (cause) => resume(Effect.die(cause)));
+            listening.listen(path.join(cwd, "dev.sock"), () => resume(Effect.succeed(listening)));
+          }),
+          (listening) =>
+            Effect.callback<void>((resume) => {
+              listening.close(() => resume(Effect.void));
+            }),
+        );
+        expect(server.listening).toBe(true);
+
+        const error = yield* workspaceFileSystem
+          .readFile({ cwd, relativePath: "dev.sock" })
+          .pipe(Effect.flip);
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        expect("detail" in error && error.detail).toBe("Only regular files can be previewed.");
       }),
     );
   });
