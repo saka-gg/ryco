@@ -155,6 +155,11 @@ function highlightedText(): string | null {
   return index === -1 ? null : (optionTexts()[index] ?? null);
 }
 
+/** The background a row is painted with. */
+function backgroundOf(element: Element): string {
+  return getComputedStyle(element).backgroundColor;
+}
+
 /** Presses a key `times` times, one press after the other as a person would. */
 async function press(key: string, times = 1) {
   for (let count = 0; count < times; count += 1) await userEvent.keyboard(`{${key}}`);
@@ -217,13 +222,31 @@ describe("ProjectSwitcher", () => {
   it("marks the draft's own row selected when its project is on one node", async () => {
     await renderSelector({ activeProjectId: HUB_LOCAL });
     await openSelector();
-    await expect
-      .element(page.getByRole("option", { name: /^ryco-hub/ }))
-      .toHaveAttribute("aria-selected", "true");
+    const hub = page.getByRole("option", { name: /^ryco-hub/ });
+    await expect.element(hub).toHaveAttribute("aria-selected", "true");
     const selected = document.querySelectorAll(
       '[data-testid="project-selector"] [role="option"][aria-selected="true"]',
     );
     expect(selected).toHaveLength(1);
+    expect(hub.element().hasAttribute("data-selected")).toBe(true);
+
+    // Selected is for assistive tech: at rest the row is painted like any
+    // other (only its bold name says current), so it never reads as a
+    // keyboard highlight that is not there.
+    const ryco = page.getByRole("option", { name: /^ryco 2 nodes/ });
+    const scratch = page.getByRole("option", { name: /^scratch/ });
+    expect(highlightedText()).toBeNull();
+    expect(backgroundOf(hub.element())).toBe(backgroundOf(scratch.element()));
+    expect(hub.element().querySelector(".font-semibold")?.textContent).toBe("ryco-hub");
+
+    // Highlighted, it takes the same tint as any other highlighted row.
+    await press("ArrowDown");
+    await expect.poll(highlightedText).toBe("ryco2 nodes · ~/Code/ryco");
+    const highlightBackground = backgroundOf(ryco.element());
+    expect(highlightBackground).not.toBe(backgroundOf(scratch.element()));
+    await press("ArrowDown");
+    await expect.poll(highlightedText).toBe("ryco-hubMacBook Pro · ~/Code/ryco-hub");
+    expect(backgroundOf(hub.element())).toBe(highlightBackground);
   });
 
   it("opens when the add-project dialog asks to show its project there", async () => {

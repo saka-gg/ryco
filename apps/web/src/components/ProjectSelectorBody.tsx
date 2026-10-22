@@ -459,8 +459,15 @@ function FooterAction(props: {
   );
 }
 
-const ROW_CLASS_NAME =
-  "min-h-0 cursor-pointer rounded-[8px] py-1.5 ps-2 pe-1 text-[13px] data-disabled:pointer-events-auto data-disabled:cursor-not-allowed data-disabled:opacity-50 data-disabled:hover:bg-transparent sm:min-h-0 sm:text-[13px]";
+// The draft's project (or "No project") row is the combobox value, so Base UI
+// marks it selected for assistive tech; on screen only its bold name says
+// "current". The item's selected tint would sit at rest like a keyboard
+// highlight, and highlighted it would differ from every other row's.
+const ROW_CLASS_NAME = cn(
+  "min-h-0 cursor-pointer rounded-[8px] py-1.5 ps-2 pe-1 text-[13px] sm:min-h-0 sm:text-[13px]",
+  "data-selected:bg-transparent [&[data-highlighted][data-selected]]:bg-accent/80",
+  "data-disabled:pointer-events-auto data-disabled:cursor-not-allowed data-disabled:opacity-50 data-disabled:hover:bg-transparent",
+);
 
 function SelectorRow(props: {
   readonly row: ProjectSelectorRow;
