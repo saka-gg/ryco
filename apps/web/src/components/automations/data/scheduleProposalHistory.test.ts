@@ -235,6 +235,25 @@ describe("schedule proposal history through the queue sync", () => {
     expect(merged.map((p) => p.proposalId)).toEqual(["p-lapsed"]);
     expect(checkoutQueueProposals(queue, history)).toBe(merged);
   });
+
+  it("keeps a plan this build cannot read in the queue but out of the schedules", () => {
+    const lapsed = proposal("p-lapsed", createPlan("auto-lapsed"), "expired", START);
+    const unsupported = {
+      ...proposal("p-future", createPlan("auto-future"), "expired", START),
+      plan: { kind: "unsupported" as const, originalKind: "mirrorRepository" },
+    };
+    useAgentControlStore.getState().applyStreamEvent(ENV, {
+      version: 1,
+      type: "snapshot",
+      queue: { revision: 1, active: [], recent: [lapsed, unsupported] },
+    });
+    const queue = useAgentControlStore.getState().queueByEnvironmentId[ENV];
+    expect(queue?.proposalsById["p-future"]?.plan.kind).toBe("unsupported");
+    expect(checkoutQueueProposals(queue, undefined).map((p) => p.proposalId)).toEqual(["p-lapsed"]);
+    expect(Object.keys(absorbScheduleProposals({}, [lapsed, unsupported]))).toEqual([
+      "auto-lapsed",
+    ]);
+  });
 });
 
 describe("retainScheduleProposalHistory", () => {

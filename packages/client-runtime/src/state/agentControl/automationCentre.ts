@@ -1,6 +1,6 @@
 import type {
   AgentControlAutomationRunStatus,
-  AgentControlProposal,
+  AgentControlProposalView,
   AutomationCentreApi,
   AutomationCentreSnapshot,
   ProjectId,
@@ -21,14 +21,14 @@ export const automationRunStatusLabel: Readonly<Record<AgentControlAutomationRun
  * queue is what every project on the device shares, so counts across
  * projects (the sidebar's badge) read it from here.
  */
-export function isWaitingAutomationRun(proposal: AgentControlProposal): boolean {
+export function isWaitingAutomationRun(proposal: AgentControlProposalView): boolean {
   return proposal.status === "pending-user-approval" && proposal.plan.kind === "automationRun";
 }
 
 /** Runs waiting for approval in the given environments' queues. */
 export function waitingAutomationRunCount(
   queues: Readonly<
-    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposal>> }>
+    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposalView>> }>
   >,
   environmentIds: readonly string[],
 ): number {

@@ -5,6 +5,11 @@
  * risk, runtime/worktree conditions, expiry, and terminal outcome. The
  * audit-safe prompt summary is the default text; full prompts appear only
  * in `detailSections`, which the card reveals through deliberate expansion.
+ *
+ * Proposals are the tolerant wire view. A plan this build cannot read
+ * (`unsupported`) and a plan the approving client runs itself
+ * (`requiresClientExecutor`) are presented, but `agentControlCardDecisions`
+ * decides whether this client may offer Approve for them.
  */
 import type { ThreadId } from "@ryco/contracts";
 import {
@@ -12,10 +17,15 @@ import {
   AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS,
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
+  AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS,
   type AgentControlCompletionReturn,
-  type AgentControlProposal,
+  type AgentControlCopyProjectTarget,
+  type AgentControlCopyProjectToNodePlan,
+  type AgentControlImportProjectPlan,
+  type AgentControlPlanView,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
+  type AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
 
 export type AgentControlStatusTone = "pending" | "info" | "success" | "danger" | "muted";
@@ -43,10 +53,95 @@ export interface AgentControlProposalCardModel {
   readonly isPending: boolean;
   readonly outcomeLabel: string | null;
   readonly executionLabel: string | null;
-  readonly completionReturns?: AgentControlProposal["completionReturns"];
+  readonly completionReturns?: AgentControlProposalView["completionReturns"];
   readonly affectedThreadIds: ReadonlyArray<ThreadId>;
   readonly affectedProjectIds: ReadonlyArray<string>;
   readonly detailSections: ReadonlyArray<AgentControlDetailSection>;
+  /**
+   * The kind the node sent when this build cannot read the plan (`unsupported`
+   * in the tolerant view); null otherwise. Such a card is never approved here.
+   */
+  readonly unsupportedKind: string | null;
+  /**
+   * The approving client runs the plan itself
+   * (`AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS`), against `clientExecutionTarget`.
+   */
+  readonly requiresClientExecutor: boolean;
+  /** The node a client-executed plan runs against; null for every other plan. */
+  readonly clientExecutionTarget: AgentControlCopyProjectTarget | null;
+}
+
+/**
+ * Whether this client can run a client-executed plan against `target` right now:
+ * it has the copy coordinator and a connection to that node. Clients without the
+ * coordinator (mobile, the web phone tier) pass none.
+ */
+export type AgentControlClientExecutionCheck = (target: AgentControlCopyProjectTarget) => boolean;
+
+/** What a pending card lets this client do. Reject is offered whenever it is pending. */
+export interface AgentControlCardDecisions {
+  readonly canApprove: boolean;
+  /** Shown in place of Approve when it is not offered. */
+  readonly approveUnavailableLabel: string | null;
+  /** The plan needs a newer Ryco: the card offers "Update Ryco". */
+  readonly offersUpdate: boolean;
+}
+
+export const AGENT_CONTROL_UNSUPPORTED_REQUEST_LABEL = "Update Ryco to review this request.";
+
+/** "Approve in Ryco on a computer connected to <target>". */
+export function agentControlClientExecutorRequiredLabel(
+  target: AgentControlCopyProjectTarget,
+): string {
+  return `Approve in Ryco on a computer connected to ${target.label}`;
+}
+
+const CAN_APPROVE: AgentControlCardDecisions = {
+  canApprove: true,
+  approveUnavailableLabel: null,
+  offersUpdate: false,
+};
+
+/**
+ * The one rule every client applies before it offers Approve: never for a plan
+ * this build cannot read, and for a client-executed plan only when this client
+ * can run it against its target. The node refuses such accepts as well; this
+ * keeps the button from promising what the client cannot do.
+ */
+export function agentControlCardDecisions(
+  model: Pick<
+    AgentControlProposalCardModel,
+    "unsupportedKind" | "requiresClientExecutor" | "clientExecutionTarget"
+  >,
+  canExecuteOnClient: AgentControlClientExecutionCheck | null,
+): AgentControlCardDecisions {
+  if (model.unsupportedKind !== null) {
+    return {
+      canApprove: false,
+      approveUnavailableLabel: AGENT_CONTROL_UNSUPPORTED_REQUEST_LABEL,
+      offersUpdate: true,
+    };
+  }
+  if (!model.requiresClientExecutor) return CAN_APPROVE;
+  const target = model.clientExecutionTarget;
+  if (target !== null && canExecuteOnClient?.(target) === true) return CAN_APPROVE;
+  return {
+    canApprove: false,
+    approveUnavailableLabel:
+      target === null
+        ? "Approve in Ryco on a computer connected to the target node"
+        : agentControlClientExecutorRequiredLabel(target),
+    offersUpdate: false,
+  };
+}
+
+const CLIENT_EXECUTED_PLAN_KINDS: ReadonlySet<string> = new Set(
+  AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS,
+);
+
+/** Whether the approving client, not the node, runs the plan. */
+export function isClientExecutedAgentControlPlan(plan: AgentControlPlanView): boolean {
+  return CLIENT_EXECUTED_PLAN_KINDS.has(plan.kind);
 }
 
 const STATUS_PRESENTATION: Record<
@@ -95,7 +190,7 @@ const shortId = (value: string): string => (value.length > 10 ? `${value.slice(0
 
 const riskLabelFromTag = (tag: string): string => tag.replaceAll("-", " ");
 
-function originPresentation(proposal: AgentControlProposal): {
+function originPresentation(proposal: AgentControlProposalView): {
   readonly label: string;
   readonly threadId: ThreadId | null;
 } {
@@ -113,15 +208,10 @@ function originPresentation(proposal: AgentControlProposal): {
   };
 }
 
-function planPresentation(proposal: AgentControlProposal): {
-  readonly actionLabel: string;
-  readonly targetLabel: string;
-  readonly runtimeLabel: string | null;
-  readonly detailSections: ReadonlyArray<AgentControlDetailSection>;
-} {
+function planPresentation(proposal: AgentControlProposalView): PlanPresentation {
   const scheduleLines = (
     schedule: Extract<
-      AgentControlProposal["plan"],
+      AgentControlProposalView["plan"],
       { kind: "createAutomation" }
     >["definition"]["schedule"],
   ) =>
@@ -138,7 +228,7 @@ function planPresentation(proposal: AgentControlProposal): {
     `Horizon: ${AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS}ms; retained run history: ${AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX}.`,
   ];
   const executionLines = (
-    execution: Extract<AgentControlProposal["plan"], { kind: "automationRun" }>["execution"],
+    execution: Extract<AgentControlProposalView["plan"], { kind: "automationRun" }>["execution"],
   ) => [
     `Project: ${execution.projectId}`,
     `Provider: ${execution.modelSelection.instanceId} · ${execution.modelSelection.model}`,
@@ -150,7 +240,7 @@ function planPresentation(proposal: AgentControlProposal): {
   ];
   const plan = proposal.plan;
   const deviceDetails = (
-    devicePlan: Extract<AgentControlProposal["plan"], { kind: `device${string}` }>,
+    devicePlan: Extract<AgentControlProposalView["plan"], { kind: `device${string}` }>,
     actionLines: ReadonlyArray<string>,
   ): ReadonlyArray<AgentControlDetailSection> => [
     {
@@ -585,77 +675,68 @@ function planPresentation(proposal: AgentControlProposal): {
         runtimeLabel: "explicit approval required",
         detailSections: deviceDetails(plan, ["Action: shut down this exact Simulator."]),
       };
-    // Minimal cards until the cross-node approval cards land: the exact plan, the setup
-    // command verbatim, and the follow-up thread's model and runtime.
     case "importProject":
-      return {
-        actionLabel: "Set up project from repository",
-        targetLabel: plan.title,
-        runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
-        detailSections: [
-          {
-            heading: "Clone and register on this node",
-            lines: [
-              `Repository: ${plan.remoteUrl}`,
-              `Branch: ${plan.branch ?? "the repository's default branch"}`,
-              `Folder: ${plan.destinationPath}`,
-              ...projectSetupLines(plan.setup),
-            ],
-          },
-          ...projectFollowUpSections(plan.followUpThread),
-        ],
-      };
+      return importProjectPresentation(plan);
     case "copyProjectToNode":
+      return copyProjectToNodePresentation(plan);
+    case "unsupported":
       return {
-        actionLabel: `Copy project to ${plan.target.label}`,
-        targetLabel: plan.source.title,
-        runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
+        actionLabel: "Unsupported request",
+        targetLabel: plan.originalKind,
+        runtimeLabel: null,
         detailSections: [
           {
-            heading: "Copy to another node",
+            heading: "Needs a newer Ryco",
             lines: [
-              plan.source.kind === "project"
-                ? `Source project: ${plan.source.projectId}`
-                : `Source repository: ${plan.source.remoteUrl}`,
-              `Target node: ${plan.target.label} (${plan.target.environmentId})`,
-              plan.destination.kind === "default"
-                ? "Folder: the target's code directory"
-                : plan.destination.kind === "child-of-default"
-                  ? `Folder: ${plan.destination.name} in the target's code directory`
-                  : `Folder: ${plan.destination.path}`,
-              `Unpushed commits: ${plan.bringCommits ? "copied" : "not copied"}`,
-              `Uncommitted changes: ${plan.bringChanges ? "copied" : "not copied"}`,
-              `Project settings: ${plan.copySettings ? "copied" : "not copied"}`,
-              ...projectSetupLines(plan.setup),
-              "Runs in the Ryco app that approves it, which must be connected to the target node.",
+              `Request kind: ${plan.originalKind}`,
+              "This version of Ryco cannot show what the request would do, so it cannot approve it.",
+              "Update Ryco to review it, or reject it.",
             ],
           },
-          ...projectFollowUpSections(plan.followUpThread),
         ],
       };
   }
 }
 
-type ProjectFollowUpThread = Extract<
-  AgentControlProposal["plan"],
-  { kind: "importProject" | "copyProjectToNode" }
->["followUpThread"];
+interface PlanPresentation {
+  readonly actionLabel: string;
+  readonly targetLabel: string;
+  readonly runtimeLabel: string | null;
+  readonly detailSections: ReadonlyArray<AgentControlDetailSection>;
+  /** Used when the server sent no prompt summary. */
+  readonly summary?: string;
+}
+
+type ProjectFollowUpThread = (
+  | AgentControlImportProjectPlan
+  | AgentControlCopyProjectToNodePlan
+)["followUpThread"];
 
 const projectFollowUpRuntimeLabel = (followUp: ProjectFollowUpThread): string | null =>
   followUp === null ? null : `${followUp.runtimeMode} · ${followUp.envMode}`;
 
-const projectSetupLines = (
-  setup: Extract<AgentControlProposal["plan"], { kind: "importProject" }>["setup"],
-): ReadonlyArray<string> =>
+/** The command verbatim, as its own line, so the card shows exactly what runs. */
+const projectSetupSections = (
+  setup: AgentControlImportProjectPlan["setup"],
+  nodeLabel: string,
+): ReadonlyArray<AgentControlDetailSection> =>
   setup === null
-    ? ["Setup command: none"]
+    ? []
     : [
-        `Setup command: ${setup.command}`,
-        ...(setup.saveAsScript ? ["The command is also saved as the project's setup script."] : []),
+        {
+          heading: `Setup command · runs on ${nodeLabel} in the new project`,
+          lines: [
+            setup.command,
+            setup.saveAsScript
+              ? "Also saved as the project's setup script."
+              : "Not saved as a project script.",
+          ],
+        },
       ];
 
 const projectFollowUpSections = (
   followUp: ProjectFollowUpThread,
+  defaultModelLabel: string,
 ): ReadonlyArray<AgentControlDetailSection> =>
   followUp === null
     ? []
@@ -664,7 +745,7 @@ const projectFollowUpSections = (
           heading: `Setup thread: ${followUp.title}`,
           lines: [
             followUp.modelSelection === null
-              ? "Model: the target's default"
+              ? `Model: ${defaultModelLabel}`
               : `Model: ${followUp.modelSelection.instanceId} · ${followUp.modelSelection.model}`,
             `Runtime: ${followUp.runtimeMode} · ${followUp.envMode}`,
             "The repository's provider hooks and settings run in that thread.",
@@ -673,7 +754,127 @@ const projectFollowUpSections = (
         },
       ];
 
-function outcomeLabel(proposal: AgentControlProposal): string | null {
+/** Risk rows from the plan itself, so they show even before the server tags them. */
+const projectRiskSection = (
+  lines: ReadonlyArray<string>,
+): ReadonlyArray<AgentControlDetailSection> =>
+  lines.length === 0 ? [] : [{ heading: "Risk", lines }];
+
+const projectRunsCommandsLine = (
+  plan: AgentControlImportProjectPlan | AgentControlCopyProjectToNodePlan,
+  nodeLabel: string,
+): ReadonlyArray<string> => {
+  const parts = [
+    ...(plan.setup === null ? [] : ["a setup command"]),
+    ...(plan.followUpThread === null ? [] : ["an agent thread"]),
+  ];
+  return parts.length === 0
+    ? []
+    : [`Runs commands: ${parts.join(" and ")} on ${nodeLabel}, in the new project.`];
+};
+
+/** Longer or multi-line commands are named only; the details show them whole, never cut. */
+const SUMMARY_SETUP_COMMAND_MAX_CHARS = 120;
+
+const projectSummaryExtras = (
+  plan: AgentControlImportProjectPlan | AgentControlCopyProjectToNodePlan,
+): string => {
+  const command = plan.setup?.command;
+  return [
+    ...(command === undefined
+      ? []
+      : command.length <= SUMMARY_SETUP_COMMAND_MAX_CHARS && !command.includes("\n")
+        ? [`runs \`${command}\``]
+        : ["runs a setup command (see details)"]),
+    ...(plan.followUpThread === null ? [] : [`starts "${plan.followUpThread.title}"`]),
+  ]
+    .map((part) => `; ${part}`)
+    .join("");
+};
+
+function importProjectPresentation(plan: AgentControlImportProjectPlan): PlanPresentation {
+  return {
+    actionLabel: "Set up project",
+    targetLabel: plan.title,
+    runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
+    summary: `Clone ${plan.remoteUrl} into ${plan.destinationPath}${projectSummaryExtras(plan)}.`,
+    detailSections: [
+      {
+        heading: "Clone and register on this node",
+        lines: [
+          `Repository: ${plan.remoteUrl}`,
+          `Branch: ${plan.branch ?? "the repository's default branch"}`,
+          `Folder: ${plan.destinationPath}`,
+          `Project: ${plan.title} (${plan.projectId})`,
+          ...(plan.setup === null ? ["Setup command: none"] : []),
+          "The folder must be missing or empty; nothing in it is replaced.",
+        ],
+      },
+      ...projectSetupSections(plan.setup, "this node"),
+      ...projectFollowUpSections(plan.followUpThread, "this node's default"),
+      ...projectRiskSection(projectRunsCommandsLine(plan, "this node")),
+    ],
+  };
+}
+
+/** Where the copy lands on the target, as the approving client resolves it. */
+function copyDestinationLabel(plan: AgentControlCopyProjectToNodePlan): string {
+  const codeDirectory = `${plan.target.label}'s code directory`;
+  switch (plan.destination.kind) {
+    case "default":
+      return `a folder named after the source in ${codeDirectory}`;
+    case "child-of-default":
+      return `${plan.destination.name} in ${codeDirectory}`;
+    case "path":
+      return plan.destination.path;
+  }
+}
+
+function copyProjectToNodePresentation(plan: AgentControlCopyProjectToNodePlan): PlanPresentation {
+  const target = plan.target.label;
+  const workspaceContent = [
+    ...(plan.bringCommits ? ["unpushed commits"] : []),
+    ...(plan.bringChanges ? ["uncommitted changes"] : []),
+  ];
+  const copied = [...workspaceContent, ...(plan.copySettings ? ["project settings"] : [])];
+  return {
+    actionLabel: `Copy to ${target}`,
+    targetLabel: plan.source.title,
+    runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
+    summary: `Copy ${plan.source.title} to ${copyDestinationLabel(plan)}${
+      copied.length === 0 ? "" : `, with ${copied.join(", ")}`
+    }${projectSummaryExtras(plan)}.`,
+    detailSections: [
+      {
+        heading: `Copy to ${target}`,
+        lines: [
+          plan.source.kind === "project"
+            ? `Source: project ${plan.source.title} (${plan.source.projectId}) on this node`
+            : `Source: repository ${plan.source.remoteUrl}`,
+          `Target node: ${target} (${plan.target.environmentId})`,
+          `Destination: ${plan.destination.kind}`,
+          `Folder: ${copyDestinationLabel(plan)}`,
+          `Unpushed commits: ${plan.bringCommits ? "copied" : "not copied"}`,
+          `Uncommitted changes: ${plan.bringChanges ? "copied" : "not copied"}`,
+          `Project settings: ${plan.copySettings ? "copied" : "not copied"}`,
+          ...(plan.setup === null ? ["Setup command: none"] : []),
+          `Runs in the Ryco app that approves it, which must be connected to ${target}.`,
+        ],
+      },
+      ...projectSetupSections(plan.setup, target),
+      ...projectFollowUpSections(plan.followUpThread, `${target}'s default`),
+      ...projectRiskSection([
+        `Cross-node: creates a project on ${target}, not on the node the agent runs on.`,
+        ...(workspaceContent.length === 0
+          ? []
+          : [`Copies workspace content: ${workspaceContent.join(" and ")} leave this node.`]),
+        ...projectRunsCommandsLine(plan, target),
+      ]),
+    ],
+  };
+}
+
+function outcomeLabel(proposal: AgentControlProposalView): string | null {
   const result = proposal.result;
   if (result === null) return null;
   if (result.outcome === "completed") {
@@ -689,7 +890,7 @@ function outcomeLabel(proposal: AgentControlProposal): string | null {
   return `${result.error.code}: ${result.error.message}`;
 }
 
-function executionPresentation(proposal: AgentControlProposal): {
+function executionPresentation(proposal: AgentControlProposalView): {
   readonly label: string | null;
   readonly affectedThreadIds: ReadonlyArray<ThreadId>;
   readonly affectedProjectIds: ReadonlyArray<string>;
@@ -722,7 +923,7 @@ function executionPresentation(proposal: AgentControlProposal): {
 }
 
 export function buildAgentControlProposalCardModel(
-  proposal: AgentControlProposal,
+  proposal: AgentControlProposalView,
   getThreadTitle?: (threadId: ThreadId) => string | undefined,
 ): AgentControlProposalCardModel {
   const status = STATUS_PRESENTATION[proposal.status];
@@ -759,7 +960,7 @@ export function buildAgentControlProposalCardModel(
       proposal.plan.kind === "deviceOpenUrl"
         ? "High risk · opens an external URL or deep link"
         : null,
-    summary: proposal.promptSummary,
+    summary: proposal.promptSummary ?? plan.summary ?? null,
     expiresAt: proposal.expiresAt,
     isPending: proposal.status === "pending-user-approval",
     outcomeLabel: outcomeLabel(proposal),
@@ -768,6 +969,9 @@ export function buildAgentControlProposalCardModel(
     affectedThreadIds: execution.affectedThreadIds,
     affectedProjectIds: execution.affectedProjectIds,
     detailSections: plan.detailSections,
+    unsupportedKind: proposal.plan.kind === "unsupported" ? proposal.plan.originalKind : null,
+    requiresClientExecutor: isClientExecutedAgentControlPlan(proposal.plan),
+    clientExecutionTarget: proposal.plan.kind === "copyProjectToNode" ? proposal.plan.target : null,
   };
 }
 

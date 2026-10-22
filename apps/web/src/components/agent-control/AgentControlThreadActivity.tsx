@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import type { AgentControlProposalId, EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { AgentControlProposalView, EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
   buildAgentControlProposalCardModel,
   type AgentControlThreadActivity as ThreadActivity,
@@ -17,7 +17,7 @@ export interface AgentControlThreadActivityProps {
   readonly submittingIds: ReadonlyArray<string>;
   readonly decisionErrorsById: Readonly<Record<string, string>>;
   readonly disabledReason: string | null;
-  readonly onDecide: (proposalId: AgentControlProposalId, decision: "accept" | "reject") => void;
+  readonly onDecide: (proposal: AgentControlProposalView, decision: "accept" | "reject") => void;
 }
 
 /**
@@ -75,8 +75,8 @@ export function AgentControlThreadActivity({
                 isSubmitting={submittingIds.includes(proposal.proposalId)}
                 decisionError={decisionErrorsById[proposal.proposalId] ?? null}
                 disabledReason={disabledReason}
-                onAccept={() => onDecide(proposal.proposalId, "accept")}
-                onReject={() => onDecide(proposal.proposalId, "reject")}
+                onAccept={() => onDecide(proposal, "accept")}
+                onReject={() => onDecide(proposal, "reject")}
               />
             ))}
           </div>

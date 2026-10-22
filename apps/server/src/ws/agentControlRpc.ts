@@ -1,8 +1,13 @@
 import {
+  AGENT_CONTROL_LEGACY_PLAN_KINDS,
   AGENT_CONTROL_WS_METHODS,
   AgentControlProposalStatus,
   AgentControlRpcError,
   AgentControlExternalRpcError,
+  type AgentControlPlanViewMode,
+  type AgentControlProposal,
+  type AgentControlProposalQueue,
+  type AgentControlProposalStreamEvent,
 } from "@ryco/contracts";
 import { Effect, Option, Schema, Stream } from "effect";
 
@@ -14,6 +19,43 @@ import { observeRpcEffect, observeRpcStreamEffect } from "../observability/RpcIn
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
 const isProposalStatus = Schema.is(AgentControlProposalStatus);
+
+const LEGACY_PLAN_KINDS: ReadonlySet<string> = new Set(AGENT_CONTROL_LEGACY_PLAN_KINDS);
+
+/**
+ * Whether a proposal reaches a client that asked for `planView`. Clients without
+ * `planView: "tolerant"` decode the closed plan union of the build they shipped
+ * in: one proposal of a kind they do not know fails their whole stream, and
+ * they then clear the environment's approval queue. They only ever see the
+ * kinds in `AGENT_CONTROL_LEGACY_PLAN_KINDS`; the others wait for a newer client.
+ */
+export const isProposalInPlanView = (
+  proposal: AgentControlProposal,
+  planView: AgentControlPlanViewMode | undefined,
+): boolean => planView === "tolerant" || LEGACY_PLAN_KINDS.has(proposal.plan.kind);
+
+/** The queue with the proposals outside `planView` left out; the same queue when none are. */
+export const proposalQueueInPlanView = (
+  queue: AgentControlProposalQueue,
+  planView: AgentControlPlanViewMode | undefined,
+): AgentControlProposalQueue => {
+  if (planView === "tolerant") return queue;
+  const visible = (proposal: AgentControlProposal) => isProposalInPlanView(proposal, planView);
+  if (queue.active.every(visible) && queue.recent.every(visible)) return queue;
+  return { ...queue, active: queue.active.filter(visible), recent: queue.recent.filter(visible) };
+};
+
+/** A stream event as `planView` sees it; null for a proposal event it never sees. */
+export const proposalStreamEventInPlanView = (
+  event: AgentControlProposalStreamEvent,
+  planView: AgentControlPlanViewMode | undefined,
+): AgentControlProposalStreamEvent | null => {
+  if (event.type === "proposal") {
+    return isProposalInPlanView(event.proposal, planView) ? event : null;
+  }
+  const queue = proposalQueueInPlanView(event.queue, planView);
+  return queue === event.queue ? event : { ...event, queue };
+};
 
 /**
  * Map internal lifecycle failures onto the bounded RPC error. A decision
@@ -212,9 +254,8 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
     });
 
   return defineWsHandlers({
-    // The proposal reads take `planView` (clients that decode the tolerant plan view send
-    // "tolerant"). Nothing is left out for clients without it yet: the validator still refuses
-    // every kind outside `AGENT_CONTROL_LEGACY_PLAN_KINDS`, so no such proposal exists.
+    // The proposal reads leave out every proposal outside the client's `planView`
+    // (`isProposalInPlanView`); clients that decode the tolerant plan view send "tolerant".
     [AGENT_CONTROL_WS_METHODS.listProposals]: (input) =>
       observeRpcEffect(
         AGENT_CONTROL_WS_METHODS.listProposals,
@@ -223,7 +264,10 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
           withService((service) =>
             service
               .getQueue({ activeLimit: input.activeLimit, recentLimit: input.recentLimit })
-              .pipe(Effect.mapError(toAgentControlRpcError)),
+              .pipe(
+                Effect.map((queue) => proposalQueueInPlanView(queue, input.planView)),
+                Effect.mapError(toAgentControlRpcError),
+              ),
           ),
         ),
         { "rpc.aggregate": "agent-control", "rpc.operation": "list" },
@@ -235,7 +279,13 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
           AGENT_CONTROL_WS_METHODS.getProposal,
           withService((service) =>
             service.getProposal(input.proposalId).pipe(
-              Effect.map((proposal) => ({ proposal: Option.getOrNull(proposal) })),
+              Effect.map((found) => ({
+                proposal: Option.getOrNull(
+                  Option.filter(found, (proposal) =>
+                    isProposalInPlanView(proposal, input.planView),
+                  ),
+                ),
+              })),
               Effect.mapError(toAgentControlRpcError),
             ),
           ),
@@ -272,14 +322,18 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "agent-control", "rpc.operation": "reject" },
       ),
-    [AGENT_CONTROL_WS_METHODS.subscribeProposals]: (_input) =>
+    [AGENT_CONTROL_WS_METHODS.subscribeProposals]: (input) =>
       observeRpcStreamEffect(
         AGENT_CONTROL_WS_METHODS.subscribeProposals,
         ownerStreamEffect(
           AGENT_CONTROL_WS_METHODS.subscribeProposals,
           withService((service) =>
             Effect.succeed(
-              service.subscribeQueue({}).pipe(Stream.mapError(toAgentControlRpcError)),
+              service.subscribeQueue({}).pipe(
+                Stream.map((event) => proposalStreamEventInPlanView(event, input.planView)),
+                Stream.filter((event) => event !== null),
+                Stream.mapError(toAgentControlRpcError),
+              ),
             ),
           ),
         ),

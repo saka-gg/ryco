@@ -8,8 +8,8 @@
 import type {
   AgentControlAutomationId,
   AgentControlAutomationRunId,
-  AgentControlProposal,
   AgentControlProposalId,
+  AgentControlProposalView,
   IsoDateTime,
   ProjectId,
 } from "@ryco/contracts";
@@ -41,7 +41,7 @@ export interface MissedAutomationRun {
 
 /** The missed run a proposal catches up on, or null when it is anything else. */
 export function missedAutomationRunOf(
-  proposal: AgentControlProposal,
+  proposal: AgentControlProposalView,
   nowMs: number,
 ): MissedAutomationRun | null {
   const plan = proposal.plan;
@@ -73,7 +73,7 @@ export function missedAutomationRunOf(
 
 /** A device's missed runs, the earliest due first. */
 export function collectMissedAutomationRuns(
-  proposals: Iterable<AgentControlProposal>,
+  proposals: Iterable<AgentControlProposalView>,
   nowMs: number,
 ): MissedAutomationRun[] {
   const runs: MissedAutomationRun[] = [];

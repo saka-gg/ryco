@@ -1,10 +1,4 @@
-import type {
-  AgentControlProposalStreamEvent,
-  AgentControlProposalStreamEventView,
-  EnvironmentId,
-} from "@ryco/contracts";
-
-import { supportedAgentControlStreamEvent } from "./proposalView.ts";
+import type { AgentControlProposalStreamEventView, EnvironmentId } from "@ryco/contracts";
 
 /**
  * The slice of `EnvironmentApi["agentControl"]` the sync needs. Injected so
@@ -23,7 +17,7 @@ export interface AgentControlSubscriptionSource {
 export interface AgentControlSyncSink {
   readonly applyStreamEvent: (
     environmentId: EnvironmentId,
-    event: AgentControlProposalStreamEvent,
+    event: AgentControlProposalStreamEventView,
   ) => void;
   readonly clearEnvironment: (environmentId: EnvironmentId) => void;
 }
@@ -34,7 +28,9 @@ export interface AgentControlSyncSink {
  * The transport resubscribes automatically after reconnects, and the server
  * opens every subscription with a fresh snapshot event, which resets the
  * store's baseline — so replayed or duplicated events are absorbed without
- * polling.
+ * polling. Events arrive through the tolerant plan view, so a plan kind this
+ * build does not know reaches the store as `unsupported` instead of failing
+ * the stream (and clearing the queue).
  *
  * Several syncs for one environment may coexist (e.g. two mounted screens),
  * so stopping deliberately leaves the shared queue state in place for any
@@ -56,8 +52,7 @@ export function startAgentControlProposalSync(input: {
   const unsubscribe = source.subscribeProposals(
     (event) => {
       if (stopped) return;
-      const supported = supportedAgentControlStreamEvent(event);
-      if (supported !== null) sink.applyStreamEvent(environmentId, supported);
+      sink.applyStreamEvent(environmentId, event);
     },
     {
       onError: () => {

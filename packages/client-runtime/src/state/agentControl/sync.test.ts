@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   EnvironmentId,
-  type AgentControlProposalStreamEvent,
   type AgentControlProposalStreamEventView,
   type AgentControlProposalView,
 } from "@ryco/contracts";
@@ -10,14 +9,14 @@ import { startAgentControlProposalSync } from "./sync.ts";
 
 const environmentId = EnvironmentId.make("env-1");
 
-const snapshot: AgentControlProposalStreamEvent = {
+const snapshot: AgentControlProposalStreamEventView = {
   version: 1,
   type: "snapshot",
   queue: { revision: 1, active: [], recent: [] },
 };
 
 function makeHarness() {
-  const applied: Array<{ environmentId: string; event: AgentControlProposalStreamEvent }> = [];
+  const applied: Array<{ environmentId: string; event: AgentControlProposalStreamEventView }> = [];
   const cleared: string[] = [];
   let listener: ((event: AgentControlProposalStreamEventView) => void) | null = null;
   let errorListener: (() => void) | null = null;
@@ -43,7 +42,7 @@ function makeHarness() {
       },
     },
     sink: {
-      applyStreamEvent: (id: EnvironmentId, event: AgentControlProposalStreamEvent) => {
+      applyStreamEvent: (id: EnvironmentId, event: AgentControlProposalStreamEventView) => {
         applied.push({ environmentId: id, event });
       },
       clearEnvironment: (id: EnvironmentId) => {
@@ -87,7 +86,7 @@ describe("startAgentControlProposalSync", () => {
     expect(harness.cleared).toEqual([]);
   });
 
-  it("leaves proposals of plan kinds this build cannot present out of the store", () => {
+  it("keeps proposals of plan kinds this build cannot read, as unsupported", () => {
     const harness = makeHarness();
     startAgentControlProposalSync({
       environmentId,
@@ -98,19 +97,21 @@ describe("startAgentControlProposalSync", () => {
       ({ proposalId, plan }) as unknown as AgentControlProposalView;
     const known = proposal("known", { kind: "interruptThread", threadId: "thread-1" } as never);
     const unknown = proposal("unknown", { kind: "unsupported", originalKind: "mirrorRepository" });
-
-    harness.emit({
+    const snapshotWithUnknown: AgentControlProposalStreamEventView = {
       version: 1,
       type: "snapshot",
       queue: { revision: 2, active: [unknown, known], recent: [unknown] },
-    });
-    harness.emit({ version: 1, type: "proposal", revision: 3, proposal: unknown });
-    harness.emit({ version: 1, type: "proposal", revision: 4, proposal: known });
+    };
 
-    expect(harness.applied.map(({ event }) => event.type)).toEqual(["snapshot", "proposal"]);
-    const first = harness.applied[0]?.event;
-    expect(first?.type === "snapshot" && first.queue.active).toEqual([known]);
-    expect(first?.type === "snapshot" && first.queue.recent).toEqual([]);
+    harness.emit(snapshotWithUnknown);
+    harness.emit({ version: 1, type: "proposal", revision: 3, proposal: unknown });
+
+    // The store renders them as "Update Ryco" cards; nothing clears the queue.
+    expect(harness.applied.map(({ event }) => event)).toEqual([
+      snapshotWithUnknown,
+      { version: 1, type: "proposal", revision: 3, proposal: unknown },
+    ]);
+    expect(harness.cleared).toEqual([]);
   });
 
   it("clears the environment when the server refuses the subscription", () => {

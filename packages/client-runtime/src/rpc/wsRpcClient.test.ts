@@ -323,3 +323,32 @@ it("routes cross-node project copy calls to their wire methods", async () => {
     tag: WS_METHODS.projectsSubscribeImport,
   });
 });
+
+it("asks for the tolerant plan view on every proposal read", async () => {
+  const listProposals = vi.fn(() => Effect.succeed({ revision: 0, active: [], recent: [] }));
+  const getProposal = vi.fn(() => Effect.succeed({ proposal: null }));
+  const subscribeProposals = vi.fn(() => Effect.void);
+  const methods = {
+    [AGENT_CONTROL_WS_METHODS.listProposals]: listProposals,
+    [AGENT_CONTROL_WS_METHODS.getProposal]: getProposal,
+    [AGENT_CONTROL_WS_METHODS.subscribeProposals]: subscribeProposals,
+  };
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(invoke(methods)),
+    subscribe: vi.fn((_invoke: (client: unknown) => unknown) => () => undefined),
+  };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  const proposalId = "proposal-1" as Parameters<
+    typeof client.agentControl.getProposal
+  >[0]["proposalId"];
+
+  await client.agentControl.listProposals({ recentLimit: 5 });
+  await client.agentControl.getProposal({ proposalId });
+  client.agentControl.subscribeProposals(() => undefined);
+  transport.subscribe.mock.calls[0]?.[0](methods);
+
+  expect(listProposals).toHaveBeenCalledWith({ recentLimit: 5, planView: "tolerant" });
+  expect(getProposal).toHaveBeenCalledWith({ proposalId, planView: "tolerant" });
+  expect(subscribeProposals).toHaveBeenCalledWith({ planView: "tolerant" });
+});

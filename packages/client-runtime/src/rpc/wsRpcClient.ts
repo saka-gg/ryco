@@ -1269,18 +1269,24 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       list: (input) => transport.request((client) => client[WS_METHODS.notesList](input)),
       command: (input) => transport.request((client) => client[WS_METHODS.notesCommand](input)),
     },
+    // The proposal reads always ask for the tolerant plan view: this client decodes
+    // a plan kind it does not know as `unsupported`, so the node sends every kind.
     agentControl: {
       listProposals: (input) =>
-        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.listProposals](input)),
+        transport.request((client) =>
+          client[AGENT_CONTROL_WS_METHODS.listProposals]({ ...input, planView: "tolerant" }),
+        ),
       getProposal: (input) =>
-        transport.request((client) => client[AGENT_CONTROL_WS_METHODS.getProposal](input)),
+        transport.request((client) =>
+          client[AGENT_CONTROL_WS_METHODS.getProposal]({ ...input, planView: "tolerant" }),
+        ),
       acceptProposal: (input) =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.acceptProposal](input)),
       rejectProposal: (input) =>
         transport.request((client) => client[AGENT_CONTROL_WS_METHODS.rejectProposal](input)),
       subscribeProposals: (listener, options) =>
         transport.subscribe(
-          (client) => client[AGENT_CONTROL_WS_METHODS.subscribeProposals]({}),
+          (client) => client[AGENT_CONTROL_WS_METHODS.subscribeProposals]({ planView: "tolerant" }),
           listener,
           { ...options, tag: AGENT_CONTROL_WS_METHODS.subscribeProposals },
         ),

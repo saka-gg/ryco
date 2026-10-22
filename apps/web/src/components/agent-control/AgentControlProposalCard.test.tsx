@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { Schema } from "effect";
 import {
+  AgentControlActionPlan,
   AgentControlProposalId,
   AgentControlRequestId,
   AgentControlRiskTag,
@@ -8,8 +10,13 @@ import {
   ProviderInstanceId,
   ThreadId,
   type AgentControlProposal,
+  type AgentControlProposalView,
 } from "@ryco/contracts";
 
+import {
+  AgentControlClientExecutorContext,
+  type AgentControlClientExecutor,
+} from "./agentControlClientExecutor";
 import { AgentControlProposalCard } from "./AgentControlProposalCard";
 import { buildAgentControlProposalCardModel } from "@ryco/client-runtime/state/agentControl";
 
@@ -52,23 +59,43 @@ function makeProposal(overrides: Partial<AgentControlProposal> = {}): AgentContr
 }
 
 function renderCard(input: {
-  proposal?: AgentControlProposal;
+  proposal?: AgentControlProposalView;
   isSubmitting?: boolean;
   decisionError?: string | null;
   disabledReason?: string | null;
+  clientExecutor?: AgentControlClientExecutor;
 }): string {
   return renderToStaticMarkup(
-    <AgentControlProposalCard
-      model={buildAgentControlProposalCardModel(input.proposal ?? makeProposal())}
-      environmentId={"local" as never}
-      isSubmitting={input.isSubmitting ?? false}
-      decisionError={input.decisionError ?? null}
-      disabledReason={input.disabledReason ?? null}
-      onAccept={() => {}}
-      onReject={() => {}}
-    />,
+    <AgentControlClientExecutorContext.Provider value={input.clientExecutor ?? null}>
+      <AgentControlProposalCard
+        model={buildAgentControlProposalCardModel(input.proposal ?? makeProposal())}
+        environmentId={"local" as never}
+        isSubmitting={input.isSubmitting ?? false}
+        decisionError={input.decisionError ?? null}
+        disabledReason={input.disabledReason ?? null}
+        onAccept={() => {}}
+        onReject={() => {}}
+      />
+    </AgentControlClientExecutorContext.Provider>,
   );
 }
+
+const copyProjectPlan = Schema.decodeUnknownSync(AgentControlActionPlan)({
+  kind: "copyProjectToNode",
+  source: {
+    kind: "project",
+    projectId: "project-1",
+    title: "ryco",
+    expectedUpdatedAt: "2026-10-22T00:00:00.000Z",
+  },
+  target: { environmentId: "env-mac-mini", label: "Mac mini" },
+  destination: { kind: "default" },
+  bringCommits: false,
+  bringChanges: false,
+  copySettings: true,
+  setup: { command: "bun install", saveAsScript: false },
+  followUpThread: null,
+});
 
 describe("AgentControlProposalCard", () => {
   it("shows a pending proposal with origin, action, risk, expiry, and decisions", () => {
@@ -238,5 +265,46 @@ describe("AgentControlProposalCard", () => {
     expect(markup).toContain("Decision no longer applies");
     // The card stays decidable so the user can retry after the queue syncs.
     expect(markup).toContain(">Approve<");
+  });
+
+  it("offers only Reject and Update Ryco for a request this build cannot read", () => {
+    const markup = renderCard({
+      proposal: {
+        ...makeProposal({ promptSummary: null }),
+        plan: { kind: "unsupported", originalKind: "mirrorRepository" },
+      },
+      // Even a client that runs client-executed plans cannot approve it.
+      clientExecutor: { canExecute: () => true, approve: async () => {} },
+    });
+    expect(markup).toContain("Unsupported request · mirrorRepository");
+    expect(markup).toContain("Update Ryco to review this request.");
+    expect(markup).toContain(">Reject<");
+    expect(markup).toContain(">Update Ryco<");
+    expect(markup).not.toContain(">Approve<");
+  });
+
+  it("sends a client-executed copy to a computer that can run it", () => {
+    const proposal = makeProposal({ plan: copyProjectPlan, promptSummary: null });
+    const markup = renderCard({ proposal });
+    expect(markup).toContain("Copy to Mac mini · ryco");
+    expect(markup).toContain("Approve in Ryco on a computer connected to Mac mini");
+    expect(markup).toContain(">Reject<");
+    expect(markup).not.toContain(">Approve<");
+    expect(markup).not.toContain(">Update Ryco<");
+
+    const targets: string[] = [];
+    const runnable = renderCard({
+      proposal,
+      clientExecutor: {
+        canExecute: (target) => {
+          targets.push(target.label);
+          return true;
+        },
+        approve: async () => {},
+      },
+    });
+    expect(runnable).toContain(">Approve<");
+    expect(runnable).not.toContain("Approve in Ryco on a computer connected to");
+    expect(targets).toEqual(["Mac mini"]);
   });
 });
