@@ -444,11 +444,12 @@ export interface CrossNodeFixture {
 
 /**
  * Where the setup script leaves its proof, relative to the repository root:
- * the directory it ran in and how many RYCO_* variables it could see. Inside
- * `.git`, so it never shows up in `git status`.
+ * the directory it ran in, and the names of the RYCO_* variables it could see
+ * (only the project script ones, RYCO_PROJECT_ROOT and RYCO_WORKTREE_PATH;
+ * never the server's). Inside `.git`, so it never shows up in `git status`.
  */
 export const SETUP_MARKER_PATH = ".git/ryco-e2e-setup";
-const SETUP_COMMAND = `{ pwd; env | grep -c '^RYCO_'; } > ${SETUP_MARKER_PATH}; exit 0`;
+const SETUP_COMMAND = `{ pwd; env | grep '^RYCO_' | cut -d= -f1 | sort | tr '\\n' ' '; echo; } > ${SETUP_MARKER_PATH}; exit 0`;
 
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 
@@ -527,6 +528,8 @@ export const buildFixture = async (input: {
   await git(workspace, "remote", "add", "origin", originUrl);
   await git(workspace, "remote", "add", "upstream", upstreamUrl);
   await git(workspace, "push", "--quiet", "--set-upstream", "origin", mainBranch);
+  // A fork's upstream holds the shared history too (it is the repository the fork came from).
+  await git(workspace, "push", "--quiet", "upstream", mainBranch);
   const mainOid = await git(workspace, "rev-parse", "HEAD");
 
   await git(workspace, "switch", "--quiet", "--create", featureBranch);

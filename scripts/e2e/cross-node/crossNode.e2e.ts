@@ -245,7 +245,9 @@ const copyProjectToB = async (input: {
     branch: fixture.featureBranch,
     headOid: fixture.headOid,
     isDetached: false,
-    primaryRemoteName: "origin",
+    // The repository identity's rule: `upstream` before `origin`. The copy clones from it and
+    // recreates `origin` next to it.
+    primaryRemoteName: "upstream",
   });
   expect(inspection.repository.remotes).toContainEqual({ name: "origin", url: fixture.originUrl });
   expect(inspection.pushedState).toMatchObject({ headOnRemote: false, unpushedCommitCount: 1 });
@@ -428,9 +430,13 @@ const expectCopiedCheckout = async (outcome: CopyOutcome) => {
     "completed",
   );
 
-  // The setup script ran in the project root and saw none of the server's RYCO_* variables.
+  // The setup script ran in the project root and saw only the project script variables, none
+  // of the server's RYCO_* ones.
   const marker = await nodeB.exec(["cat", path.posix.join(destination, SETUP_MARKER_PATH)]);
-  expect(marker.stdout.trim().split("\n")).toEqual([destination, "0"]);
+  expect(marker.stdout.trim().split("\n")).toEqual([
+    destination,
+    "RYCO_PROJECT_ROOT RYCO_WORKTREE_PATH",
+  ]);
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────
