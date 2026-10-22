@@ -28,6 +28,7 @@ import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { boundedDisabledReason } from "~/lib/boundedReason";
 import { setModelPickerOpen } from "../../modelPickerOpenState";
 import type { ProviderInstanceEntry } from "../../providerInstances";
+import type { ModelPickerMultiSelect } from "./modelPickerMultiSelect";
 
 /**
  * The popover body (search, grouping, the tuning footer) only renders once the
@@ -92,6 +93,11 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   tuning?: ReactNode;
   /** Effort / fast / context readout shown in the trigger beside the model name. */
   triggerTraits?: ModelTuningSummary | null;
+  /**
+   * Allows choosing several models for one send ("Compare models"). Desktop
+   * popover only; the frozen phone sheet keeps single selection.
+   */
+  multiSelect?: ModelPickerMultiSelect | undefined;
   terminalOpen?: boolean;
   open?: boolean;
   triggerSize?: VariantProps<typeof buttonVariants>["size"];
@@ -182,7 +188,23 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     else props.onInstanceModelChange(instanceId, model);
     setIsMenuOpen(false);
   };
-  const traits = useSheet ? null : (props.triggerTraits ?? null);
+  // The trigger names the compared models instead of the composer's own.
+  const compareSelections =
+    !useSheet && props.multiSelect?.state.enabled ? props.multiSelect.state.selections : null;
+  const compareEntries = (compareSelections ?? []).map((selection) => {
+    const option = props.modelOptionsByInstance
+      .get(selection.instanceId)
+      ?.find((candidate) => candidate.slug === selection.model);
+    return {
+      key: `${selection.instanceId}:${selection.model}`,
+      entry: props.instanceEntries.find((entry) => entry.instanceId === selection.instanceId),
+      name: option ? getTriggerDisplayModelName(option) : selection.model,
+    };
+  });
+  const compareNames = compareEntries.map((selection) => selection.name).join(", ");
+  const traits = useSheet || compareSelections ? null : (props.triggerTraits ?? null);
+  const multiSelect: ModelPickerMultiSelect | undefined =
+    props.multiSelect && !props.disabled ? props.multiSelect : undefined;
 
   // Bounded before it reaches a `title`, so an unavailability reason can never
   // carry a raw error, identifier, ticket, or payload into the DOM.
@@ -205,7 +227,46 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 
   // The trigger's contents are identical on both tiers — only what the trigger
   // opens differs — so they are built once rather than duplicated.
-  const triggerContent = (
+  const triggerContent = compareSelections ? (
+    <span
+      className={cn(
+        "flex min-w-0 w-full box-border items-center gap-1.5 overflow-hidden",
+        props.compact ? "max-w-34 sm:pl-0.5" : undefined,
+      )}
+      data-model-picker-compare="true"
+    >
+      <span className="flex shrink-0 items-center -space-x-1" aria-hidden="true">
+        {compareEntries
+          .slice(0, 3)
+          .map((selection) =>
+            selection.entry ? (
+              <ProviderInstanceIcon
+                key={selection.key}
+                driverKind={selection.entry.driverKind}
+                displayName={selection.entry.displayName}
+                accentColor={selection.entry.accentColor}
+                showBadge={false}
+                className="size-4 rounded-full bg-background ring-2 ring-background"
+                iconClassName="size-4"
+              />
+            ) : null,
+          )}
+      </span>
+      <Tooltip>
+        <TooltipTrigger render={<span className="min-w-0 flex-1 truncate" />}>
+          {compareEntries.length === 0
+            ? "Choose models"
+            : compareEntries.length === 1
+              ? compareEntries[0]!.name
+              : `${compareEntries.length} models`}
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          {compareNames ? `Compare ${compareNames}` : "Compare models"}
+        </TooltipPopup>
+      </Tooltip>
+      <ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 opacity-60" />
+    </span>
+  ) : (
     <span
       className={cn(
         "flex min-w-0 w-full box-border items-center gap-1.5 overflow-hidden",
@@ -321,6 +382,11 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             className={triggerButtonClassName}
             disabled={props.disabled}
             title={disabledReasonTitle}
+            {...(compareSelections
+              ? {
+                  "aria-label": compareNames ? `Compare models: ${compareNames}` : "Compare models",
+                }
+              : {})}
             onPointerEnter={preloadModelPickerContentForIntent}
             onFocus={preloadModelPickerContentForIntent}
           />
@@ -345,6 +411,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           modelOptionsByInstance={props.modelOptionsByInstance}
           terminalOpen={props.terminalOpen ?? false}
           {...(props.tuning ? { tuning: props.tuning } : {})}
+          {...(multiSelect ? { multiSelect } : {})}
           onRequestClose={() => setIsMenuOpen(false)}
           onInstanceModelChange={handleInstanceModelChange}
         />

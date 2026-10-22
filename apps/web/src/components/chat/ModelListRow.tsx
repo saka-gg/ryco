@@ -1,6 +1,6 @@
 import { type ProviderDriverKind, type ProviderInstanceId } from "@ryco/contracts";
 import { memo } from "react";
-import { StarIcon } from "lucide-react";
+import { CheckIcon, StarIcon } from "lucide-react";
 import {
   getDisplayModelName,
   getTriggerDisplayModelLabel,
@@ -33,6 +33,11 @@ export const ModelListRow = memo(function ModelListRow(props: {
   preferShortName?: boolean;
   useTriggerLabel?: boolean;
   jumpLabel?: string | null;
+  /**
+   * Whether "Compare models" has this model; undefined when the mode is off.
+   * Shown as a check box and reported as the option's checked state.
+   */
+  compareChecked?: boolean | undefined;
   onToggleFavorite: () => void;
 }) {
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
@@ -45,6 +50,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
       hideIndicator
       index={props.index}
       value={props.value ?? `${props.instanceId}:${props.model.slug}`}
+      {...(props.compareChecked === undefined ? {} : { "aria-checked": props.compareChecked })}
       contentClassName="flex w-full items-start gap-2"
       className={cn(
         "w-full cursor-pointer rounded px-3 py-2 transition-colors group",
@@ -97,6 +103,20 @@ export const ModelListRow = memo(function ModelListRow(props: {
               {props.jumpLabel}
             </Kbd>
           ) : null}
+          {props.compareChecked === undefined ? null : (
+            <span
+              aria-hidden="true"
+              data-slot="model-compare-check"
+              className={cn(
+                "flex size-4 shrink-0 items-center justify-center rounded-sm border",
+                props.compareChecked
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input bg-background",
+              )}
+            >
+              {props.compareChecked ? <CheckIcon className="size-3" /> : null}
+            </span>
+          )}
         </div>
         {props.showProvider && (
           <div className="flex items-center gap-1 mt-0.5">
