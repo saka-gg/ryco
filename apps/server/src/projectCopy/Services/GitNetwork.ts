@@ -36,9 +36,14 @@ export interface GitNetworkCommandInput {
   readonly args: ReadonlyArray<string>;
   /**
    * The remote the command talks to; validated (https, ssh or scp-style, as
-   * `validateCloneRemoteUrl` accepts), and it picks the clone credentials.
+   * `validateCloneRemoteUrl` accepts), and it picks the clone credentials. When those credentials
+   * apply, the argument equal to `remoteUrl` is replaced by the URL without user info.
+   *
+   * Null for a command that talks to the remotes the repository itself names (submodules, LFS):
+   * it gets the non-interactive environment and the batch-mode ssh, but never clone credentials,
+   * which must not reach a host they were not issued for.
    */
-  readonly remoteUrl: string;
+  readonly remoteUrl: string | null;
   /**
    * A remote this node's own repository already has configured (the export's primary remote):
    * `file://` URLs and local paths pass too. Never set for a URL that came from a client, another
@@ -53,6 +58,7 @@ export interface GitNetworkCommandInput {
   readonly env?: Readonly<Record<string, string>> | undefined;
   /** Bounds the collected stdout; stderr is kept as a tail. */
   readonly maxOutputBytes?: number | undefined;
+  /** `onOutput` receives stderr in whole lines (progress updates end with `\r`), redacted. */
   readonly observer?: ProjectCopyProcessObserver | undefined;
 }
 
@@ -70,6 +76,11 @@ export interface GitLsRemoteInput {
   readonly tags: boolean;
   /** Default 30 s. */
   readonly timeoutMs?: number | undefined;
+  /**
+   * The repository whose configuration applies (its `core.sshCommand`, credential helpers), e.g.
+   * the export's checkout; default: a directory outside any repository.
+   */
+  readonly cwd?: string | undefined;
 }
 
 /** One ref a remote advertises. */

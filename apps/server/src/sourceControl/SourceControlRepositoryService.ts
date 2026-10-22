@@ -1,5 +1,5 @@
 import * as NodeOS from "node:os";
-import { Context, Effect, FileSystem, Layer, Path, Schema } from "effect";
+import { Context, Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
 
 import {
   SourceControlRepositoryError,
@@ -19,6 +19,7 @@ import {
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
+import * as GitCloneAccess from "./gitCloneAccess.ts";
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 
@@ -144,13 +145,6 @@ function defaultCloneProtocol(input: {
   return input.provider?.cloneAuthentication ? "https" : undefined;
 }
 
-const GIT_ASKPASS_SCRIPT = `#!/bin/sh
-case "$1" in
-  *Username*|*username*) printf '%s\\n' "$RYCO_GIT_USERNAME" ;;
-  *) printf '%s\\n' "$RYCO_GIT_PASSWORD" ;;
-esac
-`;
-
 function expandHomePath(input: string, path: Path.Path): string {
   if (input === "~") {
     return NodeOS.homedir();
@@ -161,64 +155,15 @@ function expandHomePath(input: string, path: Path.Path): string {
   return input;
 }
 
-function isScpStyleGitUrl(input: string): boolean {
-  return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+:[^\s]+$/u.test(input);
-}
-
 function validateCloneRemoteUrl(
   remoteUrl: string,
   provider: SourceControlProviderKind,
 ): Effect.Effect<string, SourceControlRepositoryError> {
-  const trimmed = remoteUrl.trim();
-  if (trimmed.length === 0 || trimmed.startsWith("-")) {
-    return Effect.fail(
-      repositoryError({
-        operation: "cloneRepository",
-        provider,
-        detail: "Enter a valid repository URL before cloning.",
-      }),
-    );
-  }
-
-  if (isScpStyleGitUrl(trimmed)) {
-    return Effect.succeed(trimmed);
-  }
-
-  try {
-    const url = new URL(trimmed);
-    if (url.protocol === "https:" || url.protocol === "ssh:") {
-      return Effect.succeed(trimmed);
-    }
-  } catch {
-    // Fall through to the validation error below.
-  }
-
-  return Effect.fail(
-    repositoryError({
-      operation: "cloneRepository",
-      provider,
-      detail: "Clone URL must use https://, ssh://, or git@host:owner/repo.git syntax.",
-    }),
-  );
-}
-
-function isHttpsCloneUrl(remoteUrl: string): boolean {
-  try {
-    return new URL(remoteUrl).protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-function removeUrlCredentials(remoteUrl: string): string {
-  try {
-    const url = new URL(remoteUrl);
-    url.username = "";
-    url.password = "";
-    return url.toString();
-  } catch {
-    return remoteUrl;
-  }
+  return Result.match(GitCloneAccess.validateCloneRemoteUrl(remoteUrl), {
+    onSuccess: Effect.succeed,
+    onFailure: (detail) =>
+      Effect.fail(repositoryError({ operation: "cloneRepository", provider, detail })),
+  });
 }
 
 export const make = Effect.fn("makeSourceControlRepositoryService")(function* () {
@@ -447,51 +392,25 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
     }
 
     const validatedRemoteUrl = yield* validateCloneRemoteUrl(remoteUrl, provider);
-    if (!cloneProvider && isHttpsCloneUrl(validatedRemoteUrl)) {
-      const detectedProvider = providers.detectProviderFromRemoteUrl(validatedRemoteUrl);
-      if (detectedProvider?.kind && detectedProvider.kind !== "unknown") {
-        cloneProvider = yield* providers.get(detectedProvider.kind);
-        provider = detectedProvider.kind;
-      }
-    }
-    const cloneAuthentication =
-      cloneProvider?.cloneAuthentication && isHttpsCloneUrl(validatedRemoteUrl)
-        ? yield* cloneProvider.cloneAuthentication({ remoteUrl: validatedRemoteUrl })
-        : null;
-    const cloneRemoteUrl = cloneAuthentication
-      ? removeUrlCredentials(validatedRemoteUrl)
-      : validatedRemoteUrl;
+    const clone = yield* GitCloneAccess.resolveCloneCredentials({
+      registry: providers,
+      remoteUrl: validatedRemoteUrl,
+      provider: cloneProvider,
+    });
 
-    const executeClone = (env?: NodeJS.ProcessEnv) =>
+    yield* GitCloneAccess.withCloneAskpass(clone.authentication, (env) =>
       git.execute({
         operation: "SourceControlRepositoryService.cloneRepository",
         cwd: preparedDestination.parentPath,
-        args: ["clone", "--", cloneRemoteUrl, preparedDestination.directoryName],
+        args: ["clone", "--", clone.remoteUrl, preparedDestination.directoryName],
         timeoutMs: 120_000,
         maxOutputBytes: 256 * 1024,
         ...(env ? { env } : {}),
-      });
-
-    if (cloneAuthentication) {
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const askpassDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "ryco-git-askpass-",
-          });
-          const askpassPath = path.join(askpassDir, "askpass.sh");
-          yield* fileSystem.writeFileString(askpassPath, GIT_ASKPASS_SCRIPT);
-          yield* fileSystem.chmod(askpassPath, 0o700);
-          yield* executeClone({
-            GIT_ASKPASS: askpassPath,
-            GIT_TERMINAL_PROMPT: "0",
-            RYCO_GIT_USERNAME: cloneAuthentication.username,
-            RYCO_GIT_PASSWORD: cloneAuthentication.password,
-          });
-        }),
-      );
-    } else {
-      yield* executeClone();
-    }
+      }),
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
 
     const clonedPath = yield* authorizeExistingPath(
       "cloneRepository",
@@ -499,7 +418,7 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
     );
     return {
       cwd: clonedPath,
-      remoteUrl: cloneRemoteUrl,
+      remoteUrl: clone.remoteUrl,
       repository,
     };
   });

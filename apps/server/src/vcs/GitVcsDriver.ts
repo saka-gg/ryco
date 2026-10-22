@@ -86,6 +86,20 @@ export const READ_ONLY_GIT_ENV = Object.freeze({
 } satisfies NodeJS.ProcessEnv);
 
 /**
+ * Environment for git commands that may talk to a remote without a user watching: no terminal
+ * prompt, no ssh askpass dialog, no credential-manager UI, and the C locale so git's progress
+ * and errors parse the same on every machine. Background status fetches and every git process
+ * of a cross-node project copy use it.
+ */
+export const NON_INTERACTIVE_GIT_ENV = Object.freeze({
+  LC_ALL: "C",
+  LANG: "C",
+  GIT_TERMINAL_PROMPT: "0",
+  SSH_ASKPASS_REQUIRE: "never",
+  GCM_INTERACTIVE: "never",
+} satisfies NodeJS.ProcessEnv);
+
+/**
  * Leading arguments for a background porcelain `git diff` that reads the
  * working tree. With `diff.autoRefreshIndex` (on by default) such a diff locks
  * and rewrites `.git/index` whenever a tracked file's stat data changed but its

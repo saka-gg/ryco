@@ -1,5 +1,6 @@
 import { Effect, Layer } from "effect";
 
+import { NON_INTERACTIVE_GIT_ENV } from "../../vcs/GitVcsDriver.ts";
 import { GitNetworkError } from "../Errors.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import { NOT_AVAILABLE_YET, notAvailableYet } from "./notAvailableYet.ts";
@@ -22,13 +23,7 @@ const networkFailure = (operation: string) =>
 export const GitNetworkPlaceholder = Layer.succeed(
   GitNetwork,
   GitNetwork.of({
-    env: Object.freeze({
-      LC_ALL: "C",
-      LANG: "C",
-      GIT_TERMINAL_PROMPT: "0",
-      SSH_ASKPASS_REQUIRE: "never",
-      GCM_INTERACTIVE: "never",
-    }),
+    env: NON_INTERACTIVE_GIT_ENV,
     runGitNetworkCommand: (input) => networkFailure(input.operation),
     lsRemote: () => networkFailure("GitNetwork.lsRemote"),
     checkRemoteAccess: () => Effect.fail(notAvailableYet()),
