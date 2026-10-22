@@ -1770,6 +1770,118 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
   });
 
+  it.effect(
+    "leaves provider environment secrets untouched when settings.json cannot be written",
+    () => {
+      const fake = syntheticSecretStore();
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { settingsPath } = yield* ServerConfig;
+        const settings = yield* ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_rollback");
+        const instance = {
+          driver: ProviderDriverKind.make("codex"),
+          config: {},
+          environment: [
+            { name: "OPENROUTER_API_KEY", value: "old-router-key", sensitive: true },
+            { name: "OPENAI_API_KEY", value: "old-openai-key", sensitive: true },
+            { name: "EXTRA_TOKEN", value: "old-extra-token", sensitive: true },
+          ],
+        };
+        yield* settings.updateSettings({ providerInstances: { [instanceId]: instance } });
+        const before = yield* settings.getSettings;
+        const persisted = yield* fs.readFileString(settingsPath);
+        const storedSecrets = () =>
+          Array.from(fake.values, ([name, value]) => [name, new TextDecoder().decode(value)]);
+        const secrets = storedSecrets();
+        assert.lengthOf(secrets, 3);
+
+        // Removes one key, replaces one, turns one into a plain value and adds a new one.
+        const edit = settings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              ...instance,
+              environment: [
+                { name: "OPENAI_API_KEY", value: "new-openai-key", sensitive: true },
+                { name: "EXTRA_TOKEN", value: "plain-extra-token", sensitive: false },
+                { name: "NEW_API_KEY", value: "new-api-key", sensitive: true },
+              ],
+            },
+          },
+        });
+        const directory = path.dirname(settingsPath);
+        const failures = yield* Effect.gen(function* () {
+          yield* fs.chmod(directory, 0o500);
+          const edited = yield* Effect.exit(edit);
+          const removed = yield* Effect.exit(settings.updateSettings({ providerInstances: {} }));
+          return [edited, removed];
+        }).pipe(Effect.ensuring(fs.chmod(directory, 0o700).pipe(Effect.orDie)));
+        assert.isTrue(failures.every(Exit.isFailure));
+
+        assert.deepEqual(storedSecrets(), secrets);
+        assert.equal(yield* fs.readFileString(settingsPath), persisted);
+        assert.deepEqual(yield* settings.getSettings, before);
+        assert.deepEqual(yield* loadSettingsInFreshService(fake.store), before);
+
+        // Once the file is written, the keys it no longer refers to are removed.
+        yield* edit;
+        assert.sameMembers(
+          storedSecrets().map(([, value]) => value),
+          ["new-openai-key", "new-api-key"],
+        );
+      }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+    },
+  );
+
+  it.effect(
+    "restores provider environment secrets when a hub in the same update is refused",
+    () => {
+      const fake = syntheticSecretStore();
+      return Effect.gen(function* () {
+        const settings = yield* ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_with_hub");
+        const instance = {
+          driver: ProviderDriverKind.make("codex"),
+          config: {},
+          environment: [{ name: "OPENROUTER_API_KEY", value: "old-router-key", sensitive: true }],
+        };
+        yield* settings.updateSettings({ providerInstances: { [instanceId]: instance } });
+        const before = yield* settings.getSettings;
+        const secrets = Array.from(fake.values, ([name, value]) => [name, Array.from(value)]);
+
+        const refused = yield* Effect.exit(
+          settings.updateSettings({
+            providerInstances: {
+              [instanceId]: {
+                ...instance,
+                environment: [
+                  { name: "OPENROUTER_API_KEY", value: "new-router-key", sensitive: true },
+                ],
+              },
+            },
+            // A redacted key with no saved value is refused after the provider keys are stored.
+            cliProxyHubs: {
+              [CliProxyHubId.make("home")]: {
+                url: "http://127.0.0.1:8317",
+                managementKey: "",
+                managementKeyRedacted: true,
+                enabled: true,
+              },
+            },
+          }),
+        );
+        assert.isTrue(Exit.isFailure(refused));
+
+        assert.deepEqual(
+          Array.from(fake.values, ([name, value]) => [name, Array.from(value)]),
+          secrets,
+        );
+        assert.deepEqual(yield* settings.getSettings, before);
+      }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+    },
+  );
+
   it.effect("falls back to defaults for an unparseable file and keeps its exact bytes", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
