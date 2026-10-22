@@ -10,6 +10,7 @@ import {
   Cache,
   Data,
   DateTime,
+  Deferred,
   Duration,
   Effect,
   Exit,
@@ -2442,6 +2443,38 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const branch = refName.startsWith("origin/") ? refName.slice("origin/".length) : refName;
     return fetchOriginBranch(cwd, branch).pipe(Effect.as(branch));
   };
+  /**
+   * Base fetches `createWorktree` is running, by repository and base. Creations
+   * that start together (one prompt sent to several models) share one: parallel
+   * fetches of one ref race for its lock, and all but one of them fail.
+   */
+  const runningWorktreeBaseFetches = new Map<string, Deferred.Deferred<string, GitCommandError>>();
+  const sharedWorktreeBaseFetch = (cwd: string, refName: string) =>
+    // Registered together with the fetch that settles it, or not at all, so a
+    // later creation never waits on an outcome nothing completes.
+    Effect.uninterruptibleMask((restore) =>
+      Effect.suspend(() => {
+        const key = worktreeBaseKey(cwd, refName);
+        const running = runningWorktreeBaseFetches.get(key);
+        if (running) return restore(Deferred.await(running));
+        const outcome = Deferred.makeUnsafe<string, GitCommandError>();
+        runningWorktreeBaseFetches.set(key, outcome);
+        // Detached: a creation that is interrupted must not cut off the fetch
+        // the others are waiting on.
+        return fetchWorktreeBase(cwd, refName).pipe(
+          Effect.onExit((exit) =>
+            Effect.suspend(() => {
+              if (runningWorktreeBaseFetches.get(key) === outcome) {
+                runningWorktreeBaseFetches.delete(key);
+              }
+              return Deferred.done(outcome, exit);
+            }),
+          ),
+          Effect.forkDetach,
+          Effect.andThen(restore(Deferred.await(outcome))),
+        );
+      }),
+    );
   /** A prefetch of this base still running, or finished recently enough to reuse. */
   const reusableWorktreeBasePrefetch = (key: string) => {
     const entry = worktreeBasePrefetches.get(key);
@@ -2830,7 +2863,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         : Option.none<string>();
       const baseBranch = Option.isSome(prefetched)
         ? prefetched.value
-        : yield* fetchWorktreeBase(input.cwd, baseRef);
+        : yield* sharedWorktreeBaseFetch(input.cwd, baseRef);
       yield* (
         input.progress?.onFetchFinished?.({
           reused: Option.isSome(prefetched),

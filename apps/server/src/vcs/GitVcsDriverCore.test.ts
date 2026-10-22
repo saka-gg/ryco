@@ -1200,6 +1200,56 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.lengthOf(fetchArgs, 2);
       }).pipe(Effect.provide(ServerConfigLayer)),
     );
+    it.effect("shares one base fetch between worktrees created together", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", remote, "."]);
+        // Origin moved, so parallel fetches of its branch would race for the
+        // remote-tracking ref's lock (one prompt sent to several models).
+        yield* git(remote, ["commit", "--allow-empty", "-m", "new remote commit"]);
+        const remoteHead = yield* git(remote, ["rev-parse", "HEAD"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        const fetchArgs: Array<ReadonlyArray<string>> = [];
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) => {
+            if (input.args[0] === "fetch") fetchArgs.push(input.args);
+            return base.execute(input);
+          },
+        });
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+
+        const created = yield* Effect.forEach(
+          [1, 2, 3, 4],
+          (index) =>
+            driver.createWorktree({
+              cwd,
+              path: pathService.join(root, `model-${index}`),
+              refName: `origin/${initialBranch}`,
+              newRefName: `compare/model-${index}`,
+              fetchOrigin: true,
+            }),
+          { concurrency: "unbounded" },
+        );
+
+        assert.lengthOf(fetchArgs, 1);
+        assert.lengthOf(new Set(created.map((result) => result.worktree.path)), 4);
+        for (const result of created) {
+          assert.equal(yield* git(result.worktree.path, ["rev-parse", "HEAD"]), remoteHead);
+        }
+        // Once it settled, the next creation fetches again.
+        yield* driver.createWorktree({
+          cwd,
+          path: pathService.join(root, "later"),
+          refName: `origin/${initialBranch}`,
+          newRefName: "compare/later",
+          fetchOrigin: true,
+        });
+        assert.lengthOf(fetchArgs, 2);
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
     it.effect("reports the fetch and Git's checkout meter while creating a worktree", () =>
       Effect.gen(function* () {
         const remote = yield* makeTmpDir();
