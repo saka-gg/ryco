@@ -11,7 +11,9 @@ import { scopedThreadKey } from "@ryco/client-runtime/scoped";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
+import { pinMediaQueryMatches } from "../../test/browserPointer";
 import { SideChatPanel } from "./SideChatPanel";
+import { FINE_POINTER_MEDIA_QUERY } from "./chat/useSendShortcut";
 import { replaceClientSettingsSnapshot } from "../hooks/clientSettingsStore";
 import { isMacPlatform } from "../lib/utils";
 import { useSideChatStore } from "../sideChatStore";
@@ -166,8 +168,9 @@ describe("SideChatPanel", () => {
       requestId: input.requestId,
       answer: "Two lines answered",
     }));
-    // A narrow desktop window: the phone tier with a fine pointer keeps the setting.
-    expect(window.matchMedia("(any-pointer: fine)").matches).toBe(true);
+    // A narrow desktop window: the phone tier with a fine pointer keeps the setting. The
+    // pointer is pinned because device-less Linux CI reports none.
+    const restorePointer = pinMediaQueryMatches(FINE_POINTER_MEDIA_QUERY, true);
     useTierOverrideStore.setState({ override: "phone" });
     replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, sendShortcut: "mod-enter" });
     try {
@@ -188,6 +191,7 @@ describe("SideChatPanel", () => {
     } finally {
       replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
       useTierOverrideStore.setState({ override: null });
+      restorePointer();
     }
   });
   it("minimizes without stopping; cancel restores draft and ignores a late answer", async () => {
