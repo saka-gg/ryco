@@ -8,6 +8,7 @@ import type {
   AuthSessionState,
   AuthWebSocketTokenResult,
   DesktopDiscoveredSshHost,
+  DesktopSshEnsureEnvironmentOptions,
   DesktopSshEnvironmentTarget,
   DesktopSshPasswordPromptRequest,
   ExecutionEnvironmentDescriptor,
@@ -37,6 +38,7 @@ const FETCH_SSH_ENVIRONMENT_DESCRIPTOR_CHANNEL = DESKTOP_SSH_IPC.fetchEnvironmen
 const BOOTSTRAP_SSH_BEARER_SESSION_CHANNEL = DESKTOP_SSH_IPC.bootstrapBearerSession;
 const FETCH_SSH_SESSION_STATE_CHANNEL = DESKTOP_SSH_IPC.fetchSessionState;
 const ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL = DESKTOP_SSH_IPC.issueWebSocketToken;
+const REVOKE_SSH_CLIENT_SESSION_CHANNEL = DESKTOP_SSH_IPC.revokeClientSession;
 const SSH_PASSWORD_PROMPT_CHANNEL = "desktop:ssh-password-prompt";
 const RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL = DESKTOP_SSH_IPC.resolvePasswordPrompt;
 const DEFAULT_SSH_PASSWORD_PROMPT_TIMEOUT_MS = 3 * 60 * 1000;
@@ -115,7 +117,7 @@ export class DesktopSshEnvironmentManager {
 
   async ensureEnvironment(
     target: DesktopSshEnvironmentTarget,
-    options?: { readonly issuePairingToken?: boolean },
+    options?: Readonly<DesktopSshEnsureEnvironmentOptions>,
   ) {
     return await this.runtime.runPromise(
       Effect.service(SshEnvironmentManager).pipe(
@@ -136,6 +138,20 @@ export class DesktopSshEnvironmentManager {
     await this.runtime.runPromise(Scope.close(this.scope, Exit.void));
     await this.runtime.dispose();
   }
+}
+
+/** The renderer's ensure options, read strictly: owner-only applies to an issued token. */
+export function readEnsureEnvironmentOptions(
+  rawOptions: unknown,
+): DesktopSshEnsureEnvironmentOptions {
+  if (typeof rawOptions !== "object" || rawOptions === null) {
+    return { issuePairingToken: false };
+  }
+  const options = rawOptions as Readonly<Record<string, unknown>>;
+  const issuePairingToken = options.issuePairingToken === true;
+  return issuePairingToken && options.requireOwnerPairing === true
+    ? { issuePairingToken, requireOwnerPairing: true }
+    : { issuePairingToken };
 }
 
 function getSafeDesktopSshTarget(rawTarget: unknown): DesktopSshEnvironmentTarget | null {
@@ -249,16 +265,11 @@ export class DesktopSshEnvironmentBridge {
         throw new Error("Invalid desktop SSH target.");
       }
 
-      const issuePairingToken =
-        typeof rawOptions === "object" &&
-        rawOptions !== null &&
-        "issuePairingToken" in rawOptions &&
-        (rawOptions as { issuePairingToken?: unknown }).issuePairingToken === true;
-
       try {
-        return await this.manager.ensureEnvironment(target, {
-          issuePairingToken,
-        });
+        return await this.manager.ensureEnvironment(
+          target,
+          readEnsureEnvironmentOptions(rawOptions),
+        );
       } catch (error) {
         if (isSshPasswordPromptCancellation(error)) {
           return {
@@ -329,6 +340,25 @@ export class DesktopSshEnvironmentBridge {
             bearerToken: rawBearerToken,
           }),
         ),
+    );
+
+    ipcMain.removeHandler(REVOKE_SSH_CLIENT_SESSION_CHANNEL);
+    ipcMain.handle(
+      REVOKE_SSH_CLIENT_SESSION_CHANNEL,
+      async (_event, rawHttpBaseUrl, rawBearerToken, rawSessionId) => {
+        if (typeof rawSessionId !== "string" || rawSessionId.trim().length === 0) {
+          throw new Error("Invalid SSH client session id.");
+        }
+        return sshRuntime.runPromise(
+          fetchLoopbackSshJson<{ readonly revoked: boolean }>({
+            httpBaseUrl: rawHttpBaseUrl,
+            pathname: "/api/auth/clients/revoke",
+            method: "POST",
+            bearerToken: rawBearerToken,
+            body: { sessionId: rawSessionId },
+          }),
+        );
+      },
     );
 
     ipcMain.removeHandler(RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL);

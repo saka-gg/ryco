@@ -162,7 +162,7 @@ import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { makeWorktreeSetupTracker } from "../project/Layers/WorktreeSetupTracker.ts";
 
 export { isThreadDetailEvent } from "./context/orchestrationEvents.ts";
-export { toAuthAccessStreamEvent } from "./context/authEvents.ts";
+export { isListedAuthAccessChange, toAuthAccessStreamEvent } from "./context/authEvents.ts";
 export { toOpinionatedPluginRpcError } from "./context/gitErrors.ts";
 export {
   PROVIDER_STATUS_DEBOUNCE_MS,

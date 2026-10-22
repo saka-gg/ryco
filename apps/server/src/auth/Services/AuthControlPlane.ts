@@ -9,6 +9,20 @@ import type { SessionRole } from "./SessionCredentialService.ts";
 
 export const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
 
+/**
+ * Subject of the owner link a server mints for itself at startup (the printed
+ * `/pair` URL). Pairing lists leave it out: it belongs to the node's own launch,
+ * not to a link someone created.
+ */
+export const OWNER_BOOTSTRAP_PAIRING_SUBJECT = "owner-bootstrap";
+
+/**
+ * The longest an owner pairing link may stay redeemable. Redeeming one grants
+ * everything the node's user can do through Ryco, so it never outlives a
+ * pairing ceremony.
+ */
+export const OWNER_PAIRING_LINK_MAX_TTL = Duration.minutes(15);
+
 export interface IssuedPairingLink {
   readonly id: string;
   readonly credential: string;

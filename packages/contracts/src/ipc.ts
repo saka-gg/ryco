@@ -279,7 +279,7 @@ import type {
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
-import type { EnvironmentId, ProjectId, ThreadId } from "./baseSchemas.ts";
+import type { AuthSessionId, EnvironmentId, ProjectId, ThreadId } from "./baseSchemas.ts";
 import type {
   DiagnosticsSnapshot,
   DiagnosticsSignalProcessInput,
@@ -289,6 +289,7 @@ import type { StatisticsSnapshot } from "./statistics.ts";
 import type { UsageSummary, UsageSummaryRequest } from "./usage.ts";
 import type {
   AuthBearerBootstrapResult,
+  AuthSessionRole,
   AuthSessionState,
   AuthWebSocketTokenResult,
 } from "./auth.ts";
@@ -434,9 +435,21 @@ export interface DesktopSshEnvironmentBootstrap {
   target: DesktopSshEnvironmentTarget;
   httpBaseUrl: string;
   wsBaseUrl: string;
+  /**
+   * Null when none was requested, or when `requireOwnerPairing` was set and the
+   * remote CLI predates owner pairing.
+   */
   pairingToken: string | null;
+  /** The role `pairingToken` redeems to; absent from desktop builds before owner pairing. */
+  pairingRole?: AuthSessionRole;
   remotePort?: number;
   remoteServerKind?: "external" | "managed";
+}
+
+export interface DesktopSshEnsureEnvironmentOptions {
+  issuePairingToken?: boolean;
+  /** With `issuePairingToken`: an owner token or none, never a client one. */
+  requireOwnerPairing?: boolean;
 }
 
 export interface DesktopSshPasswordPromptRequest {
@@ -857,7 +870,7 @@ export interface DesktopBridge {
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
-    options?: { issuePairingToken?: boolean },
+    options?: DesktopSshEnsureEnvironmentOptions,
   ) => Promise<DesktopSshEnvironmentBootstrap>;
   disconnectSshEnvironment: (target: DesktopSshEnvironmentTarget) => Promise<void>;
   fetchSshEnvironmentDescriptor: (httpBaseUrl: string) => Promise<ExecutionEnvironmentDescriptor>;
@@ -870,6 +883,12 @@ export interface DesktopBridge {
     httpBaseUrl: string,
     bearerToken: string,
   ) => Promise<AuthWebSocketTokenResult>;
+  /** Revokes another session through an owner bearer. Absent from older desktop builds. */
+  revokeSshClientSession?: (
+    httpBaseUrl: string,
+    ownerBearerToken: string,
+    sessionId: AuthSessionId,
+  ) => Promise<{ revoked: boolean }>;
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;

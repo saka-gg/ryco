@@ -18,6 +18,7 @@ const mockResolveRemoteWebSocketConnectionUrl = vi.fn();
 const mockRotateRemoteBearerSession = vi.fn();
 const mockBootstrapSshBearerSession = vi.fn();
 const mockFetchSshSessionState = vi.fn();
+const mockRevokeSshClientSession = vi.fn();
 const mockPersistSavedEnvironmentRecord = vi.fn();
 const mockWriteSavedEnvironmentBearerToken = vi.fn();
 const mockSetSavedEnvironmentRegistry = vi.fn();
@@ -179,6 +180,7 @@ describe("addSavedEnvironment", () => {
         bootstrapSshBearerSession: mockBootstrapSshBearerSession,
         fetchSshSessionState: mockFetchSshSessionState,
         issueSshWebSocketToken: vi.fn(),
+        revokeSshClientSession: mockRevokeSshClientSession,
       },
     });
     mockResolveRemotePairingTarget.mockImplementation(
@@ -1505,6 +1507,145 @@ describe("addSavedEnvironment", () => {
     );
 
     await resetEnvironmentServiceForTests();
+  });
+
+  describe("owner re-pair of client-role ssh environments", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const sshTarget = {
+      alias: "devbox",
+      hostname: "devbox.example.com",
+      username: "julius",
+      port: 22,
+    };
+    const sshRecord = {
+      environmentId,
+      label: "Remote environment",
+      httpBaseUrl: "http://127.0.0.1:3774/",
+      wsBaseUrl: "ws://127.0.0.1:3774/",
+      createdAt: "2026-04-14T00:00:00.000Z",
+      lastConnectedAt: null,
+      desktopSsh: sshTarget,
+    };
+    const tunnelBootstrap = {
+      target: sshTarget,
+      httpBaseUrl: "http://127.0.0.1:3774/",
+      wsBaseUrl: "ws://127.0.0.1:3774/",
+      pairingToken: null,
+    };
+    const pairingCalls = () =>
+      mockEnsureSshEnvironment.mock.calls.filter(
+        (call) => (call[1] as { issuePairingToken?: boolean } | undefined)?.issuePairingToken,
+      );
+
+    beforeEach(() => {
+      mockSavedRecords = [sshRecord];
+      mockReadSavedEnvironmentBearerToken.mockResolvedValue("client-bearer");
+      mockWriteSavedEnvironmentBearerToken.mockResolvedValue(true);
+      mockFetchSshSessionState.mockImplementation(async (_httpBaseUrl, bearerToken) =>
+        bearerToken === "owner-bearer"
+          ? { authenticated: true, role: "owner", sessionId: "owner-session" }
+          : { authenticated: true, role: "client", sessionId: "client-session" },
+      );
+      mockRevokeSshClientSession.mockResolvedValue({ revoked: true });
+    });
+
+    it("re-pairs as owner over the tunnel, persists the bearer, then revokes the client session", async () => {
+      mockEnsureSshEnvironment.mockImplementation(async (_target, options) => ({
+        ...tunnelBootstrap,
+        ...(options?.issuePairingToken
+          ? { pairingToken: "owner-pairing-code", pairingRole: "owner" }
+          : {}),
+      }));
+      mockBootstrapSshBearerSession.mockResolvedValue({
+        sessionToken: "owner-bearer",
+        role: "owner",
+      });
+
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      await reconnectSavedEnvironment(environmentId);
+
+      expect(pairingCalls()).toEqual([
+        [sshTarget, { issuePairingToken: true, requireOwnerPairing: true }],
+      ]);
+      expect(mockBootstrapSshBearerSession).toHaveBeenCalledWith(
+        "http://127.0.0.1:3774/",
+        "owner-pairing-code",
+      );
+      expect(mockWriteSavedEnvironmentBearerToken).toHaveBeenCalledWith(
+        environmentId,
+        "owner-bearer",
+      );
+      expect(mockRevokeSshClientSession).toHaveBeenCalledWith(
+        "http://127.0.0.1:3774/",
+        "owner-bearer",
+        "client-session",
+      );
+      // The owner bearer is stored before the session it replaces goes away.
+      expect(mockWriteSavedEnvironmentBearerToken.mock.invocationCallOrder[0]).toBeLessThan(
+        mockRevokeSshClientSession.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY,
+      );
+      // The connection is built on the owner bearer.
+      expect(mockFetchSshSessionState).toHaveBeenLastCalledWith(
+        "http://127.0.0.1:3774/",
+        "owner-bearer",
+      );
+      expect(mockPatchRuntime).toHaveBeenCalledWith(
+        environmentId,
+        expect.objectContaining({ role: "owner" }),
+      );
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("keeps the client bearer when the remote cannot mint owner credentials, and asks once", async () => {
+      // The remote CLI predates owner pairing: an owner-only request mints nothing.
+      mockEnsureSshEnvironment.mockResolvedValue(tunnelBootstrap);
+      mockCreateEnvironmentConnection.mockImplementationOnce(() => {
+        throw new Error("socket setup failed");
+      });
+
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      await expect(reconnectSavedEnvironment(environmentId)).rejects.toThrow("socket setup failed");
+      await reconnectSavedEnvironment(environmentId);
+
+      expect(pairingCalls()).toEqual([
+        [sshTarget, { issuePairingToken: true, requireOwnerPairing: true }],
+      ]);
+      expect(mockBootstrapSshBearerSession).not.toHaveBeenCalled();
+      expect(mockWriteSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+      expect(mockRevokeSshClientSession).not.toHaveBeenCalled();
+      expect(mockPatchRuntime).toHaveBeenCalledWith(
+        environmentId,
+        expect.objectContaining({ role: "client" }),
+      );
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("never re-pairs a client bearer the tunnel issued during the same connect", async () => {
+      mockReadSavedEnvironmentBearerToken.mockResolvedValue(null);
+      mockEnsureSshEnvironment.mockImplementation(async (_target, options) => ({
+        ...tunnelBootstrap,
+        ...(options?.issuePairingToken
+          ? { pairingToken: "client-pairing-code", pairingRole: "client" }
+          : {}),
+      }));
+      mockBootstrapSshBearerSession.mockResolvedValue({
+        sessionToken: "client-bearer",
+        role: "client",
+      });
+
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      await reconnectSavedEnvironment(environmentId);
+
+      expect(pairingCalls()).toEqual([[sshTarget, { issuePairingToken: true }]]);
+      expect(mockRevokeSshClientSession).not.toHaveBeenCalled();
+
+      await resetEnvironmentServiceForTests();
+    });
   });
 
   it("rolls back ssh registry metadata when pairing token issuance fails", async () => {

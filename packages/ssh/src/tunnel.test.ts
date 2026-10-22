@@ -1,4 +1,9 @@
-import { assert, describe, it } from "@effect/vitest";
+import * as ChildProcessNode from "node:child_process";
+import * as FS from "node:fs";
+import * as OS from "node:os";
+import * as NodePath from "node:path";
+
+import { afterEach, assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NetService } from "@ryco/shared/Net";
 import { Duration, Effect, Fiber, Layer, Result, Sink, Stream } from "effect";
@@ -7,12 +12,14 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { SshPasswordPrompt } from "./auth.ts";
+import { remoteStateKey } from "./command.ts";
 import {
   buildRemoteLaunchScript,
   buildRemotePairingScript,
   buildRemoteStopScript,
   buildRemoteRycoRunnerScript,
   describeReadinessCause,
+  decodeRemotePairingToken,
   issueRemotePairingToken,
   REMOTE_PICK_PORT_SCRIPT,
   SshEnvironmentManager,
@@ -170,7 +177,16 @@ describe("ssh tunnel scripts", () => {
     );
     assert.include(
       buildRemotePairingScript(target),
-      '"$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json',
+      '"$RUNNER_FILE" auth pairing create --role owner --label "Desktop SSH" --base-dir "$PAIRING_BASE_DIR" --json',
+    );
+    assert.include(
+      buildRemotePairingScript(target),
+      '"$RUNNER_FILE" auth pairing create --label "Desktop SSH" --base-dir "$PAIRING_BASE_DIR" --json',
+    );
+    assert.include(buildRemotePairingScript(target), "PAIRING_CLIENT_FALLBACK=1");
+    assert.include(
+      buildRemotePairingScript(target, undefined, { requireOwner: true }),
+      "PAIRING_CLIENT_FALLBACK=0",
     );
     assert.include(buildRemotePairingScript(target), 'PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"');
     assert.notInclude(buildRemotePairingScript(target), "server-home");
@@ -273,8 +289,39 @@ describe("ssh tunnel scripts", () => {
     return Effect.gen(function* () {
       const result = yield* issueRemotePairingToken(target);
       assert.equal(result.credential, "LCL4R2TPHDKQ");
+      assert.equal(result.role, "client");
     }).pipe(Effect.provide(processLayer));
   });
+
+  it.effect("reports the role of the pairing token the remote CLI issued", () =>
+    Effect.gen(function* () {
+      const owner = yield* decodeRemotePairingToken(
+        '{"id":"1","credential":"OWNERTOKEN12","role":"owner","expiresAt":"2026-10-22T09:15:00.000Z"}\n',
+      );
+      assert.deepEqual(owner, { credential: "OWNERTOKEN12", role: "owner" });
+
+      // A CLI that never printed a role only mints client links.
+      const legacy = yield* decodeRemotePairingToken('{"credential":"CLIENTTOKEN1"}\n');
+      assert.deepEqual(legacy, { credential: "CLIENTTOKEN1", role: "client" });
+
+      const unsupported = yield* decodeRemotePairingToken('{"ownerPairingUnsupported":true}\n', {
+        requireOwner: true,
+      });
+      assert.deepEqual(unsupported, { credential: null, role: null });
+
+      // A required owner token is never answered with a client one.
+      const clientForOwner = yield* decodeRemotePairingToken(
+        '{"credential":"CLIENTTOKEN1","role":"client"}\n',
+        { requireOwner: true },
+      );
+      assert.deepEqual(clientForOwner, { credential: null, role: null });
+
+      const missing = yield* Effect.flip(
+        decodeRemotePairingToken('{"ownerPairingUnsupported":true}\n'),
+      );
+      assert.include(missing.message, "invalid credential");
+    }),
+  );
 
   it.effect("closes the tunnel scope and starts fresh after disconnect", () => {
     const spawnedCommands: Array<ReadonlyArray<string>> = [];
@@ -329,5 +376,138 @@ describe("ssh tunnel scripts", () => {
       assert.equal(spawnedCommands.filter((args) => args.includes("-N")).length, 2);
       assert.equal(tunnelKillCount, 1);
     }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+});
+
+/**
+ * A stand-in for the remote `ryco` CLI, run by the real pairing script through
+ * the runner's node-script override. `rejects-role` behaves like a CLI from
+ * before owner pairing (effect/cli's unknown-flag failure); `fails` fails for
+ * another reason.
+ */
+const FAKE_RYCO_CLI = `const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FAKE_RYCO_LOG, JSON.stringify(args) + "\\n");
+const mode = process.env.FAKE_RYCO_MODE;
+const roleIndex = args.indexOf("--role");
+if (mode === "fails") {
+  process.stderr.write("Error: database is locked\\n");
+  process.exit(1);
+}
+if (roleIndex !== -1 && mode === "rejects-role") {
+  process.stdout.write("DESCRIPTION\\n  Issue a new client pairing token.\\n");
+  process.stderr.write("\\nERROR\\n  Unrecognized flag: --role in command ryco auth pairing create\\n");
+  process.exit(1);
+}
+const role = roleIndex === -1 ? "client" : args[roleIndex + 1];
+process.stdout.write(JSON.stringify({
+  id: "88941235-6ed5-4184-a2ff-5339e2075958",
+  credential: role === "owner" ? "OWNERTOKEN12" : "CLIENTTOKEN1",
+  label: args[args.indexOf("--label") + 1],
+  role,
+  expiresAt: "2026-10-22T09:05:00.000Z",
+}, null, 2) + "\\n");
+`;
+
+describe("ssh pairing script", () => {
+  const target = {
+    alias: "devbox",
+    hostname: "devbox.example.com",
+    username: "julius",
+    port: 2222,
+  } as const;
+  const tempDirectories: string[] = [];
+
+  afterEach(() => {
+    for (const directory of tempDirectories.splice(0)) {
+      FS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  const runPairingScript = (
+    mode: "accepts-role" | "rejects-role" | "fails",
+    options?: { readonly requireOwner?: boolean },
+  ) => {
+    const home = FS.mkdtempSync(NodePath.join(OS.tmpdir(), "ryco-ssh-pairing-test-"));
+    tempDirectories.push(home);
+    const cliPath = NodePath.join(home, "fake-ryco.cjs");
+    const logPath = NodePath.join(home, "invocations.log");
+    FS.writeFileSync(cliPath, FAKE_RYCO_CLI, "utf8");
+    const result = ChildProcessNode.spawnSync("sh", ["-s"], {
+      input: buildRemotePairingScript(target, { nodeScriptPath: cliPath }, options),
+      env: { ...process.env, HOME: home, FAKE_RYCO_MODE: mode, FAKE_RYCO_LOG: logPath },
+      encoding: "utf8",
+    });
+    const invocations = FS.existsSync(logPath)
+      ? FS.readFileSync(logPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as ReadonlyArray<string>)
+      : [];
+    const stateDir = NodePath.join(home, ".ryco", "ssh-launch", remoteStateKey(target));
+    const leftovers = FS.readdirSync(stateDir).filter((entry) => entry.startsWith("pairing."));
+    return { ...result, home, invocations, leftovers };
+  };
+
+  it.effect("issues an owner token when the remote CLI accepts --role", () =>
+    Effect.gen(function* () {
+      const run = runPairingScript("accepts-role");
+      assert.equal(run.status, 0, run.stderr);
+      assert.deepEqual(run.invocations, [
+        [
+          "auth",
+          "pairing",
+          "create",
+          "--role",
+          "owner",
+          "--label",
+          "Desktop SSH",
+          "--base-dir",
+          NodePath.join(run.home, ".ryco"),
+          "--json",
+        ],
+      ]);
+      assert.deepEqual(run.leftovers, []);
+      const token = yield* decodeRemotePairingToken(run.stdout);
+      assert.deepEqual(token, { credential: "OWNERTOKEN12", role: "owner" });
+    }),
+  );
+
+  it.effect("retries as a client when the remote CLI rejects --role as unknown", () =>
+    Effect.gen(function* () {
+      const run = runPairingScript("rejects-role");
+      assert.equal(run.status, 0, run.stderr);
+      assert.deepEqual(
+        run.invocations.map((args) => args.slice(3, args.indexOf("--base-dir"))),
+        [
+          ["--role", "owner", "--label", "Desktop SSH"],
+          ["--label", "Desktop SSH"],
+        ],
+      );
+      // The rejected attempt's help text never reaches the JSON reader.
+      assert.notInclude(run.stdout, "DESCRIPTION");
+      assert.deepEqual(run.leftovers, []);
+      const token = yield* decodeRemotePairingToken(run.stdout);
+      assert.deepEqual(token, { credential: "CLIENTTOKEN1", role: "client" });
+    }),
+  );
+
+  it.effect("mints nothing when owner is required and the remote CLI rejects --role", () =>
+    Effect.gen(function* () {
+      const run = runPairingScript("rejects-role", { requireOwner: true });
+      assert.equal(run.status, 0, run.stderr);
+      assert.equal(run.invocations.length, 1);
+      const token = yield* decodeRemotePairingToken(run.stdout, { requireOwner: true });
+      assert.deepEqual(token, { credential: null, role: null });
+    }),
+  );
+
+  it("reports other failures as they are, without a client retry", () => {
+    const run = runPairingScript("fails");
+    assert.equal(run.status, 1);
+    assert.equal(run.invocations.length, 1);
+    assert.include(run.stderr, "database is locked");
+    assert.equal(run.stdout.trim(), "");
+    assert.deepEqual(run.leftovers, []);
   });
 });

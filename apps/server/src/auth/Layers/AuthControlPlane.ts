@@ -1,5 +1,5 @@
 import type { AuthClientSession, AuthPairingLink } from "@ryco/contracts";
-import { DateTime, Effect, Layer } from "effect";
+import { DateTime, Duration, Effect, Layer } from "effect";
 
 import { BootstrapCredentialServiceLive } from "./BootstrapCredentialService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
@@ -11,6 +11,7 @@ import {
   AuthControlPlane,
   AuthControlPlaneError,
   DEFAULT_SESSION_SUBJECT,
+  OWNER_PAIRING_LINK_MAX_TTL,
 } from "../Services/AuthControlPlane.ts";
 import type {
   AuthControlPlaneShape,
@@ -40,11 +41,23 @@ export const makeAuthControlPlane = Effect.gen(function* () {
   const bootstrapCredentials = yield* BootstrapCredentialService;
   const sessions = yield* SessionCredentialService;
 
-  const createPairingLink: AuthControlPlaneShape["createPairingLink"] = (input) =>
-    Effect.gen(function* () {
+  const createPairingLink: AuthControlPlaneShape["createPairingLink"] = (input) => {
+    const role = input?.role ?? "client";
+    if (
+      role === "owner" &&
+      input?.ttl !== undefined &&
+      Duration.isGreaterThan(input.ttl, OWNER_PAIRING_LINK_MAX_TTL)
+    ) {
+      return Effect.fail(
+        new AuthControlPlaneError({
+          message: `An owner pairing link can last at most ${Duration.toMinutes(OWNER_PAIRING_LINK_MAX_TTL)} minutes.`,
+        }),
+      );
+    }
+    return Effect.gen(function* () {
       const createdAt = yield* DateTime.now;
       const issued = yield* bootstrapCredentials.issueOneTimeToken({
-        role: input?.role ?? "client",
+        role,
         subject: input?.subject ?? "one-time-token",
         ...(input?.ttl ? { ttl: input.ttl } : {}),
         ...(input?.label ? { label: input.label } : {}),
@@ -52,13 +65,14 @@ export const makeAuthControlPlane = Effect.gen(function* () {
       return {
         id: issued.id,
         credential: issued.credential,
-        role: input?.role ?? "client",
+        role,
         subject: input?.subject ?? "one-time-token",
         ...(issued.label ? { label: issued.label } : {}),
         createdAt: DateTime.toUtc(createdAt),
         expiresAt: DateTime.toUtc(issued.expiresAt),
       } satisfies IssuedPairingLink;
     }).pipe(Effect.mapError(toAuthControlPlaneError("Failed to create pairing link.")));
+  };
 
   const listPairingLinks: AuthControlPlaneShape["listPairingLinks"] = (input) =>
     bootstrapCredentials.listActive().pipe(
