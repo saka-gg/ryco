@@ -63,4 +63,26 @@ it.layer(NodeServices.layer)("ProjectAvatarStoreLive", (it) => {
       }).pipe(Effect.provide(layer));
     }),
   );
+
+  it.effect("refuses project ids that are not a plain file name", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const dataDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-project-avatars-test-",
+      });
+
+      const layer = ProjectAvatarStoreLive({ dataDir });
+      yield* Effect.gen(function* () {
+        const store = yield* ProjectAvatarStore;
+        const escaping = "../../outside" as unknown as never;
+        const result = yield* Effect.result(
+          store.write({ projectId: escaping, bytes: PNG_1X1, contentType: "image/png" }),
+        );
+        expect(result._tag).toBe("Failure");
+        expect(yield* fileSystem.exists(`${dataDir}/outside.png`)).toBe(false);
+        expect(yield* store.read(escaping)).toBeNull();
+        yield* store.remove(escaping);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
 });
