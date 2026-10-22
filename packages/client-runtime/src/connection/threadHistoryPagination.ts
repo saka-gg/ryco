@@ -107,11 +107,28 @@ export function createThreadHistoryPaginationController(deps: {
           typeof error === "object" && error !== null
             ? (error as { readonly _tag?: unknown; readonly reason?: unknown })
             : null;
+        const historyErrorReason =
+          errorRecord?._tag === "OrchestrationThreadHistoryError" ? errorRecord.reason : undefined;
+        // Around a message the thread no longer has, the server answers
+        // stale-cursor though nothing loaded is stale. A resnapshot would
+        // reload the window for nothing and resolve as if the load worked;
+        // the caller needs the answer (a reveal settles on it).
+        if (input.request.mode.kind === "around" && historyErrorReason === "stale-cursor") {
+          if (currentGeneration(input.scope) === generation) {
+            deps.setRequestState({
+              ...input.scope,
+              collection: input.collection,
+              status: "idle",
+              cursor: null,
+              error: null,
+            });
+          }
+          throw error;
+        }
         const shouldRecover =
-          errorRecord?._tag === "OrchestrationThreadHistoryError" &&
-          (errorRecord.reason === "stale-cursor" ||
-            errorRecord.reason === "invalid-cursor" ||
-            errorRecord.reason === "unsupported-version");
+          historyErrorReason === "stale-cursor" ||
+          historyErrorReason === "invalid-cursor" ||
+          historyErrorReason === "unsupported-version";
         if (shouldRecover && deps.recoverStale && currentGeneration(input.scope) === generation) {
           try {
             await deps.recoverStale(input.scope);
