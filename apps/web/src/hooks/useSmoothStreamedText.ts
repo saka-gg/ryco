@@ -20,9 +20,14 @@ const DRAIN_WINDOW_SECONDS = 0.16;
 // Hard ceiling so a single huge flush (e.g. a pasted code block) reveals fast but bounded
 // rather than snapping in all at once.
 const MAX_CHARS_PER_SECOND = 2000;
-// Low-pass factor: how aggressively the live velocity chases the target velocity each
-// frame. Smaller is smoother but laggier; ~0.15 ≈ a ~110ms time constant at 60fps.
+// Low-pass factor: the share of the gap to the target velocity the live velocity closes
+// per 60 Hz frame. Smaller is smoother but laggier; 0.15 ≈ a ~100ms time constant.
 const VELOCITY_LERP = 0.15;
+const VELOCITY_LERP_REFERENCE_HZ = 60;
+// The same smoothing as a per-second rate, scaled by each frame's elapsed time. Applied per
+// frame instead, faster displays smooth harder: above ~150 Hz the reveal stops overshooting
+// and creeps toward the end, holding the last character of a burst back for up to a second.
+const VELOCITY_DECAY_PER_SECOND = -Math.log(1 - VELOCITY_LERP) * VELOCITY_LERP_REFERENCE_HZ;
 // Clamp per-frame delta so returning from a backgrounded tab (rAF paused) does not dump
 // the whole backlog in a single frame.
 const MAX_FRAME_SECONDS = 0.05;
@@ -70,12 +75,13 @@ export function stepSmoothReveal(
   const backlog = targetLength - state.shown;
   if (backlog > 0) {
     const targetVelocity = Math.min(MAX_CHARS_PER_SECOND, backlog / DRAIN_WINDOW_SECONDS);
-    state.velocity += (targetVelocity - state.velocity) * VELOCITY_LERP;
+    const blend = 1 - Math.exp(-VELOCITY_DECAY_PER_SECOND * dt);
+    state.velocity += (targetVelocity - state.velocity) * blend;
     const next = Math.min(targetLength, state.shown + state.velocity * dt);
-    // At high refresh rates the damped tail approaches the target without reaching it
-    // until the step drops below float precision, leaving the last character hidden and
-    // rAF running every frame. Settle a sub-character remainder, or a step that no longer
-    // moves the float, onto the target.
+    // The reveal normally overshoots and clamps onto the target. A tail that approaches it
+    // without reaching it would never get there: the step shrinks below float precision,
+    // the last character stays hidden and rAF runs every frame. Settle a sub-character
+    // remainder, or a step that no longer moves the float, onto the target.
     const stalled = dt > 0 && next === state.shown;
     state.shown = stalled || targetLength - next < SETTLE_REMAINDER_CHARS ? targetLength : next;
   }
