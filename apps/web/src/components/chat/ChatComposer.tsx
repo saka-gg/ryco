@@ -131,6 +131,7 @@ import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
 import { ComposerTaskChip } from "../tasks/ComposerTaskChip";
 import { describeRunningFollowUp, resolveComposerEnter } from "./composerFollowUp";
+import { useSendShortcut } from "./useSendShortcut";
 import type { PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
 import { LazyPhoneThreadDock } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
@@ -1014,8 +1015,7 @@ export const ChatComposer = memo(
     // old <640 px query), so 640-767 px viewports and coarse-pointer
     // landscape phones collapse consistently with the rest of the phone UI.
     const isMobileViewport = presentationTier === "phone";
-    // The Send shortcut setting is for hardware keyboards; the frozen phone tier keeps Enter.
-    const composerSendShortcut = isMobileViewport ? "enter" : settings.sendShortcut;
+    const composerSendShortcut = useSendShortcut();
     const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused;
     const phoneThreadDockReady = usePhoneThreadSurfaceReady(
       LazyPhoneThreadDock,
@@ -2106,7 +2106,7 @@ export const ChatComposer = memo(
       if (key === "Enter") {
         // The Send shortcut setting decides whether Enter sends or adds a line, and which
         // shortcut does the opposite of the follow-up setting while a turn runs; when no turn
-        // runs that flag is ignored. The frozen phone tier keeps Enter sending.
+        // runs that flag is ignored.
         const send = resolveComposerEnter({
           event,
           sendShortcut: composerSendShortcut,

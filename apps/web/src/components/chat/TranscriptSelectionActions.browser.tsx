@@ -1,9 +1,12 @@
 import "../../index.css";
 import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { useRef } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
+import { replaceClientSettingsSnapshot } from "../../hooks/clientSettingsStore";
+import { isMacPlatform } from "../../lib/utils";
 import { TranscriptSelectionActions, readTranscriptSelection } from "./TranscriptSelectionActions";
 
 const source = { environmentId: EnvironmentId.make("local"), threadId: ThreadId.make("source") };
@@ -140,6 +143,28 @@ describe("TranscriptSelectionActions", () => {
     expect(create).toHaveBeenCalledTimes(2);
     expect(create.mock.calls[0]).toEqual(create.mock.calls[1]);
     await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  });
+  it("adds a line with Enter and sends with Mod+Enter under the Always ⌘↵ send shortcut", async () => {
+    replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, sendShortcut: "mod-enter" });
+    try {
+      mounted = await render(<Harness />);
+      await select();
+      await page.getByRole("button", { name: "New chat", exact: true }).click();
+      const message = page.getByRole("textbox", { name: "Message for new chat" });
+      await message.click();
+      await userEvent.keyboard("First line{Enter}Second line");
+      await expect.element(message).toMatchTextContent(/First line\s*Second line/);
+      expect(create).not.toHaveBeenCalled();
+
+      const mod = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+      await userEvent.keyboard(`{${mod}>}{Enter}{/${mod}}`);
+      await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt: "First line\nSecond line", intent: "send" }),
+      );
+    } finally {
+      replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
+    }
   });
   it("allows empty-prompt Open in chat and blocks duplicate submits and dismissal while pending", async () => {
     let finish!: () => void;

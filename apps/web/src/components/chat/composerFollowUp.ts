@@ -26,23 +26,48 @@ export function sendRequiresModifier(sendShortcut: SendShortcut, prompt: string)
 }
 
 /**
- * What Enter does in the focused composer: `null` leaves it to the editor, which adds a new line.
- * Otherwise it sends, and `invertFollowUp` asks for the opposite of the follow-up setting (it only
- * matters while a turn runs). One rule decides the inversion: Mod+Enter where Enter sends,
- * Mod+Shift+Enter where sending itself needs Mod+Enter. Shift+Enter alone always adds a line.
+ * Whether the opposite of the follow-up setting is Mod+Shift+Enter rather than Mod+Enter. It
+ * depends on the setting alone, never on the prompt, so the shortcut a hint names stays right as
+ * the prompt grows: under either Mod+Enter option Mod+Enter is the plain send.
+ */
+function invertsFollowUpWithShift(sendShortcut: SendShortcut): boolean {
+  return sendShortcut !== "enter";
+}
+
+/**
+ * The Send shortcut in effect on this device. The frozen phone tier hides the setting, so there, on
+ * a touch screen without a mouse or trackpad, Enter keeps sending. The tier follows the viewport,
+ * so a narrow desktop window or a tablet with a trackpad keeps the setting.
+ */
+export function effectiveSendShortcut(
+  sendShortcut: SendShortcut,
+  device: { readonly phoneTier: boolean; readonly finePointer: boolean },
+): SendShortcut {
+  return device.phoneTier && !device.finePointer ? "enter" : sendShortcut;
+}
+
+/**
+ * What Enter does in a focused prompt input: `null` leaves it to the input, which adds a new line.
+ * Otherwise it sends, and `invertFollowUp` asks for the opposite of the follow-up setting (only the
+ * chat composer uses it, while a turn runs). Shift+Enter alone always adds a line. The opposite is
+ * Mod+Enter under the Enter setting and Mod+Shift+Enter under either Mod+Enter option.
  */
 export function resolveComposerEnter(input: {
   readonly event: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey">;
   readonly sendShortcut: SendShortcut;
-  /** The text the editor holds now. */
+  /** The text the input holds now. */
   readonly prompt: string;
   readonly platform?: string;
 }): { readonly invertFollowUp: boolean } | null {
-  const mod = isModKey(input.event, input.platform);
-  if (!sendRequiresModifier(input.sendShortcut, input.prompt)) {
-    return input.event.shiftKey ? null : { invertFollowUp: mod };
+  const { event, sendShortcut } = input;
+  const mod = isModKey(event, input.platform);
+  if (!invertsFollowUpWithShift(sendShortcut)) {
+    return event.shiftKey ? null : { invertFollowUp: mod };
   }
-  return mod ? { invertFollowUp: input.event.shiftKey } : null;
+  if (mod) return { invertFollowUp: event.shiftKey };
+  return event.shiftKey || sendRequiresModifier(sendShortcut, input.prompt)
+    ? null
+    : { invertFollowUp: false };
 }
 
 /**
@@ -60,15 +85,12 @@ export function modEnterShortcutLabel(
   return isMacPlatform(platform) ? label.replace(/Enter$/, "↵") : label;
 }
 
-/** How the follow-up setting's opposite is reached, for its settings row. */
-export function describeFollowUpInversion(
+/** The shortcut that does the opposite of the follow-up setting (`resolveComposerEnter`). */
+export function followUpInvertShortcutLabel(
   sendShortcut: SendShortcut,
   platform: string = navigator.platform,
 ): string {
-  const oneLine = modEnterShortcutLabel(platform, sendRequiresModifier(sendShortcut, ""));
-  if (sendShortcut !== "mod-enter-multiline") return `${oneLine} does the opposite.`;
-  const multiline = modEnterShortcutLabel(platform, true);
-  return `${oneLine} does the opposite, or ${multiline} in a multiline prompt.`;
+  return modEnterShortcutLabel(platform, invertsFollowUpWithShift(sendShortcut));
 }
 
 export interface RunningFollowUpDescription {
@@ -84,8 +106,7 @@ export interface RunningFollowUpDescription {
  * The running-state placeholder: the effective Enter action and the alternate shortcut. Steering
  * that is unavailable for the current selection degrades to queueing and says so. A send that
  * redirects (`resolveApprovalRedirect`, the same decision the send makes) steers whatever the
- * setting says: it declines the waiting approvals first, or follows an earlier redirect. The
- * placeholder shows in an empty composer, so it names the shortcut for a one-line prompt.
+ * setting says: it declines the waiting approvals first, or follows an earlier redirect.
  */
 export function describeRunningFollowUp(input: {
   readonly followUpBehavior: FollowUpBehavior;
@@ -96,11 +117,7 @@ export function describeRunningFollowUp(input: {
   readonly platform?: string;
 }): RunningFollowUpDescription {
   if (!input.surfaceAllowsSteer) return { effective: "queue", placeholder: null };
-  // The shortcut that does the opposite of the follow-up setting (`resolveComposerEnter`).
-  const shortcut = modEnterShortcutLabel(
-    input.platform,
-    sendRequiresModifier(input.sendShortcut ?? "enter", ""),
-  );
+  const shortcut = followUpInvertShortcutLabel(input.sendShortcut ?? "enter", input.platform);
   const steerAvailable = input.steerUnavailableReason === null;
   if (input.approvalRedirect === "decline" && steerAvailable) {
     return {

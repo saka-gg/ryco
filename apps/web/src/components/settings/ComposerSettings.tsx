@@ -6,7 +6,7 @@ import {
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useUiStateStore } from "../../uiStateStore";
-import { describeFollowUpInversion, modEnterShortcutLabel } from "../chat/composerFollowUp";
+import { followUpInvertShortcutLabel, modEnterShortcutLabel } from "../chat/composerFollowUp";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { SettingsSection, SettingsRow, SettingResetButton } from "./settingsLayout";
@@ -74,7 +74,7 @@ export function ComposerSettings() {
       />
       <SettingsRow
         title="Messages sent while a turn runs"
-        description={`Queue waits for the turn to finish. Steer adds the message to the running turn when the provider supports it. ${describeFollowUpInversion(sendShortcut)}`}
+        description={`Queue waits for the turn to finish. Steer adds the message to the running turn when the provider supports it. ${followUpInvertShortcutLabel(sendShortcut)} does the opposite.`}
         resetAction={
           followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
             <SettingResetButton

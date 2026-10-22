@@ -2585,46 +2585,53 @@ describe("ChatView Composer (full app)", () => {
       }
     });
 
-    it("moves the opposite action to Mod+Shift+Enter when sending needs Mod+Enter", async () => {
-      const harness = await mountSteerableRunningThread("queue", "mod-enter");
-      try {
-        const editor = await waitForComposerEditor();
-        const inversion = isMacPlatform(navigator.platform) ? "⇧⌘↵" : "Ctrl+Shift+Enter";
-        await vi.waitFor(() =>
-          expect(editor.getAttribute("aria-placeholder") ?? editor.textContent).toContain(
-            `Queue a follow-up · ${inversion} to steer`,
-          ),
-        );
+    it.each([
+      ["mod-enter", "Not yet"],
+      ["mod-enter-multiline", "Not\nyet"],
+    ] as const)(
+      "keeps Mod+Enter the send and Mod+Shift+Enter the opposite under %s",
+      async (sendShortcut, draft) => {
+        const harness = await mountSteerableRunningThread("queue", sendShortcut);
+        try {
+          const editor = await waitForComposerEditor();
+          const inversion = isMacPlatform(navigator.platform) ? "⇧⌘↵" : "Ctrl+Shift+Enter";
+          await vi.waitFor(() =>
+            expect(editor.getAttribute("aria-placeholder") ?? editor.textContent).toContain(
+              `Queue a follow-up · ${inversion} to steer`,
+            ),
+          );
 
-        // Enter adds a line instead of sending.
-        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Not yet");
-        await waitForComposerText("Not yet");
-        editor.focus();
-        pressComposerEnter(editor, { mod: false });
-        await vi.waitFor(() =>
-          expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt).toContain(
-            "\n",
-          ),
-        );
-        await waitForLayout();
-        expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? []).toEqual([]);
+          // Enter adds a line instead of sending.
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, draft);
+          await waitForComposerText(draft);
+          editor.focus();
+          pressComposerEnter(editor, { mod: false });
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt.split("\n"),
+            ).toHaveLength(draft.split("\n").length + 1),
+          );
+          await waitForLayout();
+          expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? []).toEqual([]);
 
-        // Mod+Enter sends as the setting says; Mod+Shift+Enter does the opposite.
-        await submitFollowUp("Queue with the send shortcut", { mod: true });
-        await waitForLayout();
-        expect(harness.steers()).toEqual([]);
-        useMessageQueueStore.getState().clear(THREAD_KEY);
+          // Mod+Enter sends as the setting says, a one-line prompt too, so the hint above stays
+          // right; Mod+Shift+Enter does the opposite.
+          await submitFollowUp("Queue with the send shortcut", { mod: true });
+          await waitForLayout();
+          expect(harness.steers()).toEqual([]);
+          useMessageQueueStore.getState().clear(THREAD_KEY);
 
-        await submitFollowUp("Steer with the shortcut and Shift", { mod: true, shift: true });
-        await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
-          timeout: 8_000,
-          interval: 16,
-        });
-        expect(steerAttempt()).toMatchObject({ explicit: true });
-      } finally {
-        await harness.cleanup();
-      }
-    });
+          await submitFollowUp("Steer with the shortcut and Shift", { mod: true, shift: true });
+          await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+            timeout: 8_000,
+            interval: 16,
+          });
+          expect(steerAttempt()).toMatchObject({ explicit: true });
+        } finally {
+          await harness.cleanup();
+        }
+      },
+    );
 
     it("steers a queued message whose send failed from its row", async () => {
       const harness = await mountSteerableRunningThread("queue");

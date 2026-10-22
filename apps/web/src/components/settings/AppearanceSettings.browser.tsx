@@ -18,6 +18,7 @@ import {
   PRIMARY_COLOR_OPTIONS,
 } from "../../themes/appearancePreferences";
 import { getPresentationTier, syncDocumentPresentationTier } from "../../lib/presentationTier";
+import { useTierOverrideStore } from "../../tierOverrideStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { AppearanceSettingsPanel } from "./AppearanceSettings";
 
@@ -246,6 +247,22 @@ describe("AppearanceSettingsPanel", () => {
     await page.getByRole("button", { name: "Reset wide composer labels to default" }).click();
     await expect.element(autoCollapseSwitch).toBeChecked();
     expect(useUiStateStore.getState().wideComposerControlsAutoCollapse).toBe(true);
+  });
+
+  it("offers Chat width only outside the frozen phone tier, which keeps the comfortable width", async () => {
+    try {
+      useTierOverrideStore.setState({ override: "desktop" });
+      mounted = await render(<AppearanceSettingsPanel />);
+      await expect.element(page.getByRole("combobox", { name: "Chat width" })).toBeVisible();
+
+      useTierOverrideStore.setState({ override: "phone" });
+      await expect
+        .element(page.getByRole("combobox", { name: "Chat width" }))
+        .not.toBeInTheDocument();
+      await expect.element(page.getByText("Corner radius", { exact: true })).toBeVisible();
+    } finally {
+      useTierOverrideStore.setState({ override: null });
+    }
   });
 
   it("omits reasoning and token mode style controls", async () => {
