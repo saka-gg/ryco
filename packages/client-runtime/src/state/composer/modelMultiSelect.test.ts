@@ -8,9 +8,11 @@ import {
   disableModelMultiSelect,
   enableModelMultiSelect,
   isModelMultiSelected,
+  modelMultiSelectMinimum,
   modelMultiSelectSendBlockReason,
   pruneModelMultiSelect,
   resolveModelMultiSelectTargets,
+  retryModelMultiSelect,
   toggleModelMultiSelect,
 } from "./modelMultiSelect.ts";
 
@@ -90,6 +92,30 @@ describe("model multi-select", () => {
     const two = toggleModelMultiSelect(one, { active, target: opus }).state;
     expect(modelMultiSelectSendBlockReason(two)).toBeNull();
     expect(modelMultiSelectSendBlockReason(two, 1)).toBe("Choose at most 1 models to compare.");
+  });
+
+  it("lets one model go out when it retries what an earlier send did not create", () => {
+    const retry = retryModelMultiSelect([opus, createModelSelection(claude, opus.model)]);
+    expect(retry).toEqual({ enabled: true, selections: [opus], retry: true });
+    expect(modelMultiSelectSendBlockReason(retry)).toBeNull();
+    expect(modelMultiSelectMinimum(retry)).toBe(1);
+    expect(resolveModelMultiSelectTargets(retry, active)).toEqual([opus]);
+    // It stays a retry while the user changes the selection, until compare is off.
+    const added = toggleModelMultiSelect(retry, { active, target: sonnet }).state;
+    expect(added).toEqual({ enabled: true, selections: [opus, sonnet], retry: true });
+    const removed = toggleModelMultiSelect(added, { active, target: opus }).state;
+    expect(modelMultiSelectSendBlockReason(removed)).toBeNull();
+    expect(pruneModelMultiSelect(removed, (selection) => selection.model !== sonnet.model)).toEqual(
+      { enabled: true, selections: [], retry: true },
+    );
+    expect(modelMultiSelectSendBlockReason({ enabled: true, selections: [], retry: true })).toBe(
+      "Choose a model to send to.",
+    );
+    const fresh = enableModelMultiSelect(disableModelMultiSelect(), active);
+    expect(fresh).toEqual({ enabled: true, selections: [active] });
+    expect(modelMultiSelectSendBlockReason(fresh)).toBe("Choose at least two models to compare.");
+    expect(modelMultiSelectMinimum(fresh)).toBe(2);
+    expect(retryModelMultiSelect([])).toBe(MODEL_MULTI_SELECT_OFF);
   });
 
   it("drops models that left the catalog and keeps the same value otherwise", () => {

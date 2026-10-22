@@ -5,12 +5,15 @@ import { Switch } from "../ui/switch";
 function compareHint(props: {
   enabled: boolean;
   count: number;
+  minimum: number;
   max: number;
   full: boolean;
 }): string {
   if (!props.enabled) return "Shift-click to pick several";
   if (props.full) return `Up to ${props.max} models`;
-  if (props.count < 2) return "Pick at least two models";
+  if (props.count < props.minimum) {
+    return props.minimum > 1 ? "Pick at least two models" : "Pick a model";
+  }
   return `${props.count} of ${props.max} · each in its own worktree`;
 }
 
@@ -21,6 +24,8 @@ function compareHint(props: {
 export const ModelPickerCompareBar = memo(function ModelPickerCompareBar(props: {
   enabled: boolean;
   count: number;
+  /** How many a send needs (`modelMultiSelectMinimum`). */
+  minimum: number;
   max: number;
   /** The last pick was refused because the selection is full. */
   full: boolean;

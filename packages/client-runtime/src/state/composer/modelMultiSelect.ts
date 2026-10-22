@@ -21,6 +21,12 @@ export interface ModelMultiSelectState {
   readonly enabled: boolean;
   /** Distinct by instance and model, in the order they were chosen. */
   readonly selections: ReadonlyArray<ModelSelection>;
+  /**
+   * The selection holds models an earlier send did not create, restored so the
+   * next send retries only them (`retryModelMultiSelect`): one is then enough.
+   * It stays a retry until "Compare models" is turned off.
+   */
+  readonly retry?: true | undefined;
 }
 
 export const MODEL_MULTI_SELECT_OFF: ModelMultiSelectState = Object.freeze({
@@ -63,6 +69,37 @@ export function disableModelMultiSelect(): ModelMultiSelectState {
   return MODEL_MULTI_SELECT_OFF;
 }
 
+/**
+ * Restores the models a send did not create (`summarizeMultiModelSend`'s
+ * `notCreated`) so the next send, built from the composer as it is then,
+ * retries only them. Nothing of them exists on the node, so that send is a new
+ * submission with new threads. An uncertain target may have started: restore
+ * it only when the user asks to send it again after checking its thread.
+ */
+export function retryModelMultiSelect(
+  selections: ReadonlyArray<ModelSelection>,
+): ModelMultiSelectState {
+  const keys = new Set<string>();
+  const distinct = selections.filter((selection) => {
+    const key = modelMultiSelectKey(selection);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  if (distinct.length === 0) return MODEL_MULTI_SELECT_OFF;
+  return { enabled: true, selections: distinct, retry: true };
+}
+
+/** `state` with other selections; a retry stays one. */
+function withSelections(
+  state: ModelMultiSelectState,
+  selections: ReadonlyArray<ModelSelection>,
+): ModelMultiSelectState {
+  return state.enabled && state.retry
+    ? { enabled: true, selections, retry: true }
+    : { enabled: true, selections };
+}
+
 export interface ModelMultiSelectToggleResult {
   readonly state: ModelMultiSelectState;
   /** The target was not added because the selection is full. */
@@ -90,17 +127,17 @@ export function toggleModelMultiSelect(
     // Shift-clicking the current model only turns the mode on.
     if (!state.enabled) return { state: { enabled: true, selections: current }, refused: false };
     return {
-      state: {
-        enabled: true,
-        selections: current.filter((selection) => modelMultiSelectKey(selection) !== key),
-      },
+      state: withSelections(
+        state,
+        current.filter((selection) => modelMultiSelectKey(selection) !== key),
+      ),
       refused: false,
     };
   }
   if (current.length >= max) {
     return { state: state.enabled ? state : { enabled: true, selections: current }, refused: true };
   }
-  return { state: { enabled: true, selections: [...current, input.target] }, refused: false };
+  return { state: withSelections(state, [...current, input.target]), refused: false };
 }
 
 /**
@@ -113,7 +150,7 @@ export function pruneModelMultiSelect(
 ): ModelMultiSelectState {
   if (!state.enabled) return state;
   const selections = state.selections.filter(isSelectable);
-  return selections.length === state.selections.length ? state : { enabled: true, selections };
+  return selections.length === state.selections.length ? state : withSelections(state, selections);
 }
 
 /**
@@ -132,13 +169,20 @@ export function resolveModelMultiSelectTargets(
   );
 }
 
+/** How many models a send needs: two to compare, one to retry what a send did not create. */
+export function modelMultiSelectMinimum(state: ModelMultiSelectState): number {
+  return state.retry ? 1 : 2;
+}
+
 /** Why a "Compare models" send cannot go out yet; null when it can. */
 export function modelMultiSelectSendBlockReason(
   state: ModelMultiSelectState,
   max = MULTI_MODEL_SEND_MAX_TARGETS,
 ): string | null {
   if (!state.enabled) return null;
-  if (state.selections.length < 2) return "Choose at least two models to compare.";
+  if (state.selections.length < modelMultiSelectMinimum(state)) {
+    return state.retry ? "Choose a model to send to." : "Choose at least two models to compare.";
+  }
   if (state.selections.length > max) return `Choose at most ${max} models to compare.`;
   return null;
 }

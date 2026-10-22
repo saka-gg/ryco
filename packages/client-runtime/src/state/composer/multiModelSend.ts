@@ -8,10 +8,11 @@
  * instead of running it in the project checkout (and advertises that with
  * `requiredWorktreeBootstrap`). What this module adds is identity: a target's
  * thread id is derived from the draft, the submission and the model, and its
- * message (so its command id) from that thread and the attempt. Sending a
- * target again therefore cannot create a second thread for it, and an
- * uncertain target sent again as the identical command is answered by the
- * node from its receipt or its still-running first attempt.
+ * message (so its command id) from that thread. An uncertain target is sent
+ * again only as the identical command, which the node answers from its receipt
+ * or its still-running first attempt, so it never gets a second thread. A
+ * target the node did not create is retried by the draft's next send: a new
+ * submission, built from the composer as it is then (`retryModelMultiSelect`).
  */
 import type {
   AgentTokenMode,
@@ -25,6 +26,7 @@ import type {
 import { CommandId, MessageId, ThreadId, type ProjectId } from "@ryco/contracts/base-schemas";
 import { createModelSelection } from "@ryco/shared/model";
 
+import { hasErrorTag } from "../../errors/errorTag.ts";
 import { RpcRequestRefusedError } from "../../rpc/protocol.ts";
 import { RpcTransportDisposedError } from "../../rpc/wsTransport.ts";
 import { MULTI_MODEL_SEND_MAX_TARGETS, modelMultiSelectKey } from "./modelMultiSelect.ts";
@@ -71,7 +73,7 @@ function deterministicUuid(seed: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-/** The thread a target starts: the same for every attempt of one submission. */
+/** The thread a target starts: the same for every send of one submission's target. */
 export function deriveMultiModelSendThreadId(input: {
   readonly draftId: string;
   readonly submissionId: string;
@@ -90,9 +92,9 @@ export function deriveMultiModelSendThreadId(input: {
   );
 }
 
-/** The message of one attempt; a new attempt is a new message and so a new command. */
-export function deriveMultiModelSendMessageId(threadId: ThreadId, attempt: number): MessageId {
-  return MessageId.make(deterministicUuid(JSON.stringify(["message", threadId, attempt])));
+/** The message of a target's first turn, and so (with its thread) its command. */
+export function deriveMultiModelSendMessageId(threadId: ThreadId): MessageId {
+  return MessageId.make(deterministicUuid(JSON.stringify(["message", threadId])));
 }
 
 // ---------------------------------------------------------------------------
@@ -169,8 +171,9 @@ export interface MultiModelSendTargetInput {
 export interface MultiModelSendInput {
   readonly draftId: string;
   /**
-   * Minted once per send and kept for its retries. A later send from the same
-   * draft (the composer stays open) takes a new one, so it starts new threads.
+   * Minted once per send and kept for its uncertain retries. A later send from
+   * the same draft (the composer stays open, or retries the models this one did
+   * not create) takes a new one, so it starts new threads.
    */
   readonly submissionId: string;
   readonly projectId: ProjectId;
@@ -178,7 +181,7 @@ export interface MultiModelSendInput {
   /** Every target's worktree starts here. */
   readonly baseBranch: string;
   readonly fetchOrigin?: boolean | undefined;
-  /** The project's (or node's) branch prefix; each attempt gets a fresh temporary branch. */
+  /** The project's (or node's) branch prefix; each target gets a fresh temporary branch. */
   readonly worktreeBranchPrefix?: string | undefined;
   /**
    * As in the normal new-thread send: undefined lets a node with project
@@ -195,10 +198,12 @@ export interface MultiModelSendInput {
   readonly targets: ReadonlyArray<MultiModelSendTargetInput>;
 }
 
-/** One target's first send, complete: what `commitSendTurnDispatch` sends for it. */
+/**
+ * One target's first send, complete: what `commitSendTurnDispatch` sends for
+ * it, the first time and on every uncertain retry.
+ */
 export interface MultiModelSendTargetPlan {
   readonly key: string;
-  readonly attempt: number;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
   readonly commandId: CommandId;
@@ -211,7 +216,7 @@ export interface MultiModelSendTargetPlan {
   readonly tokenMode: AgentTokenMode;
   readonly turnAttachments: ReadonlyArray<SendTurnDispatchAttachment>;
   readonly sourceControlContexts: ReadonlyArray<ComposerSourceControlContext>;
-  /** The turn's start; the thread's own creation time stays the send's. */
+  /** The send's: the thread's creation and its turn's start. */
   readonly createdAt: string;
   readonly bootstrap: NonNullable<SendTurnBootstrap>;
 }
@@ -241,18 +246,17 @@ function assertMultiModelSendInput(input: MultiModelSendInput): void {
   }
 }
 
-/** Plans one target's attempt: its thread is fixed, its message and branch are the attempt's. */
-export function planMultiModelSendTarget(
+/** Plans one target's send; its retries send the same thread, message, command and branch. */
+function planMultiModelSendTarget(
   input: MultiModelSendInput,
   target: MultiModelSendTargetInput,
-  options: { readonly attempt: number; readonly createdAt: string },
 ): MultiModelSendTargetPlan {
   const threadId = deriveMultiModelSendThreadId({
     draftId: input.draftId,
     submissionId: input.submissionId,
     target: target.modelSelection,
   });
-  const messageId = deriveMultiModelSendMessageId(threadId, options.attempt);
+  const messageId = deriveMultiModelSendMessageId(threadId);
   const title = target.title ?? input.title;
   const bootstrap = buildSendTurnBootstrap({
     requireWorktree: true,
@@ -260,8 +264,9 @@ export function planMultiModelSendTarget(
     baseBranchForWorktree: input.baseBranch,
     fetchOrigin: input.fetchOrigin,
     runSetupScript: input.runSetupScript,
-    // A fresh temporary branch per attempt: a failed attempt may leave its
-    // branch behind, and the next one must not collide with it.
+    // A fresh temporary branch per target, fixed for its retries: a failed
+    // send may leave its branch behind, and a new submission must not
+    // collide with it.
     worktreeBranchName: null,
     worktreeBranchPrefix: input.worktreeBranchPrefix,
     shouldMaterializeLegacyBranchWorktree: false,
@@ -280,7 +285,6 @@ export function planMultiModelSendTarget(
   if (!bootstrap) throw new Error("A multi-model send needs a worktree bootstrap.");
   return {
     key: modelMultiSelectKey(target.modelSelection),
-    attempt: options.attempt,
     threadId,
     messageId,
     commandId: CommandId.make(`multi-model-send:${threadId}:${messageId}`),
@@ -293,19 +297,17 @@ export function planMultiModelSendTarget(
     tokenMode: input.tokenMode,
     turnAttachments: target.turnAttachments ?? input.turnAttachments,
     sourceControlContexts: input.sourceControlContexts,
-    createdAt: options.createdAt,
+    createdAt: input.createdAt,
     bootstrap,
   };
 }
 
-/** Plans every target's first attempt, in selection order. Throws before anything is sent. */
+/** Plans every target's send, in selection order. Throws before anything is sent. */
 export function planMultiModelSend(
   input: MultiModelSendInput,
 ): ReadonlyArray<MultiModelSendTargetPlan> {
   assertMultiModelSendInput(input);
-  return input.targets.map((target) =>
-    planMultiModelSendTarget(input, target, { attempt: 1, createdAt: input.createdAt }),
-  );
+  return input.targets.map((target) => planMultiModelSendTarget(input, target));
 }
 
 // ---------------------------------------------------------------------------
@@ -315,9 +317,12 @@ export function planMultiModelSend(
 export type MultiModelSendTargetStatus =
   | { readonly kind: "pending" }
   | { readonly kind: "dispatching" }
-  /** The node accepted the turn start, or the client sees the target's thread. */
+  /** The node accepted the turn start, or the client sees the target's turn. */
   | { readonly kind: "started" }
-  /** Nothing of this target exists on the node: sending it again is safe. */
+  /**
+   * Nothing of this target exists on the node: the draft's next send may start
+   * it again, as a new submission (`retryModelMultiSelect`). Final here.
+   */
   | { readonly kind: "not-created"; readonly message: string }
   /**
    * The request may have run. Only an explicit retry sends it again, as the
@@ -333,10 +338,6 @@ export type MultiModelSendFailure = Extract<
 export const MULTI_MODEL_SEND_UNCERTAIN_MESSAGE =
   "Ryco could not confirm whether this model started. Check its thread before sending it again.";
 
-function hasTag(error: unknown, tag: string): boolean {
-  return typeof error === "object" && error !== null && "_tag" in error && error._tag === tag;
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message.trim().length > 0
     ? error.message
@@ -344,13 +345,16 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Classifies a failed attempt. `sent` is whether its turn start left this
- * client (`onBeforeTurnStart` ran); a failure before that (readiness changed,
- * invalid input) sent nothing. A refusal by this client or the node's access
- * check also ran nothing, so it keeps an earlier attempt's uncertainty. The
- * node's typed answer is definite: the turn did not start, and a failed
- * bootstrap deletes the thread it created. Anything else, a lost connection
- * or an unconfirmed hosted replay above all, may have run.
+ * Classifies a failed send. `sent` is whether its turn start left this client
+ * (`onBeforeTurnStart` ran); a failure before that (readiness changed, invalid
+ * input) sent nothing. A refusal by this client or the node's access check
+ * also ran nothing, so it keeps an earlier send's uncertainty. The node's
+ * typed answer to a first send is definite: the turn did not start, and a
+ * failed bootstrap deletes the thread it created. Its answer to an uncertain
+ * target's retry is not (as for a hosted replay, `isReplayAnswer`): a first
+ * send cut off halfway by a node restart leaves its thread and branch, and the
+ * identical command then fails on them. Anything else, a lost connection or an
+ * unconfirmed hosted replay above all, may have run.
  */
 export function classifyMultiModelSendFailure(input: {
   readonly error: unknown;
@@ -362,13 +366,13 @@ export function classifyMultiModelSendFailure(input: {
     !input.sent ||
     error instanceof RpcRequestRefusedError ||
     error instanceof RpcTransportDisposedError ||
-    hasTag(error, "AuthRpcError");
-  if (ranNothing) {
-    return input.previous.kind === "uncertain"
+    hasErrorTag(error, "AuthRpcError");
+  if (input.previous.kind === "uncertain") {
+    return ranNothing || hasErrorTag(error, "OrchestrationDispatchCommandError")
       ? input.previous
-      : { kind: "not-created", message: errorMessage(error) };
+      : { kind: "uncertain", message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE };
   }
-  if (hasTag(error, "OrchestrationDispatchCommandError")) {
+  if (ranNothing || hasErrorTag(error, "OrchestrationDispatchCommandError")) {
     return { kind: "not-created", message: errorMessage(error) };
   }
   return { kind: "uncertain", message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE };
@@ -378,12 +382,23 @@ export interface MultiModelSendDispatchDeps {
   readonly api: EnvironmentApi;
   /** `captureReviewedSendReadiness` for this send; rechecked before each turn start. */
   readonly assertMutationReady?: (() => void) | undefined;
-  /**
-   * Whether the client's live shell already holds this thread. A target whose
-   * thread exists started (perhaps on an attempt whose answer was lost) and is
-   * never sent again.
-   */
-  readonly threadExists: (threadId: ThreadId) => boolean;
+}
+
+/**
+ * Whether the client's live state shows the target's turn: its thread holds
+ * the target's message (or, from the shell alone, any user message: nothing
+ * else writes to these new threads). The thread alone is no evidence. A
+ * bootstrap publishes it before setup and the turn start and deletes it again
+ * when either fails, and the shell can still show a thread the node deleted.
+ */
+export type MultiModelSendTurnVisible = (target: {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+}) => boolean;
+
+export interface MultiModelSendRetryDeps extends MultiModelSendDispatchDeps {
+  /** An uncertain target whose turn the client sees started, and is not sent again. */
+  readonly turnVisible: MultiModelSendTurnVisible;
 }
 
 type DispatchResult =
@@ -449,9 +464,9 @@ export interface MultiModelSendTracker {
   readonly read: () => MultiModelSendSnapshot;
   readonly subscribe: (listener: () => void) => () => void;
   /**
-   * Sends every target that is safe to send, all at once: those never sent
-   * and those whose last attempt created nothing (as a new attempt). A
-   * started, uncertain or in-flight target is left alone.
+   * Sends every target not sent yet, all at once; calling it again sends
+   * nothing more. A target the node did not create stays so: the draft's next
+   * send (a new submission) retries it.
    */
   readonly send: (deps: MultiModelSendDispatchDeps) => Promise<MultiModelSendSnapshot>;
   /**
@@ -461,26 +476,22 @@ export interface MultiModelSendTracker {
    */
   readonly retryUncertain: (
     key: string,
-    deps: MultiModelSendDispatchDeps,
+    deps: MultiModelSendRetryDeps,
   ) => Promise<MultiModelSendSnapshot>;
-  /** Marks every settled, unstarted target whose thread exists as started. */
-  readonly reconcile: (threadExists: (threadId: ThreadId) => boolean) => void;
+  /**
+   * Marks every uncertain target whose turn the client sees as started. Only
+   * an uncertain one: a target the node answered for is settled.
+   */
+  readonly reconcile: (turnVisible: MultiModelSendTurnVisible) => void;
 }
 
 /**
  * Tracks one submission's targets from plan to outcome. Keep it for as long as
- * the draft can retry (outlive the composer's mount), and start a new one,
- * with a new submission id, for the draft's next send.
+ * one of them is uncertain (outlive the composer's mount), and start a new
+ * one, with a new submission id, for the draft's next send.
  */
-export function createMultiModelSendTracker(
-  input: MultiModelSendInput,
-  options: { readonly now?: () => string } = {},
-): MultiModelSendTracker {
-  const now = options.now ?? (() => new Date().toISOString());
+export function createMultiModelSendTracker(input: MultiModelSendInput): MultiModelSendTracker {
   const plans = planMultiModelSend(input);
-  const targetInputs = new Map(
-    input.targets.map((target) => [modelMultiSelectKey(target.modelSelection), target] as const),
-  );
   let snapshot: MultiModelSendSnapshot = {
     draftId: input.draftId,
     submissionId: input.submissionId,
@@ -504,11 +515,9 @@ export function createMultiModelSendTracker(
   const setTarget = (key: string, next: MultiModelSendTargetState) =>
     update((target) => (target.plan.key === key ? next : target));
 
-  const reconcile = (threadExists: (threadId: ThreadId) => boolean) =>
+  const reconcile = (turnVisible: MultiModelSendTurnVisible) =>
     update((target) =>
-      target.status.kind !== "started" &&
-      target.status.kind !== "dispatching" &&
-      threadExists(target.plan.threadId)
+      target.status.kind === "uncertain" && turnVisible(target.plan)
         ? { ...target, status: { kind: "started" } }
         : target,
     );
@@ -537,28 +546,12 @@ export function createMultiModelSendTracker(
       };
     },
     send: async (deps) => {
-      reconcile(deps.threadExists);
-      const due = snapshot.targets.flatMap((target): MultiModelSendTargetState[] => {
-        if (target.status.kind === "pending") return [target];
-        if (target.status.kind !== "not-created") return [];
-        const targetInput = targetInputs.get(target.plan.key);
-        if (!targetInput) return [];
-        // The node created nothing: a new attempt, under a new command id.
-        return [
-          {
-            plan: planMultiModelSendTarget(input, targetInput, {
-              attempt: target.plan.attempt + 1,
-              createdAt: now(),
-            }),
-            status: target.status,
-          },
-        ];
-      });
+      const due = snapshot.targets.filter((target) => target.status.kind === "pending");
       await Promise.all(due.map((target) => run(target, deps)));
       return snapshot;
     },
     retryUncertain: async (key, deps) => {
-      reconcile(deps.threadExists);
+      reconcile(deps.turnVisible);
       const target = snapshot.targets.find((candidate) => candidate.plan.key === key);
       if (target?.status.kind === "uncertain") await run(target, deps);
       return snapshot;

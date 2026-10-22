@@ -1250,6 +1250,134 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.lengthOf(fetchArgs, 2);
       }).pipe(Effect.provide(ServerConfigLayer)),
     );
+    it.effect("lets a prefetch join the base fetch of worktrees being created", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", remote, "."]);
+        yield* git(remote, ["commit", "--allow-empty", "-m", "new remote commit"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        const fetchArgs: Array<ReadonlyArray<string>> = [];
+        const release = yield* Deferred.make<void>();
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            input.args[0] !== "fetch"
+              ? base.execute(input)
+              : Effect.suspend(() => {
+                  fetchArgs.push(input.args);
+                  return Deferred.await(release).pipe(Effect.andThen(base.execute(input)));
+                }),
+        });
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+        // Resolves once both creations reached their fetch.
+        const reached = yield* Deferred.make<void>();
+        let arrivals = 0;
+        const create = (name: string) =>
+          driver.createWorktree({
+            cwd,
+            path: pathService.join(root, name),
+            refName: `origin/${initialBranch}`,
+            newRefName: `compare/${name}`,
+            fetchOrigin: true,
+            progress: {
+              onFetchStarted: () =>
+                (arrivals += 1) === 2
+                  ? Deferred.succeed(reached, undefined).pipe(Effect.asVoid)
+                  : Effect.void,
+            },
+          });
+
+        // A compare send's creations hold one fetch; the composer prefetches meanwhile.
+        const creations = yield* Effect.forkChild(
+          Effect.forEach(["model-1", "model-2"], create, { concurrency: "unbounded" }),
+        );
+        yield* Deferred.await(reached);
+        yield* Effect.yieldNow;
+        const prefetch = yield* Effect.forkChild(
+          driver.prefetchWorktreeBase({ cwd, refName: `origin/${initialBranch}` }),
+        );
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.lengthOf(fetchArgs, 1);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(creations);
+        yield* Fiber.join(prefetch);
+        assert.lengthOf(fetchArgs, 1);
+        // The prefetch took that fetch as its own: the next send reuses it.
+        yield* create("later");
+        assert.lengthOf(fetchArgs, 1);
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+    it.effect("never fetches one base twice at once, however the base is named", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", remote, "."]);
+        yield* git(remote, ["commit", "--allow-empty", "-m", "new remote commit"]);
+        const remoteHead = yield* git(remote, ["rev-parse", "HEAD"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        const fetchArgs: Array<ReadonlyArray<string>> = [];
+        const release = yield* Deferred.make<void>();
+        let running = 0;
+        let mostAtOnce = 0;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            input.args[0] !== "fetch"
+              ? base.execute(input)
+              : Effect.suspend(() => {
+                  fetchArgs.push(input.args);
+                  running += 1;
+                  mostAtOnce = Math.max(mostAtOnce, running);
+                  return Deferred.await(release).pipe(
+                    Effect.andThen(base.execute(input)),
+                    Effect.ensuring(Effect.sync(() => (running -= 1))),
+                  );
+                }),
+        });
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+
+        const first = yield* Effect.forkChild(
+          driver.createWorktree({
+            cwd,
+            path: pathService.join(root, "by-remote-name"),
+            refName: `origin/${initialBranch}`,
+            newRefName: "compare/by-remote-name",
+            fetchOrigin: true,
+          }),
+        );
+        // `main` names the ref `origin/main` does: it joins that fetch.
+        const sameRef = yield* Effect.forkChild(
+          driver.prefetchWorktreeBase({ cwd, refName: initialBranch }),
+        );
+        // `origin/HEAD` names it too, without saying so: it waits its turn.
+        const defaultBranch = yield* Effect.forkChild(
+          driver.createWorktree({
+            cwd,
+            path: pathService.join(root, "by-default"),
+            refName: "origin/HEAD",
+            newRefName: "compare/by-default",
+            fetchOrigin: true,
+          }),
+        );
+        for (let tick = 0; tick < 20 && fetchArgs.length === 0; tick += 1) {
+          yield* Effect.yieldNow;
+        }
+        yield* Effect.yieldNow;
+        assert.lengthOf(fetchArgs, 1);
+        yield* Deferred.succeed(release, undefined);
+        const created = [yield* Fiber.join(first), yield* Fiber.join(defaultBranch)];
+        yield* Fiber.join(sameRef);
+        assert.equal(mostAtOnce, 1);
+        assert.lengthOf(fetchArgs, 2);
+        for (const result of created) {
+          assert.equal(yield* git(result.worktree.path, ["rev-parse", "HEAD"]), remoteHead);
+        }
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
     it.effect("reports the fetch and Git's checkout meter while creating a worktree", () =>
       Effect.gen(function* () {
         const remote = yield* makeTmpDir();

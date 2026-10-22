@@ -10,11 +10,9 @@ import {
   Cache,
   Data,
   DateTime,
-  Deferred,
   Duration,
   Effect,
   Exit,
-  Fiber,
   FileSystem,
   Option,
   Path,
@@ -31,6 +29,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { DEFAULT_SERVER_SETTINGS, GitCommandError, type VcsRef } from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";
+import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
+import { makeKeyedSingleFlight } from "@ryco/shared/KeyedSingleFlight";
 import { withGitFilesystemGuidance } from "../git/gitFilesystemErrors.ts";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
@@ -965,6 +965,13 @@ const copyWorktreeDependencyInstallDirs = Effect.fn("copyWorktreeDependencyInsta
  * mode; a send within this window starts from that fetch.
  */
 export const WORKTREE_BASE_PREFETCH_REUSE_MS = 60_000;
+
+/** A worktree base fetch, shared by every prefetch and creation that joined it. */
+interface WorktreeBaseFetch {
+  /** A prefetch started it: a creation that joined it retries its failure. */
+  readonly prefetch: boolean;
+  readonly outcome: Exit.Exit<string, GitCommandError>;
+}
 
 export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* (options?: {
   executeOverride?: GitVcsDriver.GitVcsDriverShape["execute"];
@@ -2431,12 +2438,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return current;
     });
 
-  /** A base fetch started by `prefetchWorktreeBase`, keyed by repository and base. */
-  const worktreeBasePrefetches = new Map<
-    string,
-    { readonly fiber: Fiber.Fiber<string, GitCommandError>; settledAt: number | null }
-  >();
-  const worktreeBaseKey = (cwd: string, refName: string) => `${path.resolve(cwd)}\u0000${refName}`;
+  /**
+   * A worktree base by repository and the remote-tracking ref its fetch
+   * updates: `origin/main` and `main` name one ref, so they share one key.
+   */
+  const worktreeBaseKey = (cwd: string, refName: string) => {
+    const base = refName === "origin/HEAD" ? refName : refName.replace(/^origin\//, "");
+    return `${path.resolve(cwd)}\u0000${base}`;
+  };
   /** Fetches the base a worktree names and returns its branch on origin. */
   const fetchWorktreeBase = (cwd: string, refName: string) => {
     if (refName === "origin/HEAD") return fetchOriginDefaultBranch(cwd);
@@ -2444,81 +2453,67 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return fetchOriginBranch(cwd, branch).pipe(Effect.as(branch));
   };
   /**
-   * Base fetches `createWorktree` is running, by repository and base. Creations
-   * that start together (one prompt sent to several models) share one: parallel
-   * fetches of one ref race for its lock, and all but one of them fail.
+   * Base fetches of one repository run one at a time: two that update one ref
+   * (`origin/HEAD` and the branch it names) race for its lock.
    */
-  const runningWorktreeBaseFetches = new Map<string, Deferred.Deferred<string, GitCommandError>>();
-  const sharedWorktreeBaseFetch = (cwd: string, refName: string) =>
-    // Registered together with the fetch that settles it, or not at all, so a
-    // later creation never waits on an outcome nothing completes.
-    Effect.uninterruptibleMask((restore) =>
-      Effect.suspend(() => {
-        const key = worktreeBaseKey(cwd, refName);
-        const running = runningWorktreeBaseFetches.get(key);
-        if (running) return restore(Deferred.await(running));
-        const outcome = Deferred.makeUnsafe<string, GitCommandError>();
-        runningWorktreeBaseFetches.set(key, outcome);
-        // Detached: a creation that is interrupted must not cut off the fetch
-        // the others are waiting on.
-        return fetchWorktreeBase(cwd, refName).pipe(
-          Effect.onExit((exit) =>
-            Effect.suspend(() => {
-              if (runningWorktreeBaseFetches.get(key) === outcome) {
-                runningWorktreeBaseFetches.delete(key);
-              }
-              return Deferred.done(outcome, exit);
-            }),
-          ),
-          Effect.forkDetach,
-          Effect.andThen(restore(Deferred.await(outcome))),
-        );
-      }),
-    );
-  /** A prefetch of this base still running, or finished recently enough to reuse. */
-  const reusableWorktreeBasePrefetch = (key: string) => {
-    const entry = worktreeBasePrefetches.get(key);
-    if (!entry) return null;
-    if (
-      entry.settledAt !== null &&
-      Date.now() - entry.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS
-    ) {
-      worktreeBasePrefetches.delete(key);
+  const worktreeBaseFetchLocks = yield* makeKeyedSerialExecutor<string>();
+  /** Prefetched bases, by `worktreeBaseKey`: a creation reuses one for a while. */
+  const settledWorktreeBasePrefetches = new Map<
+    string,
+    { readonly branch: string; readonly settledAt: number }
+  >();
+  const recentWorktreeBasePrefetch = (key: string): string | null => {
+    const settled = settledWorktreeBasePrefetches.get(key);
+    if (!settled) return null;
+    if (Date.now() - settled.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS) {
+      settledWorktreeBasePrefetches.delete(key);
       return null;
     }
-    return entry;
+    return settled.branch;
+  };
+  const recordWorktreeBasePrefetch = (key: string, outcome: WorktreeBaseFetch["outcome"]) => {
+    if (Exit.isSuccess(outcome)) {
+      settledWorktreeBasePrefetches.set(key, { branch: outcome.value, settledAt: Date.now() });
+    }
+  };
+  /**
+   * The base fetch running for each `worktreeBaseKey`. Prefetches and
+   * creations that start together (one prompt sent to several models, the
+   * composer prefetching meanwhile) share one: parallel fetches of one ref race
+   * for its lock, and all but one of them fail.
+   */
+  const worktreeBaseFetches = makeKeyedSingleFlight<string, WorktreeBaseFetch, never>();
+  const joinWorktreeBaseFetch = (cwd: string, refName: string, prefetch: boolean) => {
+    const key = worktreeBaseKey(cwd, refName);
+    // Built only by the caller that starts the fetch, not by every one that joins it.
+    const fetchBase = Effect.suspend(() => fetchWorktreeBase(cwd, refName));
+    return worktreeBaseFetches.join(
+      key,
+      worktreeBaseFetchLocks.withLock(path.resolve(cwd), fetchBase).pipe(
+        Effect.exit,
+        // Recorded by the run itself, so a prefetch whose client stopped
+        // waiting (it navigated away) still serves the send that follows.
+        Effect.tap((outcome) =>
+          Effect.sync(() => {
+            if (prefetch) recordWorktreeBasePrefetch(key, outcome);
+          }),
+        ),
+        Effect.map((outcome): WorktreeBaseFetch => ({ prefetch, outcome })),
+      ),
+    );
   };
   const prefetchWorktreeBase: GitVcsDriver.GitVcsDriverShape["prefetchWorktreeBase"] = (input) =>
     Effect.gen(function* () {
       const key = worktreeBaseKey(input.cwd, input.refName);
-      const existing = reusableWorktreeBasePrefetch(key);
-      if (existing) return yield* Fiber.join(existing.fiber).pipe(Effect.asVoid);
-      for (const [candidate, entry] of worktreeBasePrefetches) {
-        if (
-          entry.settledAt !== null &&
-          Date.now() - entry.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS
-        )
-          worktreeBasePrefetches.delete(candidate);
+      if (recentWorktreeBasePrefetch(key) !== null) return;
+      // Forget the stale prefetches of other bases.
+      for (const candidate of settledWorktreeBasePrefetches.keys()) {
+        recentWorktreeBasePrefetch(candidate);
       }
-      const entry: { fiber: Fiber.Fiber<string, GitCommandError>; settledAt: number | null } = {
-        fiber: undefined as unknown as Fiber.Fiber<string, GitCommandError>,
-        settledAt: null,
-      };
-      // Detached: a client that stops waiting (it navigated away) must not
-      // interrupt a fetch the first send may already be waiting on.
-      entry.fiber = yield* Effect.forkDetach(
-        fetchWorktreeBase(input.cwd, input.refName).pipe(
-          Effect.onExit((exit) =>
-            Effect.sync(() => {
-              if (Exit.isSuccess(exit)) entry.settledAt = Date.now();
-              else if (worktreeBasePrefetches.get(key) === entry)
-                worktreeBasePrefetches.delete(key);
-            }),
-          ),
-        ),
-      );
-      worktreeBasePrefetches.set(key, entry);
-      yield* Fiber.join(entry.fiber).pipe(Effect.asVoid);
+      const fetched = yield* joinWorktreeBaseFetch(input.cwd, input.refName, true);
+      // It joined a creation's fetch, which serves as well as its own would.
+      if (!fetched.prefetch) recordWorktreeBasePrefetch(key, fetched.outcome);
+      yield* Effect.asVoid(fetched.outcome);
     });
 
   const notARepositoryRefs = {
@@ -2857,19 +2852,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // base (the composer asks for one when it enters worktree mode) stands in
       // for it while running or recently finished; a failed one is retried here.
       yield* input.progress?.onFetchStarted?.() ?? Effect.void;
-      const prefetch = reusableWorktreeBasePrefetch(worktreeBaseKey(input.cwd, baseRef));
-      const prefetched = prefetch
-        ? yield* Fiber.join(prefetch.fiber).pipe(Effect.option)
-        : Option.none<string>();
-      const baseBranch = Option.isSome(prefetched)
-        ? prefetched.value
-        : yield* sharedWorktreeBaseFetch(input.cwd, baseRef);
-      yield* (
-        input.progress?.onFetchFinished?.({
-          reused: Option.isSome(prefetched),
-          branch: baseBranch,
-        }) ?? Effect.void
-      );
+      const prefetched = recentWorktreeBasePrefetch(worktreeBaseKey(input.cwd, baseRef));
+      let reused = prefetched !== null;
+      let baseBranch = prefetched;
+      if (baseBranch === null) {
+        let fetched = yield* joinWorktreeBaseFetch(input.cwd, baseRef, false);
+        // A failed prefetch is retried here; a creation's failed fetch is the
+        // answer for every creation that joined it.
+        if (fetched.prefetch && Exit.isFailure(fetched.outcome)) {
+          fetched = yield* joinWorktreeBaseFetch(input.cwd, baseRef, false);
+        }
+        reused = fetched.prefetch;
+        baseBranch = yield* fetched.outcome;
+      }
+      yield* input.progress?.onFetchFinished?.({ reused, branch: baseBranch }) ?? Effect.void;
       // Fully qualified refs prevent a same-named local branch from winning.
       baseRef = `refs/remotes/origin/${baseBranch}`;
     }

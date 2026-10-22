@@ -2,12 +2,14 @@ import "../../index.css";
 
 import {
   MODEL_MULTI_SELECT_OFF,
+  retryModelMultiSelect,
   type ModelMultiSelectState,
 } from "@ryco/client-runtime/state/composer";
 import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderOptionSelection,
   type ServerProvider,
 } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
@@ -133,7 +135,11 @@ const PROVIDERS: ReadonlyArray<ServerProvider> = [
   ]),
 ];
 
-async function mountPicker(options: { multiSelect: boolean }) {
+async function mountPicker(options: {
+  multiSelect: boolean;
+  initialState?: ModelMultiSelectState;
+  savedModelOptionsByInstance?: Readonly<Record<string, ReadonlyArray<ProviderOptionSelection>>>;
+}) {
   const host = document.createElement("div");
   document.body.append(host);
   const onInstanceModelChange = vi.fn();
@@ -147,7 +153,9 @@ async function mountPicker(options: { multiSelect: boolean }) {
   );
 
   function Harness() {
-    const [state, setState] = useState<ModelMultiSelectState>(MODEL_MULTI_SELECT_OFF);
+    const [state, setState] = useState<ModelMultiSelectState>(
+      options.initialState ?? MODEL_MULTI_SELECT_OFF,
+    );
     return (
       <SettingsEditingScopeProvider value="all">
         <ProviderModelPicker
@@ -157,6 +165,7 @@ async function mountPicker(options: { multiSelect: boolean }) {
           lockedProvider={null}
           instanceEntries={instanceEntries}
           modelOptionsByInstance={modelOptionsByInstance}
+          savedModelOptionsByInstance={options.savedModelOptionsByInstance}
           onInstanceModelChange={onInstanceModelChange}
           {...(options.multiSelect
             ? {
@@ -238,9 +247,10 @@ describe("ProviderModelPicker — Compare models", () => {
       expect(mounted.latest()).toEqual({
         enabled: true,
         selections: [
-          // The composer's model keeps its live options.
+          // The composer's model keeps its live options, and so does another
+          // model of its instance, as a pick of it would.
           { instanceId: CODEX, model: "gpt-5-codex", options: [{ id: "effort", value: "high" }] },
-          { instanceId: CODEX, model: "gpt-5-mini" },
+          { instanceId: CODEX, model: "gpt-5-mini", options: [{ id: "effort", value: "high" }] },
         ],
       });
       await vi.waitFor(() => expect(checkedNames()).toEqual(["GPT-5 Codex", "GPT-5 Mini"]));
@@ -250,6 +260,43 @@ describe("ProviderModelPicker — Compare models", () => {
         "true",
       );
       expect(document.querySelector(".model-picker-list")).not.toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("gives a model of another instance the options the draft saved for it", async () => {
+    const mounted = await mountPicker({
+      multiSelect: true,
+      savedModelOptionsByInstance: { [CLAUDE]: [{ id: "effort", value: "high" }] },
+    });
+    try {
+      await openPicker();
+      await page.getByRole("button", { name: "Claude", exact: true }).click();
+      await shiftClick("Claude Opus 4.6");
+      expect(mounted.latest().selections.at(-1)).toEqual({
+        instanceId: CLAUDE,
+        model: "claude-opus-4-6",
+        options: [{ id: "effort", value: "high" }],
+      });
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("lets one model go out when it retries what an earlier send did not create", async () => {
+    const mounted = await mountPicker({
+      multiSelect: true,
+      initialState: retryModelMultiSelect([{ instanceId: CLAUDE, model: "claude-opus-4-6" }]),
+    });
+    try {
+      await openPicker();
+      expect(compareHint()).toBe("1 of 4 · each in its own worktree");
+      await page.getByRole("button", { name: "Claude", exact: true }).click();
+      await option("Claude Opus 4.6").click();
+      expect(mounted.latest()).toEqual({ enabled: true, selections: [], retry: true });
+      await vi.waitFor(() => expect(compareHint()).toBe("Pick a model"));
     } finally {
       await mounted.cleanup();
     }

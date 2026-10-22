@@ -6,6 +6,7 @@ import {
   enableModelMultiSelect,
   modelFavoriteKey,
   modelMultiSelectKey,
+  modelMultiSelectMinimum,
   toggleModelFavorite,
   toggleModelMultiSelect,
   indexModelFavorites,
@@ -458,6 +459,18 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     selectedInstanceId,
   ]);
 
+  /**
+   * The options a pick of this instance keeps when it names none: the
+   * composer's live ones for its own instance, the draft's saved ones otherwise.
+   */
+  const savedOptionsFor = useCallback(
+    (instanceId: ProviderInstanceId): ReadonlyArray<ProviderOptionSelection> =>
+      instanceId === props.activeInstanceId
+        ? (props.modelOptions ?? [])
+        : (props.savedModelOptionsByInstance?.[instanceId] ?? []),
+    [props.activeInstanceId, props.modelOptions, props.savedModelOptionsByInstance],
+  );
+
   /** The model a row picks, with a favorite's preset applied; null when it is gone. */
   const resolveModelPick = useCallback(
     (
@@ -489,26 +502,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       }
       const selection = applyModelFavorite(
         favorite,
-        {
-          instanceId,
-          model: resolvedModel,
-          options:
-            instanceId === props.activeInstanceId
-              ? (props.modelOptions ?? [])
-              : (props.savedModelOptionsByInstance?.[instanceId] ?? []),
-        },
+        { instanceId, model: resolvedModel, options: savedOptionsFor(instanceId) },
         capabilitiesByModelKey.get(providerModelKey(instanceId, resolvedModel)),
       );
       return { instanceId, model: resolvedModel, options: selection.options ?? [] };
     },
-    [
-      entryByInstanceId,
-      modelOptionsByInstance,
-      props.activeInstanceId,
-      props.modelOptions,
-      props.savedModelOptionsByInstance,
-      capabilitiesByModelKey,
-    ],
+    [entryByInstanceId, modelOptionsByInstance, savedOptionsFor, capabilitiesByModelKey],
   );
 
   const handleModelSelect = useCallback(
@@ -563,19 +562,19 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       if (!pick) return;
       const result = toggleModelMultiSelect(multiSelect.state, {
         active: activeSelection,
-        target:
-          // The composer's own model keeps its live options.
-          pick.options === undefined &&
-          pick.instanceId === activeSelection.instanceId &&
-          pick.model === activeSelection.model
-            ? activeSelection
-            : createModelSelection(pick.instanceId, pick.model, pick.options),
+        // Without a favorite's preset, a model keeps the options a pick of it
+        // would (the effort and the like the draft holds for its instance).
+        target: createModelSelection(
+          pick.instanceId,
+          pick.model,
+          pick.options ?? savedOptionsFor(pick.instanceId),
+        ),
         max: compareMax,
       });
       setCompareFull(result.refused);
       if (result.state !== multiSelect.state) multiSelect.onChange(result.state);
     },
-    [activeSelection, compareMax, multiSelect, resolveModelPick],
+    [activeSelection, compareMax, multiSelect, resolveModelPick, savedOptionsFor],
   );
   /** A pick toggles a model while the mode is on, or when Shift is held. */
   const isComparePick = useCallback(
@@ -947,6 +946,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             <ModelPickerCompareBar
               enabled={compareEnabled}
               count={compareEnabled ? multiSelect.state.selections.length : 0}
+              minimum={modelMultiSelectMinimum(multiSelect.state)}
               max={compareMax}
               full={compareFull}
               onEnabledChange={setCompareEnabled}

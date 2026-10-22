@@ -4,6 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type EnvironmentApi,
+  type MessageId,
   type ModelSelection,
   type ServerProvider,
   type ThreadId,
@@ -98,7 +99,7 @@ function makeNode(answer: (command: TurnStart, call: number) => NodeAnswer = () 
   return { api, commands, threads };
 }
 
-const noThreads = () => false;
+const noTurns = () => false;
 
 describe("multi-model send — plan", () => {
   it("starts each model in its own fresh worktree off the base branch", () => {
@@ -325,7 +326,7 @@ describe("multi-model send — outcomes", () => {
         previous: pending,
       }),
     ).toEqual({ kind: "uncertain", message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE });
-    // A refusal ran nothing, so it says nothing about an earlier attempt.
+    // A refusal ran nothing, so it says nothing about an earlier send.
     const refused = new RpcRequestRefusedError("awaiting-acknowledgement");
     expect(classifyMultiModelSendFailure({ error: refused, sent: true, previous: uncertain })).toBe(
       uncertain,
@@ -341,13 +342,32 @@ describe("multi-model send — outcomes", () => {
       }).kind,
     ).toBe("not-created");
   });
+
+  it("never takes the node's answer to an uncertain retry as nothing created", () => {
+    // The first send was cut off by a node restart after its thread and branch
+    // were made: the identical command fails on them, and nothing is cleaned up.
+    const uncertain = { kind: "uncertain", message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE } as const;
+    const branchExists = new OrchestrationDispatchCommandError({
+      message: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
+    });
+    expect(
+      classifyMultiModelSendFailure({ error: branchExists, sent: true, previous: uncertain }),
+    ).toBe(uncertain);
+    expect(
+      classifyMultiModelSendFailure({
+        error: new Error("Socket closed"),
+        sent: true,
+        previous: uncertain,
+      }),
+    ).toEqual(uncertain);
+  });
 });
 
 describe("multi-model send — tracker", () => {
   it("starts every target at once with its own isolated worktree bootstrap", async () => {
     const node = makeNode();
     const tracker = createMultiModelSendTracker(sendInput());
-    const snapshot = await tracker.send({ api: node.api, threadExists: noThreads });
+    const snapshot = await tracker.send({ api: node.api });
     expect(snapshot.targets.map((target) => target.status.kind)).toEqual([
       "started",
       "started",
@@ -366,11 +386,11 @@ describe("multi-model send — tracker", () => {
       });
     }
     // Started targets are never sent again.
-    await tracker.send({ api: node.api, threadExists: noThreads });
+    await tracker.send({ api: node.api });
     expect(node.commands).toHaveLength(3);
   });
 
-  it("resends only what the node did not create, under the same thread and a new command", async () => {
+  it("leaves what the node did not create to the draft's next send", async () => {
     const node = makeNode((command, call) => {
       if (call > 3) return "accept";
       if (command.modelSelection?.instanceId === codex) {
@@ -378,11 +398,8 @@ describe("multi-model send — tracker", () => {
       }
       return command.modelSelection?.model === opus.model ? "accept-then-drop" : "accept";
     });
-    let clock = 0;
-    const tracker = createMultiModelSendTracker(sendInput(), {
-      now: () => `2026-10-22T10:0${(clock += 1)}:00.000Z`,
-    });
-    const first = await tracker.send({ api: node.api, threadExists: noThreads });
+    const tracker = createMultiModelSendTracker(sendInput());
+    const first = await tracker.send({ api: node.api });
     expect(first.targets.map((target) => target.status)).toEqual([
       { kind: "not-created", message: "Could not create the worktree." },
       { kind: "uncertain", message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE },
@@ -395,26 +412,27 @@ describe("multi-model send — tracker", () => {
       ),
     ).toEqual([1, 1, 1, 0]);
 
-    const second = await tracker.send({ api: node.api, threadExists: noThreads });
-    expect(node.commands).toHaveLength(4);
-    const resent = node.commands[3]!;
+    // Sending again sends nothing: the uncertain target waits for an explicit
+    // retry, and the one not created for a new submission.
+    expect(await tracker.send({ api: node.api })).toBe(first);
+    expect(node.commands).toHaveLength(3);
+
+    // That submission is built from the composer as it is then (here, an
+    // edited prompt), with only the model not created, and new threads.
+    const edited = { ...target(gpt), outgoingMessageText: "Fix the flaky test, edited" };
+    const retry = createMultiModelSendTracker(
+      sendInput({ submissionId: "submission-2", targets: [edited] }),
+    );
+    const retried = await retry.send({ api: node.api });
+    expect(retried.targets.map((target) => target.status.kind)).toEqual(["started"]);
+    const resent = node.commands.at(-1)!;
     const before = first.targets[0]!.plan;
-    const after = second.targets[0]!.plan;
-    expect(after.attempt).toBe(2);
-    expect(resent.threadId).toBe(before.threadId);
+    expect(resent.message.text).toBe("Fix the flaky test, edited");
+    expect(resent.threadId).not.toBe(before.threadId);
     expect(resent.commandId).not.toBe(before.commandId);
-    expect(resent.message.messageId).not.toBe(before.messageId);
     expect(resent.bootstrap?.prepareWorktree?.branch).not.toBe(
       before.bootstrap.prepareWorktree?.branch,
     );
-    expect(resent.createdAt).toBe("2026-10-22T10:01:00.000Z");
-    expect(resent.bootstrap?.createThread?.createdAt).toBe("2026-10-22T10:00:00.000Z");
-    // The uncertain target waits for an explicit retry.
-    expect(second.targets.map((target) => target.status.kind)).toEqual([
-      "started",
-      "uncertain",
-      "started",
-    ]);
   });
 
   it("retries an uncertain target as the identical command and never makes a second thread", async () => {
@@ -424,17 +442,42 @@ describe("multi-model send — tracker", () => {
     const tracker = createMultiModelSendTracker(
       sendInput({ targets: [target(gpt), target(opus)] }),
     );
-    const first = await tracker.send({ api: node.api, threadExists: noThreads });
+    const first = await tracker.send({ api: node.api });
     expect(first.targets[0]!.status.kind).toBe("uncertain");
 
     const key = modelMultiSelectKey(gpt);
-    const retried = await tracker.retryUncertain(key, { api: node.api, threadExists: noThreads });
+    const retried = await tracker.retryUncertain(key, { api: node.api, turnVisible: noTurns });
     expect(retried.targets[0]!.status).toEqual({ kind: "started" });
     expect(node.commands.at(-1)).toEqual(node.commands[0]);
     expect(node.threads.size).toBe(2);
     // Nothing left to retry.
-    await tracker.retryUncertain(key, { api: node.api, threadExists: noThreads });
+    await tracker.retryUncertain(key, { api: node.api, turnVisible: noTurns });
     expect(node.commands).toHaveLength(3);
+  });
+
+  it("keeps a target uncertain when the node fails its retry on what the first send left", async () => {
+    // Call 1 is cut off by a node restart after the thread and branch were
+    // made; call 2, the identical command, finds no receipt and fails on them.
+    const node = makeNode((_command, call) =>
+      call === 1
+        ? new Error("Socket closed")
+        : new OrchestrationDispatchCommandError({
+            message: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
+          }),
+    );
+    const tracker = createMultiModelSendTracker(sendInput({ targets: [target(gpt)] }));
+    await tracker.send({ api: node.api });
+    const key = modelMultiSelectKey(gpt);
+    const retried = await tracker.retryUncertain(key, { api: node.api, turnVisible: noTurns });
+    expect(retried.targets[0]!.status).toEqual({
+      kind: "uncertain",
+      message: MULTI_MODEL_SEND_UNCERTAIN_MESSAGE,
+    });
+    // Neither a new send nor the thread the first send left makes it started.
+    await tracker.send({ api: node.api });
+    tracker.reconcile(noTurns);
+    expect(node.commands).toHaveLength(2);
+    expect(tracker.read().targets[0]!.status.kind).toBe("uncertain");
   });
 
   it("keeps a target uncertain when its retry was refused before it was sent", async () => {
@@ -449,11 +492,11 @@ describe("multi-model send — tracker", () => {
       },
     } as unknown as EnvironmentApi;
     const tracker = createMultiModelSendTracker(sendInput({ targets: [target(gpt)] }));
-    await tracker.send({ api, threadExists: noThreads });
+    await tracker.send({ api });
     refuse = true;
     const snapshot = await tracker.retryUncertain(modelMultiSelectKey(gpt), {
       api,
-      threadExists: noThreads,
+      turnVisible: noTurns,
     });
     expect(snapshot.targets[0]!.status).toEqual({
       kind: "uncertain",
@@ -468,7 +511,6 @@ describe("multi-model send — tracker", () => {
     );
     const snapshot = await tracker.send({
       api: node.api,
-      threadExists: noThreads,
       assertMutationReady: () => {
         throw new Error("The connection changed.");
       },
@@ -480,36 +522,66 @@ describe("multi-model send — tracker", () => {
     ]);
   });
 
-  it("treats a target whose thread the client sees as started", async () => {
+  it("treats an uncertain target whose turn the client sees as started", async () => {
     const node = makeNode(() => new Error("Socket closed"));
     const tracker = createMultiModelSendTracker(
       sendInput({ targets: [target(gpt), target(opus)] }),
     );
-    const first = await tracker.send({ api: node.api, threadExists: noThreads });
-    const gptThread = first.targets[0]!.plan.threadId;
-    const seen = new Set<ThreadId>([gptThread]);
+    const first = await tracker.send({ api: node.api });
+    const turns = new Set<MessageId>([first.targets[0]!.plan.messageId]);
+    const turnVisible = ({ messageId }: { readonly messageId: MessageId }) => turns.has(messageId);
     const listener = { calls: 0 };
     const unsubscribe = tracker.subscribe(() => {
       listener.calls += 1;
     });
-    tracker.reconcile((threadId) => seen.has(threadId));
+    tracker.reconcile(turnVisible);
     expect(tracker.read().targets.map((target) => target.status.kind)).toEqual([
       "started",
       "uncertain",
     ]);
     expect(listener.calls).toBe(1);
     // An unchanged reconcile publishes nothing.
-    tracker.reconcile((threadId) => seen.has(threadId));
+    tracker.reconcile(turnVisible);
     expect(listener.calls).toBe(1);
     unsubscribe();
-    // A retry first checks for the thread: the opus one exists now, so nothing is sent.
-    seen.add(first.targets[1]!.plan.threadId);
-    await tracker.retryUncertain(modelMultiSelectKey(opus), {
-      api: node.api,
-      threadExists: (threadId) => seen.has(threadId),
-    });
+    // A retry first checks for the turn: the opus one shows now, so nothing is sent.
+    turns.add(first.targets[1]!.plan.messageId);
+    await tracker.retryUncertain(modelMultiSelectKey(opus), { api: node.api, turnVisible });
     expect(node.commands).toHaveLength(2);
     expect(tracker.read().targets[1]!.status.kind).toBe("started");
+  });
+
+  it("never takes a thread without its turn, or a target the node answered for, as started", async () => {
+    // gpt's bootstrap is still running when the connection drops: its thread
+    // shows before setup and the turn start, which may yet fail and delete it.
+    // opus failed fast: its thread can still show for a frame after the answer.
+    const node = makeNode((command) =>
+      command.modelSelection?.instanceId === codex
+        ? new Error("Socket closed")
+        : new OrchestrationDispatchCommandError({ message: "The turn was not started." }),
+    );
+    const tracker = createMultiModelSendTracker(
+      sendInput({ targets: [target(gpt), target(opus)] }),
+    );
+    const first = await tracker.send({ api: node.api });
+    // The client shows both threads, neither with a user message yet.
+    const shown = new Map<ThreadId, { userMessage: boolean }>(
+      first.targets.map((target) => [target.plan.threadId, { userMessage: false }]),
+    );
+    const turnVisible = ({ threadId }: { readonly threadId: ThreadId }) =>
+      shown.get(threadId)?.userMessage === true;
+    tracker.reconcile(turnVisible);
+    expect(tracker.read().targets.map((target) => target.status.kind)).toEqual([
+      "uncertain",
+      "not-created",
+    ]);
+    // Once they show a turn, only the uncertain target moves: the node's answer stands.
+    for (const thread of shown.values()) thread.userMessage = true;
+    tracker.reconcile(turnVisible);
+    expect(tracker.read().targets.map((target) => target.status.kind)).toEqual([
+      "started",
+      "not-created",
+    ]);
   });
 
   it("does not send a target twice while it is in flight", async () => {
@@ -529,12 +601,12 @@ describe("multi-model send — tracker", () => {
     const tracker = createMultiModelSendTracker(
       sendInput({ targets: [target(gpt), target(opus)] }),
     );
-    const first = tracker.send({ api, threadExists: noThreads });
+    const first = tracker.send({ api });
     expect(tracker.read().targets.map((target) => target.status.kind)).toEqual([
       "dispatching",
       "dispatching",
     ]);
-    const second = tracker.send({ api, threadExists: noThreads });
+    const second = tracker.send({ api });
     release();
     await Promise.all([first, second]);
     expect(node.commands).toHaveLength(2);

@@ -22,6 +22,7 @@ import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
 import { selectFinalTurnReplies } from "@ryco/shared/turnReply";
 import * as Schema from "effect/Schema";
 
+import { hasErrorTag } from "../../errors/errorTag.ts";
 import { isAwaitingAdmission, RpcRequestRefusedError } from "../../rpc/protocol.ts";
 import { RpcTransportDisposedError } from "../../rpc/wsTransport.ts";
 import type { ChatAttachment, ChatMessage, ThreadSession } from "./types.ts";
@@ -563,17 +564,13 @@ export type ThreadForkOutcome =
 
 export type ThreadForkFailedOutcome = Exclude<ThreadForkOutcome, { status: "succeeded" }>;
 
-function hasTag(error: unknown, tag: string): error is Record<string, unknown> {
-  return typeof error === "object" && error !== null && "_tag" in error && error._tag === tag;
-}
-
 /**
  * Classifies a `threads.fork` rejection; never reads the node's message for branching. A typed
  * error this build cannot fully read (unknown reason or attempt) is uncertain: what the node holds
  * for the key is unknown.
  */
 export function classifyThreadForkError(error: unknown): ThreadForkFailedOutcome {
-  if (hasTag(error, "ThreadForkError")) {
+  if (hasErrorTag(error, "ThreadForkError")) {
     const { reason, retryable, attempt, message } = error;
     if (
       isThreadForkErrorReason(reason) &&
@@ -606,7 +603,7 @@ export function classifyThreadForkError(error: unknown): ThreadForkFailedOutcome
       error,
     };
   }
-  if (hasTag(error, "AuthRpcError")) {
+  if (hasErrorTag(error, "AuthRpcError")) {
     return {
       status: "refused",
       awaiting: false,
