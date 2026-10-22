@@ -54,6 +54,7 @@ import {
   retryProjectCopy,
   runProjectCopyInBackground,
   setProjectCopyRuntimeForTests,
+  showProjectCopyProgress,
   startManagedProjectCopy,
   useProjectCopyStore,
   viewCopiedProject,
@@ -287,6 +288,42 @@ describe("copyManager", () => {
 
     await viewCopiedProject("copy-1");
     expect(opened).toEqual([{ environmentId: target, projectId: newProjectId }]);
+  });
+
+  it("leaves a copy the dialog shows to the dialog, then hands a running one to its toast", async () => {
+    const copy = await startManagedProjectCopy({ plan, toast: false });
+    const run = fake.runs[0]!;
+    expect(useProjectCopyStore.getState().entries["copy-1"]).toMatchObject({
+      background: true,
+      inDialog: true,
+    });
+    run.emitProgress({ phase: "upload", uploadedBytes: 1, totalBytes: 2 });
+    expect(toasts.showProjectCopyProgressToast).not.toHaveBeenCalled();
+
+    // The dialog closed while it runs: the toast takes over.
+    showProjectCopyProgress("copy-1");
+    expect(useProjectCopyStore.getState().entries["copy-1"]).toMatchObject({
+      background: false,
+      inDialog: false,
+    });
+    expect(toasts.showProjectCopyProgressToast).toHaveBeenCalledTimes(1);
+    run.emitProgress({ phase: "done", importSnapshot: snapshot("completed") });
+    run.settle({});
+    await copy.done;
+    expect(toasts.showProjectCopyResultToast).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not toast how a copy ended while the dialog shows it", async () => {
+    const copy = await startManagedProjectCopy({ plan, toast: false });
+    const run = fake.runs[0]!;
+    run.emitProgress({ phase: "done", importSnapshot: snapshot("completed") });
+    run.settle({});
+    await copy.done;
+    expect(toasts.showProjectCopyResultToast).not.toHaveBeenCalled();
+    // Closing the dialog afterwards toasts nothing either.
+    showProjectCopyProgress("copy-1");
+    expect(toasts.showProjectCopyProgressToast).not.toHaveBeenCalled();
+    expect(toasts.showProjectCopyResultToast).not.toHaveBeenCalled();
   });
 
   it("keeps a copy running in the background without its progress toast", async () => {

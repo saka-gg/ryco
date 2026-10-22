@@ -57,6 +57,19 @@ export interface CopyProjectDialogRequest {
   readonly origin: CopyProjectDialogOrigin;
 }
 
+/**
+ * The cross-node actions a project menu offers when its surface opts in (A26):
+ * the sidebar passes them, the frozen phone tier does not.
+ */
+export interface CrossNodeProjectActions {
+  /** "Copy to another node…" */
+  readonly onCopy: () => void;
+  /** "Link a copy that's already on a node…" */
+  readonly onLink: () => void;
+  /** The menu is about to open: start loading the dialogs. */
+  readonly onIntent?: (() => void) | undefined;
+}
+
 export interface OpenCopyProjectInput {
   readonly source: ScopedProjectRef;
   readonly targetEnvironmentId?: EnvironmentId | null;
@@ -143,6 +156,28 @@ export function closeCopyProject(): void {
   const { copyProject } = useProjectNodesDialogStore.getState();
   if (!copyProject.open) return;
   useProjectNodesDialogStore.setState({ copyProject: { ...copyProject, open: false } });
+}
+
+/**
+ * A project menu's cross-node actions for one checkout: copy it (the dialog
+ * starts from it) and link a copy already on a node (the add-project dialog in
+ * link mode, else `openAddProjectFallback`, the palette's add-project views,
+ * until that dialog is available). Both preload the dialogs on menu intent.
+ */
+export function crossNodeProjectActions(input: {
+  readonly projectRef: ScopedProjectRef;
+  readonly origin: CopyProjectDialogOrigin;
+  readonly openAddProjectFallback: () => void;
+}): CrossNodeProjectActions {
+  const { projectRef, origin } = input;
+  return {
+    onCopy: () => openCopyProject({ source: projectRef, origin }),
+    onLink: () => {
+      if (addProjectDialogAvailable()) openAddProject({ mode: "link", projectRef });
+      else input.openAddProjectFallback();
+    },
+    onIntent: preloadProjectNodesDialogs,
+  };
 }
 
 /** The copy runtime calls this when it starts or resumes a copy. */

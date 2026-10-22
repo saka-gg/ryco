@@ -1,12 +1,14 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
-import type { SidebarProjectGroupingMode } from "@ryco/contracts";
+import type { EnvironmentId, SidebarProjectGroupingMode } from "@ryco/contracts";
 import type { UnifiedSettings } from "@ryco/contracts/settings";
-import { ArrowRightIcon } from "lucide-react";
-import { useMemo } from "react";
+import { ArrowRightIcon, CopyPlusIcon } from "lucide-react";
+import { useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useSettings, useUpdateSettings } from "../../../hooks/useSettings";
 import { useNodeCatalog } from "../../../environments/nodeCatalog";
+import { usePresentationTier } from "../../../hooks/usePresentationTier";
+import { preloadableLazy, useLazyComponentReady } from "../../../lib/preloadableLazy";
 import { cn } from "../../../lib/utils";
 import {
   readProjectGroupingChoice,
@@ -16,6 +18,13 @@ import {
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { selectSidebarThreadsForProjectRef, useStore } from "../../../store";
 import { DeviceIcon } from "../../DeviceIcon";
+import {
+  hasStoredProjectCopyRecords,
+  openCopyProject,
+  preloadProjectNodesDialogs,
+  useProjectNodesDialogStore,
+} from "../../projectNodes/projectNodesDialogStore";
+import { Button } from "../../ui/button";
 import { RelativeTime } from "../../pullRequests/primitives";
 import { SettingsSelect } from "../../settings/SettingsSelect";
 import { SETTINGS_INSET_CLASS, SettingsBlock, SettingsRow } from "../../settings/settingsLayout";
@@ -174,6 +183,79 @@ function CheckoutRow(props: {
 }
 
 /**
+ * The devices that lack the project; each offers "Copy here", which opens the
+ * copy dialog from this checkout with that device picked (not on the phone tier).
+ */
+export function ProjectNotOnBlock(props: {
+  readonly member: Pick<SidebarProjectGroupMember, "environmentId" | "id">;
+  readonly missing: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  }>;
+  readonly crossNode: boolean;
+}) {
+  if (!props.crossNode) {
+    return (
+      <SettingsBlock className="py-2.5 text-xs text-muted-foreground">
+        Not on {props.missing.map((device) => device.label).join(", ")}
+      </SettingsBlock>
+    );
+  }
+  return (
+    <SettingsBlock
+      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-2.5 text-xs text-muted-foreground"
+      data-testid="project-not-on"
+    >
+      <span>Not on</span>
+      {props.missing.map((device) => (
+        <span key={device.environmentId} className="inline-flex items-center gap-1.5">
+          <span className="text-foreground/80">{device.label}</span>
+          <Button
+            size="xs"
+            variant="outline"
+            aria-label={`Copy here: ${device.label}`}
+            onPointerEnter={preloadProjectNodesDialogs}
+            onFocus={preloadProjectNodesDialogs}
+            onClick={() =>
+              openCopyProject({
+                source: { environmentId: props.member.environmentId, projectId: props.member.id },
+                targetEnvironmentId: device.environmentId,
+                origin: "devices-section",
+              })
+            }
+          >
+            <CopyPlusIcon />
+            Copy here
+          </Button>
+        </span>
+      ))}
+    </SettingsBlock>
+  );
+}
+
+// Through the feature's one lazy entry (see `ProjectNodesDialogs.tsx`).
+const LazyProjectCopiesBlock = preloadableLazy(() =>
+  import("../../projectNodes/ProjectNodesDialogs").then((module) => module.ProjectCopiesBlock),
+);
+
+/**
+ * The project's copies to other nodes (A36(3)). Its code loads only when this
+ * client copied something, kept records of copies, or reaches a node that
+ * can report imports.
+ */
+function ProjectCopiesSlot(props: {
+  readonly members: ReadonlyArray<SidebarProjectGroupMember>;
+  readonly reachesCopyNode: boolean;
+}) {
+  const copiesActive = useProjectNodesDialogStore((state) => state.copiesActive);
+  const [storedRecords] = useState(hasStoredProjectCopyRecords);
+  const wanted = copiesActive || storedRecords || props.reachesCopyNode;
+  const ready = useLazyComponentReady(LazyProjectCopiesBlock, wanted);
+  if (!wanted || !ready) return null;
+  return <LazyProjectCopiesBlock members={props.members} />;
+}
+
+/**
  * Where the project is checked out, and where not. With several checkouts the
  * rows pick which one the rest of the page edits. Sidebar grouping is a
  * browser preference about these checkouts, so it lives here too.
@@ -200,6 +282,11 @@ export function ProjectDevicesSection({ member }: ProjectSectionProps) {
     ),
   });
   const selectable = snapshot.memberProjects.length > 1;
+  // The frozen phone tier gains no cross-node actions (A26).
+  const crossNode = usePresentationTier() !== "phone";
+  const reachesCopyNode = knownDevices.some(
+    (device) => device.presence === "online" && device.projectCopySupport === "yes",
+  );
 
   const saved = useSavedFlash();
   const groupingMode = useSettings(selectGroupingMode);
@@ -244,9 +331,10 @@ export function ProjectDevicesSection({ member }: ProjectSectionProps) {
         ))}
       </div>
       {missing.length > 0 ? (
-        <SettingsBlock className="py-2.5 text-xs text-muted-foreground">
-          Not on {missing.join(", ")}
-        </SettingsBlock>
+        <ProjectNotOnBlock member={member} missing={missing} crossNode={crossNode} />
+      ) : null}
+      {crossNode ? (
+        <ProjectCopiesSlot members={snapshot.memberProjects} reachesCopyNode={reachesCopyNode} />
       ) : null}
       <SettingsRow
         title="Sidebar grouping"

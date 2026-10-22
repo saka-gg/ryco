@@ -79,6 +79,11 @@ export interface ProjectCopyEntry {
   readonly running: boolean;
   /** The progress toast is hidden ("Run in background"); how it ends still toasts. */
   readonly background: boolean;
+  /**
+   * The copy dialog shows this copy's progress and how it ends, so neither
+   * toasts until the dialog hands it over (`showProjectCopyProgress`).
+   */
+  readonly inDialog: boolean;
   /** The plan is still in memory, so a failure's retry can run here. */
   readonly hasPlan: boolean;
   readonly agentControl: ProjectCopyAgentControlContext | null;
@@ -97,8 +102,14 @@ export interface StartProjectCopyOptions {
   /**
    * Show the progress toast right away (default). A dialog that shows the
    * progress itself passes false and calls `showProjectCopyProgress` when it
-   * closes ("Run in background").
+   * closes ("Run in background"); until then the copy's result does not toast
+   * either.
    */
+  readonly toast?: boolean;
+}
+
+export interface RetryProjectCopyOptions {
+  /** As in `StartProjectCopyOptions`: false while the copy dialog shows the retry. */
   readonly toast?: boolean;
 }
 
@@ -348,6 +359,7 @@ interface LaunchInput {
   readonly restartOf?: ProjectCopyJobRecord | null;
   readonly agentControl: ProjectCopyAgentControlContext | null;
   readonly background: boolean;
+  readonly inDialog: boolean;
 }
 
 async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
@@ -432,6 +444,7 @@ async function launch(input: LaunchInput): Promise<ManagedProjectCopy> {
     project: null,
     running: true,
     background: input.background,
+    inDialog: input.inDialog,
     hasPlan: plan !== null,
     agentControl,
   };
@@ -479,7 +492,8 @@ async function finish(
     running: false,
   });
   const entry = useProjectCopyStore.getState().entries[copyId];
-  if (entry) showResultToast(entry);
+  // The copy dialog shows how it ended itself.
+  if (entry && !entry.inDialog) showResultToast(entry);
   if (agentControl && entry) {
     switch (outcome.progress.phase) {
       case "done": {
@@ -528,6 +542,7 @@ export function startManagedProjectCopy(
     plan: options.plan,
     agentControl: options.agentControl ?? null,
     background: options.toast === false,
+    inDialog: options.toast === false,
   });
 }
 
@@ -551,10 +566,15 @@ export function runProjectCopyInBackground(copyId: string): void {
   dismissProjectCopyToast(copyId);
 }
 
-/** Shows the copy's progress toast again (the dialog that showed it closed). */
+/**
+ * Hands a copy the dialog showed over to the toasts (the dialog closed): its
+ * progress toast while it runs, else how it ended.
+ */
 export function showProjectCopyProgress(copyId: string): void {
-  patchEntry(copyId, { background: false });
-  refreshToast(copyId);
+  const entry = useProjectCopyStore.getState().entries[copyId];
+  if (!entry) return;
+  patchEntry(copyId, { background: false, inDialog: false });
+  if (entry.running) refreshToast(copyId);
 }
 
 /**
@@ -562,11 +582,15 @@ export function showProjectCopyProgress(copyId: string): void {
  * same copy over with the files sent instead of cloned, `resume` picks it up
  * with its ids. Null when there is nothing to retry here (no plan, or running).
  */
-export async function retryProjectCopy(copyId: string): Promise<ManagedProjectCopy | null> {
+export async function retryProjectCopy(
+  copyId: string,
+  options: RetryProjectCopyOptions = {},
+): Promise<ManagedProjectCopy | null> {
   const entry = useProjectCopyStore.getState().entries[copyId];
   if (!entry || entry.running) return null;
   const plan = plans.get(copyId) ?? null;
   const retry = entry.progress.error?.retry ?? null;
+  const inDialog = options.toast === false;
   if (retry === "send-files") {
     if (!plan) return null;
     const sendFiles = (await loadRuntime()).projectCopyPlanWithSendFiles(plan);
@@ -575,7 +599,8 @@ export async function retryProjectCopy(copyId: string): Promise<ManagedProjectCo
       plan: sendFiles,
       restartOf: entry.record,
       agentControl: entry.agentControl,
-      background: false,
+      background: inDialog,
+      inDialog,
     });
   }
   if (retry === "resume") {
@@ -583,7 +608,8 @@ export async function retryProjectCopy(copyId: string): Promise<ManagedProjectCo
       plan,
       resume: entry.record,
       agentControl: entry.agentControl,
-      background: false,
+      background: inDialog,
+      inDialog,
     });
   }
   return null;
@@ -603,6 +629,7 @@ export async function resumeProjectCopy(copyId: string): Promise<ManagedProjectC
     resume: record,
     agentControl,
     background: true,
+    inDialog: false,
   });
 }
 
@@ -725,6 +752,7 @@ export async function resumeProjectCopies(): Promise<void> {
             resume: record,
             agentControl,
             background: true,
+            inDialog: false,
           });
         } catch (error) {
           console.warn("Resuming a project copy failed.", error);

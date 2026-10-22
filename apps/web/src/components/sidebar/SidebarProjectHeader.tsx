@@ -25,6 +25,7 @@ import { ProjectSettingsMenu } from "./ProjectSettingsMenu";
 import { useHasIntersectedViewport } from "./hooks/useHasIntersectedViewport";
 import { SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE } from "../chat/promoteChatDialogStore";
 import { preloadDraftRoute } from "./threadNavigationIntent";
+import type { CrossNodeProjectActions } from "../projectNodes/projectNodesDialogStore";
 
 export function SidebarProjectHeader(props: {
   project: SidebarProjectSnapshot;
@@ -56,6 +57,8 @@ export function SidebarProjectHeader(props: {
   onRemove: (member: SidebarProjectGroupMember) => void;
   onRename: (member: SidebarProjectGroupMember) => void;
   onSettings: (member: SidebarProjectGroupMember) => void;
+  /** Copy and link across nodes in the kebab; unset on the phone tier (A26). */
+  crossNodeActions?: CrossNodeProjectActions | undefined;
 }) {
   const {
     project,
@@ -224,7 +227,11 @@ export function SidebarProjectHeader(props: {
         />
         <TooltipPopup side="top">New workspace</TooltipPopup>
       </Tooltip>
-      <Menu>
+      <Menu
+        onOpenChange={(open) => {
+          if (open) props.crossNodeActions?.onIntent?.();
+        }}
+      >
         <Tooltip>
           <TooltipTrigger
             render={
@@ -251,6 +258,7 @@ export function SidebarProjectHeader(props: {
             onRemove={props.onRemove}
             onRename={props.onRename}
             onSettings={props.onSettings}
+            crossNodeActions={props.crossNodeActions}
           />
         </MenuPopup>
       </Menu>

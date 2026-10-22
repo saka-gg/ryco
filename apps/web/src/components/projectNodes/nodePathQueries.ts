@@ -113,7 +113,10 @@ let nextConnectionId = 0;
  * A number per environment API object, so a read keyed on it runs again on a
  * new connection instead of keeping the previous connection's answer.
  */
-function connectionKey(environmentId: EnvironmentId, api: EnvironmentApi | undefined): string {
+export function connectionKey(
+  environmentId: EnvironmentId,
+  api: EnvironmentApi | undefined,
+): string {
   if (!api) return `${environmentId}\u0000-`;
   let id = connectionIds.get(api);
   if (id === undefined) {
@@ -127,9 +130,10 @@ function connectionKey(environmentId: EnvironmentId, api: EnvironmentApi | undef
 /**
  * Runs `read` whenever `key` changes and keeps only the latest answer. With
  * `keepPrevious`, the last result stays visible while the next one loads (search
- * as you type); otherwise it clears.
+ * as you type); otherwise it clears. Shared by the pickers and the copy dialog;
+ * key a read on `connectionKey` so it runs again on a new connection.
  */
-function useNodeRead<T>(
+export function useNodeRead<T>(
   key: string | null,
   read: (() => Promise<T>) | null,
   options: { readonly keepPrevious: boolean },
