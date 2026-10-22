@@ -1,6 +1,6 @@
 import "../../index.css";
 
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { page } from "vite-plus/test/browser";
 import type { EnvironmentId } from "@ryco/contracts";
@@ -18,7 +18,15 @@ import {
   sourceControlDiscoveryManager,
 } from "~/lib/sourceControlDiscoveryState";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
+import { parkPointer } from "../../../test/browserPointer";
 import { ContextPickerButton } from "./ContextPickerButton";
+
+beforeEach(async () => {
+  // The suite shares one pointer across files, and some park it in the
+  // top-left corner, where this button renders. A button that appears under
+  // the pointer gets `pointerenter`, which counts as wanting the picker.
+  await parkPointer(200, 400);
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
