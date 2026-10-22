@@ -45,6 +45,11 @@ export const makeChatProjectHandlers = (ctx: WsRpcContext) => {
         policy: ctx.workspaceAccessPolicy,
         config: ctx.config,
         settings: ctx.serverSettings,
+        // The node's "normal code directory", as the add-project and copy dialogs see it.
+        ...Option.match(ctx.projectCopy.nodePaths, {
+          onNone: () => ({}),
+          onSome: (nodePaths) => ({ resolveCodeRoots: nodePaths.resolveCodeRoots }),
+        }),
         providers: providerService.value,
         terminals: ctx.terminalManager,
         // Server-internal: the client normalizer refuses a chat's kind and root changes.
