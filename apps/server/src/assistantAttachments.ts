@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 
@@ -14,6 +13,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ryco/contracts";
 import { Data, Schema } from "effect";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 
 import {
   resolveAttachmentPath,
@@ -214,10 +214,7 @@ export async function stageWorkspaceFile(input: {
   }
   if ((await fs.realpath(source)) !== source) throw new Error("File path changed during delivery.");
   const sourceInfo = await fs.lstat(source);
-  const handle = await fs.open(
-    source,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  );
+  const handle = await fs.open(source, REGULAR_FILE_READ_FLAGS);
   let temporary: string | undefined;
   let staged = false;
   try {

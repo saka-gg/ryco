@@ -4,10 +4,12 @@ import fsPromises from "node:fs/promises";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Effect, FileSystem, Layer, Option, Path } from "effect";
+import { TestClock } from "effect/testing";
 import { PROJECT_READ_FILE_BINARY_MAX_BYTES } from "@ryco/contracts";
 
 import { ServerConfig } from "../../config.ts";
+import { makeNamedPipe, releaseNamedPipe } from "../../testing/namedPipe.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { WorkspaceEntries } from "../Services/WorkspaceEntries.ts";
@@ -142,7 +144,90 @@ const writeDirectorySymlink = Effect.fn("writeDirectorySymlink")(function* (
   ).pipe(Effect.orDie);
 });
 
+const makeFifo = Effect.fn("makeFifo")(function* (cwd: string, relativePath: string) {
+  const path = yield* Path.Path;
+  const fifoPath = path.join(cwd, relativePath);
+  yield* Effect.sync(() => makeNamedPipe(fifoPath));
+  return fifoPath;
+});
+
+/** The Effect form of settleBeforeNamedPipeDeadline: a real deadline, then the pipe is released. */
+const failsWithoutWaiting = <A, E, R>(fifoPath: string, operation: Effect.Effect<A, E, R>) =>
+  operation.pipe(
+    Effect.flip,
+    Effect.timeoutOption("2 seconds"),
+    TestClock.withLive,
+    Effect.ensuring(Effect.sync(() => releaseNamedPipe(fifoPath))),
+    Effect.map(Option.getOrThrowWith(() => new Error(`Waited on the named pipe at ${fifoPath}.`))),
+  );
+
 it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
+  describe.skipIf(process.platform === "win32")("named pipes", () => {
+    it.effect("refuses text and image previews without waiting for a writer", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const textFifo = yield* makeFifo(cwd, "pipe.txt");
+        const imageFifo = yield* makeFifo(cwd, "pipe.png");
+
+        for (const error of [
+          yield* failsWithoutWaiting(
+            textFifo,
+            workspaceFileSystem.readFile({ cwd, relativePath: "pipe.txt" }),
+          ),
+          yield* failsWithoutWaiting(
+            imageFifo,
+            workspaceFileSystem.readFileBinary({ cwd, relativePath: "pipe.png" }),
+          ),
+        ]) {
+          expect(error._tag).toBe("WorkspaceFileSystemError");
+          expect("detail" in error && error.detail).toBe("Only regular files can be previewed.");
+        }
+      }),
+    );
+
+    it.effect("refuses a guarded save without waiting for a writer", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fifoPath = yield* makeFifo(cwd, "pipe.txt");
+
+        const error = yield* failsWithoutWaiting(
+          fifoPath,
+          workspaceFileSystem.writeFile({
+            cwd,
+            relativePath: "pipe.txt",
+            contents: "edited\n",
+            expectedVersion: `sha256:${"0".repeat(64)}`,
+            encoding: "utf8",
+            lineEnding: "lf",
+          }),
+        );
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        expect("detail" in error && error.detail).toBe("Only regular files can be previewed.");
+      }),
+    );
+
+    it.effect("refuses an unguarded write without waiting for a reader", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fifoPath = yield* makeFifo(cwd, "pipe.txt");
+
+        const error = yield* failsWithoutWaiting(
+          fifoPath,
+          workspaceFileSystem.writeFile({ cwd, relativePath: "pipe.txt", contents: "edited\n" }),
+        );
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        expect("detail" in error && error.detail).toBe("Only regular files can be opened.");
+        const stat = yield* Effect.promise(() => fsPromises.lstat(fifoPath));
+        expect(stat.isFIFO()).toBe(true);
+      }),
+    );
+  });
+
   it.effect(
     "refuses parent-cwd writes into a removing checkout, aliases and removed descendants",
     () =>
@@ -614,6 +699,26 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
 
+    it.effect("replaces all of an existing file's contents", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(cwd, "notes/todo.md", "a much longer previous body\n");
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "notes/todo.md",
+          contents: "short\n",
+        });
+
+        expect(
+          yield* fileSystem.readFileString(path.join(cwd, "notes/todo.md")).pipe(Effect.orDie),
+        ).toBe("short\n");
+      }),
+    );
+
     it.effect("guardedly saves while preserving BOM, CRLF, and permissions", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -833,6 +938,34 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
           .pipe(Effect.catch(() => Effect.succeed(null)));
         expect(escapedStat).toBeNull();
       }),
+    );
+
+    it.effect.skipIf(process.platform === "win32")(
+      "does not create a file through a dangling symlink",
+      () =>
+        Effect.gen(function* () {
+          const workspaceFileSystem = yield* WorkspaceFileSystem;
+          const cwd = yield* makeTempDir;
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+
+          const externalDir = `${cwd}-outside`;
+          yield* Effect.promise(() => fsPromises.mkdir(externalDir, { recursive: true })).pipe(
+            Effect.orDie,
+          );
+          // realpath cannot resolve a dangling link, so containment only ever
+          // sees the link's own path inside the workspace.
+          yield* Effect.promise(() =>
+            fsPromises.symlink(path.join(externalDir, "planted.txt"), path.join(cwd, "notes.md")),
+          ).pipe(Effect.orDie);
+
+          const error = yield* workspaceFileSystem
+            .writeFile({ cwd, relativePath: "notes.md", contents: "escaped\n" })
+            .pipe(Effect.flip);
+
+          expect("detail" in error && error.detail).toBe("Only regular files can be opened.");
+          expect(yield* fileSystem.exists(path.join(externalDir, "planted.txt"))).toBe(false);
+        }),
     );
   });
 

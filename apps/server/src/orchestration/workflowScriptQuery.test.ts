@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 import type { ServerSettings } from "@ryco/contracts";
 import { Effect } from "effect";
 import { afterAll, assert, describe, it } from "vite-plus/test";
+import { makeNamedPipe, settleBeforeNamedPipeDeadline } from "../testing/namedPipe.ts";
 import { readWorkflowScript, workflowScriptRootsFromSettings } from "./workflowScriptQuery.ts";
 
 // A dedicated sandbox root passed via the roots override, so the test never
@@ -71,6 +72,23 @@ describe("readWorkflowScript containment", () => {
     );
     assert.equal(result, "root-unavailable");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a named pipe without waiting for a writer",
+    async () => {
+      const fifo = NodePath.join(root, "pipe.js");
+      makeNamedPipe(fifo);
+      const result = await settleBeforeNamedPipeDeadline(fifo, () =>
+        run(
+          readWorkflowScript({ scriptPath: fifo, roots }).pipe(
+            Effect.flip,
+            Effect.map((error) => error.reason),
+          ),
+        ),
+      );
+      assert.equal(result, "not-regular-file");
+    },
+  );
 });
 
 describe("workflowScriptRootsFromSettings", () => {

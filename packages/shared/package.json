@@ -416,6 +416,7 @@
     },
     "./computerAuditFile": "./src/computerAuditFile.ts",
     "./computerAuditHistory": "./src/computerAuditHistory.ts",
+    "./regularFile": "./src/regularFile.ts",
     "./pairingUrl": {
       "types": "./src/pairingUrl.ts",
       "import": "./src/pairingUrl.ts"

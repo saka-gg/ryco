@@ -2,7 +2,7 @@ import {
   DIAGNOSTIC_SECRET_KEY_PATTERN,
   redactDiagnosticText,
 } from "@ryco/shared/diagnosticRedaction";
-import { constants } from "node:fs";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { lstat, open, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -602,10 +602,7 @@ async function readFileTail(filePath: string, maxBytes: number): Promise<string>
   // Also reject links/special files on platforms without O_NOFOLLOW/O_NONBLOCK.
   const before = await lstat(filePath);
   if (!before.isFile()) throw new Error("Diagnostics only reads regular files.");
-  const handle = await open(
-    filePath,
-    constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
-  );
+  const handle = await open(filePath, REGULAR_FILE_READ_FLAGS);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino) {

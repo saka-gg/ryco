@@ -15,6 +15,7 @@ import {
   PROJECT_RELOCATION_PENDING_MESSAGE,
   PROJECT_STAGE_FILE_MAX_BYTES,
 } from "@ryco/contracts";
+import { NotRegularFileError, openRegularFile } from "@ryco/shared/regularFile";
 
 import {
   WorkspaceFileConflictError,
@@ -104,6 +105,10 @@ function pathStaysWithinRoot(rootPath: string, targetPath: string): boolean {
  * `maxBytes` is a parameter because text and raster previews ride different
  * budgets; the stability checks and refusal wording stay identical so clients
  * keep mapping both limits with one set of strings.
+ *
+ * `filePath` is the real path containment already approved, so a final link is
+ * followed as before (a dangling one still reads as missing). The open never
+ * waits on a FIFO, and nothing but a regular file is read.
  */
 async function readStableFileBytes(
   filePath: string,
@@ -112,12 +117,15 @@ async function readStableFileBytes(
   readonly bytes: Buffer;
   readonly stat: BigIntStats;
 }> {
-  const handle = await NodeFs.open(filePath, "r");
+  const { handle, stat: beforeReadStat } = await openRegularFile(filePath, {
+    bigint: true,
+    followSymlinks: true,
+  }).catch((cause: unknown) => {
+    throw cause instanceof NotRegularFileError
+      ? new Error("Only regular files can be previewed.", { cause })
+      : cause;
+  });
   try {
-    const beforeReadStat = await handle.stat({ bigint: true });
-    if (!beforeReadStat.isFile()) {
-      throw new Error("Only regular files can be previewed.");
-    }
     if (beforeReadStat.size > BigInt(maxBytes)) {
       throw new Error(
         `File is too large to preview (${beforeReadStat.size} bytes). Limit is ${maxBytes} bytes.`,
@@ -134,6 +142,24 @@ async function readStableFileBytes(
       throw new Error("File changed while it was being read. Try again.");
     }
     return { bytes, stat: afterReadStat };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Without a reader, a plain open for writing waits on a FIFO indefinitely, so
+ * the target is opened non-blocking and only truncated once it is known to be
+ * a regular file. A final link is not followed: `filePath` is a real path, so
+ * a link there is one realpath could not resolve (a dangling link, whose target
+ * containment never checked) or one swapped in since. Guarded saves already
+ * replace the path itself through rename and never write through a link.
+ */
+async function writeRegularFile(filePath: string, bytes: Uint8Array): Promise<void> {
+  const { handle } = await openRegularFile(filePath, { write: true });
+  try {
+    await handle.truncate(0);
+    await handle.writeFile(bytes);
   } finally {
     await handle.close();
   }
@@ -585,9 +611,10 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
         .pipe(
           Effect.mapError(toWorkspaceFileSystemError(input, "workspaceFileSystem.makeDirectory")),
         );
-      yield* fileSystem
-        .writeFile(realTargetPath, bytes)
-        .pipe(Effect.mapError(toWorkspaceFileSystemError(input, "workspaceFileSystem.writeFile")));
+      yield* Effect.tryPromise({
+        try: () => writeRegularFile(realTargetPath, bytes),
+        catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.writeFile"),
+      });
     }
     yield* workspaceEntries.recordFileWrite(input.cwd, target.relativePath);
     return { relativePath: target.relativePath, version: fileVersion(bytes) };

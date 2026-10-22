@@ -1,5 +1,6 @@
 import { closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { Effect, Option } from "effect";
 import { loadSharp } from "./loadSharp.ts";
 
@@ -48,7 +49,8 @@ const makeBufferBoxReader = (bytes: Uint8Array): MediaBoxReader => ({
 const withFileBoxReader = <T>(absPath: string, probe: (reader: MediaBoxReader) => T): T | null => {
   let descriptor: number;
   try {
-    descriptor = openSync(absPath, "r");
+    // A synchronous open of a FIFO would wait for a writer on the event loop.
+    descriptor = openSync(absPath, REGULAR_FILE_READ_FLAGS);
   } catch {
     return null;
   }

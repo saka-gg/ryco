@@ -1,9 +1,9 @@
-import { constants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import path from "node:path";
 import { Effect, Exit } from "effect";
 import { GitCommandError } from "@ryco/contracts";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { canonicalizeWorktreePath } from "./worktreeRoot.ts";
 
 /** Node-owned creation journal, separate from repository files and project provenance.
@@ -43,13 +43,12 @@ const readSetupFile = async (filePath: string) => {
     throw new Error(
       "Cannot safely inspect the incomplete worktree setup journal: expected a regular file.",
     );
-  const file = await open(
-    filePath,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  ).catch((cause: NodeJS.ErrnoException) => {
-    if (cause.code === "ENOENT") return null;
-    throw cause;
-  });
+  const file = await open(filePath, REGULAR_FILE_READ_FLAGS).catch(
+    (cause: NodeJS.ErrnoException) => {
+      if (cause.code === "ENOENT") return null;
+      throw cause;
+    },
+  );
   if (!file) return null;
   try {
     const stat = await file.stat();

@@ -6,8 +6,8 @@ import {
 import type { Stats } from "node:fs";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import { constants } from "node:fs";
 import path from "node:path";
+import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 import { runProcess } from "../processRunner.ts";
 
 export interface ScanBudget {
@@ -159,10 +159,7 @@ async function readSmallFile(candidate: string): Promise<string> {
   const stat = await fs.lstat(candidate);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096)
     throw new Error("Invalid git ownership file.");
-  const handle = await fs.open(
-    candidate,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  );
+  const handle = await fs.open(candidate, REGULAR_FILE_READ_FLAGS);
   try {
     const opened = await handle.stat();
     if (
