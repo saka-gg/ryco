@@ -18,6 +18,13 @@ const isomorphicLocalStorage: Storage = (() => {
   };
 })();
 
+/**
+ * The storage `getLocalStorageItem` and `setLocalStorageItem` use: the
+ * window's localStorage, shared by every window of this origin, or this
+ * window's memory (hosted Hub builds, and no window at all).
+ */
+export const appLocalStorage: Storage = isomorphicLocalStorage;
+
 const decode = <T, E>(schema: Schema.Codec<T, E>, value: string) =>
   Schema.decodeSync(Schema.fromJsonString(schema))(value);
 

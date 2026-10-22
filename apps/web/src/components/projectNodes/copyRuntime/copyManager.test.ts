@@ -65,7 +65,11 @@ import {
   viewCopiedProject,
   type ProjectCopyRuntime,
 } from "./copyManager";
-import { createWindowProjectCopyClaims, type ProjectCopyClaims } from "./projectCopyClaims";
+import {
+  createProjectCopyClaims,
+  createWindowProjectCopyClaims,
+  type ProjectCopyClaims,
+} from "./projectCopyClaims";
 import type { WebProjectCopyIo } from "./webProjectCopyIo";
 
 const target = EnvironmentId.make(MINI);
@@ -671,6 +675,28 @@ describe("copyManager across windows", () => {
     ).toEqual(["copy-1", "copy-other"]);
   });
 
+  it("without Web Locks, leaves a copy another window runs to that window", async () => {
+    // A direct build over plain HTTP on the LAN: no `navigator.locks` in either window.
+    const upload = record({ copyId: "copy-upload", stage: "upload", updatedAt: Date.now() });
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [upload], Schema.Unknown);
+    const otherWindow = createProjectCopyClaims(null);
+    const running = await otherWindow.tryClaim("copy:copy-upload");
+    expect(running).not.toBeNull();
+    setProjectCopyClaimsForTests(createProjectCopyClaims(null));
+
+    // A second tab opens while the first one uploads: it neither resumes nor cleans up.
+    await resumeProjectCopies();
+    expect(fake.runs).toHaveLength(0);
+    await expect(resumeProjectCopy("copy-upload")).rejects.toThrow(
+      "This copy is running in another Ryco window.",
+    );
+
+    // The first tab closed: this one picks the copy up.
+    running!.release();
+    await resumeProjectCopy("copy-upload");
+    expect(fake.runs.map((run) => run.input.resume?.copyId)).toEqual(["copy-upload"]);
+  });
+
   it("claims a new copy before its first record is stored", async () => {
     const claimed: string[] = [];
     const here = createWindowProjectCopyClaims();
@@ -901,5 +927,24 @@ describe("Agent Control approvals", () => {
     await resumeProjectCopies();
     expect(fake.reports).toEqual([]);
     expect(storedStarts()).toHaveLength(1);
+  });
+
+  it("without Web Locks, leaves an approval another window is still making alone", async () => {
+    // That window stored the approval and holds it between its accept and its copy.
+    const otherWindow = createProjectCopyClaims(null);
+    const approving = await otherWindow.tryClaim(`start:${agentControl.executorId}`);
+    expect(approving).not.toBeNull();
+    setLocalStorageItem(
+      PROJECT_COPY_STARTS_STORAGE_KEY,
+      [{ ...agentControl, createdAt: Date.now() }],
+      Schema.Unknown,
+    );
+    setProjectCopyClaimsForTests(createProjectCopyClaims(null));
+
+    // This tab starts (or reloads) meanwhile: it must not fail that window's proposal.
+    await resumeProjectCopies();
+    expect(fake.reports).toEqual([]);
+    expect(storedStarts()).toHaveLength(1);
+    approving!.release();
   });
 });
