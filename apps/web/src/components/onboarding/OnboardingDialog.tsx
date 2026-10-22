@@ -11,7 +11,7 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { getWsConnectionStatusForEnvironment } from "../../rpc/wsConnectionState";
 import { applyProvidersUpdated } from "../../rpc/serverState";
-import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { openAddProjectWith } from "../../commandPaletteStore";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { getProviderSummary } from "../settings/providerStatus";
 import { PROVIDER_CLIENT_DEFINITIONS } from "../settings/providerDriverMeta";
@@ -248,7 +248,7 @@ export function OnboardingDialog({
               )}
               <Button
                 disabled={!ready || !projectCapability.allowed}
-                onClick={() => useCommandPaletteStore.getState().openAddProject()}
+                onClick={() => openAddProjectWith({ environmentId })}
               >
                 Add project
               </Button>

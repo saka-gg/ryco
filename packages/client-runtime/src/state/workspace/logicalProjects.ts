@@ -51,7 +51,12 @@ function uniqueNonEmptyValues(values: ReadonlyArray<string | null | undefined>):
   return unique;
 }
 
-function deriveRepositoryRelativeProjectPath(
+/**
+ * Where a project sits inside its repository: "" at the root, `apps/web` for a
+ * monorepo subfolder (slash-separated); null when its repository root is unknown
+ * or does not contain it.
+ */
+export function deriveRepositoryRelativeProjectPath(
   project: Pick<LogicalProjectSource, "cwd" | "repositoryIdentity">,
 ): string | null {
   const rootPath = project.repositoryIdentity?.rootPath?.trim();

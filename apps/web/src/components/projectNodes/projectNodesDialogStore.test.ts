@@ -1,7 +1,7 @@
 import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { openAddProjectWith, useCommandPaletteStore } from "../../commandPaletteStore";
 import {
   ADD_PROJECT_DIALOG_ENABLED,
   addProjectDialogAvailable,
@@ -55,17 +55,22 @@ describe("projectNodesDialogStore", () => {
     expect(useProjectNodesDialogStore.getState().copyProject.open).toBe(false);
   });
 
-  it("keeps the palette's add-project views on the phone tier and until the dialog is on", () => {
+  it("opens the dialog from every Add project entry point off the phone tier", () => {
+    expect(ADD_PROJECT_DIALOG_ENABLED).toBe(true);
     expect(addProjectDialogAvailable("phone")).toBe(false);
-    expect(addProjectDialogAvailable("desktop")).toBe(ADD_PROJECT_DIALOG_ENABLED);
+    expect(addProjectDialogAvailable("desktop")).toBe(true);
 
+    // Unit tests run on the desktop tier.
     useCommandPaletteStore.getState().openAddProject();
-    if (ADD_PROJECT_DIALOG_ENABLED) return;
-    expect(useCommandPaletteStore.getState()).toMatchObject({
+    expect(useProjectNodesDialogStore.getState().addProject.open).toBe(true);
+    expect(useCommandPaletteStore.getState()).toMatchObject({ open: false, openIntent: null });
+
+    openAddProjectWith({ environmentId: MINI });
+    expect(useProjectNodesDialogStore.getState().addProject).toMatchObject({
       open: true,
-      openIntent: { kind: "add-project" },
+      token: 2,
+      request: { environmentId: MINI, mode: null, projectRef: null },
     });
-    expect(useProjectNodesDialogStore.getState().addProject.open).toBe(false);
   });
 
   it("records that copies run this session", () => {

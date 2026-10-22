@@ -19,6 +19,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import {
+  openAddProject,
+  useProjectNodesDialogStore,
+} from "../components/projectNodes/projectNodesDialogStore";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import * as environmentApi from "../environmentApi";
 import {
@@ -225,7 +229,8 @@ describe("clearWebHostedNodeScopedState", () => {
       projectOrder: ["sensitiveProject"],
       pinnedThreadKeys: { sensitiveThread: true },
     });
-    useCommandPaletteStore.getState().openAddProject();
+    useCommandPaletteStore.getState().setOpen(true);
+    openAddProject();
     useSettingsDialogStore.getState().openSettings("providers");
 
     clearWebHostedNodeScopedState(environmentId);
@@ -243,6 +248,7 @@ describe("clearWebHostedNodeScopedState", () => {
       pinnedThreadKeys: { sensitiveThread: true },
     });
     expect(useCommandPaletteStore.getState().open).toBe(true);
+    expect(useProjectNodesDialogStore.getState().addProject.open).toBe(true);
     expect(useSettingsDialogStore.getState().open).toBe(true);
     // Project artwork is keyed by node and survives a node switch.
     expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBe(ICON_SOURCE);
@@ -375,7 +381,8 @@ describe("clearWebHostedNodeScopedState", () => {
     await cacheStatistics(environmentId);
     useComposerDraftStore.getState().setPrompt(DraftId.make("accountDraft"), "private prompt");
     useUiStateStore.setState({ pinnedThreadKeys: { accountThread: true } });
-    useCommandPaletteStore.getState().openAddProject();
+    useCommandPaletteStore.getState().setOpen(true);
+    openAddProject();
     useMessageQueueStore
       .getState()
       .enqueue("accountThread", { id: "queued", composer: {} as never, settings: {} as never });
@@ -394,6 +401,7 @@ describe("clearWebHostedNodeScopedState", () => {
     ).toBeNull();
     expect(useUiStateStore.getState().pinnedThreadKeys).toEqual({});
     expect(useCommandPaletteStore.getState().open).toBe(false);
+    expect(useProjectNodesDialogStore.getState().addProject.open).toBe(false);
     // The queue reset bumps the epoch so in-flight queued sends are dropped.
     expect(useMessageQueueStore.getState()).toMatchObject({
       queuesByThreadKey: {},

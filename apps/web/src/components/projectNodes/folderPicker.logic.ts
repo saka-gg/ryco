@@ -13,12 +13,12 @@ import type {
 import {
   appendBrowsePathSegment,
   ensureBrowseDirectoryPath,
+  formatProjectPath,
   getBrowseParentPath,
   inferProjectTitleFromPath,
   isSameFilesystemPath,
   normalizeProjectPathForDispatch,
 } from "../../lib/projectPaths";
-import { formatProjectPath } from "../projects/projectsModel.logic";
 
 /**
  * What the picked folder is for:
@@ -189,7 +189,9 @@ export type FolderStatusKind =
   | "not-a-repository"
   | "refused"
   | "needs-update"
-  | "unchecked";
+  | "unchecked"
+  /** A host's rewording (`describeStatus`): where a clone goes. */
+  | "clone-destination";
 
 /** One run of the status text; `path` runs are set in the monospace face. */
 export interface FolderStatusSegment {
@@ -255,6 +257,11 @@ export interface DescribeFolderSelectionInput {
   readonly gitBranch: string | null;
   /** Link mode: the repository the checkout must belong to (null: one without a remote). */
   readonly expectedRepositoryCanonicalKey?: string | null | undefined;
+  /**
+   * The client knows the destination does not exist (a typed path its parent's listing
+   * lacks), for nodes without a preview.
+   */
+  readonly knownMissing?: boolean | undefined;
 }
 
 /**
@@ -454,7 +461,7 @@ export function describeFolderSelection(
   }
 
   // `folder` mode: the selection itself becomes the project.
-  if (preview?.state === "available") {
+  if (preview?.state === "available" || (!preview && input.knownMissing === true)) {
     return status({
       ...base,
       kind: "missing-folder",

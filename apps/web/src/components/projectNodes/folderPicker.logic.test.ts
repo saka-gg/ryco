@@ -291,6 +291,13 @@ describe("describeFolderSelection", () => {
       "Git repository on dev",
     ]);
     expect(statusFor({ supportsPreview: false }).kind).toBe("unchecked");
+    // A typed folder its parent's listing lacks is created when the project is added.
+    const missing = statusFor({ supportsPreview: false, knownMissing: true });
+    expect([missing.kind, missing.usable, missing.text]).toEqual([
+      "missing-folder",
+      true,
+      "~/Code/ryco doesn't exist yet; adding the project creates it.",
+    ]);
   });
 
   it("keeps a failed check usable outside link mode", () => {

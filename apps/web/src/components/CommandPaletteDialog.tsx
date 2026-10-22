@@ -157,6 +157,10 @@ import {
   type AddProjectRemoteSource,
   type AddProjectRemoteSourceReadiness,
 } from "./projectNodes/addProjectSources";
+import {
+  addProjectDialogAvailable,
+  openAddProject as openAddProjectDialog,
+} from "./projectNodes/projectNodesDialogStore";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
 import { LazyCreatePullRequestDialogHost } from "./pullRequests/create/lazyCreatePullRequestDialogHost";
 import {
@@ -1366,6 +1370,12 @@ function OpenCommandPaletteDialog() {
     icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
     keepOpen: true,
     run: async () => {
+      // Desktop tiers add projects in the dialog; the frozen phone tier keeps these views.
+      if (addProjectDialogAvailable()) {
+        setOpen(false);
+        openAddProjectDialog();
+        return;
+      }
       openAddProjectFlow();
     },
   });

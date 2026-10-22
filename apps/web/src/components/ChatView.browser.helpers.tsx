@@ -43,6 +43,7 @@ import { useMessageQueueStore } from "../messageQueueStore";
 import { render } from "vitest-browser-react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { resetProjectNodesDialogStoreForTests } from "./projectNodes/projectNodesDialogStore";
 import {
   useComposerDraftStore,
   DraftId,
@@ -2729,6 +2730,7 @@ export function setupChatViewBrowserSuite() {
       open: false,
       openIntent: null,
     });
+    resetProjectNodesDialogStoreForTests();
     useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
     useSidebarFoldStore.getState().reset();
     useStore.setState({

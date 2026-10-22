@@ -1,7 +1,8 @@
 // FILE: projectNodesTestFixtures.ts
-// Purpose: A fake node for the project-node pickers' browser tests: a small home folder with
-//          code roots, Git repositories and one project, served through the environment API
-//          members the pickers call, plus node catalog entries.
+// Purpose: A fake node for the project-node pickers' and dialogs' browser tests: a small home
+//          folder with code roots, Git repositories and one project, served through the
+//          environment API members the pickers call, node catalog entries, and saved nodes that
+//          keep the connection state a test gives them.
 // Layer: Test support only; imported by `*.browser.tsx` files.
 
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
@@ -13,6 +14,8 @@ import type {
   ProjectDestinationPreview,
 } from "@ryco/contracts/project-copy";
 import { vi } from "vite-plus/test";
+
+import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 
 export const FAKE_NODE_ID = EnvironmentId.make("environment-mac-mini");
 export const FAKE_HOME = "/Users/me";
@@ -207,4 +210,42 @@ export function fakeNodeEntry(overrides: Partial<NodeCatalogEntry> = {}): NodeCa
     lastSeenAt: null,
     ...overrides,
   };
+}
+
+interface PinnedSavedEnvironmentState {
+  readonly connectionState: "connected" | "disconnected";
+  readonly role: "client" | null;
+}
+
+const pinnedSavedEnvironmentStates = new Map<EnvironmentId, PinnedSavedEnvironmentState>();
+let stopPinningSavedEnvironments: (() => void) | null = null;
+
+/**
+ * Keeps a saved environment in the state a test gave it. The app's saved-environment
+ * supervisor tries to reach every saved node, finds no server in a browser test and records
+ * that, which would turn a test's connected node offline.
+ */
+export function pinSavedEnvironmentState(
+  environmentId: EnvironmentId,
+  state: PinnedSavedEnvironmentState,
+): void {
+  pinnedSavedEnvironmentStates.set(environmentId, state);
+  stopPinningSavedEnvironments ??= useSavedEnvironmentRuntimeStore.subscribe(() => {
+    const store = useSavedEnvironmentRuntimeStore.getState();
+    for (const [pinnedId, pinned] of pinnedSavedEnvironmentStates) {
+      const runtime = store.byId[pinnedId];
+      if (
+        runtime &&
+        (runtime.connectionState !== pinned.connectionState || runtime.role !== pinned.role)
+      ) {
+        store.patch(pinnedId, pinned);
+      }
+    }
+  });
+}
+
+export function unpinSavedEnvironmentStates(): void {
+  stopPinningSavedEnvironments?.();
+  stopPinningSavedEnvironments = null;
+  pinnedSavedEnvironmentStates.clear();
 }

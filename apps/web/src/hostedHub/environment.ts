@@ -10,6 +10,10 @@ import type { EnvironmentId } from "@ryco/contracts";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import {
+  closeAddProject,
+  closeCopyProject,
+} from "../components/projectNodes/projectNodesDialogStore";
 import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { forgetRememberedProjectPreferences } from "../hooks/newDraftDefaults";
 import { useMessageQueueStore } from "../messageQueueStore";
@@ -104,6 +108,8 @@ export function clearWebHostedAccountScopedState(): void {
   // in-flight completions from the previous account.
   useMessageQueueStore.getState().reset();
   useCommandPaletteStore.getState().setOpen(false);
+  closeAddProject();
+  closeCopyProject();
   useSettingsDialogStore.getState().closeSettings();
   setModelPickerOpen(false);
   clearShortcutModifierState();

@@ -17,11 +17,11 @@ import { getPresentationTier, type PresentationTier } from "../../lib/presentati
 
 /**
  * Whether `openAddProject()` entry points open `AddProjectDialog` instead of the
- * command palette's add-project views. Flipped by the add-project dialog's
- * change once the dialog covers everything the palette does (A26); until then
- * every tier keeps the palette.
+ * command palette's add-project views. On: the dialog covers everything those
+ * views do (A26). The frozen phone tier keeps the palette either way; turning
+ * this off sends every tier back to it.
  */
-export const ADD_PROJECT_DIALOG_ENABLED: boolean = false;
+export const ADD_PROJECT_DIALOG_ENABLED: boolean = true;
 
 /** Where the add-project dialog starts: a folder on the node, a clone, a copy from another node, or linking a checkout. */
 export type AddProjectDialogMode = "folder" | "clone" | "copy" | "link";
@@ -120,7 +120,8 @@ export function addProjectDialogAvailable(tier: PresentationTier = getPresentati
 /**
  * Opens the add-project dialog. Entry points that must keep the palette on the
  * phone tier (and while the dialog is off) go through
- * `useCommandPaletteStore.getState().openAddProject()`, which calls this when
+ * `useCommandPaletteStore.getState().openAddProject()`, or `openAddProjectWith`
+ * when they know the node or the source, which call this when
  * `addProjectDialogAvailable()`.
  */
 export function openAddProject(options: OpenAddProjectOptions = {}): void {

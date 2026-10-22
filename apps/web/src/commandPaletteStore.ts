@@ -3,6 +3,7 @@ import { create } from "zustand";
 import {
   addProjectDialogAvailable,
   openAddProject as openAddProjectDialog,
+  type OpenAddProjectOptions,
 } from "./components/projectNodes/projectNodesDialogStore";
 
 type CommandPaletteOpenIntent =
@@ -65,3 +66,16 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
     })),
   clearOpenIntent: () => set({ openIntent: null }),
 }));
+
+/**
+ * "Add project" from an entry point that knows more than the palette asks, e.g.
+ * onboarding's node: the dialog starts there where it is available; the
+ * palette's views (the phone tier) start at their own first step.
+ */
+export function openAddProjectWith(options: OpenAddProjectOptions): void {
+  if (addProjectDialogAvailable()) {
+    openAddProjectDialog(options);
+    return;
+  }
+  useCommandPaletteStore.getState().openAddProject();
+}

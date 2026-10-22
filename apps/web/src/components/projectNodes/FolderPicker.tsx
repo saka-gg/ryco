@@ -16,6 +16,7 @@ import {
   FolderOpenIcon,
   FolderSymlinkIcon,
   GitBranchIcon,
+  GitCommitHorizontalIcon,
   HomeIcon,
   SearchIcon,
   TriangleAlertIcon,
@@ -117,6 +118,19 @@ export interface FolderPickerProps {
   readonly onStatusChange?: ((status: FolderSelectionStatus) => void) | undefined;
   /** Offers the node's free alternative when the destination is taken. */
   readonly onUseSuggestedPath?: ((path: string) => void) | undefined;
+  /**
+   * `folder` mode: Enter on a typed path selects that folder, one that does not exist yet
+   * included (adding the project creates it), instead of browsing into it. A path that ends
+   * in a separator still browses.
+   */
+  readonly allowNewFolder?: boolean | undefined;
+  /**
+   * Rewords the status line for the host's flow ("Clones <remote> into <path>"). The status
+   * the host hears through `onStatusChange` is the reworded one.
+   */
+  readonly describeStatus?: ((status: FolderSelectionStatus) => FolderSelectionStatus) | undefined;
+  /** A control at the end of the status line, e.g. "Open" for a folder that already is a project. */
+  readonly statusAction?: ReactNode;
   readonly autoFocus?: boolean | undefined;
   readonly className?: string | undefined;
 }
@@ -202,7 +216,6 @@ export function FolderPicker(props: FolderPickerProps) {
   const hintsSettled =
     !copy || hints.isSuccess || hints.isError || api?.projects.pathHints === undefined;
   const homeDirectory = hintsData?.homeDirectory ?? null;
-  const accessRoot = hintsData?.workspaceAccessRoot ?? null;
   const [directory, setDirectory] = useState<string | null>(props.initialDirectory ?? null);
   const startDirectory =
     props.initialDirectory ?? hintsData?.defaultProjectDirectory ?? (hintsSettled ? "~" : null);
@@ -246,6 +259,8 @@ export function FolderPicker(props: FolderPickerProps) {
   };
   const browse = useFilesystemBrowse(browseInput);
   const listedDirectory = browse.data?.parentPath ?? null;
+  // A restricted node reports its access root with every listing; nothing above it lists.
+  const accessRoot = hintsData?.workspaceAccessRoot ?? browse.data?.workspaceAccessRoot ?? null;
   const annotations = useNodeListingAnnotations({
     environmentId,
     api,
@@ -277,17 +292,21 @@ export function FolderPicker(props: FolderPickerProps) {
     [projectNameById, projectNameByPath],
   );
 
+  const { filteredEntries, exactEntry } = useMemo(
+    () =>
+      filterBrowseEntries({
+        browseEntries: browse.data?.entries ?? [],
+        browseFilterQuery: browseFilter,
+        highlightedItemValue: null,
+      }),
+    [browse.data?.entries, browseFilter],
+  );
   const rows = useMemo<FolderRow[]>(() => {
     if (searching) {
       return (search.data?.matches ?? []).map((match) =>
         folderRowFromMatch(match, projectAt(match.path, match.projectId)),
       );
     }
-    const { filteredEntries } = filterBrowseEntries({
-      browseEntries: browse.data?.entries ?? [],
-      browseFilterQuery: browseFilter,
-      highlightedItemValue: null,
-    });
     return filteredEntries.map((entry) => {
       const annotation = annotations.get(normalizeProjectPathForComparison(entry.fullPath));
       const project = projectAt(entry.fullPath, annotation?.projectId ?? null);
@@ -302,7 +321,7 @@ export function FolderPicker(props: FolderPickerProps) {
         repositoryCanonicalKey: annotation?.repositoryCanonicalKey ?? null,
       };
     });
-  }, [annotations, browse.data?.entries, browseFilter, projectAt, search.data?.matches, searching]);
+  }, [annotations, filteredEntries, projectAt, search.data?.matches, searching]);
 
   /* ── Keyboard focus within the list ── */
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -365,7 +384,9 @@ export function FolderPicker(props: FolderPickerProps) {
     () => (api === undefined ? new Error(`${nodeLabel} is not connected.`) : null),
     [api, nodeLabel],
   );
-  const status = describeFolderSelection({
+  // A typed folder its parent's listing lacks (`allowNewFolder`): it does not exist yet.
+  const [typedNewFolder, setTypedNewFolder] = useState<string | null>(null);
+  const baseStatus = describeFolderSelection({
     mode,
     nodeLabel,
     homeDirectory,
@@ -383,7 +404,12 @@ export function FolderPicker(props: FolderPickerProps) {
       ? (selectedRow?.gitBranch ?? null)
       : (destinationAnnotation?.gitBranch ?? null),
     expectedRepositoryCanonicalKey: props.expectedRepositoryCanonicalKey,
+    knownMissing:
+      typedNewFolder !== null &&
+      destinationPath !== null &&
+      isSameFilesystemPath(typedNewFolder, destinationPath),
   });
+  const status = props.describeStatus ? props.describeStatus(baseStatus) : baseStatus;
   // Reported on real changes only, so an inline handler that sets state cannot loop.
   const statusKey = folderSelectionStatusKey(status);
   const reportStatus = useEffectEvent((_statusKey: string) => onStatusChange?.(status));
@@ -400,6 +426,25 @@ export function FolderPicker(props: FolderPickerProps) {
   const select = (row: FolderRow) => {
     setLastSelectedRow(row);
     onValueChange(row.path);
+  };
+  /**
+   * `allowNewFolder`: the typed folder becomes the selection and the listing moves to its
+   * parent. Without a node preview, the parent's listing tells whether it exists yet.
+   */
+  const selectTypedPath = (typed: string) => {
+    const path = normalizeTypedDirectory(typed);
+    const listed = !searchable && exactEntry !== null;
+    const row = rows.find((candidate) => isSameFilesystemPath(candidate.path, path));
+    setTypedNewFolder(searchable || listed || row ? null : path);
+    const parent = getBrowseParentPath(path);
+    if (parent !== null) navigate(parent);
+    else setQuery("");
+    if (row) {
+      select(row);
+      return;
+    }
+    setLastSelectedRow(null);
+    onValueChange(listed && exactEntry ? normalizeTypedDirectory(exactEntry.fullPath) : path);
   };
   const open = (row: FolderRow) => navigate(row.path);
   const canGoUp =
@@ -453,6 +498,14 @@ export function FolderPicker(props: FolderPickerProps) {
           return;
         }
         if (isPathQuery) {
+          if (
+            props.allowNewFolder &&
+            mode === "folder" &&
+            !hasTrailingPathSeparator(trimmedQuery)
+          ) {
+            selectTypedPath(trimmedQuery);
+            return;
+          }
           navigate(trimmedQuery);
           return;
         }
@@ -739,13 +792,15 @@ export function FolderPicker(props: FolderPickerProps) {
   }
 
   const StatusIcon =
-    status.kind === "git-repository" || status.kind === "same-repository"
-      ? GitBranchIcon
-      : status.tone === "negative" || status.tone === "caution"
-        ? TriangleAlertIcon
-        : status.kind === "empty-selection"
-          ? FolderIcon
-          : FolderOpenIcon;
+    status.kind === "clone-destination"
+      ? GitCommitHorizontalIcon
+      : status.kind === "git-repository" || status.kind === "same-repository"
+        ? GitBranchIcon
+        : status.tone === "negative" || status.tone === "caution"
+          ? TriangleAlertIcon
+          : status.kind === "empty-selection"
+            ? FolderIcon
+            : FolderOpenIcon;
   const suggestedPath = status.suggestedPath;
 
   return (
@@ -823,6 +878,7 @@ export function FolderPicker(props: FolderPickerProps) {
             Use {nodePathLeaf(suggestedPath)}
           </Button>
         ) : null}
+        {props.statusAction}
       </div>
     </div>
   );

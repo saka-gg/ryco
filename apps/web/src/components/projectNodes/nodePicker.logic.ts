@@ -9,8 +9,8 @@ import type { NodePathHints } from "@ryco/contracts/project-copy";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { inferEnvironmentMachineKind } from "@ryco/shared/environmentIcon";
 
+import { formatProjectPath } from "../../lib/projectPaths";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
-import { formatProjectPath } from "../projects/projectsModel.logic";
 
 /** What a picker knows about a node beyond the catalog, keyed by environment id. */
 export interface NodePickerNodeExtras {
