@@ -12,7 +12,7 @@ import type { ComposerContextItem } from "@ryco/client-runtime/state/composer";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";
 import { resetProjectPreviewAtomsForTests } from "../rpc/projectPreviewAtoms";
 import { composerContextIntake } from "../composerContextIntake";
-import { WORKSPACE_FILE_DRAG_TYPE } from "../workspaceFileDrag";
+import { readWorkspaceFileDragSource, WORKSPACE_FILE_DRAG_TYPE } from "../workspaceFileDrag";
 import PreviewPanel from "./PreviewPanel";
 
 type PreviewWriteFileInput = {
@@ -368,6 +368,99 @@ describe("PreviewPanel", () => {
     expect(onRevealHandled).toHaveBeenCalledTimes(1);
   });
 
+  it("drops a deep link's line when its file is left or never opened", async () => {
+    previewHarness.entries = [
+      { path: "src/app.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    previewHarness.readFiles.set("README.md", { relativePath: "README.md", contents: "# Ryco" });
+    const selectedLines = () =>
+      document
+        .querySelector("[data-test-selected-lines]")
+        ?.getAttribute("data-test-selected-lines");
+    const panel = (reveal: ComponentProps<typeof PreviewPanel>["reveal"]) => (
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>
+    );
+
+    mounted = await renderPreviewPanel({ reveal: { path: "src/app.ts", line: 2 } });
+    await vi.waitFor(() => expect(selectedLines()).toBe("2-2"));
+    // Leaving the file drops the mark; coming back does not bring it back.
+    await page.getByRole("button", { name: "README.md" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .toHaveValue("# Ryco");
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+      .toHaveValue("one\ntwo\nthree");
+    expect(selectedLines()).toBe("");
+
+    // A link whose file the unsaved-draft prompt kept from opening leaves nothing armed.
+    await page.getByRole("button", { name: "README.md" }).click();
+    await page.getByRole("textbox", { name: "Edit README.md" }).fill("# Draft");
+    previewHarness.writeFailure = { reason: "conflict", message: "External edit" };
+    await mounted.rerender(panel({ path: "src/app.ts", line: 3 }));
+    await expect
+      .element(page.getByRole("heading", { name: "Save changes before continuing?" }))
+      .toBeInTheDocument();
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .toHaveValue("# Draft");
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    await page.getByRole("button", { name: "Discard & Open" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+      .toHaveValue("one\ntwo\nthree");
+    expect(selectedLines()).toBe("");
+  });
+
+  it("shows a folder link in the tree instead of reading it", async () => {
+    previewHarness.entries = [
+      { path: "src", kind: "directory" },
+      { path: "src/app.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ];
+    mounted = await renderPreviewPanel();
+    await expect.element(page.getByRole("button", { name: "README.md" })).toBeInTheDocument();
+    await mounted.rerender(
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={{ path: "src" }} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByPlaceholder("Filter files...")).toHaveValue("src");
+    await expect.element(page.getByRole("button", { name: "README.md" })).not.toBeInTheDocument();
+    expect(previewHarness.readAttempts).not.toContain("src");
+    await expect.element(page.getByText("Open file")).toBeInTheDocument();
+  });
+
+  it("starts a new pick with an empty note", async () => {
+    previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    const release = composerContextIntake.register(PREVIEW_THREAD, () => true);
+    try {
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "src/app.ts" }).click();
+      await page.getByRole("button", { name: "Mock gutter add" }).click();
+      const note = page.getByRole("textbox", { name: "Note on src/app.ts lines 2-3" });
+      await note.fill("Why does this run twice?");
+      await page.getByRole("button", { name: "Mock gutter add" }).click();
+      await expect.element(note).toHaveValue("");
+    } finally {
+      release();
+    }
+  });
+
   it("adds picked lines, unsaved edits included, to the thread's composer", async () => {
     previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
     previewHarness.readFiles.set("src/app.ts", {
@@ -434,6 +527,9 @@ describe("PreviewPanel", () => {
       path: "src/app.ts",
     });
     expect(transfer.getData("text/plain")).toBe("src/app.ts");
+    // A real transfer carries the drag's id among its types.
+    expect(readWorkspaceFileDragSource(transfer)).toMatchObject({ path: "src/app.ts" });
+    expect(readWorkspaceFileDragSource(new DataTransfer())).toBeNull();
   });
 
   it("places the workspace tree on the right and filters visible files", async () => {

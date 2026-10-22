@@ -4,6 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { KeyHint } from "../pullRequests/primitives";
 import { CommentField, SUBMIT_SHORTCUT_LABEL } from "../pullRequests/threads/ReplyComposer";
 import { Button } from "../ui/button";
+import type { FileReferenceAddResult } from "./useFileReferencePicker";
+
+const ADD_ERRORS: Record<Exclude<FileReferenceAddResult, "added">, string> = {
+  refused: "The chat can’t take these lines right now.",
+  invalid: "These lines can’t be sent to the chat.",
+};
 
 /**
  * Opens under the last line of a range picked with the gutter `+` (drag for
@@ -11,7 +17,7 @@ import { Button } from "../ui/button";
  * note to the thread's composer (⌘↵). Esc or Cancel drops the pick; a refusal
  * stays inline, with the note kept. The note lives with the panel
  * (`restoreComment` / `onCommentChange`), so a remount while the diff
- * scrolls keeps it.
+ * scrolls keeps it. Key it by the pick's id: a new pick starts a fresh note.
  */
 export function FileReferenceNoteComposer(props: {
   /** "src/app.ts lines 12-18": what is being added. */
@@ -19,8 +25,7 @@ export function FileReferenceNoteComposer(props: {
   readonly restoreComment: () => string;
   readonly onCommentChange: (comment: string) => void;
   readonly onCancel: () => void;
-  /** False when the chat did not take the lines. */
-  readonly onAdd: (comment: string) => boolean;
+  readonly onAdd: (comment: string) => FileReferenceAddResult;
 }) {
   const [comment, setComment] = useState(props.restoreComment);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +35,8 @@ export function FileReferenceNoteComposer(props: {
   }, []);
 
   const add = () => {
-    if (!props.onAdd(comment.trim())) setError("The chat can’t take these lines right now.");
+    const result = props.onAdd(comment.trim());
+    if (result !== "added") setError(ADD_ERRORS[result]);
   };
 
   return (

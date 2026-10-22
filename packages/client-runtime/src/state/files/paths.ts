@@ -71,6 +71,11 @@ function normalizeAbsolutePath(value: string): string | null {
  * `workspaceRoot`, or null when it addresses anything outside it. Absolute
  * paths must sit under the root (case-insensitively on a Windows drive);
  * relative ones resolve against it and may not walk out of it.
+ *
+ * The result was resolved and contained here, so it is checked structurally,
+ * not with `normalizeWorkspaceRelativePath`'s guesses about input it cannot
+ * resolve: a `~assets` or `C:x` directory inside the root stays reachable.
+ * Only the exact home forms (`~`, `~/…`) are still refused.
  */
 export function resolveWorkspaceRelativePath(path: string, workspaceRoot: string): string | null {
   if (path.length === 0 || path.includes("\0")) return null;
@@ -83,7 +88,42 @@ export function resolveWorkspaceRelativePath(path: string, workspaceRoot: string
   const prefix = root.endsWith("/") ? root : `${root}/`;
   const comparable = (value: string) => (caseInsensitive ? value.toLowerCase() : value);
   if (!comparable(candidate).startsWith(comparable(prefix))) return null;
-  return normalizeWorkspaceRelativePath(candidate.slice(prefix.length));
+  // `normalizeAbsolutePath` already dropped empty, `.` and `..` segments.
+  const relative = candidate.slice(prefix.length);
+  if (relative.length === 0 || relative.length > WORKSPACE_FILE_PATH_MAX_LENGTH) return null;
+  return relative === "~" || relative.startsWith("~/") ? null : relative;
+}
+
+/**
+ * Where `workspaceRoot` sits inside `repositoryRoot`, as a relative `a/b`
+ * prefix: "" when it is the repository root itself, null when it is not
+ * inside it (or either is not an absolute path).
+ */
+export function workspacePathWithinRepository(
+  workspaceRoot: string,
+  repositoryRoot: string,
+): string | null {
+  const workspace = normalizeAbsolutePath(workspaceRoot);
+  const repository = normalizeAbsolutePath(repositoryRoot);
+  if (!workspace || !repository) return null;
+  const caseInsensitive = WINDOWS_DRIVE_ROOT_PATTERN.test(repository);
+  const comparable = (value: string) => (caseInsensitive ? value.toLowerCase() : value);
+  if (comparable(workspace) === comparable(repository)) return "";
+  return resolveWorkspaceRelativePath(workspace, repository);
+}
+
+/**
+ * A repository-relative path (a git diff's) as a path inside the workspace
+ * folder at `workspacePrefix` (from `workspacePathWithinRepository`), or null
+ * when the file lies outside that folder.
+ */
+export function repositoryPathToWorkspacePath(
+  repositoryPath: string,
+  workspacePrefix: string,
+): string | null {
+  const path = normalizeWorkspaceRelativePath(repositoryPath);
+  if (path === null || workspacePrefix.length === 0) return path;
+  return path.startsWith(`${workspacePrefix}/`) ? path.slice(workspacePrefix.length + 1) : null;
 }
 
 export function workspaceFileBasename(path: string): string {

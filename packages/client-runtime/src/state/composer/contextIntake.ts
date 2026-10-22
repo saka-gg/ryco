@@ -20,6 +20,12 @@ export interface ComposerContextIntake {
    * Makes `thread`'s composer the receiver of items for that thread until the
    * returned function runs. A later registration for the same thread takes
    * over and hands back on release.
+   *
+   * Register once for as long as the composer is mounted, and refuse in the
+   * receiver while it cannot take items (read-only, mid-send, full). Panels
+   * offer "Add to chat" while a receiver is registered, so registering and
+   * releasing around every send would make their gutters and open notes
+   * flicker.
    */
   register(thread: ScopedThreadRef, receiver: ComposerContextReceiver): () => void;
   /** Whether a composer is listening for `thread`, so offering "Add to chat" can work. */

@@ -458,8 +458,11 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   // Ryco's own Files panel reads through the thread's node, so a file inside
   // the workspace opens there on hosted web and remote nodes alike.
   const canOpenInRyco = useCallback(
-    () => !isPhoneTier && workspacePath !== null && workspaceFileOpener.canOpen(),
-    [isPhoneTier, workspaceFileOpener, workspacePath],
+    () =>
+      !isPhoneTier &&
+      workspacePath !== null &&
+      workspaceFileOpener.canOpen({ path: workspacePath, line }),
+    [isPhoneTier, line, workspaceFileOpener, workspacePath],
   );
   const handleOpenInRyco = useCallback(
     () =>
