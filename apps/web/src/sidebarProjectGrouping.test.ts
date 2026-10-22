@@ -78,6 +78,42 @@ describe("buildSidebarProjectSnapshots", () => {
     ]);
     expect(project?.remoteEnvironmentLabels).toEqual(["Build box"]);
   });
+
+  it("names a project copied to another node by its title, not its remote's disk path", () => {
+    // What a node before `canonicalRepositoryPath` sent for `linux-box:/private/tmp/git/demo.git`.
+    const repositoryIdentity: NonNullable<Project["repositoryIdentity"]> = {
+      canonicalKey: "linux-box:/private/tmp/git/demo",
+      locator: {
+        source: "git-remote",
+        remoteName: "origin",
+        remoteUrl: "linux-box:/private/tmp/git/demo.git",
+      },
+      displayName: "private/tmp/git/demo",
+      owner: "private",
+      name: "demo",
+      remotes: [],
+    };
+    const [project] = buildSnapshots({
+      projects: [
+        makeProject({
+          id: ProjectId.make("demo-local"),
+          environmentId: primaryEnvironmentId,
+          name: "demo",
+          repositoryIdentity,
+        }),
+        makeProject({
+          id: ProjectId.make("demo-remote"),
+          environmentId: remoteEnvironmentId,
+          name: "demo",
+          repositoryIdentity,
+        }),
+      ],
+      labelByEnvironmentId: { [remoteEnvironmentId]: "linux-box" },
+    });
+
+    expect(project?.groupedProjectCount).toBe(2);
+    expect(project?.displayName).toBe("demo");
+  });
 });
 
 function buildSnapshots(input: {

@@ -384,6 +384,20 @@ function ComboboxChipRemove(props: ComboboxPrimitive.ChipRemove.Props) {
 
 const useComboboxFilter = ComboboxPrimitive.useFilter;
 
+/**
+ * Moves the highlight of the combobox whose input this is `rows` rows down
+ * (negative: up), exactly as that many arrow key presses would. Base UI keeps
+ * the highlight as an index and has no way to set it, so a list about to drop
+ * rows at or above the highlighted one moves it first; otherwise the highlight
+ * stays at its index and lands on whichever row slides into it.
+ */
+function moveComboboxHighlight(input: HTMLInputElement, rows: number): void {
+  const key = rows < 0 ? "ArrowUp" : "ArrowDown";
+  for (let step = 0; step < Math.abs(rows); step += 1) {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  }
+}
+
 export {
   Combobox,
   ComboboxChipsInput,
@@ -405,4 +419,5 @@ export {
   ComboboxChips,
   ComboboxChip,
   useComboboxFilter,
+  moveComboboxHighlight,
 };

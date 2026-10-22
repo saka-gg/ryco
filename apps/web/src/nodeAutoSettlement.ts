@@ -1,4 +1,4 @@
-import { WS_METHODS, type AuthSessionRole, type EnvironmentId } from "@ryco/contracts";
+import { WS_METHODS, type EnvironmentId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import {
   getWsConnectionStatusForEnvironment,
@@ -20,9 +20,14 @@ import {
 } from "@ryco/client-runtime/state/settings";
 import { useEffect, useMemo } from "react";
 
-import { isElectron, isHostedHubMode } from "./env";
+import { isHostedHubMode } from "./env";
 import { readNodeServerConfig } from "./environments/nodeServerConfig";
-import { fetchSessionState, getPrimaryKnownEnvironment } from "./environments/primary";
+import { getPrimaryKnownEnvironment } from "./environments/primary";
+import {
+  readPrimarySessionRole,
+  requestPrimarySessionRole,
+  subscribePrimarySessionRole,
+} from "./environments/primarySessionRole";
 import {
   readEnvironmentConnection,
   updateEnvironmentServerSettings,
@@ -48,38 +53,6 @@ export interface AutoSettleRuleNode {
 type NodeRole = AutoSettleRuleHandOverCandidate["role"];
 
 /**
- * This page's own session role on the primary node, once asked. The desktop
- * app's session is its owner's; a browser asks the node once per page (again
- * only after asking failed) and tells its listeners the answer.
- */
-let primarySessionRole: {
-  readonly environmentId: EnvironmentId;
-  readonly role: AuthSessionRole | null;
-} | null = null;
-let primarySessionRequest: Promise<void> | null = null;
-const primarySessionRoleListeners = new Set<() => void>();
-
-function readPrimarySessionRole(environmentId: EnvironmentId): NodeRole {
-  if (isElectron) return "owner";
-  if (primarySessionRole?.environmentId === environmentId) return primarySessionRole.role;
-  primarySessionRequest ??= fetchSessionState().then(
-    (session) => {
-      primarySessionRequest = null;
-      primarySessionRole = {
-        environmentId,
-        role: session.authenticated ? (session.role ?? null) : null,
-      };
-      for (const listener of Array.from(primarySessionRoleListeners)) listener();
-    },
-    () => {
-      // Asked again on the next check, not in a loop.
-      primarySessionRequest = null;
-    },
-  );
-  return undefined;
-}
-
-/**
  * The role this client holds on a node: a hosted node's own role, a Desktop
  * workspace machine's, a saved environment's session role, or this page's own
  * session on the primary. Undefined while the primary's is being asked.
@@ -92,7 +65,9 @@ function readNodeRole(environmentId: EnvironmentId): NodeRole {
     );
   }
   if (environmentId === getPrimaryKnownEnvironment()?.environmentId) {
-    return readPrimarySessionRole(environmentId);
+    const role = readPrimarySessionRole(environmentId);
+    if (role === undefined) requestPrimarySessionRole(environmentId);
+    return role;
   }
   const machine = readDesktopWorkspaceState().machines.find(
     (candidate) => candidate.environmentId === environmentId,
@@ -213,11 +188,11 @@ export function useAutoSettleRuleHandOver(
       handOverAutoSettleRule(listed, clientValue);
     };
     run();
-    const unsubscribe = subscribeEnvironmentServerConfigs(run);
-    primarySessionRoleListeners.add(run);
+    const unsubscribeConfigs = subscribeEnvironmentServerConfigs(run);
+    const unsubscribeRole = subscribePrimarySessionRole(run);
     return () => {
-      unsubscribe();
-      primarySessionRoleListeners.delete(run);
+      unsubscribeConfigs();
+      unsubscribeRole();
     };
   }, [clientValue, key]);
 }

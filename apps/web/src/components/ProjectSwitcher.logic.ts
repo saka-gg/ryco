@@ -320,6 +320,42 @@ export function buildProjectSelectorRows(input: {
   return rows;
 }
 
+/**
+ * The row that stands for the draft, which the combobox marks selected: "No
+ * project" for a chat draft; else the draft's own checkout row while its
+ * project is expanded, else the draft's project row; null when no listed row
+ * is the draft's.
+ */
+export function projectSelectorValue(
+  rows: ReadonlyArray<ProjectSelectorRow>,
+  isChatDraft: boolean,
+): string | null {
+  if (isChatDraft) return NO_PROJECT_ITEM;
+  let projectItem: string | null = null;
+  for (const row of rows) {
+    if (row.kind === "checkout" && row.current) return row.item;
+    if (row.kind === "project" && row.current) projectItem = row.item;
+  }
+  return projectItem;
+}
+
+/**
+ * The project row a row belongs to: a checkout row's project above it, a
+ * project row itself. Null for "No project".
+ */
+export function projectSelectorParentIndex(
+  rows: ReadonlyArray<ProjectSelectorRow>,
+  index: number,
+): number | null {
+  const row = rows[index];
+  if (!row || row.kind === "no-project") return null;
+  for (let candidate = index; candidate >= 0; candidate -= 1) {
+    const above = rows[candidate];
+    if (above?.kind === "project" && above.project.key === row.project.key) return candidate;
+  }
+  return null;
+}
+
 /** A project row's second line: "2 nodes · ~/Code/ryco" or "Studio · ~/src/ryco". */
 export function projectRowSubline(row: Extract<ProjectSelectorRow, { kind: "project" }>): {
   readonly lead: string;

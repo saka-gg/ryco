@@ -1,3 +1,4 @@
+import { canonicalRepositoryPath } from "@ryco/shared/git";
 import { isUncPath, isWindowsDrivePath } from "@ryco/shared/path";
 import type { RepositoryIdentity, SidebarProjectGroupingMode } from "@ryco/contracts";
 
@@ -111,12 +112,31 @@ export function deriveLogicalProjectKey(
   );
 }
 
+/**
+ * The repository's `owner/name` label. Older nodes also labelled a remote addressed by a path on
+ * some disk (`host:/srv/git/demo`) with that path, which names no owner.
+ */
+function repositoryOwnerLabel(identity: RepositoryIdentity | null | undefined): string | null {
+  return identity && canonicalRepositoryPath(identity.canonicalKey) !== null
+    ? (identity.displayName ?? null)
+    : null;
+}
+
+/**
+ * The name a logical project goes by wherever it is listed (sidebar, project selector, Hub
+ * workspace): the title its checkouts share, so a project keeps its name when it gains a
+ * checkout on another node; when their titles differ, the repository's `owner/name`, else its
+ * name, else the representative's title.
+ */
 export function deriveProjectGroupLabel(input: {
   readonly representative: Pick<LogicalProjectSource, "name" | "repositoryIdentity">;
   readonly members: ReadonlyArray<Pick<LogicalProjectSource, "name" | "repositoryIdentity">>;
 }): string {
+  const sharedTitles = uniqueNonEmptyValues(input.members.map((member) => member.name));
+  if (sharedTitles.length === 1) return sharedTitles[0]!;
+
   const sharedDisplayNames = uniqueNonEmptyValues(
-    input.members.map((member) => member.repositoryIdentity?.displayName),
+    input.members.map((member) => repositoryOwnerLabel(member.repositoryIdentity)),
   );
   if (sharedDisplayNames.length === 1) return sharedDisplayNames[0]!;
 

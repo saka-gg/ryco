@@ -15,6 +15,7 @@ import {
   type NodeCatalogSnapshot,
 } from "@ryco/client-runtime/state/nodes";
 import type {
+  AuthSessionRole,
   EnvironmentConnectionState,
   EnvironmentId,
   ExecutionEnvironmentDescriptor,
@@ -33,6 +34,11 @@ import {
   subscribeDesktopWorkspaceState,
 } from "../platform/desktopWorkspace";
 import { readPrimaryEnvironmentDescriptor, subscribePrimaryEnvironmentDescriptor } from "./primary";
+import {
+  readPrimarySessionRole,
+  requestPrimarySessionRole,
+  subscribePrimarySessionRole,
+} from "./primarySessionRole";
 import { useSavedEnvironmentRegistryStore, useSavedEnvironmentRuntimeStore } from "./runtime";
 
 /**
@@ -80,6 +86,8 @@ function liveFactsFrom(
 interface CatalogSources {
   readonly primaryDescriptor: ExecutionEnvironmentDescriptor | null;
   readonly primaryStatus: WsConnectionStatus | null;
+  /** This page's own session role on the primary; undefined until it is known. */
+  readonly primaryRole: AuthSessionRole | null | undefined;
   readonly registry: ReturnType<typeof useSavedEnvironmentRegistryStore.getState>["byId"];
   readonly runtime: ReturnType<typeof useSavedEnvironmentRuntimeStore.getState>["byId"];
   readonly desktop: ReturnType<typeof readDesktopWorkspaceState> | null;
@@ -96,6 +104,8 @@ function readSources(): CatalogSources {
       hosted || !primaryDescriptor
         ? null
         : getWsConnectionStatusForEnvironment(primaryDescriptor.environmentId),
+    primaryRole:
+      hosted || !primaryDescriptor ? null : readPrimarySessionRole(primaryDescriptor.environmentId),
     registry: useSavedEnvironmentRegistryStore.getState().byId,
     runtime: useSavedEnvironmentRuntimeStore.getState().byId,
     desktop: isElectron && !hosted ? readDesktopWorkspaceState() : null,
@@ -142,8 +152,9 @@ function buildFrom(sources: CatalogSources): NodeCatalogSnapshot {
           connectionState: sources.primaryStatus
             ? primaryConnectionState(sources.primaryStatus)
             : "connecting",
-          // The Desktop app's own backend session is its owner's.
-          role: isElectron ? "owner" : null,
+          // Owner-held, and so published to Agent Control's node directory, only
+          // once the page knows its own session there is the owner's.
+          role: sources.primaryRole ?? null,
         }
       : null,
     saved,
@@ -186,7 +197,9 @@ export function readNodeCatalog(): ReadonlyArray<NodeCatalogEntry> {
 
 /**
  * Notifies when the catalog may have changed. The primary's socket status is
- * followed for whichever environment is the primary now.
+ * followed for whichever environment is the primary now, and this page's role
+ * there is asked for while it is unknown: when the catalog is first followed,
+ * and again whenever that socket changes (it connects only once signed in).
  */
 export function subscribeNodeCatalog(listener: () => void): () => void {
   let primaryEnvironmentId: EnvironmentId | null = null;
@@ -198,13 +211,22 @@ export function subscribeNodeCatalog(listener: () => void): () => void {
     if (next === primaryEnvironmentId) return;
     unsubscribePrimaryStatus?.();
     primaryEnvironmentId = next;
-    unsubscribePrimaryStatus =
-      next === null
-        ? null
-        : appAtomRegistry.subscribe(wsConnectionStatusForEnvironmentAtom(next), listener);
+    if (next === null) {
+      unsubscribePrimaryStatus = null;
+      return;
+    }
+    requestPrimarySessionRole(next);
+    unsubscribePrimaryStatus = appAtomRegistry.subscribe(
+      wsConnectionStatusForEnvironmentAtom(next),
+      () => {
+        requestPrimarySessionRole(next);
+        listener();
+      },
+    );
   };
   followPrimaryStatus();
   const unsubscribes = [
+    subscribePrimarySessionRole(listener),
     subscribePrimaryEnvironmentDescriptor(() => {
       followPrimaryStatus();
       listener();

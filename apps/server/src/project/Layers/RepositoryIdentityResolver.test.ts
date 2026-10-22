@@ -259,6 +259,34 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       expect(origin?.provider).toBe("github");
     }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
   );
+  it.effect("names no owner for remotes addressed by a path on some disk", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-repository-identity-path-remote-test-",
+      });
+
+      yield* git(cwd, ["init"]);
+      yield* git(cwd, [
+        "remote",
+        "add",
+        "origin",
+        "linux-box:/private/tmp/ryco-xnode/git/demo.git",
+      ]);
+      yield* git(cwd, ["remote", "add", "backup", "/srv/git/demo.git"]);
+
+      const resolver = yield* RepositoryIdentityResolver;
+      const identity = yield* resolver.resolve(cwd);
+
+      expect(identity).not.toBeNull();
+      // The key still groups copies of this repository; only the labels change.
+      expect(identity?.canonicalKey).toBe("linux-box:/private/tmp/ryco-xnode/git/demo");
+      expect(identity?.name).toBe("demo");
+      expect(identity?.displayName).toBeUndefined();
+      expect(identity?.owner).toBeUndefined();
+      expect(identity?.remotes?.map((remote) => remote.ownerRepo)).toEqual([undefined, undefined]);
+    }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
+  );
   it.effect("resolves roots whose path contains spaces", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

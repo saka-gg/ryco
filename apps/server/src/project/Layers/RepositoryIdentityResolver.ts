@@ -1,6 +1,8 @@
 import type { RepositoryIdentity, RepositoryRemote } from "@ryco/contracts";
 import { Cache, Duration, Effect, Exit, Layer } from "effect";
 import {
+  canonicalRepositoryName,
+  canonicalRepositoryPath,
   detectSourceControlProviderFromGitRemoteUrl,
   normalizeGitRemoteUrl,
 } from "@ryco/shared/git";
@@ -59,15 +61,15 @@ function buildRepositoryIdentity(input: {
 }): RepositoryIdentity {
   const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
   const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
-  const repositoryPath = canonicalKey.split("/").slice(1).join("/");
-  const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
-  const [owner] = repositoryPathSegments;
-  const repositoryName = repositoryPathSegments.at(-1);
+  // A remote addressed by a path on some disk has a name but no owner: its path is a location.
+  const repositoryPath = canonicalRepositoryPath(canonicalKey);
+  const repositoryPathSegments = repositoryPath?.split("/") ?? [];
+  const owner = repositoryPathSegments.length > 1 ? repositoryPathSegments[0] : undefined;
+  const repositoryName = canonicalRepositoryName(canonicalKey);
 
   const remotes = [...input.allRemotes.entries()].map(([name, url]) => {
     const provider = detectSourceControlProviderFromGitRemoteUrl(url);
-    const canonical = normalizeGitRemoteUrl(url);
-    const ownerRepo = canonical.split("/").slice(1).join("/");
+    const ownerRepo = canonicalRepositoryPath(normalizeGitRemoteUrl(url));
     const remote: {
       name: string;
       url: string;

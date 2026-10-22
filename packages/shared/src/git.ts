@@ -227,6 +227,32 @@ export function normalizeGitRemoteUrl(value: string): string {
   return normalized;
 }
 
+/** The host `normalizeGitRemoteUrl` puts before a repository path: a domain or an ssh alias. */
+const CANONICAL_REPOSITORY_HOST = /^[a-z0-9_][a-z0-9._-]*$/i;
+
+/**
+ * The repository path after the host of a key from `normalizeGitRemoteUrl` (`sak0a/ryco` for
+ * `github.com/sak0a/ryco`), the `owner/name` a repository is labelled with. Null when the key
+ * names no hosted repository: a local path (`/srv/git/demo`), an scp remote with an absolute
+ * path (`host:/srv/git/demo`) or a URL the normalizer keeps whole (`file:///srv/git/demo`).
+ * Their path is where the repository lies on some disk, not an owner and a name.
+ */
+export function canonicalRepositoryPath(canonicalKey: string): string | null {
+  const slash = canonicalKey.indexOf("/");
+  if (slash <= 0 || !CANONICAL_REPOSITORY_HOST.test(canonicalKey.slice(0, slash))) return null;
+  const path = canonicalKey
+    .slice(slash + 1)
+    .split("/")
+    .filter((segment) => segment.length > 0)
+    .join("/");
+  return path.length > 0 ? path : null;
+}
+
+/** The repository's own name, the last segment of a key from `normalizeGitRemoteUrl`. */
+export function canonicalRepositoryName(canonicalKey: string): string | null {
+  return canonicalKey.split(/[\\/:]/u).findLast((segment) => segment.length > 0) ?? null;
+}
+
 /**
  * Best-effort parse of a GitHub `owner/repo` identifier from common remote URL shapes.
  */

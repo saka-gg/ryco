@@ -40,10 +40,10 @@ import {
   buildProjectSelectorRows,
   checkoutStatusMeta,
   countProjectsByNode,
-  NO_PROJECT_ITEM,
   parseProjectSelectorQuery,
   projectRowSubline,
-  projectSelectorCheckoutItem,
+  projectSelectorParentIndex,
+  projectSelectorValue,
   stripNodeTokens,
   type ProjectSelectorCheckout,
   type ProjectSelectorProject,
@@ -55,10 +55,11 @@ import {
   openCopyProject,
   preloadProjectNodesDialogs,
 } from "./projectNodes/projectNodesDialogStore";
-import { ComboboxEmpty, ComboboxItem, ComboboxList } from "./ui/combobox";
+import { ComboboxEmpty, ComboboxItem, ComboboxList, moveComboboxHighlight } from "./ui/combobox";
 import { useHostedWorkspaceStatus, useProjectSelectorProjects } from "./useProjectSelectorProjects";
 
 const NO_EXPANSION_TOGGLES: ReadonlyMap<string, boolean> = new Map();
+const CLOSED_LIST: ProjectSelectorList = { items: [], value: null };
 /** Never a catalog id: an `@` token that names no node checks no chip. */
 const NO_NODE_VALUE = "\u0000no-node" as EnvironmentId;
 
@@ -68,7 +69,7 @@ export type ProjectSelectorKeyHandler = (event: KeyboardEvent<HTMLInputElement>)
 export interface ProjectSelectorList {
   /** The rows' values, top to bottom. */
   readonly items: ReadonlyArray<string>;
-  /** The draft's own row: its checkout, or "No project" for a chat draft. */
+  /** The draft's own row (`projectSelectorValue`). */
   readonly value: string | null;
 }
 
@@ -184,15 +185,20 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
       }),
     [active, expanded, nodeFilter, parsedQuery.text, projects, showNoProject],
   );
-  const rowByItem = useMemo(() => new Map(rows.map((row) => [row.item, row] as const)), [rows]);
+  const indexByItem = useMemo(
+    () => new Map(rows.map((row, index) => [row.item, index] as const)),
+    [rows],
+  );
   useLayoutEffect(() => {
     onListChange({
       items: rows.map((row) => row.item),
-      value: isChatDraft
-        ? NO_PROJECT_ITEM
-        : projectSelectorCheckoutItem(activeProjectEnvironmentId, activeProjectId),
+      value: projectSelectorValue(rows, isChatDraft),
     });
-  }, [activeProjectEnvironmentId, activeProjectId, isChatDraft, onListChange, rows]);
+  }, [isChatDraft, onListChange, rows]);
+  // Closed, the combobox lists nothing. The next open builds its rows afresh,
+  // so a selected index kept from these rows would put that open's first
+  // highlight on another row.
+  useLayoutEffect(() => () => onListChange(CLOSED_LIST), [onListChange]);
   const projectCountByNode = useMemo(() => countProjectsByNode(projects), [projects]);
   const chipExtras = useMemo(
     () =>
@@ -252,7 +258,8 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
   );
   const selectItem = useCallback(
     (item: string) => {
-      const row = rowByItem.get(item);
+      const index = indexByItem.get(item);
+      const row = index === undefined ? undefined : rows[index];
       if (!row) return;
       if (row.kind === "no-project") {
         onClose();
@@ -269,17 +276,19 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
     [
       activeProjectEnvironmentId,
       draftId,
+      indexByItem,
       isChatDraft,
       moveDraftThreadToProject,
       moveToCheckout,
       onClose,
-      rowByItem,
+      rows,
     ],
   );
 
   // → shows a project's checkout on every node, ← folds them (also from one of
-  // its checkout rows); only at the matching end of the text, so the caret
-  // still moves through what was typed.
+  // its checkout rows, moving the highlight up to the project row first); only
+  // at the matching end of the text, so the caret still moves through what was
+  // typed.
   const handleInputKeyDown = useCallback<ProjectSelectorKeyHandler>(
     (event) => {
       if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
@@ -290,8 +299,9 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
         .closest('[data-slot="combobox-popup"]')
         ?.querySelector<HTMLElement>("[data-highlighted][data-selector-item]")
         ?.getAttribute("data-selector-item");
-      const row = highlighted ? rowByItem.get(highlighted) : undefined;
-      if (!row || row.kind === "no-project") return;
+      const index = highlighted ? indexByItem.get(highlighted) : undefined;
+      const row = index === undefined ? undefined : rows[index];
+      if (index === undefined || !row || row.kind === "no-project") return;
       if (event.key === "ArrowRight" && atEnd && row.kind === "project" && row.expandable) {
         if (row.expanded) return;
         event.preventDefault();
@@ -302,10 +312,12 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
         const parentExpanded = row.kind === "checkout" || (row.expandable && row.expanded);
         if (!parentExpanded) return;
         event.preventDefault();
+        const parentIndex = projectSelectorParentIndex(rows, index);
+        if (parentIndex !== null) moveComboboxHighlight(input, parentIndex - index);
         toggleExpanded(row.project.key, false);
       }
     },
-    [rowByItem, toggleExpanded],
+    [indexByItem, rows, toggleExpanded],
   );
   useLayoutEffect(() => {
     keyHandlerRef.current = handleInputKeyDown;
@@ -500,6 +512,8 @@ function SelectorRow(props: {
       data-selector-item={row.item}
       disabled={disabledReason !== null}
       title={disabledReason ?? undefined}
+      // → and ← (or the chevron) show and fold the project's checkout on each node.
+      aria-expanded={row.expandable ? row.expanded : undefined}
       data-current={row.current ? "" : undefined}
       className={ROW_CLASS_NAME}
       contentClassName="flex min-w-0 items-center gap-[9px]"

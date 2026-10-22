@@ -5,6 +5,8 @@ import {
   applyGitStatusStreamEvent,
   buildTemporaryWorktreeBranchName,
   buildGeneratedWorktreeBranchName,
+  canonicalRepositoryName,
+  canonicalRepositoryPath,
   extractTemporaryWorktreeBranchPrefix,
   isManagedWorktreeBranch,
   isTemporaryWorktreeBranch,
@@ -14,6 +16,39 @@ import {
   resolveUniqueRefName,
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
+
+describe("canonicalRepositoryPath", () => {
+  it("is the owner and name after the host of a hosted repository", () => {
+    for (const remote of [
+      "git@github.com:sak0a/ryco.git",
+      "https://github.com/sak0a/ryco.git",
+      "ssh://git@github.com:22/sak0a/ryco",
+    ]) {
+      const key = normalizeGitRemoteUrl(remote);
+      expect(canonicalRepositoryPath(key)).toBe("sak0a/ryco");
+      expect(canonicalRepositoryName(key)).toBe("ryco");
+    }
+    expect(canonicalRepositoryPath(normalizeGitRemoteUrl("git@gitlab.com:a/b/c.git"))).toBe(
+      "a/b/c",
+    );
+  });
+
+  it("names no owner for a repository addressed by a path on some disk", () => {
+    for (const remote of [
+      "linux-box:/private/tmp/ryco-xnode/ui/git/demo.git",
+      "git@linux-box:/private/tmp/ryco-xnode/ui/git/demo.git",
+      "/private/tmp/ryco-xnode/ui/git/demo.git",
+      "file:///private/tmp/ryco-xnode/ui/git/demo.git",
+      "C:\\Code\\git\\demo.git",
+      "C:/Code/git/demo.git",
+      "../demo.git",
+    ]) {
+      const key = normalizeGitRemoteUrl(remote);
+      expect(canonicalRepositoryPath(key), remote).toBeNull();
+      expect(canonicalRepositoryName(key), remote).toBe("demo");
+    }
+  });
+});
 
 describe("normalizeGitRemoteUrl", () => {
   it("canonicalizes equivalent GitHub remotes across protocol variants", () => {

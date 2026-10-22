@@ -3,7 +3,7 @@ import "../index.css";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import type { WorkspaceMachineCatalogEntry } from "@ryco/client-runtime/state/workspace";
 import { DraftId } from "@ryco/client-runtime/state/composer";
-import { ThreadId, type VcsStatusResult } from "@ryco/contracts";
+import { ProjectId, ThreadId, type VcsStatusResult } from "@ryco/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { cleanup, render } from "vitest-browser-react";
@@ -30,7 +30,9 @@ import {
   useProjectNodesDialogStore,
 } from "./projectNodes/projectNodesDialogStore";
 import {
+  defaultFixtureEnvironments,
   FIXTURE_NOW_ISO,
+  fixtureProject,
   HUB_LOCAL,
   LOCAL_ENV,
   RYCO_LOCAL,
@@ -77,7 +79,9 @@ function setStudioOffline() {
   }));
 }
 
-async function renderSelector(options: { readonly openOnRequest?: boolean } = {}) {
+async function renderSelector(
+  options: { readonly openOnRequest?: boolean; readonly activeProjectId?: typeof RYCO_LOCAL } = {},
+) {
   await page.viewport(1100, 800);
   const screen = await render(
     <AppAtomRegistryProvider>
@@ -85,7 +89,7 @@ async function renderSelector(options: { readonly openOnRequest?: boolean } = {}
         <h1 className="text-2xl">
           What should we do in{" "}
           <ProjectSwitcher
-            activeProjectId={RYCO_LOCAL}
+            activeProjectId={options.activeProjectId ?? RYCO_LOCAL}
             activeProjectEnvironmentId={LOCAL_ENV}
             appearance="headline"
             draftId={DRAFT_ID}
@@ -143,6 +147,19 @@ function optionTexts(): string[] {
   });
 }
 
+/** The highlighted row's own text (see `optionTexts`); null with nothing highlighted. */
+function highlightedText(): string | null {
+  const index = Array.from(
+    document.querySelectorAll('[data-testid="project-selector"] [role="option"]'),
+  ).findIndex((option) => option.hasAttribute("data-highlighted"));
+  return index === -1 ? null : (optionTexts()[index] ?? null);
+}
+
+/** Presses a key `times` times, one press after the other as a person would. */
+async function press(key: string, times = 1) {
+  for (let count = 0; count < times; count += 1) await userEvent.keyboard(`{${key}}`);
+}
+
 function draftSession() {
   return useComposerDraftStore.getState().getDraftSession(DRAFT_ID);
 }
@@ -172,7 +189,7 @@ describe("ProjectSwitcher", () => {
     await expect
       .poll(optionTexts)
       .toEqual([
-        "sak0a/ryco2 nodes · ~/Code/ryco",
+        "ryco2 nodes · ~/Code/ryco",
         "MacBook Pro~/Code/ryco",
         "Studio~/src/ryco",
         "ryco-hubMacBook Pro · ~/Code/ryco-hub",
@@ -183,9 +200,30 @@ describe("ProjectSwitcher", () => {
     );
     expect(checkouts[0]?.getAttribute("aria-selected")).toBe("true");
     expect(checkouts[0]?.querySelector("svg.lucide-check")).not.toBeNull();
-    // Collapsing folds the per-node rows away.
+    const ryco = page.getByRole("option", { name: /^ryco 2 nodes/ });
+    await expect.element(ryco).toHaveAttribute("aria-expanded", "true");
+    await expect.element(ryco).toHaveAttribute("aria-selected", "false");
+    // Collapsing folds the per-node rows away; the project row then stands for the draft.
     await page.getByTestId("project-selector-expand").click();
     await expect.poll(() => optionTexts().length).toBe(3);
+    await expect.element(ryco).toHaveAttribute("aria-expanded", "false");
+    await expect.element(ryco).toHaveAttribute("aria-selected", "true");
+    // A project on one node has nothing to expand.
+    const hub = page.getByRole("option", { name: /^ryco-hub/ });
+    expect(hub.element().hasAttribute("aria-expanded")).toBe(false);
+    await expect.element(hub).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("marks the draft's own row selected when its project is on one node", async () => {
+    await renderSelector({ activeProjectId: HUB_LOCAL });
+    await openSelector();
+    await expect
+      .element(page.getByRole("option", { name: /^ryco-hub/ }))
+      .toHaveAttribute("aria-selected", "true");
+    const selected = document.querySelectorAll(
+      '[data-testid="project-selector"] [role="option"][aria-selected="true"]',
+    );
+    expect(selected).toHaveLength(1);
   });
 
   it("opens when the add-project dialog asks to show its project there", async () => {
@@ -197,7 +235,7 @@ describe("ProjectSwitcher", () => {
 
     requestProjectSelectorOpen(scopeProjectRef(LOCAL_ENV, RYCO_LOCAL));
     await expect.element(page.getByTestId("project-selector")).toBeVisible();
-    await expect.poll(() => optionTexts()[0]).toBe("sak0a/ryco2 nodes · ~/Code/ryco");
+    await expect.poll(() => optionTexts()[0]).toBe("ryco2 nodes · ~/Code/ryco");
 
     // Closing ends the request, so the selector stays closed afterwards.
     await userEvent.keyboard("{Escape}");
@@ -234,13 +272,13 @@ describe("ProjectSwitcher", () => {
     await expect.element(chips.getByRole("radio", { name: /All\s*3/ })).toBeChecked();
     await expect.element(chips.getByRole("radio", { name: /MacBook Pro\s*3/ })).toBeVisible();
     await chips.getByRole("radio", { name: /Studio\s*1/ }).click();
-    await expect.poll(optionTexts).toEqual(["sak0a/rycoStudio · ~/src/ryco"]);
+    await expect.poll(optionTexts).toEqual(["rycoStudio · ~/src/ryco"]);
     await chips.getByRole("radio", { name: /All/ }).click();
     await expect.poll(() => optionTexts().length).toBe(5);
 
     const search = page.getByRole("combobox", { name: "Search projects" });
     await userEvent.fill(search, "@stu");
-    await expect.poll(optionTexts).toEqual(["sak0a/rycoStudio · ~/src/ryco"]);
+    await expect.poll(optionTexts).toEqual(["rycoStudio · ~/src/ryco"]);
     await expect.element(chips.getByRole("radio", { name: /Studio/ })).toBeChecked();
     await userEvent.fill(search, "@nowhere");
     await expect.element(page.getByText("No project matches.")).toBeVisible();
@@ -254,7 +292,7 @@ describe("ProjectSwitcher", () => {
     await userEvent.fill(page.getByRole("combobox", { name: "Search projects" }), "src/ry");
     await expect
       .poll(optionTexts)
-      .toEqual(["sak0a/ryco2 nodes · ~/Code/ryco", "MacBook Pro~/Code/ryco", "Studio~/src/ryco"]);
+      .toEqual(["ryco2 nodes · ~/Code/ryco", "MacBook Pro~/Code/ryco", "Studio~/src/ryco"]);
     const marks = Array.from(
       document.querySelectorAll('[data-testid="project-selector-checkout"] mark'),
     ).map((mark) => mark.textContent);
@@ -293,6 +331,74 @@ describe("ProjectSwitcher", () => {
     await expect.poll(optionTexts).toEqual(["ryco-hubMacBook Pro · ~/Code/ryco-hub"]);
     await userEvent.keyboard("{Enter}");
     await vi.waitFor(() => expect(draftSession()?.projectId).toBe(HUB_LOCAL));
+  });
+
+  it("folds a project with ← from one of its checkout rows onto the project row", async () => {
+    await renderSelector();
+    await openSelector();
+    await expect.poll(() => optionTexts().length).toBe(5);
+    await expect.element(page.getByRole("combobox", { name: "Search projects" })).toHaveFocus();
+    // The first ↓ lands on the first row once the list has settled.
+    await press("ArrowDown");
+    await expect.poll(highlightedText).toBe("ryco2 nodes · ~/Code/ryco");
+    // From the Studio checkout, below the MacBook Pro one, folding leaves the
+    // highlight on its project, not on whichever row slides into its place.
+    await press("ArrowDown", 2);
+    await expect.poll(highlightedText).toBe("Studio~/src/ryco");
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.poll(() => optionTexts().length).toBe(3);
+    await expect.poll(highlightedText).toBe("ryco2 nodes · ~/Code/ryco");
+
+    // → shows the checkouts again, ← from the first one folds onto the project too.
+    await press("ArrowRight");
+    await expect.poll(() => optionTexts().length).toBe(5);
+    await press("ArrowDown");
+    await expect.poll(highlightedText).toBe("MacBook Pro~/Code/ryco");
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.poll(() => optionTexts().length).toBe(3);
+    await expect.poll(highlightedText).toBe("ryco2 nodes · ~/Code/ryco");
+
+    // Enter picks the row the highlight is on: the draft stays where it is.
+    await userEvent.keyboard("{Enter}");
+    await expect.poll(() => document.querySelector('[data-testid="project-selector"]')).toBeNull();
+    expect(draftSession()).toMatchObject({ environmentId: LOCAL_ENV, projectId: RYCO_LOCAL });
+    expect(useComposerDraftStore.getState().getComposerDraft(DRAFT_ID)?.prompt).toBe(PROMPT);
+  });
+
+  it("never starts an open on a row the last open's rows put there", async () => {
+    // Two more projects below ryco-hub, so an index kept from a longer list stays in bounds.
+    const environments = defaultFixtureEnvironments();
+    const local = environments[LOCAL_ENV]!;
+    environments[LOCAL_ENV] = {
+      ...local,
+      projects: [
+        ...local.projects,
+        ...["notes", "dotfiles"].map((name) =>
+          fixtureProject({
+            id: ProjectId.make(`project-${name}-local`),
+            environmentId: LOCAL_ENV,
+            name,
+            cwd: `/Users/me/${name}`,
+          }),
+        ),
+      ],
+    };
+    resetProjectsFixtureState();
+    seedProjectsFixtureStore(environments);
+    await renderSelector({ activeProjectId: HUB_LOCAL });
+    await openSelector();
+    await expect.poll(() => optionTexts().length).toBe(5);
+    // ryco expanded above the draft's row moves that row from the second to the fourth.
+    await page.getByTestId("project-selector-expand").click();
+    await expect.poll(() => optionTexts().length).toBe(7);
+    await userEvent.keyboard("{Escape}");
+    await expect.poll(() => document.querySelector('[data-testid="project-selector"]')).toBeNull();
+
+    await openSelector();
+    await expect.poll(() => optionTexts().length).toBe(5);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The fourth row now is "notes"; the highlight is on no row, or on the draft's own.
+    expect([null, "ryco-hubMacBook Pro · ~/Code/ryco-hub"]).toContain(highlightedText());
   });
 
   it("adds a project, or copies this one to another node, from the footer", async () => {

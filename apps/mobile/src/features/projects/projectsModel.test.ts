@@ -612,9 +612,10 @@ describe("Projects rows", () => {
     });
 
     // Neither member has a timestamp, so the first member (Mac Studio) is the
-    // representative and leads the machine list.
+    // representative and leads the machine list. Both checkouts share their
+    // title, which names the merged row.
     expect(projectRowAccessibilityLabel(rows[0]!)).toBe(
-      "Ryco, 0 worktrees, 0 tasks, on Mac Studio, Linux box",
+      "ryco, 0 worktrees, 0 tasks, on Mac Studio, Linux box",
     );
   });
 });

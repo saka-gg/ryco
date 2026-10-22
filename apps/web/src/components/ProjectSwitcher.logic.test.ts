@@ -11,6 +11,8 @@ import {
   NO_PROJECT_ITEM,
   parseProjectSelectorQuery,
   projectRowSubline,
+  projectSelectorParentIndex,
+  projectSelectorValue,
   stripNodeTokens,
   type ProjectSelectorNode,
   type ProjectSelectorRow,
@@ -244,6 +246,77 @@ describe("buildProjectSelectorRows", () => {
       showNoProject: true,
     });
     expect(itemsOf(rows)).toEqual(["no-project"]);
+  });
+});
+
+describe("projectSelectorValue", () => {
+  const projects = buildProjects();
+  const rowsFor = (input: {
+    readonly expanded: ReadonlyArray<string>;
+    readonly active: typeof ACTIVE | null;
+    readonly text?: string;
+  }) =>
+    buildProjectSelectorRows({
+      projects,
+      text: input.text ?? "",
+      nodeFilter: null,
+      expanded: new Set(input.expanded),
+      active: input.active,
+      showNoProject: true,
+    });
+
+  it("is the draft's checkout row while its project is expanded, else its project row", () => {
+    const expanded = rowsFor({ expanded: ["github.com/sak0a/ryco"], active: ACTIVE });
+    expect(projectSelectorValue(expanded, false)).toBe(expanded[2]?.item);
+    expect(expanded[2]).toMatchObject({ kind: "checkout", current: true });
+
+    const folded = rowsFor({ expanded: [], active: ACTIVE });
+    expect(projectSelectorValue(folded, false)).toBe(folded[1]?.item);
+    expect(folded[1]).toMatchObject({ kind: "project", current: true });
+
+    // A project with one checkout is never expanded: its row stands for the draft.
+    const hub = { environmentId: MAC, projectId: ProjectId.make("hub-mac") };
+    const hubRows = rowsFor({ expanded: [], active: hub });
+    expect(projectSelectorValue(hubRows, false)).toBe(
+      hubRows.find((row) => row.kind === "project" && row.project.name === "ryco-hub")?.item,
+    );
+  });
+
+  it("is No project for a chat draft and nothing when the draft's row is filtered out", () => {
+    expect(projectSelectorValue(rowsFor({ expanded: [], active: null }), true)).toBe(
+      NO_PROJECT_ITEM,
+    );
+    expect(
+      projectSelectorValue(rowsFor({ expanded: [], active: ACTIVE, text: "hub" }), false),
+    ).toBe(null);
+  });
+});
+
+describe("projectSelectorParentIndex", () => {
+  it("finds a checkout row's project row, and a project row itself", () => {
+    const rows = buildProjectSelectorRows({
+      projects: buildProjects(),
+      text: "",
+      nodeFilter: null,
+      expanded: new Set(["github.com/sak0a/ryco", "homelab"]),
+      active: ACTIVE,
+      showNoProject: true,
+    });
+    expect(itemsOf(rows)).toEqual([
+      "no-project",
+      "project:ryco",
+      "checkout:MacBook Pro",
+      "checkout:Mac mini",
+      "project:ryco-hub",
+      "project:homelab",
+      "checkout:Mac mini",
+      "checkout:Gaming PC",
+    ]);
+    expect(projectSelectorParentIndex(rows, 3)).toBe(1);
+    expect(projectSelectorParentIndex(rows, 7)).toBe(5);
+    expect(projectSelectorParentIndex(rows, 4)).toBe(4);
+    expect(projectSelectorParentIndex(rows, 0)).toBeNull();
+    expect(projectSelectorParentIndex(rows, 99)).toBeNull();
   });
 });
 
