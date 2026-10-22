@@ -142,6 +142,7 @@ import { WorkspacePaths } from "./workspace/Services/WorkspacePaths.ts";
 import { WorkspaceAccessPolicyLive } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 
+import { withDesktopParentLifetime } from "./desktopParentLifetime.ts";
 import { initializeDesktopResourceTelemetry } from "./diagnostics/DesktopResourceTelemetry.ts";
 
 const PortSchema = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }));
@@ -3311,7 +3312,10 @@ const runServerCommand = (
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, { ...options, useNodeConfig: true });
-    return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
+    return yield* runServer.pipe(
+      Effect.provideService(ServerConfig, config),
+      withDesktopParentLifetime,
+    );
   });
 
 // ─── ryco service ─────────────────────────────────────────────────────────────

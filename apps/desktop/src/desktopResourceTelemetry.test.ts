@@ -129,6 +129,21 @@ describe("desktop resource telemetry", () => {
     pipe.destroy();
   });
 
+  it("keeps the pipe open over malformed input: the backend takes its close for the app's exit", () => {
+    const { pipe } = backendPipe();
+    const frames: DesktopBackendLifecycleFrame[] = [];
+    const stop = attachDesktopResourceTelemetry(pipe, {
+      onLifecycleFrame: (frame) => frames.push(frame),
+    });
+    pipe.emit("data", 'not json\n{"type":"http-serving","port":7926}\n');
+    expect(pipe.destroyed).toBe(false);
+    expect(frames).toEqual([{ type: "http-serving", port: 7926 }]);
+    pipe.emit("data", "x".repeat(300 * 1024));
+    expect(pipe.destroyed).toBe(false);
+    stop.close();
+    pipe.destroy();
+  });
+
   it("hands valid app update requests to the owner, even after a handler throws", () => {
     const { pipe } = backendPipe();
     const requests: DesktopAppUpdateRequestFrame[] = [];

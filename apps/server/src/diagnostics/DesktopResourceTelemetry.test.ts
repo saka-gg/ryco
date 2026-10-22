@@ -67,6 +67,26 @@ describe("desktop resource telemetry receiver", () => {
     expect((await stale)?.processes).toEqual([]);
     pipe.destroy();
   });
+  it("tells a pipe it dropped for a protocol violation from one the app closed", () => {
+    const pipe = () =>
+      new Duplex({
+        read() {},
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+    const closedByApp = pipe();
+    const appReceiver = makeDesktopResourceTelemetry(closedByApp);
+    closedByApp.push(null);
+    closedByApp.destroy();
+    expect(appReceiver.closedByBackend()).toBe(false);
+
+    const violated = pipe();
+    const backendReceiver = makeDesktopResourceTelemetry(violated);
+    violated.emit("data", "not json\n");
+    expect(violated.destroyed).toBe(true);
+    expect(backendReceiver.closedByBackend()).toBe(true);
+  });
   it("coalesces pending requests and closes cleanly", async () => {
     const pipe = new Duplex({
       read() {},

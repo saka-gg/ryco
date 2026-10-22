@@ -28,7 +28,10 @@ export interface DesktopBackendPipe {
    * waits for `drain`.
    */
   readonly sendAppUpdateState: (state: DesktopUpdateState, options?: { force?: boolean }) => void;
-  /** Detach: stop the heartbeat and remove every listener. */
+  /**
+   * Detach: stop the heartbeat and remove every listener. The pipe stays open:
+   * the backend takes its close for the app's exit and shuts down.
+   */
   readonly close: () => void;
 }
 
@@ -199,7 +202,9 @@ export function attachDesktopResourceTelemetry(
         lastSampleAt = Date.now();
         send(true);
       },
-      () => pipe.destroy(),
+      // A malformed line is dropped. Closing the pipe over it would stop a
+      // backend this app still wants: the backend takes the close for its exit.
+      () => undefined,
     ),
   );
   pipe.on("drain", () => {

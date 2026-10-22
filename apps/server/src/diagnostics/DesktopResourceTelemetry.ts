@@ -4,6 +4,7 @@ import {
   receiveDesktopAppUpdateSnapshot,
 } from "../desktopAppUpdateBridge.ts";
 import { attachDesktopLifecycleChannel } from "../desktopLifecycle.ts";
+import { watchDesktopParentPipe } from "../desktopParentLifetime.ts";
 import { nativeResourceMonitor } from "./NativeResourceMonitor.ts";
 import { Socket } from "node:net";
 import type { Duplex } from "node:stream";
@@ -24,6 +25,9 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
   let processReceivedAt = 0;
   let pending: Promise<DesktopResourceTelemetrySnapshot | null> | undefined;
   let complete: ((snapshot: DesktopResourceTelemetrySnapshot | null) => void) | undefined;
+  // Set before the reader drops a pipe that broke the protocol, so that close
+  // is not taken for the app's exit.
+  let closedByBackend = false;
   const current = () => {
     if (!latest || Date.now() - powerReceivedAt >= DESKTOP_TELEMETRY_STALE_MS) return null;
     return Date.now() - processReceivedAt < 10_000
@@ -59,7 +63,10 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
           latest = latest ? { ...latest, power: snapshot.power } : snapshot;
         }
       },
-      () => connection.destroy(),
+      () => {
+        closedByBackend = true;
+        connection.destroy();
+      },
     ),
   );
   connection.on("error", () => connection.destroy());
@@ -71,6 +78,7 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
     complete?.(null);
   });
   return {
+    closedByBackend: () => closedByBackend,
     read(): Promise<DesktopResourceTelemetrySnapshot | null> {
       if (connection.destroyed) return Promise.resolve(null);
       if (pending) return pending;
@@ -103,6 +111,7 @@ export function initializeDesktopResourceTelemetry(fd: number): void {
     receiver = makeDesktopResourceTelemetry(connection);
     attachDesktopLifecycleChannel(connection);
     attachDesktopAppUpdateChannel(connection);
+    watchDesktopParentPipe(connection, { closedByBackend: receiver.closedByBackend });
   } catch {
     // Optional diagnostics must never prevent backend startup.
   }
