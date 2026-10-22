@@ -285,23 +285,29 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "agent-control" },
       ),
-    // Owner clients publish the nodes they hold owner on; kept per client session.
+    // Owner clients publish the nodes they hold owner on, keyed by their session: a direct
+    // session's id, or a relay channel's scope, which changes with every reconnect (the directory
+    // bounds how many publishers it keeps).
     [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: (input) =>
-      ownerEffect(
+      observeRpcEffect(
         AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
-        Option.match(agentControlNodeDirectory, {
-          onNone: () =>
-            Effect.fail(
-              new AgentControlRpcError({
-                code: "unsupported",
-                message: "This server does not keep a node directory yet.",
-              }),
-            ),
-          onSome: (directory) =>
-            directory
-              .publish({ publisherKey: currentSessionId, nodes: input.nodes })
-              .pipe(Effect.mapError(toAgentControlNodeDirectoryRpcError)),
-        }),
+        ownerEffect(
+          AGENT_CONTROL_WS_METHODS.publishNodeDirectory,
+          Option.match(agentControlNodeDirectory, {
+            onNone: () =>
+              Effect.fail(
+                new AgentControlRpcError({
+                  code: "unsupported",
+                  message: "This server does not keep a node directory yet.",
+                }),
+              ),
+            onSome: (directory) =>
+              directory
+                .publish({ publisherKey: currentSessionId, nodes: input.nodes })
+                .pipe(Effect.mapError(toAgentControlNodeDirectoryRpcError)),
+          }),
+        ),
+        { "rpc.aggregate": "agent-control", "rpc.operation": "publish-node-directory" },
       ),
     // Refused until client-executed proposals are implemented; the node does not advertise
     // `projectCopy` yet, so no client accepts one.
