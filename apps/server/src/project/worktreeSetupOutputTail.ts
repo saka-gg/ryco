@@ -33,6 +33,12 @@ export class TerminalOutputTail {
   /** Adds a chunk; reports whether the visible tail changed. */
   push(chunk: string): boolean {
     const before = this.snapshot().join("\n");
+    this.append(chunk);
+    return this.snapshot().join("\n") !== before;
+  }
+
+  /** Adds a chunk, for a reader that only takes the snapshot at the end. */
+  append(chunk: string): void {
     let text = this.carry + chunk;
     const partial = TRAILING_PARTIAL_ESCAPE.exec(text);
     this.carry = partial ? partial[0] : "";
@@ -53,7 +59,6 @@ export class TerminalOutputTail {
         this.pending = "";
       }
     }
-    return this.snapshot().join("\n") !== before;
   }
 
   /** The visible tail, including the line still being written. */
