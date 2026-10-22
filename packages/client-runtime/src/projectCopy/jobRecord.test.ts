@@ -55,6 +55,22 @@ describe("reduceProjectCopyJobRecord", () => {
     expect(current.transfers).toEqual([
       { purpose: "commits-bundle", transferId: second, committed: true },
     ]);
+    // A transfer the import will not carry (an earlier export's) leaves the record.
+    const patch = ProjectTransferId.make(uuid(5));
+    current = reduceProjectCopyJobRecord(current, {
+      type: "transfer-assigned",
+      purpose: "changes-patch",
+      transferId: patch,
+      at: 1_004,
+    });
+    current = reduceProjectCopyJobRecord(current, {
+      type: "transfer-dropped",
+      transferId: patch,
+      at: 1_004,
+    });
+    expect(current.transfers).toEqual([
+      { purpose: "commits-bundle", transferId: second, committed: true },
+    ]);
     current = reduceProjectCopyJobRecord(current, { type: "import-requested", at: 1_005 });
     expect(projectCopyResumeKind(current)).toBe("follow");
     current = reduceProjectCopyJobRecord(current, { type: "import-accepted", at: 1_006 });

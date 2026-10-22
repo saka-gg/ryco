@@ -44,8 +44,10 @@ export const projectCopyNodeApi = (client: CliRemoteRpcClient): ProjectCopyNodeA
           {
             onExit: (exit) => {
               // A failed stream (an unknown import) ends the subscription, as on the app's
-              // transport; an unsubscribe is not a failure.
+              // transport, which shows the failure to `classifyFailure` first; an unsubscribe
+              // is not a failure.
               if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
+                options?.classifyFailure?.(Cause.squash(exit.cause));
                 options?.onError?.();
               }
             },
@@ -60,6 +62,9 @@ export const projectCopyNodeApi = (client: CliRemoteRpcClient): ProjectCopyNodeA
     },
   };
 };
+
+/** The paired connections stay open for the whole run: theirs is never lost. */
+const OPEN_CONNECTION = new AbortController().signal;
 
 /** The coordinator's IO for the paired nodes, by environment id. */
 export const directProjectCopyIo = (
@@ -79,7 +84,7 @@ export const directProjectCopyIo = (
       return { environmentId, transport: "direct", release: () => undefined };
     },
     withLease: async (environmentId, call) => call(apiOf(environmentId)),
-    withNode: async (environmentId, call) => call(apiOf(environmentId)),
+    withNode: async (environmentId, call) => call(apiOf(environmentId), OPEN_CONNECTION),
     now: () => Date.now(),
     uuid: () => randomUUID(),
     sleep: (ms, signal) =>

@@ -124,6 +124,8 @@ export type ProjectCopyJobChange =
       readonly transferId: ProjectTransferId;
     }
   | { readonly type: "transfer-committed"; readonly transferId: ProjectTransferId }
+  /** A transfer the import will not carry: its export was made again without that artifact. */
+  | { readonly type: "transfer-dropped"; readonly transferId: ProjectTransferId }
   | { readonly type: "import-requested" }
   | { readonly type: "import-accepted" }
   /** The same copy started over with a new export and import (Send files after a failed clone). */
@@ -164,6 +166,11 @@ export function reduceProjectCopyJobRecord(
         transfers: record.transfers.map((transfer) =>
           transfer.transferId === event.transferId ? { ...transfer, committed: true } : transfer,
         ),
+      };
+    case "transfer-dropped":
+      return {
+        ...touched,
+        transfers: record.transfers.filter((transfer) => transfer.transferId !== event.transferId),
       };
     case "import-requested":
       return { ...touched, stage: advance(record.stage, "import-requested") };

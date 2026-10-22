@@ -667,7 +667,9 @@ function AddProjectFlow(props: {
       : null;
   useEffect(() => {
     if (followedImportId === null || nodeId === null) return;
-    const projectsApi = readEnvironmentApi(nodeId)?.projects;
+    // Through the node's current connection: a replaced one ends this stream without an error,
+    // so the new one subscribes again, and its first snapshot is the current one.
+    const projectsApi = api?.projects;
     const subscribe = projectsApi?.subscribeImport;
     if (!subscribe) return;
     let stopped = false;
@@ -703,7 +705,7 @@ function AddProjectFlow(props: {
       stopped = true;
       unsubscribe();
     };
-  }, [applyImportSnapshot, followedImportId, nodeId]);
+  }, [api, applyImportSnapshot, followedImportId, nodeId]);
   // A clone or link that finished starts a thread in the new project, as adding a folder does.
   const threadToOpen =
     !handedOver && phase.kind === "done" && phase.openThread ? phase.added.ref : null;

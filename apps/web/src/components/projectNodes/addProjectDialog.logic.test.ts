@@ -411,6 +411,9 @@ describe("imports", () => {
       title: "codex",
       destinationPath: "/Users/me/Code/codex",
       source: { kind: "clone", remoteUrl: "git@github.com:openai/codex.git", remoteName: "origin" },
+      // Nobody inspected the repository: the node checks for submodules and LFS files (A14).
+      recurseSubmodules: true,
+      usesLfs: true,
       settings: null,
       setup: null,
       followUpThread: null,

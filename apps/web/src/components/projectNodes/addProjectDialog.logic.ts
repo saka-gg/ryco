@@ -13,6 +13,7 @@ import type { EnvironmentId, ProjectId, ScopedProjectRef } from "@ryco/contracts
 import {
   PROJECT_COPY_MAX_SCRIPTS,
   PROJECT_COPY_TITLE_MAX_CHARS,
+  PROJECT_IMPORT_UNINSPECTED_CLONE_STEPS,
   ProjectImportStartInput,
   type ProjectImportId,
   type ProjectImportSnapshot,
@@ -488,9 +489,7 @@ export function buildCloneImportInput(input: {
     checkout: null,
     changes: null,
     relativeRootInRepository: "",
-    // The node updates submodules only when the checkout has them; LFS is unknown here.
-    recurseSubmodules: true,
-    usesLfs: false,
+    ...PROJECT_IMPORT_UNINSPECTED_CLONE_STEPS,
     settings: null,
     avatarTransferId: null,
     setup: null,

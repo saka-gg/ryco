@@ -22,6 +22,7 @@ import type { EnvironmentApi, EnvironmentId, ServerConfig } from "@ryco/contract
 import { readEnvironmentApi } from "../../../environmentApi";
 import { acquireNode, type AcquireNodePurpose } from "../../../environments/acquireNode";
 import { readNodeServerConfig } from "../../../environments/nodeServerConfig";
+import { subscribeEnvironmentConnections } from "../../../environments/runtime";
 import { randomUUID } from "../../../lib/utils";
 
 /** How a copy's IO holds a node; `acquireNode` in the app, a fake in tests. */
@@ -40,6 +41,11 @@ export interface WebProjectCopyIoDeps {
   readonly readApi: (environmentId: EnvironmentId) => EnvironmentApi | undefined;
   /** What the node's connection last reported; `readNodeServerConfig` in the app. */
   readonly readCachedConfig: (environmentId: EnvironmentId) => ServerConfig | null;
+  /**
+   * Calls `listener` whenever a node's connection is registered, replaced or removed;
+   * `subscribeEnvironmentConnections` in the app.
+   */
+  readonly subscribeConnections: (listener: () => void) => () => void;
   readonly now: () => number;
   readonly uuid: () => string;
   readonly setTimeout: (callback: () => void, ms: number) => unknown;
@@ -62,6 +68,7 @@ const DEFAULT_DEPS: WebProjectCopyIoDeps = {
   acquire: (environmentId, options) => acquireNode(environmentId, options),
   readApi: readEnvironmentApi,
   readCachedConfig: readNodeServerConfig,
+  subscribeConnections: subscribeEnvironmentConnections,
   now: () => Date.now(),
   uuid: randomUUID,
   setTimeout: (callback, ms) => globalThis.setTimeout(callback, ms),
@@ -70,6 +77,8 @@ const DEFAULT_DEPS: WebProjectCopyIoDeps = {
 
 interface HeldNode {
   readonly node: AcquiredNode;
+  /** Aborts once the acquired connection is no longer the node's, or the hold is released. */
+  readonly connectionLost: AbortSignal;
 }
 
 const errorMessage = (error: unknown, fallback: string): string =>
@@ -83,13 +92,17 @@ const errorMessage = (error: unknown, fallback: string): string =>
  * `withLease` with `ProjectCopyLeaseLostError` before anything is sent, and a
  * replaced connection fails `withNode` with `ProjectCopyNodeUnavailableError`;
  * the coordinator then pauses, acquires again and resumes with the same ids.
+ * A subscription opened through `withNode` dies silently with its connection
+ * (the replaced transport is disposed), so each hold watches its connection
+ * and aborts the `connectionLost` signal `withNode` hands out once it goes.
  */
 export function createWebProjectCopyIo(
   overrides: Partial<WebProjectCopyIoDeps> = {},
 ): WebProjectCopyIo {
   const deps: WebProjectCopyIoDeps = { ...DEFAULT_DEPS, ...overrides };
   const held = new Map<EnvironmentId, HeldNode>();
-  const allHandles = new Set<AcquiredNode>();
+  /** Releases every hold still out; `dispose` runs them. */
+  const releases = new Set<() => void>();
 
   const acquireNodeHandle = async (
     request: ProjectCopyAcquireRequest,
@@ -99,21 +112,30 @@ export function createWebProjectCopyIo(
       signal: request.signal,
       purpose: request.purpose,
     });
-    const entry: HeldNode = { node };
-    held.set(request.environmentId, entry);
-    allHandles.add(node);
-    let released = false;
-    return {
-      environmentId: request.environmentId,
-      transport: node.transport,
-      release: () => {
-        if (released) return;
-        released = true;
-        node.release();
-        allHandles.delete(node);
-        if (held.get(request.environmentId) === entry) held.delete(request.environmentId);
-      },
+    const lost = new AbortController();
+    let stopWatching: () => void = () => undefined;
+    const loseConnection = () => {
+      if (lost.signal.aborted) return;
+      stopWatching();
+      lost.abort();
     };
+    stopWatching = deps.subscribeConnections(() => {
+      if (!node.isConnected()) loseConnection();
+    });
+    if (!node.isConnected()) loseConnection();
+    const entry: HeldNode = { node, connectionLost: lost.signal };
+    held.set(request.environmentId, entry);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      releases.delete(release);
+      node.release();
+      loseConnection();
+      if (held.get(request.environmentId) === entry) held.delete(request.environmentId);
+    };
+    releases.add(release);
+    return { environmentId: request.environmentId, transport: node.transport, release };
   };
 
   const withLease = <T>(
@@ -139,7 +161,7 @@ export function createWebProjectCopyIo(
 
   const withNode = <T>(
     environmentId: EnvironmentId,
-    call: (api: ProjectCopyNodeApi) => Promise<T>,
+    call: (api: ProjectCopyNodeApi, connectionLost: AbortSignal) => Promise<T>,
   ): Promise<T> => {
     const entry = held.get(environmentId);
     if (!entry || !entry.node.isConnected()) {
@@ -147,7 +169,7 @@ export function createWebProjectCopyIo(
         new ProjectCopyNodeUnavailableError(environmentId, "Reconnecting to the device."),
       );
     }
-    return call(entry.node.api);
+    return call(entry.node.api, entry.connectionLost);
   };
 
   const sleep = (ms: number, signal: AbortSignal): Promise<void> =>
@@ -189,8 +211,7 @@ export function createWebProjectCopyIo(
     sleep,
     readServerConfig,
     dispose: () => {
-      for (const node of Array.from(allHandles)) node.release();
-      allHandles.clear();
+      for (const release of Array.from(releases)) release();
       held.clear();
     },
   };

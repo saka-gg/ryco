@@ -520,6 +520,9 @@ describe("planProjectCopyOptions", () => {
       checkout: null,
       changes: null,
       relativeRootInRepository: "apps/web",
+      // Nobody knows whether it uses LFS or submodules: the destination checks and only warns (A14).
+      recurseSubmodules: true,
+      usesLfs: true,
       avatarTransferId: null,
     });
   });

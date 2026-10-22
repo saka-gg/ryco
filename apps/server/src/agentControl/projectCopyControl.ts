@@ -19,6 +19,7 @@ import {
   type AgentControlProposalId,
 } from "@ryco/contracts";
 import {
+  PROJECT_IMPORT_UNINSPECTED_CLONE_STEPS,
   ProjectCopyDirectoryName,
   ProjectImportId,
   type ProjectDestinationPreview,
@@ -116,8 +117,7 @@ export const agentControlProjectImportInput = (
   changes: null,
   relativeRootInRepository: "",
   // Both steps only warn: a private submodule or a missing git-lfs never fails the import.
-  recurseSubmodules: true,
-  usesLfs: true,
+  ...PROJECT_IMPORT_UNINSPECTED_CLONE_STEPS,
   settings: null,
   avatarTransferId: null,
   setup: plan.setup,

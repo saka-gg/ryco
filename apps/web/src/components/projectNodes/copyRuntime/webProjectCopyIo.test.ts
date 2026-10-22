@@ -76,11 +76,28 @@ function acquireFrom(...nodes: FakeNode[]) {
 
 const signal = () => new AbortController().signal;
 
+/** The app's connection registry: listeners hear every registration, replacement or removal. */
+function connectionRegistry() {
+  const listeners = new Set<() => void>();
+  return {
+    subscribeConnections: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    changed: () => {
+      for (const listener of Array.from(listeners)) listener();
+    },
+    listeners,
+  };
+}
+
 describe("createWebProjectCopyIo", () => {
   it("holds a node for the copy with its id and purpose, and reports the transport", async () => {
     const mini = fakeNode(MINI, { transport: "relay" });
     const { acquire, requests } = acquireFrom(mini);
-    const io = createWebProjectCopyIo({ acquire });
+    const io = createWebProjectCopyIo({ acquire, ...connectionRegistry() });
 
     const handle = await io.acquireNode({
       environmentId: MINI,
@@ -98,7 +115,10 @@ describe("createWebProjectCopyIo", () => {
 
   it("writes under the held node's lease and fails a stale lease before anything is sent", async () => {
     const mini = fakeNode(MINI);
-    const io = createWebProjectCopyIo({ acquire: acquireFrom(mini).acquire });
+    const io = createWebProjectCopyIo({
+      acquire: acquireFrom(mini).acquire,
+      ...connectionRegistry(),
+    });
     await io.acquireNode({
       environmentId: MINI,
       copyId: "copy-1",
@@ -117,7 +137,7 @@ describe("createWebProjectCopyIo", () => {
   });
 
   it("treats a write to a node it does not hold as a lost lease, so the copy acquires it", async () => {
-    const io = createWebProjectCopyIo({ acquire: acquireFrom().acquire });
+    const io = createWebProjectCopyIo({ acquire: acquireFrom().acquire, ...connectionRegistry() });
     const call = vi.fn(async () => "sent");
     const error = await io.withLease(MINI, call).catch((reason: unknown) => reason);
     expect(isProjectCopyLeaseLostError(error)).toBe(true);
@@ -126,7 +146,10 @@ describe("createWebProjectCopyIo", () => {
 
   it("reads through the acquired connection whatever its lease, until it is replaced", async () => {
     const mini = fakeNode(MINI);
-    const io = createWebProjectCopyIo({ acquire: acquireFrom(mini).acquire });
+    const io = createWebProjectCopyIo({
+      acquire: acquireFrom(mini).acquire,
+      ...connectionRegistry(),
+    });
     await io.acquireNode({
       environmentId: MINI,
       copyId: "copy-1",
@@ -146,11 +169,66 @@ describe("createWebProjectCopyIo", () => {
     await expect(io.withNode(LAPTOP, call)).rejects.toSatisfy(isProjectCopyNodeUnavailableError);
   });
 
+  it("signals a read's connection going, so a subscription on it is not waited on forever", async () => {
+    const mini = fakeNode(MINI);
+    const registry = connectionRegistry();
+    const io = createWebProjectCopyIo({ acquire: acquireFrom(mini).acquire, ...registry });
+    await io.acquireNode({
+      environmentId: MINI,
+      copyId: "copy-1",
+      purpose: "follow",
+      signal: signal(),
+    });
+    const lost = await io.withNode(MINI, async (_api, connectionLost) => connectionLost);
+    expect(lost.aborted).toBe(false);
+
+    // Another node's connection changing leaves this one alone.
+    registry.changed();
+    expect(lost.aborted).toBe(false);
+
+    // The node's connection is replaced: its transport ends the subscription without an error.
+    mini.setConnected(false);
+    registry.changed();
+    expect(lost.aborted).toBe(true);
+    expect(registry.listeners.size).toBe(0);
+  });
+
+  it("signals the connection gone when the hold is released or the IO disposed", async () => {
+    const registry = connectionRegistry();
+    const io = createWebProjectCopyIo({
+      acquire: acquireFrom(fakeNode(MINI), fakeNode(LAPTOP)).acquire,
+      ...registry,
+    });
+    const mini = await io.acquireNode({
+      environmentId: MINI,
+      copyId: "copy-1",
+      purpose: "follow",
+      signal: signal(),
+    });
+    await io.acquireNode({
+      environmentId: LAPTOP,
+      copyId: "copy-1",
+      purpose: "copy",
+      signal: signal(),
+    });
+    const miniLost = await io.withNode(MINI, async (_api, connectionLost) => connectionLost);
+    const laptopLost = await io.withNode(LAPTOP, async (_api, connectionLost) => connectionLost);
+    expect(registry.listeners.size).toBe(2);
+
+    mini.release();
+    expect(miniLost.aborted).toBe(true);
+    expect(laptopLost.aborted).toBe(false);
+
+    io.dispose();
+    expect(laptopLost.aborted).toBe(true);
+    expect(registry.listeners.size).toBe(0);
+  });
+
   it("keeps the newer hold when the copy lets go of an earlier one", async () => {
     const copyHold = fakeNode(MINI);
     const followHold = fakeNode(MINI);
     const { acquire, requests } = acquireFrom(copyHold, followHold);
-    const io = createWebProjectCopyIo({ acquire });
+    const io = createWebProjectCopyIo({ acquire, ...connectionRegistry() });
     const copyHandle = await io.acquireNode({
       environmentId: MINI,
       copyId: "copy-1",
@@ -180,6 +258,7 @@ describe("createWebProjectCopyIo", () => {
     const timers: Array<{ callback: () => void; ms: number; cleared: boolean }> = [];
     const io = createWebProjectCopyIo({
       acquire: acquireFrom().acquire,
+      ...connectionRegistry(),
       setTimeout: (callback, ms) => {
         const timer = { callback, ms, cleared: false };
         timers.push(timer);
@@ -218,6 +297,7 @@ describe("createWebProjectCopyIo", () => {
     const readApi = vi.fn(() => undefined);
     const io = createWebProjectCopyIo({
       acquire: acquireFrom(mini).acquire,
+      ...connectionRegistry(),
       readCachedConfig: (environmentId) => (environmentId === LAPTOP ? reported : null),
       readApi,
     });
@@ -239,7 +319,10 @@ describe("createWebProjectCopyIo", () => {
   it("releases every hold it still has when disposed", async () => {
     const mini = fakeNode(MINI);
     const laptop = fakeNode(LAPTOP);
-    const io = createWebProjectCopyIo({ acquire: acquireFrom(mini, laptop).acquire });
+    const io = createWebProjectCopyIo({
+      acquire: acquireFrom(mini, laptop).acquire,
+      ...connectionRegistry(),
+    });
     await io.acquireNode({
       environmentId: MINI,
       copyId: "copy-1",

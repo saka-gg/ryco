@@ -33,6 +33,7 @@ import {
   PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES,
   PROJECT_COPY_THREAD_TITLE_MAX_CHARS,
   PROJECT_COPY_TITLE_MAX_CHARS,
+  PROJECT_IMPORT_UNINSPECTED_CLONE_STEPS,
   ProjectCopyRelativePath,
   ProjectCopyRelativeRoot,
   ProjectCopyRemoteUrl,
@@ -1172,9 +1173,10 @@ export function buildProjectImportStartInput(input: {
       checkout: null,
       changes: null,
       relativeRootInRepository: plan.source.relativeRootInRepository,
-      // The destination runs it only when the checkout has submodules; LFS is unknown here.
-      recurseSubmodules: true,
-      usesLfs: false,
+      // Nobody inspected the repository: a clone asks for both steps, a link touches nothing.
+      ...(mode === "link"
+        ? { recurseSubmodules: false, usesLfs: false }
+        : PROJECT_IMPORT_UNINSPECTED_CLONE_STEPS),
       settings: plan.choices.copySettings ? plan.source.settings : null,
       avatarTransferId: null,
     };

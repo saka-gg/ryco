@@ -758,6 +758,17 @@ export const ProjectImportStartInput = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type ProjectImportStartInput = typeof ProjectImportStartInput.Type;
 
+/**
+ * The submodule and LFS steps of a clone whose repository nobody inspected (a source without
+ * project copy, a repository URL). Both are asked for: the destination updates submodules only
+ * when the checkout has them and pulls Git LFS files only when a path is tracked by LFS, and
+ * either step only warns (A14).
+ */
+export const PROJECT_IMPORT_UNINSPECTED_CLONE_STEPS = {
+  recurseSubmodules: true,
+  usesLfs: true,
+} as const satisfies Pick<ProjectImportStartInput, "recurseSubmodules" | "usesLfs">;
+
 export const ProjectImportStepId = Schema.Literals([
   "preflight",
   "clone",

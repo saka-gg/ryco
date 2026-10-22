@@ -1405,13 +1405,18 @@ export interface EnvironmentApi {
     transferCommit?: (input: ProjectTransferCommitInput) => Promise<ProjectTransferCommitResult>;
     transferAbort?: (input: ProjectTransferAbortInput) => Promise<EmptyRpcResult>;
     importStart?: (input: ProjectImportStartInput) => Promise<ProjectImportSnapshot>;
-    /** The first snapshot is the current one; an unknown import ends the stream (`onError`). */
+    /**
+     * The first snapshot is the current one; an unknown import ends the stream (`onError`, after
+     * `classifyFailure` saw a `ProjectCopyError` with code `not-found`).
+     */
     subscribeImport?: (
       input: ProjectSubscribeImportInput,
       callback: (snapshot: ProjectImportSnapshot) => void,
       options?: {
         onResubscribe?: () => void;
         onError?: () => void;
+        /** Sees the failure that ended the stream, just before `onError`. */
+        classifyFailure?: (error: unknown) => "failed";
       },
     ) => () => void;
     cancelImport?: (input: ProjectCancelImportInput) => Promise<ProjectImportSnapshot>;

@@ -11,8 +11,12 @@
  * - A lost lease or connection pauses the copy (phase `acquire`) until the node is acquired
  *   again; the copy then resumes with the same ids through the node's current API (A22).
  * - `importStart` is a mutation: after a call that may have gone out, the node is asked whether
- *   it knows the import before the same id and input are sent again (A3).
- * - Once the target accepted the import it runs there on its own (`canCloseClient`).
+ *   it knows the import (by its id) before the same id and input are sent again (A3). Until it
+ *   answered, a cancel goes through the import rather than around it.
+ * - Once the target accepted the import it runs there on its own (`canCloseClient`). Following
+ *   it outlives the subscription's connection: when that is replaced, the import is looked up
+ *   by its id and followed again through the node's current one.
+ * - A relayed node never carries more than its cap, bytes sent again included (A7).
  *
  * @module projectCopy/run
  */
@@ -40,6 +44,7 @@ import {
   isProjectCopyLeaseLostError,
   isProjectCopyNodeUnavailableError,
   isProjectCopyRpcError,
+  ProjectCopyNodeUnavailableError,
   type ProjectCopyIo,
   type ProjectCopyNodeApi,
   type ProjectCopyNodeHandle,
@@ -73,6 +78,8 @@ const IMPORT_START_ATTEMPTS = 6;
 const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 8_000;
 const FOLLOW_MAX_DELAY_MS = 30_000;
+/** How long looking an import up by its id may wait for the node's answer before it asks again. */
+export const PROJECT_COPY_IMPORT_LOOKUP_TIMEOUT_MS = 30_000;
 
 export type ProjectCopyPhase =
   | "acquire"
@@ -289,11 +296,19 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
   let cancelImportRequested = false;
   let detachRequested = false;
   let settled = false;
-  const detachListeners = new Set<() => void>();
+  /** Wakes the subscription `follow` waits on: the copy was detached, or the import ended. */
+  const followWakers = new Set<(reason: "terminal" | "detached") => void>();
   const importAccepted = () => record.stage === "importing";
-  // Work before the import stops on cancel; settling a cancelled import and following only on stop.
-  const signalFor = (whileCancelling = false) =>
-    whileCancelling || importAccepted() ? stopController.signal : cancelController.signal;
+  /**
+   * `projects.importStart` may have reached the target without its answer reaching this client
+   * (a resumed record that stopped there, too). Until the target is asked by the import's id,
+   * a cancel can't just stop: the import may run there and has to be cancelled through its id.
+   */
+  let importMayExist = record.stage === "import-requested";
+  /** The import is (or may be) the target's now: a cancel goes through it, not around it. */
+  const importOutstanding = () => importAccepted() || importMayExist;
+  // Work before the import stops on cancel; settling the import and following it only on stop.
+  const signalFor = () => (importOutstanding() ? stopController.signal : cancelController.signal);
 
   const emit = (patch: Partial<ProjectCopyProgress>) => {
     progress = { ...progress, ...patch };
@@ -316,13 +331,13 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
   };
   const stopFollowing = () => {
     stopController.abort();
-    for (const listener of Array.from(detachListeners)) listener();
+    for (const wake of Array.from(followWakers)) wake("detached");
   };
 
-  /** `whileCancelling` lets the calls that settle a cancelled import (look it up) through. */
-  const throwIfStopped = (whileCancelling = false) => {
+  /** A cancel stops the copy only while no import of it can exist on the target yet. */
+  const throwIfStopped = () => {
     if (stopController.signal.aborted) throw new CopyDetached();
-    if (cancelRequested && !whileCancelling && !importAccepted()) throw new CopyCancelled();
+    if (cancelRequested && !importOutstanding()) throw new CopyCancelled();
   };
 
   // ── Nodes ──
@@ -348,23 +363,31 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       throw new CopyFailure("too-large", relayTooLargeMessage(progress.totalBytes), null);
     }
   };
+  /** Nodes this copy reached through the Hub; their channel carries what is counted below. */
+  const relayedNodes = new Set<EnvironmentId>();
+  /** Raw artifact bytes this copy moved through each relayed node, re-sends included. */
+  const relayedBytes = new Map<EnvironmentId, number>();
+  /**
+   * A7: the Hub's channel budget counts every byte sent through it, also the ones sent again
+   * after an export was made anew or a transfer started over. Spent before a chunk goes out, so
+   * a node's total never passes the cap.
+   */
+  const spendRelayBudget = (environmentId: EnvironmentId, bytes: number) => {
+    if (!relayedNodes.has(environmentId)) return;
+    const spent = (relayedBytes.get(environmentId) ?? 0) + bytes;
+    if (spent > PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES) {
+      throw new CopyFailure("too-large", relayTooLargeMessage(spent), null);
+    }
+    relayedBytes.set(environmentId, spent);
+  };
 
-  const acquire = async (
-    environmentId: EnvironmentId,
-    purpose: ProjectCopyNodePurpose,
-    whileCancelling = false,
-  ) => {
-    throwIfStopped(whileCancelling);
+  const acquire = async (environmentId: EnvironmentId, purpose: ProjectCopyNodePurpose) => {
+    throwIfStopped();
     let handle: ProjectCopyNodeHandle;
     try {
-      handle = await io.acquireNode({
-        environmentId,
-        copyId,
-        purpose,
-        signal: signalFor(whileCancelling),
-      });
+      handle = await io.acquireNode({ environmentId, copyId, purpose, signal: signalFor() });
     } catch (error) {
-      throwIfStopped(whileCancelling);
+      throwIfStopped();
       throw new CopyFailure(
         "node-unavailable",
         errorMessage(error, `Can't reach ${labelOf(environmentId)}.`),
@@ -372,7 +395,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       );
     }
     try {
-      throwIfStopped(whileCancelling);
+      throwIfStopped();
     } catch (error) {
       handle.release();
       throw error;
@@ -380,11 +403,12 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
     releaseNode(environmentId);
     handles.set(environmentId, handle);
     purposes.set(environmentId, purpose);
+    if (handle.transport === "relay") relayedNodes.add(environmentId);
     checkRelayBudget();
   };
 
   /** Pauses on a lost lease or connection until the node is acquired again (single-flight). */
-  const reacquire = (environmentId: EnvironmentId, whileCancelling = false): Promise<void> => {
+  const reacquire = (environmentId: EnvironmentId): Promise<void> => {
     const running = reacquiring.get(environmentId);
     if (running) return running;
     if (pausedNodes++ === 0) {
@@ -394,7 +418,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
     const attempt = (async () => {
       try {
         releaseNode(environmentId);
-        await acquire(environmentId, purposes.get(environmentId) ?? "copy", whileCancelling);
+        await acquire(environmentId, purposes.get(environmentId) ?? "copy");
       } finally {
         reacquiring.delete(environmentId);
         if (--pausedNodes === 0 && progress.phase === "acquire") emit({ phase: phaseBeforePause });
@@ -406,25 +430,25 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
 
   /**
    * One idempotent call: retried after transient failures and after a reacquire. A node's
-   * `ProjectCopyError` is a definite answer and is thrown as it is.
+   * `ProjectCopyError` is a definite answer and is thrown as it is. A read gets the signal that
+   * its connection went (see {@link ProjectCopyIo.withNode}).
    */
   const callNode = async <T>(
     environmentId: EnvironmentId,
     access: "lease" | "read",
-    call: (api: ProjectCopyNodeApi) => Promise<T>,
-    whileCancelling = false,
+    call: (api: ProjectCopyNodeApi, connectionLost?: AbortSignal) => Promise<T>,
   ): Promise<T> => {
     let failures = 0;
     let reacquires = 0;
     for (;;) {
-      throwIfStopped(whileCancelling);
+      throwIfStopped();
       try {
         return await (access === "lease"
           ? io.withLease(environmentId, call)
           : io.withNode(environmentId, call));
       } catch (error) {
         if (error instanceof CopyFailure || isProjectCopyRpcError(error)) throw error;
-        throwIfStopped(whileCancelling);
+        throwIfStopped();
         if (isProjectCopyLeaseLostError(error) || isProjectCopyNodeUnavailableError(error)) {
           if (++reacquires > REACQUIRE_ATTEMPTS) {
             throw new CopyFailure(
@@ -433,7 +457,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
               "resume",
             );
           }
-          await reacquire(environmentId, whileCancelling);
+          await reacquire(environmentId);
           continue;
         }
         if (++failures >= TRANSIENT_ATTEMPTS) {
@@ -443,7 +467,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
             "resume",
           );
         }
-        await io.sleep(retryDelay(failures), signalFor(whileCancelling));
+        await io.sleep(retryDelay(failures), signalFor());
       }
     }
   };
@@ -604,6 +628,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
         nextRead < artifact.byteLength
       ) {
         const length = Math.min(PROJECT_COPY_CHUNK_BYTES, artifact.byteLength - nextRead);
+        spendRelayBudget(source!.environmentId, length);
         reads.push(readChunk(result, artifact, nextRead, length));
         nextRead += length;
       }
@@ -624,6 +649,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
           throw error;
         }
         readAhead(true);
+        spendRelayBudget(targetEnvironmentId, read.length);
         const appended = await callNode(targetEnvironmentId, "lease", (api) =>
           need(
             api.projects.transferAppend,
@@ -657,7 +683,11 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
     }
   };
 
-  const uploadArtifact = async (result: ProjectExportResult, artifact: ProjectExportArtifact) => {
+  /** Sends one artifact; resolves with the transfer it was committed under. */
+  const uploadArtifact = async (
+    result: ProjectExportResult,
+    artifact: ProjectExportArtifact,
+  ): Promise<ProjectTransferId> => {
     const purpose = artifact.kind;
     let transferId = projectCopyJobTransfer(record, purpose)?.transferId ?? null;
     const assignTransfer = () => {
@@ -734,15 +764,44 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       }
       setUploaded(purpose, artifact.byteLength);
       dispatch({ type: "transfer-committed", transferId: id });
-      return;
+      return id;
+    }
+  };
+
+  /** Best effort: a transfer the target still holds expires there on its own. */
+  const abortTransfer = async (transferId: ProjectTransferId) => {
+    try {
+      await io.withLease(targetEnvironmentId, (api) =>
+        need(api.projects.transferAbort, targetLabel)({ transferId }),
+      );
+    } catch {
+      // Transfers expire on their own.
+    }
+  };
+
+  /**
+   * Transfers sent for an earlier export of this copy whose artifact the current export does
+   * not send (the source restarted and the changes were discarded meanwhile, say). The import
+   * must never carry them with the new export's commit, so they leave the record and the target.
+   */
+  const dropStaleTransfers = async (artifacts: ReadonlyArray<ProjectExportArtifact>) => {
+    const sent = new Set<ProjectTransferPurpose>(artifacts.map((artifact) => artifact.kind));
+    for (const transfer of record.transfers) {
+      if (sent.has(transfer.purpose)) continue;
+      dispatch({ type: "transfer-dropped", transferId: transfer.transferId });
+      await abortTransfer(transfer.transferId);
     }
   };
 
   /**
    * Export, then upload every artifact. An export that expired mid-way is made once more; one
    * whose ignored files a node refused (A33) is made again without them, and disposed at once.
+   * Resolves with the export and the transfers its own artifacts were committed under.
    */
-  const exportAndUpload = async (): Promise<ProjectExportResult | null> => {
+  const exportAndUpload = async (): Promise<{
+    readonly result: ProjectExportResult;
+    readonly transfers: Partial<Record<ProjectExportArtifactKind, ProjectTransferId>>;
+  } | null> => {
     if (source === null) return null;
     let remadeAfterExpiry = false;
     for (;;) {
@@ -750,6 +809,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       exportResult = result;
       const warningCount = warnings.length;
       const artifacts = artifactsToSend(result);
+      await dropStaleTransfers(artifacts);
       uploadedByPurpose.clear();
       emit({
         phase: "upload",
@@ -758,10 +818,11 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       });
       checkRelayBudget();
       try {
+        const transfers: Partial<Record<ProjectExportArtifactKind, ProjectTransferId>> = {};
         for (const artifact of artifacts) {
-          await uploadArtifact(result, artifact);
+          transfers[artifact.kind] = await uploadArtifact(result, artifact);
         }
-        return result;
+        return { result, transfers };
       } catch (error) {
         if (error instanceof IgnoredFilesRefused && !leaveOutIgnoredFiles) {
           leaveOutIgnoredFiles = true;
@@ -786,28 +847,88 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
 
   // ── Import ──
 
-  /** The target's snapshot of this copy's import; null when the target does not know it. */
-  const findImport = async (whileCancelling = false): Promise<ProjectImportSnapshot | null> => {
-    const listed = await callNode(
-      targetEnvironmentId,
-      "read",
-      (api) => need(api.projects.listImports, targetLabel)({}),
-      whileCancelling,
-    );
-    return listed.imports.find((entry) => entry.importId === record.importId) ?? null;
+  /**
+   * One look at this copy's import by its id (A3), however many imports the target got since:
+   * the first snapshot of `subscribeImport` is the current one. Null only when the target answers
+   * that it does not know the import; any other end of the stream is no answer, so the caller
+   * asks again.
+   */
+  const lookUpImport = (
+    api: ProjectCopyNodeApi,
+    connectionLost: AbortSignal | undefined,
+  ): Promise<ProjectImportSnapshot | null> => {
+    const subscribe = need(api.projects.subscribeImport, targetLabel);
+    return new Promise((resolve, reject) => {
+      let done = false;
+      let unknown = false;
+      let unsubscribe: (() => void) | null = null;
+      const timeout = new AbortController();
+      const finish = (settle: () => void) => {
+        if (done) return;
+        done = true;
+        timeout.abort();
+        connectionLost?.removeEventListener("abort", onConnectionLost);
+        unsubscribe?.();
+        settle();
+      };
+      // The stream ends without a word with its connection: ask again on the next one.
+      const onConnectionLost = () =>
+        finish(() =>
+          reject(
+            new ProjectCopyNodeUnavailableError(
+              targetEnvironmentId,
+              `Reconnecting to ${targetLabel}.`,
+            ),
+          ),
+        );
+      const stop = subscribe(
+        { importId: record.importId },
+        (snapshot) => {
+          if (snapshot.importId === record.importId) finish(() => resolve(snapshot));
+        },
+        {
+          classifyFailure: (error) => {
+            unknown = isProjectCopyRpcError(error) && error.code === "not-found";
+            return "failed";
+          },
+          onError: () =>
+            finish(() =>
+              unknown
+                ? resolve(null)
+                : reject(new Error(`${targetLabel} could not look up the copy.`)),
+            ),
+        },
+      );
+      if (done) stop();
+      else unsubscribe = stop;
+      if (connectionLost?.aborted) onConnectionLost();
+      else connectionLost?.addEventListener("abort", onConnectionLost, { once: true });
+      void io
+        .sleep(PROJECT_COPY_IMPORT_LOOKUP_TIMEOUT_MS, timeout.signal)
+        .then(() => finish(() => reject(new Error(`${targetLabel} did not answer.`))));
+    });
   };
+
+  /** The target's snapshot of this copy's import; null when the target does not know it. */
+  const findImport = (): Promise<ProjectImportSnapshot | null> =>
+    callNode(targetEnvironmentId, "read", lookUpImport);
 
   /**
    * A3: after a call that may have gone out, the same id and input are sent again only when the
-   * target does not know the import. A lost lease means the call never went out.
+   * target does not know the import. A lost lease means the call never went out. A cancel while
+   * the import may exist looks it up first: a known import is cancelled through its id.
    */
   const startImport = async (
     startInput: ProjectImportStartInput,
   ): Promise<ProjectImportSnapshot> => {
     emit({ phase: "import" });
     dispatch({ type: "import-requested" });
-    let mayHaveGoneOut = false;
     for (let attempt = 1; ; attempt += 1) {
+      if (importMayExist) {
+        const known = await findImport();
+        if (known !== null) return known;
+        importMayExist = false;
+      }
       throwIfStopped();
       try {
         return await io.withLease(targetEnvironmentId, (api) =>
@@ -819,7 +940,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
           throw new CopyFailure("import-rejected", error.message, null);
         }
         const notSent = isProjectCopyLeaseLostError(error);
-        mayHaveGoneOut ||= !notSent;
+        if (!notSent) importMayExist = true;
         if (attempt >= IMPORT_START_ATTEMPTS) {
           throw new CopyFailure(
             "node-unavailable",
@@ -827,71 +948,83 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
             "resume",
           );
         }
-        // Cancelled meanwhile: an import that did arrive is still cancelled through its id.
-        const whileCancelling = cancelRequested && mayHaveGoneOut;
         if (notSent || isProjectCopyNodeUnavailableError(error)) {
-          await reacquire(targetEnvironmentId, whileCancelling);
+          await reacquire(targetEnvironmentId);
         } else {
-          await io.sleep(retryDelay(attempt), signalFor(whileCancelling));
-        }
-        if (mayHaveGoneOut) {
-          const known = await findImport(whileCancelling);
-          if (known !== null) return known;
+          await io.sleep(retryDelay(attempt), signalFor());
         }
       }
     }
   };
 
+  /** Shows the newest snapshot; a terminal one wakes the follow that waits for it. */
   const applySnapshot = (snapshot: ProjectImportSnapshot) => {
     if (snapshot.importId !== record.importId) return;
     const current = progress.importSnapshot;
     if (current !== null && isTerminalImport(current)) return;
     if (current !== null && snapshot.updatedAt < current.updatedAt) return;
     emit({ importSnapshot: snapshot });
+    if (isTerminalImport(snapshot)) {
+      for (const wake of Array.from(followWakers)) wake("terminal");
+    }
   };
 
+  /** Asks the target to cancel the import; a request in flight is not sent twice. */
   const requestCancelImport = () => {
     if (cancelImportRequested) return;
     cancelImportRequested = true;
     void callNode(targetEnvironmentId, "lease", (api) =>
       need(api.projects.cancelImport, targetLabel)({ importId: record.importId }),
     ).then(applySnapshot, () => {
-      // The import goes on; following it shows how it ends.
+      // The import goes on: a later Cancel, or following it again, asks once more.
       cancelImportRequested = false;
     });
   };
 
+  /**
+   * Follows the import through one subscription until it ends, the copy is detached, or the
+   * subscription stops: with an error, or silently because its connection went.
+   */
   const subscribeOnce = (): Promise<"terminal" | "ended" | "detached"> =>
     new Promise((resolve) => {
       let unsubscribe: (() => void) | null = null;
+      let connectionLost: AbortSignal | null = null;
       let done = false;
       const finish = (result: "terminal" | "ended" | "detached") => {
         if (done) return;
         done = true;
-        detachListeners.delete(onDetach);
+        followWakers.delete(finish);
+        connectionLost?.removeEventListener("abort", onConnectionLost);
         unsubscribe?.();
         resolve(result);
       };
-      const onDetach = () => finish("detached");
-      detachListeners.add(onDetach);
-      io.withNode(targetEnvironmentId, async (api) =>
-        need(api.projects.subscribeImport, targetLabel)(
+      const onConnectionLost = () => finish("ended");
+      if (stopController.signal.aborted) {
+        finish("detached");
+        return;
+      }
+      if (progress.importSnapshot !== null && isTerminalImport(progress.importSnapshot)) {
+        finish("terminal");
+        return;
+      }
+      followWakers.add(finish);
+      io.withNode(targetEnvironmentId, async (api, lost) => {
+        if (done) return;
+        // A terminal snapshot wakes this follow through `applySnapshot`.
+        const stop = need(api.projects.subscribeImport, targetLabel)(
           { importId: record.importId },
-          (snapshot) => {
-            applySnapshot(snapshot);
-            if (progress.importSnapshot !== null && isTerminalImport(progress.importSnapshot)) {
-              finish("terminal");
-            }
-          },
+          applySnapshot,
           { onError: () => finish("ended") },
-        ),
-      ).then(
-        (stop) => {
-          unsubscribe = stop;
-          if (done) stop();
-        },
-        () => finish("ended"),
-      );
+        );
+        if (done) {
+          stop();
+          return;
+        }
+        unsubscribe = stop;
+        connectionLost = lost;
+        if (lost.aborted) finish("ended");
+        else lost.addEventListener("abort", onConnectionLost, { once: true });
+      }).catch(() => finish("ended"));
     });
 
   /** Follows the import until it ends; null when detached. */
@@ -900,7 +1033,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       const ended = await subscribeOnce();
       if (ended === "detached") return null;
       if (ended === "terminal") return progress.importSnapshot;
-      // The stream ended early: ask the node where the import stands.
+      // The stream ended early or its connection went: ask the node where the import stands.
       try {
         const known = await findImport();
         if (known === null) {
@@ -908,6 +1041,8 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
         }
         applySnapshot(known);
         if (isTerminalImport(known)) return progress.importSnapshot;
+        // A cancel that did not get through is asked for again now that the node answers.
+        if (cancelRequested) requestCancelImport();
         quiet = 0;
       } catch (error) {
         if (error instanceof CopyDetached) return null;
@@ -936,15 +1071,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
   /** Best effort, before any import exists: the target and source sweep what is left. */
   const cleanUpBeforeImport = async () => {
     if (handles.has(targetEnvironmentId)) {
-      for (const transfer of record.transfers) {
-        try {
-          await io.withLease(targetEnvironmentId, (api) =>
-            need(api.projects.transferAbort, targetLabel)({ transferId: transfer.transferId }),
-          );
-        } catch {
-          // Transfers expire on their own.
-        }
-      }
+      for (const transfer of record.transfers) await abortTransfer(transfer.transferId);
     }
     await disposeExport();
   };
@@ -954,6 +1081,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
    * view of the target (A22).
    */
   const afterImportAccepted = async (snapshot: ProjectImportSnapshot) => {
+    importMayExist = false;
     dispatch({ type: "import-accepted" });
     emit({ phase: "import", canCloseClient: true });
     applySnapshot(snapshot);
@@ -1026,7 +1154,8 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       emit({ phase: record.outcome === "completed" ? "done" : (record.outcome ?? "failed") });
       return;
     }
-    // A reload: the import may already run on the target.
+    // A reload: the import may already run on the target. Until the target answers by its id,
+    // a cancel waits for that answer (`importMayExist`), so a running import is cancelled there.
     if (input.resume && (record.stage === "import-requested" || record.stage === "importing")) {
       const resend = record.stage === "import-requested" && plan !== null;
       await acquire(targetEnvironmentId, resend ? "copy" : "follow");
@@ -1038,6 +1167,9 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       if (record.stage === "importing") {
         throw new CopyFailure("import-lost", `${targetLabel} no longer knows this copy.`, null);
       }
+      // The target never got it: a cancel now stops the copy before anything is sent again.
+      importMayExist = false;
+      throwIfStopped();
     }
     if (plan === null) {
       // Without the plan an unfinished upload can't go on; the failure cleans up what it left.
@@ -1061,18 +1193,15 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
     for (const result of acquired) {
       if (result.status === "rejected") throw result.reason;
     }
-    const result = await exportAndUpload();
+    const uploaded = await exportAndUpload();
     throwIfStopped();
-    const transfers: Partial<Record<ProjectExportArtifactKind, ProjectTransferId>> = {};
-    for (const transfer of record.transfers) {
-      if (transfer.committed) transfers[transfer.purpose] = transfer.transferId;
-    }
+    // Only this export's own transfers: one left from an earlier export never rides along.
     const built = buildProjectImportStartInput({
       plan,
       importId: record.importId,
       projectId: record.projectId,
-      exportResult: result,
-      transfers,
+      exportResult: uploaded?.result ?? null,
+      transfers: uploaded?.transfers ?? {},
     });
     warnings.push(...built.warnings);
     const accepted = await startImport(built.input);
@@ -1145,9 +1274,12 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
     getProgress: () => progress,
     done,
     cancel: () => {
-      if (settled || cancelRequested) return;
-      cancelRequested = true;
-      cancelController.abort();
+      if (settled) return;
+      if (!cancelRequested) {
+        cancelRequested = true;
+        cancelController.abort();
+      }
+      // Pressed again after a request that did not get through: it is sent once more.
       if (importAccepted()) requestCancelImport();
     },
     detach: () => {

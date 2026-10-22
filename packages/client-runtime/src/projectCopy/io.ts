@@ -86,10 +86,14 @@ export interface ProjectCopyIo {
    * Runs one read (or opens a subscription) against the node's current API; no lease is
    * needed. Rejects with {@link ProjectCopyNodeUnavailableError} when the node is not
    * connected.
+   *
+   * `connectionLost` aborts once that API's connection stops being the node's connection (it
+   * was replaced or dropped, or the hold was released). A subscription opened through it then
+   * ends without calling its `onError`, so whoever waits on one listens to this signal too.
    */
   readonly withNode: <T>(
     environmentId: EnvironmentId,
-    call: (api: ProjectCopyNodeApi) => Promise<T>,
+    call: (api: ProjectCopyNodeApi, connectionLost: AbortSignal) => Promise<T>,
   ) => Promise<T>;
   /** Epoch milliseconds. */
   readonly now: () => number;

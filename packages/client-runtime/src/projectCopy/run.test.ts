@@ -1,6 +1,8 @@
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import {
   PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES,
+  PROJECT_IMPORT_LIST_MAX,
   type ProjectExportArtifactKind,
   type ProjectExportResult,
   type ProjectExportStartInput,
@@ -23,9 +25,11 @@ import {
 import type { ProjectCopyJobRecord } from "./jobRecord.ts";
 import { projectCopyPlanWithSendFiles, type ProjectCopyRunPlan } from "./plan.ts";
 import {
+  PROJECT_COPY_IMPORT_LOOKUP_TIMEOUT_MS,
   PROJECT_COPY_MAX_CHUNK_RPCS_PER_NODE,
   PROJECT_COPY_MAX_CHUNKS_IN_MEMORY,
   startProjectCopy,
+  type ProjectCopyOutcome,
   type ProjectCopyProgress,
 } from "./run.ts";
 
@@ -50,22 +54,34 @@ const spec = (kind: ProjectExportArtifactKind, byteLength: number, seed: number)
   sha256: seed.toString(16).padStart(64, "0"),
 });
 
+const allBytes = new Map<string, Uint8Array>();
 const bytesOf = (artifact: ArtifactSpec, offset: number, length: number): Uint8Array => {
-  const bytes = new Uint8Array(length);
-  for (let index = 0; index < length; index += 1) {
-    bytes[index] = ((offset + index) * 7 + artifact.seed) % 251;
+  const key = `${artifact.sha256}:${artifact.byteLength}`;
+  let bytes = allBytes.get(key);
+  if (bytes === undefined) {
+    bytes = new Uint8Array(artifact.byteLength);
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = (index * 7 + artifact.seed) % 251;
+    }
+    allBytes.set(key, bytes);
   }
-  return bytes;
+  return bytes.subarray(offset, offset + length);
 };
 
 const toBase64 = (bytes: Uint8Array): string => {
   let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
+  for (let start = 0; start < bytes.length; start += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+  }
   return btoa(binary);
 };
 
-const fromBase64 = (value: string): Uint8Array =>
-  Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+const fromBase64 = (value: string): Uint8Array => {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+};
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -98,6 +114,8 @@ class FakeNode {
   /** Throws after the node handled the call (the answer was lost). */
   after: (method: string, input: unknown) => void = () => undefined;
   importBehaviour: ImportBehaviour = () => "complete";
+  /** Fails the commit's check of the bytes (as if they arrived damaged). */
+  failCommit: (transferId: string) => boolean = () => false;
   readonly artifacts: Map<ProjectExportArtifactKind, ArtifactSpec>;
   readonly exports = new Map<string, ProjectExportResult>();
   readonly disposed: string[] = [];
@@ -285,11 +303,13 @@ class FakeNode {
       transferCommit: (input) =>
         this.handle("transferCommit", input, () => {
           const transfer = this.transfers.get(input.transferId)!;
-          const artifact = Array.from(TEST_ARTIFACTS.values()).find(
-            (candidate) => candidate.sha256 === transfer.sha256,
+          const artifact = KNOWN_ARTIFACTS.find(
+            (candidate) =>
+              candidate.sha256 === transfer.sha256 && candidate.byteLength === transfer.byteLength,
           )!;
           const expected = bytesOf(artifact, 0, artifact.byteLength);
           if (
+            this.failCommit(input.transferId) ||
             transfer.received !== transfer.byteLength ||
             expected.some((byte, index) => transfer.data[index] !== byte)
           ) {
@@ -360,7 +380,13 @@ class FakeNode {
         const entry = this.imports.get(input.importId);
         let active = true;
         if (!entry) {
-          setTimeout(() => active && options?.onError?.(), 0);
+          setTimeout(() => {
+            if (!active) return;
+            options?.classifyFailure?.(
+              rpcError("not-found", "This node does not know that import."),
+            );
+            options?.onError?.();
+          }, 0);
           return () => {
             active = false;
           };
@@ -385,7 +411,8 @@ class FakeNode {
         this.handle("listImports", input, () => ({
           imports: Array.from(this.imports.values())
             .map((entry) => entry.snapshot)
-            .toReversed(),
+            .toReversed()
+            .slice(0, PROJECT_IMPORT_LIST_MAX),
         })),
     },
   };
@@ -397,6 +424,12 @@ const TEST_ARTIFACTS = new Map<ProjectExportArtifactKind, ArtifactSpec>([
   ["avatar", spec("avatar", 10 * KIB, 37)],
   ["repository-bundle", spec("repository-bundle", 500 * KIB, 41)],
 ]);
+/** Every artifact a fake node may be asked to verify; tests add their own. */
+const KNOWN_ARTIFACTS: ArtifactSpec[] = Array.from(TEST_ARTIFACTS.values());
+const known = (artifact: ArtifactSpec): ArtifactSpec => {
+  KNOWN_ARTIFACTS.push(artifact);
+  return artifact;
+};
 
 // ── A fake IO over two fake nodes ──
 
@@ -414,9 +447,29 @@ class FakeIo implements ProjectCopyIo {
   private clock = 1_000;
 
   readonly nodes: ReadonlyMap<EnvironmentId, FakeNode>;
+  /** Each node's current connection: replacing it ends its subscriptions without a word. */
+  private readonly connections = new Map<EnvironmentId, AbortController>();
 
   constructor(nodes: ReadonlyMap<EnvironmentId, FakeNode>) {
     this.nodes = nodes;
+  }
+
+  private connection(environmentId: EnvironmentId): AbortController {
+    let connection = this.connections.get(environmentId);
+    if (connection === undefined) {
+      connection = new AbortController();
+      this.connections.set(environmentId, connection);
+    }
+    return connection;
+  }
+
+  /**
+   * The node's connection is replaced (a relay renewal, a hidden tab in hosted mode): its
+   * transport is disposed, so its subscriptions stop without calling `onError`.
+   */
+  replaceConnection(environmentId: EnvironmentId) {
+    this.connection(environmentId).abort();
+    this.connections.set(environmentId, new AbortController());
   }
 
   node(environmentId: EnvironmentId): FakeNode {
@@ -447,12 +500,25 @@ class FakeIo implements ProjectCopyIo {
     };
   };
 
-  private wrap(api: ProjectCopyNodeApi): ProjectCopyNodeApi {
+  private wrap(api: ProjectCopyNodeApi, connection: AbortSignal): ProjectCopyNodeApi {
     const projects = api.projects;
     return {
       ...api,
       projects: {
         ...projects,
+        subscribeImport: (input, callback, options) =>
+          projects.subscribeImport!(
+            input,
+            (snapshot) => {
+              if (!connection.aborted) callback(snapshot);
+            },
+            {
+              ...options,
+              onError: () => {
+                if (!connection.aborted) options?.onError?.();
+              },
+            },
+          ),
         exportReadChunk: async (input) => {
           const result = await projects.exportReadChunk!(input);
           this.chunksHeld += 1;
@@ -474,15 +540,25 @@ class FakeIo implements ProjectCopyIo {
     if (this.loseLease(environmentId)) {
       throw new ProjectCopyLeaseLostError(environmentId);
     }
-    return call(this.wrap(this.node(environmentId).api));
+    const { signal } = this.connection(environmentId);
+    return call(this.wrap(this.node(environmentId).api, signal));
   };
 
-  readonly withNode: ProjectCopyIo["withNode"] = async (environmentId, call) =>
-    call(this.wrap(this.node(environmentId).api));
+  readonly withNode: ProjectCopyIo["withNode"] = async (environmentId, call) => {
+    const { signal } = this.connection(environmentId);
+    return call(this.wrap(this.node(environmentId).api, signal), signal);
+  };
 
   readonly now = () => (this.clock += 1);
   readonly uuid = () => `00000000-0000-4000-8000-${(this.ids += 1).toString(16).padStart(12, "0")}`;
-  readonly sleep = async () => {
+  /** Delays pass at once, except a lookup's timeout: that one waits for its signal. */
+  readonly sleep = async (ms: number, signal: AbortSignal) => {
+    if (ms === PROJECT_COPY_IMPORT_LOOKUP_TIMEOUT_MS && !signal.aborted) {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      return;
+    }
     await tick();
   };
 }
@@ -543,6 +619,26 @@ function track() {
 const expectReleased = (io: FakeIo) => {
   for (const count of io.held.values()) expect(count).toBe(0);
 };
+
+/** Resolves once `condition` holds, polling on the macrotask queue. */
+const until = (condition: () => boolean): Promise<void> =>
+  new Promise((resolve) => {
+    const poll = () => {
+      if (condition()) resolve();
+      else setTimeout(poll, 0);
+    };
+    poll();
+  });
+
+/** The copy's outcome, or `"pending"` when it did not settle within `ms` (it hangs). */
+const settleWithin = (
+  done: Promise<ProjectCopyOutcome>,
+  ms = 1_000,
+): Promise<ProjectCopyOutcome | "pending"> =>
+  Promise.race([
+    done,
+    new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), ms)),
+  ]);
 
 describe("startProjectCopy", () => {
   it("exports, uploads in bounded chunks, starts the import and follows it", async () => {
@@ -682,7 +778,9 @@ describe("startProjectCopy", () => {
     const outcome = await startProjectCopy({ io, plan: plan() }).done;
     expect(outcome.progress.phase).toBe("done");
     expect(target.count("importStart")).toBe(1);
-    expect(target.count("listImports")).toBeGreaterThanOrEqual(1);
+    // Looked up by its id (A3), not in the node's list of recent imports.
+    expect(target.count("listImports")).toBe(0);
+    expect(target.count("subscribeImport")).toBeGreaterThanOrEqual(1);
   });
 
   it("resends the same importStart when the target never got it (A3)", async () => {
@@ -897,6 +995,212 @@ describe("startProjectCopy", () => {
     expect(outcome.project?.workspaceRoot).toBeNull();
     expect(io.acquired).toEqual([{ environmentId: TARGET, purpose: "follow" }]);
     expect(target.count("importStart")).toBe(1);
+  });
+
+  it("follows the import on the target's next connection when its connection is replaced", async () => {
+    const { target, io } = setup();
+    target.importBehaviour = () => "hold";
+    const run = startProjectCopy({ io, plan: plan() });
+    await until(
+      () =>
+        run.getProgress().importSnapshot?.status === "running" &&
+        target.count("subscribeImport") > 0,
+    );
+    const { importId } = run.getProgress().importSnapshot!;
+
+    // A relay renewal (or a hidden tab in hosted mode) disposes the transport: the subscription
+    // ends without an error, and the import completes meanwhile.
+    io.replaceConnection(TARGET);
+    target.finishImport(importId, "completed");
+
+    const outcome = await settleWithin(run.done);
+    expect(outcome).not.toBe("pending");
+    expect(outcome).toMatchObject({
+      progress: { phase: "done" },
+      record: { stage: "finished", outcome: "completed" },
+    });
+    expectReleased(io);
+  });
+
+  it("looks a resumed import up by its id, however many imports the target got since (A3)", async () => {
+    const { target, io } = setup();
+    target.importBehaviour = () => "hold";
+    const first = startProjectCopy({ io, plan: plan() });
+    await until(() => first.getProgress().canCloseClient);
+    first.detach();
+    const { record } = await first.done;
+
+    // More imports than the node lists ran there since (other copies, agent imports).
+    const ours = target.imports.get(record.importId)!;
+    for (let index = 0; index < PROJECT_IMPORT_LIST_MAX + 5; index += 1) {
+      const importId = `00000000-0000-4000-8000-${(900 + index).toString().padStart(12, "0")}`;
+      target.imports.set(importId, {
+        input: ours.input,
+        snapshot: { ...ours.snapshot, importId: importId as typeof record.importId },
+      });
+    }
+
+    const resumed = startProjectCopy({ io, plan: null, resume: record });
+    setTimeout(() => target.finishImport(record.importId, "completed"), 5);
+    const outcome = await resumed.done;
+    expect(outcome.progress).toMatchObject({ phase: "done", error: null });
+    expect(target.count("listImports")).toBe(0);
+  });
+
+  it("fails as lost only when the target says it does not know the import", async () => {
+    const { target, io } = setup();
+    target.importBehaviour = () => "hold";
+    const first = startProjectCopy({ io, plan: plan() });
+    await until(() => first.getProgress().canCloseClient);
+    first.detach();
+    const { record } = await first.done;
+    target.imports.delete(record.importId);
+
+    const outcome = await startProjectCopy({ io, plan: null, resume: record }).done;
+    expect(outcome.progress).toMatchObject({
+      phase: "failed",
+      error: { code: "import-lost", retry: null },
+    });
+    expect(outcome.record).toMatchObject({ stage: "finished", outcome: "failed" });
+  });
+
+  it("cancels the import a resumed copy already started on the target", async () => {
+    const { target, io } = setup();
+    target.importBehaviour = () => "hold";
+    const first = startProjectCopy({ io, plan: plan() });
+    await until(() => first.getProgress().canCloseClient);
+    first.detach();
+    const detached = await first.done;
+    // Both answers to importStart were lost: the record never got past `import-requested`.
+    const record: ProjectCopyJobRecord = { ...detached.record, stage: "import-requested" };
+
+    const resumed = startProjectCopy({ io, plan: plan(), resume: record });
+    resumed.cancel();
+    const outcome = await settleWithin(resumed.done);
+    expect(outcome).not.toBe("pending");
+    expect(target.count("cancelImport")).toBe(1);
+    expect(target.imports.get(record.importId)?.snapshot.status).toBe("cancelled");
+    expect(target.count("importStart")).toBe(1);
+    expect(outcome).toMatchObject({
+      progress: { phase: "cancelled", canCloseClient: true },
+      record: { stage: "finished", outcome: "cancelled" },
+    });
+  });
+
+  it("stops a resumed copy the target never got without sending it again", async () => {
+    const { source, target, io } = setup();
+    // importStart never arrives, and its answer never comes back.
+    target.before = (method) => {
+      if (method === "importStart") throw new Error("SocketReadError: ping timeout");
+    };
+    const first = await startProjectCopy({ io, plan: plan() }).done;
+    expect(first.progress.error).toMatchObject({ code: "node-unavailable", retry: "resume" });
+    expect(first.record.stage).toBe("import-requested");
+    expect(target.imports.size).toBe(0);
+    target.before = () => undefined;
+    const sent = target.count("importStart");
+
+    const resumed = startProjectCopy({ io, plan: plan(), resume: first.record });
+    resumed.cancel();
+    const outcome = await resumed.done;
+    expect(outcome).toMatchObject({
+      progress: { phase: "cancelled" },
+      record: { stage: "finished", outcome: "cancelled" },
+    });
+    expect(target.count("importStart")).toBe(sent);
+    expect(target.imports.size).toBe(0);
+    expect(target.aborted).toEqual(first.record.transfers.map((transfer) => transfer.transferId));
+    expect(source.count("exportStart")).toBe(1);
+  });
+
+  it("asks the target again when Cancel is pressed after a cancel that did not get through", async () => {
+    const { target, io } = setup();
+    target.importBehaviour = () => "hold";
+    let refused = false;
+    target.before = (method) => {
+      if (method === "cancelImport" && !refused) {
+        refused = true;
+        throw rpcError("internal", "The node is busy.");
+      }
+    };
+    const run = startProjectCopy({ io, plan: plan() });
+    await until(() => run.getProgress().importSnapshot?.status === "running");
+    run.cancel();
+    await until(() => refused);
+    for (let index = 0; index < 5; index += 1) await tick();
+    expect(target.imports.get(run.getProgress().importSnapshot!.importId)?.snapshot.status).toBe(
+      "running",
+    );
+
+    run.cancel();
+    const outcome = await settleWithin(run.done);
+    expect(outcome).not.toBe("pending");
+    expect(target.count("cancelImport")).toBe(2);
+    expect(outcome).toMatchObject({
+      progress: { phase: "cancelled" },
+      record: { stage: "finished", outcome: "cancelled" },
+    });
+  });
+
+  it("never carries a transfer of an earlier export with a new export's commit", async () => {
+    const { source, target, io } = setup();
+    let restarted = false;
+    source.before = (method, input) => {
+      const { artifactId } = input as { readonly artifactId?: string };
+      if (method === "exportReadChunk" && artifactId === "artifact-avatar" && !restarted) {
+        restarted = true;
+        // The source restarts (its exports are gone); the changes were discarded meanwhile.
+        source.exports.clear();
+        source.artifacts.delete("changes-patch");
+      }
+    };
+    const outcome = await startProjectCopy({ io, plan: plan() }).done;
+    expect(outcome.progress.phase).toBe("done");
+    expect(
+      new Set(source.inputs<ProjectExportStartInput>("exportStart").map((input) => input.exportId))
+        .size,
+    ).toBe(2);
+
+    const [startInput] = target.inputs<ProjectImportStartInput>("importStart");
+    const transferOf = (purpose: ProjectTransferPurpose) =>
+      outcome.record.transfers.find((transfer) => transfer.purpose === purpose)?.transferId;
+    expect(startInput).toMatchObject({
+      commits: { transferId: transferOf("commits-bundle") },
+      changes: null,
+      avatarTransferId: transferOf("avatar"),
+    });
+    // The first export's patch left the record and the target.
+    expect(outcome.record.transfers.map((transfer) => transfer.purpose)).toEqual([
+      "commits-bundle",
+      "avatar",
+    ]);
+    expect(target.aborted).toHaveLength(1);
+    expect(Array.from(target.transfers.values()).map((transfer) => transfer.purpose)).toEqual([
+      "commits-bundle",
+      "avatar",
+    ]);
+  });
+
+  it("counts what it sends again through a relayed node against the Hub's budget (A7)", async () => {
+    const bundle = known(spec("commits-bundle", 13 * KIB * KIB, 53));
+    const { target, io } = setup({ artifacts: [bundle] });
+    io.transports.set(TARGET, "relay");
+    // The first upload does not verify, so the bundle is sent again from the start.
+    let commits = 0;
+    target.failCommit = () => ++commits === 1;
+    const outcome = await startProjectCopy({ io, plan: plan() }).done;
+    expect(outcome.progress).toMatchObject({
+      phase: "failed",
+      error: { code: "too-large", retry: null },
+    });
+    expect(outcome.progress.error?.message).toMatch(/^Too large to send through the Hub/u);
+    const appended = target
+      .inputs<{ readonly dataBase64: string }>("transferAppend")
+      .reduce((sum, input) => sum + atob(input.dataBase64).length, 0);
+    expect(appended).toBeGreaterThan(bundle.byteLength);
+    expect(appended).toBeLessThanOrEqual(PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES);
+    expect(target.count("importStart")).toBe(0);
+    expect(outcome.record).toMatchObject({ stage: "finished", outcome: "failed" });
   });
 
   it("cleans up an upload a reload interrupted when the plan is gone", async () => {
