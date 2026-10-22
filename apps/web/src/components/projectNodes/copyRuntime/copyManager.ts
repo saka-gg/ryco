@@ -37,6 +37,7 @@ import { create } from "zustand";
 
 import { readNodeCatalogSnapshot, subscribeNodeCatalog } from "../../../environments/nodeCatalog";
 import { getLocalStorageItem, setLocalStorageItem } from "../../../hooks/useLocalStorage";
+import { randomUUID } from "../../../lib/utils";
 import { selectProjectByRef, useStore } from "../../../store";
 import {
   markProjectCopiesActive,
@@ -186,12 +187,24 @@ function nodeLabel(environmentId: EnvironmentId | null): string | null {
 type Coordinator = typeof import("@ryco/client-runtime/projectCopy");
 type IoModule = typeof import("./webProjectCopyIo");
 
+/**
+ * Rebuilds an Agent Control copy's plan from its proposal after a reload, so
+ * an upload the app closed during goes on; null when the proposal no longer
+ * runs it (the copy then cleans up and reports `failed`).
+ */
+export type ProjectCopyPlanRebuilder = (
+  record: ProjectCopyJobRecord,
+  context: ProjectCopyAgentControlContext,
+) => Promise<ProjectCopyRunPlan | null>;
+
 /** What the manager needs from the coordinator and the node IO, loaded with the first copy. */
 export interface ProjectCopyRuntime {
   readonly startProjectCopy: Coordinator["startProjectCopy"];
   readonly projectCopyPlanWithSendFiles: Coordinator["projectCopyPlanWithSendFiles"];
   readonly createIo: () => WebProjectCopyIo;
   readonly callNodeWithLease: IoModule["callNodeWithLease"];
+  /** The Agent Control executor's; without it a resumed upload has no plan. */
+  readonly rebuildAgentControlPlan?: ProjectCopyPlanRebuilder;
 }
 
 let runtimeLoad: Promise<ProjectCopyRuntime> | null = null;
@@ -207,6 +220,11 @@ function loadRuntime(): Promise<ProjectCopyRuntime> {
       projectCopyPlanWithSendFiles: coordinator.projectCopyPlanWithSendFiles,
       createIo: () => io.createWebProjectCopyIo(),
       callNodeWithLease: io.callNodeWithLease,
+      // Loaded only when a resumed Agent Control copy needs its plan back.
+      rebuildAgentControlPlan: (record, context) =>
+        import("../agentControlCopyExecutor").then((executor) =>
+          executor.rebuildAgentControlCopyPlan(record, context),
+        ),
     }),
     (error: unknown) => {
       runtimeLoad = null;
@@ -579,11 +597,52 @@ export async function resumeProjectCopy(copyId: string): Promise<ManagedProjectC
   if (live.has(copyId)) return null;
   const record = useProjectCopyStore.getState().records.find((entry) => entry.copyId === copyId);
   if (!record || projectCopyResumeKind(record) === "none") return null;
+  const agentControl = agentControlOf(record);
   return launch({
-    plan: plans.get(copyId) ?? null,
+    plan: await planForResume(record, agentControl),
     resume: record,
-    agentControl: agentControlOf(record),
+    agentControl,
     background: true,
+  });
+}
+
+/**
+ * The plan a resumed copy goes on with: the one still in memory, else, for an
+ * Agent Control copy that needs one (its upload or its import request did not
+ * finish), the plan rebuilt from its proposal while that proposal still runs
+ * it. Null otherwise: the copy then follows an import that started, or cleans
+ * up and fails (reported to Agent Control).
+ */
+async function planForResume(
+  record: ProjectCopyJobRecord,
+  agentControl: ProjectCopyAgentControlContext | null,
+): Promise<ProjectCopyRunPlan | null> {
+  const known = plans.get(record.copyId);
+  if (known) return known;
+  const needsPlan =
+    projectCopyResumeKind(record) === "continue" || record.stage === "import-requested";
+  if (agentControl === null || !needsPlan) return null;
+  try {
+    const rebuild = (await loadRuntime()).rebuildAgentControlPlan;
+    return rebuild ? await rebuild(record, agentControl) : null;
+  } catch (error) {
+    console.warn("Rebuilding an Agent Control copy's plan failed.", error);
+    return null;
+  }
+}
+
+/**
+ * Reports an Agent Control copy that was accepted (`executing`) but never
+ * started here, so the proposal ends now rather than at its deadline.
+ */
+export function reportAgentControlCopyNotStarted(
+  context: ProjectCopyAgentControlContext,
+  message: string,
+): Promise<void> {
+  // Holds the node under a copy id of its own: no copy of this proposal exists.
+  return reportToAgentControl(randomUUID(), context, {
+    outcome: "failed",
+    error: boundedMessage(message) ?? "The copy did not start.",
   });
 }
 
@@ -642,8 +701,9 @@ let resumedAtStart = false;
 /**
  * At app start: picks up every unfinished copy from its record, once its nodes
  * are known here. An import that already started is followed to its end (and an
- * Agent Control copy reports how it ended); an upload the app closed during
- * cannot go on without its plan, so it cleans up and fails. Runs once.
+ * Agent Control copy reports how it ended). An upload the app closed during
+ * goes on when an Agent Control copy's plan can be rebuilt from its proposal
+ * (still `executing`); otherwise it cleans up and fails. Runs once.
  */
 export async function resumeProjectCopies(): Promise<void> {
   if (resumedAtStart) return;
@@ -654,14 +714,16 @@ export async function resumeProjectCopies(): Promise<void> {
     records
       .filter((record) => projectCopyResumeKind(record) !== "none" && !live.has(record.copyId))
       .map(async (record) => {
+        const agentControl = agentControlOf(record);
         const nodes = [record.targetEnvironmentId];
         if (record.sourceEnvironmentId !== null) nodes.push(record.sourceEnvironmentId);
+        if (agentControl !== null) nodes.push(agentControl.environmentId);
         if (!(await waitForNodes(nodes))) return;
         try {
           await launch({
-            plan: null,
+            plan: await planForResume(record, agentControl),
             resume: record,
-            agentControl: agentControlOf(record),
+            agentControl,
             background: true,
           });
         } catch (error) {

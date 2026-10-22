@@ -70,6 +70,7 @@ export function AgentControlThreadActivity({
               <AgentControlProposalCard
                 key={proposal.proposalId}
                 model={buildAgentControlProposalCardModel(proposal, getThreadTitle)}
+                proposal={proposal}
                 environmentId={environmentId}
                 getThreadTitle={getThreadTitle}
                 isSubmitting={submittingIds.includes(proposal.proposalId)}

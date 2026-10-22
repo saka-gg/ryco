@@ -1,17 +1,67 @@
 // FILE: agentControlCopyExecutor.ts
 // Purpose: The Agent Control client executor for `copyProjectToNode`
 //          proposals: decides whether this client can run a proposal's copy
-//          against its target, and approving accepts with `executeOnClient`
-//          and runs the copy through `copyRuntime/copyManager` (which reports
-//          `started` / `completed` / `failed` to the proposal's node).
+//          against its target, resolves what approving would do there for the
+//          card to show first (the folder, the setup thread's model), and
+//          approving accepts with `executeOnClient`, waits until the node runs
+//          the proposal (`executing`) and runs the copy through
+//          `copyRuntime/copyManager`, which reports `started` / `completed` /
+//          `failed` to the proposal's node. After a reload it rebuilds the plan
+//          of a copy whose upload was cut off.
 // Layer: Web, loaded on demand by `agent-control/agentControlClientExecutor`
 //        (`useAgentControlClientExecutor`) the first time a card asks whether
-//        it can approve a client-executed proposal; never in the app shell's
-//        static graph. Stub until the executor work replaces it: it can execute
-//        nothing, so every such card keeps "Approve in Ryco on a computer
-//        connected to <target>".
+//        it can approve a client-executed proposal, and by the copy runtime
+//        when it resumes one; never in the app shell's static graph. The
+//        planning, node acquisition and copy runtime load on first use.
 
-import type { AgentControlClientExecutor } from "../agent-control/agentControlClientExecutor";
+import { agentControlClientExecutorRequiredLabel } from "@ryco/client-runtime/state/agentControl";
+import {
+  projectCopyNodeRefusal,
+  type AcquiredNode,
+  type NodeCatalogSnapshot,
+} from "@ryco/client-runtime/state/nodes";
+import {
+  AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES,
+  AgentControlClientExecutorId,
+  ExecutionEnvironmentPlatformOs,
+  type AgentControlCopyProjectTarget,
+  type AgentControlCopyProjectToNodePlan,
+  type AgentControlProposalId,
+  type AgentControlProposalReceiptView,
+  type AgentControlProposalStatus,
+  type AgentControlProposalView,
+  type EnvironmentApi,
+  type EnvironmentId,
+  type ProjectId,
+  type ServerConfig,
+} from "@ryco/contracts";
+import type { ProjectCopyJobRecord, ProjectCopyRunPlan } from "@ryco/client-runtime/projectCopy";
+import * as Schema from "effect/Schema";
+
+import { isHostedHubMode } from "../../env";
+import { readEnvironmentApi } from "../../environmentApi";
+import { readNodeCatalogSnapshot, subscribeNodeCatalog } from "../../environments/nodeCatalog";
+import { readNodeServerConfig } from "../../environments/nodeServerConfig";
+import {
+  getPresentationTier,
+  subscribeToPresentationTier,
+  type PresentationTier,
+} from "../../lib/presentationTier";
+import { randomUUID } from "../../lib/utils";
+import { selectProjectByRef, useStore } from "../../store";
+import type {
+  AgentControlClientExecutionInput,
+  AgentControlClientExecutionPreview,
+  AgentControlClientExecutionPreviewState,
+  AgentControlClientExecutionPreviews,
+  AgentControlClientExecutor,
+} from "../agent-control/agentControlClientExecutor";
+import type { AgentControlCopyResolution } from "./agentControlCopyPlan";
+import type {
+  ManagedProjectCopy,
+  ProjectCopyAgentControlContext,
+  StartProjectCopyOptions,
+} from "./copyRuntime/copyManager";
 
 /**
  * The app's executor, as `useAgentControlClientExecutor` reads it: it re-reads
@@ -24,15 +74,513 @@ export interface AgentControlCopyExecutorSource {
   readonly subscribe: (listener: () => void) => () => void;
 }
 
-const UNAVAILABLE_EXECUTOR: AgentControlClientExecutor = {
-  canExecute: () => false,
-  approve: () => Promise.reject(new Error("Approving this request here is not available yet.")),
-};
+/** What the executor reads and calls; the app's by default, fakes in tests. */
+export interface AgentControlCopyExecutorDeps {
+  readonly readCatalog: () => NodeCatalogSnapshot;
+  readonly subscribeCatalog: (listener: () => void) => () => void;
+  readonly readTier: () => PresentationTier;
+  readonly subscribeTier: (listener: () => void) => () => void;
+  readonly isHosted: () => boolean;
+  /** Holds a node to read from it (`acquireNode`, purpose `follow`); the caller releases it. */
+  readonly acquireForRead: (environmentId: EnvironmentId, copyId: string) => Promise<AcquiredNode>;
+  /** The node's server config: what its connection reported, else read from `node`. */
+  readonly readServerConfig: (
+    environmentId: EnvironmentId,
+    node: AcquiredNode,
+  ) => Promise<ServerConfig | null>;
+  /** The project's `updatedAt` as this client last saw it; null when it does not know. */
+  readonly readProjectUpdatedAt: (
+    environmentId: EnvironmentId,
+    projectId: ProjectId,
+  ) => string | null;
+  readonly readAgentControlApi: (environmentId: EnvironmentId) => EnvironmentApi["agentControl"];
+  /**
+   * Follows one proposal on its node's proposal stream (as the snapshot has it,
+   * then every change); the returned function stops following.
+   */
+  readonly followProposal: (
+    environmentId: EnvironmentId,
+    proposalId: AgentControlProposalId,
+    onProposal: (proposal: AgentControlProposalView) => void,
+  ) => () => void;
+  readonly startCopy: (options: StartProjectCopyOptions) => Promise<ManagedProjectCopy>;
+  readonly reportNotStarted: (
+    context: ProjectCopyAgentControlContext,
+    message: string,
+  ) => Promise<void>;
+  readonly uuid: () => string;
+  /** How long approving waits for the node to run the proposal. */
+  readonly executingTimeoutMs: number;
+}
+
+const EXECUTING_TIMEOUT_MS = 30_000;
+
+function appDeps(): AgentControlCopyExecutorDeps {
+  return {
+    readCatalog: readNodeCatalogSnapshot,
+    subscribeCatalog: subscribeNodeCatalog,
+    readTier: getPresentationTier,
+    subscribeTier: subscribeToPresentationTier,
+    isHosted: isHostedHubMode,
+    acquireForRead: async (environmentId, copyId) =>
+      (await import("../../environments/acquireNode")).acquireNode(environmentId, {
+        copyId,
+        purpose: "follow",
+      }),
+    readServerConfig: async (environmentId, node) => {
+      const cached = readNodeServerConfig(environmentId);
+      if (cached) return cached;
+      const getConfig = node.api.server?.getConfig;
+      return getConfig ? getConfig().catch(() => null) : null;
+    },
+    readProjectUpdatedAt: (environmentId, projectId) =>
+      selectProjectByRef(useStore.getState(), { environmentId, projectId })?.updatedAt ?? null,
+    readAgentControlApi: (environmentId) => readEnvironmentApi(environmentId)?.agentControl,
+    // Its own subscription, for the moments approving waits: the app's shared
+    // proposal store stays out of this chunk (and the app shell's file count).
+    followProposal: (environmentId, proposalId, onProposal) => {
+      const subscribe = readEnvironmentApi(environmentId)?.agentControl?.subscribeProposals;
+      if (!subscribe) return () => undefined;
+      return subscribe((event) => {
+        const proposal =
+          event.type === "snapshot"
+            ? [...event.queue.active, ...event.queue.recent].find(
+                (entry) => entry.proposalId === proposalId,
+              )
+            : event.proposal.proposalId === proposalId
+              ? event.proposal
+              : undefined;
+        if (proposal) onProposal(proposal);
+      });
+    },
+    startCopy: async (options) =>
+      (await import("./copyRuntime/copyManager")).startManagedProjectCopy(options),
+    reportNotStarted: async (context, message) =>
+      (await import("./copyRuntime/copyManager")).reportAgentControlCopyNotStarted(
+        context,
+        message,
+      ),
+    uuid: randomUUID,
+    executingTimeoutMs: EXECUTING_TIMEOUT_MS,
+  };
+}
+
+// ── Shared rules ──
+
+const isPlatformOs = Schema.is(ExecutionEnvironmentPlatformOs);
+const TERMINAL_STATUSES: ReadonlySet<AgentControlProposalStatus> = new Set(
+  AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES,
+);
+
+function copyPlanOf(proposal: AgentControlProposalView): AgentControlCopyProjectToNodePlan {
+  if (proposal.plan.kind !== "copyProjectToNode") {
+    throw new Error("This request is not one this app runs.");
+  }
+  return proposal.plan;
+}
+
+/**
+ * Whether this client can run a copy against `target`: never on the phone
+ * tier (A2(4)); otherwise the target must be in this client's own catalog
+ * (A24), not refuse copies, and be a node this client may write to or try to
+ * connect to (`projectCopyNodeRefusal`, the rule acquiring it applies).
+ */
+export function canExecuteAgentControlCopy(
+  deps: Pick<AgentControlCopyExecutorDeps, "readCatalog" | "readTier" | "isHosted">,
+  target: AgentControlCopyProjectTarget,
+): boolean {
+  if (deps.readTier() === "phone") return false;
+  const catalog = deps.readCatalog();
+  const node = catalog.nodes.find((entry) => entry.environmentId === target.environmentId);
+  if (!node || node.projectCopySupport === "no") return false;
+  return (
+    projectCopyNodeRefusal(node, {
+      hosted: deps.isHosted(),
+      owner: catalog.ownerEnvironmentIds.has(node.environmentId),
+    }) === null
+  );
+}
+
+/** A resolution, and whether it failed because a node did not answer. */
+type ExecutorResolution = AgentControlCopyResolution & { readonly unreachable?: boolean };
+
+const unresolved = (
+  targetLabel: string,
+  problem: string,
+  unreachable = false,
+): ExecutorResolution => ({
+  ok: false,
+  preview: { targetLabel, destination: null, followUpModel: null, problem },
+  unreachable,
+});
+
+const errorMessage = (error: unknown, fallback: string): string =>
+  error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
+
+/**
+ * Reads the proposal's two nodes and plans its copy (`agentControlCopyPlan`):
+ * the target is resolved in this client's own catalog only (A24), and a
+ * project source must not have changed since the agent asked.
+ */
+async function resolveAgentControlCopyWith(
+  deps: AgentControlCopyExecutorDeps,
+  input: AgentControlClientExecutionInput,
+): Promise<ExecutorResolution> {
+  const { environmentId, proposal } = input;
+  const plan = copyPlanOf(proposal);
+  const target = plan.target;
+  const catalog = deps.readCatalog();
+  const targetEntry = catalog.nodes.find((node) => node.environmentId === target.environmentId);
+  if (!targetEntry) {
+    return unresolved(target.label, `${target.label} is not a device Ryco knows here.`, true);
+  }
+  const sourceEntry = catalog.nodes.find((node) => node.environmentId === environmentId);
+  const sourceLabel = sourceEntry?.label ?? "the agent's device";
+  if (plan.source.kind === "project") {
+    // The node checks this again on accept; a project already newer here fails early.
+    const updatedAt = deps.readProjectUpdatedAt(environmentId, plan.source.projectId);
+    if (updatedAt !== null && Date.parse(updatedAt) > Date.parse(plan.source.expectedUpdatedAt)) {
+      return unresolved(
+        target.label,
+        `${plan.source.title} changed on ${sourceLabel} since the agent asked. Ask it again.`,
+      );
+    }
+  }
+
+  const planner = await import("./agentControlCopyPlan");
+  const copyId = deps.uuid();
+  const [targetHold, sourceHold] = await Promise.allSettled([
+    deps.acquireForRead(target.environmentId, copyId),
+    plan.source.kind === "project" ? deps.acquireForRead(environmentId, copyId) : null,
+  ]);
+  const holds = [targetHold, sourceHold].flatMap((hold) =>
+    hold.status === "fulfilled" && hold.value !== null ? [hold.value] : [],
+  );
+  try {
+    if (targetHold.status === "rejected") {
+      return unresolved(
+        target.label,
+        errorMessage(targetHold.reason, `${target.label} did not answer.`),
+        true,
+      );
+    }
+    if (sourceHold.status === "rejected") {
+      return unresolved(
+        target.label,
+        errorMessage(sourceHold.reason, `${sourceLabel} did not answer.`),
+        true,
+      );
+    }
+    const targetNode = targetHold.value;
+    const sourceNode = sourceHold.value;
+    // Connected now, the node's own descriptor says whether it copies.
+    const support =
+      deps.readCatalog().nodes.find((node) => node.environmentId === target.environmentId)
+        ?.projectCopySupport ?? targetEntry.projectCopySupport;
+    return await planner.resolveAgentControlCopy({
+      plan,
+      proposalId: proposal.proposalId,
+      source: {
+        environmentId,
+        label: sourceLabel,
+        platformOs: isPlatformOs(sourceEntry?.platformOs) ? sourceEntry.platformOs : null,
+        transport: sourceNode?.transport ?? sourceEntry?.transport ?? null,
+        api: sourceNode?.api ?? null,
+      },
+      target: {
+        environmentId: target.environmentId,
+        label: target.label,
+        platformOs: isPlatformOs(targetEntry.platformOs) ? targetEntry.platformOs : null,
+        transport: targetNode.transport,
+        api: targetNode.api,
+        projectCopySupport:
+          support === "no" ? "no" : targetNode.api.projects.pathHints ? "yes" : "no",
+      },
+      readTargetConfig: () => deps.readServerConfig(target.environmentId, targetNode),
+    });
+  } catch (error) {
+    return unresolved(target.label, errorMessage(error, `${target.label} did not answer.`), true);
+  } finally {
+    for (const hold of holds) hold.release();
+  }
+}
+
+/**
+ * Resolves once the node runs the proposal (`executing`), as its accept
+ * receipt or its proposal stream says first. A terminal status fails with the
+ * node's reason; after the timeout the node is asked once, and a proposal a
+ * crash left `approved` is accepted again with the same executor, which makes
+ * the node finish binding it (A1(2)).
+ */
+async function waitForExecuting(
+  deps: AgentControlCopyExecutorDeps,
+  input: {
+    readonly environmentId: EnvironmentId;
+    readonly proposalId: AgentControlProposalId;
+    readonly receipt: AgentControlProposalReceiptView;
+    readonly api: NonNullable<EnvironmentApi["agentControl"]>;
+    readonly executorId: AgentControlClientExecutorId;
+  },
+): Promise<void> {
+  const { environmentId, proposalId } = input;
+  const settled = (
+    status: AgentControlProposalStatus,
+    result: AgentControlProposalReceiptView["result"],
+  ): "executing" | Error | null => {
+    if (status === "executing") return "executing";
+    if (!TERMINAL_STATUSES.has(status)) return null;
+    return new Error(
+      result?.outcome === "failed"
+        ? result.error.message
+        : `The request was ${status} before the copy could start.`,
+    );
+  };
+  let outcome = settled(input.receipt.status, input.receipt.result);
+  if (outcome === null) {
+    outcome = await new Promise<"executing" | Error | null>((resolve) => {
+      let finished = false;
+      let stop: (() => void) | null = null;
+      const finish = (value: "executing" | Error | null) => {
+        if (finished) return;
+        finished = true;
+        globalThis.clearTimeout(timer);
+        stop?.();
+        resolve(value);
+      };
+      const timer = globalThis.setTimeout(() => finish(null), deps.executingTimeoutMs);
+      const unsubscribe = deps.followProposal(environmentId, proposalId, (proposal) => {
+        const next = settled(proposal.status, proposal.result);
+        if (next !== null) finish(next);
+      });
+      // The stream may have answered while subscribing.
+      if (finished) unsubscribe();
+      else stop = unsubscribe;
+    });
+  }
+  if (outcome === null) {
+    // The stream said nothing in time: ask the node, finishing a bind a crash cut short.
+    const current = (await input.api.getProposal({ proposalId })).proposal;
+    if (current?.status === "approved") {
+      const again = await input.api.acceptProposal({
+        proposalId,
+        executeOnClient: { executorId: input.executorId },
+      });
+      outcome = settled(again.status, again.result);
+    } else if (current) {
+      outcome = settled(current.status, current.result);
+    }
+  }
+  if (outcome === "executing") return;
+  throw outcome ?? new Error("The request did not start in time. Check it on its device.");
+}
+
+// ── Executor ──
 
 /** Called once, the first time the executor is needed; lives for the app's lifetime. */
-export function startAgentControlCopyExecutor(): AgentControlCopyExecutorSource {
-  return {
-    getExecutor: () => UNAVAILABLE_EXECUTOR,
-    subscribe: () => () => undefined,
+export function startAgentControlCopyExecutor(
+  overrides: Partial<AgentControlCopyExecutorDeps> = {},
+): AgentControlCopyExecutorSource {
+  const deps: AgentControlCopyExecutorDeps = { ...appDeps(), ...overrides };
+  const listeners = new Set<() => void>();
+
+  // ── Previews ──
+  interface PreviewEntry {
+    readonly state: AgentControlClientExecutionPreviewState;
+    /**
+     * Set when the target did not answer: the preview is resolved again once
+     * the target comes online (not on every change, so a node that keeps
+     * failing is not asked in a loop).
+     */
+    readonly retry: { readonly target: EnvironmentId; readonly wasOnline: boolean } | null;
+  }
+  const previewEntries = new Map<AgentControlProposalId, PreviewEntry>();
+  const previewListeners = new Set<() => void>();
+  const notifyPreviews = () => {
+    for (const listener of Array.from(previewListeners)) listener();
   };
+  const setPreview = (proposalId: AgentControlProposalId, entry: PreviewEntry | null) => {
+    if (entry === null) previewEntries.delete(proposalId);
+    else previewEntries.set(proposalId, entry);
+    notifyPreviews();
+  };
+  const isOnline = (environmentId: EnvironmentId) =>
+    deps
+      .readCatalog()
+      .nodes.some((node) => node.environmentId === environmentId && node.presence === "online");
+  const ready = (
+    preview: AgentControlClientExecutionPreview,
+    proposal: AgentControlProposalView,
+    unreachable: boolean | undefined,
+  ): PreviewEntry => {
+    const target =
+      unreachable === true && proposal.plan.kind === "copyProjectToNode"
+        ? proposal.plan.target.environmentId
+        : null;
+    return {
+      state: { status: "ready", preview },
+      retry: target === null ? null : { target, wasOnline: isOnline(target) },
+    };
+  };
+
+  const previews: AgentControlClientExecutionPreviews = {
+    load: (input) => {
+      const { proposalId } = input.proposal;
+      if (previewEntries.has(proposalId)) return;
+      const entry: PreviewEntry = { state: { status: "loading" }, retry: null };
+      setPreview(proposalId, entry);
+      void resolveAgentControlCopyWith(deps, input)
+        .catch((error: unknown) =>
+          unresolved(
+            input.proposal.plan.kind === "copyProjectToNode"
+              ? input.proposal.plan.target.label
+              : "the target",
+            errorMessage(error, "The target did not answer."),
+          ),
+        )
+        .then((resolution) => {
+          // A newer load or an approval replaced it meanwhile.
+          if (previewEntries.get(proposalId) !== entry) return;
+          setPreview(proposalId, ready(resolution.preview, input.proposal, resolution.unreachable));
+        });
+    },
+    read: (proposalId) => previewEntries.get(proposalId)?.state ?? null,
+    subscribe: (listener) => {
+      previewListeners.add(listener);
+      return () => {
+        previewListeners.delete(listener);
+      };
+    },
+  };
+
+  /** Drops the previews whose target did not answer and is online now, to resolve them again. */
+  const dropReachablePreviews = () => {
+    let dropped = false;
+    for (const [proposalId, entry] of previewEntries) {
+      if (entry.retry !== null && !entry.retry.wasOnline && isOnline(entry.retry.target)) {
+        previewEntries.delete(proposalId);
+        dropped = true;
+      }
+    }
+    if (dropped) notifyPreviews();
+  };
+
+  // ── Approving ──
+  const canExecute = (target: AgentControlCopyProjectTarget) =>
+    canExecuteAgentControlCopy(deps, target);
+
+  const approve = async (input: AgentControlClientExecutionInput): Promise<void> => {
+    const { environmentId, proposal } = input;
+    const { proposalId } = proposal;
+    const plan = copyPlanOf(proposal);
+    if (proposal.status !== "pending-user-approval") {
+      throw new Error("This request is no longer waiting for approval.");
+    }
+    if (!canExecute(plan.target)) {
+      throw new Error(agentControlClientExecutorRequiredLabel(plan.target));
+    }
+    const shown = previews.read(proposalId);
+    const resolution = await resolveAgentControlCopyWith(deps, input);
+    setPreview(proposalId, ready(resolution.preview, proposal, resolution.unreachable));
+    if (!resolution.ok) {
+      throw new Error(resolution.preview.problem ?? "The copy can't run as asked.");
+    }
+    // The user approves what the card showed; anything else is shown first.
+    const { sameAgentControlCopyPreview } = await import("./agentControlCopyPlan");
+    if (
+      shown?.status !== "ready" ||
+      !sameAgentControlCopyPreview(shown.preview, resolution.preview)
+    ) {
+      throw new Error(
+        `Check where the copy goes on ${plan.target.label} (updated above), then approve again.`,
+      );
+    }
+
+    const api = deps.readAgentControlApi(environmentId);
+    if (!api) throw new Error("The agent's device is not connected here.");
+    const executorId = AgentControlClientExecutorId.make(deps.uuid());
+    const receipt = await api.acceptProposal({ proposalId, executeOnClient: { executorId } });
+    await waitForExecuting(deps, { environmentId, proposalId, receipt, api, executorId });
+    const context: ProjectCopyAgentControlContext = { environmentId, proposalId, executorId };
+    try {
+      await deps.startCopy({ plan: resolution.runPlan, agentControl: context });
+    } catch (error) {
+      const message = errorMessage(error, "The copy did not start.");
+      await deps.reportNotStarted(context, message);
+      throw new Error(message, { cause: error });
+    }
+    setPreview(proposalId, null);
+  };
+
+  // ── Generations ──
+  let tier = deps.readTier();
+  let catalog = deps.readCatalog();
+  let executor: AgentControlClientExecutor = { canExecute, approve, previews };
+  const refresh = () => {
+    const nextTier = deps.readTier();
+    const nextCatalog = deps.readCatalog();
+    if (nextTier === tier && nextCatalog === catalog) return;
+    tier = nextTier;
+    catalog = nextCatalog;
+    // `canExecute` reads the catalog when called; a new object makes the cards ask again.
+    executor = { canExecute, approve, previews };
+    dropReachablePreviews();
+    for (const listener of Array.from(listeners)) listener();
+  };
+  deps.subscribeCatalog(refresh);
+  deps.subscribeTier(refresh);
+
+  return {
+    getExecutor: () => executor,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+// ── Resume ──
+
+/**
+ * After a reload: the plan of an Agent Control copy whose upload (or import
+ * request) did not finish, rebuilt from its proposal while the node still runs
+ * it (`executing`, the same target). Null otherwise, and the copy then cleans
+ * up and reports `failed`.
+ */
+export async function rebuildAgentControlCopyPlanWith(
+  deps: AgentControlCopyExecutorDeps,
+  record: ProjectCopyJobRecord,
+  context: ProjectCopyAgentControlContext,
+): Promise<ProjectCopyRunPlan | null> {
+  const hold = await deps.acquireForRead(context.environmentId, deps.uuid());
+  let proposal: AgentControlProposalView | null;
+  try {
+    const getProposal = hold.api.agentControl?.getProposal;
+    if (!getProposal) return null;
+    proposal = (await getProposal({ proposalId: context.proposalId })).proposal;
+  } finally {
+    hold.release();
+  }
+  if (
+    proposal === null ||
+    proposal.status !== "executing" ||
+    proposal.plan.kind !== "copyProjectToNode" ||
+    proposal.plan.target.environmentId !== record.targetEnvironmentId
+  ) {
+    return null;
+  }
+  const resolution = await resolveAgentControlCopyWith(deps, {
+    environmentId: context.environmentId,
+    proposal,
+  });
+  return resolution.ok ? resolution.runPlan : null;
+}
+
+/** `copyManager`'s rebuild for resumed Agent Control copies, with the app's reads. */
+export function rebuildAgentControlCopyPlan(
+  record: ProjectCopyJobRecord,
+  context: ProjectCopyAgentControlContext,
+): Promise<ProjectCopyRunPlan | null> {
+  return rebuildAgentControlCopyPlanWith(appDeps(), record, context);
 }

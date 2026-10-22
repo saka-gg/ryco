@@ -430,4 +430,44 @@ describe("copyManager", () => {
       expect.objectContaining({ onRetry: undefined }),
     );
   });
+
+  it("resumes an Agent Control upload with the plan rebuilt from its proposal", async () => {
+    const now = Date.now();
+    const rebuilt = { ...plan, title: "ryco (rebuilt)" } as ProjectCopyRunPlan;
+    const rebuild = vi.fn(async (stored: ProjectCopyJobRecord) =>
+      stored.copyId === "copy-upload" ? rebuilt : null,
+    );
+    setProjectCopyRuntimeForTests({ ...fake.runtime, rebuildAgentControlPlan: rebuild });
+    const upload = record({ copyId: "copy-upload", stage: "upload", agentControl, updatedAt: now });
+    // Its proposal no longer runs: no plan, so the copy cleans up and reports `failed`.
+    const ended = record({ copyId: "copy-ended", stage: "export", agentControl, updatedAt: now });
+    // An import that started is followed; it needs no plan.
+    const importing = record({
+      copyId: "copy-importing",
+      stage: "importing",
+      agentControl,
+      updatedAt: now,
+    });
+    setLocalStorageItem(
+      PROJECT_COPY_RECORDS_STORAGE_KEY,
+      [upload, ended, importing],
+      Schema.Unknown,
+    );
+
+    await resumeProjectCopies();
+
+    expect(rebuild.mock.calls.map(([stored]) => stored.copyId).toSorted()).toEqual([
+      "copy-ended",
+      "copy-upload",
+    ]);
+    expect(rebuild).toHaveBeenCalledWith(upload, agentControl);
+    const inputs = new Map(fake.runs.map((run) => [run.input.resume?.copyId, run.input]));
+    expect(inputs.get("copy-upload")).toMatchObject({ plan: rebuilt, agentControl });
+    expect(inputs.get("copy-ended")).toMatchObject({ plan: null, agentControl });
+    expect(inputs.get("copy-importing")).toMatchObject({ plan: null, agentControl });
+    expect(useProjectCopyStore.getState().entries["copy-upload"]).toMatchObject({
+      title: "ryco (rebuilt)",
+      hasPlan: true,
+    });
+  });
 });

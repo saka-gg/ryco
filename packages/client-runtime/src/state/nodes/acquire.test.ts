@@ -8,6 +8,7 @@ import {
   NODE_ACQUIRE_TIMEOUT_MS,
   NODE_SCOPE_RENEW_INTERVAL_MS,
   NodeAcquireError,
+  projectCopyNodeRefusal,
   type NodeAcquireConnection,
   type NodeAcquirePorts,
   type ProjectCopyConnectionScope,
@@ -284,5 +285,42 @@ describe("acquireNodeConnection", () => {
       }),
     ).rejects.toBeInstanceOf(TypeError);
     expect(hold.scopes).toEqual([]);
+  });
+});
+
+describe("projectCopyNodeRefusal", () => {
+  const node = {
+    label: "Mac mini",
+    canMutate: true,
+    presence: "online",
+    mutateBlockedReason: null,
+  } as const;
+
+  it("refuses a reachable node that takes no changes, and the Hub without owner access", () => {
+    expect(projectCopyNodeRefusal(node, { hosted: false, owner: false })).toBeNull();
+    expect(
+      projectCopyNodeRefusal(
+        { ...node, canMutate: false, mutateBlockedReason: "Update Ryco on Mac mini" },
+        { hosted: false, owner: false },
+      ),
+    ).toBe("Update Ryco on Mac mini");
+    expect(
+      projectCopyNodeRefusal({ ...node, canMutate: false }, { hosted: false, owner: false }),
+    ).toBe("Mac mini is not available right now");
+    expect(projectCopyNodeRefusal(node, { hosted: true, owner: false })).toBe(
+      "Copying projects with Mac mini needs owner access to it",
+    );
+    expect(projectCopyNodeRefusal(node, { hosted: true, owner: true })).toBeNull();
+  });
+
+  it("lets an offline or connecting node be tried", () => {
+    for (const presence of ["offline", "connecting"] as const) {
+      expect(
+        projectCopyNodeRefusal(
+          { ...node, presence, canMutate: false },
+          { hosted: false, owner: false },
+        ),
+      ).toBeNull();
+    }
   });
 });

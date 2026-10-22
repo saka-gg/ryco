@@ -27,6 +27,7 @@ import {
 import { syncServerShellSnapshot, useStore } from "../../store";
 import {
   AgentControlClientExecutorContext,
+  type AgentControlClientExecutionPreviewState,
   type AgentControlClientExecutor,
 } from "../agent-control/agentControlClientExecutor";
 import { DelegationDock } from "./DelegationDock";
@@ -350,6 +351,103 @@ describe("DelegationDock", () => {
       expect(fixture.acceptProposal).not.toHaveBeenCalled();
     } finally {
       await withExecutor.unmount();
+    }
+  });
+
+  it("shows where a copy lands on its target before Approve, in full behind Details", async () => {
+    seed([shell("coordinator", "Coordinator")]);
+    const copy = proposal("copy", {
+      status: "pending-user-approval",
+      decidedAt: null,
+      promptSummary: null,
+      riskTags: ["creates-project", "cross-node", "runs-commands"],
+      plan: {
+        kind: "copyProjectToNode",
+        source: {
+          kind: "project",
+          projectId: "project-1",
+          title: "ryco",
+          expectedUpdatedAt: "2026-10-01T00:00:00.000Z",
+        },
+        target: { environmentId: "env-mac-mini", label: "Mac mini" },
+        destination: { kind: "default" },
+        bringCommits: false,
+        bringChanges: false,
+        copySettings: true,
+        setup: { command: "bun install", saveAsScript: false },
+        followUpThread: {
+          title: "Finish setting up ryco",
+          prompt: "Install the toolchain and run the tests.",
+          runtimeMode: "approval-required",
+          envMode: "local",
+          modelSelection: null,
+        },
+      },
+    });
+    seedQueue([copy]);
+    let state: AgentControlClientExecutionPreviewState | null = null;
+    const listeners = new Set<() => void>();
+    const show = (next: AgentControlClientExecutionPreviewState) => {
+      state = next;
+      for (const listener of listeners) listener();
+    };
+    const load = vi.fn(() => show({ status: "loading" }));
+    const executor: AgentControlClientExecutor = {
+      canExecute: () => true,
+      approve: vi.fn().mockResolvedValue(undefined),
+      previews: {
+        load,
+        read: () => state,
+        subscribe: (listener) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      },
+    };
+    const mounted = await render(
+      <AgentControlClientExecutorContext.Provider value={executor}>
+        <DelegationDock environmentId={ENV} threadId={COORDINATOR} />
+      </AgentControlClientExecutorContext.Provider>,
+    );
+    try {
+      await expect.element(page.getByText("Checking Mac mini…")).toBeVisible();
+      expect(load).toHaveBeenCalledWith({ environmentId: ENV, proposal: copy });
+
+      show({
+        status: "ready",
+        preview: {
+          targetLabel: "Mac mini",
+          destination: {
+            path: "/Users/me/Code/ryco",
+            tag: "new folder",
+            note: "Mac mini's code directory.",
+          },
+          followUpModel: "Opus 5.5 · Claude",
+          problem: null,
+        },
+      });
+      const line = page.getByTestId("agent-control-execution-preview");
+      await expect
+        .element(line)
+        .toMatchTextContent(/To\s*\/Users\/me\/Code\/ryco\s*on Mac mini · new folder/);
+      await expect.element(line).toMatchTextContent(/Setup thread: Opus 5\.5 · Claude/);
+
+      // Details shows the whole preview in the card, in place of the line.
+      await page.getByRole("button", { name: "Details" }).click();
+      const block = page.getByTestId("agent-control-execution-preview");
+      await expect.element(block).toMatchTextContent(/On Mac mini/);
+      await expect.element(block).toMatchTextContent(/Mac mini's code directory\./);
+      expect(block.elements()).toHaveLength(1);
+      expect(load).toHaveBeenCalledTimes(1);
+
+      await page.getByRole("button", { name: "Approve", exact: true }).click();
+      await expect
+        .poll(() => executor.approve)
+        .toHaveBeenCalledWith({ environmentId: ENV, proposal: copy });
+    } finally {
+      await mounted.unmount();
     }
   });
 

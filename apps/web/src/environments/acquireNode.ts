@@ -1,6 +1,7 @@
 import {
   acquireNodeConnection,
   NODE_ACQUIRE_TIMEOUT_MESSAGE,
+  projectCopyNodeRefusal,
   type AcquiredNode,
   type NodeAcquireConnection,
   type NodeAcquirePorts,
@@ -182,17 +183,10 @@ export async function acquireNode(
   // An id this client does not know is refused, never guessed at.
   if (!node) throw new Error("This device is not one Ryco knows here.");
   const owner = catalog.ownerEnvironmentIds.has(environmentId);
-  // Following only reads; the checks below guard the copy's writes.
+  // Following only reads; the refusal guards the copy's writes.
   if (purpose === "copy") {
-    // A reachable node that refuses changes stays refused once connected; an
-    // offline or connecting one is worth connecting to find out.
-    if (!node.canMutate && node.presence === "online") {
-      throw new Error(node.mutateBlockedReason ?? `${node.label} is not available right now`);
-    }
-    // Through the Hub, writes need the node's mutation lease, which only an owner gets.
-    if (isHostedHubMode() && !owner) {
-      throw new Error(`Copying projects with ${node.label} needs owner access to it`);
-    }
+    const refusal = projectCopyNodeRefusal(node, { hosted: isHostedHubMode(), owner });
+    if (refusal !== null) throw new Error(refusal);
   }
   let ports: NodeAcquirePorts;
   if (isHostedHubMode()) {

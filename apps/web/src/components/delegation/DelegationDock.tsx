@@ -34,6 +34,7 @@ import { buildThreadRouteParams } from "../../threadRoutes";
 import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useAgentControlClientExecutor } from "../agent-control/agentControlClientExecutor";
 import { useAgentControlSyncEnvironmentIds } from "../agent-control/agentControlSyncGate";
+import { AgentControlClientExecutionPreview } from "../agent-control/AgentControlClientExecutionPreview";
 import { AgentControlProposalCard } from "../agent-control/AgentControlProposalCard";
 import { useAgentControlDecisions } from "../agent-control/useAgentControlDecisions";
 import { useAutomationProposalSync } from "../automations/data/useAutomationProposalSync";
@@ -624,6 +625,16 @@ function DelegationDockContent(props: {
                 {cardDecisions.approveUnavailableLabel}
               </p>
             ) : null}
+            {model.requiresClientExecutor && !detailsOpen ? (
+              // What approving does on the target; Details shows it in full.
+              <AgentControlClientExecutionPreview
+                executor={clientExecutor}
+                environmentId={environmentId}
+                proposal={proposal}
+                enabled={cardDecisions.canApprove}
+                variant="row"
+              />
+            ) : null}
             {error !== null ? (
               <p role="alert" className="px-3 pb-1.5 text-[11.5px] text-destructive-foreground">
                 {error}
@@ -633,6 +644,7 @@ function DelegationDockContent(props: {
               <div className="delegation-dock-rise px-3 pt-2">
                 <AgentControlProposalCard
                   model={model}
+                  proposal={proposal}
                   environmentId={environmentId}
                   getThreadTitle={getThreadTitle}
                   isSubmitting={submitting}

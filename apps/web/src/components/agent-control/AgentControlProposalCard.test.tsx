@@ -15,6 +15,7 @@ import {
 
 import {
   AgentControlClientExecutorContext,
+  type AgentControlClientExecutionPreviewState,
   type AgentControlClientExecutor,
 } from "./agentControlClientExecutor";
 import { AgentControlProposalCard } from "./AgentControlProposalCard";
@@ -65,10 +66,12 @@ function renderCard(input: {
   disabledReason?: string | null;
   clientExecutor?: AgentControlClientExecutor;
 }): string {
+  const proposal = input.proposal ?? makeProposal();
   return renderToStaticMarkup(
     <AgentControlClientExecutorContext.Provider value={input.clientExecutor ?? null}>
       <AgentControlProposalCard
-        model={buildAgentControlProposalCardModel(input.proposal ?? makeProposal())}
+        model={buildAgentControlProposalCardModel(proposal)}
+        proposal={proposal}
         environmentId={"local" as never}
         isSubmitting={input.isSubmitting ?? false}
         decisionError={input.decisionError ?? null}
@@ -306,5 +309,66 @@ describe("AgentControlProposalCard", () => {
     expect(runnable).toContain(">Approve<");
     expect(runnable).not.toContain("Approve in Ryco on a computer connected to");
     expect(targets).toEqual(["Mac mini"]);
+  });
+
+  it("shows where a copy lands on its target and the setup thread's model before Approve", () => {
+    const proposal = makeProposal({ plan: copyProjectPlan, promptSummary: null });
+    const ready: AgentControlClientExecutionPreviewState = {
+      status: "ready",
+      preview: {
+        targetLabel: "Mac mini",
+        destination: {
+          path: "/Users/me/Code/ryco",
+          tag: "new folder",
+          note: "Mac mini's code directory.",
+        },
+        followUpModel: "Opus 5.5 · Claude",
+        problem: null,
+      },
+    };
+    const executor = (
+      state: AgentControlClientExecutionPreviewState,
+    ): AgentControlClientExecutor => ({
+      canExecute: () => true,
+      approve: async () => {},
+      previews: { load: () => {}, read: () => state, subscribe: () => () => {} },
+    });
+
+    const markup = renderCard({ proposal, clientExecutor: executor(ready) });
+    expect(markup).toContain('data-testid="agent-control-execution-preview"');
+    expect(markup).toContain("On Mac mini");
+    // The path wraps between its folders.
+    expect(markup.replaceAll(/<[^>]+>/gu, "")).toContain("/Users/me/Code/ryconew folder");
+    expect(markup).toContain(">new folder<");
+    expect(markup).toContain("Mac mini&#x27;s code directory.");
+    expect(markup).toContain("Opus 5.5 · Claude");
+
+    const blocked = renderCard({
+      proposal,
+      clientExecutor: executor({
+        status: "ready",
+        preview: { ...ready.preview, problem: "No agent provider is ready on Mac mini." },
+      }),
+    });
+    expect(blocked).toContain("No agent provider is ready on Mac mini.");
+    expect(renderCard({ proposal, clientExecutor: executor({ status: "loading" }) })).toContain(
+      "Checking Mac mini…",
+    );
+
+    // A client that can't run it (or shows no preview) resolves nothing.
+    expect(
+      renderCard({
+        proposal,
+        clientExecutor: { ...executor(ready), canExecute: () => false },
+      }),
+    ).not.toContain("agent-control-execution-preview");
+    expect(renderCard({ proposal })).not.toContain("agent-control-execution-preview");
+    // Once decided, there is nothing left to preview.
+    expect(
+      renderCard({
+        proposal: { ...proposal, status: "approved" },
+        clientExecutor: executor(ready),
+      }),
+    ).not.toContain("agent-control-execution-preview");
   });
 });

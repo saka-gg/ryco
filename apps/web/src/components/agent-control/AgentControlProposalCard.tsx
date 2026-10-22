@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { AgentControlProposalView, EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
   agentControlCardDecisions,
   type AgentControlProposalCardModel,
@@ -10,6 +10,7 @@ import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { formatExpiresInLabel } from "../../timestampFormat";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { AgentControlClientExecutionPreview } from "./AgentControlClientExecutionPreview";
 import { useAgentControlClientExecutor } from "./agentControlClientExecutor";
 
 const TONE_BADGE_VARIANT: Record<
@@ -25,6 +26,11 @@ const TONE_BADGE_VARIANT: Record<
 
 export interface AgentControlProposalCardProps {
   readonly model: AgentControlProposalCardModel;
+  /**
+   * The proposal the model was built from. A pending client-executed one then
+   * shows what approving does on its target (the executor's preview).
+   */
+  readonly proposal?: AgentControlProposalView | undefined;
   readonly environmentId: EnvironmentId;
   readonly getThreadTitle?: (threadId: ThreadId) => string | undefined;
   readonly isSubmitting: boolean;
@@ -48,6 +54,7 @@ export interface AgentControlProposalCardProps {
  */
 export const AgentControlProposalCard = memo(function AgentControlProposalCard({
   model,
+  proposal,
   environmentId,
   getThreadTitle,
   isSubmitting,
@@ -203,6 +210,15 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
               </div>
             ))}
           </div>
+        ) : null}
+        {proposal !== undefined && model.requiresClientExecutor ? (
+          <AgentControlClientExecutionPreview
+            executor={executor}
+            environmentId={environmentId}
+            proposal={proposal}
+            enabled={model.isPending && cardDecisions.canApprove}
+            variant="card"
+          />
         ) : null}
       </div>
       {model.isPending && showDecisions ? (

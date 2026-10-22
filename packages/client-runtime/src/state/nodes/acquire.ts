@@ -4,7 +4,7 @@ import {
   UNIFIED_WORKSPACE_SCOPE_LEASE_TTL_MS,
   type WorkspaceConnectionScope,
 } from "../workspace/connectionDemand.js";
-import type { NodeTransport } from "./types.js";
+import type { NodeCatalogEntry, NodeTransport } from "./types.js";
 
 /**
  * Acquiring a node for a cross-node project copy: hold it with a scope no
@@ -68,6 +68,26 @@ export class NodeLeaseLostError extends Error {
 
 export function isNodeLeaseLostError(error: unknown): error is NodeLeaseLostError {
   return error instanceof NodeLeaseLostError;
+}
+
+/**
+ * Why this client can't hold `node` to write a copy there, or null when it can
+ * try. A reachable node that refuses changes stays refused once connected; an
+ * offline or connecting one is worth connecting to find out. Through the Hub,
+ * writes need the node's mutation lease, which only an owner gets. Acquiring a
+ * node for a copy and offering to run an Agent Control copy apply this one rule.
+ */
+export function projectCopyNodeRefusal(
+  node: Pick<NodeCatalogEntry, "label" | "canMutate" | "presence" | "mutateBlockedReason">,
+  access: { readonly hosted: boolean; readonly owner: boolean },
+): string | null {
+  if (!node.canMutate && node.presence === "online") {
+    return node.mutateBlockedReason ?? `${node.label} is not available right now`;
+  }
+  if (access.hosted && !access.owner) {
+    return `Copying projects with ${node.label} needs owner access to it`;
+  }
+  return null;
 }
 
 /** A retained connection scope. `renew`, when present, is called every {@link NODE_SCOPE_RENEW_INTERVAL_MS}. */
