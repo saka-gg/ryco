@@ -10,10 +10,15 @@ import {
   fallbackReleasedTurnState,
 } from "./orchestration/turnFinalization.ts";
 import {
-  ORPHANED_PROVIDER_SESSION_ERROR,
-  ORPHANED_TURN_TERMINAL_STATE,
   isOrphanedProviderSession,
+  lastObservedWorkAt,
+  orphanedSessionRelease,
 } from "./orchestration/restartReconciliation.ts";
+import {
+  handoffDigestFailureRelease,
+  hasHandoffDigestFailureSession,
+  latestDigestFailedHandoff,
+} from "./orchestration/handoffDigestRepair.ts";
 import {
   CommandId,
   EventId,
@@ -43,6 +48,8 @@ import {
   Metric,
 } from "effect";
 
+import * as SqlClient from "effect/sql/SqlClient";
+
 import { ServerConfig } from "./config.ts";
 import { flushCompileCacheBestEffort } from "./compileCache.ts";
 import {
@@ -50,18 +57,25 @@ import {
   recordDesktopStartupPhase,
   writeDesktopLifecycleFrame,
 } from "./desktopLifecycle.ts";
+import { ContextHandoffRepository } from "./persistence/Services/ContextHandoffs.ts";
 import { ProjectionProjectRepository } from "./persistence/Services/ProjectionProjects.ts";
 import { ProjectRelocationRepository } from "./persistence/Services/ProjectRelocations.ts";
 import { ThreadForkRepository } from "./persistence/Services/ThreadForks.ts";
 import { ChatFolders } from "./project/chatFolders.ts";
 import { recoverProjectRelocations } from "./project/chatPromotion.ts";
 import { removeOrphanChatProjects } from "./project/orphanChatProjects.ts";
+import {
+  CHAT_FOLDER_CLEANUP_INTERVAL,
+  removeIdleChatFolders,
+} from "./project/chatFolderCleanup.ts";
+import { TerminalManager } from "./terminal/Services/Manager.ts";
 import { resolveProjectPreferences } from "./project/projectPreferences.ts";
 import { runRepositoryIdentitySync } from "./project/repositoryIdentitySync.ts";
 import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentityResolver.ts";
 import { Keybindings } from "./keybindings.ts";
 import { Open } from "./open.ts";
 import { currentCommandReadModel } from "./orchestration/currentCommandReadModel.ts";
+import { ContextHandoffService } from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
@@ -617,7 +631,7 @@ const settleStaleProjectedTurns = Effect.fn("settleStaleProjectedTurns")(functio
         turnId,
         state: fallbackReleasedTurnState(session),
         reason: TURN_FINALIZATION_REASON.startupStaleTurn,
-        completedAt: session.updatedAt,
+        completedAt: lastObservedWorkAt(thread, session),
       },
       createdAt: new Date().toISOString(),
     };
@@ -637,10 +651,59 @@ const settleStaleProjectedTurns = Effect.fn("settleStaleProjectedTurns")(functio
 });
 
 /**
+ * Put sessions a context handoff left in the digest error back to rest once the failed
+ * handoff's stored document verifies (see `handoffDigestRepair`). Only threads still in that
+ * exact state are read further. A document that still fails its check keeps the error.
+ */
+const repairHandoffDigestFailures = Effect.fn("repairHandoffDigestFailures")(function* (
+  snapshot: OrchestrationReadModel,
+  liveThreadIds: ReadonlySet<ThreadId>,
+) {
+  const orchestrationEngine = yield* OrchestrationEngineService;
+  const handoffs = yield* ContextHandoffRepository;
+  const contextHandoffs = yield* ContextHandoffService;
+  for (const thread of snapshot.threads) {
+    const session = thread.session;
+    if (session === null || !hasHandoffDigestFailureSession(thread, liveThreadIds)) continue;
+    yield* Effect.gen(function* () {
+      const failed = latestDigestFailedHandoff(
+        yield* handoffs.listByThread({ threadId: thread.id }),
+      );
+      if (failed === undefined) return;
+      const verifies = yield* contextHandoffs
+        .loadStoredContext({ handoffId: failed.handoffId })
+        .pipe(
+          Effect.as(true),
+          Effect.catchTag("ContextHandoffArtifactError", () => Effect.succeed(false)),
+        );
+      if (!verifies) return;
+      const command = handoffDigestFailureRelease({
+        threadId: thread.id,
+        session,
+        repairedAt: new Date().toISOString(),
+      });
+      yield* Effect.suspend(() => orchestrationEngine.dispatch(command)).pipe(
+        Effect.retry(Schedule.recurs(1)),
+      );
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("failed to repair a session left in a handoff digest error", {
+              threadId: thread.id,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+  }
+});
+
+/**
  * Settle projected provider sessions whose native process did not survive this
- * server process. This runs after the provider/orchestration roots subscribe,
- * but before the startup command gate opens, so repaired state is authoritative
- * before clients can mutate it.
+ * server process, and put back to rest the ones a handoff left in the digest
+ * error. This runs after the provider/orchestration roots subscribe, but before
+ * the startup command gate opens, so repaired state is authoritative before
+ * clients can mutate it.
  */
 export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   const directory = yield* ProviderSessionDirectory;
@@ -753,28 +816,12 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       ),
     );
 
-    const reconciledAt = new Date().toISOString();
-    // One session-set releases the session and settles its turn atomically. Without
-    // an active turn id, the decider still settles a running latest turn.
-    const sessionCommand = {
-      type: "thread.session.set" as const,
+    const sessionCommand = orphanedSessionRelease({
+      thread,
+      session,
       commandId: CommandId.make(`server:startup-reconciliation:${crypto.randomUUID()}`),
-      threadId: thread.id,
-      session: {
-        ...session,
-        status: "error" as const,
-        activeTurnId: null,
-        lastError: ORPHANED_PROVIDER_SESSION_ERROR,
-        updatedAt: reconciledAt,
-      },
-      turnOutcome: {
-        ...(session.activeTurnId !== null ? { turnId: session.activeTurnId } : {}),
-        state: ORPHANED_TURN_TERMINAL_STATE,
-        reason: TURN_FINALIZATION_REASON.startupOrphanedSession,
-        completedAt: reconciledAt,
-      },
-      createdAt: reconciledAt,
-    };
+      reconciledAt: new Date().toISOString(),
+    });
     yield* Effect.suspend(() => orchestrationEngine.dispatch(sessionCommand)).pipe(
       Effect.retry(Schedule.recurs(1)),
       Effect.catchCause((cause) =>
@@ -789,6 +836,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   }
   // Background-work boundaries, the stopped-work note and capture-time notices.
   yield* restartContinuation.publishCaptureEffects(captured);
+  yield* repairHandoffDigestFailures(snapshot, liveThreadIds);
 }).pipe(
   Effect.catchCause((cause) =>
     Cause.hasInterrupts(cause)
@@ -849,6 +897,9 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const threadForks = yield* Effect.serviceOption(ThreadForkRepository);
   const repositoryIdentityResolver = yield* Effect.serviceOption(RepositoryIdentityResolver);
   const providerInstanceBootGate = yield* Effect.serviceOption(ProviderInstanceBootGate);
+  const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const sessionDirectory = yield* Effect.serviceOption(ProviderSessionDirectory);
+  const terminalManager = yield* Effect.serviceOption(TerminalManager);
 
   const commandGate = yield* makeCommandGate();
   const httpServing = yield* Deferred.make<void>();
@@ -1069,6 +1120,29 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
             dispatch: orchestrationEngine.dispatch,
           }),
         ).pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);
+      }
+
+      if (
+        Option.isSome(storageSql) &&
+        Option.isSome(chatFolders) &&
+        Option.isSome(sessionDirectory) &&
+        Option.isSome(terminalManager)
+      ) {
+        // Empty chat folders of chats idle past `chatFolderCleanupAfterDays` go away; they come
+        // back on use. One sweep now, then hourly; a failed sweep is logged and retried.
+        const sweep = removeIdleChatFolders({
+          sql: storageSql.value,
+          settings: serverSettings,
+          chatFolders: chatFolders.value,
+          sessionDirectory: sessionDirectory.value,
+          terminals: terminalManager.value,
+        }).pipe(Effect.ignoreCause({ log: true }));
+        yield* runStartupPhase("chat-folders.remove-idle", sweep).pipe(
+          Effect.andThen(
+            Effect.repeat(Effect.delay(sweep, CHAT_FOLDER_CLEANUP_INTERVAL), Schedule.forever),
+          ),
+          Effect.forkScoped,
+        );
       }
 
       if (Option.isSome(projectionProjects) && Option.isSome(repositoryIdentityResolver)) {

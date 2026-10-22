@@ -9,6 +9,7 @@ import { RpcClientError } from "effect/rpc/RpcClientError";
 import * as Socket from "effect/socket/Socket";
 import type { HubSessionFrame } from "@ryco/contracts/hub-session";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
+import { rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type {
@@ -21,6 +22,7 @@ import type {
 import { HostedHubApi, HostedHubApiError } from "../authorization/api.ts";
 import {
   configureHostedRuntime,
+  hostedEnvironmentSessionsMode,
   type HostedNodeLifecycle,
   type HostedRuntimeConfiguration,
 } from "../authorization/runtime.ts";
@@ -48,8 +50,10 @@ import { HostedHubSession, type HubSessionSocket } from "./hostedHubSession.ts";
 import { relayCompressionFailure } from "./relayEngine.ts";
 import {
   admitHostedRequestForState,
+  getHostedRelayAttemptFactory,
   HostedRelayAttemptFactory,
   HostedRelayPreparationError,
+  resetHostedRelayAttemptFactory,
   ticketFailure,
   type HostedRelayAttemptBinding,
 } from "./transport.ts";
@@ -751,6 +755,74 @@ describe("HostedRelayAttemptFactory", () => {
       admitHostedRequestForState(
         { ...ready, transportStatus: "terminal-failure", sessionStatus: "stale" },
         proposals,
+      ),
+    ).toBe("forbidden");
+
+    // An observe-only unary read does not wait for the snapshot once the
+    // channel is online, whether a new session synchronizes or a reconnect
+    // replays, and while the browser only waits for the selection.
+    const reads = [
+      WS_METHODS.projectsReadFile,
+      WS_METHODS.vcsReadLocalChanges,
+      ORCHESTRATION_WS_METHODS.getThreadWindow,
+    ].map((tag) => ({ tag, stream: false }) as const);
+    const catchingUp = { ...ready, sessionStatus: "synchronizing" } as const;
+    for (const read of reads) {
+      for (const sessionStatus of ["synchronizing", "replaying"] as const) {
+        for (const browserStatus of ["current", "synchronizing"] as const) {
+          expect(
+            admitHostedRequestForState({ ...catchingUp, sessionStatus, browserStatus }, read),
+          ).toBe("allowed");
+        }
+      }
+      // A channel that is not up yet, a session that cannot catch up, a
+      // browser that has not revalidated, or a directory that is not current.
+      for (const waiting of [
+        { ...catchingUp, transportStatus: "connecting" },
+        { ...catchingUp, transportStatus: "opening-channel" },
+        { ...catchingUp, transportStatus: "reconnecting" },
+        { ...catchingUp, sessionStatus: "stale" },
+        { ...catchingUp, sessionStatus: "delivery-unknown" },
+        { ...catchingUp, sessionStatus: "closed" },
+        { ...catchingUp, browserStatus: "checking-access" },
+        { ...catchingUp, browserStatus: "suspended" },
+        { ...catchingUp, browserStatus: "offline" },
+        { ...catchingUp, directoryStatus: "loading" },
+      ] as const) {
+        expect(admitHostedRequestForState(waiting, read)).toBe("awaiting-session");
+      }
+    }
+    // Classified as reads, but they issue a credential, start a provider,
+    // call a model, or fetch: they wait for the snapshot.
+    for (const tag of [
+      WS_METHODS.authIssueLinkedDirectAccess,
+      WS_METHODS.providerPrewarmSession,
+      WS_METHODS.textGenerationGenerateBranchName,
+      WS_METHODS.vcsPrefetchWorktreeBase,
+      WS_METHODS.serverRefreshProviders,
+      WS_METHODS.vcsListRefs,
+    ]) {
+      expect(rpcDeliveryEffectFor(tag)).toBe("read");
+      expect(admitHostedRequestForState(catchingUp, { tag, stream: false })).toBe(
+        "awaiting-session",
+      );
+    }
+    // So do mutations, and read streams other than the session's own.
+    expect(
+      admitHostedRequestForState(catchingUp, {
+        tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+        stream: false,
+      }),
+    ).toBe("awaiting-session");
+    expect(admitHostedRequestForState(catchingUp, proposals)).toBe("awaiting-session");
+    // Early admission never widens a role, and a failed transport ends it.
+    expect(admitHostedRequestForState({ ...catchingUp, effectiveRole: "viewer" }, reads[0]!)).toBe(
+      "forbidden",
+    );
+    expect(
+      admitHostedRequestForState(
+        { ...catchingUp, transportStatus: "terminal-failure", sessionStatus: "stale" },
+        reads[0]!,
       ),
     ).toBe("forbidden");
   });
@@ -1733,5 +1805,96 @@ describe("server-authenticated relay attempts (Hub session version 2)", () => {
     expect(() => factory.createSocket(url)).toThrow("fresh relay ticket");
     expect(serverAuthenticated).toEqual([]);
     session.dispose();
+  });
+});
+
+describe("environment session modes", () => {
+  const issuedTicket = () =>
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(4)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+
+  function environmentBinding(
+    createRelaySocket: NonNullable<HostedRelayAttemptBinding["createRelaySocket"]>,
+  ): HostedRelayAttemptBinding {
+    return {
+      nodeId: () => "node_bbbbbbbbbbbbbbbbbbbbbb",
+      generation: () => 1,
+      isAuthenticated: () => true,
+      isCurrent: () => true,
+      relayUrl: () => RELAY_URL,
+      createRelaySocket,
+      authorizeRequest: () => "forbidden",
+      shouldReconnect: () => true,
+      transportStatus: () => undefined,
+      sessionStatus: () => undefined,
+      role: () => undefined,
+      failure: () => undefined,
+      markDeliveryUnknown: () => undefined,
+      connectionClosed: () => undefined,
+    };
+  }
+
+  afterEach(() => {
+    resetHostedRelayAttemptFactory();
+  });
+
+  it("refuses the selection's binding when environment sessions are retained", () => {
+    configureHostedRuntime({ ...fakeRuntime(), environmentSessions: "retained" }, hostedHubApi);
+    expect(hostedEnvironmentSessionsMode()).toBe("retained");
+    const message = "Retained hosted sessions require an environment-bound relay attempt binding.";
+    expect(() => new HostedRelayAttemptFactory()).toThrow(message);
+    expect(() => getHostedRelayAttemptFactory()).toThrow(message);
+    expect(() => new HostedRelayAttemptFactory(environmentBinding(() => undefined))).not.toThrow();
+  });
+
+  it("keeps the selection's binding in single mode", async () => {
+    const runtimes: ReadonlyArray<HostedRuntimeConfiguration> = [
+      fakeRuntime(),
+      { ...fakeRuntime(), environmentSessions: "single" },
+    ];
+    for (const runtime of runtimes) {
+      configureHostedRuntime(runtime, hostedHubApi);
+      resetHostedRelayAttemptFactory();
+      expect(hostedEnvironmentSessionsMode()).toBe("single");
+      const factory = getHostedRelayAttemptFactory();
+      expect(getHostedRelayAttemptFactory()).toBe(factory);
+    }
+    issuedTicket();
+    const factory = getHostedRelayAttemptFactory();
+    const socket = factory.createSocket(await factory.nextUrl()) as MockRelaySocket;
+    socket.callbacks.onTransportStatus("online");
+    expect(hostedHubStore.getState().transportStatus).toBe("online");
+  });
+
+  it("tells the relay socket which node its attempt is for", async () => {
+    issuedTicket();
+    const runtimeNodes: Array<string | undefined> = [];
+    configureHostedRuntime(
+      {
+        ...fakeRuntime(),
+        createRelaySocket: (input) => {
+          runtimeNodes.push(input.nodeId);
+          return new MockRelaySocket(input.callbacks as RelaySocketCallbacks);
+        },
+      },
+      hostedHubApi,
+    );
+    const selected = new HostedRelayAttemptFactory();
+    selected.createSocket(await selected.nextUrl());
+    expect(runtimeNodes).toEqual([selectedNode.id]);
+
+    const boundNodes: string[] = [];
+    const bound = new HostedRelayAttemptFactory(
+      environmentBinding((input) => {
+        boundNodes.push(input.nodeId);
+        return {};
+      }),
+    );
+    bound.createSocket(await bound.nextUrl());
+    expect(boundNodes).toEqual(["node_bbbbbbbbbbbbbbbbbbbbbb"]);
   });
 });

@@ -39,7 +39,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 export const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
-const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
+const BuildArch = Schema.Literals(["arm64", "x64"]);
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
@@ -67,10 +67,11 @@ interface PlatformConfig {
 }
 
 const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
+  // The Mac app ships for Apple Silicon only; Intel and universal Mac builds are unsupported.
   mac: {
     cliFlag: "--mac",
     defaultTarget: "dmg",
-    archChoices: ["arm64", "x64", "universal"],
+    archChoices: ["arm64"],
   },
   linux: {
     cliFlag: "--linux",
@@ -395,6 +396,15 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
 
   const target = mergeOptions(input.target, env.target, PLATFORM_CONFIG[platform].defaultTarget);
   const arch = mergeOptions(input.arch, env.arch, getDefaultArch(platform));
+  const { archChoices } = PLATFORM_CONFIG[platform];
+  if (!archChoices.includes(arch)) {
+    return yield* new BuildScriptError({
+      message:
+        platform === "mac"
+          ? `Unsupported macOS desktop arch '${arch}': the Mac app is built for Apple Silicon (arm64) only; Intel (x64) and universal Mac builds are not supported.`
+          : `Unsupported ${platform} desktop arch '${arch}'; choose ${archChoices.join(" or ")}.`,
+    });
+  }
   const version = mergeOptions(input.buildVersion, env.version, undefined);
   const releaseDir = resolveBooleanFlag(input.mockUpdates, env.mockUpdates)
     ? "release-mock"
@@ -1500,7 +1510,9 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
     Flag.optional,
   ),
   arch: Flag.Literals("arch", BuildArch.literals).pipe(
-    Flag.withDescription("Build arch, for example arm64/x64/universal (env: RYCO_DESKTOP_ARCH)."),
+    Flag.withDescription(
+      "Build arch: arm64 or x64 for Linux/Windows, arm64 only for macOS (env: RYCO_DESKTOP_ARCH).",
+    ),
     Flag.optional,
   ),
   buildVersion: Flag.String("build-version").pipe(

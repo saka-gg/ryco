@@ -6,6 +6,7 @@ import { createHashHistory, createBrowserHistory } from "@tanstack/react-router"
 import "./index.css";
 
 import { isElectron, isHostedHubMode } from "./env";
+import { startHostedAccessCheck } from "./hostedHub/bootGate";
 import { installHostedNodeHistory } from "./hostedHub/nodeRoutes";
 import { hostedPwaLifecycle } from "./pwa/lifecycle";
 import { getRouter } from "./router";
@@ -29,6 +30,12 @@ const history = isElectron
   : isHostedHubMode()
     ? installHostedNodeHistory()
     : createBrowserHistory();
+
+// Hosted builds send the access check (the session restore and the directory
+// read beside it) before the router exists: the root `beforeLoad` and the route
+// and shell chunks it downloads all come after it, and that `beforeLoad` waits
+// for this same check instead of sending another.
+if (isHostedHubMode()) startHostedAccessCheck();
 
 const router = getRouter(history);
 const DesktopQuitFeedback = React.lazy(() =>

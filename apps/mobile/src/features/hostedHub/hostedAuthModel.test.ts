@@ -456,7 +456,7 @@ describe("hosted account surface", () => {
 
   it("gates node affordances with the runtime's capability resolution", () => {
     const ready = accountView({ ...AUTHENTICATED, ...ONLINE_NODE });
-    expect(ready.capability).toEqual({ hosted: true, allowed: true, reason: null });
+    expect(ready.capability).toEqual({ hosted: true, allowed: true, reason: null, kind: "ready" });
     expect(ready.capabilityNotice).toBeNull();
     expect(ready.statusText).toBe("Online");
     expect(ready.roleLabel).toBe("Owner");

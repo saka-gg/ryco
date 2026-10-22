@@ -1,6 +1,7 @@
 import type {
   HostedAccountRefused,
   HostedAccountState,
+  HostedEnvironmentSessionsMode,
   HostedHubState,
   HostedRecoveryCodeDisplayState,
 } from "@ryco/client-runtime/authorization";
@@ -10,8 +11,15 @@ import {
   INITIAL_HOSTED_HUB_STATE,
   INITIAL_HOSTED_RECOVERY_CODE_DISPLAY_STATE,
 } from "@ryco/client-runtime/authorization/hostedStores";
+import type {
+  HostedEnvironmentSessionRecord,
+  HostedEnvironmentSessions,
+  HostedEnvironmentSessionsSnapshot,
+} from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
 import type { EnvironmentId } from "@ryco/contracts";
 import { useStore } from "zustand";
+
+import { hostedOnly } from "./hostedOnly";
 
 /**
  * Standard-build stand-in for `./state` (wired by `src/clientModeSeams.ts`).
@@ -108,6 +116,8 @@ const standardHostedHubController: {
   notifyDirectoryInvalidated: ignore,
   watchDirectoryPresence: release,
   selectNode: settled,
+  acquireEnvironment: () => Promise.resolve("refused"),
+  releaseEnvironment: settled,
   returnToDirectory: settled,
   retrySelectedNode: settled,
   transportStatus: ignore,
@@ -121,10 +131,64 @@ const standardHostedHubController: {
   markSessionReady: ignore,
   markSessionReplaying: ignore,
   reportShellSnapshotFailure: ignore,
+  reportHubSessionFailure: ignore,
   acknowledgeDeliveryUnknown: ignore,
 };
 
 export const hostedHubController = standardHostedHubController as HostedHubController;
+
+const EMPTY_ENVIRONMENT_SESSIONS: HostedEnvironmentSessionsSnapshot = Object.freeze({
+  revision: 0,
+  records: new Map<EnvironmentId, HostedEnvironmentSessionRecord>(),
+  deliveryUnknown: new Set<EnvironmentId>(),
+});
+const NO_ENVIRONMENT_SESSION_RECORDS: ReadonlyArray<never> = [];
+
+/**
+ * The per-environment session registry of a build that never connects to a
+ * hosted node: always empty, and nothing in it ever changes. Creating a record
+ * is a hosted-only act.
+ */
+const standardHostedEnvironmentSessions: {
+  readonly [K in keyof HostedEnvironmentSessions]: HostedEnvironmentSessions[K];
+} = {
+  read: () => undefined,
+  list: () => NO_ENVIRONMENT_SESSION_RECORDS,
+  getSnapshot: () => EMPTY_ENVIRONMENT_SESSIONS,
+  subscribe: release,
+  isCurrentGeneration: () => false,
+  presenceOnlineEdges: () => 0,
+  ensureRecord: () => hostedOnly("ensureRecord"),
+  markConnectRequested: ignore,
+  renew: () => undefined,
+  release: ignore,
+  suspendAll: () => [],
+  withdrawAll: () => [],
+  clear: ignore,
+  transportStatus: ignore,
+  sessionStatus: ignore,
+  role: ignore,
+  failure: ignore,
+  markDeliveryUnknown: ignore,
+  connectionClosed: ignore,
+  connectionRecovered: ignore,
+  markSessionReady: ignore,
+  markSessionReplaying: ignore,
+  reportShellSnapshotFailure: ignore,
+  registerPendingRequestReader: ignore,
+  markEnvironmentDeliveryUnknown: ignore,
+  acknowledgeDeliveryUnknown: ignore,
+};
+
+export const getHostedEnvironmentSessions: () => HostedEnvironmentSessions = () =>
+  standardHostedEnvironmentSessions;
+
+/** A standard build keeps no hosted environment sessions at all. */
+export const hostedEnvironmentSessionsMode: () => HostedEnvironmentSessionsMode = () => "single";
+
+/** A build without hosted sessions has none that selecting a node could adopt. */
+export const isHostedEnvironmentSessionAdoptable: (environmentId: EnvironmentId) => boolean = () =>
+  false;
 
 /** Standard builds have no hosted runtime to configure. */
 export const ensureWebHostedRuntimeConfigured: () => void = ignore;

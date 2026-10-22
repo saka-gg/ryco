@@ -36,6 +36,11 @@ export interface Preferences {
   readonly aiFocusEnabled?: boolean;
   readonly aiFocusRefreshIntervalMs?: AiFocusRefreshIntervalMs;
   readonly sidebarAutoSettleAfterDays?: SidebarAutoSettleAfterDays;
+  /**
+   * Keep bounded recent conversation text on this device so a thread opens with
+   * its last messages before any connection is ready. Unset means on.
+   */
+  readonly rememberThreadContent?: boolean;
 }
 
 export function sanitizePreferences(parsed: Preferences): Preferences {
@@ -54,6 +59,7 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     aiFocusEnabled?: boolean;
     aiFocusRefreshIntervalMs?: AiFocusRefreshIntervalMs;
     sidebarAutoSettleAfterDays?: SidebarAutoSettleAfterDays;
+    rememberThreadContent?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -106,6 +112,9 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
       ))
   ) {
     preferences.sidebarAutoSettleAfterDays = parsed.sidebarAutoSettleAfterDays;
+  }
+  if (typeof parsed.rememberThreadContent === "boolean") {
+    preferences.rememberThreadContent = parsed.rememberThreadContent;
   }
   if (Array.isArray(parsed.favorites)) {
     const decode = Schema.decodeUnknownOption(ModelFavorite);
@@ -191,19 +200,41 @@ export function isPreferencesHydrated(): boolean {
   return state.hydrated;
 }
 
-function subscribe(listener: Listener): () => void {
+/**
+ * Whether recent conversation text may be kept on this device. Conversations
+ * are kept unless the user turned the setting off; `preferences` defaults to
+ * the current ones and is read as the default before they hydrate.
+ */
+export function isThreadContentCacheEnabled(preferences: Preferences = state.preferences): boolean {
+  return preferences.rememberThreadContent !== false;
+}
+
+export function subscribePreferences(listener: Listener): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
 }
 
+/** Starts hydration if needed and resolves once the persisted preferences are loaded. */
+export function whenPreferencesHydrated(): Promise<void> {
+  hydratePreferences();
+  if (state.hydrated) return Promise.resolve();
+  return new Promise((resolve) => {
+    const unsubscribe = subscribePreferences(() => {
+      if (!state.hydrated) return;
+      unsubscribe();
+      resolve();
+    });
+  });
+}
+
 export function usePreferences(): Preferences {
-  return useSyncExternalStore(subscribe, getPreferencesSnapshot, getPreferencesSnapshot);
+  return useSyncExternalStore(subscribePreferences, getPreferencesSnapshot, getPreferencesSnapshot);
 }
 
 export function useIsPreferencesHydrated(): boolean {
-  return useSyncExternalStore(subscribe, isPreferencesHydrated, isPreferencesHydrated);
+  return useSyncExternalStore(subscribePreferences, isPreferencesHydrated, isPreferencesHydrated);
 }
 
 /** Test seam: reset the singleton store and hydration latch. */

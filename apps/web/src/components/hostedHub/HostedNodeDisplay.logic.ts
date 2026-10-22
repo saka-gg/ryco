@@ -162,6 +162,17 @@ export function directoryCountLine(nodes: ReadonlyArray<HostedHubNode>): string 
 }
 
 /**
+ * The nodes a hosted page may offer as choices: still authorized, and open to
+ * this browser rather than only to the native clients. Whether a choice can be
+ * made right now is `nodeSelectionBlocked`'s answer.
+ */
+export function selectableNodes(nodes: ReadonlyArray<HostedHubNode>): ReadonlyArray<HostedHubNode> {
+  return nodes.filter(
+    (node) => node.revokedAt === null && node.capabilities?.nativeClientRequired !== true,
+  );
+}
+
+/**
  * Whether the directory may start a relay session for this node — the exact
  * predicate the row's connect control and the detail sheet's Connect share, so
  * the two can never disagree about what is reachable.

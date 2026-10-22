@@ -4,7 +4,11 @@ import {
 } from "../../hooks/useHostedDraftExecutionTarget";
 import { DeviceIcon } from "../DeviceIcon";
 import { useNavigate } from "@tanstack/react-router";
-import { hostedHubFailureExplanation } from "@ryco/client-runtime/authorization";
+import {
+  hostedBrowserRevalidated,
+  hostedHubFailureExplanation,
+} from "@ryco/client-runtime/authorization";
+import type { EnvironmentId } from "@ryco/contracts";
 import type { ExternalIdentityPendingResponse } from "@ryco/contracts/hosted-identity";
 import {
   ChevronDownIcon,
@@ -12,6 +16,7 @@ import {
   CheckIcon,
   CopyIcon,
   KeyRoundIcon,
+  LayoutGridIcon,
   LifeBuoyIcon,
   Loader2Icon,
   LogOutIcon,
@@ -82,7 +87,12 @@ import type { HostedHubNode } from "../../hostedHub/types";
 import { useHostedWorkspaceOwners } from "../../hostedHub/hostedWorkspaceOwners";
 import { hostedNodeRequiresNativeClient } from "../../hostedHub/hostedConnectionCoordinator";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { selectThreadExistsByRef, useStore } from "../../store";
+import {
+  selectEnvironmentState,
+  selectThreadExistsByRef,
+  useStore,
+  type AppState,
+} from "../../store";
 import { PHONE_ANCHORED_ACTIONS_CLASS_NAME } from "../mobile/phoneAnchoredActions";
 import { GitHubIcon } from "../Icons";
 import {
@@ -120,9 +130,6 @@ import {
 } from "./ExternalIdentityWeb.logic";
 import { HostedRelayTrustNotice } from "./HostedRelayTrustNotice";
 import { canShowHostedReadPreview, useHostedReadCache } from "../../hostedHub/readCache";
-
-// Browser suites and callers keep importing the menu from the hosted root.
-export { HostedNodeMenu } from "./HostedConnectionControls";
 
 type EmailVerificationLink = Extract<
   HostedIdentityLink,
@@ -182,6 +189,15 @@ function useHubDocumentTitle(): void {
   }, [route]);
 }
 
+/**
+ * Whether the store holds a shell for the environment to show: a live snapshot,
+ * or rows restored from a cache (which are presented as last-known state).
+ */
+function selectEnvironmentHasShell(state: AppState, environmentId: EnvironmentId | null): boolean {
+  const environment = selectEnvironmentState(state, environmentId);
+  return environment.bootstrapComplete || environment.hydratedFromCacheAt !== undefined;
+}
+
 export function HostedHubRoot() {
   const readCache = useHostedReadCache();
   const directoryNodes = useHostedHubStore((state) => state.nodes);
@@ -205,6 +221,20 @@ export function HostedHubRoot() {
   );
   const hasCachedRoutedThread = useStore(
     useMemo(() => (state) => selectThreadExistsByRef(state, routedThreadRef), [routedThreadRef]),
+  );
+  const browserStatus = useHostedHubStore((state) => state.browserStatus);
+  const routedDirectoryNode = useMemo(
+    () =>
+      routedNode.nodeId === null
+        ? null
+        : (directoryNodes.find((node) => node.id === routedNode.nodeId) ?? null),
+    [directoryNodes, routedNode.nodeId],
+  );
+  const routedEnvironmentHasShell = useStore(
+    useMemo(
+      () => (state) => selectEnvironmentHasShell(state, routedDirectoryNode?.environmentId ?? null),
+      [routedDirectoryNode?.environmentId],
+    ),
   );
   const routeNotice = useHostedNodeRouteNotice();
   // The routed-node orchestrator, the workspace coordinator and the single
@@ -246,21 +276,24 @@ export function HostedHubRoot() {
   }
 
   // No shell: there is no account to configure yet.
+  const routedSelectionTerminal =
+    selectedNode?.id === routedNode.nodeId &&
+    (selectionStatus === "revoked" ||
+      selectionStatus === "authorization-removed" ||
+      selectionStatus === "incompatible");
+  // The directory lists the routed node as one this browser may open, and for a
+  // thread route it owns the thread's environment.
+  const routedNodeOpenable =
+    routedDirectoryNode !== null &&
+    !routedSelectionTerminal &&
+    routedDirectoryNode.revokedAt === null &&
+    !routedDirectoryNode.capabilities?.nativeClientRequired &&
+    (routedThreadRef === null ||
+      routedDirectoryNode.environmentId === routedThreadRef.environmentId);
   const cachedNodeMatchesRoute =
     routedThreadRef !== null &&
-    !(
-      selectedNode?.id === routedNode.nodeId &&
-      (selectionStatus === "revoked" ||
-        selectionStatus === "authorization-removed" ||
-        selectionStatus === "incompatible")
-    ) &&
-    (directoryNodes.some(
-      (node) =>
-        node.id === routedNode.nodeId &&
-        node.environmentId === routedThreadRef.environmentId &&
-        node.revokedAt === null &&
-        !node.capabilities?.nativeClientRequired,
-    ) ||
+    !routedSelectionTerminal &&
+    (routedNodeOpenable ||
       (directoryStatus !== "ready" &&
         canShowHostedReadPreview() &&
         readCache.nodes.some(
@@ -269,6 +302,15 @@ export function HostedHubRoot() {
             node.environmentId === routedThreadRef.environmentId,
         )));
   const canReadCachedRoute = hasCachedRoutedThread && cachedNodeMatchesRoute;
+  // An in-app switch: access was already checked for this browser lifecycle
+  // (`current`, or `synchronizing`, which the lifecycle owner publishes only
+  // after the access check, while the selected node's own session is still
+  // being established), so any route of a listed node can open on the shell
+  // the store already holds for its environment meanwhile. That opens the
+  // cached shell only: mutation still waits for the node's own session lease.
+  // Cold boot and resume never qualify before that check completes.
+  const accessChecked = hostedBrowserRevalidated(browserStatus);
+  const canOpenRoutedNodeInShell = routedNodeOpenable && accessChecked && routedEnvironmentHasShell;
   const canReadPendingDraft =
     draftTarget !== null &&
     routedNode.logicalPathname === `/draft/${encodeURIComponent(draftTarget.draftId)}` &&
@@ -309,9 +351,12 @@ export function HostedHubRoot() {
   if (hubRoute?.kind === "nodes" || hubRoute?.kind === "nodes-enroll") {
     return <HostedNodeDirectory />;
   }
-  // Home paints cached rows immediately. The workspace coordinator discovers
-  // missing lists in the background through ordinary, disposable demand leases.
-  // Machine administration remains the explicit `/nodes` route handled above.
+  // Every page but a thread or a draft is node-less: home, settings, projects,
+  // tasks and the rest render here whichever node the cursor is on, with no
+  // node chrome and no full-page connection surface. Home paints cached rows
+  // immediately. The workspace coordinator discovers missing lists in the
+  // background through ordinary, disposable demand leases. Machine
+  // administration remains the explicit `/nodes` route handled above.
   if (routedNode.nodeId === null) {
     if (routeNotice || routedNode.malformed) return <HostedNodeDirectory />;
     if (selectedNode && sessionEstablished) {
@@ -322,12 +367,22 @@ export function HostedHubRoot() {
   // Keep the draft and its cached project picker mounted while the target's
   // relay connects. The controller still requires a fresh lease to commit it.
   if (canReadPendingDraft) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
-  // A routed node segment is pending fail-closed validation/acquisition. Never
-  // render another environment merely because it remains the compatibility
-  // `selectedNode` while the scoped coordinator switches targets.
+  // A routed node segment is pending fail-closed validation/acquisition: a
+  // thread's or a draft's, or one left on an older address of a page no node
+  // owns, which the route orchestrator drops once it has moved the cursor.
+  // Never render another environment merely because it remains the
+  // compatibility `selectedNode` while the scoped coordinator switches targets.
   if (!selectedNode || selectedNode.id !== routedNode.nodeId) {
-    if (canReadCachedRoute) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
-    return <HostedNodeRestoringSurface />;
+    if (canReadCachedRoute || canOpenRoutedNodeInShell) {
+      return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
+    }
+    // Access was checked and the node validated, so it only waits for its
+    // session: name it instead of repeating the access-check copy.
+    return (
+      <HostedNodeRestoringSurface
+        opening={accessChecked && routedNodeOpenable ? routedDirectoryNode : null}
+      />
+    );
   }
   if (transportStatus === "terminal-failure") {
     if (canReadCachedRoute) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
@@ -335,10 +390,11 @@ export function HostedHubRoot() {
   }
   if (!sessionEstablished) {
     // The routed target has already passed the fail-closed node/environment
-    // validation above. When its exact thread is cached, keep the workspace
+    // validation above. When its exact thread is cached, or the store already
+    // holds a shell for its environment on an in-app switch, keep the workspace
     // mounted read-only while the fresh relay channel synchronizes instead of
-    // replacing the whole route with the three-second connection surface.
-    if (hasCachedRoutedThread) {
+    // replacing the whole route with a full-page connection surface.
+    if (hasCachedRoutedThread || canOpenRoutedNodeInShell) {
       return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
     }
     return <HostedNodeStartingSurface node={selectedNode} />;
@@ -436,12 +492,30 @@ function HostedNodeFailureSurface({
   readonly node: HostedHubNode;
   readonly message: string | null;
 }) {
+  const isPhoneTier = usePresentationTier() === "phone";
+  const { returnToAllNodes } = useHostedConnectionActions();
   return (
-    // The connection control already carries "All nodes", "Refresh", "Account"
-    // and "Sign out", so the terminal-failure state needs no escape of its own.
-    // It moves into the Hub bar rather than floating above the message, which
-    // is where a page-level control belongs.
-    <HubShell measure="content" trailing={<HostedConnectionControl />}>
+    // The way out lives in the Hub bar, which is where page-level controls
+    // belong. The phone tier's connection pill opens a sheet that already
+    // carries "All nodes" and "Sign out". Desktop has no connection menu, so
+    // the bar offers both itself, as the node directory's bar does.
+    <HubShell
+      measure="content"
+      trailing={
+        isPhoneTier ? (
+          <HostedConnectionControl />
+        ) : (
+          <>
+            <Button variant="ghost" onClick={() => void returnToAllNodes()}>
+              <LayoutGridIcon aria-hidden /> Manage devices
+            </Button>
+            <Button variant="ghost" onClick={() => void hostedHubController.signOut()}>
+              <LogOutIcon aria-hidden /> Sign out
+            </Button>
+          </>
+        )
+      }
+    >
       <HubStatus
         tone="destructive"
         icon={<TriangleAlertIcon aria-hidden className="size-8 text-destructive" />}
@@ -495,7 +569,7 @@ function HubStatus({
   );
 }
 
-function HostedNodeRestoringSurface() {
+function HostedNodeRestoringSurface({ opening }: { readonly opening: HostedHubNode | null }) {
   // Validation stays fail-closed. A pending draft switch can return to its
   // source through the same route orchestrator that owns the reconcile.
   return (
@@ -506,7 +580,7 @@ function HostedNodeRestoringSurface() {
       >
         <p role="status" aria-live="polite" className="text-muted-foreground text-sm">
           <InlineProgress />
-          Checking your access before reconnecting…
+          {opening ? `Opening ${opening.label}…` : "Checking your access before reconnecting…"}
         </p>
         <HostedDraftSwitchCancel />
       </HubStatus>
@@ -1400,8 +1474,8 @@ function HostedNodeDirectory() {
   }, []);
 
   const select = async (node: HostedHubNode) => {
-    // With the hosted node history installed, selection navigates into the
-    // node-scoped route and the route orchestrator drives `selectNode`.
+    // With the hosted node history installed, selection opens home with the
+    // cursor on the node; home names no node, so the address carries none.
     if (selectHostedNodeRoute(node.id)) return;
     await navigate({ to: "/", replace: true });
     await hostedHubController.selectNode(node.id);

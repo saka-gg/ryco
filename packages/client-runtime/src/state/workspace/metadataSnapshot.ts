@@ -1,7 +1,6 @@
 import type { EnvironmentId } from "@ryco/contracts";
 
 import type {
-  WorkspaceMachineCatalogEntry,
   WorkspaceMetadataCacheNamespace,
   WorkspaceMetadataCacheRecord,
   WorkspaceMetadataSnapshot,
@@ -74,35 +73,44 @@ export function isWorkspaceMetadataSnapshot(
   return true;
 }
 
-export function decodeWorkspaceMetadataSnapshot(
-  raw: string,
-  environmentId: EnvironmentId,
-): WorkspaceMetadataSnapshot | null {
-  try {
-    const value: unknown = JSON.parse(raw);
-    return isWorkspaceMetadataSnapshot(value, environmentId) ? value : null;
-  } catch {
-    return null;
-  }
+const payloadTextEncoder = new TextEncoder();
+const payloadBytesBySnapshot = new WeakMap<WorkspaceMetadataSnapshot, number>();
+const payloadBytesByArray = new WeakMap<ReadonlyArray<unknown>, number>();
+
+function serializedBytes(value: unknown): number {
+  return payloadTextEncoder.encode(JSON.stringify(value)).byteLength;
 }
 
-/** A failed/partial candidate is a no-op; only a complete newer projection replaces cache. */
-export function reconcileWorkspaceMetadataSnapshot(
-  current: WorkspaceMetadataSnapshot | null,
-  candidate: unknown,
-  environmentId: EnvironmentId,
-): { readonly snapshot: WorkspaceMetadataSnapshot | null; readonly replaced: boolean } {
-  if (!isWorkspaceMetadataSnapshot(candidate, environmentId)) {
-    return { snapshot: current, replaced: false };
+function cachedArrayBytes(array: ReadonlyArray<unknown>): number {
+  let bytes = payloadBytesByArray.get(array);
+  if (bytes === undefined) {
+    bytes = serializedBytes(array);
+    payloadBytesByArray.set(array, bytes);
   }
-  if (current && candidate.capturedAt < current.capturedAt) {
-    return { snapshot: current, replaced: false };
-  }
-  return { snapshot: candidate, replaced: true };
+  return bytes;
 }
 
+/**
+ * The UTF-8 size of the serialized snapshot. Snapshots and their member arrays
+ * are immutable, so sizes are cached per object: a snapshot that reuses its
+ * arrays from an earlier one only re-measures its few fixed fields.
+ */
 export function workspaceMetadataPayloadBytes(snapshot: WorkspaceMetadataSnapshot): number {
-  return new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+  const cached = payloadBytesBySnapshot.get(snapshot);
+  if (cached !== undefined) return cached;
+  const { projects, worktrees, threads } = snapshot;
+  const bytes =
+    Array.isArray(projects) && Array.isArray(worktrees) && Array.isArray(threads)
+      ? // Each array serializes to its own bytes; replacing it with a one
+        // character placeholder leaves the fixed fields and punctuation.
+        serializedBytes({ ...snapshot, projects: 0, worktrees: 0, threads: 0 }) -
+        3 +
+        cachedArrayBytes(projects) +
+        cachedArrayBytes(worktrees) +
+        cachedArrayBytes(threads)
+      : serializedBytes(snapshot);
+  payloadBytesBySnapshot.set(snapshot, bytes);
+  return bytes;
 }
 
 function threadRecency(thread: WorkspaceMetadataSnapshot["threads"][number]): number {
@@ -199,23 +207,4 @@ export function planWorkspaceMetadataCacheEvictions(input: {
     bytes -= candidate.payloadBytes;
   }
   return { accepted: count <= maxEntries && bytes <= maxBytes, evict };
-}
-
-export type WorkspaceCacheReconciliationAction =
-  | { readonly type: "retain" }
-  | { readonly type: "lock-stale" }
-  | { readonly type: "purge" };
-
-export function reconcileWorkspaceCacheForMachine(
-  machine: WorkspaceMachineCatalogEntry,
-): WorkspaceCacheReconciliationAction {
-  switch (machine.cacheDisposition) {
-    case "available":
-      return { type: "retain" };
-    case "locked-stale":
-      return { type: "lock-stale" };
-    case "purge":
-      return { type: "purge" };
-  }
-  return { type: "purge" };
 }

@@ -1,5 +1,6 @@
 import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
 import { WorktreeNotesServiceLive } from "./notes/WorktreeNotesService.ts";
+import { NodeUpdateServiceLive } from "./nodeUpdate/NodeUpdateService.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
@@ -615,6 +616,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   // (and one discovery cache) instead of building its own per connection.
   SourceControlDiscovery.layer,
   ProviderMaintenanceRunner.layer,
+  // The node's own release and one-click update: one state for every connection, and the
+  // boot report of an update that restarted this process.
+  NodeUpdateServiceLive,
   ContextHandoffInspectionLive,
   AgentControlMcpServerLive.pipe(
     // HTML render tools exist only on the private listener; the external

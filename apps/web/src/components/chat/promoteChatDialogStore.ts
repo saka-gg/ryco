@@ -112,7 +112,7 @@ function readEnvironmentServerConfig(environmentId: EnvironmentId): ServerConfig
 export function canPromoteChatOn(environmentId: EnvironmentId): boolean {
   return promotionSupported(
     readEnvironmentServerConfig(environmentId),
-    readHostedRpcCapability(WS_METHODS.projectsPromoteChat).allowed,
+    readHostedRpcCapability(WS_METHODS.projectsPromoteChat, environmentId).allowed,
     getPresentationTier(),
   );
 }
@@ -120,7 +120,7 @@ export function canPromoteChatOn(environmentId: EnvironmentId): boolean {
 /** Whether "Turn into project…" is offered for chats on `environmentId`. */
 export function useCanPromoteChat(environmentId: EnvironmentId | null | undefined): boolean {
   const config = useEnvironmentServerConfig(environmentId);
-  const capability = useHostedRpcCapability(WS_METHODS.projectsPromoteChat);
+  const capability = useHostedRpcCapability(WS_METHODS.projectsPromoteChat, environmentId ?? null);
   const tier = usePresentationTier();
   return promotionSupported(config, capability.allowed, tier);
 }

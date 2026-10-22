@@ -30,6 +30,14 @@ The large structured document lives only in the server-local `provider_context_h
 It is not copied into orchestration events, snapshots, RPC responses, activities, logs, or
 analytics. Timeline activities contain only small boundary metadata and a digest.
 
+The document and the prepared delivery payload each carry a sha-256 digest of their canonical JSON.
+Every load checks the digest against the JSON as stored, before validating it, and refuses a
+document that was changed afterwards. Values are stored in the form validation reads back: a value
+cut to its length limit drops any whitespace left at the cut, and a shortened entry is marked
+`truncated` only where its format has that flag. Rows written by earlier versions, which could keep
+such whitespace, still verify, and so does a stored payload whose digest covers the context exactly
+as the provider received it.
+
 ## Durability and failure behavior
 
 The operation records `requested`, `preparing`, and `dispatching` before provider delivery. Target
@@ -42,6 +50,12 @@ exact still-live source binding when possible, preserves the source model select
 failed divider. If the server restarts after dispatch and acceptance cannot be proved, recovery
 marks the operation `delivery-uncertain` and never blindly resends the message. Both outcomes remain
 visible after reload and can be retried with a new send.
+
+A source that cannot be put back is shown in error with the failure's message, and a failed handoff
+never blocks the next one: the next send prepares a new handoff. Earlier versions refused some
+intact stored documents with a digest error. At startup, a thread whose session still shows that
+error is put back to rest (`stopped`, no error) when the failed handoff's stored document verifies
+now. This is not new activity, so a snoozed thread stays snoozed.
 
 Every provider event is checked against both its `ProviderInstanceId` and `RuntimeSessionId` before
 any lifecycle, message, tool, request, plan, checkpoint, activity, or buffer mutation. Late events

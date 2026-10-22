@@ -33,6 +33,7 @@ import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
+import { makeCodexStoredThreadReader } from "../Layers/CodexStoredThreadReader.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -45,6 +46,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
+  normalizeCommandPath,
 } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -55,12 +57,47 @@ import {
 } from "./CodexHomeLayout.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
-  provider: DRIVER_KIND,
-  npmPackageName: "@openai/codex",
-  homebrewFormula: "codex",
-  nativeUpdate: null,
-});
+const CODEX_STANDALONE_SEGMENT = "/packages/standalone/";
+const CODEX_STANDALONE_PATTERN = /[\\/]packages[\\/]standalone[\\/]/gi;
+
+/**
+ * The standalone installer links `~/.local/bin/codex` (Windows:
+ * `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, a junction) into
+ * `$CODEX_HOME/packages/standalone/…`, which the real path shows.
+ */
+function isCodexStandaloneCommandPath(commandPath: string): boolean {
+  return normalizeCommandPath(commandPath).includes(CODEX_STANDALONE_SEGMENT);
+}
+
+/** The `CODEX_HOME` a standalone install lives in, read from its real path. */
+export function codexHomeFromStandaloneCommandPath(realCommandPath: string): string | null {
+  let index = -1;
+  for (const match of realCommandPath.matchAll(CODEX_STANDALONE_PATTERN)) {
+    index = match.index;
+  }
+  return index > 0 ? realCommandPath.slice(0, index) : null;
+}
+
+/**
+ * `codex update` replaces the standalone tree under `CODEX_HOME`, so it runs against the home
+ * that tree lives in. Without a standalone path it gets the instance's explicitly selected shared
+ * home (an auth-overlay shadow home only carries auth), or Codex's own default.
+ */
+export function makeCodexMaintenanceResolver(explicitSharedHomePath: string | undefined) {
+  return makePackageManagedProviderMaintenanceResolver({
+    provider: DRIVER_KIND,
+    npmPackageName: "@openai/codex",
+    nativeUpdate: {
+      args: ["update"],
+      isCommandPath: isCodexStandaloneCommandPath,
+      env: (context) => {
+        const codexHome =
+          codexHomeFromStandaloneCommandPath(context.realCommandPath) ?? explicitSharedHomePath;
+        return codexHome ? { CODEX_HOME: codexHome } : undefined;
+      },
+    },
+  });
+}
 
 /**
  * Services the driver needs to materialize an instance. Surfaced as the
@@ -140,10 +177,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         enabled,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
-      });
+      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(
+        makeCodexMaintenanceResolver(
+          homeLayout.effectiveHomePath === undefined ? undefined : homeLayout.sharedHomePath,
+        ),
+        {
+          binaryPath: effectiveConfig.binaryPath,
+          env: processEnv,
+        },
+      );
       const probeFingerprint = yield* makeProviderProbeFingerprint({
         driverKind: DRIVER_KIND,
         binaryPaths: [effectiveConfig.binaryPath],
@@ -167,6 +209,17 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         });
       }
 
+      // One read-only app-server per instance serves the adapter's history reads and the
+      // status probe, so a probe while it is up starts no process. A change to the binary
+      // (upgrade, removal) or to the login retires it at the next probe.
+      const storedThreadReader = yield* makeCodexStoredThreadReader({
+        binaryPath: effectiveConfig.binaryPath,
+        cwd: process.cwd(),
+        ...(effectiveConfig.homePath ? { homePath: effectiveConfig.homePath } : {}),
+        environment: processEnv,
+        binaryIdentity: probeFingerprint,
+      });
+
       // `makeCodexAdapter` and `makeCodexTextGeneration` have `never` error
       // channels at construction time — their failure modes are all on the
       // per-operation closures they return. No `mapError` wrapper is needed
@@ -176,6 +229,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        storedThreadReader,
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
@@ -185,7 +239,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // in as instance rebuilds from the registry rather than in-place
       // updates. Pre-provide `ChildProcessSpawner` so the check fits
       // `makeManagedServerProvider.checkProvider`'s `R = never`.
-      const checkProvider = checkCodexProviderStatus(effectiveConfig, undefined, processEnv).pipe(
+      const checkProvider = checkCodexProviderStatus(
+        effectiveConfig,
+        undefined,
+        processEnv,
+        storedThreadReader,
+      ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );

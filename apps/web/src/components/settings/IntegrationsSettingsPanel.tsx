@@ -3,6 +3,7 @@ import { useSettingsTarget, useSettingsEditingScope } from "../../settingsTarget
 import { WS_METHODS } from "@ryco/contracts";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { ChevronDownIcon, KeyRoundIcon } from "lucide-react";
 import { useState } from "react";
@@ -79,7 +80,12 @@ function ComputerUseSection() {
 function NodeIntegrationsSettingsPanel() {
   const enabled = useSettings((settings) => settings.agentControl.enabled);
   const { updateSettings } = useUpdateSettings();
-  const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
+  const target = useSettingsTarget();
+  const settingsCapability = useHostedRpcCapability(
+    WS_METHODS.serverUpdateSettings,
+    target?.environmentId ?? null,
+  );
+  const settingsReason = hostedCapabilityCopy(settingsCapability, target?.nodeLabel);
   const [manualSetupOpen, setManualSetupOpen] = useState(false);
 
   return (
@@ -96,8 +102,8 @@ function NodeIntegrationsSettingsPanel() {
               : "Agent Control is unavailable to Ryco sessions and external clients."
           }
           status={
-            !settingsCapability.allowed && settingsCapability.reason ? (
-              <span className="text-destructive-foreground">{settingsCapability.reason}</span>
+            !settingsCapability.allowed && settingsReason ? (
+              <span className="text-destructive-foreground">{settingsReason}</span>
             ) : undefined
           }
           control={

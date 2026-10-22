@@ -1,7 +1,7 @@
 import { assert, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ConfigProvider, DateTime, Effect, Layer, Option } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse, UrlParams } from "effect/http";
 
 import * as ForgejoApi from "./ForgejoApi.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -130,7 +130,7 @@ export function urlParam(
   request: HttpClientRequest.HttpClientRequest,
   name: string,
 ): string | null {
-  return request.urlParams.params.find(([key]) => key === name)?.[1] ?? null;
+  return Option.getOrNull(UrlParams.getFirst(request.urlParams, name));
 }
 
 type Route = readonly [

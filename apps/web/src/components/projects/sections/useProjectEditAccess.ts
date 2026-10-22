@@ -2,6 +2,7 @@ import { ORCHESTRATION_WS_METHODS, type EnvironmentId } from "@ryco/contracts";
 
 import { useEnvironmentSettingsTarget } from "../../../hooks/useEnvironmentSettingsTarget";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
+import { hostedSyncingCopy } from "../../../hostedHub/switchTarget";
 import { useEnvironmentPresence } from "../useEnvironmentPresence";
 
 export interface ProjectEditAccess {
@@ -25,7 +26,10 @@ export interface ProjectEditAccess {
  * device (a Hub viewer can look, not change), then whether the device is live.
  */
 export function useProjectEditAccess(environmentId: EnvironmentId): ProjectEditAccess {
-  const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
+  const dispatchCapability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    environmentId,
+  );
   const presence = useEnvironmentPresence(environmentId);
   const { target } = useEnvironmentSettingsTarget(environmentId);
   const where = presence.isPrimary ? "this device" : presence.label;
@@ -36,6 +40,11 @@ export function useProjectEditAccess(environmentId: EnvironmentId): ProjectEditA
     nodeReason: null,
   });
   if (!dispatchCapability.allowed) {
+    // A connection that is only being established is not a refusal: say that it
+    // is syncing instead of quoting the stale-authorization reason.
+    if (dispatchCapability.kind === "establishing") {
+      return readOnly(hostedSyncingCopy(presence.label));
+    }
     return readOnly(dispatchCapability.reason ?? "Your access to this device is read-only.");
   }
   if (target && target.canMutate === false) {

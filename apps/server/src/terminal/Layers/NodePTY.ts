@@ -51,11 +51,16 @@ export const ensureNodePtySpawnHelperExecutable = Effect.fn(function* (explicitP
   yield* fs.chmod(helperPath, 0o755).pipe(Effect.orElseSucceed(() => undefined));
 });
 
-class NodePtyProcess implements PtyProcess {
+export class NodePtyProcess implements PtyProcess {
   private readonly process: import("node-pty").IPty;
+  private readonly platform: NodeJS.Platform;
 
-  constructor(process: import("node-pty").IPty) {
+  constructor(
+    process: import("node-pty").IPty,
+    platform: NodeJS.Platform = globalThis.process.platform,
+  ) {
     this.process = process;
+    this.platform = platform;
   }
 
   get pid(): number {
@@ -91,6 +96,22 @@ class NodePtyProcess implements PtyProcess {
     return () => {
       disposable.dispose();
     };
+  }
+
+  /**
+   * The tty's foreground process, read with one syscall on macOS, where the alternative is
+   * spawning `ps`. Elsewhere callers use the process table: Linux lists a shell's children
+   * from procfs without spawning anything (and node-pty reports the shell's own path there
+   * whenever the foreground group's leader is gone), and Windows has no foreground group.
+   */
+  foregroundProcessName(): string | undefined {
+    if (this.platform !== "darwin") return undefined;
+    try {
+      const name = this.process.process;
+      return typeof name === "string" && name.length > 0 ? name : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }
 

@@ -34,8 +34,13 @@ import type { ThreadId, TurnId } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
-import { isForkBaseItemId } from "@ryco/shared/threadFork";
+import {
+  capThreadActivitiesPreservingMilestones,
+  compareThreadActivities,
+  resolveRevertRetention,
+  retainThreadMessagesAfterForkRevert,
+  retainTurnItemsAfterRevert,
+} from "@ryco/shared/threadActivity";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 import {
   applySourceControlStateToPullRequestLinks,
@@ -61,6 +66,12 @@ import {
 } from "./types.ts";
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
+import { sessionFailureDetail } from "./threadFailure.ts";
+import {
+  forgetCollectedRows,
+  forgetDerivedThread,
+  retireDerivedThread,
+} from "./threadDerivationMemo.ts";
 import {
   MAX_THREAD_ACTIVITIES,
   MAX_THREAD_CHECKPOINTS,
@@ -411,7 +422,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     session: thread.session ? mapSession(thread.session) : null,
     messages: thread.messages.map((message) => mapMessage(environmentId, message)),
     proposedPlans: thread.proposedPlans.map(mapProposedPlan),
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    error: sanitizeThreadErrorMessage(sessionFailureDetail(thread.session)),
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     settledOverride: thread.settledOverride,
@@ -453,7 +464,7 @@ function mapThreadShell(
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     tokenMode: thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    error: sanitizeThreadErrorMessage(sessionFailureDetail(thread.session)),
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     settledOverride: thread.settledOverride,
@@ -899,59 +910,103 @@ function markThreadMessagesLive(state: EnvironmentState, threadId: ThreadId) {
   return rest;
 }
 
-function buildMessageSlice(thread: Thread): {
-  ids: MessageId[];
-  byId: Record<MessageId, ChatMessage>;
-} {
+/** One thread's collection as an ordered id list plus the items keyed by id. */
+interface KeyedSlice<K extends string, V> {
+  ids: K[];
+  byId: Record<K, V>;
+}
+
+/**
+ * Builds a thread collection's slice. When `previous` is the slice stored for
+ * the same collection, an item deep-equal to its stored counterpart keeps the
+ * stored object, an unchanged id order keeps the stored `ids` array, and an
+ * unchanged set of entries keeps the stored `byId` record, so a re-applied
+ * window leaves every selector over the collection on the same references.
+ */
+function buildKeyedSlice<K extends string, V>(
+  items: ReadonlyArray<V>,
+  keyOf: (item: V) => K,
+  previous: KeyedSlice<K, V> | undefined,
+): KeyedSlice<K, V> {
+  const ids = items.map(keyOf);
+  const byId = Object.fromEntries(
+    items.map((item, index) => {
+      const id = ids[index]!;
+      const stored = previous !== undefined ? ownValue(previous.byId, id) : undefined;
+      return [id, stored !== undefined && plainDataEqual(stored, item) ? stored : item] as const;
+    }),
+  ) as Record<K, V>;
+  if (previous === undefined) return { ids, byId };
   return {
-    ids: thread.messages.map((message) => message.id),
-    byId: Object.fromEntries(
-      thread.messages.map((message) => [message.id, message] as const),
-    ) as Record<MessageId, ChatMessage>,
+    ids: reuseUnchangedIds(previous.ids, ids),
+    byId: reuseUnchangedRecord(previous.byId, byId, Object.keys(byId) as K[]),
   };
 }
 
-function buildActivitySlice(thread: Thread): {
-  ids: string[];
-  byId: Record<string, OrchestrationThreadActivity>;
-} {
-  return buildActivitySliceFromActivities(thread.activities);
+function buildMessageSlice(
+  messages: ReadonlyArray<ChatMessage>,
+  previous?: KeyedSlice<MessageId, ChatMessage>,
+): KeyedSlice<MessageId, ChatMessage> {
+  return buildKeyedSlice(messages, (message) => message.id, previous);
 }
 
-function buildActivitySliceFromActivities(activities: ReadonlyArray<OrchestrationThreadActivity>): {
-  ids: string[];
-  byId: Record<string, OrchestrationThreadActivity>;
-} {
+function buildActivitySliceFromActivities(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  previous?: KeyedSlice<string, OrchestrationThreadActivity>,
+): KeyedSlice<string, OrchestrationThreadActivity> {
+  return buildKeyedSlice(activities, (activity) => activity.id, previous);
+}
+
+function buildProposedPlanSlice(
+  plans: ReadonlyArray<ProposedPlan>,
+  previous?: KeyedSlice<string, ProposedPlan>,
+): KeyedSlice<string, ProposedPlan> {
+  return buildKeyedSlice(plans, (plan) => plan.id, previous);
+}
+
+function buildTurnDiffSlice(
+  summaries: ReadonlyArray<TurnDiffSummary>,
+  previous?: KeyedSlice<TurnId, TurnDiffSummary>,
+): KeyedSlice<TurnId, TurnDiffSummary> {
+  return buildKeyedSlice(summaries, (summary) => summary.turnId, previous);
+}
+
+/** The slice stored for a thread, when both of its records are present. */
+function storedThreadSlice<K extends string, V>(
+  idsByThreadId: Record<ThreadId, K[]>,
+  byIdByThreadId: Record<ThreadId, Record<K, V>>,
+  threadId: ThreadId,
+): KeyedSlice<K, V> | undefined {
+  const ids = ownValue(idsByThreadId, threadId);
+  const byId = ownValue(byIdByThreadId, threadId);
+  return ids !== undefined && byId !== undefined ? { ids, byId } : undefined;
+}
+
+/**
+ * Stores a thread's slice in its two per-thread records. A record whose entry
+ * is already the given array or object is returned as is, so an unchanged
+ * collection publishes no new container.
+ */
+function writeThreadSliceRecords<K extends string, V>(
+  idsByThreadId: Record<ThreadId, K[]>,
+  byIdByThreadId: Record<ThreadId, Record<K, V>>,
+  threadId: ThreadId,
+  slice: KeyedSlice<K, V>,
+): { idsByThreadId: Record<ThreadId, K[]>; byIdByThreadId: Record<ThreadId, Record<K, V>> } {
   return {
-    ids: activities.map((activity) => activity.id),
-    byId: Object.fromEntries(
-      activities.map((activity) => [activity.id, activity] as const),
-    ) as Record<string, OrchestrationThreadActivity>,
+    idsByThreadId: writeChangedRecordEntry(idsByThreadId, threadId, slice.ids),
+    byIdByThreadId: writeChangedRecordEntry(byIdByThreadId, threadId, slice.byId),
   };
 }
 
-function buildProposedPlanSlice(thread: Thread): {
-  ids: string[];
-  byId: Record<string, ProposedPlan>;
-} {
-  return {
-    ids: thread.proposedPlans.map((plan) => plan.id),
-    byId: Object.fromEntries(
-      thread.proposedPlans.map((plan) => [plan.id, plan] as const),
-    ) as Record<string, ProposedPlan>,
-  };
-}
-
-function buildTurnDiffSlice(thread: Thread): {
-  ids: TurnId[];
-  byId: Record<TurnId, TurnDiffSummary>;
-} {
-  return {
-    ids: thread.turnDiffSummaries.map((summary) => summary.turnId),
-    byId: Object.fromEntries(
-      thread.turnDiffSummaries.map((summary) => [summary.turnId, summary] as const),
-    ) as Record<TurnId, TurnDiffSummary>,
-  };
+function writeChangedRecordEntry<K extends string, V>(
+  record: Record<K, V>,
+  key: K,
+  value: V,
+): Record<K, V> {
+  return Object.hasOwn(record, key) && record[key] === value
+    ? record
+    : ({ ...record, [key]: value } as Record<K, V>);
 }
 
 function getProjects(state: EnvironmentState): Project[] {
@@ -1113,6 +1168,7 @@ function writeThreadState(
   );
 
   if (!threadShellsEqual(previousShell, nextShell)) {
+    retireDerivedThread(previousShell, nextShell);
     nextState = {
       ...nextState,
       threadShellById: {
@@ -1143,19 +1199,34 @@ function writeThreadState(
   }
 
   if (previousThread?.messages !== resolvedThread.messages) {
-    const nextMessageSlice = buildMessageSlice(resolvedThread);
-    nextState = {
-      ...nextState,
-      cachedMessageThreadIds: markThreadMessagesLive(nextState, resolvedThread.id),
-      messageIdsByThreadId: {
-        ...nextState.messageIdsByThreadId,
-        [resolvedThread.id]: nextMessageSlice.ids,
-      },
-      messageByThreadId: {
-        ...nextState.messageByThreadId,
-        [resolvedThread.id]: nextMessageSlice.byId,
-      },
-    };
+    const { idsByThreadId: messageIdsByThreadId, byIdByThreadId: messageByThreadId } =
+      writeThreadSliceRecords(
+        nextState.messageIdsByThreadId,
+        nextState.messageByThreadId,
+        resolvedThread.id,
+        buildMessageSlice(
+          resolvedThread.messages,
+          storedThreadSlice(
+            nextState.messageIdsByThreadId,
+            nextState.messageByThreadId,
+            resolvedThread.id,
+          ),
+        ),
+      );
+    // Identical messages still end the cached-body state: the body is live now.
+    const cachedMessageThreadIds = markThreadMessagesLive(nextState, resolvedThread.id);
+    if (
+      messageIdsByThreadId !== nextState.messageIdsByThreadId ||
+      messageByThreadId !== nextState.messageByThreadId ||
+      cachedMessageThreadIds !== nextState.cachedMessageThreadIds
+    ) {
+      nextState = {
+        ...nextState,
+        cachedMessageThreadIds,
+        messageIdsByThreadId,
+        messageByThreadId,
+      };
+    }
   }
   if (pendingMessages.length > 0) {
     const { [resolvedThread.id]: _removed, ...rest } = nextState.pendingMessagesByThreadId;
@@ -1166,48 +1237,72 @@ function writeThreadState(
   }
 
   if (previousThread?.activities !== nextThread.activities) {
-    const nextActivitySlice = buildActivitySlice(nextThread);
-    nextState = {
-      ...nextState,
-      activityIdsByThreadId: {
-        ...nextState.activityIdsByThreadId,
-        [nextThread.id]: nextActivitySlice.ids,
-      },
-      activityByThreadId: {
-        ...nextState.activityByThreadId,
-        [nextThread.id]: nextActivitySlice.byId,
-      },
-    };
+    const { idsByThreadId: activityIdsByThreadId, byIdByThreadId: activityByThreadId } =
+      writeThreadSliceRecords(
+        nextState.activityIdsByThreadId,
+        nextState.activityByThreadId,
+        nextThread.id,
+        buildActivitySliceFromActivities(
+          nextThread.activities,
+          storedThreadSlice(
+            nextState.activityIdsByThreadId,
+            nextState.activityByThreadId,
+            nextThread.id,
+          ),
+        ),
+      );
+    if (
+      activityIdsByThreadId !== nextState.activityIdsByThreadId ||
+      activityByThreadId !== nextState.activityByThreadId
+    ) {
+      nextState = { ...nextState, activityIdsByThreadId, activityByThreadId };
+    }
   }
 
   if (previousThread?.proposedPlans !== nextThread.proposedPlans) {
-    const nextProposedPlanSlice = buildProposedPlanSlice(nextThread);
-    nextState = {
-      ...nextState,
-      proposedPlanIdsByThreadId: {
-        ...nextState.proposedPlanIdsByThreadId,
-        [nextThread.id]: nextProposedPlanSlice.ids,
-      },
-      proposedPlanByThreadId: {
-        ...nextState.proposedPlanByThreadId,
-        [nextThread.id]: nextProposedPlanSlice.byId,
-      },
-    };
+    const { idsByThreadId: proposedPlanIdsByThreadId, byIdByThreadId: proposedPlanByThreadId } =
+      writeThreadSliceRecords(
+        nextState.proposedPlanIdsByThreadId,
+        nextState.proposedPlanByThreadId,
+        nextThread.id,
+        buildProposedPlanSlice(
+          nextThread.proposedPlans,
+          storedThreadSlice(
+            nextState.proposedPlanIdsByThreadId,
+            nextState.proposedPlanByThreadId,
+            nextThread.id,
+          ),
+        ),
+      );
+    if (
+      proposedPlanIdsByThreadId !== nextState.proposedPlanIdsByThreadId ||
+      proposedPlanByThreadId !== nextState.proposedPlanByThreadId
+    ) {
+      nextState = { ...nextState, proposedPlanIdsByThreadId, proposedPlanByThreadId };
+    }
   }
 
   if (previousThread?.turnDiffSummaries !== nextThread.turnDiffSummaries) {
-    const nextTurnDiffSlice = buildTurnDiffSlice(nextThread);
-    nextState = {
-      ...nextState,
-      turnDiffIdsByThreadId: {
-        ...nextState.turnDiffIdsByThreadId,
-        [nextThread.id]: nextTurnDiffSlice.ids,
-      },
-      turnDiffSummaryByThreadId: {
-        ...nextState.turnDiffSummaryByThreadId,
-        [nextThread.id]: nextTurnDiffSlice.byId,
-      },
-    };
+    const { idsByThreadId: turnDiffIdsByThreadId, byIdByThreadId: turnDiffSummaryByThreadId } =
+      writeThreadSliceRecords(
+        nextState.turnDiffIdsByThreadId,
+        nextState.turnDiffSummaryByThreadId,
+        nextThread.id,
+        buildTurnDiffSlice(
+          nextThread.turnDiffSummaries,
+          storedThreadSlice(
+            nextState.turnDiffIdsByThreadId,
+            nextState.turnDiffSummaryByThreadId,
+            nextThread.id,
+          ),
+        ),
+      );
+    if (
+      turnDiffIdsByThreadId !== nextState.turnDiffIdsByThreadId ||
+      turnDiffSummaryByThreadId !== nextState.turnDiffSummaryByThreadId
+    ) {
+      nextState = { ...nextState, turnDiffIdsByThreadId, turnDiffSummaryByThreadId };
+    }
   }
 
   return nextState;
@@ -1251,6 +1346,7 @@ function writeThreadShellState(
   );
 
   if (!threadShellsEqual(previousShell, nextThread.shell)) {
+    retireDerivedThread(previousShell, nextThread.shell);
     nextState = {
       ...nextState,
       threadShellById: writeRecordEntry(
@@ -1315,6 +1411,7 @@ function writeArchivedThreadStub(
   state: EnvironmentState,
   stub: ArchivedThreadStub,
 ): EnvironmentState {
+  retireDerivedThread(state.threadShellById[stub.id], stub);
   return {
     ...state,
     threadShellById: { ...state.threadShellById, [stub.id]: stub },
@@ -1338,6 +1435,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
   if (!shell) {
     return state;
   }
+  retireDerivedThread(shell, undefined);
 
   const nextThreadIds = removeId(state.threadIds, threadId);
   const currentProjectThreadIds = state.threadIdsByProjectId[shell.projectId] ?? EMPTY_THREAD_IDS;
@@ -1408,6 +1506,93 @@ export function removeThreadByRef(state: AppState, threadRef: ScopedThreadRef): 
     threadRef.environmentId,
     removeThreadState(environmentState, threadRef.threadId),
   );
+}
+
+/** The record without the given threads' entries; the record itself when it holds none of them. */
+function withoutThreadEntries<R extends Record<ThreadId, unknown> | undefined>(
+  record: R,
+  threadIds: ReadonlySet<ThreadId>,
+): R {
+  if (record === undefined) return record;
+  let next: Record<ThreadId, unknown> | undefined;
+  for (const threadId of threadIds) {
+    if (!Object.hasOwn(record, threadId)) continue;
+    next ??= { ...record };
+    delete next[threadId];
+  }
+  return (next ?? record) as R;
+}
+
+function evictThreadBodiesFromEnvironment(
+  state: EnvironmentState,
+  threadIds: ReadonlySet<ThreadId>,
+): EnvironmentState {
+  const next: EnvironmentState = {
+    ...state,
+    messageIdsByThreadId: withoutThreadEntries(state.messageIdsByThreadId, threadIds),
+    messageByThreadId: withoutThreadEntries(state.messageByThreadId, threadIds),
+    pendingMessagesByThreadId: withoutThreadEntries(state.pendingMessagesByThreadId, threadIds),
+    activityIdsByThreadId: withoutThreadEntries(state.activityIdsByThreadId, threadIds),
+    activityByThreadId: withoutThreadEntries(state.activityByThreadId, threadIds),
+    proposedPlanIdsByThreadId: withoutThreadEntries(state.proposedPlanIdsByThreadId, threadIds),
+    proposedPlanByThreadId: withoutThreadEntries(state.proposedPlanByThreadId, threadIds),
+    turnDiffIdsByThreadId: withoutThreadEntries(state.turnDiffIdsByThreadId, threadIds),
+    turnDiffSummaryByThreadId: withoutThreadEntries(state.turnDiffSummaryByThreadId, threadIds),
+    threadHistoryByThreadId: withoutThreadEntries(state.threadHistoryByThreadId, threadIds),
+    threadHistoryLoadByThreadId: withoutThreadEntries(state.threadHistoryLoadByThreadId, threadIds),
+    cachedMessageThreadIds: withoutThreadEntries(state.cachedMessageThreadIds, threadIds),
+  };
+  return (Object.keys(next) as Array<keyof EnvironmentState>).every(
+    (key) => next[key] === state[key],
+  )
+    ? state
+    : next;
+}
+
+/**
+ * Drops the loaded body of each given thread: its messages, activities,
+ * proposed plans, turn diffs and history pages, with their load state. The
+ * thread's shell, session, turn state and sidebar summary stay, as does every
+ * other thread's body (by identity), so the thread still lists and a later
+ * open loads its window again as for a thread never opened.
+ *
+ * The thread composed from the dropped body is forgotten too (a cache-only
+ * side effect): it is memoized under the shell, which stays, and would keep
+ * the body reachable until the thread was composed again. So are the arrays
+ * collected from the dropped body, so a holder of an older state does not keep
+ * them reachable through the module-level memo.
+ */
+export function evictThreadBodies(
+  state: AppState,
+  threadRefs: ReadonlyArray<ScopedThreadRef>,
+): AppState {
+  const threadIdsByEnvironmentId = new Map<EnvironmentId, Set<ThreadId>>();
+  for (const { environmentId, threadId } of threadRefs) {
+    const threadIds = threadIdsByEnvironmentId.get(environmentId) ?? new Set<ThreadId>();
+    threadIds.add(threadId);
+    threadIdsByEnvironmentId.set(environmentId, threadIds);
+  }
+  let nextState = state;
+  for (const [environmentId, threadIds] of threadIdsByEnvironmentId) {
+    const environmentState = state.environmentStateById[environmentId];
+    if (!environmentState) continue;
+    for (const threadId of threadIds) {
+      const shell = ownValue(environmentState.threadShellById, threadId);
+      if (shell !== undefined) forgetDerivedThread(shell);
+      forgetCollectedRows(
+        ownValue(environmentState.messageIdsByThreadId, threadId),
+        ownValue(environmentState.activityIdsByThreadId, threadId),
+        ownValue(environmentState.proposedPlanIdsByThreadId, threadId),
+        ownValue(environmentState.turnDiffIdsByThreadId, threadId),
+      );
+    }
+    nextState = commitEnvironmentState(
+      nextState,
+      environmentId,
+      evictThreadBodiesFromEnvironment(environmentState, threadIds),
+    );
+  }
+  return nextState;
 }
 
 function upsertWorktreeState(
@@ -1498,23 +1683,6 @@ function removeWorktreeState(state: EnvironmentState, worktreeId: WorktreeId): E
   };
 }
 
-function compareActivities(
-  left: Thread["activities"][number],
-  right: Thread["activities"][number],
-): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
-}
-
 /** Apply a server-decided release to the latest turn it names; other turns are untouched. */
 function settleReleasedLatestTurn(
   latestTurn: Thread["latestTurn"],
@@ -1557,126 +1725,6 @@ function buildLatestTurn(params: {
     assistantMessageId: params.assistantMessageId,
     ...(resolvedPlan ? { sourceProposedPlan: resolvedPlan } : {}),
   };
-}
-
-function retainThreadMessagesAfterRevert(
-  messages: ReadonlyArray<ChatMessage>,
-  retainedTurnIds: ReadonlySet<string>,
-  turnCount: number,
-): ChatMessage[] {
-  const retainedMessageIds = new Set<string>();
-  for (const message of messages) {
-    if (message.role === "system") {
-      retainedMessageIds.add(message.id);
-      continue;
-    }
-    if (
-      message.turnId !== undefined &&
-      message.turnId !== null &&
-      retainedTurnIds.has(message.turnId)
-    ) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedUserCount = messages.filter(
-    (message) => message.role === "user" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingUserCount = Math.max(0, turnCount - retainedUserCount);
-  if (missingUserCount > 0) {
-    const fallbackUserMessages = messages
-      .filter(
-        (message) =>
-          message.role === "user" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === undefined ||
-            message.turnId === null ||
-            retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingUserCount);
-    for (const message of fallbackUserMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedAssistantCount = messages.filter(
-    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-  if (missingAssistantCount > 0) {
-    const fallbackAssistantMessages = messages
-      .filter(
-        (message) =>
-          message.role === "assistant" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === undefined ||
-            message.turnId === null ||
-            retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingAssistantCount);
-    for (const message of fallbackAssistantMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  return messages.filter((message) => retainedMessageIds.has(message.id));
-}
-
-/**
- * The messages a revert of `threadId` keeps. A fork's inherited history (and its provenance)
- * predates every checkpoint the fork owns, so it always stays; it is kept apart from the
- * count-based fallback, which only ever fills in the fork's own messages. The server's
- * projections apply the same rule (`isForkBaseItemId`).
- */
-function retainThreadMessagesAfterForkRevert(
-  threadId: ThreadId,
-  messages: ReadonlyArray<ChatMessage>,
-  retainedTurnIds: ReadonlySet<string>,
-  turnCount: number,
-): ChatMessage[] {
-  const ownMessages = retainThreadMessagesAfterRevert(
-    messages.filter((message) => !isForkBaseItemId(threadId, message.id)),
-    retainedTurnIds,
-    turnCount,
-  );
-  const keptOwnMessageIds = new Set(ownMessages.map((message) => message.id));
-  return messages.filter(
-    (message) => isForkBaseItemId(threadId, message.id) || keptOwnMessageIds.has(message.id),
-  );
-}
-
-function retainThreadActivitiesAfterRevert(
-  threadId: ThreadId,
-  activities: ReadonlyArray<OrchestrationThreadActivity>,
-  retainedTurnIds: ReadonlySet<string>,
-): OrchestrationThreadActivity[] {
-  return activities.filter(
-    (activity) =>
-      activity.turnId === null ||
-      isForkBaseItemId(threadId, activity.id) ||
-      retainedTurnIds.has(activity.turnId),
-  );
-}
-
-function retainThreadProposedPlansAfterRevert(
-  threadId: ThreadId,
-  proposedPlans: ReadonlyArray<ProposedPlan>,
-  retainedTurnIds: ReadonlySet<string>,
-): ProposedPlan[] {
-  return proposedPlans.filter(
-    (proposedPlan) =>
-      proposedPlan.turnId === null ||
-      isForkBaseItemId(threadId, proposedPlan.id) ||
-      retainedTurnIds.has(proposedPlan.turnId),
-  );
 }
 
 function toLegacySessionStatus(
@@ -1734,6 +1782,7 @@ function updateThreadShellTimestamp(
   if (!shell || shell.updatedAt === updatedAt || isArchivedThreadStub(shell)) {
     return state;
   }
+  retireDerivedThread(shell, undefined);
 
   return {
     ...state,
@@ -1779,6 +1828,8 @@ function updateThreadSettlementState(
   if (shellUnchanged && summaryUnchanged) {
     return state;
   }
+  // A full shell is written anew below even when only the summary differs.
+  retireDerivedThread(shell, undefined);
 
   return {
     ...state,
@@ -2017,14 +2068,14 @@ function insertActivityIdByOrder(
   activity: OrchestrationThreadActivity,
 ): string[] {
   const lastActivity = ids.length > 0 ? byId[ids[ids.length - 1]!] : undefined;
-  if (!lastActivity || compareActivities(lastActivity, activity) <= 0) {
+  if (!lastActivity || compareThreadActivities(lastActivity, activity) <= 0) {
     return [...ids, activity.id];
   }
 
   const nextIds = [...ids];
   const insertIndex = nextIds.findIndex((id) => {
     const existing = byId[id];
-    return existing ? compareActivities(activity, existing) < 0 : false;
+    return existing ? compareThreadActivities(activity, existing) < 0 : false;
   });
   if (insertIndex === -1) {
     nextIds.push(activity.id);
@@ -2297,9 +2348,9 @@ function syncEnvironmentShellSnapshot(
       nextState.threadIds.push(thread.id);
     }
     const previousShell = ownValue(state.threadShellById, thread.id);
-    nextState.threadShellById[thread.id] = threadShellsEqual(previousShell, mapped.shell)
-      ? previousShell!
-      : mapped.shell;
+    const shell = threadShellsEqual(previousShell, mapped.shell) ? previousShell! : mapped.shell;
+    retireDerivedThread(previousShell, shell);
+    nextState.threadShellById[thread.id] = shell;
     const previousSession = ownValue(state.threadSessionById, thread.id);
     nextState.threadSessionById[thread.id] =
       previousSession !== undefined && threadSessionsEqual(previousSession, mapped.session)
@@ -2345,10 +2396,17 @@ function syncEnvironmentShellSnapshot(
     const entry = archivedThreadStubsEqual(previousShell, stub)
       ? (previousShell as ArchivedThreadStub)
       : stub;
+    retireDerivedThread(previousShell, entry);
     nextState.threadShellById[stub.id] = entry;
     nextState.sidebarThreadSummaryById[stub.id] = entry;
     delete nextState.threadSessionById[stub.id];
     delete nextState.threadTurnStateById[stub.id];
+  }
+  // A thread the snapshot no longer lists leaves the store with its shell.
+  for (const threadId of state.threadIds) {
+    if (!nextThreadIds.has(threadId)) {
+      retireDerivedThread(ownValue(state.threadShellById, threadId), undefined);
+    }
   }
   for (const threadId of nextState.threadIds) {
     const projectId = nextState.threadShellById[threadId]!.projectId;
@@ -2481,27 +2539,27 @@ function mergeThreadHistoryPageState(
     for (const message of page.items) {
       byId[message.id] = mapMessage(environmentId, message);
     }
-    const ids = Object.values(byId)
+    const messages = Object.values(byId)
       .toSorted(
         (left, right) =>
           left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
       )
-      .slice(-MAX_THREAD_MESSAGES)
-      .map((message) => message.id);
-    const retainedIds = new Set(ids);
+      .slice(-MAX_THREAD_MESSAGES);
+    const { idsByThreadId: messageIdsByThreadId, byIdByThreadId: messageByThreadId } =
+      writeThreadSliceRecords(
+        state.messageIdsByThreadId,
+        state.messageByThreadId,
+        threadId,
+        buildMessageSlice(
+          messages,
+          storedThreadSlice(state.messageIdsByThreadId, state.messageByThreadId, threadId),
+        ),
+      );
     nextState = {
       ...nextState,
       cachedMessageThreadIds: markThreadMessagesLive(state, threadId),
-      messageIdsByThreadId: {
-        ...nextState.messageIdsByThreadId,
-        [threadId]: ids,
-      },
-      messageByThreadId: {
-        ...nextState.messageByThreadId,
-        [threadId]: Object.fromEntries(
-          Object.entries(byId).filter(([messageId]) => retainedIds.has(messageId as MessageId)),
-        ) as Record<MessageId, ChatMessage>,
-      },
+      messageIdsByThreadId,
+      messageByThreadId,
     };
   } else if (page.collection === "activities") {
     const byId = { ...state.activityByThreadId[threadId] };
@@ -2509,21 +2567,20 @@ function mergeThreadHistoryPageState(
       byId[activity.id] = { ...activity };
     }
     const activities = capThreadActivitiesPreservingMilestones(
-      Object.values(byId).toSorted(compareActivities),
+      Object.values(byId).toSorted(compareThreadActivities),
       MAX_THREAD_ACTIVITIES,
     );
-    const slice = buildActivitySliceFromActivities(activities);
-    nextState = {
-      ...nextState,
-      activityIdsByThreadId: {
-        ...nextState.activityIdsByThreadId,
-        [threadId]: slice.ids,
-      },
-      activityByThreadId: {
-        ...nextState.activityByThreadId,
-        [threadId]: slice.byId,
-      },
-    };
+    const { idsByThreadId: activityIdsByThreadId, byIdByThreadId: activityByThreadId } =
+      writeThreadSliceRecords(
+        state.activityIdsByThreadId,
+        state.activityByThreadId,
+        threadId,
+        buildActivitySliceFromActivities(
+          activities,
+          storedThreadSlice(state.activityIdsByThreadId, state.activityByThreadId, threadId),
+        ),
+      );
+    nextState = { ...nextState, activityIdsByThreadId, activityByThreadId };
   } else if (page.collection === "proposedPlans") {
     const byId = { ...state.proposedPlanByThreadId[threadId] };
     for (const plan of page.items) {
@@ -2535,17 +2592,21 @@ function mergeThreadHistoryPageState(
           left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
       )
       .slice(-MAX_THREAD_PROPOSED_PLANS);
-    nextState = {
-      ...nextState,
-      proposedPlanIdsByThreadId: {
-        ...nextState.proposedPlanIdsByThreadId,
-        [threadId]: plans.map((plan) => plan.id),
-      },
-      proposedPlanByThreadId: {
-        ...nextState.proposedPlanByThreadId,
-        [threadId]: Object.fromEntries(plans.map((plan) => [plan.id, plan] as const)),
-      },
-    };
+    const { idsByThreadId: proposedPlanIdsByThreadId, byIdByThreadId: proposedPlanByThreadId } =
+      writeThreadSliceRecords(
+        state.proposedPlanIdsByThreadId,
+        state.proposedPlanByThreadId,
+        threadId,
+        buildProposedPlanSlice(
+          plans,
+          storedThreadSlice(
+            state.proposedPlanIdsByThreadId,
+            state.proposedPlanByThreadId,
+            threadId,
+          ),
+        ),
+      );
+    nextState = { ...nextState, proposedPlanIdsByThreadId, proposedPlanByThreadId };
   } else {
     const byId = { ...state.turnDiffSummaryByThreadId[threadId] };
     for (const checkpoint of page.items) {
@@ -2558,19 +2619,17 @@ function mergeThreadHistoryPageState(
           left.turnId.localeCompare(right.turnId),
       )
       .slice(-MAX_THREAD_CHECKPOINTS);
-    nextState = {
-      ...nextState,
-      turnDiffIdsByThreadId: {
-        ...nextState.turnDiffIdsByThreadId,
-        [threadId]: summaries.map((summary) => summary.turnId),
-      },
-      turnDiffSummaryByThreadId: {
-        ...nextState.turnDiffSummaryByThreadId,
-        [threadId]: Object.fromEntries(
-          summaries.map((summary) => [summary.turnId, summary] as const),
-        ) as Record<TurnId, TurnDiffSummary>,
-      },
-    };
+    const { idsByThreadId: turnDiffIdsByThreadId, byIdByThreadId: turnDiffSummaryByThreadId } =
+      writeThreadSliceRecords(
+        state.turnDiffIdsByThreadId,
+        state.turnDiffSummaryByThreadId,
+        threadId,
+        buildTurnDiffSlice(
+          summaries,
+          storedThreadSlice(state.turnDiffIdsByThreadId, state.turnDiffSummaryByThreadId, threadId),
+        ),
+      );
+    nextState = { ...nextState, turnDiffIdsByThreadId, turnDiffSummaryByThreadId };
   }
 
   return {
@@ -2589,13 +2648,24 @@ export function syncServerThreadWindow(
 ): AppState {
   const withThread = syncServerThreadDetail(state, snapshot.thread, environmentId);
   const environmentState = getStoredEnvironmentState(withThread, environmentId);
-  const { [snapshot.thread.id]: _previousLoad, ...threadHistoryLoadByThreadId } =
+  const threadId = snapshot.thread.id;
+  const previousHistory = ownValue(environmentState.threadHistoryByThreadId, threadId);
+  const hasHistoryLoadState =
+    environmentState.threadHistoryLoadByThreadId !== undefined &&
+    Object.hasOwn(environmentState.threadHistoryLoadByThreadId, threadId);
+  // A re-applied window usually carries the history state already stored.
+  const history =
+    previousHistory !== undefined && plainDataEqual(previousHistory, snapshot.history)
+      ? previousHistory
+      : snapshot.history;
+  if (history === previousHistory && !hasHistoryLoadState) return withThread;
+  const { [threadId]: _previousLoad, ...threadHistoryLoadByThreadId } =
     environmentState.threadHistoryLoadByThreadId ?? {};
   return commitEnvironmentState(withThread, environmentId, {
     ...environmentState,
     threadHistoryByThreadId: {
       ...environmentState.threadHistoryByThreadId,
-      [snapshot.thread.id]: snapshot.history,
+      [threadId]: history,
     },
     threadHistoryLoadByThreadId,
   });
@@ -2955,7 +3025,7 @@ function applyEnvironmentOrchestrationEvent(
       return updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,
         session: mapSession(event.payload.session),
-        error: sanitizeThreadErrorMessage(event.payload.session.lastError),
+        error: sanitizeThreadErrorMessage(sessionFailureDetail(event.payload.session)),
         // The server decided which turn this release ends; settle only that turn, in
         // the same frame as the session, so the open view never flashes Working.
         latestTurn:
@@ -3100,34 +3170,31 @@ function applyEnvironmentOrchestrationEvent(
               (right.checkpointTurnCount ?? Number.MAX_SAFE_INTEGER),
           )
           .slice(-MAX_THREAD_CHECKPOINTS);
-        const retainedTurnIds = new Set(turnDiffSummaries.map((entry) => entry.turnId));
+        // Events carrying `latestTurn` are authoritative; older ones keep the count-based rule.
+        // The server's projection applies the same retention (`resolveRevertRetention`).
+        const { keepTurnItem, boundaryAt } = resolveRevertRetention({
+          retainedTurnIds: turnDiffSummaries.map((entry) => entry.turnId),
+          latestTurn: event.payload.latestTurn,
+          droppedTurnIds: event.payload.droppedTurnIds,
+        });
         const messages = retainThreadMessagesAfterForkRevert(
           thread.id,
           thread.messages,
-          retainedTurnIds,
+          keepTurnItem,
           event.payload.turnCount,
+          boundaryAt,
         ).slice(-MAX_THREAD_MESSAGES);
-        const proposedPlans = retainThreadProposedPlansAfterRevert(
+        const proposedPlans = retainTurnItemsAfterRevert(
           thread.id,
           thread.proposedPlans,
-          retainedTurnIds,
+          keepTurnItem,
         ).slice(-MAX_THREAD_PROPOSED_PLANS);
-        const activities = retainThreadActivitiesAfterRevert(
-          thread.id,
-          thread.activities,
-          retainedTurnIds,
-        );
+        const activities = retainTurnItemsAfterRevert(thread.id, thread.activities, keepTurnItem);
         const latestCheckpoint = turnDiffSummaries.at(-1) ?? null;
-
-        return {
-          ...thread,
-          turnDiffSummaries,
-          messages,
-          proposedPlans,
-          activities,
-          pendingSourceProposedPlan: undefined,
-          latestTurn:
-            latestCheckpoint === null
+        const latestTurn =
+          event.payload.latestTurn !== undefined
+            ? event.payload.latestTurn
+            : latestCheckpoint === null
               ? null
               : {
                   turnId: latestCheckpoint.turnId,
@@ -3138,7 +3205,16 @@ function applyEnvironmentOrchestrationEvent(
                   startedAt: latestCheckpoint.completedAt,
                   completedAt: latestCheckpoint.completedAt,
                   assistantMessageId: latestCheckpoint.assistantMessageId ?? null,
-                },
+                };
+
+        return {
+          ...thread,
+          turnDiffSummaries,
+          messages,
+          proposedPlans,
+          activities,
+          pendingSourceProposedPlan: undefined,
+          latestTurn,
           updatedAt: event.occurredAt,
         };
       });
@@ -4242,6 +4318,14 @@ export function hydrateEnvironmentStatesFromCache(
   return nextState;
 }
 
+/** A stub claims no live activity, and a summary with no session or liveness has none to drop. */
+function summaryHasNothingToDemote(summary: SidebarThreadOrStub): boolean {
+  return (
+    isArchivedThreadStub(summary) ||
+    (summary.session === null && summary.backgroundLiveness == null)
+  );
+}
+
 /**
  * Demote a live environment to last-known state when its connection is
  * disposed without the environment being forgotten (e.g. switching the
@@ -4259,18 +4343,27 @@ export function demoteEnvironmentStateToCachedSnapshot(
     return state;
   }
 
-  const threadSessionById = Object.fromEntries(
-    Object.keys(environmentState.threadSessionById).map((threadId) => [threadId, null]),
-  ) as Record<ThreadId, ThreadSession | null>;
-  const sidebarThreadSummaryById = Object.fromEntries(
-    Object.entries(environmentState.sidebarThreadSummaryById).map(([threadId, summary]) => [
-      threadId,
-      // A stub claims no live activity to begin with.
-      isArchivedThreadStub(summary)
-        ? summary
-        : { ...summary, session: null, backgroundLiveness: null },
-    ]),
-  ) as Record<ThreadId, SidebarThreadOrStub>;
+  // Only entries that hold a session or liveness change; a record with none of
+  // them keeps its identity, so leaving a node does not re-render every row.
+  const threadSessionById = Object.values(environmentState.threadSessionById).every(
+    (session) => session === null,
+  )
+    ? environmentState.threadSessionById
+    : (Object.fromEntries(
+        Object.keys(environmentState.threadSessionById).map((threadId) => [threadId, null]),
+      ) as Record<ThreadId, ThreadSession | null>);
+  const sidebarThreadSummaryById = Object.values(environmentState.sidebarThreadSummaryById).every(
+    summaryHasNothingToDemote,
+  )
+    ? environmentState.sidebarThreadSummaryById
+    : (Object.fromEntries(
+        Object.entries(environmentState.sidebarThreadSummaryById).map(([threadId, summary]) => [
+          threadId,
+          summaryHasNothingToDemote(summary)
+            ? summary
+            : { ...summary, session: null, backgroundLiveness: null },
+        ]),
+      ) as Record<ThreadId, SidebarThreadOrStub>);
   return commitEnvironmentState(state, environmentId, {
     ...environmentState,
     threadSessionById,
@@ -4456,6 +4549,8 @@ interface AppStore extends AppState {
     onEntryError?: (environmentId: EnvironmentId, error: unknown) => void,
   ) => void;
   demoteEnvironmentStateToCachedSnapshot: (environmentId: EnvironmentId, demotedAt: number) => void;
+  /** Drops the loaded bodies of the given threads; see `evictThreadBodies`. */
+  evictThreadBodies: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void;
   syncServerShellSnapshot: (
     snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
@@ -4574,6 +4669,10 @@ export const useStore = create<AppStore>((set, get) => {
     demoteEnvironmentStateToCachedSnapshot: (environmentId, demotedAt) => {
       shellCoalescer.flush();
       set((state) => demoteEnvironmentStateToCachedSnapshot(state, environmentId, demotedAt));
+    },
+    evictThreadBodies: (threadRefs) => {
+      shellCoalescer.flush();
+      set((state) => evictThreadBodies(state, threadRefs));
     },
     applyLoadedThreadShells: (threads, environmentId) => {
       shellCoalescer.flush();

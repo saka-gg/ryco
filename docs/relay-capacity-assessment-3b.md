@@ -157,10 +157,26 @@ environment each:
 
 At the bound of 3, background release plus leases turn the eight-client shared-NAT reconnect case
 from an over-capacity 24-upgrade burst into an 8-upgrade burst. If there is no retained mounted
-scope after backgrounding, the retained contribution is zero. Foregrounding must reconnect only
-the retained set and stagger those attempts; reconnecting the LRU/catalog eagerly would erase the
-mitigation. While foregrounded, LRU recency may fill the remaining slots again as the user opens
-work, but it does so on demand rather than as one synchronized wake-up.
+scope after backgrounding, the retained contribution is zero. Foregrounding reconnects the retained
+set and at most the last warm set (no more than 3 connections per client in total, never the
+catalog), staggered after the foreground, as preemptible demand that yields first; eagerly
+reacquiring the catalog, or every environment a client has used, would erase the mitigation. While
+foregrounded, LRU recency may fill the remaining slots again as the user opens work, but it does so
+on demand rather than as one synchronized wake-up.
+
+Restoring the warm set gives back part of that reduction: a foreground may again cost a client up
+to 3 upgrades, the "Warm foreground maximum" row above (24 tokens for 8 clients behind one address
+at the bound of 3, against a 20-token bucket). Ordering spreads those upgrades but does not keep
+them under the bucket. A client restores its warm set only after the environment in view has
+connected, and its warm wakes trail its foreground and retained connects by whole stagger steps.
+That lowers the peak, but a stagger step of 750 ms refills less than one token, so eight clients
+behind one address that wake together can still exceed the bucket. Each client issues its warm
+connects last, so when the clients wake together the excess falls on warm connects, and it is not
+retried: a warm connect that is refused, rate limited or interrupted is dropped, and its
+environment is not restored again for a few minutes unless the user routes to it or its directory
+entry changes. Boot restore runs only in a visible tab; hidden tabs restore nothing until they
+become visible, so the tabs of one browser do not each wake the same machines. Warm leases are
+never demanded, so they add nothing to the reconnect burst after a Hub restart.
 
 Wave 3b's mobile scopes do not own the web simulator preview, so leases do not reduce the existing
 web screenshot fallback and must not be counted as if they did. The general invariant is still
@@ -262,7 +278,9 @@ Wave 3b may be built and reviewed against this gate:
 - define the maximum as a named constant no greater than 3;
 - land and test scope leases before raising the maximum;
 - acquire only on a user opening work in an environment;
-- release non-retained connections on background and do not eagerly reacquire the catalog;
+- release non-retained connections on background; foreground reacquires the retained set and at
+  most the last warm set (no more than 3 connections per client in total, never the catalog),
+  staggered after the foreground, as preemptible demand that yields first;
 - stagger reconnects so one peer address does not issue more than 20 upgrades in a burst;
 - assert at most 3 active hosted connections under a five-node fixture;
 - assert acquiring or retaining a connection does not start unrelated high-volume work; and
@@ -275,8 +293,10 @@ it measures a different risk and is not a prerequisite for the bounded client-si
 
 ## Wave 4 hosted-Web qualification
 
-Hosted Web deliberately starts below the native ceiling. Its named maximum is one because the
-browser can add a sustained full-PNG preview to the ordinary thread, VCS, and provider streams.
+Hosted Web deliberately started below the native ceiling. Its named maximum was one because the
+browser can add a sustained full-PNG preview to the ordinary thread, VCS, and provider streams. The
+warm set qualification below raised it to three; this section is kept as the record of the
+one-connection bound it replaced.
 The adaptive sampler uses the measured base64 payload, schedules only after completion, retains the
 750 ms floor, and suspends when either the document or preview is hidden.
 
@@ -297,3 +317,119 @@ one environment connects and four wait. Backgrounding releases non-retained LRU 
 foregrounding restores only retained demand, so the one-connection Web bound produces at most one
 reconnect attempt and cannot form a reconnect storm. Raising the bound requires measured aggregate
 scope traffic in the same change.
+
+## Hosted Web warm set qualification (measured)
+
+Hosted Web now keeps a warm set of up to three environments per tab, the unified ceiling. The
+change that raised the bound records its qualification here, measured on a local full-stack fixture
+(a Hub, enrolled nodes and headless browser contexts on one machine, with no added network delay
+unless stated) with the previous bound of one and the new bound of three, in interleaved blocks.
+Each cell pools at least seven samples per bound (switches, wakes, restarts, heap runs or tabs),
+except the node ladder, which sampled two nodes at four channel counts twice per bound. Values are
+medians with the range in parentheses. Numbers are local aggregates; they carry no hostnames, URLs,
+node or account identifiers, logs or raw traces.
+
+The bound stays within the gate above: it is a named constant no greater than three, the demand
+state refuses a larger platform ceiling, the five-node test asserts that at most three hosted
+connections exist at any time, and only scopes (a mounted view, a queued send, home discovery, a
+short navigation-press intent) and the restored warm set (at most the three most recently used
+environments, as preemptible leases that yield to every scope) acquire an environment. The
+full-PNG fallback stays bounded by the one device preview a tab may sample at a time.
+
+Only demanded environments reconnect on their own. After a Hub session loss — a deploy, a restart,
+an interruption at a proxy — a warm environment that nothing demands is released and reconnects
+when it is demanded again, so the reconnect burst after a Hub restart is the number of demanded
+environments across tabs, not three per tab. Warm leases are not demand: a restored warm
+environment whose relay drops is released the same way, so restoring the warm set leaves this
+burst unchanged. This holds whether or not any Hub-side rate-limit change is deployed.
+
+| Check                                        | Target                                                                                                 | Bound of one                                                                                    | Bound of three                                                                                                       |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Traffic per warm environment                 | Idle warm stream bytes/s and streaming bytes/s per environment                                         | 52 B/s per tab idle on its one connection; nothing from machines out of view                    | +58 B/s idle per extra warm environment; +2.9 KB/s while one of them streams                                         |
+| Two visible previews under the preview lease | No `transfer_limit` close in 10 minutes                                                                | Not measured: no device preview source on the fixture                                           | Not measured: no device preview source on the fixture                                                                |
+| Browser memory and long tasks                | JS heap at three environments within 1.5× of one, with 1,000 and 4,500 threads                         | 213 and 803 MiB after three machines                                                            | 209 and 803 MiB (0.98× and 1.00× of the bound of one); 7.5× and 27× of one machine in both bounds: missed as written |
+| Node cost per extra channel                  | Node RSS and CPU per additional channel                                                                | 0.02 MiB RSS (at most 1.3 MiB) and about 0.015% of one core per idle channel                    | The same per channel                                                                                                 |
+| Wake and Hub restart, up to 8 contexts       | No `rate_limited` loop; reconnects after the restart limited to demanded environments                  | No rate limiting; one ticket and one stream per tab per wake or restart                         | No rate limiting; one ticket and one stream per tab; a restart turned 24 warm streams into 8: met                    |
+| Warm switch                                  | Click task ≤150 ms, content ≤200 ms, writable ≤250 ms (±10%); no new Hub stream, no node shell request | Click 197 ms, content 352 ms, writable 356 ms; a Hub stream and a node shell request per switch | Click 132 ms, content 158 ms, writable 158 ms; no Hub stream, no node shell request: met                             |
+| Four simultaneous foreground wakes           | At most 8 slots per node, no retry storm, node handshake bucket (8 burst, 2/s) not exhausted           | At most 2 channels per node, one ticket per tab, at most 2 opens per node in any second         | At most 4 channels per node (2 after the wake), one ticket per tab, at most 2 opens per node in any second: met      |
+
+The switch, reconnect and wake targets are met. The memory target is missed as written, for a
+reason that does not depend on the bound (below). The preview check and native wakes remain manual
+checks.
+
+Results:
+
+- **Traffic.** Seven tabs per block, two blocks per bound, each opened a thread on three machines in
+  turn and stayed on the last. With the bound of one a tab carried 52 B/s (45–56) while idle, sent
+  and received together, on its one connection. With the bound of three it carried 168 B/s
+  (160–184), about 58 B/s for each of the two extra warm environments. While a thread on a warm
+  machine out of view received a message every two seconds, each tab carried 3.0 KB/s (3.02–3.03),
+  about 2.9 KB/s for that environment's live updates; with the bound of one the tab was not
+  connected to that machine and stayed at 52 B/s.
+- **Previews.** Not measured. The fixture nodes have no device preview source (a preview needs a
+  simulator attached through the node's device helper), so the ten-minute check remains a manual
+  check against a Hub with a device-capable node. The warm set adds no preview traffic by
+  construction: a tab samples at most one device preview at a time, so a second visible preview
+  pauses instead of opening a second full-PNG stream, as the preview lease tests assert.
+- **Browser memory and long tasks.** One tab opened a thread on three machines in turn, eight runs
+  per bound and size, with 333 threads per machine (1,000 in all) and 1,500 per machine (4,500 in
+  all). The JS heap after garbage collection, after the first, second and third machine, was 28.6,
+  121 and 213 MiB, and 29.3, 406 and 803 MiB, with the bound of one; 27.9, 119 and 209 MiB, and
+  29.5, 406 and 803 MiB, with the bound of three. The warm connections add no measurable heap: after
+  the same three machines the bound of three holds 0.98× and 1.00× of the bound of one. The target
+  as written, three environments within 1.5× of one, is missed in both bounds (7.4–7.5× and 27×):
+  the inbox keeps and renders the thread rows of every machine the tab has left, at about
+  0.25–0.28 MiB of heap per row on this fixture, and the first point has no rows yet. That row cost
+  is independent of the bound. The switch to the third machine ran a long task of about 0.6 s with
+  1,000 threads and 3.9–4.1 s in all with 4,500 threads in both bounds; an idle tab ran no long
+  tasks in either bound.
+- **Node cost.** A ladder added browser contexts until two nodes each held 0, 2, 4 and 6 channels.
+  Node RSS grew by 0.02 MiB per channel (median; at most 1.3 MiB), inside the drift of a node
+  without channels over the same windows (up to 3 MiB). Idle CPU stayed at about 0.1% of one core
+  with six channels, about 0.015% per channel. The per-channel cost is the same in both bounds; the
+  bound of three places one channel on each of up to three nodes per tab.
+- **Wake and Hub restart.** Eight tabs, each in view on one of three machines and, with the bound of
+  three, warm on the other two, went offline for 10 seconds four times and then saw four Hub
+  restarts, in two blocks per bound; three more restarts per bound hit tabs that still held their
+  full warm sets. Every wake cost one ticket and one stream per tab in both bounds; with the bound of
+  three the first wake closed all 24 warm streams and reopened only the 8 in view. Tabs were writable
+  again 0.50 s (0.39–0.62) after the wake with the bound of one and 0.45 s (0.23–1.39) with the
+  bound of three. After every restart each tab
+  opened exactly one stream, also when the tabs held 24 warm streams before it. Ticket requests for
+  a node that had not yet re-registered were refused as offline and retried (2–12 refusals per
+  restart for eight tabs), so tabs were writable again in two clusters, around 2.7 s and 6 s after
+  the Hub was ready: 2.9 s (0.4–7.1) with the bound of one and 4.0 s (1.0–11.0) with the bound of
+  three, the median moving with the share of tabs in the later cluster. The longest case followed a
+  restart that took 5 seconds under load. No request was rejected for a rate limit in either bound,
+  and no node saw more than three channel opens in any second.
+- **Switch.** The switch probe alternated between threads on two of three machines, 16 measured
+  switches per bound and delay; with the bound of three every switch went to a warm environment.
+  With the bound of one: click task 197 ms (186–207), content 352 ms (209–403), writable 356 ms
+  (330–403), and every switch opened a Hub stream and a node shell subscription. With the bound of
+  three: click task 132 ms (118–145), content and writable 158 ms (140–169), and no switch opened a
+  Hub stream, issued a ticket or reached a node's shell subscription. Switching back to a thread
+  opened before took 127 ms (108–151) to the click and 150 ms (140–175) to content and writable.
+  With 40 ms added in each direction, a warm switch to a thread not yet opened took 289 ms (138–299)
+  to content, one node round trip for its messages, against 829 ms with the bound of one. A true
+  cold switch, cycling four machines so that the bound of three always returns to its released,
+  least recently used environment, took 235, 254 and 385 ms (click, content, writable) with the
+  bound of one and 203, 236 and 357 ms with the bound of three when a stream had to open (18 of 24
+  switches; the other six still found the environment warm): not slower.
+- **Four simultaneous wakes.** Two tabs of one context and two more contexts, each in view on its
+  own machine and, with the bound of three, warm on the others, went offline together four times
+  per block. Before a wake each node carried at most 2 channels with the bound of one and 4 with the
+  bound of three; after it at most 2 in both. Every wake cost exactly one ticket per tab, no node saw
+  more than 2 channel opens in any second against a handshake burst of 8, and no request was
+  rejected or retried.
+
+Caveats:
+
+- The Hub's peer-keyed rate buckets are shared by every client behind one address. Behind a
+  terminating proxy that is every client of the deployment, so the fixture's per-machine numbers are
+  a lower bound for what a proxy-fronted Hub sees after a restart.
+- Eight tabs whose warm sets cover the same machine hold eight channels on it, the per-node channel
+  limit. More tabs warm on one machine were not measured.
+- The four simultaneous wakes are browser contexts (two tabs of one context and two more contexts
+  standing in for other devices). Native Desktop and Mobile wakes cannot be measured on the local
+  fixture, because native sign-in needs an https origin and a native identity; they remain a manual
+  check against a production Hub.

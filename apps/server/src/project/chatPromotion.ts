@@ -621,6 +621,11 @@ export interface ChatPromotionDependencies {
   >;
   readonly relocations: ProjectRelocationRepositoryShape;
   readonly chatFolders: Pick<ChatFoldersShape, "capability">;
+  /**
+   * Recreates the chat's own folder when empty-folder cleanup removed it (`chatFolderRestore.ts`),
+   * so an old chat can still be turned into a project. Absent means a missing folder is refused.
+   */
+  readonly restoreChatFolder?: (folder: string) => Effect.Effect<boolean>;
   readonly policy: WorkspaceAccessPolicyShape;
   readonly config: Pick<ServerConfigShape, "workspaceAccessRoot">;
   readonly settings: Pick<ServerSettingsShape, "getSettings">;
@@ -661,7 +666,10 @@ export interface ChatPromotionDependencies {
 }
 
 export interface ChatPromotionShape {
-  /** Read-only: never creates, moves or locks anything. */
+  /**
+   * Read-only: never moves or locks anything, and creates nothing but the chat's own empty
+   * folder when empty-folder cleanup removed it.
+   */
   readonly preview: (
     input: ProjectsPromoteChatPreviewInput,
   ) => Effect.Effect<ProjectsPromoteChatPreviewResult, ProjectChatError>;
@@ -694,6 +702,11 @@ export const makeChatPromotion = (deps: ChatPromotionDependencies): ChatPromotio
 
   /** The chat's folder by realpath; the move and every containment check use this path. */
   const canonicalSource = (project: ProjectionProject) =>
+    (deps.restoreChatFolder?.(project.workspaceRoot) ?? Effect.void).pipe(
+      Effect.andThen(canonicalSourceOnDisk(project)),
+    );
+
+  const canonicalSourceOnDisk = (project: ProjectionProject) =>
     Effect.tryPromise(async () => {
       const source = await realpath(project.workspaceRoot);
       if (!(await isDirectory(source))) throw new Error("not a directory");

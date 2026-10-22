@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { EventEmitter } from "node:events";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  createNativeSecurityHelperRunner,
   DesktopNativeSecurityError,
   DesktopNativeSecurityHelper,
   desktopNativeInstallationNamespace,
@@ -171,5 +174,147 @@ describe("Desktop native security helper", () => {
       }),
     });
     await expect(malformed.getSigningKey()).rejects.toBeInstanceOf(DesktopNativeSecurityError);
+  });
+});
+
+describe("helper process lifetime while a relay session holds it", () => {
+  const request = { operation: "signing.create" } as const;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Stand-ins for helper processes: each answers every request line with `{ ok: true }`. */
+  function fakeProcesses() {
+    const children: Array<{ readonly end: ReturnType<typeof vi.fn> }> = [];
+    const spawn = vi.fn(() => {
+      const stdout = new EventEmitter();
+      const end = vi.fn();
+      const stdin = {
+        on: vi.fn(),
+        end,
+        write: vi.fn(() => {
+          queueMicrotask(() => stdout.emit("data", Buffer.from('{"ok":true}\n')));
+          return true;
+        }),
+      };
+      children.push({ end });
+      return Object.assign(new EventEmitter(), { stdin, stdout, kill: vi.fn() });
+    });
+    return { spawn: spawn as never, spawned: spawn, children };
+  }
+
+  it("lets an idle helper exit after the idle period when nothing holds it", async () => {
+    const { spawn, children } = fakeProcesses();
+    const run = createNativeSecurityHelperRunner("helper", { spawn, idleMs: 2_000 });
+    await run(request);
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(children[0]!.end).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(children[0]!.end).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the helper up while held and lets it exit one idle period after the release", async () => {
+    const { spawn, spawned, children } = fakeProcesses();
+    const run = createNativeSecurityHelperRunner("helper", { spawn, idleMs: 2_000 });
+    const release = run.holdForRelay();
+    await run(request);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(children[0]!.end).not.toHaveBeenCalled();
+    // The relay session signs again later: the same process answers.
+    await run(request);
+    expect(spawned).toHaveBeenCalledOnce();
+
+    release();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(children[0]!.end).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(children[0]!.end).toHaveBeenCalledOnce();
+  });
+
+  it("cancels an idle exit that is already pending when a hold starts", async () => {
+    const { spawn, children } = fakeProcesses();
+    const run = createNativeSecurityHelperRunner("helper", { spawn, idleMs: 2_000 });
+    await run(request);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const release = run.holdForRelay();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(children[0]!.end).not.toHaveBeenCalled();
+
+    release();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(children[0]!.end).toHaveBeenCalledOnce();
+  });
+
+  it("applies the idle exit only after the last of several holds is released", async () => {
+    const { spawn, children } = fakeProcesses();
+    const run = createNativeSecurityHelperRunner("helper", { spawn, idleMs: 2_000 });
+    const first = run.holdForRelay();
+    const second = run.holdForRelay();
+    await run(request);
+
+    first();
+    first();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(children[0]!.end).not.toHaveBeenCalled();
+
+    second();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(children[0]!.end).toHaveBeenCalledOnce();
+  });
+
+  it("applies the idle exit to a request made after the hold was released", async () => {
+    const { spawn, children } = fakeProcesses();
+    const run = createNativeSecurityHelperRunner("helper", { spawn, idleMs: 2_000 });
+    const release = run.holdForRelay();
+    release();
+    await run(request);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(children[0]!.end).toHaveBeenCalledOnce();
+  });
+
+  it("passes the hold through the security helper, and is a no-op for a runner without one", () => {
+    const release = vi.fn();
+    const holdForRelay = vi.fn(() => release);
+    const held = new DesktopNativeSecurityHelper({
+      run: Object.assign(async () => ({ ok: true }), { holdForRelay }),
+      store: memoryStore(),
+    });
+    held.holdForRelay()();
+    expect(holdForRelay).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+
+    const plain = new DesktopNativeSecurityHelper({
+      run: async () => ({ ok: true }),
+      store: memoryStore(),
+    });
+    expect(() => plain.holdForRelay()()).not.toThrow();
+  });
+});
+
+describe("public key reset notifications", () => {
+  it("tells listeners when either key is reset, until they unsubscribe", async () => {
+    const helper = new DesktopNativeSecurityHelper({
+      run: async () => ({ ok: true }),
+      store: memoryStore(),
+    });
+    const listener = vi.fn();
+    const unsubscribe = helper.onPublicKeysChanged(listener);
+
+    await helper.deleteAgreementKey();
+    expect(listener).toHaveBeenCalledTimes(1);
+    await helper.deleteSigningKey();
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    unsubscribe();
+    await helper.deleteAgreementKey();
+    expect(listener).toHaveBeenCalledTimes(2);
   });
 });

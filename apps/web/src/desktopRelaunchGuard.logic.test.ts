@@ -1,8 +1,12 @@
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it } from "vitest";
 
-import { countActiveDesktopTurns, describeActiveDesktopTurns } from "./desktopRelaunchGuard.logic";
+import {
+  collectInterruptibleTurnsByEnvironment,
+  countActiveDesktopTurns,
+  describeActiveDesktopTurns,
+} from "./desktopRelaunchGuard.logic";
 
 const LOCAL = EnvironmentId.make("env-local");
 const REMOTE = EnvironmentId.make("env-remote");
@@ -81,6 +85,40 @@ describe("countActiveDesktopTurns", () => {
     // and relaunched without asking.
     expect(countActiveDesktopTurns([thread()], LOCAL, false)).toBeNull();
     expect(countActiveDesktopTurns([], LOCAL, false)).toBeNull();
+  });
+});
+
+describe("collectInterruptibleTurnsByEnvironment", () => {
+  const CODEX = ProviderInstanceId.make("codex");
+  const CLAUDE = ProviderInstanceId.make("claude_work");
+  const selection = (instanceId: ProviderInstanceId) => ({ instanceId, model: "model" });
+
+  it("counts every environment's interruptible turns and the providers they run on", () => {
+    const activity = collectInterruptibleTurnsByEnvironment([
+      thread({ session: runningSession, modelSelection: selection(CODEX) }),
+      thread({ hasPendingApprovals: true, modelSelection: selection(CODEX) }),
+      thread({ hasPendingUserInput: true, modelSelection: selection(CLAUDE) }),
+      thread({ environmentId: REMOTE, session: runningSession, modelSelection: selection(CLAUDE) }),
+      thread({ environmentId: REMOTE, backgroundLiveness: "working" }),
+      thread({ modelSelection: selection(CLAUDE) }),
+    ]);
+    expect(activity.get(LOCAL)).toEqual({
+      runningChatCount: 3,
+      busyProviderInstanceIds: [CODEX, CLAUDE],
+    });
+    expect(activity.get(REMOTE)).toEqual({
+      runningChatCount: 2,
+      busyProviderInstanceIds: [CLAUDE],
+    });
+  });
+
+  it("lists no environment whose threads are idle, archived, or only monitoring", () => {
+    const activity = collectInterruptibleTurnsByEnvironment([
+      thread({ modelSelection: selection(CODEX) }),
+      thread({ archivedAt: "2026-10-04T00:00:00.000Z", session: runningSession }),
+      thread({ environmentId: REMOTE, backgroundLiveness: "monitoring" }),
+    ]);
+    expect(activity.size).toBe(0);
   });
 });
 

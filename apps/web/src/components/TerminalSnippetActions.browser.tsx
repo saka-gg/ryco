@@ -8,6 +8,8 @@ const fixture = vi.hoisted(() => ({
   hostedMode: false,
   hosted: {
     generation: 1,
+    selectedNode: { environmentId: "synthetic-node-a" },
+    nodes: [],
     effectiveRole: "owner",
     directoryStatus: "ready",
     transportStatus: "online",
@@ -21,6 +23,7 @@ const fixture = vi.hoisted(() => ({
   } | null,
   state: {} as unknown,
   connections: new Map<string, unknown>(),
+  records: new Map<string, unknown>(),
 }));
 vi.mock("../env", () => ({ isHostedHubMode: () => fixture.hostedMode }));
 vi.mock("../lib/utils", () => ({ randomUUID: () => crypto.randomUUID() }));
@@ -37,6 +40,11 @@ vi.mock("../hostedHub/state", () => ({
     acknowledgeDeliveryUnknown: vi.fn(),
     markEnvironmentDeliveryUnknown: vi.fn(),
   },
+  getHostedEnvironmentSessions: () => ({
+    read: (environmentId: string) => fixture.records.get(environmentId),
+    getSnapshot: () => ({ records: fixture.records }),
+    subscribe: () => () => undefined,
+  }),
 }));
 vi.mock("../hostedHub/hostedConnectionCoordinator", () => ({
   readHostedNodeMutationLease: (environmentId: string) =>
@@ -94,6 +102,8 @@ describe("conversation terminal action ownership", () => {
     fixture.hostedMode = false;
     fixture.hosted = {
       generation: 1,
+      selectedNode: { environmentId: "synthetic-node-a" },
+      nodes: [],
       effectiveRole: "owner",
       directoryStatus: "ready",
       transportStatus: "online",
@@ -101,6 +111,7 @@ describe("conversation terminal action ownership", () => {
       sessionStatus: "ready",
     };
     fixture.lease = null;
+    fixture.records.clear();
     fixture.state = {
       activeEnvironmentId: otherRef.environmentId,
       environmentStateById: {
@@ -223,6 +234,44 @@ describe("conversation terminal action ownership", () => {
       const result = action!("printf 'a'").catch((error: Error) => error);
       const request = readRequest();
       fixture.lease = { ...fixture.lease, selectionGeneration: 3 };
+      expect(request.isCurrent()).toBe(false);
+      const send = vi.fn(async () => undefined);
+      request.dispatch("synthetic-process", send);
+      expect(await result).toBeInstanceOf(Error);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("fences a pending insertion on the node's own session, not on the selected node", async () => {
+    fixture.hostedMode = true;
+    // The selected node is another one, with a role that must not decide here.
+    fixture.hosted.selectedNode = { environmentId: otherRef.environmentId };
+    fixture.hosted.effectiveRole = "viewer";
+    const record = {
+      generation: 4,
+      effectiveRole: "owner",
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionRecoveredAfterUnknown: false,
+      failure: null,
+    };
+    fixture.records.set(threadRef.environmentId, record);
+    fixture.lease = {
+      environmentId: threadRef.environmentId,
+      selectionGeneration: 1,
+      snapshotGeneration: 1,
+    };
+    const screen = await mount();
+    try {
+      expect(action).not.toBeNull();
+      const result = action!("printf 'a'").catch((error: Error) => error);
+      const request = readRequest();
+      expect(request.isCurrent()).toBe(true);
+      fixture.hosted = { ...fixture.hosted, generation: 2 };
+      expect(request.isCurrent()).toBe(true);
+      fixture.records.set(threadRef.environmentId, { ...record, generation: 5 });
       expect(request.isCurrent()).toBe(false);
       const send = vi.fn(async () => undefined);
       request.dispatch("synthetic-process", send);

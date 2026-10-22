@@ -612,8 +612,9 @@ export function useGitActionRunner({
         runImmediately: false,
       });
 
-      try {
-        const result = await promise;
+      // The conditionals live in a nested function: the compiler cannot lower
+      // them inside the `try` that also covers the awaited mutation.
+      const finishSucceeded = (result: GitRunStackedActionResult) => {
         elapsedTicker.stop();
         clearActiveGitActionProgress();
         syncThreadBranchAfterGitAction(result);
@@ -645,6 +646,10 @@ export function useGitActionRunner({
           description: result.toast.description,
           action: followUp,
         });
+      };
+
+      try {
+        finishSucceeded(await promise);
       } catch (err) {
         elapsedTicker.stop();
         clearActiveGitActionProgress();

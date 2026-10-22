@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
+  NODE_SWITCH_CONTENT_MEASURE_PREFIX,
   WEB_PERF_BUDGETS,
   evaluateMeasureDuration,
+  evaluateNodeSwitchContentBudget,
   evaluateSidebarExpandBudget,
   evaluateTabSwitchBudget,
   perfMarkNamesForKey,
@@ -9,11 +11,17 @@ import {
   sidebarExpandMeasureName,
   tabSwitchMeasureName,
 } from "./budgets";
+import {
+  markNodeSwitchIntent,
+  markNodeSwitchPhase,
+  resetNodeSwitchInstrumentationForTests,
+} from "./nodeSwitchInstrumentation";
 
 describe("WEB_PERF_BUDGETS", () => {
-  it("defines tab switch and sidebar expand ceilings", () => {
+  it("defines tab switch, sidebar expand and node switch ceilings", () => {
     expect(WEB_PERF_BUDGETS.tabSwitchMs).toBeGreaterThan(0);
     expect(WEB_PERF_BUDGETS.sidebarExpandMs).toBeGreaterThan(0);
+    expect(WEB_PERF_BUDGETS.nodeSwitchContentMs).toBeGreaterThan(0);
   });
 });
 
@@ -125,5 +133,77 @@ describe("perfMarkNamesForKey", () => {
       sidebarExpandClick: "ryco:sidebar-expand:click:env:thr_1",
       sidebarExpandFirstPaint: "ryco:sidebar-expand:first-paint:env:thr_1",
     });
+  });
+});
+
+function measureEntry(name: string, duration: number): PerformanceEntry {
+  return { duration, entryType: "measure", name, startTime: 0, toJSON: () => ({}) };
+}
+
+function performanceWithMeasures(entries: PerformanceEntry[]) {
+  return {
+    getEntriesByType: (type: string) => (type === "measure" ? entries : []),
+  } satisfies Pick<Performance, "getEntriesByType">;
+}
+
+describe("evaluateNodeSwitchContentBudget", () => {
+  afterEach(() => {
+    resetNodeSwitchInstrumentationForTests();
+    performance.clearMarks();
+    performance.clearMeasures();
+  });
+
+  it("evaluates the content measure of the latest switch against the configured budget", () => {
+    const evaluation = evaluateNodeSwitchContentBudget(
+      performanceWithMeasures([
+        measureEntry(`${NODE_SWITCH_CONTENT_MEASURE_PREFIX}2`, 600),
+        measureEntry(`${NODE_SWITCH_CONTENT_MEASURE_PREFIX}10`, 150),
+        measureEntry(`${NODE_SWITCH_CONTENT_MEASURE_PREFIX}9`, 900),
+      ]),
+    );
+    expect(evaluation).toEqual({
+      measureName: `${NODE_SWITCH_CONTENT_MEASURE_PREFIX}10`,
+      durationMs: 150,
+      budgetMs: WEB_PERF_BUDGETS.nodeSwitchContentMs,
+      withinBudget: true,
+    });
+  });
+
+  it("fails when the latest switch paints its content over budget", () => {
+    expect(
+      evaluateNodeSwitchContentBudget(
+        performanceWithMeasures([
+          measureEntry(`${NODE_SWITCH_CONTENT_MEASURE_PREFIX}1`, 120),
+          measureEntry(`${NODE_SWITCH_CONTENT_MEASURE_PREFIX}2`, 450),
+        ]),
+      )?.withinBudget,
+    ).toBe(false);
+  });
+
+  it("ignores other phases, tab switches and malformed names", () => {
+    expect(
+      evaluateNodeSwitchContentBudget(
+        performanceWithMeasures([
+          measureEntry("ryco:node-switch:mutation-ready:3", 80),
+          measureEntry("ryco:tab-switch:env:thr_1", 80),
+          measureEntry(`${NODE_SWITCH_CONTENT_MEASURE_PREFIX}latest`, 80),
+          measureEntry(NODE_SWITCH_CONTENT_MEASURE_PREFIX, 80),
+        ]),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when no switch was measured", () => {
+    expect(evaluateNodeSwitchContentBudget(performanceWithMeasures([]))).toBeNull();
+  });
+
+  it("finds the measures the node switch instrumentation records", () => {
+    markNodeSwitchIntent("environment-a", "press");
+    markNodeSwitchPhase("content-painted", "environment-a");
+    const evaluation = evaluateNodeSwitchContentBudget();
+    expect(evaluation?.measureName).toMatch(
+      new RegExp(`^${NODE_SWITCH_CONTENT_MEASURE_PREFIX}\\d+$`),
+    );
+    expect(evaluation?.budgetMs).toBe(WEB_PERF_BUDGETS.nodeSwitchContentMs);
   });
 });

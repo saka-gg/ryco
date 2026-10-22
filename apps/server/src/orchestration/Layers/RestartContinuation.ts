@@ -357,6 +357,7 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
         return {
           threadId: thread.id,
           sourceTurnId: shape.sourceTurnId,
+          kind: shape.kind,
           runtimeSessionId: record.runtimeSessionId,
           backgroundWork,
           status: classification.status,
@@ -370,6 +371,7 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
         : {
             threadId: stored.record.threadId,
             sourceTurnId: stored.record.sourceTurnId,
+            kind: stored.record.kind,
             runtimeSessionId: stored.record.runtimeSessionId,
             backgroundWork: stored.record.backgroundWork,
             status: stored.status,
@@ -482,7 +484,7 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
                 row.sourceTurnId,
                 RESTART_CONTINUATION_SKIPPED_KIND,
                 row.reason,
-                restartSkipNotice(row.reason as RestartSkipReason),
+                restartSkipNotice(row.reason as RestartSkipReason, row.kind),
               );
             }
           }),
@@ -546,7 +548,7 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
                 record.sourceTurnId,
                 RESTART_CONTINUATION_SKIPPED_KIND,
                 reason,
-                restartSkipNotice(reason),
+                restartSkipNotice(reason, record.kind),
               );
             }
             return settled;

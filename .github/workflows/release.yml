@@ -16,15 +16,26 @@ on:
         required: false
         type: string
 
+# Every job starts read-only and is granted only what it needs. In particular,
+# id-token: write lets a job mint the OIDC token npm trusted publishing accepts,
+# so only publish_cli gets it: the build legs run third-party build code.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
+
+# Release jobs default to no GitHub cache access: each setup passes
+# bun-cache: none and restore-turbo-cache: "false", and this default makes the
+# cache service enforce it. Only `verify` overrides it (job-level cache-mode
+# wins) with `read`: it ships nothing, so it may restore caches but not save
+# them. Main-scope cache entries can be written by validation runs of unmerged
+# code on backends that do not enforce the read cap (Blacksmith), so nothing
+# restored from a cache may end up in a shipped artifact.
+cache-mode: none
 
 jobs:
-  preflight:
-    name: Preflight
+  resolve:
+    name: Resolve release
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     outputs:
       release_channel: ${{ steps.release_meta.outputs.release_channel }}
       version: ${{ steps.release_meta.outputs.version }}
@@ -40,12 +51,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # Previous-tag resolution reads every release tag.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup project
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: release-preflight
+          # The release metadata scripts need only the scripts workspace.
+          install-args: --filter=@ryco/scripts
+          install-resource-monitor-toolchain: "false"
+          bun-cache: none
+          restore-turbo-cache: "false"
 
       - id: release_meta
         name: Resolve release version
@@ -108,15 +125,6 @@ jobs:
             exit 1
           fi
 
-      - name: Lint
-        run: bun run lint
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Test
-        run: bun run test
-
       - id: previous_tag
         name: Resolve previous release tag
         run: |
@@ -125,12 +133,85 @@ jobs:
             --current-tag "${{ steps.release_meta.outputs.tag }}" \
             --github-output
 
+  # Release verification reuses CI's verdict when CI already passed on exactly
+  # this commit. That does not weaken the gate: a green CI run on the identical
+  # SHA ran a superset of what verify runs (format, lint, typecheck, every unit
+  # test shard, the build, browser tests, desktop build and release smoke).
+  # Only runs on main count: CI's jobs check out the branch tip, and only on
+  # main does every push cancel the running CI, so a green run there validated
+  # head_sha throughout. Releases from other branches always run verify.
+  ci-status:
+    name: CI status
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      reuse: ${{ steps.ci.outputs.reuse }}
+    steps:
+      - id: ci
+        name: Find a green CI run for the release commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+
+          # Any failure to answer means "no": verify then runs in full.
+          run_url=""
+          if ! run_url="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f head_sha="$RELEASE_SHA" -f status=success -f per_page=100 |
+            jq -r --arg sha "$RELEASE_SHA" --arg repo "$GITHUB_REPOSITORY" \
+              'first(.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .status == "completed" and .conclusion == "success" and .head_repository.full_name == $repo) | .html_url) // empty')"; then
+            echo "::warning::Could not query CI runs for $RELEASE_SHA; running release verification."
+            run_url=""
+          fi
+
+          if [[ -n "$run_url" ]]; then
+            echo "CI passed on $RELEASE_SHA: $run_url"
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No successful CI run for $RELEASE_SHA; running release verification."
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Starts with the builds once resolve succeeds; nothing is published unless
+  # it passes (or was skipped because CI already passed on this commit, see
+  # ci-status). Waiting on resolve keeps a bad or already-published version
+  # from running the whole validation workflow for a release that cannot
+  # publish.
+  verify:
+    name: Verify
+    needs: [resolve, ci-status]
+    if: ${{ needs.ci-status.outputs.reuse != 'true' }}
+    # Verification ships nothing, so it may restore caches, but a release run
+    # must not seed caches that later runs restore.
+    cache-mode: read
+    uses: ./.github/workflows/_validation.yml
+    with:
+      checkout-ref: ${{ github.sha }}
+      run-browser-tests: false
+      # The build legs below produce the real desktop artifacts.
+      run-desktop-build: false
+      # Cheap, and it exercises the release-only steps (version alignment,
+      # nightly metadata, Windows manifest merge) before anything is published.
+      run-release-smoke: true
+
   build:
     name: Build ${{ matrix.label }}
-    needs: preflight
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' }}
+    needs: resolve
+    if: ${{ !failure() && !cancelled() && needs.resolve.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      # Reads native build caches from earlier release runs' artifacts.
+      actions: read
+    env:
+      # Shipped web bundles compile every module from source instead of reading
+      # React Compiler output from a local transform cache.
+      RYCO_REACT_COMPILER_CACHE: "off"
     strategy:
       fail-fast: false
       matrix:
@@ -145,6 +226,9 @@ jobs:
             platform: linux
             target: AppImage
             arch: x64
+            # This leg's server build (CLI + bundled web client) is what
+            # publish_cli ships to npm.
+            cli-dist: true
           - label: Linux arm64
             runner: ubuntu-24.04-arm
             platform: linux
@@ -164,21 +248,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
-          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.ref }}
+          # The build reads only HEAD (for the embedded commit hash).
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Setup project
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: release-build-${{ matrix.arch }}-${{ matrix.platform }}
+          # Root tooling plus the workspaces the desktop artifact and CLI build
+          # need. Skipping the rest (mobile) roughly halves the installed files,
+          # which dominates install time on Windows.
+          install-args: --filter=./ --filter=@ryco/desktop --filter=ryco-cli --filter=@ryco/web --filter=@ryco/scripts
+          bun-cache: none
+          restore-turbo-cache: "false"
 
+      # The computer-use helper's pinned toolchain (its rust-toolchain.toml and
+      # build-computer-use-helper.mjs). Also made the default, so no build step
+      # picks up the runner image's floating stable.
       - name: Install computer-use Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.98.1
+        shell: bash
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          rustup default 1.98.1
 
       - name: Align package versions to release version
-        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+        run: node scripts/update-release-package-versions.ts "${{ needs.resolve.outputs.version }}"
 
       - name: Install Spectre-mitigated MSVC libs
         if: matrix.platform == 'win'
@@ -242,6 +337,34 @@ jobs:
           "SIGNTOOL_PATH=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "signtool.exe: $($signtool.FullName)"
 
+      # Native helper builds (computer-use, cua, appsnap, ...) are content-keyed,
+      # and the native build scripts revalidate every reused entry (key, sha256,
+      # --hello handshake, cua provenance) and rebuild from source on any
+      # mismatch. Seed that cache from the newest artifact of a release run on
+      # main; a missing or rejected artifact, or a failing restore, only costs a
+      # source build.
+      - name: Restore native build cache
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RYCO_NATIVE_BUILD_CACHE_DIR: ${{ runner.temp }}/native-builds
+        run: |
+          echo "RYCO_NATIVE_BUILD_CACHE_DIR=$RYCO_NATIVE_BUILD_CACHE_DIR" >> "$GITHUB_ENV"
+          artifacts="$RYCO_NATIVE_BUILD_CACHE_DIR/artifacts"
+          node scripts/ci/native-cache.ts restore \
+            --name "native-cache-${{ matrix.platform }}-${{ matrix.arch }}" \
+            --dest "$artifacts"
+
+          # Artifact zips do not keep file modes, and the computer-use entry is
+          # validated by executing it (--hello), so a restored 0644 binary would
+          # be rebuilt every time. Entries are checked by key and sha256 before
+          # anything runs, and chmod leaves the mtimes prune relies on alone.
+          if [[ "$RUNNER_OS" != Windows && -d "$artifacts" ]]; then
+            find "$artifacts" -mindepth 3 -maxdepth 3 -type f \
+              \( -name binary -o -name cua-driver \) -exec chmod 755 {} +
+          fi
+
       - name: Build desktop artifact
         shell: bash
         env:
@@ -267,7 +390,7 @@ jobs:
             --platform "${{ matrix.platform }}"
             --target "${{ matrix.target }}"
             --arch "${{ matrix.arch }}"
-            --build-version "${{ needs.preflight.outputs.version }}"
+            --build-version "${{ needs.resolve.outputs.version }}"
             --verbose
           )
 
@@ -338,13 +461,6 @@ jobs:
             done
           done
 
-          if [[ "${{ matrix.platform }}" == "mac" && "${{ matrix.arch }}" != "arm64" ]]; then
-            shopt -s nullglob
-            for manifest in release-publish/*-mac.yml; do
-              mv "$manifest" "${manifest%.yml}-${{ matrix.arch }}.yml"
-            done
-          fi
-
           # Windows updater metadata is channel-specific (for example
           # "latest.yml" or "nightly.yml"). Suffix each per-arch copy so the
           # release job can merge matching arm64/x64 manifests back into one
@@ -370,6 +486,23 @@ jobs:
           path: apps/server/dist/resource-monitor
           if-no-files-found: error
 
+      # publish_cli ships this server build (with its bundled web client)
+      # instead of repeating it: same build scripts, release version and runner
+      # image. Tarred because artifact zips drop file modes (bin.mjs and the
+      # bundled helper scripts are executable).
+      - name: Pack CLI build
+        if: ${{ matrix.cli-dist }}
+        shell: bash
+        run: tar -C apps/server -cf "$RUNNER_TEMP/cli-dist.tar" dist
+
+      - name: Upload CLI build
+        if: ${{ matrix.cli-dist }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-dist
+          path: ${{ runner.temp }}/cli-dist.tar
+          if-no-files-found: error
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -377,38 +510,72 @@ jobs:
           path: release-publish/*
           if-no-files-found: error
 
+      # Only release runs on main publish native caches; the restore side
+      # accepts nothing else. A failed cache upload must not fail the release.
+      - name: Prune unused native build cache entries
+        if: ${{ github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+        shell: bash
+        run: node scripts/ci/native-cache.ts prune --dir "$RYCO_NATIVE_BUILD_CACHE_DIR/artifacts"
+
+      - name: Upload native build cache
+        if: ${{ github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-cache-${{ matrix.platform }}-${{ matrix.arch }}
+          path: ${{ env.RYCO_NATIVE_BUILD_CACHE_DIR }}/artifacts
+          retention-days: 90
+          if-no-files-found: ignore
+
   publish_cli:
     name: Publish CLI to npm
-    needs: [preflight, build]
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.build.result == 'success' }}
+    needs: [resolve, ci-status, verify, build]
+    # Publishing requires verification: either verify passed, or it was skipped
+    # because CI already passed on this exact commit. Defined once here and
+    # reused by release_draft, so both publish paths share the same gate.
+    if: &publish-gate >-
+      ${{ !failure() && !cancelled()
+        && needs.resolve.result == 'success'
+        && needs.build.result == 'success'
+        && (needs.verify.result == 'success'
+          || (needs.verify.result == 'skipped' && needs.ci-status.outputs.reuse == 'true')) }}
     # npm trusted publishing requires GitHub-hosted runners so the OIDC runner
     # identity matches the package's trusted publisher configuration.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
 
       - name: Setup project
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: release-publish-cli
           registry-url: https://registry.npmjs.org
-          install-dependencies: "false"
-
-      - name: Install dependencies
-        run: vp install --frozen-lockfile --filter=ryco-cli --filter=@ryco/web --filter=@ryco/scripts
+          # Only cli.ts publish and the version script run here.
+          install-args: --filter=ryco-cli --filter=@ryco/scripts
+          install-resource-monitor-toolchain: "false"
+          bun-cache: none
+          restore-turbo-cache: "false"
 
       - name: Align package versions to release version
-        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+        run: node scripts/update-release-package-versions.ts "${{ needs.resolve.outputs.version }}"
 
-      - name: Build web package
-        run: bun --filter=@ryco/web run build
+      - name: Download CLI build
+        uses: actions/download-artifact@v8
+        with:
+          name: cli-dist
+          path: ${{ runner.temp }}/cli-dist
 
-      - name: Build CLI package
-        run: bun --filter=ryco-cli run build
+      - name: Unpack CLI build
+        shell: bash
+        run: tar -C apps/server -xf "$RUNNER_TEMP/cli-dist/cli-dist.tar"
 
       - name: Download platform resource monitors
         uses: actions/download-artifact@v8
@@ -421,29 +588,39 @@ jobs:
         shell: bash
         run: find apps/server/dist/resource-monitor -type f -name ryco-resource-monitor -exec chmod 755 {} +
 
+      # The package smoke test inside `publish` fails if the bundled CLI reports
+      # a different version than the one being published.
       - name: Publish CLI package
-        run: node apps/server/scripts/cli.ts publish --tag "${{ needs.preflight.outputs.cli_dist_tag }}" --app-version "${{ needs.preflight.outputs.version }}" --provenance --verbose
+        run: node apps/server/scripts/cli.ts publish --tag "${{ needs.resolve.outputs.cli_dist_tag }}" --app-version "${{ needs.resolve.outputs.version }}" --provenance --verbose
 
-  release:
-    name: Publish GitHub Release
-    needs: [preflight, build, publish_cli]
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.build.result == 'success' && needs.publish_cli.result == 'success' }}
+  # Uploads the GitHub release as a draft while npm publishes. Drafts are
+  # invisible to users, /releases/latest and electron-updater, so the release
+  # still becomes public only after npm has the version (see release).
+  release_draft:
+    name: Draft GitHub Release
+    needs: [resolve, ci-status, verify, build]
+    # The verification gate defined on publish_cli.
+    if: *publish-gate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.id || steps.draft_first.outputs.id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
 
       - name: Setup project
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: release-github-release
-          install-dependencies: "false"
-
-      - name: Install dependencies
-        run: vp install --frozen-lockfile --filter=@ryco/scripts
+          install-args: --filter=@ryco/scripts
+          install-resource-monitor-toolchain: "false"
+          bun-cache: none
+          restore-turbo-cache: "false"
 
       - name: Download all desktop artifacts
         uses: actions/download-artifact@v8
@@ -499,18 +676,44 @@ jobs:
           ```
           EOF
 
-      - name: Publish release
-        if: needs.preflight.outputs.previous_tag != ''
+      # A rerun, or an earlier failed run for the same version, leaves a draft
+      # behind. The tag lookup API cannot see drafts, so list them, and replace
+      # rather than duplicate them. A published release for the tag is never
+      # touched.
+      - name: Remove stale draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == env.RELEASE_TAG) | "\(.id) \(.draft)"')"
+          while read -r id draft; do
+            [[ -n "$id" ]] || continue
+            if [[ "$draft" != true ]]; then
+              echo "::error::Release $id already publishes $RELEASE_TAG; refusing to replace it."
+              exit 1
+            fi
+            echo "Deleting draft release $id for $RELEASE_TAG left by an earlier attempt."
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/$id"
+          done <<< "$releases"
+
+      # Latest is decided when the draft is published; drafts cannot be latest.
+      - id: draft
+        name: Create draft release
+        if: needs.resolve.outputs.previous_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.preflight.outputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.ref }}
-          name: ${{ needs.preflight.outputs.release_name }}
+          draft: true
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.ref }}
+          name: ${{ needs.resolve.outputs.release_name }}
           body_path: release-assets/release-body.md
           generate_release_notes: true
-          previous_tag: ${{ needs.preflight.outputs.previous_tag }}
-          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
-          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          previous_tag: ${{ needs.resolve.outputs.previous_tag }}
+          prerelease: ${{ needs.resolve.outputs.is_prerelease }}
           files: |
             release-assets/*.dmg
             release-assets/*.zip
@@ -521,17 +724,18 @@ jobs:
           fail_on_unmatched_files: true
           token: ${{ github.token }}
 
-      - name: Publish first release
-        if: needs.preflight.outputs.previous_tag == ''
+      - id: draft_first
+        name: Create first draft release
+        if: needs.resolve.outputs.previous_tag == ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.preflight.outputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.ref }}
-          name: ${{ needs.preflight.outputs.release_name }}
+          draft: true
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.ref }}
+          name: ${{ needs.resolve.outputs.release_name }}
           body_path: release-assets/release-body.md
           generate_release_notes: true
-          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
-          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          prerelease: ${{ needs.resolve.outputs.is_prerelease }}
           files: |
             release-assets/*.dmg
             release-assets/*.zip
@@ -541,13 +745,44 @@ jobs:
             release-assets/*.yml
           fail_on_unmatched_files: true
           token: ${{ github.token }}
+
+  release:
+    name: Publish GitHub Release
+    needs: [resolve, publish_cli, release_draft]
+    if: ${{ !failure() && !cancelled() && needs.resolve.result == 'success' && needs.publish_cli.result == 'success' && needs.release_draft.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # Publishing creates the tag at the draft's target commit.
+      - name: Publish draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.release_draft.outputs.release_id }}
+          MAKE_LATEST: ${{ needs.resolve.outputs.make_latest }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$RELEASE_ID" ]]; then
+            echo "::error::release_draft did not report a release id."
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -f make_latest="$MAKE_LATEST" \
+            --jq '"Published \(.html_url)"'
 
   finalize:
     name: Finalize release
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.release.result == 'success' && needs.preflight.outputs.release_channel == 'stable' }}
-    needs: [preflight, release]
+    if: ${{ !failure() && !cancelled() && needs.resolve.result == 'success' && needs.release.result == 'success' && needs.resolve.outputs.release_channel == 'stable' }}
+    needs: [resolve, release]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      # Pushes the version bump to main.
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -559,16 +794,15 @@ jobs:
       - name: Setup project
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: release-finalize
-          install-dependencies: "false"
-
-      - name: Install dependencies
-        run: vp install --frozen-lockfile --filter=@ryco/scripts
+          install-args: --filter=@ryco/scripts
+          install-resource-monitor-toolchain: "false"
+          bun-cache: none
+          restore-turbo-cache: "false"
 
       - id: update_versions
         name: Update version strings
         env:
-          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: node scripts/update-release-package-versions.ts "$RELEASE_VERSION" --github-output
 
       - name: Format package.json files
@@ -583,7 +817,7 @@ jobs:
         if: steps.update_versions.outputs.changed == 'true'
         shell: bash
         env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           if git diff --quiet -- apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json bun.lock; then
             echo "No version changes to commit."

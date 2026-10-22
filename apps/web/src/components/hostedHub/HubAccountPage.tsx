@@ -1,8 +1,15 @@
-import { ArrowLeftIcon, PaletteIcon, ShieldCheckIcon, UserRoundIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  LogOutIcon,
+  PaletteIcon,
+  ShieldCheckIcon,
+  UserRoundIcon,
+} from "lucide-react";
 import type { ComponentProps, ReactElement } from "react";
 
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { navigateHub, type HubAccountSection } from "../../hostedHub/hubRoutes";
-import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
 import {
   preloadableLazy,
   useLazyComponentReady,
@@ -15,6 +22,7 @@ import { HubPage, HubPanel } from "./shell/HubPage";
 import { HubShell } from "./shell/HubShell";
 import { setHostedReadCacheEnabled, useHostedReadCache } from "../../hostedHub/readCache";
 import { Checkbox } from "../ui/checkbox";
+import { HostedPwaControls } from "./HostedPwaControls";
 import type * as AppearanceSettingsModule from "../settings/AppearanceSettings";
 
 // Both panels are large and neither is on the Hub's first paint. They render
@@ -63,6 +71,11 @@ const SECTIONS: readonly {
  */
 export function HubAccountPage({ section }: { readonly section: HubAccountSection }) {
   const account = useHostedHubStore((state) => state.account);
+  // The desktop workspace has no connection menu, so the account's own
+  // actions — signing out, installing or updating the app — live here, behind
+  // the sidebar's Account entry. The phone tier keeps them in its connection
+  // sheet and this page as it was.
+  const accountActions = usePresentationTier() !== "phone";
   usePreloadWhenIdle(AccountSettingsPanel, true);
   usePreloadWhenIdle(AppearanceSettingsPanel, true);
 
@@ -70,9 +83,16 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
     <HubShell
       measure="page"
       trailing={
-        <Button variant="ghost" onClick={() => navigateHub({ kind: "nodes" })}>
-          <ArrowLeftIcon aria-hidden /> Nodes
-        </Button>
+        <>
+          <Button variant="ghost" onClick={() => navigateHub({ kind: "nodes" })}>
+            <ArrowLeftIcon aria-hidden /> Nodes
+          </Button>
+          {accountActions ? (
+            <Button variant="ghost" onClick={() => void hostedHubController.signOut()}>
+              <LogOutIcon aria-hidden /> Sign out
+            </Button>
+          ) : null}
+        </>
       }
     >
       <HubPage
@@ -115,6 +135,7 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
               <div className="space-y-6">
                 <HubAccountOverview />
                 <RememberBrowserPanel />
+                {accountActions ? <HostedPwaControls /> : null}
               </div>
             ) : section === "security" ? (
               <LoadedSectionPanel panel={AccountSettingsPanel}>

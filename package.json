@@ -9,15 +9,16 @@
       "scripts"
     ],
     "catalog": {
-      "effect": "4.0.2",
-      "@effect/atom-react": "4.0.2",
-      "@effect/openapi-generator": "4.0.2",
-      "@effect/platform-bun": "4.0.2",
-      "@effect/platform-node": "4.0.2",
-      "@effect/platform-node-shared": "4.0.2",
-      "@effect/sql-sqlite-bun": "4.0.2",
-      "@effect/vitest": "4.0.2",
-      "@effect/tsgo": "0.51.1",
+      "effect": "4.0.5",
+      "@effect/atom-react": "4.0.5",
+      "@effect/openapi-generator": "4.0.5",
+      "@effect/platform-bun": "4.0.5",
+      "@effect/platform-node": "4.0.5",
+      "@effect/platform-node-shared": "4.0.5",
+      "@effect/sql-sqlite-bun": "4.0.5",
+      "@effect/vitest": "4.0.5",
+      "@effect/tsgo": "0.53.4",
+      "@babel/core": "7.29.7",
       "@noble/ciphers": "2.3.0",
       "@noble/curves": "2.3.0",
       "@noble/hashes": "2.3.0",
@@ -32,7 +33,8 @@
       "vitest": "5.0.3",
       "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
       "vite-plus": "1.1.0",
-      "ws": "8.21.3"
+      "ws": "8.21.3",
+      "tsc-rs": "0.7.0"
     }
   },
   "type": "module",
@@ -49,15 +51,18 @@
     "build": "turbo run build",
     "build:desktop": "turbo run build --filter=@ryco/desktop --filter=ryco-cli",
     "typecheck": "turbo run typecheck",
+    "typecheck:fast": "turbo run typecheck:fast",
+    "check": "vp check --quiet && turbo run typecheck:fast --continue --output-logs=errors-only",
+    "check:changed": "node scripts/check-changed.ts",
     "lint": "vp lint --report-unused-disable-directives",
     "test": "turbo run test",
+    "test:changed": "node scripts/check-changed.ts --no-fmt --no-lint --types=none",
     "test:desktop-smoke": "turbo run smoke-test --filter=@ryco/desktop",
     "test:device": "bun scripts/device-helper-smoke.ts",
     "test:device:probe": "bun scripts/device-helper-smoke.ts --probe-only",
     "test:device:sweep": "bun scripts/device-helper-sweep.ts",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check",
-    "build:contracts": "turbo run build --filter=@ryco/contracts",
     "generate:relay-fixtures": "bun scripts/generate-relay-fixtures.ts",
     "generate:node-identity-fixtures": "bun scripts/generate-node-identity-fixtures.ts",
     "generate:e2ee-fixtures": "bun scripts/generate-e2ee-fixtures.ts",
@@ -87,13 +92,14 @@
     "@types/node": "catalog:",
     "oxfmt": "0.72.0",
     "oxlint": "1.87.0",
+    "tsc-rs": "catalog:",
     "turbo": "^2.10.12",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"
   },
   "overrides": {
-    "@babel/core": "7.29.7",
+    "@babel/core": "catalog:",
     "@effect/atom-react": "catalog:",
     "@effect/platform-bun": "catalog:",
     "@effect/platform-node": "catalog:",
@@ -137,7 +143,7 @@
   "packageManager": "bun@1.4.3",
   "msw": {
     "workerDirectory": [
-      "apps/web/public"
+      "apps/web/test/public"
     ]
   },
   "patchedDependencies": {
@@ -151,9 +157,8 @@
     "query-string@7.1.3": "patches/query-string@7.1.3.patch",
     "react-native-keyboard-controller@1.21.9": "patches/react-native-keyboard-controller@1.21.9.patch",
     "react-native-nitro-modules@0.36.5": "patches/react-native-nitro-modules@0.36.5.patch",
-    "@effect/platform-node-shared@4.0.2": "patches/@effect%2Fplatform-node-shared@4.0.2.patch",
-    "effect@4.0.2": "patches/effect@4.0.2.patch",
-    "@effect/platform-node@4.0.2": "patches/@effect%2Fplatform-node@4.0.2.patch"
+    "effect@4.0.5": "patches/effect@4.0.5.patch",
+    "@effect/platform-node@4.0.5": "patches/@effect%2Fplatform-node@4.0.5.patch"
   },
   "trustedDependencies": [
     "node-pty",

@@ -13,9 +13,17 @@ import { WORKTREE_BRANCH_CHANGE_TYPES } from "@ryco/shared/git";
 import { limitSection } from "./TextGenerationUtils.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
+/** User instructions override the style rules above them, never the JSON response shape. */
 function policyInstruction(instruction: string | undefined): ReadonlyArray<string> {
   const trimmed = instruction?.trim();
-  return trimmed ? ["", "Additional instructions:", limitSection(trimmed, 4_000)] : [];
+  return trimmed
+    ? [
+        "",
+        "Additional instructions (they take precedence over the style rules above; keep the JSON keys):",
+        limitSection(trimmed, 4_000),
+        "If an instruction asks for something the change data cannot show (such as screenshots), add a short, clearly marked placeholder for the author instead of inventing it.",
+      ]
+    : [];
 }
 
 // ---------------------------------------------------------------------------

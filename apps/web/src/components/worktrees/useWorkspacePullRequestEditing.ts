@@ -29,7 +29,10 @@ export function useWorkspacePullRequestEditing(input: {
 }): WorkspacePullRequestEditing {
   const presentationTier = usePresentationTier();
   const connection = useWsConnectionStatusForEnvironment(input.environmentId);
-  const capability = useHostedRpcCapability(WS_METHODS.sourceControlLinkWorktreePullRequest);
+  const capability = useHostedRpcCapability(
+    WS_METHODS.sourceControlLinkWorktreePullRequest,
+    input.environmentId,
+  );
   const worktree = input.worktree;
   const supported =
     input.environmentId !== null &&

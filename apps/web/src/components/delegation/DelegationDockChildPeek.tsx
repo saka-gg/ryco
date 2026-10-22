@@ -115,7 +115,10 @@ export function DelegationDockChildPeek(props: {
     activeThreadId: threadId,
     setThreadError,
   });
-  const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
+  const dispatchCapability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    environmentId,
+  );
 
   const input = pending.inputs[0];
   const approval = pending.approvals[0];
@@ -136,6 +139,7 @@ export function DelegationDockChildPeek(props: {
         />
       ) : approval ? (
         <ApprovalCard
+          environmentId={environmentId}
           approval={approval}
           pendingCount={pending.approvals.length}
           isResponding={actions.respondingRequestIds.includes(approval.requestId)}

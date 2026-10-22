@@ -13,11 +13,17 @@ import SimulatorPanel from "./SimulatorPanel";
 
 const mocks = vi.hoisted(() => ({
   hosted: false,
+  previewStatus: "streaming" as string,
+  noteInteraction: vi.fn(),
+  streamInput: vi.fn(),
+  keyEvent: vi.fn(),
   testing: vi.fn<() => Promise<void>>(),
   list: vi.fn(),
   getThreadState: vi.fn(),
 }));
 const hub = create(() => ({
+  selectedNode: { environmentId: "simulator-env" },
+  nodes: [],
   effectiveRole: "owner",
   directoryStatus: "ready",
   transportStatus: "online",
@@ -37,13 +43,23 @@ vi.mock("../../hostedHub/state", () => ({
     acknowledgeDeliveryUnknown: vi.fn(),
     markEnvironmentDeliveryUnknown: vi.fn(),
   },
+  getHostedEnvironmentSessions: () => ({
+    read: () => undefined,
+    getSnapshot: () => ({ records: new Map() }),
+    subscribe: () => () => undefined,
+  }),
 }));
 vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
   useHostedWorkspaceState: () => workspace(),
 }));
 vi.mock("../../environmentApi", () => ({
   readEnvironmentApi: () => ({
-    device: { testing: mocks.testing, list: mocks.list, getThreadState: mocks.getThreadState },
+    device: {
+      testing: mocks.testing,
+      list: mocks.list,
+      getThreadState: mocks.getThreadState,
+      keyEvent: mocks.keyEvent,
+    },
   }),
 }));
 vi.mock("../../environments/runtime", () => ({ readEnvironmentConnection: () => undefined }));
@@ -51,11 +67,15 @@ vi.mock("./useDeviceVideoStream", () => ({
   useDeviceVideoStream: () => ({ status: "idle", error: null, dimensions: null }),
 }));
 vi.mock("./useDeviceScreenshotStream", () => ({
-  useDeviceScreenshotStream: () => ({
-    status: "streaming",
-    error: null,
-    dimensions: { width: 400, height: 800 },
-  }),
+  useDeviceScreenshotStream: (input: unknown) => {
+    mocks.streamInput(input);
+    return {
+      status: mocks.previewStatus,
+      error: null,
+      dimensions: { width: 400, height: 800 },
+      noteInteraction: mocks.noteInteraction,
+    };
+  },
 }));
 
 const environmentId = EnvironmentId.make("simulator-env");
@@ -81,6 +101,10 @@ const snapshot: ThreadDeviceState = {
 
 beforeEach(() => {
   mocks.hosted = false;
+  mocks.previewStatus = "streaming";
+  mocks.noteInteraction.mockReset();
+  mocks.streamInput.mockReset();
+  mocks.keyEvent.mockReset().mockResolvedValue(undefined);
   mocks.testing.mockReset().mockResolvedValue(undefined);
   // Keep panel refresh pending so only the real store's explicit connection
   // transitions below publish readiness; cached snapshots remain in place.
@@ -185,5 +209,94 @@ describe("SimulatorPanel testing readiness", () => {
     hub.setState({ browserStatus: "current" });
     await expect.element(dark).toBeEnabled();
     expect(mocks.testing).not.toHaveBeenCalled();
+  });
+});
+
+describe("SimulatorPanel hosted preview pause", () => {
+  // The device frame needs a definite box before its screen can be hit-tested.
+  const mountSized = () =>
+    render(
+      <div style={{ width: "min(600px, 100vw)", height: 700, display: "flex" }}>
+        <SimulatorPanel environmentId={environmentId} threadId={threadId} />
+      </div>,
+    );
+
+  it("shows no pause overlay while the preview is streaming", async () => {
+    const screen = await mountSized();
+    await expect.element(screen.getByLabelText("iPhone screen")).toBeVisible();
+    await expect.element(screen.getByText(/Preview paused/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["paused-by-other-preview", "Preview paused — another preview is active"],
+    ["paused-idle", "Preview paused — click to resume"],
+  ])("explains a %s preview and resumes it from the overlay", async (status, message) => {
+    mocks.previewStatus = status;
+    const screen = await mountSized();
+    await expect.element(screen.getByText(message)).toBeVisible();
+    const resume = screen.getByRole("button", { name: "Resume", exact: true });
+    await expect.element(resume).toBeVisible();
+    mocks.noteInteraction.mockClear();
+    // A plain click sends no pointer or key events, so only the button itself can report this.
+    (resume.element() as HTMLElement).click();
+    expect(mocks.noteInteraction).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([[true], [false]])(
+    "marks the preview as hosted only in the hosted app (hosted: %s)",
+    async (hosted) => {
+      mocks.hosted = hosted;
+      const screen = await mountSized();
+      await expect.element(screen.getByLabelText("iPhone screen")).toBeVisible();
+      expect(mocks.streamInput).toHaveBeenLastCalledWith(expect.objectContaining({ hosted }));
+    },
+  );
+
+  const pressKey = (key: string) => {
+    const canvas = document.querySelector("canvas")!;
+    const init = { key, code: key, bubbles: true };
+    canvas.dispatchEvent(new KeyboardEvent("keydown", init));
+    canvas.dispatchEvent(new KeyboardEvent("keyup", init));
+  };
+
+  it("forwards key presses to the device while the preview is live", async () => {
+    const screen = await mountSized();
+    await expect.element(screen.getByLabelText("iPhone screen")).toBeVisible();
+    pressKey("ArrowDown");
+    expect(mocks.keyEvent.mock.calls.map(([input]) => input.direction)).toEqual(["down", "up"]);
+  });
+
+  it.each(["paused-idle", "paused-by-other-preview"])(
+    "uses a key press on a %s preview only to resume it",
+    async (status) => {
+      mocks.previewStatus = status;
+      const screen = await mountSized();
+      await expect.element(screen.getByLabelText("iPhone screen")).toBeVisible();
+      pressKey("ArrowDown");
+      expect(mocks.noteInteraction).toHaveBeenCalledTimes(1);
+      expect(mocks.keyEvent).not.toHaveBeenCalled();
+
+      // Once the preview is live again the same key is forwarded.
+      mocks.previewStatus = "streaming";
+      await screen.rerender(
+        <div style={{ width: "min(600px, 100vw)", height: 700, display: "flex" }}>
+          <SimulatorPanel environmentId={environmentId} threadId={threadId} />
+        </div>,
+      );
+      pressKey("ArrowDown");
+      expect(mocks.keyEvent).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("reports pointer and keyboard activity in the panel as interaction", async () => {
+    const screen = await mountSized();
+    await expect.element(screen.getByLabelText("iPhone screen")).toBeVisible();
+    expect(mocks.noteInteraction).not.toHaveBeenCalled();
+    await screen.getByRole("button", { name: "Refresh simulators", exact: true }).click();
+    expect(mocks.noteInteraction).toHaveBeenCalledTimes(1);
+    document
+      .querySelector("select")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(mocks.noteInteraction).toHaveBeenCalledTimes(2);
   });
 });

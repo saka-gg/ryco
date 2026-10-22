@@ -12,6 +12,7 @@ import {
   type OrchestrationThreadShell,
   ThreadId,
 } from "@ryco/contracts";
+import { isRestartReleasedSession } from "@ryco/shared/restartContinuation";
 import { Deferred, Effect, Fiber, Option, Stream } from "effect";
 
 import { CliRemoteError, type CliRemoteRpcClient as RemoteRpcClient } from "./remotes.ts";
@@ -37,6 +38,8 @@ const threadState = (thread: OrchestrationThreadShell): string => {
   if (thread.hasPendingUserInput) return "needs input";
   const status = thread.session?.status;
   if (status === "running" || status === "starting") return "running";
+  // A node restart cut the turn off; nothing failed.
+  if (isRestartReleasedSession(thread.session)) return "interrupted";
   if (status === "error") return "error";
   return "idle";
 };
@@ -66,7 +69,8 @@ const TERMINAL_SESSION_STATUSES = new Set(["ready", "idle", "interrupted", "stop
 /**
  * Start a turn on an existing thread with the thread's own model and modes. With
  * `onAssistantText`, keep following the thread and hand over assistant text as
- * it streams until the turn ends; resolves to the session's final error, if any.
+ * it streams until the turn ends; resolves to the session's final error, if any,
+ * and fails with an interruption when a node restart cut the turn off.
  */
 export const sendToRemoteThread = (
   client: RemoteRpcClient,
@@ -128,6 +132,7 @@ const followTurn = (
   Effect.gen(function* () {
     let turnStarted = false;
     let finalError: string | null = null;
+    let interruption = null as string | null;
     const printed = new Set<string>();
     yield* client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
       Stream.tap(() => Deferred.succeed(subscribed, undefined)),
@@ -151,12 +156,21 @@ const followTurn = (
           return false;
         }
         if (turnStarted && TERMINAL_SESSION_STATUSES.has(status)) {
-          finalError = status === "error" ? event.payload.session.lastError : null;
+          const session = event.payload.session;
+          if (isRestartReleasedSession(session)) {
+            interruption = session.lastError;
+          } else if (status === "error") {
+            finalError = session.lastError;
+          }
           return true;
         }
         return false;
       }),
       Stream.runDrain,
     );
+    // A node restart cut the turn off: report an interruption, not a failed turn.
+    if (interruption !== null) {
+      return yield* new CliRemoteError({ message: `The turn was interrupted. ${interruption}` });
+    }
     return finalError;
   });

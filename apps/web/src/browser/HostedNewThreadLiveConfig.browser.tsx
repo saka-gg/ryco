@@ -65,7 +65,7 @@ vi.mock("../hostedHub/hostedConnectionCoordinator", () => {
     throw new Error("Not available in this test.");
   };
   return {
-    MAX_HOSTED_WEB_CONNECTIONS: 1,
+    MAX_HOSTED_WEB_CONNECTIONS: 3,
     HOSTED_WEB_WAKE_STAGGER_MS: 750,
     HOME_DISCOVERY_CACHE_WAIT_MS: 1_500,
     readHostedWorkspaceState: () => signedOut,
@@ -73,8 +73,10 @@ vi.mock("../hostedHub/hostedConnectionCoordinator", () => {
     readHostedNodeMutationLease: vi.fn(),
     waitForHostedNodeMutationLease: vi.fn(),
     nodeIdForHostedEnvironment: vi.fn(),
-    hasActiveHostedWorkspaceCoordinator: () => false,
     setHostedWorkspaceBackgrounded: async () => undefined,
+    isHostedEnvironmentDemanded: () => false,
+    canPreconnectHostedEnvironment: () => false,
+    requestHostedWorkspaceReconcile: () => undefined,
     retryHostedHomeDiscovery: () => undefined,
     startHostedWorkspaceCoordinator: unavailable,
     createHostedConnectionCoordinator: unavailable,
@@ -84,9 +86,6 @@ vi.mock("../hostedHub/hostedConnectionCoordinator", () => {
     hostedDemandAwaitsPresence: unavailable,
   };
 });
-vi.mock("../hostedHub/adoptHostedEnvironmentRoute", () => ({
-  adoptHostedEnvironmentRoute: () => undefined,
-}));
 vi.mock("../environments/runtime", { spy: true });
 
 import {

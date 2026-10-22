@@ -240,6 +240,8 @@ export interface ProviderCommandReactorOptions {
   readonly lifecycleCapacity?: number;
   /** After a first turn started, how long title and branch generation wait for it to stream. Default 1 s. */
   readonly firstTurnGenerationDelayMs?: number;
+  /** Wait before the one retry of a failed title generation. Default 2 s. */
+  readonly generationRetryDelayMs?: number;
   /** How long a turn start waits for its pre-turn checkpoint baseline. Default 5 s. */
   readonly preTurnBaselineWaitMs?: number;
 }
@@ -247,6 +249,7 @@ export interface ProviderCommandReactorOptions {
 const DEFAULT_LIVENESS_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_CONCURRENT_RECOVERIES = 4;
 const DEFAULT_FIRST_TURN_GENERATION_DELAY_MS = 1_000;
+const DEFAULT_GENERATION_RETRY_DELAY_MS = 2_000;
 const GOALLESS_RUNTIMES_MAX = 4_096;
 /** First-turn generation starts by then even when the turn never visibly starts. */
 const FIRST_TURN_GENERATION_MAX_WAIT = Duration.seconds(15);
@@ -494,6 +497,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const firstTurnGenerationDelayMs = Math.max(
     0,
     options?.firstTurnGenerationDelayMs ?? DEFAULT_FIRST_TURN_GENERATION_DELAY_MS,
+  );
+  const generationRetrySchedule = Schedule.exponential(
+    Duration.millis(
+      Math.max(0, options?.generationRetryDelayMs ?? DEFAULT_GENERATION_RETRY_DELAY_MS),
+    ),
   );
   const preTurnBaselineWait = Duration.millis(
     Math.max(0, options?.preTurnBaselineWaitMs ?? DEFAULT_PRE_TURN_BASELINE_WAIT_MS),
@@ -1596,7 +1604,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
               ...(branchPrefix !== null ? { includeBranch: true } : {}),
             })
             .pipe(
-              Effect.retry({ times: 1, schedule: Schedule.exponential("2 seconds") }),
+              Effect.retry({ times: 1, schedule: generationRetrySchedule }),
               Effect.map(Option.some),
               Effect.catchCause((cause) =>
                 logFailure("provider command reactor failed to generate or rename thread title")(

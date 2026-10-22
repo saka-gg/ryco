@@ -11,6 +11,11 @@
     <meta name="theme-color" content="#0b0b0c" />
     <meta name="apple-mobile-web-app-title" content="Ryco" />
     <script>
+      // The only inline script: the hosted Hub's content security policy allows
+      // exactly one, by hash. The mark comes first because the entry marks only
+      // begin once the deferred module script runs, which would leave the earlier
+      // HTML parse and theme setup out of the startup timeline.
+      performance.mark("ryco:startup:html");
       (() => {
         const LIGHT_BACKGROUND = "#ffffff";
         const DARK_BACKGROUND = "#0b0b0c";

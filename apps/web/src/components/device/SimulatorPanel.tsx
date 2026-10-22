@@ -21,6 +21,7 @@ import {
   LoaderCircleIcon,
   LockIcon,
   MonitorOffIcon,
+  PlayIcon,
   PowerIcon,
   RefreshCwIcon,
   SmartphoneIcon,
@@ -38,6 +39,7 @@ import {
   type PointerEvent,
 } from "react";
 
+import { isHostedHubMode } from "../../env";
 import { readEnvironmentApi } from "../../environmentApi";
 import { readEnvironmentConnection } from "../../environments/runtime";
 import { cn } from "~/lib/utils";
@@ -164,7 +166,7 @@ export default function SimulatorPanel(props: {
 }) {
   const { environmentId, threadId } = props;
   useDeviceRuntime(environmentId);
-  const testingCapability = useHostedRpcCapability(DEVICE_WS_METHODS.app);
+  const testingCapability = useHostedRpcCapability(DEVICE_WS_METHODS.app, environmentId);
   const hostedWorkspace = useHostedWorkspaceState();
   const testingMutationReady =
     testingCapability.allowed &&
@@ -309,11 +311,14 @@ export default function SimulatorPanel(props: {
     canvasRef,
     udid: attached?.state === "booted" ? attached.udid : null,
     enabled: !useNativeVideo,
+    hosted: isHostedHubMode(),
     screenshot: api ? (input) => api.screenshot(input) : null,
   });
   const videoStatus = useNativeVideo ? nativeVideo.status : hostedVideo.status;
   const videoError = useNativeVideo ? nativeVideo.error : hostedVideo.error;
   const dimensions = useNativeVideo ? nativeVideo.dimensions : hostedVideo.dimensions;
+  const { noteInteraction } = hostedVideo;
+  const previewPaused = videoStatus === "paused-by-other-preview" || videoStatus === "paused-idle";
 
   const pressRef = useRef<{ readonly point: DevicePoint | null; readonly at: number } | null>(null);
   const pointFromEvent = useCallback(
@@ -392,6 +397,17 @@ export default function SimulatorPanel(props: {
     };
   }, [api, generation, threadKey, attached?.udid]);
 
+  // Keys whose press found the preview paused. They only resume it: the frame on
+  // screen is stale, so neither the press nor its release may act on the device.
+  const resumingKeys = useRef(new Set<string>());
+  const noteKeyInteraction = (event: KeyboardEvent) => {
+    if (!event.repeat) {
+      if (previewPaused) resumingKeys.current.add(event.code);
+      else resumingKeys.current.delete(event.code);
+    }
+    noteInteraction();
+  };
+
   const keyEvent = useCallback(
     (event: KeyboardEvent<HTMLCanvasElement>, direction: "down" | "up") => {
       if (!attached || !api) return;
@@ -401,6 +417,10 @@ export default function SimulatorPanel(props: {
       const keyCode = deviceHidUsageForKey(event.key);
       if (text === null && keyCode === null) return;
       event.preventDefault();
+      if (resumingKeys.current.has(event.code)) {
+        if (direction === "up") resumingKeys.current.delete(event.code);
+        return;
+      }
       if (attached.platform !== "android-emulator") {
         void api
           .keyEvent({
@@ -550,7 +570,11 @@ export default function SimulatorPanel(props: {
       : undefined;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-background">
+    <div
+      className="flex min-h-0 flex-1 flex-col bg-background"
+      onPointerDownCapture={() => noteInteraction()}
+      onKeyDownCapture={noteKeyInteraction}
+    >
       <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border/60 px-3">
         <SmartphoneIcon className="size-4 text-muted-foreground" />
         <select
@@ -661,7 +685,24 @@ export default function SimulatorPanel(props: {
                 onKeyDown={(event) => keyEvent(event, "down")}
                 onKeyUp={(event) => keyEvent(event, "up")}
               />
-              {videoStatus !== "streaming" ? (
+              {videoStatus === "paused-by-other-preview" || videoStatus === "paused-idle" ? (
+                // Covers the frozen frame so a tap cannot land on a screen that has moved on.
+                // Key presses are held back separately; see `resumingKeys`.
+                <div
+                  role="status"
+                  className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/75 p-6 text-center text-white"
+                >
+                  <p className="text-xs font-medium">
+                    {videoStatus === "paused-idle"
+                      ? "Preview paused — click to resume"
+                      : "Preview paused — another preview is active"}
+                  </p>
+                  <Button size="xs" variant="outline" onClick={() => noteInteraction()}>
+                    <PlayIcon />
+                    Resume
+                  </Button>
+                </div>
+              ) : videoStatus !== "streaming" ? (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center bg-black/75 p-6 text-center text-white">
                   <LoaderCircleIcon className="size-5 animate-spin text-white/60" />
                   <p className="mt-3 text-xs font-medium">

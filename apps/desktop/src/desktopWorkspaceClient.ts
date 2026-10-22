@@ -1,7 +1,6 @@
 import { EnvironmentId, type DesktopWorkspaceStateProjection } from "@ryco/contracts";
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import {
-  buildUnifiedWorkspaceIndex,
   createWorkspaceConnectionDemandState,
   planWorkspaceConnectionDemand,
   reconcileWorkspaceMachineCatalog,
@@ -12,7 +11,6 @@ import {
   setWorkspaceEnvironmentConnected,
   UNIFIED_WORKSPACE_MAX_CONNECTIONS,
   workspaceMetadataPayloadBytes,
-  type UnifiedWorkspaceIndex,
   type WorkspaceConnectionDemandPlan,
   type WorkspaceConnectionDemandState,
   type WorkspaceConnectionScope,
@@ -88,21 +86,46 @@ export interface DesktopWorkspaceClientSnapshot {
   readonly accountId: string | null;
   readonly localEnvironmentId: EnvironmentId | null;
   readonly catalog: ReadonlyArray<WorkspaceMachineCatalogEntry>;
-  readonly workspace: UnifiedWorkspaceIndex;
+  /**
+   * Metadata snapshots of the machines whose metadata may be shown, ordered by
+   * environment. A snapshot is identified by its environment and `capturedAt`.
+   */
+  readonly snapshots: ReadonlyArray<WorkspaceMetadataSnapshot>;
   readonly demand: WorkspaceConnectionDemandState;
   readonly queuedEnvironmentIds: ReadonlyArray<EnvironmentId>;
   /** Null unless signed in. */
   readonly accountE2ee: DesktopWorkspaceAccountE2ee | null;
+  /**
+   * Set only on a published state whose `snapshots` are the same as in the
+   * previous publication, so a subscriber that already holds them can skip
+   * them. A state read on demand never sets it.
+   */
+  readonly snapshotsUnchanged?: true;
 }
 
-const EMPTY_WORKSPACE: UnifiedWorkspaceIndex = {
-  machines: [],
-  snapshots: [],
-  projects: [],
-  worktrees: [],
-  threads: [],
-  logicalProjects: [],
-};
+/**
+ * What a subscriber can observe of the state, apart from its snapshots. The
+ * observation and heartbeat times of a machine move on every directory read
+ * without changing what a subscriber can do, so they are left out.
+ */
+function stateRevision(state: DesktopWorkspaceClientSnapshot): string {
+  return JSON.stringify([
+    state.status,
+    state.accountId,
+    state.localEnvironmentId,
+    state.catalog.map(({ presence, ...machine }) => [machine, presence.online]),
+    state.demand.connections
+      .filter((entry) => entry.connected)
+      .map((entry) => entry.environmentId)
+      .toSorted(),
+    state.queuedEnvironmentIds,
+    state.accountE2ee,
+  ]);
+}
+
+function snapshotsRevision(snapshots: ReadonlyArray<WorkspaceMetadataSnapshot>): string {
+  return JSON.stringify(snapshots.map((entry) => [entry.environmentId, entry.capturedAt]));
+}
 
 function nativeTrustForPin(
   pin: { readonly environmentId: string } | null,
@@ -130,6 +153,7 @@ export class DesktopWorkspaceClient {
   #demand = createWorkspaceConnectionDemandState(UNIFIED_WORKSPACE_MAX_CONNECTIONS);
   #queued: ReadonlyArray<EnvironmentId> = [];
   #leaseSequence = 0;
+  #published: { readonly state: string; readonly snapshots: string } | null = null;
 
   constructor(input: {
     readonly hubOrigin: string;
@@ -157,16 +181,25 @@ export class DesktopWorkspaceClient {
       localEnvironmentId:
         this.#catalog.find((entry) => entry.nodeId === ready?.nodeId)?.environmentId ?? null,
       catalog: this.#catalog,
-      workspace: buildUnifiedWorkspaceIndex({
-        machines: this.#catalog,
-        snapshots: Array.from(this.#snapshots.values()),
-        localDesktopEnvironmentId:
-          this.#catalog.find((entry) => entry.nodeId === ready?.nodeId)?.environmentId ?? null,
-      }),
+      snapshots: this.#availableSnapshots(),
       demand: this.#demand,
       queuedEnvironmentIds: this.#queued,
       accountE2ee: ready === null ? null : this.#accountE2ee(ready),
     };
+  }
+
+  /** Same eligibility as the unified workspace index: only readable machines contribute. */
+  #availableSnapshots(): ReadonlyArray<WorkspaceMetadataSnapshot> {
+    const readable = new Set(
+      this.#catalog
+        .filter((machine) => machine.cacheDisposition === "available" && machine.canReadMetadata)
+        .map((machine) => machine.environmentId),
+    );
+    return Array.from(this.#snapshots.values())
+      .filter((entry) => readable.has(entry.environmentId))
+      .toSorted((left, right) =>
+        String(left.environmentId).localeCompare(String(right.environmentId)),
+      );
   }
 
   #accountE2ee(
@@ -309,6 +342,10 @@ export class DesktopWorkspaceClient {
     return this.refreshCatalog();
   }
 
+  /**
+   * The snapshot must already be validated, as the IPC boundary does for what
+   * the renderer sends. It is measured here, once, and the cache relies on that.
+   */
   async acceptWorkspaceSnapshot(
     snapshot: WorkspaceMetadataSnapshot,
   ): Promise<DesktopWorkspaceClientSnapshot> {
@@ -603,11 +640,26 @@ export class DesktopWorkspaceClient {
     }));
   }
 
+  /**
+   * Notifies subscribers only when what they can observe changed, so a lease
+   * renewal or a focus change that alters nothing publishes nothing.
+   */
   #publish(): DesktopWorkspaceClientSnapshot {
     const snapshot = this.snapshot();
-    for (const listener of this.#listeners) listener(snapshot);
-    return snapshot;
+    const revision = {
+      state: stateRevision(snapshot),
+      snapshots: snapshotsRevision(snapshot.snapshots),
+    };
+    const previous = this.#published;
+    if (previous?.state === revision.state && previous.snapshots === revision.snapshots) {
+      return snapshot;
+    }
+    this.#published = revision;
+    const published =
+      previous?.snapshots === revision.snapshots
+        ? { ...snapshot, snapshotsUnchanged: true as const }
+        : snapshot;
+    for (const listener of this.#listeners) listener(published);
+    return published;
   }
 }
-
-export { EMPTY_WORKSPACE as EMPTY_DESKTOP_WORKSPACE };

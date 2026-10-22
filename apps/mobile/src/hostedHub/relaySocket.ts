@@ -1,12 +1,15 @@
 import type { HostedEarlyRelaySocket } from "@ryco/client-runtime/authorization";
 import type { DpopSignerService } from "@ryco/client-runtime/platform";
-import { RELAY_AUTHENTICATION_DEADLINE_MS } from "@ryco/contracts/relay";
 import {
   HostedRelayEngine,
   type HostedRelaySocketCallbacks,
   type RelayE2eeProvider,
   type RelaySocket,
 } from "@ryco/client-runtime/relay";
+import {
+  EARLY_RELAY_SOCKET_TICKET_WAIT_MS,
+  EarlyRelaySocket,
+} from "@ryco/client-runtime/relay/earlyRelaySocket";
 
 import { createMobileDpopSigner } from "../platform/dpopSigner";
 import { mobileSessionCredentials } from "../platform/sessionCredentials";
@@ -107,20 +110,7 @@ export interface MobileHostedRelaySocketOptions {
   readonly relayCompression?: boolean | undefined;
 }
 
-/**
- * How long an opened early socket waits for its ticket. The Hub closes a socket
- * that has not authenticated within {@link RELAY_AUTHENTICATION_DEADLINE_MS} of
- * opening; this lets go of it well before, and the attempt continues in the
- * serial order with a fresh socket.
- */
-export const EARLY_RELAY_SOCKET_TICKET_WAIT_MS = RELAY_AUTHENTICATION_DEADLINE_MS - 1_500;
-
-interface EarlySocketSink {
-  readonly open: () => void;
-  readonly message: (data: unknown) => void;
-  readonly close: (reason?: string) => void;
-  readonly error: () => void;
-}
+export { EARLY_RELAY_SOCKET_TICKET_WAIT_MS };
 
 export interface MobileEarlyRelaySocketOptions {
   readonly url: string;
@@ -131,134 +121,64 @@ export interface MobileEarlyRelaySocketOptions {
   readonly clearTimeout?: (timer: unknown) => void;
 }
 
+interface UpgradeHeaderOptions {
+  readonly url: string;
+  readonly dpopSigner?: (() => Promise<DpopSignerService>) | undefined;
+  readonly readBearerToken?: (() => string | null) | undefined;
+}
+
+/**
+ * The relay upgrade's authorization: the session token and a DPoP proof over
+ * the upgrade request, for the early upgrade and the one opened after the
+ * ticket alike. A missing token or a failed mint throws without carrying either
+ * into the error.
+ *
+ * These are the only headers this adapter sets. It deliberately sets no
+ * `Cookie` — one on this upgrade is a hard 403 server-side.
+ *
+ * It cannot *guarantee* the absence of one, and that limit is worth being
+ * precise about: React Native's own WebSocket module attaches a `Cookie`
+ * from the app-global store (Android `ForwardingCookieHandler` →
+ * `CookieManager`; iOS `NSHTTPCookieStorage`) before these headers, and
+ * appends rather than replaces, so nothing passed here can remove it. It
+ * also always sets `Origin`, which the Hub does not check on this branch.
+ * The protection is therefore upstream: no in-app WebView ships, and the
+ * authorization handoff uses the OS-managed system browser whose cookies
+ * never enter the app-global store. Owner acceptance row 8 is what proves
+ * it end to end.
+ */
+async function prepareUpgradeHeaders(
+  options: UpgradeHeaderOptions,
+): Promise<Readonly<Record<string, string>>> {
+  const token = (
+    options.readBearerToken ?? (() => mobileSessionCredentials.readBearerToken?.() ?? null)
+  )();
+  if (token === null || token.length === 0) throw new Error(UPGRADE_FAILED);
+  const signer = await (options.dpopSigner ?? createMobileDpopSigner)();
+  const proof = await signer.sign({ method: "GET", url: options.url, token });
+  return { Authorization: `DPoP ${token}`, DPoP: proof };
+}
+
 /**
  * The relay upgrade, started before the attempt has its ticket.
  *
  * The native upgrade is authorized by the session token and a DPoP proof
- * alone; the ticket only travels in the first frame. Opening the socket beside
- * the ticket request hides the ticket's round trip under the socket's TCP,
- * TLS and upgrade, as the node connector does for its own proof. The socket
- * carries no authority until the ticket-bearing auth frame, and is used by at
- * most one attempt: the one {@link MobileHostedRelaySocket} that adopts it.
- * One that opened and waited {@link EARLY_RELAY_SOCKET_TICKET_WAIT_MS} for its
- * ticket, closed, or failed to mint its proof is not adopted, and the attempt
- * opens a fresh socket after its ticket instead.
+ * alone; the ticket only travels in the first frame. The shared
+ * `EarlyRelaySocket` owns the lifecycle: it holds events until adoption,
+ * discards the socket on timeout, close, error or a failed proof, and hands it
+ * to at most one attempt. This supplies the React Native socket and the upgrade
+ * headers; the one {@link MobileHostedRelaySocket} that holds the ticket adopts
+ * it.
  */
-export class MobileEarlyRelaySocket implements HostedEarlyRelaySocket {
-  readonly #options: MobileEarlyRelaySocketOptions;
-  readonly #ready: Promise<NativeSocketLike | null>;
-  #socket: NativeSocketLike | null = null;
-  #opened = false;
-  #unusable = false;
-  #adopted = false;
-  #timer: unknown = null;
-  #sink: EarlySocketSink | null = null;
-  readonly #held: Array<{ readonly type: "message"; readonly data: unknown }> = [];
-
+export class MobileEarlyRelaySocket extends EarlyRelaySocket<NativeSocketLike> {
   constructor(options: MobileEarlyRelaySocketOptions) {
-    this.#options = options;
-    this.#ready = this.#start();
-  }
-
-  async #start(): Promise<NativeSocketLike | null> {
-    try {
-      // As in `MobileHostedRelaySocket`: nothing that can fail runs before the
-      // first await, so the constructor never throws.
-      await Promise.resolve();
-      const token = (
-        this.#options.readBearerToken ??
-        (() => mobileSessionCredentials.readBearerToken?.() ?? null)
-      )();
-      if (token === null || token.length === 0) throw new Error(UPGRADE_FAILED);
-      const signer = await (this.#options.dpopSigner ?? createMobileDpopSigner)();
-      const proof = await signer.sign({ method: "GET", url: this.#options.url, token });
-      if (this.#unusable) return null;
-      const socket = (this.#options.createSocket ?? defaultCreateSocket)(this.#options.url, {
-        Authorization: `DPoP ${token}`,
-        DPoP: proof,
-      });
-      socket.binaryType = "arraybuffer";
-      this.#socket = socket;
-      socket.addEventListener("open", () => {
-        if (this.#sink) return this.#sink.open();
-        this.#opened = true;
-        this.#timer = (this.#options.setTimeout ?? globalThis.setTimeout)(() => {
-          this.#timer = null;
-          if (!this.#adopted) this.discard();
-        }, EARLY_RELAY_SOCKET_TICKET_WAIT_MS);
-      });
-      socket.addEventListener("message", (event: never) => {
-        const data = (event as { data?: unknown }).data;
-        if (this.#sink) this.#sink.message(data);
-        else this.#held.push({ type: "message", data });
-      });
-      socket.addEventListener("close", (event: { readonly reason?: string }) => {
-        if (this.#sink) return this.#sink.close(event.reason);
-        this.#markUnusable();
-      });
-      socket.addEventListener("error", () => {
-        if (this.#sink) return this.#sink.error();
-        this.#markUnusable();
-      });
-      return socket;
-    } catch {
-      this.#markUnusable();
-      return null;
-    }
-  }
-
-  /**
-   * Hand the socket to the one attempt that holds its ticket, or `null` when it
-   * is no longer usable (then it is closed). `attach` replays what happened
-   * before adoption once the caller has stored the socket.
-   */
-  async adopt(): Promise<{
-    readonly socket: NativeSocketLike;
-    readonly attach: (sink: EarlySocketSink) => void;
-  } | null> {
-    const socket = await this.#ready;
-    if (socket === null || this.#unusable || this.#adopted) {
-      this.discard();
-      return null;
-    }
-    this.#adopted = true;
-    this.#clearTimer();
-    return {
-      socket,
-      attach: (sink) => {
-        this.#sink = sink;
-        const held = this.#held.splice(0);
-        if (this.#opened) sink.open();
-        for (const entry of held) sink.message(entry.data);
-      },
-    };
-  }
-
-  discard(): void {
-    if (this.#adopted) return;
-    this.#markUnusable();
-    this.#clearTimer();
-    this.#held.length = 0;
-    const socket = this.#socket;
-    if (socket && socket.readyState !== CLOSING && socket.readyState !== CLOSED) {
-      try {
-        socket.close(1000, "closed");
-      } catch {
-        // Already gone.
-      }
-    }
-  }
-
-  #markUnusable(): void {
-    this.#unusable = true;
-  }
-
-  #clearTimer(): void {
-    if (this.#timer === null) return;
-    (this.#options.clearTimeout ?? ((timer) => globalThis.clearTimeout(timer as never)))(
-      this.#timer,
-    );
-    this.#timer = null;
+    super({
+      url: options.url,
+      prepareUpgradeHeaders: () => prepareUpgradeHeaders(options),
+      createSocket: options.createSocket ?? defaultCreateSocket,
+      ...(options.setTimeout === undefined ? {} : { setTimeout: options.setTimeout }),
+      ...(options.clearTimeout === undefined ? {} : { clearTimeout: options.clearTimeout }),
+    });
   }
 }
 
@@ -482,31 +402,14 @@ export class MobileHostedRelaySocket {
         return;
       }
       if (this.#abandoned) return;
-      const readToken =
-        options.readBearerToken ?? (() => mobileSessionCredentials.readBearerToken?.() ?? null);
-      const token = readToken();
-      if (token === null || token.length === 0) throw new Error(UPGRADE_FAILED);
-      const signer = await (options.dpopSigner ?? createMobileDpopSigner)();
-      const proof = await signer.sign({ method: "GET", url: this.url, token });
+      const headers = await prepareUpgradeHeaders({
+        url: this.url,
+        dpopSigner: options.dpopSigner,
+        readBearerToken: options.readBearerToken,
+      });
       if (this.#abandoned) return;
 
-      // These are the only headers this adapter sets. It deliberately sets no
-      // `Cookie` — one on this upgrade is a hard 403 server-side.
-      //
-      // It cannot *guarantee* the absence of one, and that limit is worth being
-      // precise about: React Native's own WebSocket module attaches a `Cookie`
-      // from the app-global store (Android `ForwardingCookieHandler` →
-      // `CookieManager`; iOS `NSHTTPCookieStorage`) before these headers, and
-      // appends rather than replaces, so nothing passed here can remove it. It
-      // also always sets `Origin`, which the Hub does not check on this branch.
-      // The protection is therefore upstream: no in-app WebView ships, and the
-      // authorization handoff uses the OS-managed system browser whose cookies
-      // never enter the app-global store. Owner acceptance row 8 is what proves
-      // it end to end.
-      const socket = (options.createSocket ?? defaultCreateSocket)(this.url, {
-        Authorization: `DPoP ${token}`,
-        DPoP: proof,
-      });
+      const socket = (options.createSocket ?? defaultCreateSocket)(this.url, headers);
       socket.binaryType = "arraybuffer";
       this.#socket = socket;
 

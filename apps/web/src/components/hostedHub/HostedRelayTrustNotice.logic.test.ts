@@ -19,6 +19,7 @@ import {
 } from "./HostedE2eeVerification.logic";
 import {
   hostedRelayTrustDisclosure,
+  hostedRelayTrustDisclosureStatus,
   HOSTED_RELAY_TRUST_DISCLOSURE_STATES,
 } from "./HostedRelayTrustNotice.logic";
 
@@ -106,6 +107,32 @@ describe("the hosted relay trust disclosure is a function of the channel state",
     for (const { where, text } of everyDisclosure()) {
       expect(text, where).not.toContain("not application-level end-to-end encrypted");
     }
+  });
+});
+
+describe("which channel the disclosure speaks for", () => {
+  it("discloses the selected node's channel while it has one", () => {
+    for (const status of ["negotiating", "web-unsigned", "legacy"] as const) {
+      expect(hostedRelayTrustDisclosureStatus(status, ["legacy", "web-unsigned"]), status).toBe(
+        status,
+      );
+    }
+  });
+
+  it("says no channel is open only while none is open in this tab", () => {
+    expect(hostedRelayTrustDisclosureStatus("unavailable", [])).toBe("unavailable");
+    // The cursor can sit on a node with no channel while other nodes' channels
+    // stay open: "No node channel is open in this tab" would then be false.
+    expect(hostedRelayTrustDisclosureStatus("unavailable", ["web-unsigned"])).toBe("web-unsigned");
+  });
+
+  it("discloses the weakest channel open in this tab, never a stronger one", () => {
+    expect(
+      hostedRelayTrustDisclosureStatus("unavailable", ["web-unsigned", "negotiating", "legacy"]),
+    ).toBe("legacy");
+    expect(hostedRelayTrustDisclosureStatus("unavailable", ["web-unsigned", "negotiating"])).toBe(
+      "negotiating",
+    );
   });
 });
 
@@ -476,6 +503,14 @@ const RETIRED_CLAIM_SHAPES: ReadonlyArray<{ readonly name: string; readonly patt
 ];
 
 /**
+ * A literal every shape above requires verbatim. `normalizeForScan` only strips
+ * line leaders and collapses whitespace, so it cannot create one inside a word,
+ * and a file without either cannot match: most of the repository skips the
+ * normalization. The paraphrase test below keeps a new shape from outgrowing it.
+ */
+const SCAN_TRIGGER = /encr|forwarded/i;
+
+/**
  * The two sites that hold the retired sentence deliberately, and why each must
  * keep holding it.
  */
@@ -509,7 +544,11 @@ function normalizeForScan(text: string): string {
     .trim();
 }
 
+let scanTargets: readonly string[] | undefined;
+
+/** The repository walk, done once for the tests below. */
 function collectScanTargets(): readonly string[] {
+  if (scanTargets) return scanTargets;
   const found: string[] = [];
   const visit = (relativeDirectory: string): void => {
     let entries;
@@ -532,6 +571,7 @@ function collectScanTargets(): readonly string[] {
     }
   };
   for (const root of SCAN_ROOTS) visit(`${root}/`);
+  scanTargets = found;
   return found;
 }
 
@@ -556,17 +596,21 @@ describe("no public file still carries the retired claim", () => {
     }
   });
 
+  // Reads every text file in the repository, which on a loaded CI runner takes longer than the
+  // default five seconds.
   it("finds it in no file outside the two deliberate sites", () => {
     const offenders: string[] = [];
     for (const path of collectScanTargets()) {
       if (path === SCAN_SELF_PATH || allowed.has(path)) continue;
-      const prose = normalizeForScan(readRepoFile(path));
+      const text = readRepoFile(path);
+      if (!SCAN_TRIGGER.test(text)) continue;
+      const prose = normalizeForScan(text);
       for (const { name, pattern } of RETIRED_CLAIM_SHAPES) {
         if (pattern.test(prose)) offenders.push(`${path}: ${name}`);
       }
     }
     expect(offenders).toEqual([]);
-  });
+  }, 30_000);
 
   it("keeps the allowlist honest: each allowed site still carries the sentence", () => {
     // An allowlist entry for a file that no longer states the claim is a hole
@@ -590,6 +634,8 @@ describe("no public file still carries the retired claim", () => {
     ]) {
       const caught = RETIRED_CLAIM_SHAPES.some(({ pattern }) => pattern.test(paraphrase));
       expect(caught, paraphrase).toBe(true);
+      // The scan only normalizes files the trigger admits.
+      expect(SCAN_TRIGGER.test(paraphrase), paraphrase).toBe(true);
     }
   });
 });
@@ -597,10 +643,11 @@ describe("no public file still carries the retired claim", () => {
 describe("the disclosure may not point at what the surface under it does not draw", () => {
   it("refers to no session code, on any state", () => {
     // This notice mounts at six sites across BOTH presentation tiers, and
-    // §13.5's `WebSAS` renders at two of them (the desktop node menu, where
-    // `HostedConnectionControls.tsx` mounts `HostedE2eeVerification`, and
-    // Settings → Security, where `NodeSecuritySettings.tsx` draws this tab's own
-    // channel; `AGENTS.md` freezes the web phone tier). Copy here that
+    // §13.5's `WebSAS` renders at only two surfaces (the desktop thread
+    // connection popover, where `HostedConnectionControls.tsx` mounts
+    // `HostedE2eeVerification`, and Settings → Security, where
+    // `NodeSecuritySettings.tsx` draws this tab's own channel; `AGENTS.md`
+    // freezes the web phone tier). Copy here that
     // presupposed a comparison value on the page read identically on the phone
     // connection sheet, which draws none: it told that reader a §13.5
     // comparison existed and that a hostile Hub could forge it, while handing

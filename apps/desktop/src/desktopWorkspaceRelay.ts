@@ -10,6 +10,11 @@ import {
   type RelaySocket,
 } from "@ryco/client-runtime/relay";
 import {
+  EarlyRelaySocket,
+  type AdoptedEarlyRelaySocket,
+  type EarlySocketLike,
+} from "@ryco/client-runtime/relay/earlyRelaySocket";
+import {
   makeRelayE2eeInitiator,
   type RelayE2eeInitiatorAttempt,
 } from "@ryco/client-runtime/relay/e2ee";
@@ -85,8 +90,17 @@ function opaqueTransportId(): string {
   return Crypto.randomBytes(24).toString("base64url");
 }
 
-function bytesFromRawData(data: RawData): Uint8Array | null {
-  if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
+/**
+ * One inbound frame as bytes, or null when it is too large.
+ *
+ * The socket asks `ws` for `arraybuffer`, which hands the listener an
+ * ArrayBuffer nothing else references, so it is wrapped as is: the relay engine
+ * owns it from here and wipes it once decoded. A Buffer (only delivered if the
+ * binary type ever changes) can be a window onto a chunk shared with later
+ * frames, so it is copied out before the engine can wipe it.
+ */
+export function bytesFromRawData(data: RawData): Uint8Array | null {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (Array.isArray(data)) {
     const total = data.reduce((sum, part) => sum + part.byteLength, 0);
     if (total > MAX_APPLICATION_FRAME_BYTES) return null;
@@ -100,6 +114,21 @@ function bytesFromRawData(data: RawData): Uint8Array | null {
   }
   const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   return view.byteLength <= MAX_APPLICATION_FRAME_BYTES ? Uint8Array.from(view) : null;
+}
+
+/**
+ * A `ws` socket as the early socket drives it. `ws` registers the `open`,
+ * `message`, `close` and `error` events through `addEventListener`, but types
+ * the event name per event rather than as any string.
+ */
+type RelayUpgradeSocket = WebSocket & EarlySocketLike;
+
+/** Opens a relay upgrade socket with its authorization headers. */
+function openRelayWebSocket(
+  url: string,
+  headers: Readonly<Record<string, string>>,
+): RelayUpgradeSocket {
+  return new WebSocket(url, { headers }) as RelayUpgradeSocket;
 }
 
 function nativeAttempt(input: {
@@ -139,7 +168,8 @@ class DesktopWorkspaceRelaySocket {
     readonly target: DesktopWorkspaceRelayTarget;
     readonly ticket: string;
     readonly ticketExpiresAt: number;
-    readonly headers: Readonly<Record<string, string>>;
+    /** The upgrade socket this attempt owns, opened through the manager's socket port. */
+    readonly upgrade: AdoptedEarlyRelaySocket<RelayUpgradeSocket>;
     readonly e2ee: RelayE2eeProvider;
     /** §4.6: `false` after an earlier attempt for this environment failed on compression. */
     readonly relayCompression: boolean;
@@ -151,9 +181,8 @@ class DesktopWorkspaceRelaySocket {
       readonly close: (code: number, reason: string) => void;
     };
   }) {
-    const socket = new WebSocket(input.target.relayUrl, {
-      headers: input.headers,
-    });
+    const { upgrade } = input;
+    const socket = upgrade.socket;
     socket.binaryType = "arraybuffer";
     this.#socket = socket;
     const openListeners: Array<() => void> = [];
@@ -167,6 +196,8 @@ class DesktopWorkspaceRelaySocket {
       get readyState() {
         return socket.readyState;
       },
+      // The engine wipes its frame as soon as this returns, while `ws` can keep
+      // the buffer past that (compression, write queue), so `ws` gets its own.
       send: (bytes) => socket.send(Buffer.from(bytes)),
       close: (code, reason) => socket.close(code, reason),
       onOpen: (listener) => openListeners.push(listener),
@@ -174,44 +205,59 @@ class DesktopWorkspaceRelaySocket {
       onClose: (listener) => closeListeners.push(listener),
       onError: (listener) => errorListeners.push(listener),
     };
-    this.#engine = new HostedRelayEngine({
-      ticket: input.ticket,
-      ticketExpiresAt: input.ticketExpiresAt,
-      socket: relaySocket,
-      callbacks: input.callbacks,
-      e2ee: input.e2ee,
-      ...(input.relayCompression && RELAY_PAYLOAD_INFLATER !== undefined
-        ? { inflater: RELAY_PAYLOAD_INFLATER }
-        : {}),
-      timers: {
-        now: Date.now,
-        setTimeout: (callback, ms) => globalThis.setTimeout(callback, ms),
-        clearTimeout: (id) => globalThis.clearTimeout(id as ReturnType<typeof setTimeout>),
-        queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
-      },
-      events: {
-        onOpen: input.events.open,
-        onData: input.events.message,
-        onError: input.events.error,
-        onClose: input.events.close,
-      },
-    });
-    socket.on("open", () => {
+    try {
+      this.#engine = new HostedRelayEngine({
+        ticket: input.ticket,
+        ticketExpiresAt: input.ticketExpiresAt,
+        socket: relaySocket,
+        callbacks: input.callbacks,
+        e2ee: input.e2ee,
+        ...(input.relayCompression && RELAY_PAYLOAD_INFLATER !== undefined
+          ? { inflater: RELAY_PAYLOAD_INFLATER }
+          : {}),
+        timers: {
+          now: Date.now,
+          setTimeout: (callback, ms) => globalThis.setTimeout(callback, ms),
+          clearTimeout: (id) => globalThis.clearTimeout(id as ReturnType<typeof setTimeout>),
+          queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
+        },
+        events: {
+          onOpen: input.events.open,
+          onData: input.events.message,
+          onError: input.events.error,
+          onClose: input.events.close,
+        },
+      });
+    } catch (error) {
+      // The adopted socket has no other owner left; it carries no authority yet.
+      socket.close(1000, "closed");
+      throw error;
+    }
+    const handleOpen = () => {
       for (const listener of openListeners) listener();
-    });
-    socket.on("message", (data, isBinary) => {
-      const bytes = isBinary ? bytesFromRawData(data) : null;
+    };
+    const handleMessage = (bytes: Uint8Array | null) => {
       if (bytes === null) {
         this.#engine.reportUndecodableMessage("frame_too_large");
         return;
       }
       for (const listener of messageListeners) listener(bytes);
-    });
-    socket.on("close", (_code, reason) => {
-      for (const listener of closeListeners) listener(reason.toString());
-    });
-    socket.on("error", () => {
+    };
+    const handleClose = (reason: string) => {
+      for (const listener of closeListeners) listener(reason);
+    };
+    const handleError = () => {
       for (const listener of errorListeners) listener();
+    };
+    // What the socket received while it waited for this attempt is replayed
+    // first, in order, then every later event arrives as it happens. Text
+    // frames reach the listener as strings, binary ones as the ArrayBuffer.
+    upgrade.attach({
+      open: handleOpen,
+      message: (data) =>
+        handleMessage(typeof data === "string" ? null : bytesFromRawData(data as RawData)),
+      close: (reason) => handleClose(reason ?? ""),
+      error: handleError,
     });
   }
 
@@ -219,7 +265,8 @@ class DesktopWorkspaceRelaySocket {
     if (bytes.byteLength > MAX_APPLICATION_FRAME_BYTES) {
       throw new Error("Desktop workspace RPC frame is too large.");
     }
-    this.#engine.send(Uint8Array.from(bytes));
+    // The engine copies whatever it keeps, so the caller's bytes are sent as is.
+    this.#engine.send(bytes);
   }
 
   close(): void {
@@ -240,6 +287,7 @@ export class DesktopWorkspaceRelayManager {
   readonly #emit: (event: DesktopWorkspaceTransportEvent) => void;
   readonly #now: () => number;
   readonly #socketFactory: DesktopWorkspaceRelaySocketFactory;
+  readonly #createUpgradeSocket: typeof openRelayWebSocket;
   readonly #transports = new Map<string, PreparedTransport>();
   /**
    * Environments whose relay attempts run without payload compression, because
@@ -253,12 +301,26 @@ export class DesktopWorkspaceRelayManager {
     readonly emit: (event: DesktopWorkspaceTransportEvent) => void;
     readonly now?: () => number;
     readonly socketFactory?: DesktopWorkspaceRelaySocketFactory;
+    /** Opens every relay upgrade socket: the one started beside the ticket request and its replacement. */
+    readonly createUpgradeSocket?: typeof openRelayWebSocket;
   }) {
     this.#authority = input.authority;
     this.#emit = input.emit;
     this.#now = input.now ?? Date.now;
     this.#socketFactory =
       input.socketFactory ?? ((socketInput) => new DesktopWorkspaceRelaySocket(socketInput));
+    this.#createUpgradeSocket = input.createUpgradeSocket ?? openRelayWebSocket;
+  }
+
+  #openUpgradeSocket(
+    target: DesktopWorkspaceRelayTarget,
+    prepareUpgradeHeaders: () => Promise<Readonly<Record<string, string>>>,
+  ): EarlyRelaySocket<RelayUpgradeSocket> {
+    return new EarlyRelaySocket<RelayUpgradeSocket>({
+      url: target.relayUrl,
+      prepareUpgradeHeaders,
+      createSocket: this.#createUpgradeSocket,
+    });
   }
 
   prepare(environmentId: EnvironmentId): string {
@@ -301,8 +363,14 @@ export class DesktopWorkspaceRelayManager {
     const isCurrent = () => this.#transports.get(transportId) === prepared;
     let preparation: Extract<DesktopNativeE2eePreparation, { readonly kind: "native" }> | undefined;
     let handshake: DesktopNativeE2eeHandshakeService | undefined;
+    let earlySocket: EarlyRelaySocket<RelayUpgradeSocket> | undefined;
+    let releaseSecurityHelper: (() => void) | undefined;
     let destroyed = false;
     const cleanup = () => {
+      // Safe to repeat. Has no effect on an early socket the relay socket adopted.
+      earlySocket?.discard();
+      releaseSecurityHelper?.();
+      releaseSecurityHelper = undefined;
       if (preparation && handshake && !destroyed) {
         destroyed = true;
         handshake.destroy(preparation.attemptHandle);
@@ -326,8 +394,18 @@ export class DesktopWorkspaceRelayManager {
       // preparation independently so a sibling request failure cannot leak it.
       handshake = await this.#authority.handshake();
       if (!isCurrent()) return;
+      // The relay session signs and borrows keys until it ends; keep the
+      // security helper up instead of respawning it after its idle exit.
+      releaseSecurityHelper = handshake.holdForRelay();
+      // Start the upgrade authorization before the E2EE preparation and the
+      // ticket request ask the security helper for anything, and open the
+      // socket beside them, so its connect and TLS handshake overlap them. It
+      // carries no authority until the ticket-bearing auth frame, and is
+      // discarded unless the attempt below passes every check and adopts it.
+      const upgradeHeaders = this.#authority.authorizeUpgrade(target);
+      earlySocket = this.#openUpgradeSocket(target, () => upgradeHeaders);
       let preparationFailed = false;
-      const [resolvedPreparation, ticket, headers] = await Promise.all([
+      const [resolvedPreparation, ticket] = await Promise.all([
         this.#authority.prepareE2ee(target, prepared.pairingOnly).then((value) => {
           if (value.kind === "native") preparation = value;
           if (!isCurrent() || preparationFailed) cleanup();
@@ -336,7 +414,9 @@ export class DesktopWorkspaceRelayManager {
         target.nativeTrust === "account-trusted" && !prepared.pairingOnly
           ? Promise.resolve(null)
           : this.#authority.issueTicket(target),
-        this.#authority.authorizeUpgrade(target),
+        // Awaited so an upgrade that cannot be authorized fails the attempt at
+        // once instead of after the preparation and the ticket.
+        upgradeHeaders,
       ]).catch((error: unknown) => {
         preparationFailed = true;
         cleanup();
@@ -367,11 +447,27 @@ export class DesktopWorkspaceRelayManager {
         throw new Error("Desktop workspace target trust state changed.");
       }
       const attempt = nativeAttempt({ target, preparation, handshake });
+      // Every check has passed: adopt the early socket. One that timed out
+      // waiting for its ticket, closed, or failed is replaced by a fresh socket
+      // with a newly minted authorization, opened through the same port.
+      let upgrade = await earlySocket.adopt();
+      if (upgrade === null && isCurrent()) {
+        earlySocket = this.#openUpgradeSocket(target, () =>
+          this.#authority.authorizeUpgrade(target),
+        );
+        upgrade = await earlySocket.adopt();
+      }
+      if (!isCurrent()) {
+        upgrade?.socket.close(1000, "closed");
+        cleanup();
+        return;
+      }
+      if (upgrade === null) throw new Error("Desktop workspace relay upgrade is unavailable.");
       const active = this.#socketFactory({
         target,
         ticket: relayTicket.ticket,
         ticketExpiresAt: relayTicket.expiresAt,
-        headers,
+        upgrade,
         e2ee: (host) => makeRelayE2eeInitiator({ host, attempt }),
         relayCompression: this.#compressionAllowed(prepared.environmentId),
         callbacks: {

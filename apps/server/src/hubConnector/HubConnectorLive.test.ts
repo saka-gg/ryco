@@ -1,7 +1,9 @@
 import { dirname, join } from "node:path";
 
 import { EnvironmentId } from "@ryco/contracts";
-import { Effect, Layer } from "effect";
+import type { RelayChannelId, RelayChannelOpenFrame, RelayLimits } from "@ryco/contracts/relay";
+import { decodeRelayFrame } from "@ryco/shared/relayCodec";
+import { Effect, Layer, Option, Tracer } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { HUB_CONNECTED_EXTERNAL_TOPOLOGY } from "../agentControl/externalTopology.ts";
@@ -14,13 +16,22 @@ import {
 } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import type { HubIdentityProcessLockResult } from "../hubIdentity/HubIdentityProcessLock.ts";
+import type { ProjectionStubbedShellSnapshot } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { HubIdentityInUseError } from "./HubConnector.ts";
 import {
   HubConnectorService,
   type HubConnectorServiceShape,
+  instrumentRelayChannelOpens,
   makeHubConnectorLive,
+  relayChannelShellWarmUp,
 } from "./HubConnectorLive.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
+import {
+  RelayChannelRegistry,
+  type RelayChannelSessionFactory,
+  type RelayRpcChannelSession,
+} from "./RelayChannelRegistry.ts";
+import { RelaySendQueue } from "./RelaySendQueue.ts";
 
 const HUB_ORIGIN = "https://relay.example";
 const STATE_PATH = "/nonexistent/ryco-hub-connector-live/userdata/hub-identity.json";
@@ -232,5 +243,212 @@ describe("HubConnectorLive", () => {
         expect(calls).toContain("nativeNodeClaim.prepare");
       },
     );
+  });
+});
+
+const channelId = `ch_${"A".repeat(22)}` as RelayChannelId;
+const secondChannelId = `ch_${"B".repeat(22)}` as RelayChannelId;
+const relayVersion = { protocolMajor: 1, protocolMinor: 2 } as const;
+const relayLimits: RelayLimits = {
+  maxControlFrameBytes: 1_024,
+  maxDataChunkBytes: 1_024,
+  maxQueuedBytes: 4_096,
+  maxChannels: 2,
+  heartbeatIntervalMs: 20_000,
+  deadConnectionTimeoutMs: 45_000,
+  authenticationDeadlineMs: 5_000,
+};
+const channelOpen: RelayChannelOpenFrame = {
+  type: "channel.open",
+  ...relayVersion,
+  channelId,
+  capability: "ryco.rpc",
+  effectiveRole: "operator",
+};
+
+const macrotask = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * A relay connection's registry over the connector's channel opens: each
+ * session announces itself with one data frame once accepted, as the E2EE
+ * carrier does. `wire` lists the frame types the socket received, in order.
+ */
+function relayConnection(options: {
+  readonly warm?: Effect.Effect<unknown, unknown> | undefined;
+  readonly open?: () => Promise<void>;
+  readonly run?: <A>(effect: Effect.Effect<A>) => Promise<A>;
+}) {
+  const wire: string[] = [];
+  const runs: Promise<unknown>[] = [];
+  let fatal = 0;
+  const sessions: RelayChannelSessionFactory = {
+    open: async ({ send }) => {
+      await options.open?.();
+      return {
+        receive: async () => true,
+        queuedBytes: async () => 0,
+        supportsChunkedMessages: () => false,
+        close: async () => undefined,
+        onAccepted: () => {
+          send(new Uint8Array([1]));
+        },
+      } satisfies RelayRpcChannelSession;
+    },
+  };
+  const run = <A>(effect: Effect.Effect<A>): Promise<A> => {
+    const result = options.run === undefined ? Effect.runPromise(effect) : options.run(effect);
+    runs.push(result);
+    return result;
+  };
+  const factory = instrumentRelayChannelOpens(sessions, { run, warm: options.warm });
+  const sendQueue = new RelaySendQueue(
+    {
+      bufferedAmount: 0,
+      send: (bytes) => {
+        const frame = decodeRelayFrame(Uint8Array.from(bytes));
+        wire.push(frame.ok ? frame.value.type : "undecodable");
+      },
+    },
+    relayLimits,
+  );
+  const registry = new RelayChannelRegistry({
+    limits: relayLimits,
+    protocol: relayVersion,
+    sendQueue,
+    factory,
+    onOutboundReady: () => sendQueue.flush(),
+    onFatal: () => {
+      fatal += 1;
+    },
+  });
+  return {
+    factory,
+    registry,
+    wire,
+    fatal: () => fatal,
+    /** Every effect the connector ran settled, none rejected. */
+    settled: () => Promise.all(runs),
+  };
+}
+
+describe("relay channel opens", () => {
+  it("warm the shell once the channel's accept and carrier are on the wire", async () => {
+    const wireWhenWarmed: string[][] = [];
+    let finishOpen!: () => void;
+    const opening = new Promise<void>((resolve) => {
+      finishOpen = resolve;
+    });
+    const connection = relayConnection({
+      open: () => opening,
+      warm: Effect.sync(() => {
+        wireWhenWarmed.push([...connection.wire]);
+      }),
+    });
+
+    const handled = connection.registry.handle(channelOpen);
+    await macrotask();
+    // Nothing is warmed while the channel's session is still being prepared.
+    expect(wireWhenWarmed).toEqual([]);
+    finishOpen();
+    await handled;
+    await macrotask();
+    await connection.settled();
+
+    expect(wireWhenWarmed).toEqual([["channel.accept", "data"]]);
+    expect(connection.wire).toEqual(["channel.accept", "data"]);
+  });
+
+  it("warm the node's stubbed shell, once per channel open", async () => {
+    let reads = 0;
+    const query = {
+      getStubbedShellSnapshot: () =>
+        Effect.sync(() => {
+          reads += 1;
+          return {} as ProjectionStubbedShellSnapshot;
+        }),
+    };
+    const connection = relayConnection({ warm: relayChannelShellWarmUp(Option.some(query)) });
+
+    await connection.registry.handle(channelOpen);
+    await connection.registry.handle({ ...channelOpen, channelId: secondChannelId });
+    await macrotask();
+    await connection.settled();
+
+    expect(reads).toBe(2);
+    expect(connection.wire).toEqual(["channel.accept", "data", "channel.accept", "data"]);
+    // Without a shell query that builds the stubbed form, nothing is warmed.
+    expect(relayChannelShellWarmUp(Option.none())).toBeUndefined();
+    expect(relayChannelShellWarmUp(Option.some({}))).toBeUndefined();
+  });
+
+  it("open the channel when the warm-up fails", async () => {
+    for (const warm of [
+      Effect.fail(new Error("database is locked")),
+      Effect.die(new Error("shell build defect")),
+    ]) {
+      let attempts = 0;
+      const connection = relayConnection({
+        warm: Effect.suspend(() => {
+          attempts += 1;
+          return warm;
+        }),
+      });
+      await connection.registry.handle(channelOpen);
+      await macrotask();
+      await connection.settled();
+
+      expect(attempts).toBe(1);
+      expect(connection.wire).toEqual(["channel.accept", "data"]);
+      expect(connection.fatal()).toBe(0);
+    }
+  });
+
+  it("rethrow a failed open unchanged and warm nothing", async () => {
+    const failure = new Error("advertisement unavailable");
+    let warmed = 0;
+    const connection = relayConnection({
+      open: () => Promise.reject(failure),
+      warm: Effect.sync(() => {
+        warmed += 1;
+      }),
+    });
+
+    await expect(
+      connection.factory.open({} as Parameters<RelayChannelSessionFactory["open"]>[0]),
+    ).rejects.toBe(failure);
+    await connection.registry.handle(channelOpen);
+    await macrotask();
+    await connection.settled();
+
+    expect(connection.wire).toEqual(["channel.reject"]);
+    expect(warmed).toBe(0);
+  });
+
+  it("are timed as root spans that carry their duration and nothing else", async () => {
+    const spans: Tracer.NativeSpan[] = [];
+    const tracer = Tracer.make({
+      span: (options) => {
+        const span = new Tracer.NativeSpan(options);
+        spans.push(span);
+        return span;
+      },
+    });
+    const connection = relayConnection({
+      // Inside another span, as a connection's own work may be.
+      run: (effect) =>
+        Effect.runPromise(
+          effect.pipe(Effect.withSpan("relay.connection"), Effect.withTracer(tracer)),
+        ),
+    });
+    await connection.registry.handle(channelOpen);
+    await connection.settled();
+
+    const opens = spans.filter((span) => span.name === "relay.channel.open");
+    expect(opens).toHaveLength(1);
+    const [open] = opens;
+    expect(Option.isNone(open!.parent)).toBe(true);
+    expect([...open!.attributes.keys()]).toEqual(["relay.channel.open.durationMs"]);
+    expect(open!.attributes.get("relay.channel.open.durationMs")).toBeTypeOf("number");
+    expect(open!.status._tag).toBe("Ended");
   });
 });

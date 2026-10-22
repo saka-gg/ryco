@@ -31,18 +31,18 @@ import Migration0058 from "./Migrations/058_ProjectMemory.ts";
 import Migration0055 from "./Migrations/055_ApprovalResponseClaims.ts";
 import Migration0056 from "./Migrations/056_UserInputResponseClaims.ts";
 /**
- * MigrationsLive - Migration runner with inline loader
+ * Migration runner with inline loader
  *
  * Uses Migrator.make with fromRecord to define migrations inline.
  * All migrations are statically imported - no dynamic file system loading.
  *
- * Migrations run automatically when the MigrationLayer is provided,
- * ensuring the database schema is always up-to-date before the application starts.
+ * `runMigrations` applies pending migrations and their idempotent repairs. The SQLite
+ * persistence layer runs it while it is built, so the database schema is up to date
+ * before the application starts.
  */
 
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
-import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 
 import { trackStartupPhase } from "../startupStallMonitor.ts";
@@ -137,6 +137,9 @@ import Migration0091, {
 import Migration0092, {
   ensureLocalTaskDelegationsTable,
 } from "./Migrations/092_LocalTaskDelegations.ts";
+import Migration0093, {
+  dropUnusedOrchestrationIndexes,
+} from "./Migrations/093_DropUnusedOrchestrationIndexes.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -240,6 +243,7 @@ export const migrationEntries = [
   [90, "AuthAccessLinks", Migration0090],
   [91, "GuardedLatestCompletedTurnTrigger", Migration0091],
   [92, "LocalTaskDelegations", Migration0092],
+  [93, "DropUnusedOrchestrationIndexes", Migration0093],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -589,6 +593,16 @@ export const repairLocalTaskDelegationsTable = Effect.fn("repairLocalTaskDelegat
   },
 );
 
+// Unused orchestration indexes: run 093 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id). One catalog lookup per boot once they are gone.
+export const repairUnusedOrchestrationIndexes = Effect.fn("repairUnusedOrchestrationIndexes")(
+  function* () {
+    if (yield* dropUnusedOrchestrationIndexes) {
+      yield* Effect.log("Dropped unused orchestration indexes");
+    }
+  },
+);
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -790,6 +804,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 92) {
         yield* repairLocalTaskDelegationsTable();
       }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 93) {
+        yield* repairUnusedOrchestrationIndexes();
+      }
     }),
   );
   yield* Effect.log("Migrations ran successfully").pipe(
@@ -799,22 +816,3 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   );
   return executedMigrations;
 });
-
-/**
- * Layer that runs migrations when the layer is built.
- *
- * Use this to ensure migrations run before your application starts.
- * Migrations are run automatically - no separate script is needed.
- *
- * @example
- * ```typescript
- * import { MigrationsLive } from "@acme/db/Migrations"
- * import * as SqliteClient from "@acme/db/SqliteClient"
- *
- * // Migrations run automatically when SqliteClient is provided
- * const AppLayer = MigrationsLive.pipe(
- *   Layer.provideMerge(SqliteClient.layer({ filename: "database.sqlite" }))
- * )
- * ```
- */
-export const MigrationsLive = Layer.effectDiscard(runMigrations());

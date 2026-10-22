@@ -1,4 +1,5 @@
 import { hostedHubStore } from "@ryco/client-runtime/authorization";
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   HostedRelayPreparationError,
   relayE2eeUnresolvedAttemptFailure,
@@ -166,35 +167,44 @@ export function prepareWebRelayE2ee(): Promise<undefined> {
 let lastAttempt: RelayE2eeInitiatorAttempt | null = null;
 
 /**
- * The channel whose §13 projection is currently published, as an identity.
+ * The node a relay channel is opened to, and the environment whose §13
+ * projection that channel publishes into.
  *
- * A stale channel's teardown MUST NOT clear a live channel's projection. The
- * engine ends a channel from `#finish`, and nothing orders that against the
- * successor socket's `channel.accept`: a reconnect can build the next machine —
- * which publishes `negotiating` — before the previous engine finishes tearing
- * down, and an unconditional reset in the loser's `dispose` would then erase the
- * winner's state. Comparing identities makes the clear apply to the channel that
- * earned the state and to no other.
+ * A channel's attempt is resolved for ITS OWN node and never for the selected
+ * one: the hosted client keeps channels to several nodes, and a warm channel
+ * reconnects whether or not its node is selected — or whether any node is. A
+ * selection-bound attempt checked §5.2's statement and §12.1's latch against
+ * whichever node happened to be selected, and closed every channel while none
+ * was.
  */
-let publishedChannel: object | null = null;
+export interface WebRelayE2eeTarget {
+  readonly nodeId: string;
+  readonly environmentId: EnvironmentId;
+}
 
 /**
- * The hosted selection this channel is opened against, or `null`.
+ * The hosted selection a channel to `nodeId` is opened against, or `null`.
  *
  * `hubOrigin` is read from the document's own origin rather than from anything
  * the Hub sends: §12.1.1 calls it "the origin the client configured and is
  * actually connected to", and on this tier the page IS that origin. §5.2 step 4
- * checks every statement against it.
+ * checks every statement against it. The account is the signed-in one, and the
+ * node is the channel's, so §12.1's latch key is always the channel's own triple.
  */
-function currentSelection(): WebE2eeSelection | null {
+function selectionForNode(nodeId: string | undefined): WebE2eeSelection | null {
   const origin = globalThis.window?.location.origin;
   if (typeof origin !== "string" || origin.length === 0) return null;
   const state = hostedHubStore.getState();
-  const node = state.selectedNode;
-  if (state.accountStatus !== "authenticated" || state.account === null || node === null) {
+  if (state.accountStatus !== "authenticated" || state.account === null || !nodeId) {
     return null;
   }
-  return { hubOrigin: origin, accountId: state.account.id, nodeId: node.id };
+  return { hubOrigin: origin, accountId: state.account.id, nodeId };
+}
+
+/** The selected node as a channel target, for callers that name no node of their own. */
+function selectedNodeTarget(): WebRelayE2eeTarget | null {
+  const node = hostedHubStore.getState().selectedNode;
+  return node === null ? null : { nodeId: node.id, environmentId: node.environmentId };
 }
 
 /**
@@ -259,7 +269,9 @@ export function webRelayE2eeAttempt(selection: WebE2eeSelection): RelayE2eeIniti
     },
     // §13.5, published only at the `e2ee` lock and only on this tier. The
     // machine derives it; this hands it to the projection and nothing else.
-    onWebVerificationCode: publishWebE2eeVerificationCode,
+    // {@link resolveWebRelayE2eeProvider} binds each channel's copy to that
+    // channel's own entry, so a code lands only where its session is current.
+    onWebVerificationCode: (code) => publishWebE2eeVerificationCode(code),
   };
 }
 
@@ -267,13 +279,15 @@ export function webRelayE2eeAttempt(selection: WebE2eeSelection): RelayE2eeIniti
  * A channel that closes without releasing anything (§11.2: "a client executing
  * FATAL-PRE sends nothing and closes").
  *
- * Reached when the selection cannot be read at all — a sign-out or a node
- * deselect that lands between the ticket mint and this synchronous construction.
- * It is deliberately NOT a legacy channel: what is missing IS the latch key, and
- * §12.1.1 forbids treating unobtainable evidence as an unset latch. Also
- * reached, for the same reason, if the handshake code is not loaded yet, which
- * the hosted transport rules out by awaiting {@link prepareWebRelayE2ee} before
- * it buys a ticket: a channel this tier cannot negotiate is not a plaintext one.
+ * Reached when the channel's selection cannot be read at all — a sign-out that
+ * lands between the ticket mint and this synchronous construction, or a node
+ * that is no longer in the directory, so the channel has no environment to
+ * project into. It is deliberately NOT a legacy channel: what is missing IS the
+ * latch key, and §12.1.1 forbids treating unobtainable evidence as an unset
+ * latch. Also reached, for the same reason, if the handshake code is not loaded
+ * yet, which the hosted transport rules out by awaiting
+ * {@link prepareWebRelayE2ee} before it buys a ticket: a channel this tier
+ * cannot negotiate is not a plaintext one.
  *
  * The close is the RETRYABLE one, so a store that moved under a reconnect costs
  * one channel rather than the whole hosted session.
@@ -292,23 +306,41 @@ function unresolvedAttemptChannel(host: RelayE2eeHost): RelayE2eeChannel {
  * The `RelayE2eeProvider` the hosted socket is built with, resolved
  * synchronously at `createRelaySocket`.
  *
+ * `target` is the channel's own node and environment. `null` says the channel's
+ * node could not be resolved, and that channel closes; omitted, the selected
+ * node is the target.
+ *
  * `undefined` is the §14.5 answer and nothing else: no CSPRNG, or no secure
  * context, so this client has no E2EE at all and the engine runs the unchanged
  * legacy channel. Every other unresolved state closes.
  */
-export function resolveWebRelayE2eeProvider(): RelayE2eeProvider | undefined {
+export function resolveWebRelayE2eeProvider(
+  target?: WebRelayE2eeTarget | null,
+): RelayE2eeProvider | undefined {
+  // Before §14.5, because it is not an E2EE question: a channel with no
+  // environment cannot be labelled anywhere, and §12.2 forbids an unlabelled
+  // plaintext channel as firmly as §12.1.1 forbids an unkeyed latch.
+  if (target === null) return unresolvedAttemptChannel;
   if (!randomnessUsable) {
     // §14.5 refused E2EE, so the engine locks `legacy` at `channel.accept` with
     // no machine in between — and §12.2 labels that channel like any other
     // fallback. It is published HERE because there is no §4.4 machine to publish
     // it from: a projection left at `unavailable` would render this channel
     // `Online` with no claim either way, which is the state that has no channel
-    // rather than the one that locked plaintext.
-    lockWebE2eeChannelMode("legacy");
+    // rather than the one that locked plaintext. It is the TARGET's label: on
+    // the displayed entry it would describe another node's channel.
+    if (target === undefined) {
+      lockWebE2eeChannelMode("legacy");
+    } else {
+      const channelIdentity = {};
+      beginWebE2eeChannelAttempt(target.environmentId, channelIdentity);
+      lockWebE2eeChannelMode("legacy", target.environmentId, channelIdentity);
+    }
     return undefined;
   }
-  const selection = currentSelection();
-  if (selection === null) return unresolvedAttemptChannel;
+  const channelTarget = target ?? selectedNodeTarget();
+  const selection = selectionForNode(channelTarget?.nodeId);
+  if (channelTarget === null || selection === null) return unresolvedAttemptChannel;
   const e2ee = loadedE2ee;
   if (e2ee === null) {
     // The retry this close asks for finds the code loaded.
@@ -316,6 +348,7 @@ export function resolveWebRelayE2eeProvider(): RelayE2eeProvider | undefined {
     return unresolvedAttemptChannel;
   }
   const { makeRelayE2eeInitiator } = e2ee;
+  const { environmentId } = channelTarget;
   const attempt = webRelayE2eeAttempt(selection);
   lastAttempt = attempt;
   return (host) => {
@@ -323,10 +356,11 @@ export function resolveWebRelayE2eeProvider(): RelayE2eeProvider | undefined {
     // channel may not describe the next one, and §13.5's code is bound to a
     // single session by construction. Publishing `negotiating` here — which
     // claims nothing — is what keeps either from surviving the socket that
-    // produced it.
+    // produced it. The identity makes this channel the entry's owner, and every
+    // later write below applies only while it still is: a stale channel's lock,
+    // code or teardown cannot touch the entry a successor took over.
     const channelIdentity = {};
-    publishedChannel = channelIdentity;
-    beginWebE2eeChannelAttempt();
+    beginWebE2eeChannelAttempt(environmentId, channelIdentity);
     // THE LOCK IS OBSERVED AT `host.lockMode` AND NOT AFTER AN OPERATION, and
     // the difference is row K13. §4.4's mode lock is a state the machine holds
     // rather than a callback, so a projection synced after `intercept`/`emit`
@@ -341,10 +375,14 @@ export function resolveWebRelayE2eeProvider(): RelayE2eeProvider | undefined {
         ...host,
         lockMode: (mode) => {
           host.lockMode(mode);
-          lockWebE2eeChannelMode(mode);
+          lockWebE2eeChannelMode(mode, environmentId, channelIdentity);
         },
       },
-      attempt,
+      attempt: {
+        ...attempt,
+        onWebVerificationCode: (code) =>
+          publishWebE2eeVerificationCode(code, environmentId, channelIdentity),
+      },
     });
     // …AND THE END OF THE CHANNEL IS OBSERVED THE SAME WAY. §4.4's machine is
     // "created when the channel is accepted and destroyed when it closes", and
@@ -360,9 +398,7 @@ export function resolveWebRelayE2eeProvider(): RelayE2eeProvider | undefined {
       ...channel,
       dispose: (options) => {
         channel.dispose(options);
-        if (publishedChannel !== channelIdentity) return;
-        publishedChannel = null;
-        resetWebE2eeSession();
+        resetWebE2eeSession(environmentId, channelIdentity);
       },
     };
   };
@@ -384,8 +420,9 @@ let sessionWatch: (() => void) | undefined;
  * sign-out ends it.
  *
  * The account scope is half of §12.1's key, so a session that ends takes its
- * latches and its §13 projection with it — a standing `web-unsigned` would
- * otherwise describe a channel for an account that is no longer signed in.
+ * latches and every environment's §13 projection with it — a standing
+ * `web-unsigned` would otherwise describe a channel for an account that is no
+ * longer signed in.
  *
  * NODE SELECTION IS DELIBERATELY NOT A TRIGGER. The latch is already keyed per
  * node within one session, so switching nodes needs no clearing — and clearing
@@ -447,6 +484,5 @@ function scheduleWebE2eeWarmUp(): void {
 export function resetWebRelayE2eeForTests(): void {
   randomnessUsable = detectWebE2eeRandomness();
   lastAttempt = null;
-  publishedChannel = null;
   sessionWatch?.();
 }

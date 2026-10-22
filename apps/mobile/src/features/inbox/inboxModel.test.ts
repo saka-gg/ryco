@@ -6,6 +6,7 @@ import type {
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 
 import { buildInboxSections, resolveInboxEmptyState, type InboxEnvironment } from "./inboxModel";
 
@@ -544,6 +545,28 @@ describe("mobile settlement and attention policy", () => {
     expect(build({ autoSettleAfterDays: null })[0]?.key).toBe("active");
     expect(build({ autoSettleAfterDays: 14 })[0]?.key).toBe("active");
   });
+  it("settles each node's threads by that node's own rule", () => {
+    const otherNode: InboxEnvironment = { ...environment, environmentId: NODE_B, label: "Mini" };
+    const sections = build({
+      projects: [project(NODE_A, "p", "Ryco"), project(NODE_B, "p", "Ryco")],
+      environments: [
+        { ...environment, autoSettleAfterDays: 3 },
+        { ...otherNode, autoSettleAfterDays: 14 },
+      ],
+      threads: [
+        thread(NODE_A, "old", "p", { latestUserMessageAt: activityAt }),
+        thread(NODE_B, "old", "p", { latestUserMessageAt: activityAt }),
+      ],
+      // This device's own rule decides only for nodes that keep none.
+      autoSettleAfterDays: null,
+    });
+    expect(
+      sections.find((section) => section.key === "settled")?.rows.map((row) => row.key),
+    ).toEqual(["node-a:old"]);
+    expect(
+      sections.find((section) => section.key === "active")?.rows.map((row) => row.key),
+    ).toEqual(["node-b:old"]);
+  });
   it("protects queued messages and environment-level unknown delivery", () => {
     expect(build({ localQueuedThreadIds: new Set(["node-a:old"]) })[0]?.rows[0]).toMatchObject({
       attentionState: "active",
@@ -676,6 +699,52 @@ describe("inbox usage limits", () => {
 
   it("falls back to Error when the thread targets another instance", () => {
     expect(rowFor("codex", "2026-07-26T09:00:00.000Z")).toMatchObject({
+      state: "error",
+      statusLabel: "Error",
+    });
+  });
+});
+
+describe("inbox errors", () => {
+  const session = (lastError: string) => ({
+    provider: "codex" as never,
+    status: "error" as const,
+    orchestrationStatus: "error" as const,
+    createdAt: "2026-07-26T08:00:00.000Z",
+    updatedAt: "2026-07-26T08:05:00.000Z",
+    lastError,
+  });
+  const interrupted = {
+    turnId: "turn-1" as never,
+    state: "interrupted" as const,
+    requestedAt: "2026-07-26T08:00:00.000Z",
+    startedAt: "2026-07-26T08:00:01.000Z",
+    completedAt: "2026-07-26T08:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const rowFor = (lastError: string) =>
+    buildInboxSections({
+      projects: [project(NODE_A, "project-a", "Ryco")],
+      worktrees: [],
+      environments: [{ environmentId: NODE_A, label: "Mac Studio", connectionState: "connected" }],
+      threads: [
+        thread(NODE_A, "thread", "project-a", {
+          session: session(lastError),
+          latestTurn: interrupted,
+        }),
+      ],
+      nowMs: Date.parse("2026-07-26T09:00:00.000Z"),
+    })[0]?.rows[0];
+
+  it("labels a thread a server restart interrupted Idle, not Error", () => {
+    expect(rowFor(ORPHANED_PROVIDER_SESSION_ERROR)).toMatchObject({
+      state: "idle",
+      statusLabel: "Idle",
+    });
+  });
+
+  it("keeps a genuine provider error an Error", () => {
+    expect(rowFor("Provider exited (code 1)")).toMatchObject({
       state: "error",
       statusLabel: "Error",
     });

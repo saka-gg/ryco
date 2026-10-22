@@ -1,17 +1,22 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import {
   createMobileHostedScopeLeaseStore,
   measureHostedLeaseReconnectTraffic,
+  mobileHostedConnectionScopes,
   MOBILE_SCOPE_LEASE_TTL_MS,
-  MOBILE_SCOPE_REPORT_INTERVAL_MS,
   readMobileHostedScopeLeaseDiagnostics,
-  recordMobileHostedScopeLeaseReport,
 } from "./hostedConnectionScopes";
 
 describe("mobile hosted connection scope leases", () => {
+  afterEach(() => {
+    mobileHostedConnectionScopes.reset();
+    vi.useRealTimers();
+  });
+
   const ENV_A = "env-a" as EnvironmentId;
+  const ENV_B = "env-b" as EnvironmentId;
   const THREAD_A = "thread-a" as ThreadId;
 
   it("refcounts identical mounted scopes and releases only the final owner", () => {
@@ -33,38 +38,60 @@ describe("mobile hosted connection scope leases", () => {
     expect(store.isEnvironmentRetained(ENV_A)).toBe(false);
   });
 
-  it("reports immediately, on scope changes, and before the lease TTL expires", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
+  it("computes diagnostics from the live scopes when read", () => {
     const store = createMobileHostedScopeLeaseStore();
-    const reports: Array<{ readonly observedAt: number; readonly count: number }> = [];
-    const stop = store.startReporter({
-      now: () => Date.now(),
-      report: (report) => {
-        recordMobileHostedScopeLeaseReport(report);
-        reports.push({ observedAt: report.observedAt, count: report.scopes.length });
-      },
+    const read = () => readMobileHostedScopeLeaseDiagnostics(store, () => 42);
+    expect(read()).toEqual({
+      observedAt: 42,
+      ttlMs: MOBILE_SCOPE_LEASE_TTL_MS,
+      activeScopeCount: 0,
+      retainedEnvironmentCount: 0,
     });
-    expect(MOBILE_SCOPE_REPORT_INTERVAL_MS).toBeLessThan(MOBILE_SCOPE_LEASE_TTL_MS);
-    expect(reports).toEqual([{ observedAt: 0, count: 0 }]);
 
-    const release = store.retain(ENV_A, { type: "provider-status" });
-    await Promise.resolve();
-    expect(reports.at(-1)?.count).toBe(1);
+    const releaseThread = store.retain(ENV_A, { type: "thread-detail", threadId: THREAD_A });
+    const releaseSameThread = store.retain(ENV_A, { type: "thread-detail", threadId: THREAD_A });
+    const releaseProvider = store.retain(ENV_A, { type: "provider-status" });
+    const releaseOther = store.retain(ENV_B, { type: "vcs-status", cwd: "/work/repo" });
+    expect(read()).toEqual({
+      observedAt: 42,
+      ttlMs: MOBILE_SCOPE_LEASE_TTL_MS,
+      activeScopeCount: 3,
+      retainedEnvironmentCount: 2,
+    });
+
+    releaseThread();
+    expect(read().activeScopeCount).toBe(3);
+    releaseSameThread();
+    releaseOther();
+    expect(read()).toMatchObject({ activeScopeCount: 1, retainedEnvironmentCount: 1 });
+    releaseProvider();
+    expect(read()).toMatchObject({ activeScopeCount: 0, retainedEnvironmentCount: 0 });
+  });
+
+  it("reads the module store by default and stamps the current time", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_234);
+    const release = mobileHostedConnectionScopes.retain(ENV_A, { type: "provider-status" });
     expect(readMobileHostedScopeLeaseDiagnostics()).toEqual({
-      observedAt: 0,
+      observedAt: 1_234,
       ttlMs: MOBILE_SCOPE_LEASE_TTL_MS,
       activeScopeCount: 1,
       retainedEnvironmentCount: 1,
     });
-    await vi.advanceTimersByTimeAsync(MOBILE_SCOPE_REPORT_INTERVAL_MS);
-    expect(reports.at(-1)?.observedAt).toBe(MOBILE_SCOPE_REPORT_INTERVAL_MS);
-
     release();
-    await Promise.resolve();
-    expect(reports.at(-1)?.count).toBe(0);
-    stop();
-    vi.useRealTimers();
+    expect(readMobileHostedScopeLeaseDiagnostics().activeScopeCount).toBe(0);
+  });
+
+  it("schedules no timer while scopes are retained, released or read", async () => {
+    vi.useFakeTimers();
+    const store = createMobileHostedScopeLeaseStore();
+    const release = store.retain(ENV_A, { type: "provider-status" });
+    readMobileHostedScopeLeaseDiagnostics(store);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(MOBILE_SCOPE_LEASE_TTL_MS * 2);
+    release();
+    expect(vi.getTimerCount()).toBe(0);
+    expect("startReporter" in store).toBe(false);
   });
 
   it("quantifies the assessed eight-client reconnect reduction", () => {

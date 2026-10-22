@@ -405,9 +405,6 @@ const createDesktopBridgeStub = (overrides?: {
     status: "idle",
     channel: "latest",
     currentVersion: "0.0.0-test",
-    hostArch: "arm64",
-    appArch: "arm64",
-    runningUnderArm64Translation: false,
     availableVersion: null,
     downloadedVersion: null,
     downloadPercent: null,
@@ -567,6 +564,7 @@ const createDesktopBridgeStub = (overrides?: {
       state: idleUpdateState,
     }),
     onUpdateState: () => () => {},
+    respondToRemoteInstall: vi.fn().mockResolvedValue(idleUpdateState),
     notifyTurnComplete: vi.fn().mockResolvedValue(undefined),
     onTurnCompleteNotificationActivated: () => () => {},
   };

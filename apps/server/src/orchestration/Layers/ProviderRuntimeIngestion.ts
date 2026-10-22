@@ -55,6 +55,7 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
 import { isGitRepository } from "../../git/Utils.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { findThreadInArray } from "../threadIndex.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -177,6 +178,11 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const LIVE_ASSISTANT_DELTA_FLUSH_INTERVAL = Duration.millis(32);
 const LIVE_ASSISTANT_DELTA_FLUSH_THRESHOLD_CHARS = 4_096;
+// A subagent message and a task's progress are latest-state activities that
+// providers rewrite on every tick. They are persisted at most once per
+// interval; boundaries (completion, turn end, session exit) persist the rest.
+const SUBAGENT_MESSAGE_WRITE_INTERVAL_MS = 300;
+const TASK_PROGRESS_WRITE_INTERVAL_MS = 5_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = readEnv("RYCO_STRICT_PROVIDER_LIFECYCLE_GUARD") !== "0";
 const HISTORY_RECOVERY_TIMEOUT = Duration.seconds(25);
 const HISTORY_RECOVERY_TRACKED_THREADS = 1_000;
@@ -212,7 +218,34 @@ type RuntimeIngestionInput =
       source: "reasoningFlush";
       key: string;
       generation: number;
+    }
+  | {
+      source: "coalescedActivityFlush";
+      key: string;
+      generation: number;
     };
+
+type ActivityAppendCommand = Extract<OrchestrationCommand, { type: "thread.activity.append" }>;
+
+/** Which latest-state activity stream a coalesced write belongs to. */
+type CoalescedActivityGroup = "subagent-message" | "task-progress";
+
+/**
+ * Write state of one latest-state activity (one activity id). Offers newer than
+ * the last write replace `pending` instead of being persisted one by one.
+ */
+interface CoalescedActivityWrite {
+  readonly group: CoalescedActivityGroup;
+  readonly threadId: ThreadId;
+  readonly intervalMs: number;
+  readonly generation: number;
+  /** Newest command not persisted yet; null while everything offered is persisted. */
+  pending: ActivityAppendCommand | null;
+  /** What the last persisted command said; a different value is persisted at once. */
+  writtenChangeKey: string;
+  writtenAtMs: number;
+  flushScheduled: boolean;
+}
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.make(String(value));
@@ -363,6 +396,36 @@ function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): s
         return threadId ? [threadId] : [];
       })
     : [];
+}
+
+function taskProgressActivityId(threadId: string, taskId: string): EventId {
+  return EventId.make(`task-progress:${threadId}:${taskId}`);
+}
+
+function taskUsageActivityId(threadId: string, taskId: string): EventId {
+  return EventId.make(`task-usage:${threadId}:${taskId}`);
+}
+
+/**
+ * What a task.progress activity says besides its usage numbers. A change here
+ * is persisted at once; a tick that only moves usage waits for the write interval.
+ * The usage-only activity has no such state, so it is always paced.
+ */
+export function taskProgressChangeKey(
+  activity: Pick<OrchestrationThreadActivity, "payload">,
+): string {
+  const payload = asRecord(activity.payload);
+  if (payload === null || payload.usageSnapshot === true) {
+    return "usage";
+  }
+  return JSON.stringify([
+    payload.title,
+    payload.summary,
+    payload.detail,
+    payload.lastToolName,
+    payload.status,
+    payload.error,
+  ]);
 }
 
 function subagentMessageActivityId(input: {
@@ -818,7 +881,7 @@ export function runtimeEventToActivities(
               {
                 // Activity is latest state, not history, so each meaningful
                 // tick replaces the last and a large fleet stays bounded.
-                id: EventId.make(`task-progress:${event.threadId}:${event.payload.taskId}`),
+                id: taskProgressActivityId(event.threadId, event.payload.taskId),
                 createdAt: event.createdAt,
                 tone: "info" as const,
                 kind: "task.progress" as const,
@@ -847,7 +910,7 @@ export function runtimeEventToActivities(
         ...(event.payload.typedUsage !== undefined
           ? [
               {
-                id: EventId.make(`task-usage:${event.threadId}:${event.payload.taskId}`),
+                id: taskUsageActivityId(event.threadId, event.payload.taskId),
                 createdAt: event.createdAt,
                 tone: "info" as const,
                 kind: "task.progress" as const,
@@ -1272,6 +1335,21 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
+  /**
+   * The thread as the engine holds it in memory. Every raw provider event resolves its thread,
+   * and the command model already carries what that takes (session, goal, usage limit, model
+   * selection), so the event path needs no SQL read. A deleted thread is not found, as in the
+   * projection. Engine doubles without an in-memory model fall back to the SQL shell.
+   */
+  const resolveLiveThread = Effect.fnUntraced(function* (threadId: ThreadId) {
+    if (orchestrationEngine.getReadModel === undefined) {
+      return yield* resolveThreadShell(threadId);
+    }
+    const model = yield* orchestrationEngine.getReadModel();
+    const thread = findThreadInArray(model.threads, threadId);
+    return thread === undefined || thread.deletedAt !== null ? undefined : thread;
+  });
+
   const rememberAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
     Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
       Effect.flatMap((existingIds) =>
@@ -1553,7 +1631,182 @@ const make = Effect.gen(function* () {
     return subagentProviderThreadIdsByThread.get(String(threadId))?.has(providerThreadId) ?? false;
   };
 
-  const upsertSubagentMessageActivity = (input: {
+  const coalescedActivityWrites = new Map<string, CoalescedActivityWrite>();
+  let nextCoalescedActivityGeneration = 1;
+
+  // An interval measured on a clock that stepped backwards counts as elapsed,
+  // so a pending write is never held for the size of the step.
+  const writeIntervalElapsed = (entry: CoalescedActivityWrite, nowMs: number) => {
+    const sinceLastWriteMs = nowMs - entry.writtenAtMs;
+    return sinceLastWriteMs < 0 || sinceLastWriteMs >= entry.intervalMs;
+  };
+
+  const writeCoalescedActivity = (
+    entry: CoalescedActivityWrite,
+    command: ActivityAppendCommand,
+    changeKey: string,
+  ) => {
+    entry.pending = null;
+    entry.writtenChangeKey = changeKey;
+    entry.writtenAtMs = Date.now();
+    return orchestrationEngine.dispatch(command).pipe(Effect.asVoid);
+  };
+
+  const scheduleCoalescedActivityFlush = (key: string, entry: CoalescedActivityWrite) =>
+    Effect.gen(function* () {
+      const enqueue = enqueueRuntimeInput;
+      if (!enqueue || entry.flushScheduled) {
+        return;
+      }
+      entry.flushScheduled = true;
+      const waitMs = Math.min(
+        entry.intervalMs,
+        Math.max(1, entry.writtenAtMs + entry.intervalMs - Date.now()),
+      );
+      yield* Effect.forkScoped(
+        Effect.sleep(Duration.millis(waitMs)).pipe(
+          Effect.andThen(
+            enqueue({
+              source: "coalescedActivityFlush",
+              key,
+              generation: entry.generation,
+            }),
+          ),
+        ),
+      );
+    });
+
+  const flushCoalescedActivity = (input: { key: string; generation: number }) =>
+    Effect.gen(function* () {
+      const entry = coalescedActivityWrites.get(input.key);
+      if (!entry || entry.generation !== input.generation) {
+        return;
+      }
+      entry.flushScheduled = false;
+      const pending = entry.pending;
+      if (pending === null) {
+        return;
+      }
+      // A write since this timer was set restarted the interval.
+      if (!writeIntervalElapsed(entry, Date.now())) {
+        yield* scheduleCoalescedActivityFlush(input.key, entry);
+        return;
+      }
+      yield* writeCoalescedActivity(entry, pending, entry.writtenChangeKey);
+    });
+
+  /**
+   * Persists a latest-state activity (an upsert by activity id) at most once per
+   * interval. The first write of an activity, a write whose `changeKey` differs
+   * from the last persisted one, and a write after a quiet interval go through
+   * at once; the rest replace the pending write, which a timer then persists.
+   */
+  const offerCoalescedActivity = (input: {
+    group: CoalescedActivityGroup;
+    threadId: ThreadId;
+    intervalMs: number;
+    changeKey: string;
+    command: ActivityAppendCommand;
+  }) =>
+    Effect.gen(function* () {
+      const key = input.command.activity.id;
+      const existing = coalescedActivityWrites.get(key);
+      if (existing === undefined) {
+        const created: CoalescedActivityWrite = {
+          group: input.group,
+          threadId: input.threadId,
+          intervalMs: input.intervalMs,
+          generation: nextCoalescedActivityGeneration++,
+          pending: null,
+          writtenChangeKey: input.changeKey,
+          writtenAtMs: 0,
+          flushScheduled: false,
+        };
+        coalescedActivityWrites.set(key, created);
+        yield* writeCoalescedActivity(created, input.command, input.changeKey);
+        return;
+      }
+      if (
+        existing.writtenChangeKey !== input.changeKey ||
+        writeIntervalElapsed(existing, Date.now())
+      ) {
+        yield* writeCoalescedActivity(existing, input.command, input.changeKey);
+        return;
+      }
+      existing.pending = input.command;
+      yield* scheduleCoalescedActivityFlush(key, existing);
+    });
+
+  /** Forgets an activity's write state; returns the write it never persisted. */
+  const takePendingCoalescedActivity = (key: string): ActivityAppendCommand | null => {
+    const entry = coalescedActivityWrites.get(key);
+    if (entry === undefined) {
+      return null;
+    }
+    coalescedActivityWrites.delete(key);
+    return entry.pending;
+  };
+
+  // A failed flush must not abort the lifecycle handling it runs inside.
+  const dispatchPendingCoalescedActivity = (command: ActivityAppendCommand) =>
+    orchestrationEngine.dispatch(command).pipe(
+      Effect.asVoid,
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.interrupt
+          : Effect.logWarning("provider runtime ingestion failed to flush a coalesced activity", {
+              activityId: command.activity.id,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+
+  /** Persists what is still pending for the given activities, then forgets them. */
+  const settleCoalescedActivities = (keys: ReadonlyArray<string>) =>
+    Effect.suspend(() =>
+      Effect.forEach(
+        keys.flatMap((key) => {
+          const pending = takePendingCoalescedActivity(key);
+          return pending === null ? [] : [pending];
+        }),
+        dispatchPendingCoalescedActivity,
+        { discard: true },
+      ),
+    );
+
+  const settleCoalescedActivitiesForThread = (threadId: ThreadId, group: CoalescedActivityGroup) =>
+    Effect.suspend(() =>
+      settleCoalescedActivities(
+        [...coalescedActivityWrites]
+          .filter(([, entry]) => entry.threadId === threadId && entry.group === group)
+          .map(([key]) => key),
+      ),
+    );
+
+  const settleTaskProgressForTask = (threadId: ThreadId, taskId: string) =>
+    settleCoalescedActivities([
+      taskProgressActivityId(threadId, taskId),
+      taskUsageActivityId(threadId, taskId),
+    ]);
+
+  /** Persists every pending write without ending its activity's interval tracking. */
+  const flushAllCoalescedActivities = Effect.suspend(() =>
+    Effect.forEach(
+      [...coalescedActivityWrites.values()].flatMap((entry) => {
+        const pending = entry.pending;
+        if (pending === null) {
+          return [];
+        }
+        entry.pending = null;
+        entry.writtenAtMs = Date.now();
+        return [pending];
+      }),
+      dispatchPendingCoalescedActivity,
+      { discard: true },
+    ),
+  );
+
+  const subagentMessageUpsertCommand = (input: {
     event: ProviderRuntimeEvent;
     threadId: ThreadId;
     subagentId?: string | undefined;
@@ -1562,41 +1815,42 @@ const make = Effect.gen(function* () {
     text: string;
     streaming: boolean;
     createdAt: string;
-  }) =>
-    Effect.gen(function* () {
-      const sessionSequence = (input.event as ProviderRuntimeEvent & { sessionSequence?: number })
-        .sessionSequence;
-      const commandKey = `${input.providerThreadId}:${input.providerItemId}`;
-      yield* orchestrationEngine.dispatch({
-        type: "thread.activity.append",
-        commandId: providerCommandId(input.event, "subagent-message-upsert", commandKey),
-        threadId: input.threadId,
-        activity: {
-          id: subagentMessageActivityId({
-            threadId: input.threadId,
-            providerThreadId: input.providerThreadId,
-            providerItemId: input.providerItemId,
-          }),
-          createdAt: input.createdAt,
-          tone: "info",
-          kind: "agent.message",
-          summary: input.streaming ? "Agent message streaming" : "Agent message",
-          payload: {
-            itemType: "assistant_message",
-            text: truncateActivityText(input.text),
-            streaming: input.streaming,
-            providerThreadId: input.providerThreadId,
-            providerItemId: input.providerItemId,
-            ...(input.subagentId ? { subagentId: input.subagentId } : {}),
-            ...(input.event.providerRefs ? { providerRefs: input.event.providerRefs } : {}),
-          },
-          turnId: toTurnId(input.event.turnId) ?? null,
-          ...(sessionSequence !== undefined ? { sequence: sessionSequence } : {}),
-        },
+  }): ActivityAppendCommand => {
+    const sessionSequence = (input.event as ProviderRuntimeEvent & { sessionSequence?: number })
+      .sessionSequence;
+    const commandKey = `${input.providerThreadId}:${input.providerItemId}`;
+    return {
+      type: "thread.activity.append",
+      commandId: providerCommandId(input.event, "subagent-message-upsert", commandKey),
+      threadId: input.threadId,
+      activity: {
+        id: subagentMessageActivityId({
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          providerItemId: input.providerItemId,
+        }),
         createdAt: input.createdAt,
-      });
-    });
+        tone: "info",
+        kind: "agent.message",
+        summary: input.streaming ? "Agent message streaming" : "Agent message",
+        payload: {
+          itemType: "assistant_message",
+          text: truncateActivityText(input.text),
+          streaming: input.streaming,
+          providerThreadId: input.providerThreadId,
+          providerItemId: input.providerItemId,
+          ...(input.subagentId ? { subagentId: input.subagentId } : {}),
+          ...(input.event.providerRefs ? { providerRefs: input.event.providerRefs } : {}),
+        },
+        turnId: toTurnId(input.event.turnId) ?? null,
+        ...(sessionSequence !== undefined ? { sequence: sessionSequence } : {}),
+      },
+      createdAt: input.createdAt,
+    };
+  };
 
+  // The full text keeps accumulating here on every delta; only its persistence
+  // is paced, so a completion or flush always writes the whole message.
   const appendSubagentMessageDelta = (input: {
     event: ProviderRuntimeEvent;
     threadId: ThreadId;
@@ -1616,10 +1870,12 @@ const make = Effect.gen(function* () {
         `${subagentMessageTextByKey.get(key) ?? ""}${input.delta}`,
       );
       subagentMessageTextByKey.set(key, text);
-      yield* upsertSubagentMessageActivity({
-        ...input,
-        text,
-        streaming: true,
+      yield* offerCoalescedActivity({
+        group: "subagent-message",
+        threadId: input.threadId,
+        intervalMs: SUBAGENT_MESSAGE_WRITE_INTERVAL_MS,
+        changeKey: "streaming",
+        command: subagentMessageUpsertCommand({ ...input, text, streaming: true }),
       });
     });
 
@@ -1640,19 +1896,32 @@ const make = Effect.gen(function* () {
       });
       const bufferedText = subagentMessageTextByKey.get(key) ?? "";
       subagentMessageTextByKey.delete(key);
+      // The completed message below carries everything the pending write would.
+      const pendingStreamingWrite = takePendingCoalescedActivity(
+        subagentMessageActivityId({
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          providerItemId: input.providerItemId,
+        }),
+      );
       const fallbackText = input.fallbackText ?? "";
       const text =
         hasRenderableAssistantText(fallbackText) && fallbackText.length >= bufferedText.length
           ? fallbackText
           : bufferedText;
       if (!hasRenderableAssistantText(text)) {
+        if (pendingStreamingWrite !== null) {
+          yield* dispatchPendingCoalescedActivity(pendingStreamingWrite);
+        }
         return;
       }
-      yield* upsertSubagentMessageActivity({
-        ...input,
-        text,
-        streaming: false,
-      });
+      yield* orchestrationEngine.dispatch(
+        subagentMessageUpsertCommand({
+          ...input,
+          text,
+          streaming: false,
+        }),
+      );
     });
 
   const bufferedSubagentProviderItemIds = (input: {
@@ -1673,14 +1942,17 @@ const make = Effect.gen(function* () {
     return [...providerItemIds];
   };
 
+  // Drops the thread's unfinished child messages. What was streamed so far is
+  // persisted first, so the stored text ends where the stream did.
   const clearSubagentMessageBuffersForThread = (threadId: ThreadId) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const prefix = `${threadId}:`;
       for (const key of subagentMessageTextByKey.keys()) {
         if (key.startsWith(prefix)) {
           subagentMessageTextByKey.delete(key);
         }
       }
+      yield* settleCoalescedActivitiesForThread(threadId, "subagent-message");
     });
 
   const appendBufferedAssistantText = (messageId: MessageId, delta: string) =>
@@ -2358,7 +2630,7 @@ const make = Effect.gen(function* () {
         )
       )
         return;
-      const thread = yield* resolveThreadShell(event.threadId);
+      const thread = yield* resolveLiveThread(event.threadId);
       if (!thread) return;
 
       // A fast pre-check only: lifecycle updates are fenced again atomically by the decider.
@@ -2397,7 +2669,7 @@ const make = Effect.gen(function* () {
         if (structuralChange && providerService.getThreadGoal) {
           const current = yield* providerService.getThreadGoal(thread.id);
           if (current !== false) goal = current;
-          const latest = yield* resolveThreadShell(thread.id);
+          const latest = yield* resolveLiveThread(thread.id);
           if (
             latest?.session?.runtimeSessionId !== activeSession.runtimeSessionId ||
             latest?.session?.providerInstanceId !== activeSession.providerInstanceId
@@ -2559,10 +2831,14 @@ const make = Effect.gen(function* () {
               : activeTurnId;
         const status = (() => {
           switch (event.type) {
-            case "session.state.changed":
-              return event.payload.state === "ready" && nextActiveTurnId !== null
-                ? "running"
-                : orchestrationSessionStatusFromRuntimeState(event.payload.state);
+            case "session.state.changed": {
+              const reported = orchestrationSessionStatusFromRuntimeState(event.payload.state);
+              if (nextActiveTurnId !== null) return reported === "ready" ? "running" : reported;
+              // Only a turn makes a session run. A status report between turns (Claude
+              // reports a permission mode change as `running`) would otherwise leave an
+              // idle session running with nothing left to end it.
+              return reported === "running" ? (thread.session?.status ?? reported) : reported;
+            }
             case "turn.started":
               return "running";
             case "session.exited":
@@ -2943,6 +3219,7 @@ const make = Effect.gen(function* () {
           });
         }
         yield* clearSubagentMessageBuffersForThread(thread.id);
+        yield* settleCoalescedActivitiesForThread(thread.id, "task-progress");
       }
 
       if (
@@ -3005,6 +3282,7 @@ const make = Effect.gen(function* () {
       if (event.type === "session.exited") {
         yield* clearTurnStateForSession(thread.id);
         yield* clearSubagentMessageBuffersForThread(thread.id);
+        yield* settleCoalescedActivitiesForThread(thread.id, "task-progress");
       }
 
       if (event.type === "runtime.error") {
@@ -3231,6 +3509,7 @@ const make = Effect.gen(function* () {
 
       let taskTitle: string | undefined;
       if (event.type === "task.completed") {
+        yield* settleTaskProgressForTask(thread.id, event.payload.taskId);
         taskTitle = yield* lookupTaskDescription(thread.id, event.payload.taskId);
         if (!taskTitle) {
           const detailedThread = yield* getLoadedThreadDetail();
@@ -3239,8 +3518,8 @@ const make = Effect.gen(function* () {
       }
 
       const activities = runtimeEventToActivities(event, taskTitle);
-      yield* Effect.forEach(activities, (activity) =>
-        orchestrationEngine.dispatch({
+      yield* Effect.forEach(activities, (activity) => {
+        const command: ActivityAppendCommand = {
           type: "thread.activity.append",
           commandId: providerCommandId(event, "thread-activity-append", String(activity.id)),
           threadId: thread.id,
@@ -3255,8 +3534,18 @@ const make = Effect.gen(function* () {
                 }
               : activity,
           createdAt: activity.createdAt,
-        }),
-      ).pipe(Effect.asVoid);
+        };
+        // Task progress is latest state that providers rewrite on every tick.
+        return event.type === "task.progress"
+          ? offerCoalescedActivity({
+              group: "task-progress",
+              threadId: thread.id,
+              intervalMs: TASK_PROGRESS_WRITE_INTERVAL_MS,
+              changeKey: taskProgressChangeKey(activity),
+              command,
+            })
+          : orchestrationEngine.dispatch(command).pipe(Effect.asVoid);
+      }).pipe(Effect.asVoid);
 
       // A completed assistant message is not proof of turn completion. Write
       // the delegation acknowledgement only after accepted lifecycle handling,
@@ -3466,11 +3755,13 @@ const make = Effect.gen(function* () {
           ? processDomainEvent(input.event)
           : input.source === "reasoningFlush"
             ? flushReasoningSegment(input)
-            : flushLiveAssistantDeltaBuffer({
-                key: input.key,
-                generation: input.generation,
-                commandTag: "assistant-delta-coalesced-interval",
-              }).pipe(Effect.asVoid);
+            : input.source === "coalescedActivityFlush"
+              ? flushCoalescedActivity(input)
+              : flushLiveAssistantDeltaBuffer({
+                  key: input.key,
+                  generation: input.generation,
+                  commandTag: "assistant-delta-coalesced-interval",
+                }).pipe(Effect.asVoid);
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
@@ -3482,7 +3773,9 @@ const make = Effect.gen(function* () {
           source: input.source,
           ...(input.source === "history"
             ? { threadId: input.threadId }
-            : input.source === "liveAssistantFlush" || input.source === "reasoningFlush"
+            : input.source === "liveAssistantFlush" ||
+                input.source === "reasoningFlush" ||
+                input.source === "coalescedActivityFlush"
               ? { flushKey: input.key, flushGeneration: input.generation }
               : { eventId: input.event.eventId, eventType: input.event.type }),
           cause: Cause.pretty(cause),
@@ -3674,14 +3967,16 @@ const make = Effect.gen(function* () {
   return {
     reconcileThread,
     start,
-    // Drain pending runtime work, flush any remaining live assistant text,
-    // then drain again for scheduled flush inputs that landed during shutdown.
+    // Drain pending runtime work, flush any remaining live assistant text and
+    // coalesced activity writes, then drain again for scheduled flush inputs
+    // that landed during shutdown.
     drain: worker.drain.pipe(
       Effect.andThen(
         flushLiveAssistantDeltaBuffersSafely({
           commandTag: "assistant-delta-flush-on-drain",
         }),
       ),
+      Effect.andThen(flushAllCoalescedActivities),
       Effect.andThen(worker.drain),
     ),
   } satisfies ProviderRuntimeIngestionShape;

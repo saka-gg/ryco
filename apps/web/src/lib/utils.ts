@@ -1,7 +1,10 @@
 import { CommandId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
 import { type CxOptions, cx } from "class-variance-authority";
 import { twMerge } from "tailwind-merge";
-import { DraftId } from "../composerDraftStore";
+// Not "../composerDraftStore" (it re-exports this same schema): nearly every
+// component imports this module, and the store's persistence pulls in the
+// environment runtime.
+import { DraftId } from "@ryco/client-runtime/state/composer";
 
 export function cn(...inputs: CxOptions) {
   return twMerge(cx(inputs));

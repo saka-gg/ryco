@@ -253,9 +253,8 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
   const primaryShellCache =
     keepsLocalCaches && rendersRootSurface(pathname) ? loadPrimaryShellCache() : null;
   // Provider catalogs this page already holds, so the config snapshot can
-  // leave them out. The early config subscription waits for them (see
-  // `startPrimaryConnectionEarly`); the shell's own subscribes after its
-  // chunk commits, which is later still.
+  // leave them out. The primary connection's config subscription waits for
+  // them (see `startPrimaryConnectionEarly`).
   const providerCatalogs = keepsLocalCaches ? attachProviderCatalogPersistence() : null;
   const {
     discardPrefetchedPrimaryWebSocketToken,
@@ -363,24 +362,34 @@ async function restorePrimaryShellCache(
  * here. The shell's `startEnvironmentConnectionService` stays the owner; the
  * supervisor's `connectPrimary` returns this same connection to it.
  *
- * Where the shell will mount, the welcome and config subscriptions start on it
- * too (the shell's `ServerStateBootstrap` takes them over), so a welcome that
- * names a bootstrap thread warms that thread's route chunk and detail stream
- * while the shell is still loading. They wait for the persisted provider
- * catalogs to attach, so the config snapshot still leaves those out. The
- * shell's `EventRouter` stays the one that navigates.
+ * The connection's config subscription starts with it and feeds the config
+ * store the shell shows from. It waits (a bounded time) for the persisted
+ * provider catalogs to attach, so the config snapshot still leaves those out.
+ * Where the shell will mount, the welcome subscription and the config
+ * projection start on the connection too (the shell's `ServerStateBootstrap`
+ * takes them over), so the shell's first render already has the config, and a
+ * welcome that names a bootstrap thread warms that thread's route chunk and
+ * detail stream while the shell is still loading. The shell's `EventRouter`
+ * stays the one that navigates.
  */
 function startPrimaryConnectionEarly(input: {
   readonly providerCatalogs: Promise<unknown> | null;
   readonly syncsServerState: boolean;
 }): void {
-  void import("../environments/runtime")
-    .then(({ connectPrimaryEnvironment }) => {
+  const { providerCatalogs } = input;
+  void Promise.all([
+    import("../environments/runtime"),
+    providerCatalogs === null ? null : import("@ryco/client-runtime/rpc"),
+  ])
+    .then(([{ connectPrimaryEnvironment }, rpc]) => {
+      // Declared before the connection (and so its config subscription) exists.
+      if (rpc !== null && providerCatalogs !== null) {
+        rpc.providerCatalogCache.expectLoad(providerCatalogs);
+      }
       const connection = connectPrimaryEnvironment();
       if (!connection || !input.syncsServerState) return;
       return import("../rpc/earlyServerStateSync").then(({ startEarlyPrimaryServerStateSync }) =>
         startEarlyPrimaryServerStateSync(connection, {
-          after: input.providerCatalogs,
           onFirstWelcome: warmWelcomeBootstrapThread,
         }),
       );

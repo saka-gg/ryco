@@ -7,6 +7,7 @@ import {
   type OrchestrationStubbedShellSnapshot,
 } from "@ryco/contracts";
 import { Schema } from "effect";
+import { vi } from "vitest";
 
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
 
@@ -87,6 +88,18 @@ describe("pageShellSnapshot", () => {
     assert.equal(begin.snapshotSequence, 42);
     assert.equal(begin.threadCount, 1);
     assert.equal(begin.archivedThreadCount, 0);
+    assert.equal(Object.hasOwn(begin, "settlementPolicy"), false);
+  });
+
+  it("carries the node's settlement policy in the header", () => {
+    const [begin] = flatten(
+      pageShellSnapshot({
+        ...snapshotOf([thread("a", false)]),
+        settlementPolicy: { autoSettleAfterDays: 30 },
+      }),
+    );
+    assert(begin?.kind === "snapshot-begin");
+    assert.deepEqual(begin.settlementPolicy, { autoSettleAfterDays: 30 });
   });
 
   it("sends unarchived threads first, in one message while the shell fits the budget", () => {
@@ -205,6 +218,43 @@ describe("pageShellSnapshot", () => {
     assert(
       Buffer.byteLength(JSON.stringify(stubbed)) < Buffer.byteLength(JSON.stringify(full)) * 0.7,
     );
+  });
+
+  it("pages the same snapshot identically for every subscriber", () => {
+    const snapshot = stubbedSnapshotOf(
+      Array.from({ length: 60 }, (_, index) => thread(`t${index}`, index % 4 === 0, 150)),
+      Array.from({ length: 40 }, (_, index) => stub(`x${index}`, 150)),
+    );
+    const budget = 8 * 1024;
+    const first = pageShellSnapshot(snapshot, budget);
+    const second = pageShellSnapshot(snapshot, budget);
+    assert(first.length > 2);
+    assert.deepEqual(second, first);
+  });
+
+  it("measures each thread and stub once, however many subscribers receive the snapshot", () => {
+    const threads = [thread("a", false), thread("b", false), thread("x", true)];
+    const stubs = [stub("s1"), stub("s2")];
+    const snapshot = stubbedSnapshotOf(threads, stubs);
+    const measured = new Map<object, number>();
+    const stringify = JSON.stringify;
+    const spy = vi.spyOn(JSON, "stringify").mockImplementation((...args) => {
+      const [value] = args;
+      if (typeof value === "object" && value !== null) {
+        measured.set(value, (measured.get(value) ?? 0) + 1);
+      }
+      return stringify(...args);
+    });
+    try {
+      pageShellSnapshot(snapshot);
+      pageShellSnapshot(snapshot);
+      pageShellSnapshot(snapshot, 1_024);
+    } finally {
+      spy.mockRestore();
+    }
+    for (const entry of [...threads, ...stubs]) {
+      assert.equal(measured.get(entry), 1);
+    }
   });
 
   it("produces items the wire schema accepts", () => {

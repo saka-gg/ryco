@@ -13,6 +13,7 @@ import {
   type ThreadPriorityPromptChunk,
   type ValidatedThreadPriorityRanking,
 } from "../threadPriority/threadPriorityPolicy.ts";
+import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
 export type TextGenerationProvider = "codex" | "claudeAgent" | "cursor" | "grok" | "opencode";
 
@@ -37,6 +38,8 @@ export interface CommitMessageGenerationInput {
   includeBranch?: boolean;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
+  /** The user's writing instructions for this kind of text. */
+  policy?: TextGenerationPolicy | undefined;
 }
 
 export interface CommitMessageGenerationResult {
@@ -55,6 +58,8 @@ export interface PrContentGenerationInput {
   diffPatch: string;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
+  /** The user's writing instructions for this kind of text. */
+  policy?: TextGenerationPolicy | undefined;
 }
 
 export interface PrContentGenerationResult {

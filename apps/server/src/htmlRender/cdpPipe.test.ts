@@ -8,8 +8,8 @@ const posix = process.platform !== "win32";
 // The browser's commands go in on fd 3, the way `launchBrowser` sends them.
 // Closing the scope stops the writer before it stops the browser, and on
 // Linux a child killed with commands still unread resets that pipe. The
-// patched spawner keeps that late reset from becoming an uncaught exception,
-// which Vitest reports as an unhandled error.
+// spawner keeps that late reset from becoming an uncaught exception, which
+// Vitest reports as an unhandled error.
 describe("the browser's command pipe", () => {
   it.live.skipIf(!posix)("outlives a browser stopped with commands unread", () =>
     Effect.gen(function* () {

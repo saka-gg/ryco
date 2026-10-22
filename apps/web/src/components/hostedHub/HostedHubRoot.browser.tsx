@@ -33,6 +33,7 @@ vi.mock("../../env", async (importOriginal) => ({
 }));
 
 import {
+  getHostedEnvironmentSessions,
   hostedHubController,
   useHostedAccountStore,
   useHostedHubStore,
@@ -44,10 +45,18 @@ import {
 } from "../../hostedHub/hubRoutes";
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
 import type { HostedHubNode } from "../../hostedHub/types";
-import { HostedHubRoot, HostedNodeMenu } from "./HostedHubRoot";
+import { selectEnvironmentState, useStore } from "../../store";
+import { HostedHubRoot } from "./HostedHubRoot";
+import { HostedThreadConnectionBadge } from "./HostedConnectionControls";
 import { preloadHostedRootAppShell } from "./hostedRootAppShell";
 import { hostedRelayTrustDisclosure } from "./HostedRelayTrustNotice.logic";
-import { RETIRED_HOSTED_RELAY_TRUST_SENTENCE } from "../../../test/hostedConnectionVocabulary";
+import {
+  applyWebE2eeVerificationCode,
+  RETIRED_HOSTED_RELAY_TRUST_SENTENCE,
+} from "../../../test/hostedConnectionVocabulary";
+import { getPresentationTier } from "../../lib/presentationTier";
+import { SidebarChromeFooter } from "../sidebar/SidebarChrome";
+import { SidebarProvider } from "../ui/sidebar";
 import { resetWebE2eeSession } from "../../hostedHub/e2eeSession";
 import {
   installHostedNodeHistory,
@@ -70,6 +79,8 @@ const session = {
   revokedAt: null,
   revocationReasonCode: null,
 };
+/** A well-formed §13.5 rendering (`E2EE_WEB_SAS_CHARS`: 8 Crockford, 4-4). */
+const BADGE_WEB_SAS = "5TCV-8M2N";
 const activeSpace = {
   id: "space_aaaaaaaaaaaaaaaaaaaaaa",
   kind: "personal" as const,
@@ -105,6 +116,24 @@ function node(id: string, online: boolean, role: "viewer" | "operator" | "owner"
 
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
+/**
+ * The environment's own session, as its connection reports it: requested and,
+ * unless `transportStatus` says otherwise, online. The shared session fields
+ * show the selected environment's record, so a case seeds the record rather
+ * than those fields.
+ */
+function seedSession(
+  target: HostedHubNode,
+  options: { readonly established?: boolean } = {},
+): { readonly generation: number } {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.ensureRecord(target);
+  sessions.markConnectRequested(target.environmentId, generation);
+  sessions.transportStatus(target.environmentId, generation, "online");
+  if (options.established) sessions.markSessionReady(target.environmentId, generation);
+  return { generation };
+}
+
 // The boot gate preloads the workspace shell before the hosted root renders an
 // authenticated account; do the same, so a case asserting the workspace sees it
 // on the root's first pass rather than racing a cold chunk load.
@@ -116,12 +145,14 @@ beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   hostedHubController.resetForTests();
+  getHostedEnvironmentSessions().clear();
   resetHostedNodeRoutesForTests();
   resetHubRoutesForTests();
   // The §13 projection is module scope, so a channel left standing by another
   // case would render this one's disclosure at the wrong claim.
   resetWebE2eeSession();
   navigate.mockClear();
+  useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   navigateHub({ kind: "nodes" }, { replace: true });
   vi.spyOn(hostedHubApi, "getPublicSignupConfiguration").mockResolvedValue({
     status: "disabled",
@@ -135,6 +166,7 @@ afterEach(async () => {
   await page.viewport(1_280, 720);
   mounted = null;
   hostedHubController.resetForTests();
+  getHostedEnvironmentSessions().clear();
   resetHostedNodeRoutesForTests();
   resetHubRoutesForTests();
   resetWebE2eeSession();
@@ -168,13 +200,17 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       directoryStatus: "ready",
       nodes: [selectable],
     });
-    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockImplementation(async () => {
-      useHostedHubStore.setState({
-        selectedNode: selectable,
-        transportStatus: "connecting",
-        sessionEstablished: false,
+    // Discovery connects the device through the lifecycle owner; it never
+    // selects it.
+    const acquire = vi
+      .spyOn(hostedHubController, "acquireEnvironment")
+      .mockImplementation(async () => {
+        const sessions = getHostedEnvironmentSessions();
+        const { generation } = sessions.ensureRecord(selectable);
+        sessions.markConnectRequested(selectable.environmentId, generation);
+        return "connecting";
       });
-    });
+    const selectNode = vi.spyOn(hostedHubController, "selectNode");
 
     mounted = await render(<HostedHubRoot />);
 
@@ -184,7 +220,8 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect
       .element(page.getByRole("heading", { name: /^Your nodes?$/ }))
       .not.toBeInTheDocument();
-    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(selectable.id));
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledWith(selectable.id));
+    expect(selectNode).not.toHaveBeenCalled();
     expect(window.location.pathname).toBe("/");
     await expect
       .element(page.getByRole("heading", { name: /Connecting to/ }))
@@ -815,18 +852,25 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
   });
 
   it("keeps the node session UI unmounted until the initial snapshot is ready", async () => {
+    // The store holds nothing for this node yet, so there is no shell to keep on
+    // screen and the page says it is connecting.
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
-    window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
     installHostedNodeHistory();
+    // Its relay channel is online; its shell snapshot has not arrived.
+    seedSession(selectedNode);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
       session,
       directoryStatus: "ready",
+      browserStatus: "current",
       nodes: [selectedNode],
       selectedNode,
-      transportStatus: "online",
-      sessionEstablished: false,
     });
     mounted = await render(<HostedHubRoot />);
     await expect
@@ -835,19 +879,79 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect.element(page.getByRole("status")).toMatchTextContent(/synchronizing Ryco state/);
   });
 
-  it("shows a labelled relay failure without mounting the node session UI", async () => {
-    const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
-    window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+  it("keeps the workspace mounted through a switch to a node the store already has a shell for", async () => {
+    const current = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
+    const target = {
+      ...node("node_bbbbbbbbbbbbbbbbbbbbbb", true, "owner"),
+      label: "Second node",
+    };
+    window.history.replaceState(window.history.state, "", `/node/${target.id}/projects`);
     installHostedNodeHistory();
+    useStore.setState({
+      activeEnvironmentId: current.environmentId,
+      environmentStateById: {
+        [target.environmentId]: {
+          ...selectEnvironmentState(useStore.getState(), target.environmentId),
+          hydratedFromCacheAt: 1,
+        },
+      },
+    });
+    seedSession(current, { established: true });
+    // The target's connection is on its way; selecting it joins that.
+    const { generation: targetGeneration } = seedSession(target);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
       session,
       directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [current, target],
+      selectedNode: current,
+      selectionStatus: "online",
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    const selectNode = vi.spyOn(hostedHubController, "selectNode");
+
+    mounted = await render(<HostedHubRoot />);
+
+    const sidebar = () => document.querySelector('[data-slot="sidebar-wrapper"]');
+    await vi.waitFor(() => expect(sidebar()).not.toBeNull());
+    const mountedSidebar = sidebar();
+    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(target.id));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id));
+    getHostedEnvironmentSessions().markSessionReady(target.environmentId, targetGeneration);
+    await vi.waitFor(() => expect(useHostedHubStore.getState().sessionEstablished).toBe(true));
+
+    // Never a full-page surface, and the very same workspace throughout.
+    await expect
+      .element(page.getByRole("heading", { name: /Connecting to|Restoring your node/ }))
+      .not.toBeInTheDocument();
+    expect(sidebar()).toBe(mountedSidebar);
+  });
+
+  it("shows a labelled relay failure without mounting the node session UI", async () => {
+    const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
+    installHostedNodeHistory();
+    const { generation } = seedSession(selectedNode);
+    getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {
+      kind: "authentication",
+      retryable: false,
+    });
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
       nodes: [selectedNode],
       selectedNode,
-      transportStatus: "terminal-failure",
-      errorMessage: "The relay authentication attempt expired or was rejected.",
     });
     mounted = await render(<HostedHubRoot />);
     await expect
@@ -861,18 +965,27 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
 
   it("retries bounded synchronization failures from the selected node", async () => {
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
-    window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
     installHostedNodeHistory();
     const retry = vi.spyOn(hostedHubController, "retrySelectedNode").mockResolvedValue();
+    // The session-sync deadline ran out before the shell snapshot arrived.
+    const { generation } = seedSession(selectedNode);
+    getHostedEnvironmentSessions().reportShellSnapshotFailure(
+      selectedNode.environmentId,
+      generation,
+    );
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
       session,
       directoryStatus: "ready",
+      browserStatus: "current",
       nodes: [selectedNode],
       selectedNode,
-      transportStatus: "terminal-failure",
-      errorMessage: "Ryco state could not be synchronized.",
     });
 
     mounted = await render(<HostedHubRoot />);
@@ -1047,7 +1160,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect.element(page.getByText("Revoked", { exact: true })).toBeVisible();
   });
 
-  it("shows availability, switches nodes, and preserves delivery uncertainty", async () => {
+  it("shows the thread node's availability and preserves delivery uncertainty", async () => {
     const current = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
     const replacement = {
       ...node("node_bbbbbbbbbbbbbbbbbbbbbb", true, "owner"),
@@ -1063,24 +1176,35 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       selectionStatus: "online",
       transportStatus: "reconnecting",
       sessionStatus: "stale",
+      // A reconnect with nothing wrong is a quiet "Connecting…"; the dropped
+      // connection the owner has to know about carries an error.
+      errorMessage: "The relay connection dropped.",
     });
-    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
-    mounted = await render(<HostedNodeMenu />);
+    const acknowledge = vi.spyOn(hostedHubController, "acknowledgeDeliveryUnknown");
+    mounted = await render(<HostedThreadConnectionBadge environmentId={current.environmentId} />);
     await expect.element(page.getByText("Unavailable", { exact: true })).toBeVisible();
     await page.getByText("Unavailable", { exact: true }).click();
-    await page.getByRole("button", { name: new RegExp(replacement.label) }).click();
-    expect(selectNode).toHaveBeenCalledWith(replacement.id);
+    await expect.element(page.getByText("The relay connection dropped.")).toBeVisible();
+    // A location, not a switch: no other node is offered from here.
+    await expect
+      .element(page.getByRole("button", { name: new RegExp(replacement.label) }))
+      .not.toBeInTheDocument();
 
     useHostedHubStore.setState({
+      errorMessage: null,
       transportStatus: "online",
       sessionStatus: "delivery-unknown",
       sessionRecoveredAfterUnknown: true,
     });
     await expect.element(page.getByText("Delivery unknown", { exact: true })).toBeVisible();
     await expect.element(page.getByText(/did not resend it automatically/)).toBeVisible();
+    await page.getByRole("button", { name: "Acknowledge" }).click();
+    expect(acknowledge).toHaveBeenCalledOnce();
   });
 
   it("allows another node after terminal failure ends browser synchronization", async () => {
+    // Switching lives on the device directory now; its rows apply the same
+    // fail-closed rule the header menu's list did.
     const current = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
     const replacement = {
       ...node("node_bbbbbbbbbbbbbbbbbbbbbb", true, "owner"),
@@ -1100,15 +1224,90 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       sessionStatus: "synchronizing",
       generation: 9,
     });
-    mounted = await render(<HostedNodeMenu />);
-    await page.getByText("Synchronizing", { exact: true }).click();
-    const replacementButton = page.getByRole("button", { name: new RegExp(replacement.label) });
+    mounted = await render(<HostedHubRoot />);
+    const replacementButton = page.getByRole("button", { name: /^Second node/ });
     await expect.element(replacementButton).toBeDisabled();
 
     hostedHubController.failure(9, { kind: "incompatible", retryable: false });
 
-    await expect.element(page.getByText("Incompatible", { exact: true })).toBeVisible();
     await expect.element(replacementButton).toBeEnabled();
+  });
+
+  it("offers Manage devices and Sign out on the desktop failure surface", async () => {
+    // Desktop has no connection menu any more, so the terminal-failure page
+    // carries its own way out instead of relying on one.
+    const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
+    installHostedNodeHistory();
+    const { generation } = seedSession(selectedNode);
+    getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {
+      kind: "authentication",
+      retryable: false,
+    });
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [selectedNode],
+      selectedNode,
+    });
+    const signOut = vi.spyOn(hostedHubController, "signOut").mockResolvedValue();
+    mounted = await render(<HostedHubRoot />);
+    await expect
+      .element(page.getByRole("heading", { name: `Unable to connect to ${selectedNode.label}` }))
+      .toBeVisible();
+    expect(document.querySelector('[data-testid="hosted-connection-pill"]')).toBeNull();
+
+    await page.getByRole("button", { name: "Sign out" }).click();
+    expect(signOut).toHaveBeenCalledOnce();
+    await page.getByRole("button", { name: "Manage devices" }).click();
+    await vi.waitFor(() => expect(window.location.pathname).toBe("/nodes"));
+  });
+
+  it("draws the thread badge's session code for every hosted role", async () => {
+    // Settings → Security is owner-only in hosted mode, so for every other role
+    // this popover is where the session code stays reachable; it draws the long
+    // form for them rather than pointing at a section they lack.
+    for (const role of ["owner", "operator", "viewer"] as const) {
+      const current = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, role);
+      useHostedHubStore.setState({
+        accountStatus: "authenticated",
+        account,
+        session,
+        directoryStatus: "ready",
+        browserStatus: "current",
+        nodes: [current],
+        selectedNode: current,
+        selectionStatus: "online",
+        effectiveRole: role,
+        transportStatus: "online",
+        sessionStatus: "ready",
+        sessionEstablished: true,
+      });
+      applyWebE2eeVerificationCode(BADGE_WEB_SAS, current.environmentId);
+      mounted = await render(<HostedThreadConnectionBadge environmentId={current.environmentId} />);
+
+      await page.getByText("Encrypted web", { exact: true }).click();
+      const block = await vi.waitFor(() => {
+        const found = document.querySelector<HTMLElement>(
+          '[data-testid="hosted-e2ee-verification"]',
+        );
+        expect(found, `the session code did not render for ${role}`).not.toBeNull();
+        return found!;
+      });
+      expect(block.textContent, role).toContain(BADGE_WEB_SAS);
+      expect(block.getAttribute("data-form"), role).toBe(role === "owner" ? "inline" : "settings");
+
+      await mounted.unmount();
+      mounted = null;
+      resetWebE2eeSession();
+    }
   });
 });
 
@@ -1172,5 +1371,38 @@ describe("hosted Hub routes", () => {
     // product. `branding.ts` would have produced "Ryco (Beta)".
     expect(document.title).toContain("Ryco Hub");
     expect(document.title).not.toContain("(Beta)");
+  });
+
+  it("reaches the account page from the sidebar footer and signs out there on desktop", async () => {
+    // Without a connection menu the account's own actions live on its page,
+    // one entry away from anywhere in the desktop workspace. The frozen phone
+    // tier keeps them in its connection sheet and this page as it was.
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [],
+    });
+    const signOut = vi.spyOn(hostedHubController, "signOut").mockResolvedValue();
+    mounted = await render(
+      <SidebarProvider>
+        <SidebarChromeFooter />
+      </SidebarProvider>,
+    );
+    await page.getByRole("button", { name: "Account" }).click();
+    expect(window.location.pathname).toBe("/account");
+    await mounted.unmount();
+
+    mounted = await render(<HostedHubRoot />);
+    await expect.element(page.getByRole("heading", { name: "Account" })).toBeVisible();
+    await page.getByRole("button", { name: "Sign out" }).click();
+    expect(signOut).toHaveBeenCalledOnce();
+
+    await page.viewport(390, 844);
+    await vi.waitFor(() => expect(getPresentationTier()).toBe("phone"));
+    await expect.element(page.getByRole("heading", { name: "Account" })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
   });
 });

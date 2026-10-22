@@ -1888,7 +1888,7 @@ it.effect("decodes thread.session-set with and without a released turn", () =>
   }),
 );
 
-it.effect("decodes a turn outcome hint only on the internal thread.session.set command", () =>
+it.effect("decodes the turn outcome hint and snooze flag only on the internal session-set", () =>
   Effect.gen(function* () {
     const session = {
       threadId: "thread-1",
@@ -1909,6 +1909,7 @@ it.effect("decodes a turn outcome hint only on the internal thread.session.set c
         reason: "provider-turn-completed",
         completedAt: "2026-01-02T00:00:00.000Z",
       },
+      wakesSnoozed: false,
       createdAt: "2026-01-02T00:00:00.000Z",
     });
     if (command.type !== "thread.session.set") {
@@ -1919,6 +1920,7 @@ it.effect("decodes a turn outcome hint only on the internal thread.session.set c
       reason: "provider-turn-completed",
       completedAt: "2026-01-02T00:00:00.000Z",
     });
+    assert.strictEqual(command.wakesSnoozed, false);
 
     const fromClient = yield* Effect.exit(
       decodeClientOrchestrationCommand({
@@ -1927,6 +1929,7 @@ it.effect("decodes a turn outcome hint only on the internal thread.session.set c
         threadId: "thread-1",
         session,
         turnOutcome: { state: "completed", reason: "forged" },
+        wakesSnoozed: false,
         createdAt: "2026-01-02T00:00:00.000Z",
       }),
     );
@@ -2056,6 +2059,47 @@ it("keeps decoding the single snapshot item older servers send", () => {
     },
   });
   assert.equal(item.kind, "snapshot");
+  assert.equal(item.kind === "snapshot" && Object.hasOwn(item.snapshot, "settlementPolicy"), false);
+});
+
+it("carries the node's settlement policy in single and paged shell snapshots", () => {
+  const item = decodeShellStreamItem({
+    kind: "snapshot",
+    snapshot: {
+      snapshotSequence: 1,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-10-12T00:00:00.000Z",
+      settlementPolicy: { autoSettleAfterDays: null },
+    },
+  });
+  assert.deepEqual(item.kind === "snapshot" ? item.snapshot.settlementPolicy : undefined, {
+    autoSettleAfterDays: null,
+  });
+  const begin = decodeShellStreamItem({
+    kind: "snapshot-begin",
+    snapshotSequence: 4,
+    updatedAt: "2026-10-12T00:00:00.000Z",
+    projects: [],
+    threadCount: 0,
+    archivedThreadCount: 0,
+    settlementPolicy: { autoSettleAfterDays: 14 },
+  });
+  assert.deepEqual(begin.kind === "snapshot-begin" ? begin.settlementPolicy : undefined, {
+    autoSettleAfterDays: 14,
+  });
+  assert.throws(() =>
+    decodeShellStreamItem({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 1,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-10-12T00:00:00.000Z",
+        settlementPolicy: { autoSettleAfterDays: 2 },
+      },
+    }),
+  );
 });
 
 it("accepts shell subscribe input with and without paged delivery", () => {

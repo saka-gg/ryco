@@ -10,8 +10,10 @@ const hoisted = vi.hoisted(() => ({
     scope: { kind: "fresh" },
   })),
   record: null as unknown,
+  resolveRecord: vi.fn((_selection: { readonly nodeId: string }) => hoisted.record),
   localProvider: vi.fn(),
-  localPrepare: vi.fn(async () => undefined),
+  localPrepare: vi.fn(async (_target?: unknown) => undefined),
+  localResolve: vi.fn((_target?: unknown) => hoisted.localProvider),
   begin: vi.fn(),
   dispose: vi.fn(),
   invalidateEnrollment: vi.fn(async () => undefined),
@@ -49,14 +51,14 @@ vi.mock("../platform/nativeE2ee", () => ({
 }));
 vi.mock("../platform/e2eeTrustStore", () => ({
   mobileE2eeTrustStore: {
-    resolve: () => hoisted.record,
+    resolve: hoisted.resolveRecord,
     classify: hoisted.classify,
     marker: () => ({ kind: "unset" }),
   },
 }));
 vi.mock("./e2eeAttempt", () => ({
   prepareMobileRelayE2eeAttempt: hoisted.localPrepare,
-  resolveMobileRelayE2eeProvider: () => hoisted.localProvider,
+  resolveMobileRelayE2eeProvider: hoisted.localResolve,
 }));
 vi.mock("./e2eeSession", async (importOriginal) => ({
   mobileE2eeLocalRecordContext: (await importOriginal<typeof import("./e2eeSession")>())
@@ -84,6 +86,7 @@ import {
   resetMobileAccountE2eeAttemptForTests,
 } from "./accountE2eeAttempt";
 import { setMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
+import type { MobileE2eeAttemptTarget } from "./e2eeAttempt";
 
 const READY = {
   namespace: { hubOrigin: "https://hub.example.test", accountId: `acct_${"a".repeat(22)}` },
@@ -397,5 +400,137 @@ describe("mobile account E2EE relay attempt", () => {
     ).rejects.toMatchObject({ failure: { kind: "revoked", retryable: false } });
     expect(hoisted.invalidateEnrollment).toHaveBeenCalledWith("revoked");
     expect(hoisted.begin).not.toHaveBeenCalled();
+  });
+
+  describe("with a channel target", () => {
+    const TARGET_NODE = `node_${"t".repeat(22)}`;
+
+    function target(): {
+      readonly target: MobileE2eeAttemptTarget;
+      readonly supersede: () => void;
+    } {
+      let current = true;
+      return {
+        target: {
+          nodeId: TARGET_NODE,
+          nodeLabel: "Workshop",
+          environmentId: "env-target" as MobileE2eeAttemptTarget["environmentId"],
+          generation: 42,
+          isCurrent: () => current,
+        },
+        supersede: () => {
+          current = false;
+        },
+      };
+    }
+
+    it.each([
+      ["verified pin", "verified"],
+      ["pairing", "unverified"],
+    ])(
+      "prepares the local %s branch for the target's node and generation, not the selection's",
+      async (_name, state) => {
+        hoisted.record = { state, index: { localNodeHandle: "local-target" } };
+        const { target: channelTarget } = target();
+
+        const prepared = await prepareMobileRelaySocketContext(channelTarget);
+
+        expect(prepared).toMatchObject({
+          kind: "local",
+          target: channelTarget,
+          selection: {
+            nodeId: TARGET_NODE,
+            nodeLabel: "Workshop",
+            environmentId: "env-target",
+            generation: 42,
+          },
+        });
+        expect(hoisted.resolveRecord).toHaveBeenCalledWith(
+          expect.objectContaining({ nodeId: TARGET_NODE }),
+        );
+        expect(hoisted.localPrepare).toHaveBeenCalledWith(channelTarget);
+        expect(hoisted.localResolve).toHaveBeenCalledWith(channelTarget);
+
+        // The selected node is a different one; the ticket is for the target.
+        const issued = await issueMobileRelayAttempt({
+          nodeId: TARGET_NODE,
+          preparedSocketContext: prepared,
+        });
+        expect(hoisted.issueRelayTicket).toHaveBeenCalledWith(TARGET_NODE);
+        expect(providerForMobileRelaySocketContext(issued.preparedSocketContext)).toBe(
+          hoisted.localProvider,
+        );
+      },
+    );
+
+    it("still prepares when nothing is selected", async () => {
+      hostedHubStore.setState({ selectedNode: null } as never);
+      hoisted.record = { state: "verified", index: { localNodeHandle: "local-target" } };
+
+      await expect(prepareMobileRelaySocketContext(target().target)).resolves.toMatchObject({
+        kind: "local",
+        selection: { nodeId: TARGET_NODE },
+      });
+    });
+
+    it("throws selection changed when the target is superseded during the enrollment wait", async () => {
+      let state: { status: string; generation: number; ready: unknown; errorCode: null } = {
+        status: "securing",
+        generation: 5,
+        ready: null,
+        errorCode: null,
+      };
+      const listeners = new Set<() => void>();
+      setMobileNativeE2eeEnrollmentCoordinator({
+        getState: () => state,
+        subscribe: (listener: () => void) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      } as never);
+      hoisted.record = { state: "verified", index: { localNodeHandle: "local-target" } };
+      const channel = target();
+
+      const prepared = prepareMobileRelaySocketContext(channel.target);
+      channel.supersede();
+      state = { status: "ready", generation: 6, ready: READY, errorCode: null };
+      for (const listener of listeners) listener();
+
+      await expect(prepared).rejects.toThrow("Hosted node selection changed.");
+      expect(hoisted.localPrepare).not.toHaveBeenCalled();
+    });
+
+    it("refuses to issue an account grant for a target superseded after preparation", async () => {
+      const channel = target();
+      const prepared = await prepareMobileRelaySocketContext(channel.target);
+      expect(prepared).toMatchObject({ kind: "account", selection: { nodeId: TARGET_NODE } });
+
+      channel.supersede();
+
+      await expect(
+        issueMobileRelayAttempt({ nodeId: TARGET_NODE, preparedSocketContext: prepared }),
+      ).rejects.toThrow("Hosted node selection changed.");
+      expect(hoisted.resolveTrust).not.toHaveBeenCalled();
+    });
+
+    it("keeps a target's account grant when the selection moves", async () => {
+      const prepared = await prepareMobileRelaySocketContext(target().target);
+      hostedHubStore.setState({ selectedNode: null, generation: 99 } as never);
+
+      const issued = await issueMobileRelayAttempt({
+        nodeId: TARGET_NODE,
+        preparedSocketContext: prepared,
+      });
+
+      expect(issued.ticket).toBe("account-ticket");
+      expect(hoisted.resolveTrust).toHaveBeenCalledWith(
+        expect.objectContaining({ node: { nodeId: TARGET_NODE, accountGrantAllowed: true } }),
+      );
+      expect(hoisted.begin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selection: expect.objectContaining({ nodeId: TARGET_NODE, environmentId: "env-target" }),
+        }),
+      );
+    });
   });
 });

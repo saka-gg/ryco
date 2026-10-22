@@ -39,6 +39,13 @@ vi.mock("../environments/runtime", () => ({
     harness.listeners.add(listener);
     return () => harness.listeners.delete(listener);
   },
+  // Imported by modules the hook's graph loads; never called by these tests.
+  getPrimaryEnvironmentConnection: vi.fn(),
+  resetEnvironmentServiceForTests: vi.fn(),
+  resetSavedEnvironmentRegistryStoreForTests: vi.fn(),
+  resetSavedEnvironmentRuntimeStoreForTests: vi.fn(),
+  resolveEnvironmentHttpUrl: vi.fn(),
+  updateEnvironmentServerSettings: vi.fn(),
 }));
 
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
-import { configureHostedRuntime } from "@ryco/client-runtime/authorization";
+import {
+  configureHostedRuntime,
+  isHostedEnvironmentSessionLive,
+  resetHostedEnvironmentSessionsForTests,
+  type HostedRelayFailure,
+} from "@ryco/client-runtime/authorization";
 import * as threadStore from "../store";
 
 import type { HostedHubNode, HostedHubSessionResponse } from "./types";
@@ -31,6 +36,7 @@ vi.mock("./transport", () => ({ hasHostedRelayPendingRequests, resetHostedRelayA
 import { hostedHubApi, HostedHubApiError } from "./api";
 import {
   HOSTED_SESSION_SYNC_FAILURE_MESSAGE,
+  getHostedEnvironmentSessions,
   hostedHubController,
   useHostedHubStore,
 } from "./state";
@@ -38,13 +44,16 @@ import {
   getRoutedHostedNode,
   installHostedNodeHistory,
   resetHostedNodeRoutesForTests,
+  setHostedNodeRouteEnvironmentResolver,
 } from "./nodeRoutes";
 import {
   getHostedNodeRouteNotice,
+  leaveHostedNodeRouteToDirectory,
   resetHostedNodeRouteOrchestratorForTests,
   selectHostedNodeRoute,
   startHostedNodeRouteOrchestrator,
 } from "./nodeRouteOrchestrator";
+import { hostedWebConnectionScopes } from "./hostedConnectionScopes";
 
 const sessionResponse: HostedHubSessionResponse = {
   account: {
@@ -90,16 +99,72 @@ function node(
 }
 
 let stopOrchestrator: (() => void) | null = null;
+let stopRouteDemand: (() => void) | null = null;
 
-function setup(initialUrl: string): {
+/**
+ * The workspace coordinator's part, reduced to what these routes need: every
+ * environment a route scope demands is acquired through the lifecycle owner
+ * while it has no live session, as the demand executor does with free slots.
+ * Selecting a node only moves the cursor; this is what connects it.
+ */
+function startRouteDemand(): () => void {
+  const acquireDemanded = () => {
+    const state = useHostedHubStore.getState();
+    const sessions = getHostedEnvironmentSessions();
+    for (const entry of hostedWebConnectionScopes.list()) {
+      const target = state.nodes.find(
+        (candidate) => candidate.environmentId === entry.environmentId,
+      );
+      if (!target || isHostedEnvironmentSessionLive(sessions.read(target.environmentId))) continue;
+      void hostedHubController.acquireEnvironment(target.id);
+    }
+  };
+  retainedPorts.requestEnvironmentReconcile.mockImplementation(acquireDemanded);
+  const unsubscribeScopes = hostedWebConnectionScopes.subscribe(acquireDemanded);
+  const unsubscribeStore = useHostedHubStore.subscribe(acquireDemanded);
+  return () => {
+    unsubscribeScopes();
+    unsubscribeStore();
+  };
+}
+
+function setup(
+  initialUrl: string,
+  options: { readonly demand?: boolean } = {},
+): {
   win: FakeHistoryWindow;
   history: ReturnType<typeof installHostedNodeHistory>;
   flush: () => void;
 } {
   const win = createFakeHistoryWindow(initialUrl);
   const history = installHostedNodeHistory(win as unknown as Window & typeof globalThis);
+  // A thread link names its own environment's node, as the workspace
+  // coordinator resolves it from the authorized directory in the app.
+  setHostedNodeRouteEnvironmentResolver(
+    (environmentId) =>
+      useHostedHubStore.getState().nodes.find((entry) => entry.environmentId === environmentId)
+        ?.id ?? null,
+  );
   stopOrchestrator = startHostedNodeRouteOrchestrator();
+  if (options.demand !== false) stopRouteDemand = startRouteDemand();
   return { win, history, flush: () => history.flush() };
+}
+
+function recordGeneration(environmentId: EnvironmentId): number {
+  return getHostedEnvironmentSessions().read(environmentId)!.generation;
+}
+
+/** The environment's own relay attempt came online and accepted its shell snapshot. */
+function establish(environmentId: EnvironmentId): void {
+  const sessions = getHostedEnvironmentSessions();
+  const generation = recordGeneration(environmentId);
+  sessions.transportStatus(environmentId, generation, "online");
+  sessions.markSessionReady(environmentId, generation);
+}
+
+/** The environment's own relay attempt failed. */
+function fail(environmentId: EnvironmentId, failure: HostedRelayFailure): void {
+  getHostedEnvironmentSessions().failure(environmentId, recordGeneration(environmentId), failure);
 }
 
 /** Let queued reconcile microtasks and history flushes settle. */
@@ -116,22 +181,34 @@ const unusedPlatformService = new Proxy(
   },
 );
 
-// The hosted controller now reads an injected runtime. Configure it with a
-// node lifecycle that routes the package transition-queue effects to this
-// suite's existing observable fakes — a node activation is one primary
-// connect, a teardown clears node-scoped state — so the historical route
-// assertions keep their meaning without touching the controller internals.
-// The teardown effects also record their order so a Back-driven deactivation
-// can assert the documented reset → disconnect → clear → descriptor sequence.
+// The hosted controller reads an injected runtime. Configure it, as hosted Web
+// runs, with retained environment sessions and a node lifecycle that routes
+// the package's effects to this suite's observable fakes — a node activation
+// is one environment connect, clearing node-scoped state is a deactivation —
+// so the route assertions keep their meaning without touching the controller
+// internals. The teardown effects also record their order.
 const teardownOrder: string[] = [];
-beforeEach(() => {
-  teardownOrder.length = 0;
+const retainedPorts = {
+  connectEnvironment: vi.fn((node: HostedHubNode, _generation: number) => {
+    void activateHostedNode(node);
+  }),
+  releaseEnvironment: vi.fn(
+    async (_environmentId: EnvironmentId, _generation: number) => undefined,
+  ),
+  suspendEnvironment: vi.fn(
+    async (_environmentId: EnvironmentId, _generation: number) => undefined,
+  ),
+  requestEnvironmentReconcile: vi.fn(),
+};
+
+function configureRouteRuntime(): void {
   configureHostedRuntime(
     {
       endpoint: unusedPlatformService as never,
       httpClient: unusedPlatformService as never,
       passkeyCeremony: unusedPlatformService as never,
       sessionCredentials: unusedPlatformService as never,
+      environmentSessions: "retained",
       nodeLifecycle: {
         activate: async () => undefined,
         suspend: async () => undefined,
@@ -143,13 +220,12 @@ beforeEach(() => {
         writePrimaryEnvironmentDescriptor: (descriptor) => {
           if (descriptor === null) teardownOrder.push("descriptor:null");
         },
-        connectPrimaryEnvironment: () => {
-          void activateHostedNode();
-        },
+        connectPrimaryEnvironment: () => undefined,
         disconnectPrimaryEnvironment: async () => {
           teardownOrder.push("disconnect");
         },
         setActiveEnvironmentId: () => undefined,
+        ...retainedPorts,
       },
       timers: {
         now: () => Date.now(),
@@ -184,9 +260,16 @@ beforeEach(() => {
     },
     hostedHubApi,
   );
+}
+
+beforeEach(() => {
+  teardownOrder.length = 0;
+  configureRouteRuntime();
 });
 
 afterEach(() => {
+  stopRouteDemand?.();
+  stopRouteDemand = null;
   stopOrchestrator?.();
   stopOrchestrator = null;
   resetHostedNodeRouteOrchestratorForTests();
@@ -199,6 +282,9 @@ afterEach(() => {
   suspendHostedNode.mockClear();
   hasHostedRelayPendingRequests.mockClear();
   resetHostedRelayAttemptFactory.mockClear();
+  for (const port of Object.values(retainedPorts)) port.mockClear();
+  retainedPorts.requestEnvironmentReconcile.mockReset();
+  resetHostedEnvironmentSessionsForTests();
 });
 
 describe("hosted node route restore pipeline", () => {
@@ -213,7 +299,6 @@ describe("hosted node route restore pipeline", () => {
     expect(useHostedHubStore.getState().selectedNode?.id).toBe(first.id);
     useHostedHubStore.setState({ browserStatus: "checking-access" });
 
-    selectHostedNodeRoute(second.id);
     history.push(`/${second.environmentId}/t_2`);
     flush();
     await settle();
@@ -298,7 +383,8 @@ describe("hosted node route restore pipeline", () => {
     });
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([offline]);
-    const { win, flush } = setup(`/node/${offline.id}`);
+    const path = `/node/${offline.id}/${offline.environmentId}/t_1`;
+    const { win, flush } = setup(path);
 
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
@@ -307,15 +393,15 @@ describe("hosted node route restore pipeline", () => {
     expect(useHostedHubStore.getState().selectedNode?.id).toBe(offline.id);
     expect(useHostedHubStore.getState().selectionStatus).toBe("offline");
     expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
-    expect(win.location.pathname).toBe(`/node/${offline.id}`);
+    expect(win.location.pathname).toBe(path);
     expect(getHostedNodeRouteNotice()).toBeNull();
 
-    hostedHubController.markSessionReady(offline.environmentId);
+    establish(offline.environmentId);
     await settle();
     flush();
 
     expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
-    expect(win.location.pathname).toBe(`/node/${offline.id}`);
+    expect(win.location.pathname).toBe(path);
     expect(getHostedNodeRouteNotice()).toBeNull();
   });
 
@@ -326,7 +412,7 @@ describe("hosted node route restore pipeline", () => {
     });
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([offline]);
-    const { win, flush } = setup(`/node/${offline.id}`);
+    const { win, flush } = setup(`/node/${offline.id}/${offline.environmentId}/t_1`);
 
     await hostedHubController.bootstrap();
     await settle();
@@ -337,13 +423,12 @@ describe("hosted node route restore pipeline", () => {
     flush();
     await settle();
 
-    expect(deactivateHostedNode).toHaveBeenCalledWith(offline.environmentId);
     expect(useHostedHubStore.getState().selectedNode).toBeNull();
     expect(win.location.pathname).toBe("/");
     expect(getHostedNodeRouteNotice()).toMatch(/is offline/);
   });
 
-  it("keeps an interactive offline selection on its existing failure surface", async () => {
+  it("keeps a node chosen from the directory selected on home when it fails offline", async () => {
     vi.useFakeTimers();
     const offline = node("node_aaaaaaaaaaaaaaaaaaaaaa", {
       presence: { online: false, lastHeartbeatAt: null },
@@ -366,7 +451,8 @@ describe("hosted node route restore pipeline", () => {
     expect(state.selectionStatus).toBe("offline");
     expect(state.transportStatus).toBe("terminal-failure");
     expect(state.errorMessage).toBe(HOSTED_SESSION_SYNC_FAILURE_MESSAGE);
-    expect(win.location.pathname).toBe(`/node/${offline.id}`);
+    // Home names no node, and a failure there takes over nothing.
+    expect(win.location.pathname).toBe("/");
     expect(getHostedNodeRouteNotice()).toBeNull();
   });
 
@@ -376,14 +462,12 @@ describe("hosted node route restore pipeline", () => {
     });
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([offline]);
-    const { win, flush } = setup(`/node/${offline.id}`);
+    const path = `/node/${offline.id}/${offline.environmentId}/t_1`;
+    const { win, flush } = setup(path);
 
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "authentication",
-      retryable: false,
-    });
+    fail(offline.environmentId, { kind: "authentication", retryable: false });
     await settle();
     flush();
 
@@ -392,11 +476,11 @@ describe("hosted node route restore pipeline", () => {
     expect(state.selectionStatus).toBe("offline");
     expect(state.transportStatus).toBe("terminal-failure");
     expect(state.errorMessage).toMatch(/authentication attempt/);
-    expect(win.location.pathname).toBe(`/node/${offline.id}`);
+    expect(win.location.pathname).toBe(path);
     expect(getHostedNodeRouteNotice()).toBeNull();
   });
 
-  it("tears down a pending offline URL restore on Back and fences late readiness", async () => {
+  it("keeps the cursor on a pending offline restore left on Back, releasing only its demand", async () => {
     const offline = node("node_aaaaaaaaaaaaaaaaaaaaaa", {
       presence: { online: false, lastHeartbeatAt: null },
     });
@@ -405,25 +489,26 @@ describe("hosted node route restore pipeline", () => {
     const { win, history, flush } = setup("/");
 
     await hostedHubController.bootstrap();
-    history.push(`/node/${offline.id}`);
+    history.push(`/${offline.environmentId}/t_1`);
     flush();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
-    const generation = useHostedHubStore.getState().generation;
+    const returnToDirectory = vi.spyOn(hostedHubController, "returnToDirectory");
 
     win.history.back();
-    await vi.waitFor(() =>
-      expect(deactivateHostedNode).toHaveBeenCalledWith(offline.environmentId),
-    );
     await settle();
     flush();
 
-    expect(useHostedHubStore.getState().selectedNode).toBeNull();
-    expect(useHostedHubStore.getState().generation).toBeGreaterThan(generation);
     expect(win.location.pathname).toBe("/");
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(offline.id);
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    expect(returnToDirectory).not.toHaveBeenCalled();
+    expect(retainedPorts.releaseEnvironment).not.toHaveBeenCalled();
 
-    hostedHubController.markSessionReady(offline.environmentId);
-    expect(useHostedHubStore.getState().selectedNode).toBeNull();
-    expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
+    // The environment's own session may still come up; the cursor shows it.
+    establish(offline.environmentId);
+    await settle();
+    expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
+    expect(activateHostedNode).toHaveBeenCalledOnce();
   });
 
   it("normalizes malformed node routes fail-closed before authentication", async () => {
@@ -552,63 +637,58 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe(`/node/${target.id}/${target.environmentId}/t_1`);
   });
 
-  it("tears the selection down on Back and re-runs the pipeline on Forward", async () => {
+  it("keeps the cursor on Back from a thread with the session kept warm, and adopts it on Forward", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
-    const { win, flush } = setup("/");
+    const { win, history, flush } = setup("/");
+    const threadPath = `/node/${target.id}/${target.environmentId}/t_1`;
 
     await hostedHubController.bootstrap();
-    expect(selectHostedNodeRoute(target.id)).toBe(true);
+    history.push(`/${target.environmentId}/t_1`);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
-    expect(win.location.pathname).toBe(`/node/${target.id}`);
-    useHostedHubStore.setState({
-      transportStatus: "online",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    expect(win.location.pathname).toBe(threadPath);
+    establish(target.environmentId);
+    expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
     const generationBefore = useHostedHubStore.getState().generation;
 
     teardownOrder.length = 0;
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
     await settle();
-    // The Back-driven deactivation drives the transition queue in the documented
-    // order: reset the relay attempt, disconnect, clear node-scoped state, then
-    // write a null primary descriptor.
-    expect(teardownOrder).toEqual(["reset", "disconnect", "clear", "descriptor:null"]);
     flush();
-    const afterBack = useHostedHubStore.getState();
-    expect(afterBack.selectedNode).toBeNull();
-    expect(afterBack.selectionStatus).toBe("none");
-    expect(afterBack.transportStatus).toBe("idle");
-    expect(afterBack.sessionStatus).toBe("closed");
-    expect(afterBack.generation).toBeGreaterThan(generationBefore);
+    // Home names no node: the cursor stays and nothing is torn down, released,
+    // or cleared, not even the shown environment.
     expect(win.location.pathname).toBe("/");
+    expect(teardownOrder).toEqual([]);
+    expect(deactivateHostedNode).not.toHaveBeenCalled();
+    expect(retainedPorts.releaseEnvironment).not.toHaveBeenCalled();
+    expect(useHostedHubStore.getState()).toMatchObject({
+      selectedNode: target,
+      sessionEstablished: true,
+      generation: generationBefore,
+    });
 
     win.history.forward();
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledTimes(2));
+    await settle();
     flush();
-    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
-    expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
-    expect(win.location.pathname).toBe(`/node/${target.id}`);
+    // The continuously live session is adopted as it is: no new connection.
+    expect(activateHostedNode).toHaveBeenCalledOnce();
+    expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
+    expect(win.location.pathname).toBe(threadPath);
   });
 
   it("returns a URL-restored terminal authorization failure to the directory", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
-    const { win, flush } = setup(`/node/${target.id}`);
+    const { win, flush } = setup(`/node/${target.id}/${target.environmentId}/t_1`);
 
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
 
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "incompatible",
-      retryable: false,
-    });
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
+    fail(target.environmentId, { kind: "incompatible", retryable: false });
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     flush();
 
     const state = useHostedHubStore.getState();
@@ -619,7 +699,7 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe("/");
   });
 
-  it("keeps interactive terminal failures on the existing failure surface", async () => {
+  it("clears a chosen node's terminal failure from home, keeping its explanation", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
@@ -629,17 +709,14 @@ describe("hosted node route restore pipeline", () => {
     expect(selectHostedNodeRoute(target.id)).toBe(true);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
 
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "incompatible",
-      retryable: false,
-    });
+    fail(target.environmentId, { kind: "incompatible", retryable: false });
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     flush();
 
-    const state = useHostedHubStore.getState();
-    expect(state.selectedNode?.id).toBe(target.id);
-    expect(state.transportStatus).toBe("terminal-failure");
-    expect(state.selectionStatus).toBe("incompatible");
-    expect(win.location.pathname).toBe(`/node/${target.id}`);
+    // The directory renders its existing bounded incompatibility alert.
+    expect(useHostedHubStore.getState().selectionStatus).toBe("incompatible");
+    expect(getHostedNodeRouteNotice()).toBeNull();
+    expect(win.location.pathname).toBe("/");
   });
 
   it("keeps the bounded synchronization-timeout surface for a restored node", async () => {
@@ -647,7 +724,8 @@ describe("hosted node route restore pipeline", () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
-    const { win, flush } = setup(`/node/${target.id}`);
+    const path = `/node/${target.id}/${target.environmentId}/t_1`;
+    const { win, flush } = setup(path);
 
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
@@ -659,22 +737,18 @@ describe("hosted node route restore pipeline", () => {
     expect(state.transportStatus).toBe("terminal-failure");
     expect(state.errorMessage).toBe(HOSTED_SESSION_SYNC_FAILURE_MESSAGE);
     // Sync timeouts keep the retryable failure surface; no directory fallback.
-    expect(win.location.pathname).toBe(`/node/${target.id}`);
+    expect(win.location.pathname).toBe(path);
   });
 
   it("clears the routed segment when a connected node loses authorization", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
-    const { win, flush } = setup(`/node/${target.id}`);
+    const { win, flush } = setup(`/node/${target.id}/${target.environmentId}/t_1`);
 
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
-    useHostedHubStore.setState({
-      transportStatus: "online",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    establish(target.environmentId);
 
     listNodes.mockResolvedValue([node(target.id, { revokedAt: 5 })]);
     await hostedHubController.refreshDirectory();
@@ -687,89 +761,76 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe("/");
   });
 
-  it("keeps the directory entry intact when history jumps back across a nested thread stack", async () => {
+  it("keeps home un-replaced when history jumps back across a nested thread stack", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
     const { win, history, flush } = setup("/");
 
     await hostedHubController.bootstrap();
-    expect(selectHostedNodeRoute(target.id)).toBe(true);
+    history.push(`/${target.environmentId}/t_1`);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
     // The router pushes a nested thread view inside the node scope.
-    history.push(`/${target.environmentId}/t_1?workspaceTab=diff`);
+    history.push(`/${target.environmentId}/t_2?workspaceTab=diff`);
     flush();
-    expect(win.location.pathname).toBe(`/node/${target.id}/${target.environmentId}/t_1`);
+    expect(win.location.pathname).toBe(`/node/${target.id}/${target.environmentId}/t_2`);
 
     win.history.go(-2);
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
     await settle();
     flush();
+    await settle();
 
-    // The stale pre-pop thread pathname must not be readopted: the directory
-    // entry survives un-replaced, the node is not re-activated, and the
-    // teardown is the final lifecycle transition.
-    expect(useHostedHubStore.getState().selectedNode).toBeNull();
+    // The stale pre-pop thread pathname must not be readopted: the home entry
+    // survives un-replaced, and the node is not connected again.
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
     expect(activateHostedNode).toHaveBeenCalledOnce();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
     expect(win.location.pathname).toBe("/");
     expect(win.entries()[0]).toMatchObject({ url: "/" });
-    expect(deactivateHostedNode.mock.invocationCallOrder.at(-1)!).toBeGreaterThan(
-      activateHostedNode.mock.invocationCallOrder.at(-1)!,
-    );
   });
 
-  it("tears down cleanly on a single Back when the thread entry was replace-created", async () => {
+  it("leaves cleanly on a single Back when the thread entry was replace-created", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
     const { win, history, flush } = setup("/");
 
     await hostedHubController.bootstrap();
-    expect(selectHostedNodeRoute(target.id)).toBe(true);
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
+    history.push("/settings");
     flush();
     // Thread navigation with replace: true (deleted-thread fallback path).
     history.replace(`/${target.environmentId}/t_1`);
+    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
     expect(win.entries()).toHaveLength(2);
     expect(win.location.pathname).toBe(`/node/${target.id}/${target.environmentId}/t_1`);
 
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
     await settle();
     flush();
+    await settle();
 
-    expect(useHostedHubStore.getState().selectedNode).toBeNull();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
     expect(activateHostedNode).toHaveBeenCalledOnce();
     expect(win.location.pathname).toBe("/");
     expect(win.entries()[0]).toMatchObject({ url: "/" });
-    expect(deactivateHostedNode.mock.invocationCallOrder.at(-1)!).toBeGreaterThan(
-      activateHostedNode.mock.invocationCallOrder.at(-1)!,
-    );
   });
 
-  it("recovers selection after Back interrupts an in-flight browser resume", async () => {
+  it("leaves an in-flight browser resume alone when Back leaves a thread", async () => {
     const target = node();
     const restoreSession = vi
       .spyOn(hostedHubApi, "restoreSession")
       .mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
-    const { win, flush } = setup("/");
+    const { win, history, flush } = setup("/");
 
     await hostedHubController.bootstrap();
-    expect(selectHostedNodeRoute(target.id)).toBe(true);
+    history.push(`/${target.environmentId}/t_1`);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
-    useHostedHubStore.setState({
-      transportStatus: "online",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    establish(target.environmentId);
 
-    // A browser resume that never completes parks browserStatus in a
-    // node-scoped phase.
-    restoreSession.mockImplementationOnce(() => new Promise<never>(() => undefined));
     let finishRecheck: (value: typeof sessionResponse) => void = () => undefined;
     restoreSession.mockImplementationOnce(
       () =>
@@ -782,22 +843,20 @@ describe("hosted node route restore pipeline", () => {
       expect(useHostedHubStore.getState().browserStatus).toBe("checking-access"),
     );
 
+    // Home names no node: Back neither leaves the selection nor stands in for
+    // the access check the resume is running.
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
-    expect(useHostedHubStore.getState().selectedNode).toBeNull();
-    // Back does not stand in for the access check the abandoned resume never
-    // finished: an account-scoped one re-runs before the directory is current.
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
     expect(useHostedHubStore.getState().browserStatus).toBe("checking-access");
     finishRecheck(sessionResponse);
-    await vi.waitFor(() => expect(useHostedHubStore.getState().browserStatus).toBe("current"));
-
-    // The abandoned resume no longer gates a subsequent selection.
-    expect(selectHostedNodeRoute(target.id)).toBe(true);
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(useHostedHubStore.getState().browserStatus).not.toBe("checking-access"),
+    );
     expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
   });
 
-  it("drops a pending interactive selection when history returns to the directory", async () => {
+  it("selects nothing for a node chosen before the directory is current", async () => {
     const offline = node("node_aaaaaaaaaaaaaaaaaaaaaa", {
       presence: { online: false, lastHeartbeatAt: null },
     });
@@ -815,53 +874,22 @@ describe("hosted node route restore pipeline", () => {
     await vi.waitFor(() =>
       expect(useHostedHubStore.getState().accountStatus).toBe("authenticated"),
     );
-    // Interactive selection while the directory is still loading, then Back
-    // before it resolves: the interactive intent must not leak into the next
-    // URL-driven restore of the same node.
+    // The choice lands while the directory is still loading: the lifecycle
+    // owner selects nothing, so nothing is demanded either.
     expect(selectHostedNodeRoute(offline.id)).toBe(true);
     flush();
     await settle();
-    win.history.back();
-    await settle();
+    expect(useHostedHubStore.getState().selectedNode).toBeNull();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    expect(win.entries()).toHaveLength(1);
 
     resolveNodes([offline]);
     await bootstrap;
-    win.history.forward();
-    await settle();
-    flush();
-
-    // The forward re-entry is now a URL restore, not leaked interactive
-    // intent, but still enters the same bounded activation lifecycle.
-    expect(activateHostedNode).toHaveBeenCalledOnce();
+    expect(selectHostedNodeRoute(offline.id)).toBe(true);
+    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     expect(useHostedHubStore.getState().selectedNode?.id).toBe(offline.id);
     expect(useHostedHubStore.getState().selectionStatus).toBe("offline");
     expect(getHostedNodeRouteNotice()).toBeNull();
-    expect(win.location.pathname).toBe(`/node/${offline.id}`);
-  });
-
-  it("keeps the terminal explanation when Back leaves a failed interactive node", async () => {
-    const target = node();
-    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
-    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
-    const { win, flush } = setup("/");
-
-    await hostedHubController.bootstrap();
-    expect(selectHostedNodeRoute(target.id)).toBe(true);
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
-    flush();
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "incompatible",
-      retryable: false,
-    });
-    await settle();
-    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
-
-    win.history.back();
-    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
-    flush();
-
-    // The directory still renders the bounded incompatibility explanation.
-    expect(useHostedHubStore.getState().selectionStatus).toBe("incompatible");
     expect(win.location.pathname).toBe("/");
   });
 
@@ -869,16 +897,18 @@ describe("hosted node route restore pipeline", () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
-    const { win, flush } = setup("/");
+    const { win, history, flush } = setup("/nodes");
 
     await hostedHubController.bootstrap();
     expect(selectHostedNodeRoute(target.id)).toBe(true);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
+    history.push(`/${target.environmentId}/t_1`);
+    history.push("/settings");
+    flush();
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
     win.history.forward();
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledTimes(2));
+    await settle();
     flush();
 
     const serializedEntries = JSON.stringify(win.entries());
@@ -896,5 +926,178 @@ describe("hosted node route restore pipeline", () => {
         keys.every((key) => key === "__TSR_index" || key === "__TSR_key" || key === "key"),
       ).toBe(true);
     }
+  });
+});
+
+describe("hosted node routes move only the cursor", () => {
+  it("keeps the cursor on home and settings with no demand, acquire, or release", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([first, second]);
+    // No demand driver: what the routes alone do.
+    const { win, history, flush } = setup(`/node/${first.id}/${first.environmentId}/t_1`, {
+      demand: false,
+    });
+    await hostedHubController.bootstrap();
+    flush();
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(first.id);
+    expect(hostedWebConnectionScopes.list()).toEqual([
+      expect.objectContaining({
+        environmentId: first.environmentId,
+        scope: { type: "thread-detail", threadId: "t_1" },
+      }),
+    ]);
+    const acquireEnvironment = vi.spyOn(hostedHubController, "acquireEnvironment");
+    const releaseEnvironment = vi.spyOn(hostedHubController, "releaseEnvironment");
+    const returnToDirectory = vi.spyOn(hostedHubController, "returnToDirectory");
+    const selectNode = vi.spyOn(hostedHubController, "selectNode");
+
+    for (const pathname of ["/", "/settings", "/tasks"]) {
+      history.push(pathname);
+      flush();
+      await settle();
+      // The address names no node, the cursor stays on the last thread's
+      // node, and the page holds no demand.
+      expect(win.location.pathname, pathname).toBe(pathname);
+      expect(useHostedHubStore.getState().selectedNode?.id, pathname).toBe(first.id);
+      expect(hostedWebConnectionScopes.list(), pathname).toEqual([]);
+    }
+    expect(selectNode).not.toHaveBeenCalled();
+
+    // A thread on another node moves the cursor and holds that thread's view.
+    history.push(`/${second.environmentId}/t_2`);
+    flush();
+    await settle();
+    expect(win.location.pathname).toBe(`/node/${second.id}/${second.environmentId}/t_2`);
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(second.id);
+    expect(hostedWebConnectionScopes.list()).toEqual([
+      expect.objectContaining({
+        environmentId: second.environmentId,
+        scope: { type: "thread-detail", threadId: "t_2" },
+      }),
+    ]);
+
+    // "All nodes" is a page no node owns as well.
+    expect(leaveHostedNodeRouteToDirectory()).toBe(true);
+    flush();
+    await settle();
+    expect(win.location.pathname).toBe("/nodes");
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(second.id);
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+
+    // Selecting connected nothing: the workspace coordinator does, through acquire.
+    expect(acquireEnvironment).not.toHaveBeenCalled();
+    expect(releaseEnvironment).not.toHaveBeenCalled();
+    expect(returnToDirectory).not.toHaveBeenCalled();
+    expect(retainedPorts.connectEnvironment).not.toHaveBeenCalled();
+    expect(activateHostedNode).not.toHaveBeenCalled();
+  });
+
+  it("opens an older node address of a page no node owns on that page, with the cursor on its node", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([first, second]);
+    const { win, flush } = setup(`/node/${second.id}/settings?section=general`, {
+      demand: false,
+    });
+
+    await hostedHubController.bootstrap();
+    flush();
+    await settle();
+
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(second.id);
+    expect(win.entries()).toHaveLength(1);
+    expect(win.location.pathname).toBe("/settings");
+    expect(win.location.search).toBe("?section=general");
+    expect(getRoutedHostedNode()).toEqual({
+      nodeId: null,
+      malformed: false,
+      logicalPathname: "/settings",
+    });
+    expect(getHostedNodeRouteNotice()).toBeNull();
+    // No route-scoped demand: the bookmark moves the cursor and connects nothing.
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    expect(retainedPorts.connectEnvironment).not.toHaveBeenCalled();
+  });
+
+  it("opens an older node home address on node-less home", async () => {
+    const target = node();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
+    const { win, flush } = setup(`/node/${target.id}`, { demand: false });
+
+    await hostedHubController.bootstrap();
+    flush();
+    await settle();
+
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
+    expect(win.location.pathname).toBe("/");
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+  });
+
+  it("opens home with the cursor on a node chosen from the directory, demanding it briefly", async () => {
+    vi.useFakeTimers();
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([first, second]);
+    const { win, flush } = setup("/nodes", { demand: false });
+    await hostedHubController.bootstrap();
+    flush();
+    await settle();
+
+    expect(selectHostedNodeRoute(second.id)).toBe(true);
+    flush();
+    await settle();
+    expect(win.location.pathname).toBe("/");
+    expect(win.entries()).toHaveLength(2);
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(second.id);
+    expect(hostedWebConnectionScopes.list()).toEqual([
+      expect.objectContaining({
+        environmentId: second.environmentId,
+        scope: { type: "interactive" },
+      }),
+    ]);
+
+    // A few seconds, as a press on a thread row holds its node; the cursor stays.
+    await vi.advanceTimersByTimeAsync(3_000);
+    await settle();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(second.id);
+  });
+
+  it("clears the cursor on home when its node is revoked or the session ends", async () => {
+    const target = node();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
+    const { history, flush } = setup(`/node/${target.id}/${target.environmentId}/t_1`);
+    await hostedHubController.bootstrap();
+    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
+    establish(target.environmentId);
+    history.push("/");
+    flush();
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
+
+    listNodes.mockResolvedValue([node(target.id, { revokedAt: 5 })]);
+    await hostedHubController.refreshDirectory();
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
+    expect(useHostedHubStore.getState().selectionStatus).toBe("revoked");
+
+    listNodes.mockResolvedValue([target]);
+    await hostedHubController.refreshDirectory();
+    history.push(`/${target.environmentId}/t_1`);
+    flush();
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id));
+    history.push("/");
+    flush();
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
+
+    await hostedHubController.expireSession();
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
   });
 });

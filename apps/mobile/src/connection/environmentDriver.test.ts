@@ -80,11 +80,15 @@ vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
 
 import { installHostedPrimaryConnectionFactory } from "../hostedHub/primaryConnectionFactory";
 import type { HostedPrimaryConnectionDeps } from "../hostedHub/primaryConnection";
+import { useComposerDraftStore } from "../state/composerDraftStore";
+import { useMessageQueueStore } from "../state/messageQueueStore";
 import { subscribeAppStateResume } from "./appStateResume";
 import { createMobileEnvironmentDriver, type MobileCatalogLike } from "./environmentDriver";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import { createSavedSessionHints, type SavedSessionHints } from "./savedSessionHints";
 import { selectThreadDetailLoaded, useStore } from "../state/threadsRuntime";
+import { selectThreadBodyUsage } from "@ryco/client-runtime/state/threads/threadBodyResidency";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 
 const ENV_ID = "env-1" as EnvironmentId;
 
@@ -1119,6 +1123,123 @@ describe("mobile environment driver", () => {
     void driver.supervisor.remove(environmentId);
   });
 
+  it("keeps the body of a running thread and of one with a queued send or unsent draft, while old idle bodies go", async () => {
+    const environmentId = "env-residency" as EnvironmentId;
+    const listeners = new Map<string, (item: unknown) => void>();
+    const driver = createMobileEnvironmentDriver({
+      catalog: createFakeCatalog().catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: () => () => {},
+    });
+    const connection = fakeConnection(environmentId);
+    (connection.client as { orchestration?: unknown }).orchestration = {
+      subscribeThreadWindow: (
+        input: { readonly threadId: string },
+        listener: (item: unknown) => void,
+      ) => {
+        listeners.set(input.threadId, listener);
+        return () => undefined;
+      },
+    };
+    driver.supervisor.register(connection);
+
+    const page = { oldestCursor: null, newestCursor: null, hasMoreBefore: false };
+    const windowSnapshot = (threadId: string, running: boolean) => ({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 1,
+        thread: {
+          id: threadId,
+          projectId: "project-1",
+          title: threadId,
+          modelSelection: { instanceId: "codex", model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          worktreeId: null,
+          latestTurn: running
+            ? {
+                turnId: "turn-1",
+                state: "running",
+                requestedAt: "2026-10-15T00:00:00.000Z",
+                startedAt: "2026-10-15T00:00:01.000Z",
+                completedAt: null,
+                assistantMessageId: null,
+              }
+            : null,
+          createdAt: "2026-10-15T00:00:00.000Z",
+          updatedAt: "2026-10-15T00:00:00.000Z",
+          archivedAt: null,
+          deletedAt: null,
+          messages: [
+            {
+              id: `${threadId}-message`,
+              role: "user",
+              text: "hello",
+              turnId: null,
+              streaming: false,
+              createdAt: "2026-10-15T00:00:00.000Z",
+              updatedAt: "2026-10-15T00:00:00.000Z",
+            },
+          ],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+          session: null,
+        },
+        history: { messages: page, proposedPlans: page, activities: page, checkpoints: page },
+      },
+    });
+    const refOf = (index: number) => scopeThreadRef(environmentId, `thread-${index}` as ThreadId);
+    const bodyCount = () =>
+      selectThreadBodyUsage(useStore.getState()).filter(
+        ({ ref }) => ref.environmentId === environmentId,
+      ).length;
+
+    // thread-0 and thread-1 are the oldest idle threads: only their work keeps them.
+    useMessageQueueStore.getState().enqueue(`${environmentId}:thread-0`, {
+      id: "queued-message",
+      composer: {},
+      settings: {},
+    });
+    useComposerDraftStore.getState().setPrompt(refOf(1), "unsent draft");
+    // A draft entry that holds only a changed composer mode is no unsent work.
+    useComposerDraftStore.getState().setInteractionMode(refOf(4), "plan");
+    try {
+      for (let index = 0; index < 70; index += 1) {
+        const release = driver.supervisor.retainThreadDetailSubscription(
+          environmentId,
+          `thread-${index}` as ThreadId,
+          { view: true },
+        );
+        // thread-2 is mid-turn, so it is busy rather than idle.
+        listeners.get(`thread-${index}`)?.(windowSnapshot(`thread-${index}`, index === 2));
+        release();
+        await Promise.resolve();
+      }
+      await Promise.resolve();
+
+      const loaded = (index: number) => selectThreadDetailLoaded(useStore.getState(), refOf(index));
+      expect(loaded(0)).toBe(true);
+      expect(loaded(1)).toBe(true);
+      expect(loaded(2)).toBe(true);
+      // 70 bodies against a budget of 64: the oldest six unprotected ones go.
+      expect(loaded(3)).toBe(false);
+      expect(loaded(4)).toBe(false);
+      expect(loaded(8)).toBe(false);
+      expect(loaded(9)).toBe(true);
+      expect(loaded(69)).toBe(true);
+      expect(bodyCount()).toBe(64);
+    } finally {
+      useMessageQueueStore.getState().clear(`${environmentId}:thread-0`);
+      useComposerDraftStore.getState().setPrompt(refOf(1), "");
+      useComposerDraftStore.getState().setInteractionMode(refOf(4), null);
+      await driver.supervisor.resetForTests();
+      useStore.getState().removeEnvironmentState(environmentId);
+    }
+  });
+
   it("routes a thread-stream snapshot/event from the state sink into state/threads", () => {
     const sink = createMobileEnvironmentStateSink();
     const snapshotSpy = vi
@@ -1159,6 +1280,25 @@ describe("subscribeAppStateResume", () => {
     appStateHolder.handler!("active");
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledWith("appstate-active");
+
+    unsubscribe();
+  });
+
+  it("ignores inactive interruptions but resumes after background passes through inactive", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppStateResume(listener);
+
+    // Notification Center or the app-switcher peek: inactive and straight back.
+    appStateHolder.handler!("inactive");
+    appStateHolder.handler!("active");
+    expect(listener).not.toHaveBeenCalled();
+
+    // A real background trip returns through inactive before active.
+    appStateHolder.handler!("background");
+    appStateHolder.handler!("inactive");
+    expect(listener).not.toHaveBeenCalled();
+    appStateHolder.handler!("active");
+    expect(listener).toHaveBeenCalledTimes(1);
 
     unsubscribe();
   });

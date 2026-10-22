@@ -254,6 +254,11 @@ describe("hosted node directory", () => {
     useUiStateStore.getState().setSidebarMode("inbox");
     seedDirectory([cachedNode]);
     const selectNode = vi.spyOn(hostedHubController, "selectNode");
+    // The boot's warm restore connects the machine this browser cached through
+    // the lifecycle owner, in the background and without selecting it. No Hub
+    // answers here, so a real attempt's refused ticket would expire the session
+    // and replace the directory with the sign-in gate.
+    vi.spyOn(hostedHubController, "acquireEnvironment").mockResolvedValue("connecting");
     const rootRoute = createRootRoute({ component: HostedHubRoot });
     const router = createRouter({
       routeTree: rootRoute,

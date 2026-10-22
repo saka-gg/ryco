@@ -2923,37 +2923,37 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         sizeBytes: 30,
       });
       const cookie = yield* getAuthenticatedSessionCookieHeader();
-
-      const interrupted = yield* Effect.result(
-        postAttachmentUpload({
-          uploadToken: created.uploadToken,
-          cookie,
-          body: HttpBody.stream(
-            Stream.concat(
-              Stream.make(new TextEncoder().encode("partial-bytes")),
-              Stream.fail(new Error("client aborted")),
-            ),
-          ),
-        }),
+      const url = yield* getHttpServerUrl(
+        `/attachments/upload?token=${encodeURIComponent(created.uploadToken)}`,
       );
-      assert.isTrue(interrupted._tag === "Failure" || interrupted._tag === "Success");
 
-      const cleanupComplete = () =>
-        fileSystem
-          .readDirectory(config.attachmentsDir)
-          .pipe(
-            Effect.map(
-              (entries) => entries.filter((entry) => entry.endsWith(".part")).length === 0,
-            ),
-          );
-      const waitMillis = (millis: number) =>
-        Effect.promise(() => new Promise((resolve) => setTimeout(resolve, millis)));
-      let clean = yield* cleanupComplete();
-      for (let attempt = 0; attempt < 20 && !clean; attempt += 1) {
-        yield* waitMillis(50);
-        clean = yield* cleanupComplete();
-      }
-      assert.isTrue(clean);
+      const partFileCount = fileSystem
+        .readDirectory(config.attachmentsDir)
+        .pipe(Effect.map((entries) => entries.filter((entry) => entry.endsWith(".part")).length));
+      const waitForPartFiles = (count: number) =>
+        Effect.gen(function* () {
+          let current = yield* partFileCount;
+          for (let attempt = 0; attempt < 100 && current !== count; attempt += 1) {
+            yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+            current = yield* partFileCount;
+          }
+          assert.equal(current, count);
+        });
+
+      // node:http, not fetch: fetch fails a request whose body stream errors
+      // before sending it, so the server would never see the upload start.
+      const upload = NodeHttp.request(url, {
+        method: "POST",
+        agent: false,
+        headers: { cookie, "content-type": "application/octet-stream", "content-length": "30" },
+      });
+      upload.on("error", () => {});
+      upload.write("partial-bytes");
+      // The staging file exists once the server is streaming the body; then the
+      // client drops the connection mid-upload.
+      yield* waitForPartFiles(1).pipe(Effect.ensuring(Effect.sync(() => upload.destroy())));
+
+      yield* waitForPartFiles(0);
       assert.deepEqual(yield* fileSystem.readDirectory(config.attachmentsDir), []);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -6257,6 +6257,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(begin.snapshotSequence, 7);
       assert.equal(begin.threadCount, 3);
       assert.equal(begin.archivedThreadCount, 1);
+      // A node that never set its rule carries the shared default.
+      assert.deepEqual(begin.settlementPolicy, { autoSettleAfterDays: 7 });
       assert.deepEqual(
         items.flatMap((item) =>
           item.kind === "snapshot-threads" ? item.threads.map((thread) => thread.id) : [],
@@ -6287,6 +6289,43 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         first.snapshot.threads.map((thread) => thread.id),
         ["archived-1", "live-1", "live-2"],
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("carries the node's own settlement rule in the shell snapshot", () =>
+    Effect.gen(function* () {
+      const livePubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            readEventsPage: (fromSequenceExclusive) =>
+              Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
+            subscribeDomainEvents: PubSub.subscribe(livePubSub),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () => Effect.succeed(pagedShellSnapshot()),
+          },
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              threadAutoSettleAfterDays: null,
+            }),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.map((collected) => Array.from(collected)[0]),
+          ),
+        ),
+      );
+
+      assertTrue(first?.kind === "snapshot");
+      assert.deepEqual(first.snapshot.settlementPolicy, { autoSettleAfterDays: null });
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

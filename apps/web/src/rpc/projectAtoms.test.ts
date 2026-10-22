@@ -15,9 +15,14 @@ vi.mock("~/environmentApi", () => ({
   readEnvironmentApi,
 }));
 
+import { hostedHubStore } from "~/hostedHub/state";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import {
   canResolveProjectSearchEntriesLocally,
+  clearProjectAtomStateForEnvironment,
+  EMPTY_FILESYSTEM_BROWSE_STATE,
+  EMPTY_PROJECT_SEARCH_ENTRIES_STATE,
+  FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT,
   getFilesystemBrowseStateAtom,
   getProjectSearchEntriesSnapshot,
   invalidateProjectSearchEntries,
@@ -28,9 +33,11 @@ import {
   resetProjectAtomsForTests,
   retainProjectSearchEntriesScope,
   retryProjectSearchEntries,
+  watchFilesystemBrowse,
 } from "./projectAtoms";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
+const OTHER_ENVIRONMENT_ID = EnvironmentId.make("environment-other");
 const CWD = "/tmp/workspace";
 
 /** A server result that is cut by its limit, so it cannot be narrowed locally. */
@@ -61,13 +68,27 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
-function snapshot(query: string) {
+function snapshot(query: string, environmentId: EnvironmentId = ENVIRONMENT_ID) {
   return getProjectSearchEntriesSnapshot({
-    environmentId: ENVIRONMENT_ID,
+    environmentId,
     cwd: CWD,
     query,
     limit: 80,
   });
+}
+
+function browseInput(partialPath: string, environmentId: EnvironmentId = ENVIRONMENT_ID) {
+  return { environmentId, partialPath };
+}
+
+function browseState(partialPath: string, environmentId: EnvironmentId = ENVIRONMENT_ID) {
+  const key = resolveFilesystemBrowseKey(browseInput(partialPath, environmentId));
+  if (key === null) throw new Error("expected filesystem browse key");
+  return appAtomRegistry.get(getFilesystemBrowseStateAtom(key));
+}
+
+function browseResult(parentPath: string): FilesystemBrowseResult {
+  return { parentPath, entries: [] };
 }
 
 beforeEach(() => {
@@ -494,5 +515,295 @@ describe("projectAtoms", () => {
 
     expect(searchEntries).toHaveBeenCalledTimes(2);
     expect(snapshot("src")).toMatchObject({ data: recovered, error: null });
+  });
+});
+
+describe("environment-scoped clear", () => {
+  it("resets only the given environment's search and browse state", async () => {
+    const searchA = result("a.ts");
+    const searchB = result("b.ts");
+    searchEntries.mockResolvedValueOnce(searchA).mockResolvedValueOnce(searchB);
+    const browse = vi.fn(async ({ partialPath }: { partialPath: string }) =>
+      browseResult(partialPath),
+    );
+    readEnvironmentApi.mockReturnValue({ filesystem: { browse } });
+
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "a" });
+    requestProjectSearchEntries({ environmentId: OTHER_ENVIRONMENT_ID, cwd: CWD, query: "b" });
+    requestFilesystemBrowse(browseInput("/workspace/"));
+    requestFilesystemBrowse(browseInput("/workspace/", OTHER_ENVIRONMENT_ID));
+    await flush();
+    expect(snapshot("a").data).toBe(searchA);
+    expect(snapshot("b", OTHER_ENVIRONMENT_ID).data).toBe(searchB);
+    expect(browseState("/workspace/").data).not.toBeNull();
+
+    clearProjectAtomStateForEnvironment(ENVIRONMENT_ID);
+
+    expect(snapshot("a")).toEqual(EMPTY_PROJECT_SEARCH_ENTRIES_STATE);
+    expect(browseState("/workspace/")).toEqual(EMPTY_FILESYSTEM_BROWSE_STATE);
+    expect(snapshot("b", OTHER_ENVIRONMENT_ID).data).toBe(searchB);
+    expect(browseState("/workspace/", OTHER_ENVIRONMENT_ID).data).toEqual(
+      browseResult("/workspace/"),
+    );
+
+    // The cleared environment refetches; the other one still answers from cache.
+    searchEntries.mockResolvedValueOnce(result("a2.ts"));
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "a" });
+    requestProjectSearchEntries({ environmentId: OTHER_ENVIRONMENT_ID, cwd: CWD, query: "b" });
+    requestFilesystemBrowse(browseInput("/workspace/"));
+    requestFilesystemBrowse(browseInput("/workspace/", OTHER_ENVIRONMENT_ID));
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(3);
+    expect(browse).toHaveBeenCalledTimes(3);
+  });
+
+  it("fences responses still in flight for the cleared environment", async () => {
+    const search = createDeferred<ProjectSearchEntriesResult>();
+    searchEntries.mockReturnValueOnce(search.promise);
+    const pendingBrowse = createDeferred<FilesystemBrowseResult>();
+    readEnvironmentApi.mockReturnValue({
+      filesystem: { browse: vi.fn(() => pendingBrowse.promise) },
+    });
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "a" });
+    const release = watchFilesystemBrowse(browseInput("/workspace/"));
+    await flush();
+
+    clearProjectAtomStateForEnvironment(ENVIRONMENT_ID);
+    search.resolve(result("a.ts"));
+    pendingBrowse.resolve(browseResult("/workspace/"));
+    await flush();
+
+    expect(snapshot("a")).toEqual(EMPTY_PROJECT_SEARCH_ENTRIES_STATE);
+    expect(browseState("/workspace/")).toEqual(EMPTY_FILESYSTEM_BROWSE_STATE);
+    release();
+  });
+
+  it("leaves the requests of an environment whose id extends the cleared one untouched", async () => {
+    const nestedEnvironmentId = EnvironmentId.make(`${ENVIRONMENT_ID}::nested`);
+    const nested = result("nested.ts");
+    const search = createDeferred<ProjectSearchEntriesResult>();
+    searchEntries.mockReturnValueOnce(search.promise);
+    requestProjectSearchEntries({ environmentId: nestedEnvironmentId, cwd: CWD, query: "n" });
+    await flush();
+
+    clearProjectAtomStateForEnvironment(ENVIRONMENT_ID);
+    search.resolve(nested);
+    await flush();
+
+    expect(snapshot("n", nestedEnvironmentId).data).toBe(nested);
+  });
+
+  it("stops a rebuilding search from re-asking after its environment was cleared", async () => {
+    retainProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+    searchEntries.mockResolvedValue({ ...result("src/old.ts"), refreshing: true });
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "src" });
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(1);
+
+    clearProjectAtomStateForEnvironment(ENVIRONMENT_ID);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(searchEntries).toHaveBeenCalledTimes(1);
+    releaseProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+  });
+
+  it("resets a key that was reused after an earlier clear", async () => {
+    const browse = vi.fn(async ({ partialPath }: { partialPath: string }) =>
+      browseResult(partialPath),
+    );
+    readEnvironmentApi.mockReturnValue({ filesystem: { browse } });
+    searchEntries.mockResolvedValue(result("a.ts"));
+
+    for (let round = 0; round < 2; round += 1) {
+      requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "a" });
+      requestFilesystemBrowse(browseInput("/workspace/"));
+      await flush();
+      expect(snapshot("a").data).not.toBeNull();
+      expect(browseState("/workspace/").data).not.toBeNull();
+
+      clearProjectAtomStateForEnvironment(ENVIRONMENT_ID);
+      expect(snapshot("a")).toEqual(EMPTY_PROJECT_SEARCH_ENTRIES_STATE);
+      expect(browseState("/workspace/")).toEqual(EMPTY_FILESYSTEM_BROWSE_STATE);
+    }
+  });
+});
+
+describe("filesystem browse retention", () => {
+  const browse = vi.fn(async ({ partialPath }: { partialPath: string }) =>
+    browseResult(partialPath),
+  );
+
+  function path(index: number): string {
+    return `/workspace/${index}/`;
+  }
+
+  async function visit(partialPath: string): Promise<void> {
+    const release = watchFilesystemBrowse(browseInput(partialPath));
+    await flush();
+    release();
+  }
+
+  beforeEach(() => {
+    readEnvironmentApi.mockReturnValue({ filesystem: { browse } });
+  });
+
+  it("keeps the released limit warm and evicts the oldest beyond it", async () => {
+    for (let index = 0; index < FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT; index += 1) {
+      await visit(path(index));
+    }
+    for (let index = 0; index < FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT; index += 1) {
+      expect(browseState(path(index)).data).not.toBeNull();
+    }
+
+    await visit(path(FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT));
+
+    expect(browseState(path(0))).toEqual(EMPTY_FILESYSTEM_BROWSE_STATE);
+    expect(browseState(path(1)).data).not.toBeNull();
+    expect(browseState(path(FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT)).data).not.toBeNull();
+  });
+
+  it("evicts in release order, not visit order", async () => {
+    const releaseFirst = watchFilesystemBrowse(browseInput(path(0)));
+    await flush();
+    for (let index = 1; index <= FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT; index += 1) {
+      await visit(path(index));
+    }
+    expect(browseState(path(0)).data).not.toBeNull();
+
+    // The first path is the most recently released, so the second one goes.
+    releaseFirst();
+    expect(browseState(path(1))).toEqual(EMPTY_FILESYSTEM_BROWSE_STATE);
+    expect(browseState(path(0)).data).not.toBeNull();
+  });
+
+  it("never evicts a key that is observed again after its release", async () => {
+    await visit(path(0));
+    const release = watchFilesystemBrowse(browseInput(path(0)));
+    await flush();
+    for (let index = 1; index <= FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT + 4; index += 1) {
+      await visit(path(index));
+    }
+
+    expect(browseState(path(0)).data).not.toBeNull();
+    release();
+  });
+
+  it("counts an unobserved request toward the limit", async () => {
+    for (let index = 0; index <= FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT; index += 1) {
+      requestFilesystemBrowse(browseInput(path(index)));
+      await flush();
+    }
+
+    expect(browseState(path(0))).toEqual(EMPTY_FILESYSTEM_BROWSE_STATE);
+    expect(browseState(path(1)).data).not.toBeNull();
+  });
+
+  it("fences a response that settles after its key was evicted", async () => {
+    const pending = createDeferred<FilesystemBrowseResult>();
+    browse.mockReturnValueOnce(pending.promise);
+    requestFilesystemBrowse(browseInput(path(0)));
+    await flush();
+    for (let index = 1; index <= FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT; index += 1) {
+      await visit(path(index));
+    }
+
+    pending.resolve(browseResult(path(0)));
+    await flush();
+
+    expect(browseState(path(0))).toEqual(EMPTY_FILESYSTEM_BROWSE_STATE);
+  });
+
+  it("ignores a release that outlived a reset of its key", async () => {
+    const releaseStale = watchFilesystemBrowse(browseInput(path(0)));
+    await flush();
+    resetProjectAtomsForTests();
+    const releaseCurrent = watchFilesystemBrowse(browseInput(path(0)));
+    await flush();
+
+    // A miscounted release would make the observed key evictable.
+    releaseStale();
+    for (let index = 1; index <= FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT; index += 1) {
+      await visit(path(index));
+    }
+
+    expect(browseState(path(0)).data).not.toBeNull();
+    releaseCurrent();
+  });
+
+  it("stops counting a cleared environment's released keys toward the limit", async () => {
+    const other = watchFilesystemBrowse(browseInput(path(0), OTHER_ENVIRONMENT_ID));
+    await flush();
+    other();
+    const room = FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT - 1;
+    for (let index = 1; index <= room; index += 1) {
+      await visit(path(index));
+    }
+    clearProjectAtomStateForEnvironment(ENVIRONMENT_ID);
+    for (let index = 1; index <= room; index += 1) {
+      await visit(path(room + index));
+    }
+
+    // The other environment's key and the fifteen released since the clear fit the limit.
+    expect(browseState(path(0), OTHER_ENVIRONMENT_ID).data).not.toBeNull();
+  });
+});
+
+describe("filesystem browse unavailable copy", () => {
+  const SYNCING_MESSAGE = "Syncing with this node…";
+  const UNAVAILABLE_MESSAGE = "The environment is temporarily unavailable. Reconnecting…";
+
+  function node(overrides: Record<string, unknown> = {}) {
+    return {
+      environmentId: ENVIRONMENT_ID,
+      revokedAt: null,
+      presence: { online: true, lastHeartbeatAt: null },
+      ...overrides,
+    } as never;
+  }
+
+  function unavailableMessage(): string | undefined {
+    readEnvironmentApi.mockReturnValue(undefined);
+    requestFilesystemBrowse({ ...browseInput("/workspace/"), staleTime: 0 }, { force: true });
+    return browseState("/workspace/").error?.message;
+  }
+
+  beforeEach(() => {
+    vi.stubEnv("VITE_RYCO_CLIENT_MODE", "hosted-hub");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    hostedHubStore.setState({ nodes: [] });
+  });
+
+  it("reports syncing for a known hosted node that is not connected yet", () => {
+    hostedHubStore.setState({ nodes: [node()] });
+
+    expect(unavailableMessage()).toBe(SYNCING_MESSAGE);
+  });
+
+  it("keeps the unavailable copy for an unknown, revoked, offline or native-only node", () => {
+    hostedHubStore.setState({ nodes: [node({ environmentId: OTHER_ENVIRONMENT_ID })] });
+    expect(unavailableMessage()).toBe(UNAVAILABLE_MESSAGE);
+
+    hostedHubStore.setState({ nodes: [node({ revokedAt: 1 })] });
+    expect(unavailableMessage()).toBe(UNAVAILABLE_MESSAGE);
+
+    hostedHubStore.setState({
+      nodes: [node({ presence: { online: false, lastHeartbeatAt: null } })],
+    });
+    expect(unavailableMessage()).toBe(UNAVAILABLE_MESSAGE);
+
+    hostedHubStore.setState({
+      nodes: [node({ capabilities: { repositoryIdentity: true, nativeClientRequired: true } })],
+    });
+    expect(unavailableMessage()).toBe(UNAVAILABLE_MESSAGE);
+  });
+
+  it("keeps the unavailable copy outside hosted mode", () => {
+    vi.stubEnv("VITE_RYCO_CLIENT_MODE", "standard");
+    hostedHubStore.setState({ nodes: [node()] });
+
+    expect(unavailableMessage()).toBe(UNAVAILABLE_MESSAGE);
   });
 });

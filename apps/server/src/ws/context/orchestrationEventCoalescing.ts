@@ -81,7 +81,7 @@ export interface OrchestrationEventCoalescer {
    * failed queue still fails the subscription and forces resync.
    */
   readonly push: (event: OrchestrationEvent) => Effect.Effect<void, OrchestrationGetSnapshotError>;
-  /** Flush all held frames in sequence order (flush tick, teardown). */
+  /** Flush all held frames in sequence order (window elapsed, teardown). */
   readonly flush: Effect.Effect<void, OrchestrationGetSnapshotError>;
 }
 
@@ -94,8 +94,9 @@ export const makeOrchestrationEventCoalescer = (input: {
   readonly onCoalesced?: (sequence: number) => Effect.Effect<void>;
   /**
    * Maximum dwell time for held progress frames. A burst collapses to at most
-   * one frame per key per window; `0` degrades to pass-through. A periodic
-   * flush tick keeps the newest state visible even between bursts.
+   * one frame per key per window; `0` degrades to pass-through. The caller
+   * flushes once the window has elapsed, which keeps the newest state visible
+   * even between bursts.
    */
   readonly windowMs: number;
   readonly maxKeys?: number;

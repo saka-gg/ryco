@@ -78,6 +78,9 @@ export function createShellSnapshotAssembler(
               threads: received,
               ...(receivedStubs === null ? {} : { archivedThreadStubs: receivedStubs }),
               updatedAt: begun.updatedAt,
+              ...(begun.settlementPolicy === undefined
+                ? {}
+                : { settlementPolicy: begun.settlementPolicy }),
             },
           };
         }

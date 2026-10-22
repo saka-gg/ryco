@@ -58,6 +58,10 @@
       "types": "./src/authorization/e2ee.ts",
       "import": "./src/authorization/e2ee.ts"
     },
+    "./authorization/hostedEnvironmentSessions": {
+      "types": "./src/authorization/hostedEnvironmentSessions.ts",
+      "import": "./src/authorization/hostedEnvironmentSessions.ts"
+    },
     "./authorization/hostedStores": {
       "types": "./src/authorization/hostedStores.ts",
       "import": "./src/authorization/hostedStores.ts"
@@ -86,9 +90,17 @@
       "types": "./src/relay/dpop.ts",
       "import": "./src/relay/dpop.ts"
     },
+    "./relay/earlyRelaySocket": {
+      "types": "./src/relay/earlyRelaySocket.ts",
+      "import": "./src/relay/earlyRelaySocket.ts"
+    },
     "./relay/ecdsa": {
       "types": "./src/relay/ecdsa.ts",
       "import": "./src/relay/ecdsa.ts"
+    },
+    "./relay/environmentAttemptBinding": {
+      "types": "./src/relay/environmentAttemptBinding.ts",
+      "import": "./src/relay/environmentAttemptBinding.ts"
     },
     "./relay/reconnectPolicy": {
       "types": "./src/relay/reconnectPolicy.ts",
@@ -114,6 +126,14 @@
       "types": "./src/state/tasks/index.ts",
       "import": "./src/state/tasks/index.ts"
     },
+    "./state/nodeUpdate": {
+      "types": "./src/state/nodeUpdate/index.ts",
+      "import": "./src/state/nodeUpdate/index.ts"
+    },
+    "./updates": {
+      "types": "./src/updates/index.ts",
+      "import": "./src/updates/index.ts"
+    },
     "./state/orchestration": {
       "types": "./src/state/orchestration/index.ts",
       "import": "./src/state/orchestration/index.ts"
@@ -121,6 +141,14 @@
     "./state/threads": {
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
+    },
+    "./state/threads/threadBodyResidency": {
+      "types": "./src/state/threads/threadBodyResidency.ts",
+      "import": "./src/state/threads/threadBodyResidency.ts"
+    },
+    "./state/threads/threadContentCachePolicy": {
+      "types": "./src/state/threads/threadContentCachePolicy.ts",
+      "import": "./src/state/threads/threadContentCachePolicy.ts"
     },
     "./state/session": {
       "types": "./src/state/session/index.ts",
@@ -174,7 +202,8 @@
     "./state/lifecycle": "./src/state/lifecycle/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "typecheck": "tsc --noEmit --incremental && tsc --noEmit --incremental -p tsconfig.test.json",
+    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo && tsc-rs --noEmit -p tsconfig.test.json --incremental --tsBuildInfoFile .turbo/tsc-rs.test.tsbuildinfo",
     "test": "vp test run"
   },
   "dependencies": {

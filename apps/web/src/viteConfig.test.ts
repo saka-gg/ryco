@@ -119,6 +119,16 @@ describe("web Vite config", () => {
     expect(build?.rolldownOptions?.output?.chunkFileNames).toBeTypeOf("function");
   });
 
+  it("groups the cold hosted routes' package modules only in hosted builds", () => {
+    const groupCount = (clientMode: "hosted-hub" | "standard") => {
+      const codeSplitting = (createWebViteConfig(clientMode) as ViteConfigWithOptimizeDeps).build
+        ?.rolldownOptions?.output?.codeSplitting as { readonly groups: ReadonlyArray<unknown> };
+      return codeSplitting.groups.length;
+    };
+    // Standard builds keep their chunk layout.
+    expect(groupCount("hosted-hub")).toBe(groupCount("standard") + 1);
+  });
+
   it("builds ES workers so the diff worker stops inlining the Shiki wasm", () => {
     expect((createWebViteConfig() as ViteConfigWithOptimizeDeps).worker?.format).toBe("es");
   });

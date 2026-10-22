@@ -2,7 +2,11 @@ name: PR Vouch
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+    # Validation follows code changes. ready_for_review and converted_to_draft
+    # change no code, and a dispatch for them would cancel and restart the run
+    # for the same head; /recheck-vouch re-runs validation explicitly. `closed`
+    # only stops validation (see stop-validation).
+    types: [opened, reopened, synchronize, closed]
   issue_comment:
     types: [created]
   push:
@@ -18,8 +22,42 @@ permissions:
   pull-requests: read
 
 jobs:
+  # A closed or merged PR needs no validation: ci.yml validates what lands on
+  # main. One more dispatch joins the PR's concurrency group in
+  # pull-request-validation.yml, which cancels the run in flight, and the new
+  # run's Gate skips the closed PR. This runs for every author, since a
+  # maintainer may have dispatched validation for an unvouched PR. Like the
+  # label job, it runs a fixed script on the event's PR number and never
+  # checks out or executes PR code.
+  stop-validation:
+    name: Stop validation for PR ${{ github.event.pull_request.number }}
+    if: ${{ github.event_name == 'pull_request_target' && github.event.action == 'closed' }}
+    permissions:
+      # repository_dispatch
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch validation for the closed PR
+        uses: actions/github-script@v8
+        with:
+          retries: 3
+          script: |
+            const pr = context.payload.pull_request;
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              event_type: "trusted-pr-validation",
+              client_payload: {
+                pr: pr.number,
+                source: "closed",
+              },
+            });
+            core.info(`Dispatched validation for ${pr.merged ? "merged" : "closed"} PR #${pr.number} to stop the run in flight.`);
+
   collect-targets:
     name: Collect PR targets
+    if: ${{ github.event_name != 'pull_request_target' || github.event.action != 'closed' }}
     permissions:
       contents: read
       pull-requests: read
@@ -208,8 +246,9 @@ jobs:
 
             // Repository dispatch always runs a workflow from the default
             // branch, so no pull-request code is evaluated before this trust
-            // decision. On a synchronize event, dispatch again to validate
-            // the new merge ref even when the author was already trusted.
+            // decision. Every opened, reopened, or synchronize event and every
+            // /recheck-vouch validates the current merge even when the author
+            // was already trusted; a VOUCHED.td push only newly trusted authors.
             if (nextLabelName === "vouch:trusted" && (context.eventName !== "push" || !wasTrusted)) {
               await github.rest.repos.createDispatchEvent({
                 owner: context.repo.owner,
@@ -217,7 +256,11 @@ jobs:
                 event_type: "trusted-pr-validation",
                 client_payload: {
                   pr: issueNumber,
-                  source: context.eventName,
+                  // Names the validation run, e.g. "PR #12 (synchronize)".
+                  source:
+                    context.eventName === "pull_request_target"
+                      ? context.payload.action
+                      : context.eventName,
                 },
               });
               core.info(`Dispatched trusted validation for PR #${issueNumber}.`);

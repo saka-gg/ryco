@@ -1,12 +1,12 @@
-import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
+import {
+  getReportedThreadCapabilitiesSnapshot,
+  getShellSettlementRulesSnapshot,
+  subscribeReportedThreadCapabilities,
+} from "@ryco/client-runtime/rpc";
 import { useMemo, useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { getCachedHubNodeRoster, subscribeCachedHubNodeRoster } from "../../hostedHub/nodeRoster";
-import {
-  readEnvironmentDescriptor,
-  usePrimaryEnvironmentDescriptor,
-} from "../../hostedHub/primaryEnvironment";
 import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
 import { readEnvironmentApi } from "../../connection/environmentApi";
 import { selectCacheHydratedEnvironmentIds, useStore } from "../../state/threadsRuntime";
@@ -41,8 +41,17 @@ export function useHomeEnvironments(options?: {
   const rosterNodes = useSyncExternalStore(subscribeCachedHubNodeRoster, getCachedHubNodeRoster);
   const cacheProvenanceEnvironmentIds = useStore(useShallow(selectCacheHydratedEnvironmentIds));
   const shellCurrentByEnvironmentId = useStore(useShallow(selectShellCurrentByEnvironmentId));
-  const primaryDescriptor = usePrimaryEnvironmentDescriptor();
-  const serverConfigs = useEnvironmentServerConfigs();
+  // Changes only when a node's thread capabilities or auto-settle rule do, not on config pushes.
+  const reportedThreadCapabilities = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getReportedThreadCapabilitiesSnapshot,
+    getReportedThreadCapabilitiesSnapshot,
+  );
+  const shellSettlementRules = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getShellSettlementRulesSnapshot,
+    getShellSettlementRulesSnapshot,
+  );
   // Wave 4: trust is keyed by the roster's Hub-minted node id, which is why the
   // roster records go in whole rather than the environment ids alone. The store
   // snapshot is a stable reference between commits, so this does not re-derive
@@ -76,14 +85,14 @@ export function useHomeEnvironments(options?: {
   return useMemo(
     () =>
       buildHomeEnvironments({
-        serverConfigs,
+        reportedThreadCapabilities,
+        shellSettlementRules,
         direct: directRows.map((row) => ({
           environmentId: row.record.environmentId,
           label: row.record.label,
           connectionState: row.runtime.connectionState,
           role: row.runtime.role,
-          threadSnoozeSupported: row.runtime.descriptor?.capabilities.threadSnooze ?? false,
-          threadSettlementSupported: row.runtime.descriptor?.capabilities.threadSettlement ?? false,
+          descriptorCapabilities: row.runtime.descriptor?.capabilities ?? null,
           shellCurrent: shellCurrentByEnvironmentId[row.record.environmentId] === true,
           apiAvailable: readEnvironmentApi(row.record.environmentId) !== undefined,
         })),
@@ -95,16 +104,6 @@ export function useHomeEnvironments(options?: {
             transportStatus: connection.transportStatus,
             sessionStatus: connection.sessionStatus,
             role: connection.effectiveRole,
-            threadSnoozeSupported:
-              (connection.environmentId === primaryDescriptor?.environmentId
-                ? primaryDescriptor
-                : readEnvironmentDescriptor(connection.environmentId)
-              )?.capabilities.threadSnooze ?? false,
-            threadSettlementSupported:
-              connection.environmentId === primaryDescriptor?.environmentId
-                ? primaryDescriptor.capabilities.threadSettlement
-                : (readEnvironmentDescriptor(connection.environmentId)?.capabilities
-                    .threadSettlement ?? false),
             shellCurrent: shellCurrentByEnvironmentId[connection.environmentId] === true,
             apiAvailable: readEnvironmentApi(connection.environmentId) !== undefined,
           })),
@@ -130,10 +129,10 @@ export function useHomeEnvironments(options?: {
       eligibleHostedEnvironmentIds,
       hosted,
       lastSeenNow,
-      primaryDescriptor,
-      serverConfigs,
+      reportedThreadCapabilities,
       rosterNodes,
       shellCurrentByEnvironmentId,
+      shellSettlementRules,
       trustByEnvironmentId,
     ],
   );

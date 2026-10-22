@@ -62,6 +62,7 @@ import { Button } from "../ui/button";
 import { Group, GroupSeparator } from "../ui/group";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
+import { DesktopConversationCacheRow } from "./DesktopConversationCacheRow";
 import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
 import { savedChangeRelaunch, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import {
@@ -2709,6 +2710,7 @@ export function ConnectionsSettings() {
                 {renderEndpointRows("endpoint-rail")}
                 {renderTailscaleRow()}
                 <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
+                <DesktopConversationCacheRow desktopBridge={desktopBridge} />
               </>
             ) : (
               renderDisabledNetworkAccessRow()

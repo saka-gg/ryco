@@ -453,6 +453,8 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
     };
 
     const feed = yield* makeLocalTaskChangeFeed();
+    // Published only after the write committed, so a list read stamped with the feed's position
+    // holds every change counted in it.
     const changed = (taskId: string, deleted = false) => feed.publish(taskId, deleted);
     /** The task a start belongs to, for its change: none once the start is gone. */
     const changedStart = (commandId: string) =>
@@ -467,6 +469,8 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
       get,
       list: (input) =>
         Effect.gen(function* () {
+          // Read before the page's query: every change counted in it committed before the read.
+          const position = yield* feed.position;
           const decoded = yield* Schema.decodeUnknownEffect(LocalTaskListInput)(input);
           const limit = decoded.limit ?? 50;
           const rows =
@@ -474,7 +478,11 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
             FROM local_tasks WHERE deleted_at IS NULL AND task_id > ${decoded.afterId ?? ""}
             ORDER BY task_id ASC LIMIT ${limit + 1}`;
           const tasks = yield* presentMany(rows.slice(0, limit));
-          return { tasks, nextCursor: rows.length > limit ? tasks.at(-1)!.taskId : null };
+          return {
+            tasks,
+            nextCursor: rows.length > limit ? tasks.at(-1)!.taskId : null,
+            position,
+          };
         }).pipe(Effect.mapError(mapError)),
       search: (input) =>
         Effect.gen(function* () {

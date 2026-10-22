@@ -46,6 +46,7 @@ interface FakeSocket extends NativeSocketLike {
   readonly headers: Readonly<Record<string, string>>;
   emit: (type: string, event?: unknown) => void;
   closed: { code?: number; reason?: string } | null;
+  readonly closeCalls: Array<{ code?: number; reason?: string }>;
   setReadyState: (value: number) => void;
   setBufferedAmount: (value: number) => void;
 }
@@ -65,6 +66,7 @@ function createFakeSocket(headers: Readonly<Record<string, string>>): FakeSocket
     sent: [],
     headers,
     closed: null,
+    closeCalls: [],
     send: (data) => {
       socket.sent.push(data);
     },
@@ -73,6 +75,9 @@ function createFakeSocket(headers: Readonly<Record<string, string>>): FakeSocket
         ...(code === undefined ? {} : { code }),
         ...(reason === undefined ? {} : { reason }),
       };
+      socket.closeCalls.push(socket.closed);
+      // As on a real socket, closing moves it to CLOSING.
+      readyState = 2;
     },
     addEventListener: (type, listener) => {
       const set = listeners.get(type) ?? [];
@@ -631,5 +636,106 @@ describe("early relay socket", () => {
     pre.socket.discard();
     await drain();
     expect(pre.sockets).toHaveLength(0);
+  });
+
+  it("replays what the early socket received before it was adopted", async () => {
+    const pre = early();
+    await drain();
+    const socket = pre.sockets[0]!;
+    socket.setReadyState(1);
+    socket.emit("open");
+    // The Hub's first frame can land before the attempt holds its ticket.
+    emitFrame(socket, { type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
+    expect(socket.sent).toHaveLength(0);
+
+    const harness = build({ earlySocket: pre.socket });
+    await drain();
+    expect(harness.sockets).toHaveLength(0);
+    expect(sentTypes(socket)).toEqual(["auth"]);
+    emitFrame(socket, {
+      type: "channel.open",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      capability: "ryco.rpc",
+      effectiveRole: "operator",
+    });
+    emitFrame(socket, { type: "channel.accept", ...VERSION, channelId: CHANNEL_ID });
+    await drain();
+    expect(harness.events.map((event) => event.type)).toContain("open");
+  });
+
+  it("closes the early socket exactly once when it is discarded repeatedly", async () => {
+    const pre = early();
+    await drain();
+    pre.sockets[0]!.setReadyState(1);
+    pre.sockets[0]!.emit("open");
+    pre.socket.discard();
+    pre.socket.discard();
+    expect(pre.sockets[0]!.closeCalls).toEqual([{ code: 1000, reason: "closed" }]);
+    await expect(pre.socket.adopt()).resolves.toBeNull();
+    expect(pre.sockets[0]!.closeCalls).toHaveLength(1);
+  });
+
+  it("closes the early socket once when it errors before adoption", async () => {
+    const pre = early();
+    await drain();
+    pre.sockets[0]!.setReadyState(1);
+    pre.sockets[0]!.emit("open");
+    pre.sockets[0]!.emit("error");
+    expect(pre.sockets[0]!.closeCalls).toHaveLength(1);
+    const harness = build({ earlySocket: pre.socket });
+    await drain();
+    expect(pre.sockets[0]!.closeCalls).toHaveLength(1);
+    expect(sentTypes(pre.sockets[0]!)).toEqual([]);
+    expect(harness.sockets).toHaveLength(1);
+  });
+
+  it("does not close an early socket that already closed itself", async () => {
+    const pre = early();
+    await drain();
+    pre.sockets[0]!.setReadyState(3);
+    pre.sockets[0]!.emit("close", { code: 1006, reason: "gone" });
+    await expect(pre.socket.adopt()).resolves.toBeNull();
+    expect(pre.sockets[0]!.closeCalls).toHaveLength(0);
+  });
+
+  it("keeps an adopted socket open when it is discarded afterwards", async () => {
+    const pre = early();
+    const harness = build({ earlySocket: pre.socket });
+    await drain();
+    pre.socket.discard();
+    expect(pre.sockets[0]!.closeCalls).toHaveLength(0);
+    expect(harness.sockets).toHaveLength(0);
+  });
+
+  it("opens no early socket when its proof cannot be prepared, and the attempt opens one fresh socket", async () => {
+    const createSocket = vi.fn();
+    const pre = new MobileEarlyRelaySocket({
+      url: RELAY_URL,
+      readBearerToken: () => TOKEN,
+      dpopSigner: async () => {
+        throw new Error("enclave unavailable");
+      },
+      createSocket,
+    });
+    await drain();
+    expect(createSocket).not.toHaveBeenCalled();
+
+    const harness = build({ earlySocket: pre });
+    await drain();
+    expect(createSocket).not.toHaveBeenCalled();
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.sockets[0]!.headers).toEqual({ Authorization: `DPoP ${TOKEN}`, DPoP: PROOF });
+  });
+
+  it("opens no early socket when no bearer token is held", async () => {
+    const createSocket = vi.fn();
+    const pre = new MobileEarlyRelaySocket({
+      url: RELAY_URL,
+      readBearerToken: () => null,
+      createSocket,
+    });
+    await expect(pre.adopt()).resolves.toBeNull();
+    expect(createSocket).not.toHaveBeenCalled();
   });
 });

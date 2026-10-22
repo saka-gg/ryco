@@ -3,6 +3,7 @@ import { getPreviewFileSession, resetPreviewFileSessionsForTests } from "./previ
 import { createPreviewFileDocument } from "./PreviewFileEditSession";
 import {
   type EnvironmentApi,
+  EventId,
   type MessageId,
   type OrchestrationReadModel,
   ORCHESTRATION_WS_METHODS,
@@ -13,6 +14,8 @@ import {
   WS_METHODS,
   DEFAULT_AGENT_TOKEN_MODE,
 } from "@ryco/contracts";
+import { RESTART_INTERRUPTION_NOTICE } from "@ryco/client-runtime/state/threads";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { useMessageQueueStore } from "../messageQueueStore";
@@ -1003,6 +1006,75 @@ describe("ChatView Conversation (full app)", () => {
       expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1);
     } finally {
       __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows a restart release as a quiet interruption line, not a thread error", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "restart-release-existing" as MessageId,
+      targetText: "Existing turn",
+    });
+    const base = snapshot.threads[0]!;
+    const released = {
+      ...base,
+      session: {
+        ...base.session!,
+        status: "error" as const,
+        lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+      },
+    };
+    const errorToast = () =>
+      document.querySelector<HTMLElement>('[data-slot="toast-root"][data-type="error"]');
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: { ...snapshot, threads: [released] },
+    });
+    try {
+      await waitForComposerEditor();
+      await expect.element(page.getByText(RESTART_INTERRUPTION_NOTICE)).toBeVisible();
+      await waitForLayout();
+      expect(errorToast()).toBeNull();
+
+      // A node that explains the interruption itself leaves no second line.
+      const turnId = "turn-restart-released" as TurnId;
+      windowSequence += 1;
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThreadWindow, {
+        kind: "snapshot",
+        snapshot: toThreadWindowSnapshot(windowSequence, {
+          ...released,
+          latestTurn: {
+            turnId,
+            state: "interrupted",
+            requestedAt: base.createdAt,
+            startedAt: base.createdAt,
+            completedAt: base.updatedAt,
+            assistantMessageId: null,
+          },
+          activities: [
+            {
+              id: EventId.make("restart-continuation-notice"),
+              tone: "info",
+              kind: "restart.continuation-skipped",
+              summary: "Not continued automatically after the restart.",
+              payload: { schemaVersion: 1, reason: "disabled" },
+              turnId,
+              createdAt: base.updatedAt,
+            },
+          ],
+        }),
+      });
+      await vi.waitFor(() =>
+        expect(document.body.textContent).not.toContain(RESTART_INTERRUPTION_NOTICE),
+      );
+      expect(errorToast()).toBeNull();
+
+      emitThreadSession(base, { status: "error", lastError: "Provider exited (code 1)" });
+      await vi.waitFor(() =>
+        expect(errorToast()?.textContent).toContain("Provider exited (code 1)"),
+      );
+      expect(errorToast()?.textContent).toContain("Thread error");
+    } finally {
       await mounted.cleanup();
     }
   });

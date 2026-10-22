@@ -8,7 +8,7 @@ import { PassThrough } from "node:stream";
 
 import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@ryco/contracts";
 import { SYNARA_DEVELOPMENT_BUNDLE_ID } from "@ryco/shared/desktopIdentity";
-import { describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
   DesktopAppSnapManager,
@@ -37,6 +37,20 @@ function createFakeChildProcess(): FakeChildProcess {
 async function flushPromises(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+/**
+ * `dispose()` does not wait for file work already in flight, so a late write can
+ * land while the directory is removed (ENOTEMPTY); the retries let it finish.
+ */
+function removeCaptureDirectory(directory: string): void {
+  rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+}
+
+// A test that fails between faking timers and its `finally` must not leave the
+// next test on a frozen clock, where its first real wait hangs to the timeout.
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("AppSnap permission probe freshness", () => {
   function fixture() {
@@ -844,7 +858,7 @@ describe("AppSnap helper protocol", () => {
       releaseMkdir();
       mkdir.mockRestore();
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -912,7 +926,7 @@ describe("AppSnap helper protocol", () => {
       );
     } finally {
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -1045,7 +1059,7 @@ describe("AppSnap helper protocol", () => {
     } finally {
       rename.mockRestore();
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -1138,7 +1152,7 @@ describe("AppSnap helper protocol", () => {
       finalManager.dispose();
     } finally {
       firstManager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -1187,7 +1201,7 @@ describe("AppSnap helper protocol", () => {
       restartedManager.dispose();
     } finally {
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 });
@@ -1244,7 +1258,7 @@ describe("AppSnap window picker requests", () => {
       onError,
       dispose: () => {
         manager.dispose();
-        rmSync(captureDirectory, { recursive: true, force: true });
+        removeCaptureDirectory(captureDirectory);
       },
     };
   }
@@ -1442,7 +1456,11 @@ describe("AppSnap window picker requests", () => {
       await vi.advanceTimersByTimeAsync(20_000);
       await assertion;
       releaseRename();
-      for (let index = 0; index < 6; index += 1) await flushPromises();
+      // The resumed persistence finishes writing the pending pair before it deletes it again;
+      // an empty directory is the end of that chain, however long the file system takes.
+      await vi.waitFor(() => expect(FS.readdirSync(captureDirectory)).toEqual([]), {
+        timeout: 10_000,
+      });
 
       expect(onCaptured).not.toHaveBeenCalled();
       expect(await manager.listPendingCaptures()).toHaveLength(0);
@@ -1580,7 +1598,7 @@ describe("AppSnap window picker requests", () => {
       finalManager.dispose();
     } finally {
       firstManager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 });
@@ -1619,7 +1637,7 @@ describe("AppSnap permission guide", () => {
       spawn,
       dispose: () => {
         manager.dispose();
-        rmSync(captureDirectory, { recursive: true, force: true });
+        removeCaptureDirectory(captureDirectory);
       },
     };
   }
@@ -1758,7 +1776,7 @@ describe("AppSnap permission guide", () => {
     } finally {
       vi.useRealTimers();
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -1809,7 +1827,7 @@ describe("AppSnap permission guide", () => {
     } finally {
       vi.useRealTimers();
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -1882,7 +1900,7 @@ describe("AppSnap permission guide", () => {
     } finally {
       vi.useRealTimers();
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -1943,7 +1961,7 @@ describe("AppSnap permission guide", () => {
     } finally {
       vi.useRealTimers();
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 });
@@ -2041,7 +2059,7 @@ describe("AppSnap setup registration failures", () => {
       expect(openSettingsPane).not.toHaveBeenCalled();
     } finally {
       manager.dispose();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 
@@ -2081,7 +2099,7 @@ describe("AppSnap setup registration failures", () => {
     } finally {
       manager.dispose();
       vi.useRealTimers();
-      rmSync(captureDirectory, { recursive: true, force: true });
+      removeCaptureDirectory(captureDirectory);
     }
   });
 });
@@ -2145,7 +2163,7 @@ describe("AppSnap permission setup sessions", () => {
       onPermissionGuideState,
       dispose: () => {
         manager.dispose();
-        rmSync(captureDirectory, { recursive: true, force: true });
+        removeCaptureDirectory(captureDirectory);
       },
     };
   }
@@ -2321,7 +2339,7 @@ describe("explicit AppSnap observation", () => {
       expect(FS.existsSync(outputDirectory)).toBe(false);
     } finally {
       manager.dispose();
-      rmSync(directory, { recursive: true, force: true });
+      removeCaptureDirectory(directory);
     }
   });
   it("cancels only the matching request and rejects concurrent requests", async () => {
@@ -2353,7 +2371,7 @@ describe("explicit AppSnap observation", () => {
       expect(child.kill).toHaveBeenCalledOnce();
     } finally {
       manager.dispose();
-      rmSync(directory, { recursive: true, force: true });
+      removeCaptureDirectory(directory);
     }
   });
 });
@@ -2390,7 +2408,7 @@ describe("AppSnap bounded helper shutdown", () => {
     } finally {
       vi.useRealTimers();
       manager.dispose();
-      rmSync(directory, { recursive: true, force: true });
+      removeCaptureDirectory(directory);
     }
   });
 });

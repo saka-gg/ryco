@@ -1,0 +1,239 @@
+diff --git a/dist/NodeHttpServer.js b/dist/NodeHttpServer.js
+index 566aee016af50c8c6d8f1286495ee615ed2c61d6..6b70662835aec0f474a1472be04327e5486b76c7 100644
+--- a/dist/NodeHttpServer.js
++++ b/dist/NodeHttpServer.js
+@@ -70,10 +70,6 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
+       }
+     });
+   }).pipe(Effect.cached);
+-  const preemptiveShutdown = options.disablePreemptiveShutdown ? Effect.void : Effect.timeoutOrElse(shutdown, {
+-    duration: options.gracefulShutdownTimeout ?? Duration.seconds(20),
+-    orElse: () => Effect.void
+-  });
+   yield* Scope.addFinalizer(scope, shutdown);
+   yield* Effect.callback(resume => {
+     function onError(cause) {
+@@ -96,8 +92,63 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
+     ...options.websocket,
+     noServer: true
+   })), wss => Effect.callback(resume => {
++    // `close` waits for every client to finish, and a client that never
++    // answers its close frame would hold it for ws's 30 s close timeout.
++    for (const client of wss.clients) {
++      client.terminate();
++    }
+     wss.close(() => resume(Effect.void));
+   })).pipe(Scope.provide(scope), Effect.cached);
++  // Upgraded sockets keep `server.close()` open until their fibers end, and
++  // those are interrupted only after the preemptive shutdown. Ask WebSocket
++  // clients to go away (1001) first, so a graceful shutdown waits only on
++  // in-flight HTTP requests; past the timeout, connections are closed.
++  // Upgraded sockets are not in the server's connection list, so WebSocket
++  // clients that never answered the close frame are terminated as well.
++  const closeWebSockets = Effect.flatMap(wss, wss => Effect.sync(() => {
++    for (const client of wss.clients) {
++      client.close(1001);
++    }
++  }));
++  const forceCloseConnections = Effect.flatMap(wss, wss => Effect.sync(() => {
++    server.closeAllConnections();
++    for (const client of wss.clients) {
++      client.terminate();
++    }
++  }));
++  // `server.close()` closes only the keep-alive connections idle at that
++  // moment. One whose response is still being written (a file body ends a
++  // read after the client already has every byte) would stay open until its
++  // keep-alive timeout and hold a graceful shutdown for the whole timeout, so
++  // once the server is closing, each connection closes as its own response
++  // finishes. Not `server.closeIdleConnections()`: it also destroys other
++  // connections whose response has called `end()` but is still flushing to a
++  // slow client, and drops the bytes not yet written.
++  const upgradedSockets = new WeakSet();
++  const closeConnectionIfClosing = (nodeRequest, socket) => {
++    // Skip a socket already ending (a `Connection: close` response), one Node
++    // handed to a queued pipelined response (that response closes it in
++    // turn), and one a pipelined upgrade gave to the WebSocket server.
++    if (server.listening || socket.destroyed || !socket.writable || socket._httpMessage || upgradedSockets.has(socket)) {
++      return;
++    }
++    // Closing while the request body is still arriving resets the connection,
++    // and the client can lose the response it has not read yet.
++    if (!nodeRequest.complete) {
++      nodeRequest.once("end", () => closeConnectionIfClosing(nodeRequest, socket));
++      return;
++    }
++    // As Node does after a last response: flush pending writes, then close.
++    if (typeof socket.destroySoon === "function") {
++      socket.destroySoon();
++    } else {
++      socket.end();
++    }
++  };
++  const preemptiveShutdown = options.disablePreemptiveShutdown ? Effect.void : Effect.andThen(closeWebSockets, Effect.timeoutOrElse(shutdown, {
++    duration: options.gracefulShutdownTimeout ?? Duration.seconds(20),
++    orElse: () => forceCloseConnections
++  }));
+   return HttpServer.make({
+     address: boundAddress,
+     serve: Effect.fnUntraced(function* (httpApp, middleware) {
+@@ -111,12 +162,24 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
+         middleware: middleware,
+         scope
+       });
++      // Node registers its own `finish` handling, which detaches the socket
++      // from the response and hands it to a queued pipelined response, before
++      // it emits `request`; this listener runs after.
++      const onRequest = (nodeRequest, nodeResponse) => {
++        const socket = nodeRequest.socket;
++        handler(nodeRequest, nodeResponse);
++        nodeResponse.once("finish", () => closeConnectionIfClosing(nodeRequest, socket));
++      };
++      const onUpgrade = (nodeRequest, socket, head) => {
++        upgradedSockets.add(socket);
++        upgradeHandler(nodeRequest, socket, head);
++      };
+       yield* Scope.addFinalizerExit(serveScope, () => Effect.ensuring(preemptiveShutdown, Effect.sync(() => {
+-        server.off("request", handler);
+-        server.off("upgrade", upgradeHandler);
++        server.off("request", onRequest);
++        server.off("upgrade", onUpgrade);
+       })));
+-      server.on("request", handler);
+-      server.on("upgrade", upgradeHandler);
++      server.on("request", onRequest);
++      server.on("upgrade", onUpgrade);
+     })
+   });
+ });
+diff --git a/src/NodeHttpServer.ts b/src/NodeHttpServer.ts
+index ade58dcbdf89f7bc9339deac321d560fca88ea61..fec3575935d3d03ae5176329464f88cc720b95cc 100644
+--- a/src/NodeHttpServer.ts
++++ b/src/NodeHttpServer.ts
+@@ -119,13 +119,6 @@ export const make = Effect.fnUntraced(function*(
+     })
+   }).pipe(Effect.cached)
+ 
+-  const preemptiveShutdown = options.disablePreemptiveShutdown ?
+-    Effect.void :
+-    Effect.timeoutOrElse(shutdown, {
+-      duration: options.gracefulShutdownTimeout ?? Duration.seconds(20),
+-      orElse: () => Effect.void
+-    })
+-
+   yield* Scope.addFinalizer(scope, shutdown)
+ 
+   yield* Effect.callback<void, ServeError>((resume) => {
+@@ -151,6 +144,11 @@ export const make = Effect.fnUntraced(function*(
+     Effect.sync(() => new NodeWS.WebSocketServer({ ...options.websocket, noServer: true })),
+     (wss) =>
+       Effect.callback<void>((resume) => {
++        // `close` waits for every client to finish, and a client that never
++        // answers its close frame would hold it for ws's 30 s close timeout.
++        for (const client of wss.clients) {
++          client.terminate()
++        }
+         wss.close(() => resume(Effect.void))
+       })
+   ).pipe(
+@@ -158,6 +156,67 @@ export const make = Effect.fnUntraced(function*(
+     Effect.cached
+   )
+ 
++  // Upgraded sockets keep `server.close()` open until their fibers end, and
++  // those are interrupted only after the preemptive shutdown. Ask WebSocket
++  // clients to go away (1001) first, so a graceful shutdown waits only on
++  // in-flight HTTP requests; past the timeout, connections are closed.
++  // Upgraded sockets are not in the server's connection list, so WebSocket
++  // clients that never answered the close frame are terminated as well.
++  const closeWebSockets = Effect.flatMap(wss, (wss) =>
++    Effect.sync(() => {
++      for (const client of wss.clients) {
++        client.close(1001)
++      }
++    }))
++  const forceCloseConnections = Effect.flatMap(wss, (wss) =>
++    Effect.sync(() => {
++      server.closeAllConnections()
++      for (const client of wss.clients) {
++        client.terminate()
++      }
++    }))
++  // `server.close()` closes only the keep-alive connections idle at that
++  // moment. One whose response is still being written (a file body ends a
++  // read after the client already has every byte) would stay open until its
++  // keep-alive timeout and hold a graceful shutdown for the whole timeout, so
++  // once the server is closing, each connection closes as its own response
++  // finishes. Not `server.closeIdleConnections()`: it also destroys other
++  // connections whose response has called `end()` but is still flushing to a
++  // slow client, and drops the bytes not yet written.
++  const upgradedSockets = new WeakSet<Duplex>()
++  const closeConnectionIfClosing = (nodeRequest: Http.IncomingMessage, socket: Net.Socket): void => {
++    // Skip a socket already ending (a `Connection: close` response), one Node
++    // handed to a queued pipelined response (that response closes it in
++    // turn), and one a pipelined upgrade gave to the WebSocket server.
++    if (
++      server.listening || socket.destroyed || !socket.writable || (socket as any)._httpMessage ||
++      upgradedSockets.has(socket)
++    ) {
++      return
++    }
++    // Closing while the request body is still arriving resets the connection,
++    // and the client can lose the response it has not read yet.
++    if (!nodeRequest.complete) {
++      nodeRequest.once("end", () => closeConnectionIfClosing(nodeRequest, socket))
++      return
++    }
++    // As Node does after a last response: flush pending writes, then close.
++    if (typeof socket.destroySoon === "function") {
++      socket.destroySoon()
++    } else {
++      socket.end()
++    }
++  }
++  const preemptiveShutdown = options.disablePreemptiveShutdown ?
++    Effect.void :
++    Effect.andThen(
++      closeWebSockets,
++      Effect.timeoutOrElse(shutdown, {
++        duration: options.gracefulShutdownTimeout ?? Duration.seconds(20),
++        orElse: () => forceCloseConnections
++      })
++    )
++
+   return HttpServer.make({
+     address: boundAddress,
+     serve: Effect.fnUntraced(function*(httpApp, middleware) {
+@@ -171,16 +230,28 @@ export const make = Effect.fnUntraced(function*(
+         middleware: middleware as any,
+         scope
+       })
++      // Node registers its own `finish` handling, which detaches the socket
++      // from the response and hands it to a queued pipelined response, before
++      // it emits `request`; this listener runs after.
++      const onRequest = (nodeRequest: Http.IncomingMessage, nodeResponse: Http.ServerResponse) => {
++        const socket = nodeRequest.socket
++        handler(nodeRequest, nodeResponse)
++        nodeResponse.once("finish", () => closeConnectionIfClosing(nodeRequest, socket))
++      }
++      const onUpgrade = (nodeRequest: Http.IncomingMessage, socket: Duplex, head: Buffer) => {
++        upgradedSockets.add(socket)
++        upgradeHandler(nodeRequest, socket, head)
++      }
+       yield* Scope.addFinalizerExit(serveScope, () =>
+         Effect.ensuring(
+           preemptiveShutdown,
+           Effect.sync(() => {
+-            server.off("request", handler)
+-            server.off("upgrade", upgradeHandler)
++            server.off("request", onRequest)
++            server.off("upgrade", onUpgrade)
+           })
+         ))
+-      server.on("request", handler)
+-      server.on("upgrade", upgradeHandler)
++      server.on("request", onRequest)
++      server.on("upgrade", onUpgrade)
+     })
+   })
+ })

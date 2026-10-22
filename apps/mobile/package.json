@@ -4,8 +4,11 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "dev": "expo start --clear",
-    "dev:client": "APP_VARIANT=development expo start --dev-client --scheme ryco-dev --clear --lan",
+    "dev": "expo start",
+    "dev:clean": "expo start --clear",
+    "dev:client": "APP_VARIANT=development expo start --dev-client --scheme ryco-dev --lan",
+    "dev:client:clean": "APP_VARIANT=development expo start --dev-client --scheme ryco-dev --clear --lan",
+    "bundle:check": "CI=1 EXPO_OFFLINE=1 EXPO_NO_TELEMETRY=1 APP_VARIANT=production expo export --platform all --output-dir dist/bundle-check",
     "start": "expo start",
     "start:dev": "APP_VARIANT=development expo start",
     "start:preview": "APP_VARIANT=preview expo start",
@@ -21,14 +24,14 @@
     "config:preview": "APP_VARIANT=preview expo config",
     "config:prod": "APP_VARIANT=production expo config",
     "test": "vp test run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit --incremental",
+    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo"
   },
   "dependencies": {
     "@callstack/liquid-glass": "^0.8.1",
     "@effect/atom-react": "catalog:",
     "@expo-google-fonts/dm-sans": "^0.4.2",
     "@expo/metro-runtime": "~57.0.15",
-    "@expo/ui": "~57.0.17",
     "@legendapp/list": "3.3.10",
     "@pierre/diffs": "1.4.1",
     "@react-native-menu/menu": "^2.0.0",
@@ -39,7 +42,6 @@
     "@ryco/contracts": "workspace:*",
     "@ryco/mobile-device-key": "workspace:*",
     "@ryco/mobile-markdown-text": "workspace:*",
-    "@ryco/mobile-review-diff-native": "workspace:*",
     "@ryco/shared": "workspace:*",
     "@shikijs/core": "4.4.3",
     "@shikijs/engine-javascript": "4.4.3",
@@ -76,12 +78,9 @@
     "expo-web-browser": "~57.0.2",
     "fflate": "0.8.3",
     "punycode": "^2.3.1",
-    "ratex-react-native": "0.1.14",
     "react": "19.2.3",
-    "react-dom": "19.2.3",
     "react-native": "0.86.3",
     "react-native-gesture-handler": "~2.32.0",
-    "react-native-image-viewing": "^0.2.2",
     "react-native-keyboard-controller": "1.21.9",
     "react-native-nitro-markdown": "0.10.0",
     "react-native-nitro-modules": "0.36.5",
@@ -105,6 +104,7 @@
     "@types/react": "~19.2.18",
     "@types/react-dom": "^19.2.7",
     "babel-preset-expo": "~57.0.11",
+    "react-dom": "19.2.3",
     "tailwindcss": "^4.3.3",
     "typescript": "catalog:"
   },
@@ -118,6 +118,10 @@
       "buildFromSource": [
         "react-native-screens",
         "@react-native-menu/menu"
+      ],
+      "exclude": [
+        "@ryco/mobile-review-diff-native",
+        "ratex-react-native"
       ]
     }
   }

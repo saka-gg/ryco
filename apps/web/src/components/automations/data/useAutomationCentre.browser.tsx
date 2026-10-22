@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTROL_WS_METHODS,
   AgentControlAutomationId,
   AgentControlRpcError,
   EnvironmentId,
@@ -23,6 +24,10 @@ const device = vi.hoisted(() => ({
   snapshotReads: 0,
   commands: [] as AutomationCentreCommand[],
   command: vi.fn(),
+  capability: vi.fn((_method: string, _environmentId?: string | null) => ({
+    allowed: true,
+    reason: null as string | null,
+  })),
   config: null as { readonly settings: { readonly agentControl: { enabled: boolean } } } | null,
 }));
 vi.mock("../../../environments/runtime", () => ({
@@ -65,7 +70,16 @@ vi.mock("../../../environmentApi", () => {
   return { readEnvironmentApi: () => api, readEnvironmentApiForConnection: () => api };
 });
 vi.mock("../../../hostedHub/capabilities", () => ({
-  useHostedRpcCapability: () => ({ allowed: true, reason: null }),
+  useHostedRpcCapability: device.capability,
+}));
+// Node labels come from the hosted directory; the centre only needs the copy rule.
+vi.mock("../../../hostedHub/state", () => ({
+  useHostedHubStore: (selector: (state: object) => unknown) =>
+    selector({ nodes: [], selectedNode: null }),
+}));
+vi.mock("../../../hostedHub/switchTarget", () => ({
+  hostedCapabilityCopy: (capability: { readonly reason: string | null }) => capability.reason,
+  hostedSwitchTargetLabel: () => null,
 }));
 
 import { useAutomationCentre, type AutomationCentreState } from "../useAutomationCentre";
@@ -104,6 +118,7 @@ beforeEach(() => {
   device.commands.length = 0;
   device.command.mockReset();
   device.command.mockResolvedValue(undefined);
+  device.capability.mockReturnValue({ allowed: true, reason: null });
   latest.clear();
 });
 afterEach(() => {
@@ -111,6 +126,18 @@ afterEach(() => {
 });
 
 describe("useAutomationCentre", () => {
+  it("gates changes on the role on the device it acts on", async () => {
+    const screen = await render(<Probe projectId={ALPHA} />);
+    await expect.element(screen.getByTestId("error-alpha")).toHaveTextContent("ok");
+    expect(device.capability).toHaveBeenCalledWith(AGENT_CONTROL_WS_METHODS.automationCommand, ENV);
+    expect(latest.get(ALPHA)?.disabledReason).toBeNull();
+
+    device.capability.mockReturnValue({ allowed: false, reason: "Not allowed." });
+    await screen.rerender(<Probe projectId={ALPHA} />);
+    expect(latest.get(ALPHA)?.disabledReason).toBe("Not allowed.");
+    screen.unmount();
+  });
+
   it("reads nothing while the device's own config says Agent Control is off", async () => {
     device.config = { settings: { agentControl: { enabled: false } } };
     const screen = await render(<Probe projectId={ALPHA} />);

@@ -25,9 +25,8 @@
     }
   },
   "scripts": {
-    "dev": "tsdown src/client.ts src/rpc.ts src/protocol.ts src/schema.ts --format esm,cjs --dts --watch --clean",
-    "build": "tsdown src/client.ts src/rpc.ts src/protocol.ts src/schema.ts --format esm,cjs --dts --clean",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental",
+    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo",
     "test": "vp test run",
     "generate": "bun run scripts/generate.ts",
     "probe": "bun run test/examples/codex-app-server-probe.ts"
@@ -40,7 +39,6 @@
     "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
-    "tsdown": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"

@@ -424,6 +424,8 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
   sendDisabledReason?: string | null | undefined;
+  sendsQueueUntilReady?: string | null | undefined;
+  mutationUnavailableReason?: string | null | undefined;
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
@@ -451,6 +453,8 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         isPreparingWorktree={props.isPreparingWorktree}
         hasSendableContent={props.hasSendableContent}
         sendDisabledReason={props.sendDisabledReason}
+        sendsQueueUntilReady={props.sendsQueueUntilReady}
+        mutationUnavailableReason={props.mutationUnavailableReason}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
@@ -549,18 +553,31 @@ export interface ComposerFooterProps {
   isPreparingWorktree: boolean;
   hasSendableContent: boolean;
   sendDisabledReason?: string | null | undefined;
+  /** Set while a send waits in the queue for the environment; the caption says when it goes out. */
+  sendsQueueUntilReady?: string | null | undefined;
+  /**
+   * Why actions that must reach the node now are unavailable, worded for this
+   * environment; `null` when they are available.
+   */
+  mutationUnavailableReason?: string | null | undefined;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
 }
 
 export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooterProps) {
-  // The read-only mutation capability, not a connectivity probe: the composer
-  // asks whether the dispatch method is available and renders accordingly. No
-  // second readiness or authorization implementation lives here.
-  const mutationCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
+  // The read-only mutation capability of this composer's environment, not a
+  // connectivity probe: the composer asks whether the dispatch method is
+  // available and renders accordingly. No second readiness or authorization
+  // implementation lives here; the parent only words the refusal.
+  const mutationCapability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    props.environmentId,
+  );
   const mutationsBlocked = !mutationCapability.allowed;
-  const mutationsBlockedReason = mutationCapability.reason;
+  const mutationsBlockedReason = mutationsBlocked
+    ? (props.mutationUnavailableReason ?? mutationCapability.reason)
+    : null;
   const isPhoneTier = usePresentationTier() === "phone";
   const phoneSessionPolicyReady = usePhoneThreadSurfaceReady(
     LazyPhoneSessionPolicyControl,
@@ -735,6 +752,8 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           isPreparingWorktree={props.isPreparingWorktree}
           hasSendableContent={props.hasSendableContent}
           sendDisabledReason={props.sendDisabledReason}
+          sendsQueueUntilReady={props.sendsQueueUntilReady}
+          mutationUnavailableReason={props.mutationUnavailableReason}
           preserveComposerFocusOnPointerDown={props.isMobileViewport}
           onPreviousPendingQuestion={props.onPreviousPendingQuestion}
           onInterrupt={props.onInterrupt}

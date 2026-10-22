@@ -14,8 +14,12 @@ import {
   getPreferencesSnapshot,
   hydratePreferences,
   isPreferencesHydrated,
+  isThreadContentCacheEnabled,
   resetPreferencesStoreForTests,
+  sanitizePreferences,
+  subscribePreferences,
   updatePreferences,
+  whenPreferencesHydrated,
 } from "./preferencesStore";
 
 async function flush() {
@@ -113,4 +117,88 @@ it("migrates model-only favorites unchanged and reloads multiple effort presets"
   hydratePreferences();
   await flush();
   expect(getPreferencesSnapshot().favorites).toEqual(favorites);
+});
+
+describe("keeping recent conversations on this device", () => {
+  it("is on until the user turns it off, before and after preferences load", async () => {
+    expect(getPreferencesSnapshot().rememberThreadContent).toBeUndefined();
+    expect(isThreadContentCacheEnabled()).toBe(true);
+
+    kvStore.set("ryco.preferences", JSON.stringify({ baseFontSize: 18 }));
+    hydratePreferences();
+    await flush();
+    expect(getPreferencesSnapshot().rememberThreadContent).toBeUndefined();
+    expect(isThreadContentCacheEnabled()).toBe(true);
+    expect(isThreadContentCacheEnabled({})).toBe(true);
+    expect(isThreadContentCacheEnabled({ rememberThreadContent: true })).toBe(true);
+    expect(isThreadContentCacheEnabled({ rememberThreadContent: false })).toBe(false);
+  });
+
+  it("persists the choice and reads it back after a restart", async () => {
+    updatePreferences({ rememberThreadContent: false });
+    expect(isThreadContentCacheEnabled()).toBe(false);
+    await flush();
+    expect(JSON.parse(kvStore.get("ryco.preferences") ?? "{}")).toMatchObject({
+      rememberThreadContent: false,
+    });
+
+    resetPreferencesStoreForTests();
+    hydratePreferences();
+    await flush();
+    expect(getPreferencesSnapshot().rememberThreadContent).toBe(false);
+    expect(isThreadContentCacheEnabled()).toBe(false);
+
+    updatePreferences({ rememberThreadContent: true });
+    await flush();
+    resetPreferencesStoreForTests();
+    hydratePreferences();
+    await flush();
+    expect(getPreferencesSnapshot().rememberThreadContent).toBe(true);
+  });
+
+  it("keeps the other preferences when the choice changes", async () => {
+    updatePreferences({ baseFontSize: 17, projectGroupingEnabled: false });
+    updatePreferences({ rememberThreadContent: false });
+    await flush();
+    expect(getPreferencesSnapshot()).toMatchObject({
+      baseFontSize: 17,
+      projectGroupingEnabled: false,
+      rememberThreadContent: false,
+    });
+  });
+
+  it("drops a stored value that is not a boolean, which leaves the default", async () => {
+    for (const stored of ["no", 0, null, {}]) {
+      expect(
+        sanitizePreferences({ rememberThreadContent: stored as never }).rememberThreadContent,
+      ).toBeUndefined();
+    }
+    kvStore.set("ryco.preferences", JSON.stringify({ rememberThreadContent: "no" }));
+    hydratePreferences();
+    await flush();
+    expect(isThreadContentCacheEnabled()).toBe(true);
+  });
+
+  it("resolves once the saved preferences are loaded and tells subscribers about changes", async () => {
+    kvStore.set("ryco.preferences", JSON.stringify({ rememberThreadContent: false }));
+    const changed = vi.fn();
+    const unsubscribe = subscribePreferences(changed);
+
+    let loaded = false;
+    const ready = whenPreferencesHydrated().then(() => {
+      loaded = true;
+    });
+    expect(isPreferencesHydrated()).toBe(false);
+    await ready;
+    expect(loaded).toBe(true);
+    expect(isThreadContentCacheEnabled()).toBe(false);
+    expect(changed).toHaveBeenCalled();
+
+    // Already loaded: it resolves at once, without reading again.
+    await whenPreferencesHydrated();
+    unsubscribe();
+    changed.mockClear();
+    updatePreferences({ rememberThreadContent: true });
+    expect(changed).not.toHaveBeenCalled();
+  });
 });

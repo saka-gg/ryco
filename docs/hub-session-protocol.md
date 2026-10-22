@@ -112,6 +112,11 @@ Fail-closed rules:
   `ready`; those attempts use an HTTP ticket.
 - An unsupported relay minor is refused like an HTTP `426`, with the `protocol_unsupported` close.
 
+Several concurrent logical streams per session are normal: a hosted Web tab keeps a warm set of up
+to three environments, each with its own logical stream (plus a replacement while one reconnects),
+and switching among them reuses the streams already open. This needs no protocol change; each
+stream still establishes its own authority as above.
+
 There are at most eight logical streams per session. The outer queue is bounded at
 2 MiB including native socket buffering and at most 2,048 queued frames; individual relay and process limits still
 apply. Send capacity reserves room for control frames. Tickets and queued payload bytes

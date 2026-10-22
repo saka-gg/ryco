@@ -29,19 +29,7 @@ function harness(initial: WakeState) {
 }
 
 describe("retained node wake after a foreground recovery", () => {
-  it("wakes retained nodes as soon as the recovery has revalidated access", () => {
-    const { retainedWake, wake, listeners } = harness({
-      accountStatus: "authenticated",
-      browserStatus: "current",
-    });
-
-    retainedWake.begin()();
-
-    expect(wake).toHaveBeenCalledOnce();
-    expect(listeners.size).toBe(0);
-  });
-
-  it("holds the wake until the access retry has made a stale browser current", () => {
+  it("holds the wake until the access retry has revalidated a stale browser", () => {
     const { retainedWake, wake, listeners, set } = harness({
       accountStatus: "authenticated",
       browserStatus: "stale",
@@ -51,16 +39,49 @@ describe("retained node wake after a foreground recovery", () => {
     expect(wake).not.toHaveBeenCalled();
 
     set({ browserStatus: "checking-access" });
-    set({ browserStatus: "synchronizing" });
     expect(wake).not.toHaveBeenCalled();
 
-    set({ browserStatus: "current" });
+    // Revalidated: only the selected node's own session is still establishing,
+    // and it must not hold the other nodes back.
+    set({ browserStatus: "synchronizing" });
     expect(wake).toHaveBeenCalledOnce();
     expect(listeners.size).toBe(0);
 
     set({ browserStatus: "current" });
     expect(wake).toHaveBeenCalledOnce();
   });
+
+  it.each(["current", "synchronizing"] as const)(
+    "wakes at once when the recovery settles with a %s browser",
+    (browserStatus) => {
+      const { retainedWake, wake, listeners } = harness({
+        accountStatus: "authenticated",
+        browserStatus,
+      });
+
+      retainedWake.begin()();
+
+      expect(wake).toHaveBeenCalledOnce();
+      expect(listeners.size).toBe(0);
+    },
+  );
+
+  it.each(["checking-access", "stale", "suspended", "offline"] as const)(
+    "waits while the browser is %s",
+    (browserStatus) => {
+      const { retainedWake, wake, listeners, set } = harness({
+        accountStatus: "authenticated",
+        browserStatus,
+      });
+
+      retainedWake.begin()();
+      expect(wake).not.toHaveBeenCalled();
+      expect(listeners.size).toBe(1);
+
+      set({ browserStatus: "current" });
+      expect(wake).toHaveBeenCalledOnce();
+    },
+  );
 
   it("holds the wake until an unreachable account's access check succeeds", () => {
     const { retainedWake, wake, set } = harness({

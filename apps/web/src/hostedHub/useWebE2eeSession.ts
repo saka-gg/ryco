@@ -1,7 +1,16 @@
-import { useSyncExternalStore } from "react";
+import type { EnvironmentId } from "@ryco/contracts";
+import { useCallback, useSyncExternalStore } from "react";
 
 import type { WebHostedE2eeChannelStatus } from "./connectionStatus";
-import { subscribeWebE2eeSession, webE2eeSessionState } from "./e2eeSession";
+import {
+  subscribeWebE2eeOpenChannels,
+  subscribeWebE2eeSession,
+  subscribeWebE2eeSessionFor,
+  webE2eeOpenChannelStatuses,
+  webE2eeSessionState,
+  webE2eeSessionStateFor,
+  type WebE2eeSessionState,
+} from "./e2eeSession";
 
 /**
  * React binding for this tier's §13 channel projection.
@@ -13,9 +22,32 @@ import { subscribeWebE2eeSession, webE2eeSessionState } from "./e2eeSession";
  */
 const channelStatus = (): WebHostedE2eeChannelStatus => webE2eeSessionState().status;
 
+const statusOf = (state: WebE2eeSessionState): WebHostedE2eeChannelStatus => state.status;
+const verificationCodeOf = (state: WebE2eeSessionState): string | null => state.verificationCode;
+
+/**
+ * One field of one environment's projection, displayed or not, re-read only
+ * when that environment's entry changes.
+ */
+function useWebE2eeSessionFieldFor<T>(
+  environmentId: EnvironmentId,
+  field: (state: WebE2eeSessionState) => T,
+): T {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeWebE2eeSessionFor(environmentId, listener),
+    [environmentId],
+  );
+  const read = useCallback(
+    () => field(webE2eeSessionStateFor(environmentId)),
+    [environmentId, field],
+  );
+  return useSyncExternalStore(subscribe, read, read);
+}
+
 /**
  * What `docs/relay-e2ee-protocol.md` §4.4 locked on the channel behind this
- * session, for the hosted status derivation.
+ * session, for the hosted status derivation. It is the displayed environment's
+ * channel — the selected node's — and never another node's.
  *
  * EVERY HOSTED STATUS SURFACE TAKES IT, and §12.2 is why: "A client that falls
  * back MUST label the channel **legacy** in every user-facing surface and
@@ -35,10 +67,34 @@ export function useWebE2eeChannelStatus(): WebHostedE2eeChannelStatus {
   return useSyncExternalStore(subscribeWebE2eeSession, channelStatus, channelStatus);
 }
 
+/**
+ * The distinct states of every channel open in this tab, displayed or not, so a
+ * surface that speaks for the whole tab can tell "no channel is open" from "no
+ * channel behind the selection".
+ */
+export function useWebE2eeOpenChannelStatuses(): readonly WebHostedE2eeChannelStatus[] {
+  return useSyncExternalStore(
+    subscribeWebE2eeOpenChannels,
+    webE2eeOpenChannelStatuses,
+    webE2eeOpenChannelStatuses,
+  );
+}
+
+/**
+ * {@link useWebE2eeChannelStatus} for one environment's channel, displayed or
+ * not, for a surface that describes a specific node rather than the selection.
+ */
+export function useWebE2eeChannelStatusFor(
+  environmentId: EnvironmentId,
+): WebHostedE2eeChannelStatus {
+  return useWebE2eeSessionFieldFor(environmentId, statusOf);
+}
+
 const verificationCode = (): string | null => webE2eeSessionState().verificationCode;
 
 /**
- * §13.5's rendered code for the current session, or `null`.
+ * §13.5's rendered code for the displayed environment's current session, or
+ * `null`.
  *
  * Narrowed to the one field for the reason {@link useWebE2eeChannelStatus} is:
  * the two change on different events, and a surface drawing the code should not
@@ -55,4 +111,13 @@ const verificationCode = (): string | null => webE2eeSessionState().verification
  */
 export function useWebE2eeVerificationCode(): string | null {
   return useSyncExternalStore(subscribeWebE2eeSession, verificationCode, verificationCode);
+}
+
+/**
+ * {@link useWebE2eeVerificationCode} for one environment's channel, displayed or
+ * not: the code of the session that environment's own channel locked, gated by
+ * the surface on {@link useWebE2eeChannelStatusFor} for the same environment.
+ */
+export function useWebE2eeVerificationCodeFor(environmentId: EnvironmentId): string | null {
+  return useWebE2eeSessionFieldFor(environmentId, verificationCodeOf);
 }

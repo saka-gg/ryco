@@ -69,7 +69,7 @@ import { isArchivedThreadStub, isFullThreadEntry, type Project } from "../../typ
 import { useUiStateStore } from "../../uiStateStore";
 import { filterBrowseEntries } from "../CommandPalette.logic";
 import { AnimatedHeight } from "../AnimatedHeight";
-import { getEditorLabel } from "../settings/SettingsPanels.editor";
+import { getEditorLabel } from "../settings/editorLabels.logic";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import {
   Autocomplete,

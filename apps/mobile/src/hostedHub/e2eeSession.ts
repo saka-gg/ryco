@@ -230,11 +230,23 @@ const DIAGNOSTICS_MAX = 8;
 let fallbackState: MobileE2eeSessionState = INITIAL;
 let activeEnvironmentId: string | null = null;
 const states = new Map<string, MobileE2eeSessionState>();
+/**
+ * The channel each entry's claim currently belongs to: the last one that began
+ * an attempt there and has not ended. A channel that names itself can only
+ * publish its mode lock while it is still that channel, so a channel an
+ * environment has since replaced — or one that already ended — can never
+ * overwrite the claim of the channel that replaced it.
+ */
+const currentChannels = new Map<string | null, object>();
 const listeners = new Set<() => void>();
 const environmentListeners = new Map<string, Set<() => void>>();
 
+function entryKey(environmentId?: string | null): string | null {
+  return environmentId === undefined ? activeEnvironmentId : environmentId;
+}
+
 function stateFor(environmentId?: string | null): MobileE2eeSessionState {
-  const key = environmentId === undefined ? activeEnvironmentId : environmentId;
+  const key = entryKey(environmentId);
   return key === null ? fallbackState : (states.get(key) ?? INITIAL);
 }
 
@@ -387,14 +399,37 @@ export function markMobileE2eeKeyCustodyUnavailable(environmentId?: string | nul
  * the last channel presented: both are the owner's to resolve on the ceremony
  * surface (§13.1.1's dismissal rule), and a reconnect must not silently empty
  * the comparison they are standing in front of.
+ *
+ * `channel` is the new channel's identity. Passing it makes this channel the
+ * entry's current one, which every earlier channel of the environment stops
+ * being.
  */
-export function beginMobileE2eeChannelAttempt(environmentId?: string | null): void {
+export function beginMobileE2eeChannelAttempt(
+  environmentId?: string | null,
+  channel?: object,
+): void {
+  if (channel !== undefined) currentChannels.set(entryKey(environmentId), channel);
   const state = stateFor(environmentId);
   if (state.selection === null) return;
   publish({ ...state, channel: "negotiating" }, environmentId);
 }
 
-/** No hosted channel at all — signed out, no node selected, or none open yet. */
+/**
+ * The channel ended. Its claim stays standing like any other until the next
+ * channel begins (a reconnect must not empty the surface the owner is reading),
+ * but nothing the ended channel reports afterwards may change it.
+ */
+export function endMobileE2eeChannel(environmentId: string | null, channel: object): void {
+  if (currentChannels.get(environmentId) === channel) currentChannels.delete(environmentId);
+}
+
+/**
+ * No hosted channel at all — signed out, no node selected, or none open yet.
+ *
+ * With an environment, exactly that environment's entry returns to the initial
+ * state and every other environment's projection is left as it is; with none,
+ * every entry is cleared.
+ */
 export function resetMobileE2eeSession(environmentId?: string | null): void {
   if (environmentId === undefined) {
     const changed = states.size > 0 || fallbackState !== INITIAL || activeEnvironmentId !== null;
@@ -418,11 +453,16 @@ export function resetMobileE2eeSession(environmentId?: string | null): void {
  * locked `e2ee` while its selection resolved to no verified pin is §13.1's
  * release-gated pairing channel, and it is reported `unverified` so no surface
  * can spell it the way the verified row is spelled.
+ *
+ * A lock that names its `channel` is published only while that channel is the
+ * entry's current one: a replaced or ended channel's late lock claims nothing.
  */
 export function lockMobileE2eeChannelMode(
   mode: "e2ee" | "legacy",
   environmentId?: string | null,
+  channel?: object,
 ): void {
+  if (channel !== undefined && currentChannels.get(entryKey(environmentId)) !== channel) return;
   const state = stateFor(environmentId);
   publish(
     {
@@ -621,6 +661,7 @@ export function resetMobileE2eeSessionForTests(): void {
   listeners.clear();
   environmentListeners.clear();
   states.clear();
+  currentChannels.clear();
   fallbackState = INITIAL;
   activeEnvironmentId = null;
 }

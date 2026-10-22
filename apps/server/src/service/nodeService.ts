@@ -184,10 +184,29 @@ export function renderNodeServiceDefinition(
   return platform === "launchd" ? renderLaunchAgentPlist(spec) : renderSystemdUserUnit(spec);
 }
 
-/** The CLI entry script as it will be found after a reboot, symlinks resolved. */
+const PNPM_RELEASE_FOLDER_PATTERN =
+  /^(.*[\\/]node_modules[\\/])\.pnpm[\\/]ryco-cli@[^\\/]+[\\/]node_modules[\\/](ryco-cli[\\/].+)$/u;
+
+/**
+ * pnpm keeps every release in its own folder (`node_modules/.pnpm/ryco-cli@<v>/…`) and
+ * links `node_modules/ryco-cli` to the current one. The link is what survives the next
+ * `pnpm add -g`; the release folder is replaced or pruned. `null` for any other path.
+ */
+export function pnpmLinkedEntryScript(realScriptPath: string): string | null {
+  const match = PNPM_RELEASE_FOLDER_PATTERN.exec(realScriptPath);
+  return match ? `${match[1]}${match[2]}` : null;
+}
+
+/**
+ * The CLI entry script as it will be found after a reboot, symlinks resolved, except
+ * pnpm's package link, which is kept so the service follows `pnpm add -g` updates.
+ */
 export async function resolveCliEntryScript(argv1: string | undefined = process.argv[1]) {
   if (!argv1) throw new Error("Unable to determine the ryco CLI entry script.");
-  return realpath(argv1).catch(() => path.resolve(argv1));
+  const resolved = await realpath(argv1).catch(() => path.resolve(argv1));
+  const linked = pnpmLinkedEntryScript(resolved);
+  if (linked !== null && (await realpath(linked).catch(() => null)) === resolved) return linked;
+  return resolved;
 }
 
 export class NodeServiceError extends Error {

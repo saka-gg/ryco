@@ -1,15 +1,19 @@
 import type {
-  DesktopWorkspaceMetadataProjection,
+  DesktopThreadContentProjectionMap,
   DesktopWorkspaceScopeProjection,
   DesktopWorkspaceStateProjection,
+  DesktopWorkspaceStatePush,
+  DesktopWorkspaceStateSummary,
 } from "@ryco/contracts";
 import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { decodeCachedEnvironmentContent } from "@ryco/client-runtime/state/threads/threadContentCachePolicy";
 import {
   isWorkspaceMetadataSnapshot,
   type WorkspaceConnectionScope,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 
+import type { DesktopThreadContentCache } from "./desktopThreadContentCache.ts";
 import type {
   DesktopWorkspaceClient,
   DesktopWorkspaceClientSnapshot,
@@ -67,9 +71,9 @@ function parseScope(value: unknown): WorkspaceConnectionScope {
   }
 }
 
-export function projectDesktopWorkspaceState(
+export function projectDesktopWorkspaceSummary(
   state: DesktopWorkspaceClientSnapshot,
-): DesktopWorkspaceStateProjection {
+): DesktopWorkspaceStateSummary {
   return {
     status: state.status,
     accountId: state.accountId,
@@ -86,29 +90,83 @@ export function projectDesktopWorkspaceState(
       canConnect: machine.canConnect,
       canMutate: machine.canMutate,
       effectiveRole: machine.canConnect ? machine.effectiveRole : null,
-      threadSettlementSupported: machine.capabilities.threadSettlement,
+      ...(machine.capabilities.threadSettlement !== undefined
+        ? { threadSettlementSupported: machine.capabilities.threadSettlement }
+        : {}),
       accessReasons: machine.accessReasons,
     })),
-    snapshots: state.workspace.snapshots.flatMap((entry) =>
-      entry.status === "available" ? [entry.snapshot] : [],
-    ),
     queuedEnvironmentIds: state.queuedEnvironmentIds,
     activeConnectionCount: state.demand.connections.filter((entry) => entry.connected).length,
     ...(state.accountE2ee === null ? {} : { accountE2ee: state.accountE2ee }),
   };
 }
 
-export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient) {
+/** The complete state, for a renderer that holds none (first load or reload). */
+export function projectDesktopWorkspaceFullState(
+  state: DesktopWorkspaceClientSnapshot,
+): DesktopWorkspaceStateProjection {
+  return { ...projectDesktopWorkspaceSummary(state), snapshots: state.snapshots };
+}
+
+/**
+ * The state as pushed to the renderer: its snapshots only when they changed
+ * since the previous publication.
+ */
+export function projectDesktopWorkspaceState(
+  state: DesktopWorkspaceClientSnapshot,
+): DesktopWorkspaceStatePush {
+  return state.snapshotsUnchanged === true
+    ? projectDesktopWorkspaceSummary(state)
+    : projectDesktopWorkspaceFullState(state);
+}
+
+/** What the handlers need of the Desktop thread content cache. */
+export type DesktopWorkspaceThreadContent = Pick<
+  DesktopThreadContentCache,
+  "isEnabled" | "setEnabled" | "load" | "publish"
+>;
+
+/** For a workspace client without a content cache: nothing is kept, and the setting reads off. */
+const NO_THREAD_CONTENT: DesktopWorkspaceThreadContent = {
+  isEnabled: async () => false,
+  setEnabled: async () => undefined,
+  load: async () => ({}),
+  publish: async () => undefined,
+};
+
+/**
+ * Thread content is kept and served only for the signed-in account's machines
+ * whose metadata may be shown, the same eligibility as their snapshots.
+ */
+function threadContentScope(state: DesktopWorkspaceClientSnapshot, environment: EnvironmentId) {
+  if (state.status !== "ready" || state.accountId === null) return null;
+  const eligible = state.catalog.some(
+    (machine) =>
+      machine.environmentId === environment &&
+      machine.canReadMetadata &&
+      machine.cacheDisposition === "available",
+  );
+  return eligible ? { accountId: state.accountId, environmentId: environment } : null;
+}
+
+/**
+ * Replies to invoked commands carry no snapshot bodies: the renderer learns of
+ * changed snapshots from the pushed state and reads the full state with `getState`.
+ */
+export function createDesktopWorkspaceIpcHandlers(
+  client: DesktopWorkspaceClient,
+  threadContent: DesktopWorkspaceThreadContent = NO_THREAD_CONTENT,
+) {
   return {
-    getState: async () => projectDesktopWorkspaceState(client.snapshot()),
-    refreshCatalog: async () => projectDesktopWorkspaceState(await client.refreshCatalog()),
+    getState: async () => projectDesktopWorkspaceFullState(client.snapshot()),
+    refreshCatalog: async () => projectDesktopWorkspaceSummary(await client.refreshCatalog()),
     renameDevice: async (raw: unknown) => {
       if (typeof raw !== "object" || raw === null || Array.isArray(raw))
         throw new Error("Device name request is invalid.");
       const input = raw as { readonly environmentId?: unknown; readonly label?: unknown };
       if (typeof input.label !== "string" || !input.label.trim() || input.label.trim().length > 100)
         throw new Error("Use a device name of 1–100 characters.");
-      return projectDesktopWorkspaceState(
+      return projectDesktopWorkspaceSummary(
         await client.renameDevice(environmentId(input.environmentId), input.label.trim()),
       );
     },
@@ -116,7 +174,7 @@ export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient
       if (!isWorkspaceMetadataSnapshot(raw)) {
         throw new Error("Desktop workspace metadata snapshot is invalid.");
       }
-      return projectDesktopWorkspaceState(
+      return projectDesktopWorkspaceSummary(
         await client.acceptWorkspaceSnapshot(raw as WorkspaceMetadataSnapshot),
       );
     },
@@ -129,18 +187,21 @@ export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient
         environmentId: environmentId(input.environmentId),
         scope: parseScope(input.scope),
       });
-      return { leaseId: retained.leaseId, state: projectDesktopWorkspaceState(retained.snapshot) };
+      return {
+        leaseId: retained.leaseId,
+        state: projectDesktopWorkspaceSummary(retained.snapshot),
+      };
     },
     renewScope: async (raw: unknown) =>
-      projectDesktopWorkspaceState(await client.renewScope(leaseId(raw))),
+      projectDesktopWorkspaceSummary(await client.renewScope(leaseId(raw))),
     releaseScope: async (raw: unknown) =>
-      projectDesktopWorkspaceState(await client.releaseScope(leaseId(raw))),
+      projectDesktopWorkspaceSummary(await client.releaseScope(leaseId(raw))),
     setBackgrounded: async (raw: unknown) => {
       if (typeof raw !== "boolean") throw new Error("Desktop workspace lifecycle is invalid.");
-      return projectDesktopWorkspaceState(await client.setBackgrounded(raw));
+      return projectDesktopWorkspaceSummary(await client.setBackgrounded(raw));
     },
     purgeCache: async (raw?: unknown) =>
-      projectDesktopWorkspaceState(
+      projectDesktopWorkspaceSummary(
         await client.purgeCache(raw === undefined ? undefined : environmentId(raw)),
       ),
     beginVerification: async (raw: unknown) => {
@@ -155,6 +216,35 @@ export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient
         nodeId: input.nodeId,
         environmentId: environmentId(input.environmentId),
       });
+    },
+    publishThreadContent: async (rawEnvironmentId: unknown, raw: unknown) => {
+      const environment = environmentId(rawEnvironmentId);
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error("Desktop thread content is invalid.");
+      }
+      const scope = threadContentScope(client.snapshot(), environment);
+      // The cache bounds what it is handed to the shared policy: thread count and record size.
+      if (scope !== null) await threadContent.publish(scope, raw);
+    },
+    getThreadContent: async (
+      rawEnvironmentId: unknown,
+    ): Promise<DesktopThreadContentProjectionMap> => {
+      const environment = environmentId(rawEnvironmentId);
+      const state = client.snapshot();
+      const scope = threadContentScope(state, environment);
+      const snapshot = state.snapshots.find((entry) => entry.environmentId === environment);
+      if (scope === null || snapshot === undefined) return {};
+      // Only threads the environment's own metadata lists, each decoded within the shared limits.
+      return decodeCachedEnvironmentContent(
+        { content: await threadContent.load(scope) },
+        new Set(snapshot.threads.map((thread) => String(thread.id))),
+      );
+    },
+    getThreadContentCacheEnabled: async () => threadContent.isEnabled(),
+    setThreadContentCacheEnabled: async (raw: unknown) => {
+      if (typeof raw !== "boolean") throw new Error("Desktop thread content setting is invalid.");
+      await threadContent.setEnabled(raw);
+      return threadContent.isEnabled();
     },
     cancelVerification: async (raw: unknown) => client.cancelVerification(opaqueHandle(raw)),
     verifyApproval: async (raw: unknown) => {
@@ -174,7 +264,7 @@ export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient
       ) {
         throw new Error("Desktop workspace approval is invalid.");
       }
-      return projectDesktopWorkspaceState(
+      return projectDesktopWorkspaceSummary(
         await client.verifyApproval({
           nodeId: input.nodeId,
           environmentId: environmentId(input.environmentId),
@@ -183,10 +273,4 @@ export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient
       );
     },
   };
-}
-
-export function asDesktopWorkspaceMetadataProjection(
-  snapshot: WorkspaceMetadataSnapshot,
-): DesktopWorkspaceMetadataProjection {
-  return snapshot;
 }

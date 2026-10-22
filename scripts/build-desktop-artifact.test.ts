@@ -904,4 +904,61 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(resolved.mockUpdates, false);
     }),
   );
+
+  const archInput = (platform: "mac" | "linux" | "win", arch: Option.Option<"arm64" | "x64">) => ({
+    platform: Option.some(platform),
+    target: Option.none(),
+    arch,
+    buildVersion: Option.none(),
+    outputDir: Option.some("release-test"),
+    skipBuild: Option.none(),
+    keepStage: Option.none(),
+    signed: Option.none(),
+    verbose: Option.none(),
+    mockUpdates: Option.none(),
+    mockUpdateServerPort: Option.none(),
+  });
+  const withEnv = (env: Record<string, string>) =>
+    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })));
+
+  it.effect("builds macOS artifacts for Apple Silicon only", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveBuildOptions(archInput("mac", Option.none())).pipe(
+        withEnv({}),
+      );
+      assert.equal(resolved.arch, "arm64");
+
+      const intel = yield* resolveBuildOptions(archInput("mac", Option.some("x64"))).pipe(
+        withEnv({}),
+        Effect.flip,
+      );
+      assert.match(intel.message, /Apple Silicon \(arm64\) only/);
+
+      const intelFromEnv = yield* resolveBuildOptions(archInput("mac", Option.none())).pipe(
+        withEnv({ RYCO_DESKTOP_ARCH: "x64" }),
+        Effect.flip,
+      );
+      assert.match(intelFromEnv.message, /Apple Silicon \(arm64\) only/);
+
+      const universal = yield* Effect.exit(
+        resolveBuildOptions(archInput("mac", Option.none())).pipe(
+          withEnv({ RYCO_DESKTOP_ARCH: "universal" }),
+        ),
+      );
+      assert.equal(universal._tag, "Failure");
+    }),
+  );
+
+  it.effect("keeps both x64 and arm64 for Linux and Windows artifacts", () =>
+    Effect.gen(function* () {
+      for (const platform of ["linux", "win"] as const) {
+        for (const arch of ["x64", "arm64"] as const) {
+          const resolved = yield* resolveBuildOptions(archInput(platform, Option.some(arch))).pipe(
+            withEnv({}),
+          );
+          assert.equal(resolved.arch, arch);
+        }
+      }
+    }),
+  );
 });

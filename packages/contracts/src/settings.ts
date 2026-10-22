@@ -27,6 +27,11 @@ import {
 } from "./model.ts";
 import { AgentTokenMode, DEFAULT_AGENT_TOKEN_MODE, ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import {
+  DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+  SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
+  SidebarAutoSettleAfterDays,
+} from "./threadAutoSettlement.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -42,12 +47,22 @@ export const SidebarThreadSortOrder = Schema.Literals(["updated_at", "created_at
 export type SidebarThreadSortOrder = typeof SidebarThreadSortOrder.Type;
 export const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = "updated_at";
 
-export const SIDEBAR_AUTO_SETTLE_DAY_OPTIONS = [1, 3, 7, 14, 30, 90] as const;
-export const SidebarAutoSettleAfterDays = Schema.NullOr(
-  Schema.Literals(SIDEBAR_AUTO_SETTLE_DAY_OPTIONS),
+export {
+  DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+  SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
+  SidebarAutoSettleAfterDays,
+};
+
+/**
+ * How long a chat without a project stays idle before its folder is removed while still empty.
+ * Null keeps empty chat folders. The folder comes back whenever the chat needs it again.
+ */
+export const CHAT_FOLDER_CLEANUP_DAY_OPTIONS = [1, 3, 7, 14, 30] as const;
+export const ChatFolderCleanupAfterDays = Schema.NullOr(
+  Schema.Literals(CHAT_FOLDER_CLEANUP_DAY_OPTIONS),
 );
-export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
-export const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 7;
+export type ChatFolderCleanupAfterDays = typeof ChatFolderCleanupAfterDays.Type;
+export const DEFAULT_CHAT_FOLDER_CLEANUP_AFTER_DAYS: ChatFolderCleanupAfterDays = 3;
 
 export const SidebarProjectGroupingMode = Schema.Literals([
   "repository",
@@ -525,6 +540,9 @@ export const WorktreeBranchPrefix = TrimmedString.check(
 /** Server-local filesystem input; platform and filesystem validation belongs to the server. */
 export const WorktreeRoot = TrimmedString.check(Schema.isMaxLength(4096));
 
+/** Free-form guidance appended to a generated Git text prompt. Empty adds nothing. */
+export const GitWritingInstructions = TrimmedString.check(Schema.isMaxLength(4_000));
+
 /** Initialization applies only to newly created Git worktree checkouts. */
 export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "none"]);
 export type WorktreeSubmodules = typeof WorktreeSubmodules.Type;
@@ -649,6 +667,9 @@ export const ServerSettings = Schema.Struct({
   worktreeRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   // Node-only root (no per-project overrides). Empty selects the Ryco-managed chats directory.
   chatsRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  chatFolderCleanupAfterDays: ChatFolderCleanupAfterDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_FOLDER_CLEANUP_AFTER_DAYS)),
+  ),
   worktreeSubmodules: WorktreeSubmodules.pipe(
     Schema.withDecodingDefault(Effect.succeed("recursive" as const)),
   ),
@@ -681,9 +702,20 @@ export const ServerSettings = Schema.Struct({
       }),
     ),
   ),
+  // Applied to every generated commit message, and to generated pull request titles and bodies.
+  commitMessageInstructions: GitWritingInstructions.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+  ),
+  pullRequestInstructions: GitWritingInstructions.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+  ),
   inboxPriorityModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  // The node's automatic settlement rule, the same on every client that lists its threads.
+  // Absent until someone sets it (the shared default applies); null turns it off. Named apart
+  // from the client's `sidebarAutoSettleAfterDays`, which older nodes still leave to clients.
+  threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
 
   // Legacy single-instance-per-driver settings. Continues to be the source
   // of truth until `providerInstances` (below) lands per-driver migration
@@ -830,6 +862,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   worktreeRoot: Schema.optionalKey(WorktreeRoot),
   chatsRoot: Schema.optionalKey(WorktreeRoot),
+  chatFolderCleanupAfterDays: Schema.optionalKey(ChatFolderCleanupAfterDays),
   worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),
   projectWorktreeSubmodules: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(WorktreeSubmodules)),
@@ -843,7 +876,17 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultAgentTokenMode: Schema.optionalKey(AgentTokenMode),
   addProjectBaseDirectory: Schema.optionalKey(Schema.String),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
+  commitMessageInstructions: Schema.optionalKey(GitWritingInstructions),
+  pullRequestInstructions: Schema.optionalKey(GitWritingInstructions),
   inboxPriorityModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelectionPatch)),
+  threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
+  /**
+   * Applies the patch only while the node's rule is still this (`"absent"`: never set), so of
+   * two clients handing a node their rule at once, the first one's stands.
+   */
+  expectedThreadAutoSettleAfterDays: Schema.optionalKey(
+    Schema.Union([Schema.Literal("absent"), SidebarAutoSettleAfterDays]),
+  ),
   providerEventLogs: Schema.optionalKey(Schema.NullOr(ProviderEventLogMode)),
   observability: Schema.optionalKey(
     Schema.Struct({

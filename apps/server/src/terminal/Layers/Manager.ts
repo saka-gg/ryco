@@ -7,6 +7,7 @@ import {
 } from "../../storage/lifecycle.ts";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { restoreChatFolder } from "../../project/chatFolderRestore.ts";
 
 import {
   DEFAULT_TERMINAL_ID,
@@ -107,6 +108,14 @@ const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
  */
 const DEFAULT_SUBPROCESS_IDLE_POLL_INTERVAL_MS = 5_000;
 /**
+ * Once nothing (input, a start, an activity change, or output) has happened for this long,
+ * the idle cadence lengthens to the deep-idle interval. Input, a start or an activity change
+ * restores the fast cadence on the next tick; output restores the regular idle cadence. A
+ * terminal left open and untouched then costs one check per deep-idle interval.
+ */
+const DEFAULT_SUBPROCESS_DEEP_IDLE_AFTER_MS = 60_000;
+const DEFAULT_SUBPROCESS_DEEP_IDLE_POLL_INTERVAL_MS = 30_000;
+/**
  * Output alone does not keep the fast cadence: a command producing output
  * already shows as running, and its end shows as output going quiet after the
  * next prompt. One check runs on the first tick after output has been quiet
@@ -193,6 +202,11 @@ interface TerminalSessionState {
   cols: number;
   rows: number;
   process: PtyProcess | null;
+  /**
+   * The foreground process name the PTY reported while the process table showed the shell
+   * without children: what the shell goes by when idle. Null until seen, and for each new PTY.
+   */
+  idleForegroundName: string | null;
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
@@ -844,6 +858,26 @@ function withSnapshotterFallback(
         );
 }
 
+interface SubprocessReading {
+  readonly session: TerminalSessionState;
+  readonly terminalPid: number;
+  readonly hasRunningSubprocess: boolean;
+  /** Set when the process table found the shell idle: the name it went by. */
+  readonly idleForegroundName: string | undefined;
+}
+
+/**
+ * The PTY's foreground process name, or undefined when it cannot say. A throwing adapter
+ * reads as one that cannot say: polling must outlive any single session's PTY.
+ */
+function readForegroundName(session: TerminalSessionState): string | undefined {
+  try {
+    return session.process?.foregroundProcessName?.();
+  } catch {
+    return undefined;
+  }
+}
+
 function capHistory(history: string, maxLines: number): string {
   if (history.length === 0) return history;
   const hasTrailingNewline = history.endsWith("\n");
@@ -1157,6 +1191,16 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       Math.round(
         (options.subprocessIdlePollIntervalMs ?? DEFAULT_SUBPROCESS_IDLE_POLL_INTERVAL_MS) /
           Math.max(1, subprocessPollIntervalMs),
+      ),
+    );
+    const subprocessDeepIdleAfterTicks = Math.max(
+      subprocessIdlePollTicks,
+      Math.ceil(DEFAULT_SUBPROCESS_DEEP_IDLE_AFTER_MS / Math.max(1, subprocessPollIntervalMs)),
+    );
+    const subprocessDeepIdlePollTicks = Math.max(
+      subprocessIdlePollTicks,
+      Math.round(
+        DEFAULT_SUBPROCESS_DEEP_IDLE_POLL_INTERVAL_MS / Math.max(1, subprocessPollIntervalMs),
       ),
     );
     const subprocessOutputQuietMs = Math.min(
@@ -1727,7 +1771,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
      * spawning, history I/O and kill escalation run under the thread lock only.
      */
     const withStorageAdmission = <A, E, R>(cwd: string, commit: Effect.Effect<A, E, R>) =>
-      storageLifecycleLock.withPermit(assertValidCwd(cwd).pipe(Effect.andThen(commit)));
+      storageLifecycleLock.withPermit(
+        // Inside the lock empty-folder cleanup also takes, so a chat's recreated folder stays.
+        (Option.isSome(storageSql) ? restoreChatFolder(storageSql.value, cwd) : Effect.void).pipe(
+          Effect.andThen(assertValidCwd(cwd)),
+          Effect.andThen(commit),
+        ),
+      );
 
     /**
      * Admits a PTY start in `target.cwd` and, in the same critical section,
@@ -2126,6 +2176,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
               yield* modifyManagerState((state) => {
                 session.process = ptyProcess;
+                session.idleForegroundName = null;
                 session.pid = processPid;
                 session.status = "running";
                 advanceCursor(session);
@@ -2233,8 +2284,14 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     });
 
     let processTableSnapshotFailing = false;
-    /** Returns whether any terminal's subprocess activity changed. */
-    const pollSubprocessActivity = Effect.fn("terminal.pollSubprocessActivity")(function* () {
+    /**
+     * Returns whether any terminal's subprocess activity changed. With `trustForeground`, a PTY
+     * whose foreground process is evidently a command, not the shell, reads as running without
+     * a process table; every other reading comes from the table.
+     */
+    const pollSubprocessActivity = Effect.fn("terminal.pollSubprocessActivity")(function* (
+      trustForeground: boolean,
+    ) {
       const state = yield* readManagerState;
       const runningSessions = [...state.sessions.values()].filter(
         (session): session is TerminalSessionState & { pid: number } =>
@@ -2245,38 +2302,88 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         return false;
       }
 
-      // One process-table enumeration serves every running terminal in this
-      // tick. Spawning pgrep/ps per session scales with terminal count and can
-      // create enough short-lived processes to exhaust host PID capacity.
-      const processTable = yield* processTableSnapshotter(
-        runningSessions.map((session) => session.pid),
-      ).pipe(
-        Effect.map(Option.some),
-        Effect.catch((reason) => {
-          // A persistent failure (e.g. a process table larger than the output
-          // cap) would otherwise log on every tick; log once per failure streak.
-          if (processTableSnapshotFailing) return Effect.succeed(Option.none());
-          processTableSnapshotFailing = true;
-          return Effect.logWarning("failed to snapshot processes for terminal subprocess polling", {
-            reason,
-          }).pipe(Effect.as(Option.none<TerminalProcessTableSnapshot>()));
-        }),
-      );
-
-      // A failed or partial snapshot is not authoritative. Keep the last
-      // known state rather than incorrectly marking every terminal idle.
-      if (Option.isNone(processTable)) {
-        return false;
+      // The foreground name is evidence only in one direction. A name other than the
+      // one the shell showed while idle means a command runs. The shell's own name
+      // says nothing: a background job, a nested shell and a script run by the
+      // shell's own interpreter all leave it in the foreground, and some shells
+      // go by a different name than the one they were started as. Those readings,
+      // and every reading from a PTY that cannot name its foreground, share one
+      // process-table enumeration per tick: spawning pgrep/ps per session scales
+      // with terminal count and can create enough short-lived processes to
+      // exhaust host PID capacity.
+      const readings: SubprocessReading[] = [];
+      const tableSessions: Array<{
+        readonly session: TerminalSessionState;
+        readonly terminalPid: number;
+        readonly foreground: string | undefined;
+      }> = [];
+      for (const session of runningSessions) {
+        const terminalPid = session.pid;
+        const foreground = readForegroundName(session);
+        if (
+          trustForeground &&
+          foreground !== undefined &&
+          session.idleForegroundName !== null &&
+          foreground !== session.idleForegroundName
+        ) {
+          readings.push({
+            session,
+            terminalPid,
+            hasRunningSubprocess: true,
+            idleForegroundName: undefined,
+          });
+        } else {
+          tableSessions.push({ session, terminalPid, foreground });
+        }
       }
-      processTableSnapshotFailing = false;
+
+      if (tableSessions.length > 0) {
+        const processTable = yield* processTableSnapshotter(
+          tableSessions.map(({ terminalPid }) => terminalPid),
+        ).pipe(
+          Effect.map(Option.some),
+          Effect.catch((reason) => {
+            // A persistent failure (e.g. a process table larger than the output
+            // cap) would otherwise log on every tick; log once per failure streak.
+            if (processTableSnapshotFailing) return Effect.succeed(Option.none());
+            processTableSnapshotFailing = true;
+            return Effect.logWarning(
+              "failed to snapshot processes for terminal subprocess polling",
+              { reason },
+            ).pipe(Effect.as(Option.none<TerminalProcessTableSnapshot>()));
+          }),
+        );
+
+        // A failed or partial snapshot is not authoritative. Keep the last
+        // known state rather than incorrectly marking every terminal idle.
+        if (Option.isSome(processTable)) {
+          processTableSnapshotFailing = false;
+          for (const { session, terminalPid, foreground } of tableSessions) {
+            const hasRunningSubprocess =
+              (processTable.value.childrenByParent.get(terminalPid)?.length ?? 0) > 0;
+            readings.push({
+              session,
+              terminalPid,
+              hasRunningSubprocess,
+              // The shell's own name, when the table found it idle and the name held
+              // still across the snapshot (a command that started and ended meanwhile
+              // would change it).
+              idleForegroundName:
+                !hasRunningSubprocess &&
+                foreground !== undefined &&
+                readForegroundName(session) === foreground
+                  ? foreground
+                  : undefined,
+            });
+          }
+        }
+      }
       let changed = false;
 
       const checkSubprocessActivity = Effect.fn("terminal.checkSubprocessActivity")(function* (
-        session: TerminalSessionState & { pid: number },
+        reading: SubprocessReading,
       ) {
-        const terminalPid = session.pid;
-        const hasRunningSubprocess =
-          (processTable.value.childrenByParent.get(terminalPid)?.length ?? 0) > 0;
+        const { session, terminalPid, hasRunningSubprocess, idleForegroundName } = reading;
 
         const event = yield* modifyManagerState((state) => {
           const liveSession: Option.Option<TerminalSessionState> = Option.fromNullishOr(
@@ -2285,9 +2392,14 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           if (
             Option.isNone(liveSession) ||
             liveSession.value.status !== "running" ||
-            liveSession.value.pid !== terminalPid ||
-            liveSession.value.hasRunningSubprocess === hasRunningSubprocess
+            liveSession.value.pid !== terminalPid
           ) {
+            return [Option.none(), state] as const;
+          }
+          if (idleForegroundName !== undefined) {
+            liveSession.value.idleForegroundName = idleForegroundName;
+          }
+          if (liveSession.value.hasRunningSubprocess === hasRunningSubprocess) {
             return [Option.none(), state] as const;
           }
 
@@ -2313,20 +2425,24 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         }
       });
 
-      yield* Effect.forEach(runningSessions, checkSubprocessActivity, {
+      yield* Effect.forEach(readings, checkSubprocessActivity, {
         concurrency: "unbounded",
         discard: true,
       });
       return changed;
     });
 
-    // Ticks every `subprocessPollIntervalMs`, but snapshots the process table
+    // Ticks every `subprocessPollIntervalMs`, but checks subprocess activity
     // only: on every tick while a terminal had input (or a start, or an
     // activity change) within the idle interval; once on the first tick after
     // output went quiet, which is when a command that printed its way to the
     // next prompt has ended; and otherwise once per idle interval. Continuous
     // output (a dev server, a watcher) thus costs the idle cadence, not a
-    // snapshot per tick.
+    // check per tick. When neither input nor output has happened for the
+    // deep-idle window, the idle interval lengthens to the deep-idle interval.
+    // Only the fast cadence takes a command's word for it (a foreground process
+    // other than the shell); the idle cadence always asks the process table, so a
+    // shell that replaced itself cannot read as running for long.
     let observedIoRevision = -1;
     let observedOutputRevision = 0;
     let ticksSinceIo = 0;
@@ -2344,19 +2460,21 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         outputSincePoll = true;
       }
       ticksSincePoll += 1;
-      const outputWentQuiet =
-        outputSincePoll &&
-        (yield* Clock.currentTimeMillis) - lastTerminalOutputAtMs >= subprocessOutputQuietMs;
+      const sinceOutputMs = (yield* Clock.currentTimeMillis) - lastTerminalOutputAtMs;
+      const outputWentQuiet = outputSincePoll && sinceOutputMs >= subprocessOutputQuietMs;
+      const deepIdle =
+        ticksSinceIo >= subprocessDeepIdleAfterTicks &&
+        sinceOutputMs >= DEFAULT_SUBPROCESS_DEEP_IDLE_AFTER_MS;
       if (
         ticksSinceIo >= subprocessIdlePollTicks &&
-        ticksSincePoll < subprocessIdlePollTicks &&
+        ticksSincePoll < (deepIdle ? subprocessDeepIdlePollTicks : subprocessIdlePollTicks) &&
         !outputWentQuiet
       ) {
         return;
       }
       ticksSincePoll = 0;
       outputSincePoll = false;
-      if (yield* pollSubprocessActivity()) noteTerminalIo();
+      if (yield* pollSubprocessActivity(ticksSinceIo < subprocessIdlePollTicks)) noteTerminalIo();
     });
 
     yield* Effect.forever(
@@ -2434,6 +2552,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               cols,
               rows,
               process: null,
+              idleForegroundName: null,
               unsubscribeData: null,
               unsubscribeExit: null,
               hasRunningSubprocess: false,
@@ -2673,6 +2792,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                   cols: input.cols,
                   rows: input.rows,
                   process: null,
+                  idleForegroundName: null,
                   unsubscribeData: null,
                   unsubscribeExit: null,
                   hasRunningSubprocess: false,

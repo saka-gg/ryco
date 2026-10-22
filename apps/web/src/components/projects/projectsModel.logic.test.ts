@@ -7,15 +7,18 @@ import type {
 } from "../../sidebarProjectGrouping";
 import {
   buildProjectListRows,
+  classifyHostedNodePresence,
   deriveProjectDevices,
   devicesWithoutProject,
   filterProjectListRows,
   findProjectCheckout,
   formatProjectPath,
   inferHomeDirectory,
+  isThisDevice,
   projectMotionDirection,
   projectPathTail,
   projectRepositoryLabel,
+  type EnvironmentPresenceStatus,
 } from "./projectsModel.logic";
 
 const LOCAL = "env-local" as EnvironmentId;
@@ -243,5 +246,71 @@ describe("motion direction", () => {
     expect(projectMotionDirection(3, 1)).toBe(-1);
     expect(projectMotionDirection(2, 2)).toBe(0);
     expect(projectMotionDirection(-1, 2)).toBe(0);
+  });
+});
+
+describe("classifyHostedNodePresence", () => {
+  const reachable = { online: true, connected: false, establishing: false, hasShell: false };
+
+  it("calls a node the Hub sees online reachable, selected or not", () => {
+    // Opening it connects, so reachability does not wait for a connection.
+    expect(classifyHostedNodePresence(reachable)).toBe("online");
+    expect(classifyHostedNodePresence({ ...reachable, hasShell: true })).toBe("online");
+    expect(classifyHostedNodePresence({ ...reachable, connected: true, hasShell: true })).toBe(
+      "online",
+    );
+  });
+
+  it("calls a connection that is on its way connecting", () => {
+    expect(classifyHostedNodePresence({ ...reachable, establishing: true })).toBe("connecting");
+    expect(classifyHostedNodePresence({ ...reachable, establishing: true, hasShell: true })).toBe(
+      "connecting",
+    );
+  });
+
+  it("shows the cached copy of a node that is not reachable", () => {
+    const unreachable = { online: false, connected: false, establishing: false };
+    expect(classifyHostedNodePresence({ ...unreachable, hasShell: true })).toBe("cached");
+    expect(classifyHostedNodePresence({ ...unreachable, hasShell: false })).toBe("offline");
+  });
+
+  it("stays within the existing statuses", () => {
+    const known = {
+      online: true,
+      connecting: true,
+      cached: true,
+      offline: true,
+    } satisfies Record<EnvironmentPresenceStatus, true>;
+    const reached = new Set<EnvironmentPresenceStatus>();
+    for (const online of [true, false]) {
+      for (const connected of [true, false]) {
+        for (const establishing of [true, false]) {
+          for (const hasShell of [true, false]) {
+            reached.add(classifyHostedNodePresence({ online, connected, establishing, hasShell }));
+          }
+        }
+      }
+    }
+    expect([...reached].toSorted()).toEqual(Object.keys(known).toSorted());
+  });
+});
+
+describe("isThisDevice", () => {
+  it("is the primary environment of a standard client", () => {
+    expect(
+      isThisDevice({ hosted: false, environmentId: "env-a", primaryEnvironmentId: "env-a" }),
+    ).toBe(true);
+    expect(
+      isThisDevice({ hosted: false, environmentId: "env-b", primaryEnvironmentId: "env-a" }),
+    ).toBe(false);
+    expect(
+      isThisDevice({ hosted: false, environmentId: "env-a", primaryEnvironmentId: null }),
+    ).toBe(false);
+  });
+
+  it("is never the node a hosted browser has selected", () => {
+    expect(
+      isThisDevice({ hosted: true, environmentId: "env-a", primaryEnvironmentId: "env-a" }),
+    ).toBe(false);
   });
 });

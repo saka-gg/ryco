@@ -7,7 +7,6 @@ import {
   MoreHorizontalIcon,
   PlusIcon,
   Trash2Icon,
-  TriangleAlertIcon,
 } from "lucide-react";
 import React, { memo, useCallback, useState } from "react";
 import {
@@ -34,12 +33,13 @@ import {
   type SidebarThreadSortOrder,
 } from "@ryco/contracts";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 import { hasNoShortcutModifiers } from "../../keybindings";
 import { projectTreeItemId, useUiStateStore } from "../../uiStateStore";
 import type { useUpdateSettings } from "~/hooks/useSettings";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import type { SidebarProjectTreeRow } from "../../sidebarProjectFolders";
-import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -329,11 +329,6 @@ const SidebarProjectFolderRow = memo(function SidebarProjectFolderRow(
 });
 
 export interface SidebarProjectsContentProps {
-  showArm64IntelBuildWarning: boolean;
-  arm64IntelBuildWarningDescription: string | null;
-  desktopUpdateButtonAction: "download" | "install" | "none";
-  desktopUpdateButtonDisabled: boolean;
-  handleDesktopUpdateButtonClick: () => void;
   projectSortOrder: SidebarProjectSortOrder;
   threadSortOrder: SidebarThreadSortOrder;
   projectGroupingMode: SidebarProjectGroupingMode;
@@ -361,11 +356,6 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
   props: SidebarProjectsContentProps,
 ) {
   const {
-    showArm64IntelBuildWarning,
-    arm64IntelBuildWarningDescription,
-    desktopUpdateButtonAction,
-    desktopUpdateButtonDisabled,
-    handleDesktopUpdateButtonClick,
     projectSortOrder,
     threadSortOrder,
     projectGroupingMode,
@@ -393,7 +383,11 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
     | null
   >(null);
   const [folderNameDraft, setFolderNameDraft] = useState("");
-  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
+  // hosted-capability: routed node
+  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
+  const routedNodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state));
+  const addProjectUnavailableReason =
+    hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ?? "Add project is unavailable";
   const openCreateFolderDialog = useCallback(
     (input: { initialProjectKeys?: readonly string[]; initialName?: string } = {}) => {
       const initialName = input.initialName ?? "";
@@ -473,29 +467,6 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
   return (
     <>
       <SidebarContent className="gap-0" onViewportScroll={handleSidebarListScroll}>
-        {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
-          <SidebarGroup className="px-2 pt-2 pb-0">
-            <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8">
-              <TriangleAlertIcon />
-              <AlertTitle>Intel build on Apple Silicon</AlertTitle>
-              <AlertDescription>{arm64IntelBuildWarningDescription}</AlertDescription>
-              {desktopUpdateButtonAction !== "none" ? (
-                <AlertAction>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={desktopUpdateButtonDisabled}
-                    onClick={handleDesktopUpdateButtonClick}
-                  >
-                    {desktopUpdateButtonAction === "download"
-                      ? "Download ARM build"
-                      : "Install ARM build"}
-                  </Button>
-                </AlertAction>
-              ) : null}
-            </Alert>
-          </SidebarGroup>
-        ) : null}
         <SidebarGroup className="px-2 py-2">
           <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
             <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
@@ -532,9 +503,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       className="inline-flex"
                       tabIndex={addProjectCapability.allowed ? undefined : 0}
                       aria-label={
-                        addProjectCapability.allowed
-                          ? undefined
-                          : (addProjectCapability.reason ?? "Add project is unavailable")
+                        addProjectCapability.allowed ? undefined : addProjectUnavailableReason
                       }
                     >
                       <button
@@ -551,9 +520,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
                   }
                 />
                 <TooltipPopup side="right">
-                  {addProjectCapability.allowed
-                    ? "Add project"
-                    : (addProjectCapability.reason ?? "Add project is unavailable")}
+                  {addProjectCapability.allowed ? "Add project" : addProjectUnavailableReason}
                 </TooltipPopup>
               </Tooltip>
             </div>

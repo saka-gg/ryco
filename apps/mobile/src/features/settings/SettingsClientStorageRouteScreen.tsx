@@ -3,6 +3,7 @@ import { ScrollView } from "react-native";
 
 import { LoadingScreen } from "../../components/LoadingScreen";
 import {
+  isThreadContentCacheEnabled,
   updatePreferences,
   useIsPreferencesHydrated,
   usePreferences,
@@ -35,6 +36,13 @@ export function SettingsClientStorageRouteScreen() {
           label="Group by repository"
           value={preferences.projectGroupingEnabled !== false}
           onValueChange={(value) => updatePreferences({ projectGroupingEnabled: value })}
+        />
+        {/* Message text from recent conversations is kept so a thread opens with its last
+            messages before the connection is ready. Turning it off removes what is stored. */}
+        <SettingsSwitchRow
+          label="Keep recent conversations on this device"
+          value={isThreadContentCacheEnabled(preferences)}
+          onValueChange={(value) => updatePreferences({ rememberThreadContent: value })}
         />
         <SettingsRow
           label="Base font size"

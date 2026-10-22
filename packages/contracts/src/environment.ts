@@ -57,6 +57,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadSidebarUndo: Schema.optional(Schema.Boolean),
   threadSnooze: Schema.optional(Schema.Boolean),
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * The node keeps the automatic settlement rule (`threadAutoSettleAfterDays`) and
+   * carries it in its shell snapshot; absent on older servers, whose threads follow
+   * each client's own rule and which drop the key from settings patches.
+   */
+  nodeAutoSettlement: Schema.optionalKey(Schema.Boolean),
   threadPriorityRanking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
@@ -86,6 +92,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   providerSessionPrewarm: Schema.optionalKey(Schema.Boolean),
   /** `provider.readProjectCommands` (per-directory skills and slash commands); absent on older servers. */
   providerProjectCommands: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `server.subscribeNodeUpdate` / `server.checkNodeUpdate` / `server.updateNode`: the node
+   * reports its Ryco release and installation and can update itself; absent on older servers.
+   */
+  nodeSelfUpdate: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

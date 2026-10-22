@@ -26,7 +26,9 @@ export function ConnectedInboxSidebar(
 ) {
   const router = useRouter();
   const openAddProject = useCommandPaletteStore((store) => store.openAddProject);
-  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
+  // Adding opens the command palette, which gates the same action on the routed node.
+  // hosted-capability: routed node
+  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
   const openProjectSettings = useCallback(
     (projectRef: ScopedProjectRef) => {
       void router.navigate(

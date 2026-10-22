@@ -1,9 +1,4 @@
-import type {
-  AuthSessionState,
-  EnvironmentId,
-  OrchestrationEvent,
-  ThreadId,
-} from "@ryco/contracts";
+import type { AuthSessionState, EnvironmentId, OrchestrationEvent } from "@ryco/contracts";
 import {
   checkSavedEnvironmentSession,
   createEnvironmentConnection,
@@ -28,12 +23,14 @@ import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 
 import { createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
 import { WsTransport } from "../rpc/wsTransport";
-import { fullThreadEntry } from "@ryco/client-runtime/state/threads";
 import {
-  selectSidebarThreadSummaryByRef,
-  selectThreadByRef,
-  useStore,
-} from "../state/threadsRuntime";
+  hasUnsentThreadWork,
+  isThreadNonIdle,
+  selectThreadBodyUsage,
+} from "@ryco/client-runtime/state/threads/threadBodyResidency";
+import { useComposerDraftStore } from "../state/composerDraftStore";
+import { useMessageQueueStore } from "../state/messageQueueStore";
+import { useStore } from "../state/threadsRuntime";
 import { invalidateAllCheckpointDiffs } from "../rpc/checkpointDiffAtoms";
 import { invalidateProjectFilesState } from "../rpc/projectFilesAtoms";
 import { markEnvironmentSnapshotDirty } from "../persistence/environmentSnapshotPersistence";
@@ -48,54 +45,6 @@ import {
   type ThreadDetailEventScheduling,
 } from "./threadDetailEvents";
 import { writeEnvironmentServerConfig } from "../state/environmentServerConfigs";
-
-// §4 stub closure: the supervisor evicts idle thread-detail subscriptions; a
-// subscription is non-idle while the thread has pending approvals/user-input, an
-// actionable proposed plan, a non-idle orchestration status, a running latest
-// turn, or a pending source proposed plan. Straight port of the web predicate
-// (apps/web/src/environments/runtime/service.ts:231-277) over runtime-A selectors.
-export function isThreadDetailSubscriptionNonIdle(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-): boolean {
-  const threadRef = scopeThreadRef(environmentId, threadId);
-  const state = useStore.getState();
-  // An archived stub knows of no pending work; once loaded, its full summary does.
-  const sidebarThread = fullThreadEntry(selectSidebarThreadSummaryByRef(state, threadRef));
-
-  if (sidebarThread) {
-    if (
-      sidebarThread.hasPendingApprovals ||
-      sidebarThread.hasPendingUserInput ||
-      sidebarThread.hasActionableProposedPlan
-    ) {
-      return true;
-    }
-    const orchestrationStatus = sidebarThread.session?.orchestrationStatus;
-    if (
-      orchestrationStatus &&
-      orchestrationStatus !== "idle" &&
-      orchestrationStatus !== "stopped"
-    ) {
-      return true;
-    }
-    if (sidebarThread.latestTurn?.state === "running") {
-      return true;
-    }
-  }
-
-  const thread = selectThreadByRef(state, threadRef);
-  if (!thread) return false;
-
-  const orchestrationStatus = thread.session?.orchestrationStatus;
-  return (
-    Boolean(
-      orchestrationStatus && orchestrationStatus !== "idle" && orchestrationStatus !== "stopped",
-    ) ||
-    thread.latestTurn?.state === "running" ||
-    thread.pendingSourceProposedPlan !== undefined
-  );
-}
 
 // Bound wrappers for every injected timer/lifecycle seam (the slice-3b lesson:
 // unbound globals throw "Illegal invocation").
@@ -646,7 +595,15 @@ export function createMobileEnvironmentDriver(
     },
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
     subscribeBrowserResume: (listener) => subscribeResume(listener),
-    isThreadDetailSubscriptionNonIdle,
+    isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
+      isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
+    listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),
+    evictThreadBodies: (threadRefs) => useStore.getState().evictThreadBodies(threadRefs),
+    isThreadBodyProtected: (threadRef) =>
+      hasUnsentThreadWork(threadRef, {
+        queuesByThreadKey: useMessageQueueStore.getState().queuesByThreadKey,
+        draftsByThreadKey: useComposerDraftStore.getState().draftsByThreadKey,
+      }),
     syncThreadDetailSnapshot: (environmentId, snapshot) =>
       useStore
         .getState()

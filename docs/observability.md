@@ -41,6 +41,20 @@ Important fields in each record:
 
 The schema lives in `apps/server/src/observability/TraceRecord.ts`.
 
+To keep the file small, it leaves out fast successful spans. The OTLP exporter still receives every
+span:
+
+- SQL statement spans (spans with `db.query.text`) that succeed faster than 50 ms
+  (`RYCO_TRACE_SQL_MIN_DURATION_MS`).
+- Other child spans that succeed faster than 5 ms (`RYCO_TRACE_SPAN_MIN_DURATION_MS`). Root spans,
+  including ones that continue a remote trace, and child spans that recorded a log message (see
+  [Logs](#logs)) are always kept.
+
+Failed and interrupted spans are always kept. A kept span can name a parent that was left out, so an
+occasional `parentSpanId` has no record in the file. Set either variable to `0` to record every span
+of that kind. With `RYCO_TRACE_TIMING_ENABLED=false` spans carry no durations, so neither threshold
+applies and every span is recorded.
+
 ### Metrics
 
 Metrics are not written to a local file.
@@ -513,10 +527,15 @@ Local trace file:
 - `RYCO_TRACE_MAX_FILES`: rotated file count, default `10`
 - `RYCO_TRACE_BATCH_WINDOW_MS`: flush window, default `200`
 - `RYCO_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
-- `RYCO_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
+- `RYCO_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`; when `false` the two duration
+  thresholds below do not apply
 - `RYCO_TRACE_SQL_MIN_DURATION_MS`: SQL statement spans that succeed faster than this are left out
   of the local trace file, default `50`; `0` records every statement. Failed statements are always
   kept, and the OTLP exporter still receives every span
+- `RYCO_TRACE_SPAN_MIN_DURATION_MS`: other child spans that succeed faster than this are left out
+  of the local trace file, default `5`; `0` records every span. Root spans, failed or interrupted
+  spans, and spans that recorded a log message are always kept, and the OTLP exporter still
+  receives every span
 
 OTLP export:
 

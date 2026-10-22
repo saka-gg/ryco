@@ -21,6 +21,18 @@ export const bindHostedDispatchReplay: Hosted["bindHostedDispatchReplay"] = () =
 export const getHostedRelayAttemptFactory: Hosted["getHostedRelayAttemptFactory"] = () =>
   hostedOnly("getHostedRelayAttemptFactory");
 
+export const createHostedEnvironmentAttemptFactory: Hosted["createHostedEnvironmentAttemptFactory"] =
+  () => hostedOnly("createHostedEnvironmentAttemptFactory");
+
+export const webHostedEnvironmentAttemptPorts: Hosted["webHostedEnvironmentAttemptPorts"] = () =>
+  hostedOnly("webHostedEnvironmentAttemptPorts");
+
+export const createWebHostedRelaySocket: Hosted["createWebHostedRelaySocket"] = () =>
+  hostedOnly("createWebHostedRelaySocket");
+
+export const createWebHostedServerAuthenticatedRelaySocket: Hosted["createWebHostedServerAuthenticatedRelaySocket"] =
+  () => hostedOnly("createWebHostedServerAuthenticatedRelaySocket");
+
 export const ticketFailure: Hosted["ticketFailure"] = () => hostedOnly("ticketFailure");
 
 export const HostedRelayAttemptFactory = function HostedRelayAttemptFactory() {

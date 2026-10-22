@@ -1,5 +1,13 @@
-import type { HostedHubState } from "@ryco/client-runtime/authorization";
-import { hostedHubStore } from "@ryco/client-runtime/authorization";
+import type {
+  HostedEnvironmentSessionRecord,
+  HostedHubState,
+} from "@ryco/client-runtime/authorization";
+import {
+  canAdoptHostedEnvironmentSession,
+  getHostedEnvironmentSessions,
+  hostedHubStore,
+  isJoinableHostedEnvironmentSession,
+} from "@ryco/client-runtime/authorization";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import {
@@ -16,7 +24,8 @@ import { acquireMobileHostedNode } from "../hostedHub/acquireNode";
  * thread lives on. This module owns the decision ("should this environment
  * become the hosted selection, and if not, why not?") and the debounced,
  * cancel-safe engine that acts on it. Nothing else triggers a retarget — not
- * scroll, not inbox rendering, not prefetch.
+ * scroll, not inbox rendering, not prefetch. An environment whose session is
+ * already live or on its way skips the debounce.
  *
  * Two things this module deliberately does NOT do:
  *
@@ -156,9 +165,9 @@ export function deriveThreadConnectionRetarget(
   }
 
   // 6. Directory. "stale" means the last refresh failed: the node list cannot
-  //    be trusted to decide anything, so fail closed exactly like web does
-  //    (hostedHub/nodeRouteOrchestrator.ts:239). "idle"/"loading" are the
-  //    bootstrap transients and simply have no answer yet.
+  //    be trusted to decide anything, so fail closed exactly like web's node
+  //    route orchestrator does. "idle"/"loading" are the bootstrap transients
+  //    and simply have no answer yet.
   if (state.directoryStatus === "stale") {
     return { kind: "degraded", reason: "directory-unavailable" };
   }
@@ -166,7 +175,7 @@ export function deriveThreadConnectionRetarget(
 
   // 7. Browser status leaves "current" on every app background and comes back
   //    on resume. A retarget requested inside that window is a bounded wait,
-  //    never a failure (web's comment at nodeRouteOrchestrator.ts:244-250).
+  //    never a failure (web's node route orchestrator waits the same way).
   if (state.browserStatus !== "current") return { kind: "wait" };
 
   // 8. Directory is authoritative, so absence and revocation are now facts
@@ -175,9 +184,9 @@ export function deriveThreadConnectionRetarget(
   if (directoryNode.revokedAt !== null) return { kind: "degraded", reason: "revoked" };
 
   // 9. Retarget. Presence-offline still retargets: a thread tap is interactive
-  //    intent, matching web's `interactiveNodeId` path skipping the presence
-  //    fail-fast (nodeRouteOrchestrator.ts:261-265). Offline belongs on the row
-  //    as provenance, not as a gate on the tap.
+  //    intent, so it skips the presence fail-fast, as web's thread routes
+  //    select their node whatever its presence. Offline belongs on the row as
+  //    provenance, not as a gate on the tap.
   //
   //    One exception keeps the guard mirror intact: a terminal selection (rule
   //    2's fall-through) whose own node the directory still lists as live is a
@@ -229,17 +238,25 @@ export interface ThreadConnectionRetargetEngineDeps {
    * re-evaluate when the store happens to move; hydration itself must count.
    */
   readonly subscribeRoster?: (listener: () => void) => () => void;
+  /**
+   * Whether the environment's session is live or on its way, so selecting it
+   * adopts or joins that session instead of starting a connection. Such an
+   * open skips the debounce; omitted means every open waits.
+   */
+  readonly hasWarmSession?: (environmentId: EnvironmentId) => boolean;
   /** Trailing debounce window. Long enough to swallow an A→B tap-through. */
   readonly debounceMs?: number;
   readonly timers?: ThreadConnectionRetargetTimers;
 }
 
 /**
- * Every cross-node thread open waits this long before `selectNode` starts, so
- * it is kept as short as still coalesces a programmatic or double-tap A→B into
- * one relay ticket (and drops a back-swipe-before-dispatch to none). A leading
- * dispatch for an idle engine was considered and rejected: it would spend a
- * ticket on A in exactly the A→B case this window exists to collapse.
+ * Every cross-node thread open to an environment without a warm session waits
+ * this long before `selectNode` starts, so it is kept as short as still
+ * coalesces a programmatic or double-tap A→B into one relay ticket (and drops a
+ * back-swipe-before-dispatch to none). A leading dispatch for an idle engine
+ * was considered and rejected for those opens: it would spend a ticket on A in
+ * exactly the A→B case this window exists to collapse. An open to a warm
+ * session spends no ticket, so the window would only add latency there.
  */
 export const THREAD_CONNECTION_RETARGET_DEBOUNCE_MS = 100;
 
@@ -429,7 +446,16 @@ export function createThreadConnectionRetargetEngine(
         dispatchedNodeId = null;
       }
       ensureStoreSubscription();
-      armDebounce();
+      if (deps.hasWarmSession?.(environmentId)) {
+        // Selecting a warm session adopts or joins it and buys no ticket, so
+        // coalescing a quick A→B saves nothing here: drop the older target's
+        // pending wait and decide now. The microtask hop keeps a throwing
+        // actuator out of the opener's render effect.
+        cancelDebounce();
+        scheduleEvaluate();
+      } else {
+        armDebounce();
+      }
 
       let released = false;
       return () => {
@@ -484,6 +510,20 @@ export function createThreadConnectionRetargetEngine(
 // App singleton
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether the environment's session record can be selected without a new
+ * connection: it can be adopted as it is, or a connection requested for it is
+ * still on its way and a second request joins it.
+ */
+export function isWarmHostedEnvironmentSession(
+  record: HostedEnvironmentSessionRecord | undefined,
+): boolean {
+  return (
+    record !== undefined &&
+    (canAdoptHostedEnvironmentSession(record) || isJoinableHostedEnvironmentSession(record))
+  );
+}
+
 let mobileEngine: ThreadConnectionRetargetEngine | null = null;
 
 /**
@@ -509,6 +549,8 @@ export function ensureMobileThreadConnectionRetargetEngine(): ThreadConnectionRe
     getRosterEntry: (environmentId) =>
       getCachedHubNodeRoster().find((record) => record.environmentId === environmentId) ?? null,
     subscribeRoster: subscribeCachedHubNodeRoster,
+    hasWarmSession: (environmentId) =>
+      isWarmHostedEnvironmentSession(getHostedEnvironmentSessions().read(environmentId)),
   });
   return mobileEngine;
 }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const hoisted = vi.hoisted(() => ({
   readMobileHostedConfig: vi.fn(),
@@ -18,10 +18,13 @@ const hoisted = vi.hoisted(() => ({
   trustRevision: 0,
   trustListeners: new Set<() => void>(),
   prepareCalls: 0,
+  preparedTargets: [] as unknown[],
   disposeCalls: 0,
+  disposedEnvironments: [] as string[],
   resetSessionCalls: 0,
-  primaryConnection: { kind: "primary" },
-  createHostedPrimaryConnection: vi.fn(),
+  resetEnvironments: [] as (string | undefined)[],
+  environmentConnection: { kind: "primary" },
+  createHostedEnvironmentConnection: vi.fn(),
 }));
 
 vi.mock("react-native", () => ({
@@ -74,21 +77,26 @@ vi.mock("./e2eeAttempt", () => ({
   disposeMobileRelayE2eeAttempt: () => {
     hoisted.disposeCalls += 1;
   },
-  prepareMobileRelayE2eeAttempt: () => {
+  disposeMobileRelayE2eeAttemptFor: (environmentId: string) => {
+    hoisted.disposedEnvironments.push(environmentId);
+  },
+  prepareMobileRelayE2eeAttempt: (target?: unknown) => {
     hoisted.prepareCalls += 1;
+    hoisted.preparedTargets.push(target);
     return Promise.resolve();
   },
   resolveMobileRelayE2eeProvider: () => undefined,
 }));
 // The relay connection itself is covered in primaryConnection.test.ts; here only
-// its installation on the driver's seam matters.
+// its installation on the connection seam matters.
 vi.mock("./primaryConnection", () => ({
-  createHostedPrimaryConnection: hoisted.createHostedPrimaryConnection,
+  createHostedEnvironmentConnection: hoisted.createHostedEnvironmentConnection,
 }));
 vi.mock("./e2eeSession", () => ({
   getMobileE2eeSessionState: () => ({ event: null }),
-  resetMobileE2eeSession: () => {
+  resetMobileE2eeSession: (environmentId?: string) => {
     hoisted.resetSessionCalls += 1;
+    hoisted.resetEnvironments.push(environmentId);
   },
   subscribeMobileE2eeSession: () => () => undefined,
 }));
@@ -117,6 +125,10 @@ vi.mock("./nodeLifecycle", () => ({
     connectPrimaryEnvironment: () => undefined,
     disconnectPrimaryEnvironment: async () => undefined,
     setActiveEnvironmentId: () => undefined,
+    connectEnvironment: () => undefined,
+    releaseEnvironment: async () => undefined,
+    suspendEnvironment: async () => undefined,
+    requestEnvironmentReconcile: () => undefined,
   },
 }));
 
@@ -126,10 +138,13 @@ vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => {
     ...actual,
     // Installing the runtime (and with it the relay socket factory) is where a
     // channel first becomes possible, so that is what the ordering marker records.
-    configureHostedRuntime: vi.fn((...args: Parameters<typeof actual.configureHostedRuntime>) => {
-      hoisted.calls.push("configure");
-      return actual.configureHostedRuntime(...args);
-    }),
+    configureHostedRuntime: vi.fn(
+      (...[configuration, api]: Parameters<typeof actual.configureHostedRuntime>) => {
+        hoisted.calls.push("configure");
+        return actual.configureHostedRuntime(configuration, api);
+      },
+    ),
+    configureHostedEnvironmentSessions: vi.fn(actual.configureHostedEnvironmentSessions),
   };
 });
 vi.mock("@ryco/client-runtime/authorization/e2ee", async (importOriginal) => {
@@ -141,11 +156,17 @@ vi.mock("@ryco/client-runtime/authorization/e2ee", async (importOriginal) => {
 });
 
 import {
+  configureHostedEnvironmentSessions,
+  configureHostedRuntime,
+  getHostedEnvironmentSessions,
   getHostedRuntimeConfiguration,
   hostedHubController,
   hostedHubStore,
+  resetHostedEnvironmentSessionsForTests,
+  type HostedHubNode,
 } from "@ryco/client-runtime/authorization";
 import { createNativeE2eeEnrollmentCoordinator } from "@ryco/client-runtime/authorization/e2ee";
+import type { EnvironmentId } from "@ryco/contracts";
 
 import {
   configureMobileHostedRuntime,
@@ -162,7 +183,10 @@ import {
 } from "./hubProfile";
 import { resetMobileHostedRuntimeConfigForTests } from "./runtimeConfig";
 import { getMobileHostedUnavailableReason } from "./runtimeAvailability";
-import { createHostedPrimaryConnectionIfLoaded } from "./primaryConnectionFactory";
+import {
+  createHostedEnvironmentConnectionIfLoaded,
+  createHostedPrimaryConnectionIfLoaded,
+} from "./primaryConnectionFactory";
 
 const HOSTED_CONFIG = {
   hubOrigin: "https://hub.example.test",
@@ -187,8 +211,12 @@ beforeEach(() => {
   hoisted.trustRevision = 0;
   hoisted.trustListeners.clear();
   hoisted.prepareCalls = 0;
+  hoisted.preparedTargets.length = 0;
   hoisted.disposeCalls = 0;
+  hoisted.disposedEnvironments.length = 0;
   hoisted.resetSessionCalls = 0;
+  hoisted.resetEnvironments.length = 0;
+  resetHostedEnvironmentSessionsForTests();
   vi.clearAllMocks();
   hoisted.hydrate.mockResolvedValue(undefined);
   hoisted.readMobileHostedConfig.mockReturnValue(HOSTED_CONFIG);
@@ -221,10 +249,15 @@ describe("hosted runtime configuration", () => {
     expect(configuration.sessionCredentials.mode).toBe("bearer");
     expect(configuration.dpopSigner).toBe(signer);
     expect(configuration.nativeAuthorization).toBe(hoisted.nativeAuthorization);
-    expect(typeof configuration.nodeLifecycle.connectPrimaryEnvironment).toBe("function");
+    expect(configuration.environmentSessions).toBe("retained");
+    expect(typeof configuration.nodeLifecycle.connectEnvironment).toBe("function");
+    expect(typeof configuration.nodeLifecycle.releaseEnvironment).toBe("function");
+    expect(typeof configuration.nodeLifecycle.suspendEnvironment).toBe("function");
+    expect(typeof configuration.nodeLifecycle.requestEnvironmentReconcile).toBe("function");
     expect(typeof configuration.isForeground).toBe("function");
     expect(typeof configuration.subscribeForeground).toBe("function");
     expect(typeof configuration.hasPendingRelayRequests).toBe("function");
+    expect(configuration.demandDrivenDirectoryRefresh).toBe(true);
     expect(typeof configuration.resetRelayAttemptFactory).toBe("function");
     expect(typeof configuration.relayUrl).toBe("function");
     expect(typeof configuration.createRelaySocket).toBe("function");
@@ -243,14 +276,40 @@ describe("hosted runtime configuration", () => {
     );
   });
 
-  it("installs the relay connection on the driver's seam as soon as it loads", () => {
-    // The driver is on the launch path and never imports the relay connection;
-    // this lazily loaded module installs it before any session can exist.
-    hoisted.createHostedPrimaryConnection.mockReturnValue(hoisted.primaryConnection);
+  it("installs the environment relay connection on the seam as soon as it loads", () => {
+    // The connection code on the launch path never imports the relay
+    // connection; this lazily loaded module installs it before any session can
+    // exist.
+    hoisted.createHostedEnvironmentConnection.mockReturnValue(hoisted.environmentConnection);
+    const input = {} as Parameters<typeof createHostedEnvironmentConnectionIfLoaded>[0];
+
+    expect(createHostedEnvironmentConnectionIfLoaded(input)).toBe(hoisted.environmentConnection);
+    expect(hoisted.createHostedEnvironmentConnection).toHaveBeenCalledWith(input);
+  });
+
+  it("never builds the driver's selection-following primary connection", async () => {
+    // Every hosted connection goes through the controller's bounded connect
+    // path; a primary built by the driver would bypass its cap and fencing.
+    await configureMobileHostedRuntime();
     const deps = {} as Parameters<typeof createHostedPrimaryConnectionIfLoaded>[0];
 
-    expect(createHostedPrimaryConnectionIfLoaded(deps)).toBe(hoisted.primaryConnection);
-    expect(hoisted.createHostedPrimaryConnection).toHaveBeenCalledWith(deps);
+    expect(createHostedPrimaryConnectionIfLoaded(deps)).toBeNull();
+    expect(hoisted.createHostedEnvironmentConnection).not.toHaveBeenCalled();
+  });
+
+  it("gives the environment session registry the runtime's bound timers first", async () => {
+    await configureMobileHostedRuntime();
+    const { timers } = getHostedRuntimeConfiguration();
+    const ports = vi.mocked(configureHostedEnvironmentSessions).mock.calls[0]![0];
+
+    // Before the runtime is configured, so no session deadline is ever armed
+    // on another clock.
+    expect(vi.mocked(configureHostedEnvironmentSessions).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(configureHostedRuntime).mock.invocationCallOrder[0]!,
+    );
+    expect(ports.now).toBe(timers.now);
+    const handle = ports.setTimeout(() => undefined, 0);
+    ports.clearTimeout(handle);
   });
 
   it("targets the Hub public origin, which is what the proof signs into htu", async () => {
@@ -333,7 +392,12 @@ describe("hosted runtime configuration", () => {
     const prepareAtStart = hoisted.prepareCalls;
 
     const account = (id: string) => ({ id }) as never;
-    const node = (id: string) => ({ id }) as never;
+    const node = (id: string) =>
+      ({
+        id,
+        environmentId: `env_${id}`,
+        presence: { online: true, lastHeartbeatAt: null },
+      }) as never;
     hostedHubStore.setState({
       accountStatus: "authenticated",
       account: account("a\u0000b"),
@@ -367,6 +431,196 @@ describe("hosted runtime configuration", () => {
     const disposals = hoisted.disposeCalls;
     hostedHubStore.setState({ account: account("") } as never);
     expect(hoisted.disposeCalls).toBe(disposals + 1);
+  });
+});
+
+describe("the §4.4 attempt watcher", () => {
+  const ACCOUNT_ID = "acct_watch";
+
+  afterEach(() => {
+    hostedHubStore.setState({
+      accountStatus: "signed-out",
+      account: null,
+      selectedNode: null,
+    } as never);
+  });
+
+  /** An enrollment that is already ready, so the watcher primes channels. */
+  function readyEnrollment(): void {
+    vi.mocked(createNativeE2eeEnrollmentCoordinator).mockReturnValueOnce({
+      getState: () => ({
+        status: "ready",
+        generation: 1,
+        ready: { namespace: { hubOrigin: HOSTED_CONFIG.hubOrigin, accountId: ACCOUNT_ID } },
+        errorCode: null,
+      }),
+      subscribe: () => () => undefined,
+      ensure: async () => undefined,
+      invalidate: async () => undefined,
+    } as never);
+  }
+
+  function node(id: string, environmentId: string): HostedHubNode {
+    return {
+      id,
+      environmentId: environmentId as EnvironmentId,
+      label: `Label ${id}`,
+      platformOs: "darwin",
+      platformArch: "arm64",
+      clientVersion: "1",
+      createdAt: 0,
+      updatedAt: 0,
+      lastAuthenticatedAt: null,
+      revokedAt: null,
+      revocationReasonCode: null,
+      grant: { id: `grant_${id}`, role: "owner" },
+      effectiveRole: "owner",
+      presence: { online: true, lastHeartbeatAt: null },
+    };
+  }
+
+  function signIn(selected: HostedHubNode | null): void {
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: { id: ACCOUNT_ID } as never,
+      selectedNode: selected,
+      generation: 1,
+    } as never);
+  }
+
+  /** A record with a connection requested, as the controller leaves it. */
+  function connect(entry: HostedHubNode): number {
+    const sessions = getHostedEnvironmentSessions();
+    const record = sessions.ensureRecord(entry);
+    sessions.markConnectRequested(record.environmentId, record.generation);
+    return record.generation;
+  }
+
+  function targets(): { nodeId: string; environmentId: string; generation: number }[] {
+    return (
+      hoisted.preparedTargets as (
+        | { nodeId: string; environmentId: string; generation: number }
+        | undefined
+      )[]
+    )
+      .filter((target) => target !== undefined)
+      .map(({ nodeId, environmentId, generation }) => ({ nodeId, environmentId, generation }));
+  }
+
+  describe("with retained environment sessions", () => {
+    beforeEach(async () => {
+      readyEnrollment();
+      signIn(node("node_a", "env_a"));
+      await configureMobileHostedRuntime();
+    });
+
+    it("primes every connected record for its own node and record generation", () => {
+      const generationA = connect(node("node_a", "env_a"));
+      const generationB = connect(node("node_b", "env_b"));
+
+      expect(targets()).toEqual([
+        { nodeId: "node_a", environmentId: "env_a", generation: generationA },
+        { nodeId: "node_b", environmentId: "env_b", generation: generationB },
+      ]);
+      // Never the selection-following form.
+      expect(hoisted.preparedTargets).not.toContain(undefined);
+    });
+
+    it("fences each target by its record generation", () => {
+      connect(node("node_b", "env_b"));
+      const [target] = hoisted.preparedTargets as { isCurrent: () => boolean }[];
+      expect(target!.isCurrent()).toBe(true);
+
+      getHostedEnvironmentSessions().renew("env_b" as never);
+
+      expect(target!.isCurrent()).toBe(false);
+    });
+
+    it("resets nothing when the selection is cleared", () => {
+      connect(node("node_a", "env_a"));
+      connect(node("node_b", "env_b"));
+      const prepares = hoisted.prepareCalls;
+
+      hostedHubStore.setState({ selectedNode: null } as never);
+
+      expect(hoisted.disposeCalls).toBe(0);
+      expect(hoisted.disposedEnvironments).toEqual([]);
+      expect(hoisted.resetEnvironments).toEqual([]);
+      expect(hoisted.prepareCalls).toBe(prepares);
+    });
+
+    it("resets only a removed record's environment", () => {
+      connect(node("node_a", "env_a"));
+      connect(node("node_b", "env_b"));
+
+      getHostedEnvironmentSessions().release("env_b" as never);
+
+      expect(hoisted.disposedEnvironments).toEqual(["env_b"]);
+      expect(hoisted.resetEnvironments).toEqual(["env_b"]);
+      expect(hoisted.disposeCalls).toBe(0);
+    });
+
+    it("resets a renewed record's environment and primes its new generation", () => {
+      connect(node("node_a", "env_a"));
+      connect(node("node_b", "env_b"));
+      hoisted.preparedTargets.length = 0;
+
+      const renewed = getHostedEnvironmentSessions().renew("env_b" as never)!;
+      expect(hoisted.disposedEnvironments).toEqual(["env_b"]);
+      expect(hoisted.resetEnvironments).toEqual(["env_b"]);
+      // Renewed, but nothing is requested for the new generation yet.
+      expect(targets()).toEqual([]);
+
+      getHostedEnvironmentSessions().markConnectRequested(
+        renewed.environmentId,
+        renewed.generation,
+      );
+      expect(targets()).toEqual([
+        { nodeId: "node_b", environmentId: "env_b", generation: renewed.generation },
+      ]);
+    });
+
+    it("re-primes every connected record when the trust document changes", () => {
+      connect(node("node_a", "env_a"));
+      connect(node("node_b", "env_b"));
+      hoisted.preparedTargets.length = 0;
+
+      hoisted.trustRevision += 1;
+      for (const listener of hoisted.trustListeners) listener();
+
+      // Records are listed most recently accessed first; the order is not the point.
+      expect(
+        targets()
+          .map((target) => target.environmentId)
+          .toSorted(),
+      ).toEqual(["env_a", "env_b"]);
+    });
+
+    it("revokes every attempt and projection on sign-out", () => {
+      connect(node("node_a", "env_a"));
+      connect(node("node_b", "env_b"));
+
+      hostedHubStore.setState({
+        accountStatus: "signed-out",
+        account: null,
+        selectedNode: null,
+      } as never);
+
+      expect(hoisted.disposeCalls).toBe(1);
+      expect(hoisted.resetEnvironments).toEqual([undefined]);
+    });
+  });
+
+  it("prepares nothing for a selected node until a connection is requested for it", async () => {
+    readyEnrollment();
+    signIn(node("node_a", "env_a"));
+    await configureMobileHostedRuntime();
+
+    // The selection is only a cursor: no selection-following attempt.
+    expect(hoisted.preparedTargets).toEqual([]);
+
+    const generation = connect(node("node_a", "env_a"));
+    expect(targets()).toEqual([{ nodeId: "node_a", environmentId: "env_a", generation }]);
   });
 });
 

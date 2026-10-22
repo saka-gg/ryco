@@ -1,4 +1,4 @@
-export type BuildArch = "arm64" | "x64" | "universal";
+export type BuildArch = "arm64" | "x64";
 export type BuildPlatform = "mac" | "linux" | "win";
 
 interface PlatformConfig {

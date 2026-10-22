@@ -12,6 +12,7 @@ import {
   buildSideQuestionPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
+import { gitWritingPolicyFromSettings } from "./TextGenerationPresets.ts";
 import {
   limitUnicode,
   normalizeCliError,
@@ -98,6 +99,56 @@ describe("buildPrContentPrompt", () => {
     expect(result.prompt).toContain("3 files changed");
     expect(result.prompt).toContain("Diff patch:");
     expect(result.prompt).toContain("export function login()");
+  });
+
+  it("adds the user's pull request instructions with precedence over the style rules", () => {
+    const { prompt } = buildPrContentPrompt({
+      baseBranch: "main",
+      headBranch: "feature/auth",
+      commitSummary: "feat: add login page",
+      diffSummary: "3 files changed",
+      diffPatch: "diff",
+      policy: gitWritingPolicyFromSettings({
+        commitMessageInstructions: "",
+        pullRequestInstructions: "Add a Before / After section when the UI changed.",
+      }),
+    });
+
+    expect(prompt).toContain("take precedence over the style rules above");
+    expect(prompt).toContain("Add a Before / After section when the UI changed.");
+    expect(prompt).toContain("placeholder");
+  });
+});
+
+describe("gitWritingPolicyFromSettings", () => {
+  it("returns nothing without instructions and keeps each kind separate", () => {
+    expect(
+      gitWritingPolicyFromSettings({ commitMessageInstructions: " ", pullRequestInstructions: "" }),
+    ).toBeUndefined();
+
+    const policy = gitWritingPolicyFromSettings({
+      commitMessageInstructions: "Use Conventional Commits.",
+      pullRequestInstructions: "",
+    });
+    const { prompt: commitPrompt } = buildCommitMessagePrompt({
+      branch: "main",
+      stagedSummary: "M README.md",
+      stagedPatch: "diff",
+      includeBranch: false,
+      policy,
+    });
+    const { prompt: prPrompt } = buildPrContentPrompt({
+      baseBranch: "main",
+      headBranch: "feature",
+      commitSummary: "",
+      diffSummary: "",
+      diffPatch: "",
+      policy,
+    });
+
+    expect(commitPrompt).toContain("Use Conventional Commits.");
+    expect(prPrompt).not.toContain("Use Conventional Commits.");
+    expect(prPrompt).not.toContain("Additional instructions");
   });
 });
 

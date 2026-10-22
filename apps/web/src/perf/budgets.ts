@@ -6,6 +6,8 @@ export const WEB_PERF_BUDGETS = {
   tabSwitchMs: 400,
   /** Sidebar project expand: click mark → thread list first paint. */
   sidebarExpandMs: 350,
+  /** Hosted node switch toward an established node: intent → thread content painted. */
+  nodeSwitchContentMs: 200,
 } as const satisfies Record<string, number>;
 
 export type WebPerfBudgetKey = keyof typeof WEB_PERF_BUDGETS;
@@ -16,6 +18,12 @@ export interface PerfBudgetEvaluation {
   readonly budgetMs: number;
   readonly withinBudget: boolean;
 }
+
+/**
+ * Node-switch content measures are named per switch,
+ * `ryco:node-switch:content-painted:<n>`, so they are found by this prefix.
+ */
+export const NODE_SWITCH_CONTENT_MEASURE_PREFIX = "ryco:node-switch:content-painted:";
 
 export function tabSwitchMeasureName(key: string): string {
   return `ryco:tab-switch:${key}`;
@@ -83,6 +91,37 @@ export function evaluateSidebarExpandBudget(
     measureName,
     durationMs,
     budgetMs: WEB_PERF_BUDGETS.sidebarExpandMs,
+  });
+}
+
+/** Evaluates the most recent node switch whose content paint was measured. */
+export function evaluateNodeSwitchContentBudget(
+  performanceObject: Pick<Performance, "getEntriesByType"> = globalThis.performance,
+): PerfBudgetEvaluation | null {
+  if (!performanceObject) {
+    return null;
+  }
+  let latest: { readonly n: number; readonly entry: PerformanceEntry } | null = null;
+  for (const entry of performanceObject.getEntriesByType("measure")) {
+    if (!entry.name.startsWith(NODE_SWITCH_CONTENT_MEASURE_PREFIX)) {
+      continue;
+    }
+    const switchNumber = entry.name.slice(NODE_SWITCH_CONTENT_MEASURE_PREFIX.length);
+    if (!/^\d+$/.test(switchNumber) || !Number.isFinite(entry.duration)) {
+      continue;
+    }
+    const n = Number(switchNumber);
+    if (latest === null || n > latest.n) {
+      latest = { n, entry };
+    }
+  }
+  if (latest === null) {
+    return null;
+  }
+  return evaluateMeasureDuration({
+    measureName: latest.entry.name,
+    durationMs: latest.entry.duration,
+    budgetMs: WEB_PERF_BUDGETS.nodeSwitchContentMs,
   });
 }
 

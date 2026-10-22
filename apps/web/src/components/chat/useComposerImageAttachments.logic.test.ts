@@ -1,6 +1,10 @@
 import type { ProviderDriverKind } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+// Imported statically (vi.mock is hoisted above it) so the module graph loads
+// while the file is collected, not inside the first test's timeout.
+import { resolveComposerAttachmentRouting } from "./useComposerImageAttachments";
+
 vi.mock("@ryco/shared/providerCapabilities", () => ({
   providerSupportsGeneralFileAttachments: vi.fn(
     (provider: { toString(): string }) =>
@@ -15,8 +19,7 @@ function makeFile(name: string, type: string): File {
 }
 
 describe("resolveComposerAttachmentRouting", () => {
-  it("attaches every file directly when the environment advertises fileAttachments", async () => {
-    const { resolveComposerAttachmentRouting } = await import("./useComposerImageAttachments");
+  it("attaches every file directly when the environment advertises fileAttachments", () => {
     const image = makeFile("shot.png", "image/png");
     const doc = makeFile("notes.pdf", "application/pdf");
     const routing = resolveComposerAttachmentRouting({
@@ -28,8 +31,7 @@ describe("resolveComposerAttachmentRouting", () => {
     expect(routing.references).toEqual([]);
   });
 
-  it("falls back to file references for non-images when the capability is absent", async () => {
-    const { resolveComposerAttachmentRouting } = await import("./useComposerImageAttachments");
+  it("falls back to file references for non-images when the capability is absent", () => {
     const image = makeFile("shot.png", "image/png");
     const doc = makeFile("notes.pdf", "application/pdf");
     const routing = resolveComposerAttachmentRouting({
@@ -41,8 +43,7 @@ describe("resolveComposerAttachmentRouting", () => {
     expect(routing.references).toEqual([doc]);
   });
 
-  it("attaches files inline (dataUrl) when the legacy provider gate allows it", async () => {
-    const { resolveComposerAttachmentRouting } = await import("./useComposerImageAttachments");
+  it("attaches files inline (dataUrl) when the legacy provider gate allows it", () => {
     const doc = makeFile("notes.pdf", "application/pdf");
     const routing = resolveComposerAttachmentRouting({
       fileUploadMaxBytes: null,

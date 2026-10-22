@@ -16,11 +16,10 @@ const desktop = resolve(dirname(scriptPath), "..");
 // (native/macos/RycoWindowMaterial.m, loaded by src/windowTranslucency.ts).
 export function buildWindowMaterialAddon(desktopDirectory = desktop, { development = false } = {}) {
   if (process.platform !== "darwin") return;
+  // Always arm64: the Mac app is Apple Silicon only.
   const arch = desktopBuildArch({ development });
   const source = join(desktopDirectory, "native/macos/RycoWindowMaterial.m");
   const output = join(desktopDirectory, "resources/ryco-window-material.node");
-  const architectures =
-    arch === "universal" ? ["arm64", "x86_64"] : [arch === "x64" ? "x86_64" : "arm64"];
   const compileArguments = [
     "--sdk",
     "macosx",
@@ -32,7 +31,8 @@ export function buildWindowMaterialAddon(desktopDirectory = desktop, { developme
     "-Wall",
     "-Wextra",
     "-Werror",
-    ...architectures.flatMap((architecture) => ["-arch", architecture]),
+    "-arch",
+    arch,
     "-mmacosx-version-min=11.0",
     // Node-API symbols resolve against the host Electron binary at load time.
     "-bundle",

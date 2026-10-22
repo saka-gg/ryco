@@ -1,5 +1,6 @@
 import { readPersistedCwd } from "../runtimeCwd.ts";
 import * as SqlClient from "effect/sql/SqlClient";
+import { restoreChatFolder } from "../../project/chatFolderRestore.ts";
 import { acquireStoragePathUseLease, retainStoragePathUseLease } from "../../storage/lifecycle.ts";
 /**
  * ProviderServiceLive - Cross-provider orchestration layer.
@@ -1503,6 +1504,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ),
           );
           yield* Effect.addFinalizer(() => release);
+          // Held now, so empty-folder cleanup cannot remove a chat's folder again before the start.
+          yield* restoreChatFolder(storageSql.value, effectiveCwd);
         }
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,

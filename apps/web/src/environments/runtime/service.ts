@@ -48,6 +48,7 @@ export {
 } from "@ryco/client-runtime/connection";
 
 import { markPromotedDraftThreadByRef, useComposerDraftStore } from "~/composerDraftStore";
+import { useMessageQueueStore } from "~/messageQueueStore";
 import { ensureLocalApi } from "~/localApi";
 import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
 import { createProjectSearchInvalidationQueue } from "~/rpc/projectSearchInvalidation";
@@ -78,13 +79,13 @@ import {
   writeSavedEnvironmentBearerToken,
 } from "./catalog";
 import { createEnvironmentConnection, type EnvironmentConnection } from "./connection";
+import { useStore, selectEnvironmentState } from "~/store";
+import { createEnvironmentEventBatcher } from "@ryco/client-runtime/state/threads";
 import {
-  useStore,
-  selectEnvironmentState,
-  selectSidebarThreadSummaryByRef,
-  selectThreadByRef,
-} from "~/store";
-import { createEnvironmentEventBatcher, fullThreadEntry } from "@ryco/client-runtime/state/threads";
+  hasUnsentThreadWork,
+  isThreadNonIdle,
+  selectThreadBodyUsage,
+} from "@ryco/client-runtime/state/threads/threadBodyResidency";
 import { useTerminalStateStore } from "~/terminalStateStore";
 import type { WsProtocolCloseContext } from "@ryco/client-runtime/rpc";
 import {
@@ -92,11 +93,14 @@ import {
   createDirectDeviceRpcTransport,
   WS_URL_PROVIDER_TIMEOUT_MS,
 } from "@ryco/client-runtime/rpc";
+import { environmentQueryRefresh } from "../../rpc/environmentQueryRefresh";
 import {
-  environmentQueryRefresh,
-  isHostedEnvironmentQueryRefreshReady,
-} from "../../rpc/environmentQueryRefresh";
-import { applySettingsUpdated, getServerConfig } from "../../rpc/serverState";
+  applySettingsUpdated,
+  clearEnvironmentServerConfigs,
+  forgetEnvironmentServerConfig,
+  getServerConfig,
+  writeEnvironmentServerConfig,
+} from "../../rpc/serverState";
 import { DeviceWsTransport, HostedWsTransport, WsTransport } from "../../rpc/wsTransport";
 import { createWsRpcClient, type WsRpcClient } from "../../rpc/wsRpcClient";
 import { appendVersionMismatchHint, resolveServerConfigVersionMismatch } from "../../versionSkew";
@@ -106,19 +110,15 @@ import {
   measureStartupPhase,
 } from "~/perf/startupInstrumentation";
 import { isHostedHubMode } from "~/env";
-import {
-  hostedHubController,
-  markHostedSessionReady,
-  markHostedSessionReplaying,
-  reportHostedShellSnapshotFailure,
-  useHostedHubStore,
-} from "~/hostedHub/state";
-import {
-  bindHostedDispatchReplay,
-  getHostedRelayAttemptFactory,
-  hostedDispatchLineage,
-} from "~/hostedHub/transport";
+import type { HostedHubNode } from "@ryco/client-runtime/authorization";
+import { isHostedEnvironmentDemanded } from "~/hostedHub/hostedConnectionCoordinator";
+import { getHostedEnvironmentSessions } from "~/hostedHub/state";
 import { createWebEnvironmentStateSink } from "./environmentStateSink";
+import {
+  createHostedEnvironmentConnection,
+  hostedEnvironmentConnectionGeneration,
+  type HostedConnectionFence,
+} from "./hostedEnvironmentConnection";
 import { webFrameScheduler, webSocket } from "../../platform";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
 
@@ -179,8 +179,15 @@ function getEnvironmentSupervisor() {
       needsProviderInvalidation = false;
       projectSearchInvalidations.reset();
     },
+    // Hosted connections are opened only through the lifecycle owner's
+    // connect port (`connectHostedEnvironment`); the primary path only ever
+    // finds the one already registered for the active environment.
     createPrimaryConnection: () =>
-      getPrimaryKnownEnvironment()?.environmentId ? createPrimaryEnvironmentConnection() : null,
+      isHostedHubMode()
+        ? readRegisteredHostedPrimaryConnection()
+        : getPrimaryKnownEnvironment()?.environmentId
+          ? createPrimaryEnvironmentConnection()
+          : null,
     listSavedEnvironmentRecords,
     hasSavedEnvironmentRegistryHydrated,
     waitForSavedEnvironmentRegistryHydration,
@@ -195,7 +202,14 @@ function getEnvironmentSupervisor() {
     waitForPrimaryShellSnapshotApplied,
     subscribeBrowserResume: subscribeBrowserResumeReconnects,
     isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
-      isNonIdleThreadDetailSubscription({ environmentId, threadId }),
+      isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
+    listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),
+    evictThreadBodies: (threadRefs) => useStore.getState().evictThreadBodies(threadRefs),
+    isThreadBodyProtected: (threadRef) =>
+      hasUnsentThreadWork(threadRef, {
+        queuesByThreadKey: useMessageQueueStore.getState().queuesByThreadKey,
+        draftsByThreadKey: useComposerDraftStore.getState().draftsByThreadKey,
+      }),
     syncThreadDetailSnapshot: (environmentId, snapshot) =>
       useStore
         .getState()
@@ -292,55 +306,6 @@ async function waitForPrimaryShellSnapshotApplied(timeoutMs: number): Promise<vo
       globalThis.setTimeout(resolve, timeoutMs);
     }),
   ]);
-}
-
-function isNonIdleThreadDetailSubscription(input: {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-}): boolean {
-  const threadRef = scopeThreadRef(input.environmentId, input.threadId);
-  const state = useStore.getState();
-  // An archived stub knows of no pending work; once loaded, its full summary does.
-  const sidebarThread = fullThreadEntry(selectSidebarThreadSummaryByRef(state, threadRef));
-
-  // Prefer shell/sidebar state first because it carries the coarse thread
-  // readiness flags used throughout the UI (pending approvals/input/plan).
-  if (sidebarThread) {
-    if (
-      sidebarThread.hasPendingApprovals ||
-      sidebarThread.hasPendingUserInput ||
-      sidebarThread.hasActionableProposedPlan
-    ) {
-      return true;
-    }
-
-    const orchestrationStatus = sidebarThread.session?.orchestrationStatus;
-    if (
-      orchestrationStatus &&
-      orchestrationStatus !== "idle" &&
-      orchestrationStatus !== "stopped"
-    ) {
-      return true;
-    }
-
-    if (sidebarThread.latestTurn?.state === "running") {
-      return true;
-    }
-  }
-
-  const thread = selectThreadByRef(state, threadRef);
-  if (!thread) {
-    return false;
-  }
-
-  const orchestrationStatus = thread.session?.orchestrationStatus;
-  return (
-    Boolean(
-      orchestrationStatus && orchestrationStatus !== "idle" && orchestrationStatus !== "stopped",
-    ) ||
-    thread.latestTurn?.state === "running" ||
-    thread.pendingSourceProposedPlan !== undefined
-  );
 }
 
 function disposeThreadDetailSubscriptionsForEnvironment(environmentId: EnvironmentId): void {
@@ -799,8 +764,13 @@ export function flushEnvironmentThreadDetailEvents(): void {
   threadDetailEventBatcher.flush();
 }
 
+/**
+ * A connection's stream handlers. `fence` is the hosted lifecycle owner's for
+ * the connection — the environment's session record generation — and `null`
+ * for a direct connection, which nothing fences.
+ */
 function createEnvironmentConnectionHandlers(
-  hostedGeneration: number | null = null,
+  fence: HostedConnectionFence | null = null,
   initialRefreshEnvironmentId?: EnvironmentId,
   options: {
     /**
@@ -811,8 +781,7 @@ function createEnvironmentConnectionHandlers(
     readonly resumeShell?: boolean;
   } = {},
 ) {
-  const acceptsEvent = () =>
-    hostedGeneration === null || useHostedHubStore.getState().generation === hostedGeneration;
+  const acceptsEvent = () => fence === null || fence.accepts();
   let queryRefreshGeneration = initialRefreshEnvironmentId
     ? environmentQueryRefresh.begin(initialRefreshEnvironmentId)
     : null;
@@ -823,19 +792,12 @@ function createEnvironmentConnectionHandlers(
   const completeQueryRefresh = (environmentId: EnvironmentId) => {
     const refreshGeneration = queryRefreshGeneration;
     if (refreshGeneration === null) return;
-    const isAuthoritativelyReady = () => {
-      if (hostedGeneration === null) return true;
-      return isHostedEnvironmentQueryRefreshReady(
-        useHostedHubStore.getState(),
-        environmentId,
-        hostedGeneration,
-      );
-    };
+    const isAuthoritativelyReady = () => fence === null || fence.isQueryRefreshReady(environmentId);
     void environmentQueryRefresh
       .ready(environmentId, refreshGeneration, isAuthoritativelyReady)
       .catch(() => undefined);
   };
-  const resumeShell = options.resumeShell === true && hostedGeneration === null;
+  const resumeShell = options.resumeShell === true && fence === null;
   return {
     ...(resumeShell
       ? {
@@ -849,14 +811,10 @@ function createEnvironmentConnectionHandlers(
     onResubscribe: (environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
       beginQueryRefresh(environmentId);
-      if (hostedGeneration !== null) {
-        markHostedSessionReplaying(environmentId, hostedGeneration);
-      }
+      fence?.markReplaying(environmentId);
     },
     onShellError: (environmentId: EnvironmentId) => {
-      if (hostedGeneration !== null && acceptsEvent()) {
-        reportHostedShellSnapshotFailure(environmentId, hostedGeneration);
-      }
+      if (fence !== null && fence.accepts()) fence.reportShellError(environmentId);
     },
     resetShellProjection: (environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
@@ -880,11 +838,11 @@ function createEnvironmentConnectionHandlers(
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().syncShellSnapshot(snapshot, environmentId, {
         onCurrent: () => {
-          if (hostedGeneration !== null) markHostedSessionReady(environmentId, hostedGeneration);
+          fence?.markReady(environmentId);
           completeQueryRefresh(environmentId);
         },
         onReady: () => {
-          if (hostedGeneration !== null) markHostedSessionReady(environmentId, hostedGeneration);
+          fence?.markReady(environmentId);
           completeQueryRefresh(environmentId);
         },
       });
@@ -920,32 +878,6 @@ function createPrimaryEnvironmentClient(
     );
   }
   const connectionLabel = knownEnvironment?.label ?? null;
-
-  if (isHostedHubMode()) {
-    const attemptFactory = getHostedRelayAttemptFactory();
-    const environmentId = knownEnvironment?.environmentId ?? null;
-    const dispatchReplay = bindHostedDispatchReplay({
-      environmentId,
-      lineage: hostedDispatchLineage(useHostedHubStore.getState()),
-      markUncertain: () => {
-        if (environmentId) hostedHubController.markEnvironmentDeliveryUnknown(environmentId);
-      },
-    });
-    const hostedHandlers = attemptFactory.lifecycleHandlers(dispatchReplay);
-    const transport = new HostedWsTransport(() => attemptFactory.nextUrl(), {
-      ...hostedHandlers,
-      getConnectionLabel: () => connectionLabel,
-      getEnvironmentId: () => knownEnvironment?.environmentId ?? null,
-      onOpen: () => {
-        hostedHandlers.onOpen?.();
-        markStartupPhase("primary-ws-open");
-      },
-    });
-    return dispatchReplay.wrap(
-      createWsRpcClient(transport, createDeviceRpcClient(transport, { manageTransport: false })),
-    );
-  }
-
   const authenticatedSocketUrl = async (
     pathname: "/ws" | "/ws/device" | "/ws/device-frames",
     signal?: AbortSignal,
@@ -1259,38 +1191,43 @@ async function removeConnection(environmentId: EnvironmentId): Promise<boolean> 
   return await getEnvironmentSupervisor().remove(environmentId);
 }
 
+/**
+ * The hosted connection registered for the active environment, if any. Hosted
+ * mode never builds a connection on the primary path: a second constructor
+ * would be a second lifecycle owner, outside the connection cap and the
+ * record generations that fence every hosted connection.
+ */
+function readRegisteredHostedPrimaryConnection(): EnvironmentConnection | null {
+  const environmentId = getPrimaryKnownEnvironment()?.environmentId;
+  return environmentId ? getEnvironmentSupervisor().read(environmentId) : null;
+}
+
 function createPrimaryEnvironmentConnection(): EnvironmentConnection {
+  if (isHostedHubMode()) {
+    const registered = readRegisteredHostedPrimaryConnection();
+    if (registered) return registered;
+    throw new Error("No hosted connection is registered for the active environment.");
+  }
   const knownEnvironment = getPrimaryKnownEnvironment();
   if (!knownEnvironment?.environmentId) {
     throw new Error("Unable to resolve the primary environment.");
   }
+  const environmentId = knownEnvironment.environmentId;
 
-  const existing = getEnvironmentSupervisor().read(knownEnvironment.environmentId);
+  const existing = getEnvironmentSupervisor().read(environmentId);
   if (existing) {
     return existing;
   }
 
-  const hostedGeneration = isHostedHubMode() ? useHostedHubStore.getState().generation : null;
   return registerConnection(
     createEnvironmentConnection({
       kind: "primary",
       knownEnvironment,
       client: createPrimaryEnvironmentClient(knownEnvironment),
-      // The hosted lifecycle owner's generation: once it moves on, this
-      // connection's config is neither published nor read.
-      ...(hostedGeneration === null
-        ? {}
-        : {
-            lifecycleGeneration: {
-              generation: hostedGeneration,
-              readCurrent: () => useHostedHubStore.getState().generation,
-            },
-          }),
-      ...createEnvironmentConnectionHandlers(
-        hostedGeneration,
-        hostedGeneration !== null ? knownEnvironment.environmentId : undefined,
-        { resumeShell: hostedGeneration === null },
-      ),
+      // The config stream starts with the connection and feeds the
+      // per-environment config store, ahead of any shell that shows it.
+      onConfigUpdated: (config, type) => writeEnvironmentServerConfig(environmentId, config, type),
+      ...createEnvironmentConnectionHandlers(null, undefined, { resumeShell: true }),
     }),
   );
 }
@@ -1307,6 +1244,81 @@ export async function disconnectPrimaryEnvironment(): Promise<void> {
 
 export function connectPrimaryEnvironment(): EnvironmentConnection | null {
   return maybeCreatePrimaryEnvironmentConnection();
+}
+
+// Retained hosted sessions: the lifecycle owner's ports for one environment's
+// connection. Each names the record generation it acts for, so a late release
+// or suspension of an old generation never tears down a newer connection.
+
+/**
+ * Open the environment's connection for this record generation. An existing
+ * connection of an older generation is removed first; one of this generation
+ * or a newer one makes this a no-op, as does a generation the record has
+ * already moved past.
+ */
+export async function connectHostedEnvironment(
+  node: HostedHubNode,
+  generation: number,
+): Promise<void> {
+  const environmentId = node.environmentId;
+  const sessions = getHostedEnvironmentSessions();
+  if (!sessions.isCurrentGeneration(environmentId, generation)) return;
+  const existing = getEnvironmentSupervisor().read(environmentId);
+  if (existing) {
+    const existingGeneration = hostedEnvironmentConnectionGeneration(existing);
+    if (existingGeneration !== null && existingGeneration >= generation) return;
+    await removeConnection(environmentId).catch(() => false);
+    if (
+      !sessions.isCurrentGeneration(environmentId, generation) ||
+      getEnvironmentSupervisor().read(environmentId)
+    ) {
+      return;
+    }
+  }
+  registerConnection(
+    createHostedEnvironmentConnection({
+      node,
+      generation,
+      sessions,
+      handlersFor: (fence) => createEnvironmentConnectionHandlers(fence, environmentId),
+      isDemanded: () => isHostedEnvironmentDemanded(environmentId),
+    }),
+  );
+}
+
+/**
+ * Local teardown of the environment's connection when its generation is at
+ * most `generation`. Never waits for the remote end to acknowledge a close.
+ */
+async function removeHostedConnectionUpTo(
+  environmentId: EnvironmentId,
+  generation: number,
+): Promise<void> {
+  const existing = getEnvironmentSupervisor().read(environmentId);
+  if (!existing) return;
+  const existingGeneration = hostedEnvironmentConnectionGeneration(existing);
+  if (existingGeneration !== null && existingGeneration > generation) return;
+  await removeConnection(environmentId).catch(() => false);
+}
+
+/** Remove the environment's connection of this generation or older. */
+export function removeHostedEnvironment(
+  environmentId: EnvironmentId,
+  generation: number,
+): Promise<void> {
+  return removeHostedConnectionUpTo(environmentId, generation);
+}
+
+/**
+ * Dispose the transport of the environment's connection of this generation or
+ * older. What it displays stays in the store; the lifecycle owner decides when
+ * node-scoped state goes.
+ */
+export function suspendHostedEnvironment(
+  environmentId: EnvironmentId,
+  generation: number,
+): Promise<void> {
+  return removeHostedConnectionUpTo(environmentId, generation);
 }
 
 /** Connect one exact native-verified Hub node through Desktop main's opaque relay transport. */
@@ -1346,7 +1358,8 @@ export async function connectDesktopWorkspaceEnvironment(input: {
       kind: "saved",
       knownEnvironment: { ...knownEnvironment, environmentId: input.environmentId },
       client: createWsRpcClient(transport),
-      onConfigUpdated: (config) => {
+      onConfigUpdated: (config, type) => {
+        writeEnvironmentServerConfig(input.environmentId, config, type);
         useSavedEnvironmentRuntimeStore.getState().ensure(input.environmentId);
         useSavedEnvironmentRuntimeStore.getState().patch(input.environmentId, {
           descriptor: config.environment,
@@ -1574,7 +1587,8 @@ async function connectSavedEnvironment(
           throw toSavedEnvironmentCredentialError(error);
         }
       },
-      onConfigUpdated: (config) => {
+      onConfigUpdated: (config, type) => {
+        writeEnvironmentServerConfig(activeRecord.environmentId, config, type);
         initialConfigSnapshot.resolve(config);
         useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
           descriptor: config.environment,
@@ -1839,6 +1853,7 @@ export async function removeSavedEnvironment(environmentId: EnvironmentId): Prom
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
   useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
+  forgetEnvironmentServerConfig(environmentId);
   useStore.getState().removeEnvironmentState(environmentId);
   // Project artwork is cached per node, past its connections: forget it too.
   clearProjectIconCache(environmentId);
@@ -1961,6 +1976,7 @@ export function startEnvironmentConnectionService(): () => void {
 export async function resetEnvironmentServiceForTests(): Promise<void> {
   await getEnvironmentSupervisor().resetForTests();
   environmentSupervisor = null;
+  clearEnvironmentServerConfigs();
   lastBrowserHiddenAt = null;
   primaryShellSnapshotApplied = false;
   primaryShellSnapshotAppliedPromise = new Promise<void>((resolve) => {

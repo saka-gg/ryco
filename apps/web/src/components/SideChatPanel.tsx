@@ -59,7 +59,10 @@ export function SideChatPanel({
 }) {
   const key = scopedThreadKey(threadRef);
   const chat = useSideChatStore((state) => state.chatsByThreadKey[key]);
-  const capability = useHostedRpcCapability(WS_METHODS.textGenerationAskSideQuestion);
+  const capability = useHostedRpcCapability(
+    WS_METHODS.textGenerationAskSideQuestion,
+    threadRef.environmentId,
+  );
   const ready = connected && capability.allowed;
   useEffect(() => {
     if (!ready) sideChatStore.getState().disconnect(key);

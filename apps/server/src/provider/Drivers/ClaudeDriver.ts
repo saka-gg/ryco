@@ -66,14 +66,13 @@ function isClaudeNativeCommandPath(commandPath: string): boolean {
   );
 }
 
+// Homebrew installs (the `claude-code` and `claude-code@latest` casks) are found from the keg;
+// WinGet and system packages (apt, dnf, apk) stay manual.
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@anthropic-ai/claude-code",
-  homebrewFormula: "claude-code",
   nativeUpdate: {
-    executable: "claude",
     args: ["update"],
-    lockKey: "claude-native",
     isCommandPath: isClaudeNativeCommandPath,
   },
 });

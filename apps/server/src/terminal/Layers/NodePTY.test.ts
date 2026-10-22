@@ -1,8 +1,56 @@
 import { FileSystem, Path, Effect } from "effect";
 import { assert, it } from "@effect/vitest";
 
-import { ensureNodePtySpawnHelperExecutable } from "./NodePTY.ts";
+import { NodePtyProcess, ensureNodePtySpawnHelperExecutable } from "./NodePTY.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+
+const fakePty = (readProcess: () => unknown) =>
+  ({
+    pid: 4242,
+    get process() {
+      return readProcess();
+    },
+  }) as unknown as import("node-pty").IPty;
+
+it("names the foreground process the wrapped pty reports on macOS", () => {
+  assert.equal(
+    new NodePtyProcess(
+      fakePty(() => "vim"),
+      "darwin",
+    ).foregroundProcessName(),
+    "vim",
+  );
+});
+
+it("cannot name the foreground process when the pty throws or reports nothing", () => {
+  const throwing = fakePty(() => {
+    throw new Error("pty is gone");
+  });
+  assert.isUndefined(new NodePtyProcess(throwing, "darwin").foregroundProcessName());
+  assert.isUndefined(
+    new NodePtyProcess(
+      fakePty(() => ""),
+      "darwin",
+    ).foregroundProcessName(),
+  );
+  assert.isUndefined(
+    new NodePtyProcess(
+      fakePty(() => undefined),
+      "darwin",
+    ).foregroundProcessName(),
+  );
+});
+
+it("leaves Linux and Windows to the process table", () => {
+  for (const platform of ["linux", "win32"] as const) {
+    assert.isUndefined(
+      new NodePtyProcess(
+        fakePty(() => "zsh"),
+        platform,
+      ).foregroundProcessName(),
+    );
+  }
+});
 
 it.layer(NodeServices.layer)("ensureNodePtySpawnHelperExecutable", (it) => {
   it.effect("adds executable bits when helper exists but is not executable", () =>

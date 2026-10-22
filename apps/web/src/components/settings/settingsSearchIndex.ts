@@ -304,6 +304,20 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "providers",
+    title: "Commit message instructions",
+    owner: "node",
+    description: "Guide the style of generated commit messages.",
+    keywords: "git writing prompt text generation conventional commits custom",
+  },
+  {
+    section: "providers",
+    title: "Pull request instructions",
+    owner: "node",
+    description: "Guide generated pull request titles and descriptions.",
+    keywords: "git writing prompt text generation pr body description before after custom",
+  },
+  {
+    section: "providers",
     title: "Provider instances",
     owner: "node",
     description: "Configure Codex, Claude, Copilot, OpenCode, and Cursor.",
@@ -372,6 +386,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "client",
     description: "Devices and sessions allowed to connect.",
     keywords: "revoke tokens",
+  },
+  {
+    section: "updates",
+    title: "Update everything",
+    owner: "client",
+    description: "Update Ryco and its providers on every connected device in one click.",
+    keywords: "upgrade release version check for updates node cli provider channel",
   },
   // The section §13.5's copy points an owner at — "Settings → Security explains
   // what else this tab cannot check" — so the terms it sends them looking for

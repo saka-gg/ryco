@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   CLIENT_MODE_SEAM_MODULES,
@@ -90,16 +90,50 @@ describe("client-mode seams", () => {
     expect(standard.hostedHubController.leaseRecoveryCodeDisplay()()).toBeUndefined();
   });
 
+  it("gives standard builds an inert environment session registry with every registry member", async () => {
+    const [hosted, standard] = await Promise.all([
+      import("./hostedHub/state"),
+      import("./hostedHub/state.standard"),
+    ]);
+    const registry = standard.getHostedEnvironmentSessions();
+    expect(Object.keys(registry).toSorted()).toEqual(
+      Object.keys(hosted.getHostedEnvironmentSessions()).toSorted(),
+    );
+    const snapshot = registry.getSnapshot();
+    expect(snapshot.records.size).toBe(0);
+    expect(snapshot.deliveryUnknown.size).toBe(0);
+    expect(registry.getSnapshot()).toBe(snapshot);
+    expect(registry.list()).toEqual([]);
+    const environmentId = "env-1" as Parameters<typeof registry.read>[0];
+    expect(registry.read(environmentId)).toBeUndefined();
+    const listener = vi.fn();
+    expect(registry.subscribe(listener)()).toBeUndefined();
+    expect(listener).not.toHaveBeenCalled();
+    expect(() => registry.ensureRecord({} as Parameters<typeof registry.ensureRecord>[0])).toThrow(
+      /hosted-hub builds/u,
+    );
+    expect(standard.hostedEnvironmentSessionsMode()).toBe("single");
+    // No session is ever ready to adopt, so a row intent never reads a window
+    // through it.
+    expect(standard.isHostedEnvironmentSessionAdoptable(environmentId)).toBe(false);
+    expect(hosted.isHostedEnvironmentSessionAdoptable(environmentId)).toBe(false);
+  });
+
   it("reports the signed-out hosted workspace and never grants a lease", async () => {
     const [hosted, standard] = await Promise.all([
       import("./hostedHub/hostedConnectionCoordinator"),
       import("./hostedHub/hostedConnectionCoordinator.standard"),
     ]);
     expect(standard.readHostedWorkspaceState()).toEqual(hosted.readHostedWorkspaceState());
+    expect(standard.MAX_HOSTED_WEB_CONNECTIONS).toBe(hosted.MAX_HOSTED_WEB_CONNECTIONS);
     const environmentId = "env-1" as Parameters<typeof standard.readHostedNodeMutationLease>[0];
     expect(standard.readHostedNodeMutationLease(environmentId)).toBeNull();
     await expect(standard.waitForHostedNodeMutationLease(environmentId)).resolves.toBeNull();
     expect(standard.nodeIdForHostedEnvironment(environmentId)).toBeNull();
+    expect(standard.isHostedEnvironmentDemanded(environmentId)).toBe(false);
+    // A row press never connects anything ahead of a navigation in a standard build.
+    expect(standard.canPreconnectHostedEnvironment(environmentId)).toBe(false);
+    expect(standard.requestHostedWorkspaceReconcile({ reason: "resume" })).toBeUndefined();
     expect(() => standard.startHostedWorkspaceCoordinator()).toThrow(/hosted-hub builds/u);
   });
 
@@ -110,6 +144,16 @@ describe("client-mode seams", () => {
       null,
     );
     expect(() => standard.getHostedRelayAttemptFactory()).toThrow(/hosted-hub builds/u);
+    expect(() =>
+      standard.createHostedEnvironmentAttemptFactory(
+        {} as Parameters<typeof standard.createHostedEnvironmentAttemptFactory>[0],
+      ),
+    ).toThrow(/hosted-hub builds/u);
+    expect(() =>
+      standard.webHostedEnvironmentAttemptPorts(
+        {} as Parameters<typeof standard.webHostedEnvironmentAttemptPorts>[0],
+      ),
+    ).toThrow(/hosted-hub builds/u);
   });
 
   it("keeps the hosted boot gate loud in standard builds", async () => {

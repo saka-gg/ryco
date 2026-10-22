@@ -21,6 +21,7 @@ import {
 import { Effect, Layer, Option, Stream } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { canonicalJson, sha256Hex } from "../../canonicalJson.ts";
 import {
   ContextHandoffRepository,
   type ContextHandoffRecord,
@@ -52,7 +53,9 @@ import {
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
 import {
+  CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
   ContextHandoffService,
+  ContextHandoffServiceLive,
   type ContextHandoffServiceShape,
   type PreparedContextHandoffArtifact,
 } from "../contextHandoff/ContextHandoffService.ts";
@@ -239,13 +242,24 @@ interface RepositoryHooks {
   ) => ContextHandoffRecord | undefined;
 }
 
-function makeRepository(initial?: ContextHandoffRecord, hooks: RepositoryHooks = {}) {
+/**
+ * Holds the handoff under test and, read-only, `earlier` handoffs of the same thread. Writes
+ * reach only the handoff under test.
+ */
+function makeRepository(
+  initial?: ContextHandoffRecord,
+  hooks: RepositoryHooks = {},
+  earlier: ReadonlyArray<ContextHandoffRecord> = [],
+) {
   let record = initial;
   let getByIdCalls = 0;
+  const earlierRecord = (id: ContextHandoffId) =>
+    earlier.find((candidate) => candidate.handoffId === id);
+  const isCurrent = (id: ContextHandoffId) => record !== undefined && record.handoffId === id;
   const service: ContextHandoffRepositoryShape = {
     create: (input) =>
       Effect.sync(() => {
-        if (record) return false;
+        if (record || earlierRecord(input.handoffId)) return false;
         record = input;
         return true;
       }),
@@ -260,20 +274,24 @@ function makeRepository(initial?: ContextHandoffRecord, hooks: RepositoryHooks =
             }),
           );
         }
-        const snapshot = record?.handoffId === requestedId ? Option.some(record) : Option.none();
+        const snapshot = isCurrent(requestedId)
+          ? Option.some(record!)
+          : Option.fromNullishOr(earlierRecord(requestedId));
         if (hooks.afterGetById) record = hooks.afterGetById(call, record);
         return Effect.succeed(snapshot);
       }),
-    listByThread: () => Effect.succeed(record ? [record] : []),
+    listByThread: () => Effect.succeed([...earlier, ...(record ? [record] : [])]),
     listRecoverable: () =>
       Effect.succeed(
-        record && (record.status === "preparing" || record.status === "dispatching")
-          ? [record]
-          : [],
+        [...earlier, ...(record ? [record] : [])].filter(
+          (candidate) => candidate.status === "preparing" || candidate.status === "dispatching",
+        ),
       ),
     compareAndSetStatus: (input) =>
       Effect.sync(() => {
-        if (!record || record.status !== input.expectedStatus) return false;
+        if (!record || !isCurrent(input.handoffId) || record.status !== input.expectedStatus) {
+          return false;
+        }
         record = {
           ...record,
           status: input.nextStatus,
@@ -284,10 +302,30 @@ function makeRepository(initial?: ContextHandoffRecord, hooks: RepositoryHooks =
         };
         return true;
       }),
-    storeContextIfEmpty: () => Effect.succeed(false),
+    storeContextIfEmpty: (input) =>
+      Effect.sync(() => {
+        if (
+          !record ||
+          !isCurrent(input.handoffId) ||
+          record.structuredContext !== null ||
+          record.contextDigest !== null
+        ) {
+          return false;
+        }
+        record = {
+          ...record,
+          contextVersion: input.contextVersion,
+          structuredContext: input.structuredContext,
+          contextDigest: input.contextDigest,
+          updatedAt: input.updatedAt,
+        };
+        return true;
+      }),
     storeDeliveryArtifactIfEmpty: (input) =>
       Effect.sync(() => {
-        if (!record || record.deliveryArtifact !== null) return false;
+        if (!record || !isCurrent(input.handoffId) || record.deliveryArtifact !== null) {
+          return false;
+        }
         record = {
           ...record,
           deliveryArtifact: input.deliveryArtifact,
@@ -378,8 +416,18 @@ function makeHarness(input?: {
   readonly getSession?: ProviderServiceShape["getSession"];
   readonly startFreshSessionFailure?: ProviderServiceError;
   readonly repositoryHooks?: RepositoryHooks;
+  /** Whether putting the source binding back succeeds (default true). */
+  readonly restoreSucceeds?: boolean;
+  /** Earlier handoffs of the thread, which the repository holds read-only. */
+  readonly earlierRecords?: ReadonlyArray<ContextHandoffRecord>;
+  /** Build, store and render context with the real service instead of the stand-in. */
+  readonly liveContextService?: boolean;
 }) {
-  const repository = makeRepository(input?.initialRecord, input?.repositoryHooks);
+  const repository = makeRepository(
+    input?.initialRecord,
+    input?.repositoryHooks,
+    input?.earlierRecords,
+  );
   const thread = input?.thread ?? makeThread();
   const commands: OrchestrationCommand[] = [];
   const deliveryOrder: string[] = [];
@@ -437,7 +485,7 @@ function makeHarness(input?: {
   const restoreSessionBinding = vi.fn((_binding: ProviderRuntimeBinding) =>
     Effect.sync(() => {
       deliveryOrder.push("restore");
-      return true;
+      return input?.restoreSucceeds ?? true;
     }),
   );
   const stopSession = vi.fn((_input: { readonly threadId: ThreadId }) =>
@@ -507,7 +555,11 @@ function makeHarness(input?: {
       refreshInBackground: Effect.void,
     }),
     Layer.succeed(ContextHandoffRepository, repository.service),
-    Layer.succeed(ContextHandoffService, contextService),
+    input?.liveContextService
+      ? ContextHandoffServiceLive.pipe(
+          Layer.provide(Layer.succeed(ContextHandoffRepository, repository.service)),
+        )
+      : Layer.succeed(ContextHandoffService, contextService),
     Layer.mock(OrchestrationEngineService)({
       bootSequence: 0,
       dispatch,
@@ -763,6 +815,33 @@ describe("ContextHandoffCoordinator", () => {
     ).toBe(true);
   });
 
+  it("projects a source that cannot be put back as an error that does not wake the thread", async () => {
+    const sendFailure = new ProviderAdapterRequestError({
+      provider: "claudeAgent",
+      method: "sendTurn",
+      detail: "target rejected the turn",
+    });
+    const harness = makeHarness({ sendFailure, restoreSucceeds: false });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    const restore = harness.commands.findLast((command) => command.type === "thread.session.set");
+    expect(restore).toMatchObject({
+      session: {
+        providerInstanceId: sourceSelection.instanceId,
+        runtimeSessionId: sourceRuntimeSessionId,
+        status: "error",
+        lastError: "target rejected the turn",
+      },
+      // A rollback is not new activity: a snoozed thread stays snoozed.
+      wakesSnoozed: false,
+    });
+  });
+
   it("never resends an ambiguous dispatch during recovery", async () => {
     const record: ContextHandoffRecord = {
       ...requestedRecord(),
@@ -1008,6 +1087,126 @@ describe("ContextHandoffCoordinator", () => {
     expect(handoffActivityPayloads(harness.commands)).toHaveLength(0);
     expect(harness.stopSessionBinding).not.toHaveBeenCalled();
     expect(harness.restoreSessionBinding).not.toHaveBeenCalled();
+  });
+});
+
+describe("ContextHandoffCoordinator after a handoff failed its digest check", () => {
+  const failedHandoffId = ContextHandoffId.make("handoff-digest-failed");
+  const failedMessageId = MessageId.make("digest-failed-message");
+  const failedAt = "2026-08-03T23:00:00.000Z";
+  // Stored as earlier versions wrote it: the title keeps whitespace that decoding trims, and
+  // their check digested the decoded document, so this handoff failed before it was sent.
+  const storedDocument = {
+    ...artifact.document,
+    thread: { ...artifact.document.thread, title: `${artifact.document.thread.title} ` },
+  };
+  const failedRecord: ContextHandoffRecord = {
+    ...makeRequestedContextHandoffRecord({
+      handoffId: failedHandoffId,
+      threadId: ThreadId.make("thread-handoff-coordinator"),
+      sourceSelection,
+      targetSelection,
+      sourceRuntimeSessionId,
+      firstMessageId: failedMessageId,
+      createdAt: failedAt,
+      updatedAt: failedAt,
+    }),
+    status: "failed",
+    structuredContext: storedDocument,
+    contextDigest: sha256Hex(canonicalJson(storedDocument)),
+    error: CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
+  };
+
+  it("builds and delivers a new handoff on the next model change", async () => {
+    const base = makeThread();
+    const thread = makeThread({
+      messages: [
+        {
+          id: failedMessageId,
+          role: "user",
+          text: "Switch models",
+          turnId: null,
+          streaming: false,
+          createdAt: failedAt,
+          updatedAt: failedAt,
+        },
+        ...base.messages,
+      ],
+      activities: [
+        {
+          id: EventId.make("digest-failed-activity"),
+          tone: "error",
+          kind: "context-handoff",
+          summary: "Context handoff failed",
+          payload: {
+            schemaVersion: 1,
+            handoffId: failedHandoffId,
+            mode: "full-context-fresh-session",
+            status: "failed",
+            targetMessageId: failedMessageId,
+            sourceSelection,
+            targetSelection,
+            sourceRuntimeSessionId,
+            sources: [sourceEndpoint],
+            target: targetEndpoint,
+            error: CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
+          },
+          turnId: null,
+          createdAt: failedAt,
+        },
+        ...base.activities,
+      ],
+      // Startup put the session the failure left in error back to rest.
+      session: { ...base.session!, status: "stopped", lastError: null },
+    });
+    const harness = makeHarness({
+      thread,
+      earlierRecords: [failedRecord],
+      liveContextService: true,
+      getSession: () => Effect.succeed(Option.none()),
+    });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        // The failed handoff is terminal: recovery leaves it alone.
+        yield* coordinator.recover();
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn.mock.calls[0]?.[0].input).toContain(
+      "  Preserve this exact message 👩🏽‍💻  ",
+    );
+    expect(harness.repository.get()).toMatchObject({
+      handoffId,
+      status: "consumed",
+      acceptedProviderTurnId: targetTurnId,
+      error: null,
+    });
+    expect(harness.repository.get().contextDigest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(harness.commands.some((command) => command.type === "thread.meta.update")).toBe(true);
+
+    // The earlier record stays failed, and its stored document verifies now.
+    const earlier = await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ContextHandoffService;
+        return yield* service.loadStoredContext({ handoffId: failedHandoffId });
+      }).pipe(
+        Effect.provide(
+          ContextHandoffServiceLive.pipe(
+            Layer.provide(Layer.succeed(ContextHandoffRepository, harness.repository.service)),
+          ),
+        ),
+      ),
+    );
+    expect(earlier.digest).toBe(failedRecord.contextDigest);
+    expect(earlier.document.thread.title).toBe(artifact.document.thread.title);
+    expect(
+      Option.getOrThrow(
+        await Effect.runPromise(harness.repository.service.getById({ handoffId: failedHandoffId })),
+      ).status,
+    ).toBe("failed");
   });
 });
 

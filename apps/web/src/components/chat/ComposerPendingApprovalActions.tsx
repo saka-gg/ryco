@@ -1,4 +1,4 @@
-import type { ApprovalResponseIdentity } from "@ryco/contracts";
+import type { ApprovalResponseIdentity, EnvironmentId } from "@ryco/contracts";
 import {
   ORCHESTRATION_WS_METHODS,
   type ApprovalRequestId,
@@ -6,9 +6,13 @@ import {
 } from "@ryco/contracts";
 import { memo } from "react";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 import { Button } from "../ui/button";
 
 interface ComposerPendingApprovalActionsProps {
+  /** The environment the approval belongs to; `null` for the routed node. */
+  environmentId: EnvironmentId | null;
   requestId: ApprovalRequestId;
   approvalIdentity?: ApprovalResponseIdentity | undefined;
   isResponding: boolean;
@@ -20,12 +24,20 @@ interface ComposerPendingApprovalActionsProps {
 }
 
 export const ComposerPendingApprovalActions = memo(function ComposerPendingApprovalActions({
+  environmentId,
   requestId,
   approvalIdentity,
   isResponding,
   onRespondToApproval,
 }: ComposerPendingApprovalActionsProps) {
-  const capability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
+  // An approval decision reaches the node at once or not at all: it is never
+  // queued, so it waits disabled while the connection is not ready.
+  const capability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    environmentId,
+  );
+  const label = useHostedHubStore((state) => hostedSwitchTargetLabel(state, environmentId));
+  const unavailableReason = capability.allowed ? null : hostedCapabilityCopy(capability, label);
   const disabled = isResponding || !capability.allowed;
   return (
     <>
@@ -33,7 +45,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         size="sm"
         variant="ghost"
         disabled={disabled}
-        title={capability.reason ?? undefined}
+        title={unavailableReason ?? undefined}
         onClick={() => void onRespondToApproval(requestId, "cancel", approvalIdentity)}
       >
         Cancel turn
@@ -42,7 +54,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         size="sm"
         variant="destructive-outline"
         disabled={disabled}
-        title={capability.reason ?? undefined}
+        title={unavailableReason ?? undefined}
         onClick={() => void onRespondToApproval(requestId, "decline", approvalIdentity)}
       >
         Decline
@@ -51,7 +63,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         size="sm"
         variant="outline"
         disabled={disabled}
-        title={capability.reason ?? undefined}
+        title={unavailableReason ?? undefined}
         onClick={() => void onRespondToApproval(requestId, "acceptForSession", approvalIdentity)}
       >
         Always allow this session
@@ -60,7 +72,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         size="sm"
         variant="default"
         disabled={disabled}
-        title={capability.reason ?? undefined}
+        title={unavailableReason ?? undefined}
         onClick={() => void onRespondToApproval(requestId, "accept", approvalIdentity)}
       >
         Approve once

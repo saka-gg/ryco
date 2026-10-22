@@ -21,12 +21,16 @@ import { Context } from "effect";
 import type { Effect } from "effect";
 
 import type { RestartBackgroundWorkRecord } from "../../persistence/Layers/RestartContinuations.ts";
-import type { RestartContinuationStatus } from "../restartContinuationPolicy.ts";
+import type {
+  RestartContinuationKind,
+  RestartContinuationStatus,
+} from "../restartContinuationPolicy.ts";
 
 /** A ledger row this startup captured (newly inserted or already present). */
 export interface CapturedRestartThread {
   readonly threadId: ThreadId;
   readonly sourceTurnId: TurnId;
+  readonly kind: RestartContinuationKind;
   readonly runtimeSessionId: RuntimeSessionId | null;
   readonly backgroundWork: RestartBackgroundWorkRecord;
   readonly status: RestartContinuationStatus;

@@ -175,6 +175,34 @@ describe("WsTransport subscriptions refused before sending", () => {
   });
 });
 
+describe("WsTransport request dispatch", () => {
+  it("writes a subscription's request within the task that starts it, before any timer runs", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    // The first subscription waits for the session's client; later ones find it ready.
+    const stopFirst = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeTerminalEvents]({}),
+      () => undefined,
+      { tag: WS_METHODS.subscribeTerminalEvents },
+    );
+    await vi.waitFor(() =>
+      expect(
+        sockets[0]!
+          .requests()
+          .filter((request) => request.tag === WS_METHODS.subscribeTerminalEvents),
+      ).toHaveLength(1),
+    );
+
+    const stop = subscribeProposals(transport, vi.fn());
+    // Only microtasks run here: no timer fires and no later task starts.
+    for (let turn = 0; turn < 1_000; turn += 1) await Promise.resolve();
+    expect(proposalRequests(sockets[0]!)).toHaveLength(1);
+    stop();
+    stopFirst();
+  });
+});
+
 describe("WsTransport resync failures", () => {
   it("grows the retry delay for back-to-back resyncs up to a cap", () => {
     expect(
@@ -402,5 +430,184 @@ describe("WsTransport request abort", () => {
         ),
       ).toBe(true),
     );
+  });
+});
+
+describe("WsTransport reconnect wakes", () => {
+  /** A test-controlled wake source that records the listeners it holds. */
+  function wakeSource() {
+    const listeners = new Set<(delayMs: number) => void>();
+    const source = {
+      listeners,
+      subscriptions: 0,
+      subscribe(listener: (delayMs: number) => void) {
+        source.subscriptions += 1;
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      wake(delayMs: number) {
+        for (const listener of Array.from(listeners)) listener(delayMs);
+      },
+    };
+    return source;
+  }
+
+  function reconnecting(
+    url: string | (() => Promise<string>),
+    options: {
+      readonly delayMs?: number;
+      readonly wake?: ReturnType<typeof wakeSource>;
+    } = {},
+  ): WsTransport {
+    const transport = new WsTransport(url, fakeSocketPlatform(sockets), {
+      preserveSocketPath: true,
+      recordConnectionState: false,
+      getReconnectDelayMs: () => options.delayMs ?? 60_000,
+      ...(options.wake === undefined ? {} : { subscribeReconnectWake: options.wake.subscribe }),
+    });
+    transports.push(transport);
+    return transport;
+  }
+
+  /** Open the first socket, then drop it so a reconnect delay starts. */
+  async function dropFirstSocket(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.open();
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.drop();
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("retries at once when woken during a long delay", async () => {
+    const wake = wakeSource();
+    reconnecting("ws://relay.test/relay", { wake });
+    await dropFirstSocket();
+    expect(wake.listeners.size).toBe(1);
+
+    wake.wake(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets).toHaveLength(2);
+    // The listener left with the delay it served.
+    expect(wake.listeners.size).toBe(0);
+  });
+
+  it("retries after the wake's own delay", async () => {
+    const wake = wakeSource();
+    reconnecting("ws://relay.test/relay", { wake });
+    await dropFirstSocket();
+
+    wake.wake(500);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("never lengthens a delay that ends before the wake's", async () => {
+    const wake = wakeSource();
+    reconnecting("ws://relay.test/relay", { delayMs: 300, wake });
+    await dropFirstSocket();
+
+    wake.wake(1_000);
+    await vi.advanceTimersByTimeAsync(299);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets).toHaveLength(2);
+    expect(wake.listeners.size).toBe(0);
+  });
+
+  it("listens only while a delay is pending", async () => {
+    const wake = wakeSource();
+    reconnecting("ws://relay.test/relay", { wake });
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(wake.listeners.size).toBe(0);
+    wake.wake(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("makes one attempt for two wakes during one delay", async () => {
+    const wake = wakeSource();
+    reconnecting("ws://relay.test/relay", { wake });
+    await dropFirstSocket();
+    const listener = Array.from(wake.listeners)[0]!;
+
+    listener(100);
+    // Only the first wake of a delay counts, even through a listener still held.
+    listener(0);
+    wake.wake(0);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(2);
+    expect(wake.subscriptions).toBe(1);
+  });
+
+  it("stops listening when the delay ends without a wake", async () => {
+    const wake = wakeSource();
+    reconnecting("ws://relay.test/relay", { delayMs: 300, wake });
+    await dropFirstSocket();
+    expect(wake.listeners.size).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sockets).toHaveLength(2);
+    expect(wake.listeners.size).toBe(0);
+  });
+
+  it("stops listening when the transport is disposed", async () => {
+    const wake = wakeSource();
+    const transport = reconnecting("ws://relay.test/relay", { wake });
+    await dropFirstSocket();
+    expect(wake.listeners.size).toBe(1);
+
+    await transport.dispose();
+    expect(wake.listeners.size).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("wakes a socket URL provider that failed", async () => {
+    const wake = wakeSource();
+    const provider = vi.fn(async () => {
+      if (provider.mock.calls.length === 1) throw new Error("node offline");
+      return "ws://relay.test/relay";
+    });
+    reconnecting(provider, { wake });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(provider).toHaveBeenCalledOnce();
+    expect(sockets).toHaveLength(0);
+    expect(wake.listeners.size).toBe(1);
+
+    wake.wake(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(1);
+    expect(wake.listeners.size).toBe(0);
+  });
+
+  it("waits the whole delay without a wake handler", async () => {
+    reconnecting("ws://relay.test/relay");
+    await dropFirstSocket();
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets).toHaveLength(2);
   });
 });

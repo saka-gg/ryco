@@ -4,9 +4,17 @@ import { AppState, type AppStateStatus } from "react-native";
 
 // iOS suspends WebSockets on background and the runtime only models resume via
 // AppLifecycle "resume" + the supervisor's reconnectAfterResume heartbeat. So
-// the mobile adapter drives resume aggressively: every foreground transition
+// the mobile adapter drives resume aggressively: every return from background
 // emits BOTH "foreground" and "resume" so the supervisor re-checks and
 // reconnects the socket the OS tore down while backgrounded.
+//
+// Only `background` means the OS may suspend the process. iOS also reports
+// `inactive` for Notification Center and Control Center pulls, the app-switcher
+// peek, system alerts and call UI; the process keeps running and its sockets
+// stay open, so `inactive` is treated as still in the foreground and neither
+// entering nor leaving it emits an event. iOS returns from background through
+// `inactive` before `active`, which is why leaving `background` is only
+// observed on `active`.
 
 // Cached connectivity so the synchronous `isOnline()` contract can be answered
 // without awaiting a network probe. Optimistically online until proven offline.
@@ -24,8 +32,12 @@ function isConnected(state: Network.NetworkState): boolean {
   return state.isConnected !== false;
 }
 
+function isBackground(state: AppStateStatus): boolean {
+  return state === "background";
+}
+
 function subscribeNative(): () => void {
-  let lastForeground = AppState.currentState === "active";
+  let backgrounded = isBackground(AppState.currentState);
   let disposed = false;
   let networkRevision = 0;
 
@@ -48,16 +60,16 @@ function subscribeNative(): () => void {
 
   const appStateSubscription = AppState.addEventListener("change", (next: AppStateStatus) => {
     if (disposed) return;
-    const nowForeground = next === "active";
-    const wasForeground = lastForeground;
-    lastForeground = nowForeground;
-    if (nowForeground && !wasForeground) {
+    if (isBackground(next)) {
+      if (backgrounded) return;
+      backgrounded = true;
+      emit("background");
+    } else if (next === "active" && backgrounded) {
+      backgrounded = false;
       // Connectivity changes can be missed while iOS suspends the app.
       refreshNetworkState();
       emit("foreground");
       emit("resume");
-    } else if (!nowForeground && wasForeground) {
-      emit("background");
     }
   });
 
@@ -76,7 +88,7 @@ function subscribeNative(): () => void {
 }
 
 export const mobileAppLifecycle: AppLifecycleService = {
-  isForeground: () => AppState.currentState === "active",
+  isForeground: () => !isBackground(AppState.currentState),
   isOnline: () => cachedOnline,
   subscribe: (listener) => {
     // One native source updates the cache and broadcasts to every consumer.

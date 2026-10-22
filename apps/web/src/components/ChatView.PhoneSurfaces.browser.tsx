@@ -3,6 +3,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { syncDocumentVisualViewportInsets } from "../lib/visualViewportInsets";
 import { cdpSession } from "../../test/browserPointer";
+import { browserWaitFor } from "../../test/browserWait";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { installVisualViewportStub } from "../../test/browserVisualViewport";
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
@@ -575,7 +576,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
     });
 
     try {
-      await vi.waitFor(() => {
+      await browserWaitFor(() => {
         expect(document.documentElement.getAttribute("data-tier")).toBe("desktop");
       });
       const workspaceToggle = await waitForElement(
@@ -595,7 +596,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
         () => document.querySelector<HTMLElement>('[data-slot="crown-rail-slot"]'),
         "Unable to find the Crown rail slot.",
       );
-      await vi.waitFor(() => {
+      await browserWaitFor(() => {
         expect(Math.round(slot.getBoundingClientRect().width)).toBe(72);
       });
       const crownRoot = rail.closest<HTMLElement>('[data-slot="crown-overview"]')!;
@@ -603,7 +604,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       // An icon click expands the island into the card on that section; the
       // branch section opens from the spine (the rail's Ship icon ships instead).
       rail.querySelector<HTMLElement>('[data-nav-key="changes"]')!.click();
-      await vi.waitFor(() => {
+      await browserWaitFor(() => {
         expect(crownRoot.dataset.mode).toBe("card");
       });
       crownRoot
@@ -621,7 +622,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
         "Unable to find the full-width overview branch selector.",
       );
       await waitForLayout();
-      await vi.waitFor(() => {
+      await browserWaitFor(() => {
         expect(Math.round(branchSelector.getBoundingClientRect().height)).toBe(36);
         expect(branchSelector.getBoundingClientRect().width).toBeGreaterThan(200);
       });
@@ -630,7 +631,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
         '[data-slot="combobox-trigger"]',
       );
       expect(branchTrigger).not.toBeNull();
-      await vi.waitFor(() => {
+      await browserWaitFor(() => {
         expect(branchTrigger!.disabled).toBe(false);
       });
       branchTrigger!.click();
@@ -640,7 +641,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       );
       // Escape closes only the picker; the card stays expanded.
       await userEvent.keyboard("{Escape}");
-      await vi.waitFor(() => {
+      await browserWaitFor(() => {
         expect(document.querySelector('input[placeholder="Search refs..."]')).toBeNull();
       });
       expect(crownRoot.dataset.mode).toBe("card");
@@ -650,7 +651,7 @@ describe("ChatView PhoneSurfaces (full app)", () => {
         "Unable to find the card's collapse affordance.",
       );
       collapse.click();
-      await vi.waitFor(() => {
+      await browserWaitFor(() => {
         expect(crownRoot.dataset.mode).toBe("dot");
       });
 

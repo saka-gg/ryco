@@ -1,3 +1,6 @@
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
+
 import { Context, DateTime, Effect, Layer, Option } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -15,6 +18,7 @@ import {
   type VcsInitInput,
   type VcsListRefsInput,
   type VcsListRefsResult,
+  type VcsListRemotesResult,
   type VcsPullResult,
   type VcsRemoveWorktreeInput,
   type VcsStatusInput,
@@ -452,6 +456,131 @@ function parseGitRemoteVerboseOutput(
   return remotes;
 }
 
+const REPOSITORY_MEMO_CAPACITY = 512;
+
+/**
+ * Answers per working directory, each valid while the repository metadata
+ * fingerprint it was read under still matches. Least recently used entries go
+ * first once the capacity is reached.
+ */
+interface RepositoryMemo<A> {
+  readonly get: (cwd: string, fingerprint: string) => A | undefined;
+  readonly set: (cwd: string, fingerprint: string, value: A) => void;
+}
+
+function makeRepositoryMemo<A>(): RepositoryMemo<A> {
+  const entries = new Map<string, { readonly fingerprint: string; readonly value: A }>();
+  return {
+    get: (cwd, fingerprint) => {
+      const entry = entries.get(cwd);
+      if (entry === undefined) return undefined;
+      entries.delete(cwd);
+      if (entry.fingerprint !== fingerprint) return undefined;
+      entries.set(cwd, entry);
+      return entry.value;
+    },
+    set: (cwd, fingerprint, value) => {
+      entries.delete(cwd);
+      entries.set(cwd, { fingerprint, value });
+      if (entries.size > REPOSITORY_MEMO_CAPACITY) {
+        const oldest = entries.keys().next().value;
+        if (oldest !== undefined) entries.delete(oldest);
+      }
+    },
+  };
+}
+
+/**
+ * Size, modification time and inode of a file, or null when it cannot be read.
+ * Git replaces its files by renaming a lock file over them, so the inode
+ * catches a rewrite that keeps the size and lands within one timestamp tick.
+ */
+const readFileSignature = (target: string) =>
+  stat(target).then(
+    (stats) => `${stats.size}:${stats.mtimeMs}:${stats.ino}`,
+    () => null,
+  );
+
+/** The git directory a `.git` file names (linked worktrees, submodules). */
+async function readGitDirPointer(dotGitFile: string): Promise<string | null> {
+  const contents = await readFile(dotGitFile, "utf8").catch(() => null);
+  const pointer = contents === null ? undefined : /^gitdir:\s*(.+?)\s*$/m.exec(contents)?.[1];
+  return pointer ? path.resolve(path.dirname(dotGitFile), pointer) : null;
+}
+
+/**
+ * A key for what git's answers about the repository enclosing `cwd` are read
+ * from, built from a few `stat` calls and no process spawn: the checkout that
+ * owns the nearest `.git`, the shared git directory, and the signature of its
+ * `config` (where remotes live) and, with `includeHead`, of the checkout's
+ * `HEAD` (git stops treating a directory as a repository without one).
+ *
+ * Null whenever the layout is unexpected or unreadable (no repository, a bare
+ * one, a missing directory): such answers are asked of git every time.
+ */
+async function readRepositoryMetadataFingerprint(
+  cwd: string,
+  options: { readonly includeHead: boolean },
+): Promise<string | null> {
+  try {
+    let directory = path.resolve(cwd);
+    if (!(await stat(directory)).isDirectory()) return null;
+    for (;;) {
+      const dotGit = path.join(directory, ".git");
+      const entry = await stat(dotGit).catch(() => null);
+      if (entry !== null) {
+        const gitDir = entry.isDirectory() ? dotGit : await readGitDirPointer(dotGit);
+        if (gitDir === null) return null;
+        const commonDirPointer = (
+          await readFile(path.join(gitDir, "commondir"), "utf8").catch(() => "")
+        ).trim();
+        const commonDir = commonDirPointer ? path.resolve(gitDir, commonDirPointer) : gitDir;
+        const [config, head] = await Promise.all([
+          readFileSignature(path.join(commonDir, "config")),
+          options.includeHead ? readFileSignature(path.join(gitDir, "HEAD")) : "",
+        ]);
+        return config === null || head === null
+          ? null
+          : [directory, commonDir, config, head].join("\0");
+      }
+      const parent = path.dirname(directory);
+      if (parent === directory) return null;
+      directory = parent;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Answers from the memo while the repository metadata behind `cwd` is
+ * unchanged, otherwise from `compute`. The fingerprint is read before
+ * computing, so a change made meanwhile only makes the next call recompute.
+ * Only values that pass `remember` are kept: a folder that is not a
+ * repository may become one, so that answer is asked again.
+ */
+const memoizeByRepositoryMetadata = <A, E, R>(
+  memo: RepositoryMemo<A>,
+  cwd: string,
+  options: {
+    readonly includeHead: boolean;
+    readonly remember?: (value: A) => boolean;
+  },
+  compute: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.gen(function* () {
+    const fingerprint = yield* Effect.promise(() =>
+      readRepositoryMetadataFingerprint(cwd, options),
+    );
+    if (fingerprint === null) return yield* compute;
+    const key = path.resolve(cwd);
+    const cached = memo.get(key, fingerprint);
+    if (cached !== undefined) return cached;
+    const value = yield* compute;
+    if (options.remember?.(value) ?? true) memo.set(key, fingerprint, value);
+    return value;
+  });
+
 const gitCommand = (
   process: VcsProcess.VcsProcessShape,
   operation: string,
@@ -520,24 +649,33 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         : {}),
     });
 
+  // Repositories and their remotes rarely change, but they are asked for
+  // constantly: each answer is kept until the repository's metadata files change.
+  const detectedRepositories = makeRepositoryMemo<ReturnType<typeof parseDetectRepositoryOutput>>();
+  const listedRemotes = makeRepositoryMemo<VcsListRemotesResult["remotes"]>();
+
   // One rev-parse prints all three answers (one line each); outside a work
   // tree (no repository, a bare one, inside .git) it exits nonzero or says false.
   const detectRepository: VcsDriver.VcsDriverShape["detectRepository"] = Effect.fn(
     "detectRepository",
   )(function* (cwd) {
-    const result = yield* gitCommand(
-      process,
-      "GitVcsDriver.detectRepository",
+    const detected = yield* memoizeByRepositoryMetadata(
+      detectedRepositories,
       cwd,
-      ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir"],
-      {
-        allowNonZeroExit: true,
-        timeoutMs: 5_000,
-        maxOutputBytes: 16_384,
-        env: READ_ONLY_GIT_ENV,
-      },
+      { includeHead: true, remember: (detected) => detected !== null },
+      gitCommand(
+        process,
+        "GitVcsDriver.detectRepository",
+        cwd,
+        ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir"],
+        {
+          allowNonZeroExit: true,
+          timeoutMs: 5_000,
+          maxOutputBytes: 16_384,
+          env: READ_ONLY_GIT_ENV,
+        },
+      ).pipe(Effect.map((result) => parseDetectRepositoryOutput(result.exitCode, result.stdout))),
     );
-    const detected = parseDetectRepositoryOutput(result.exitCode, result.stdout);
     if (detected === null) {
       return null;
     }
@@ -632,37 +770,50 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
 
   const listRemotes: VcsDriver.VcsDriverShape["listRemotes"] = Effect.fn("listRemotes")(
     function* (cwd) {
-      const result = yield* gitCommand(process, "GitVcsDriver.listRemotes", cwd, ["remote", "-v"], {
-        allowNonZeroExit: true,
-        timeoutMs: 5_000,
-        maxOutputBytes: 64 * 1024,
-        env: READ_ONLY_GIT_ENV,
-      });
+      const remotes = yield* memoizeByRepositoryMetadata(
+        listedRemotes,
+        cwd,
+        { includeHead: false },
+        Effect.gen(function* () {
+          const result = yield* gitCommand(
+            process,
+            "GitVcsDriver.listRemotes",
+            cwd,
+            ["remote", "-v"],
+            {
+              allowNonZeroExit: true,
+              timeoutMs: 5_000,
+              maxOutputBytes: 64 * 1024,
+              env: READ_ONLY_GIT_ENV,
+            },
+          );
 
-      if (result.exitCode !== 0) {
-        return yield* new VcsProcessExitError({
-          operation: "GitVcsDriver.listRemotes",
-          command: "git remote -v",
-          cwd,
-          exitCode: result.exitCode,
-          detail: result.stderr.trim() || "git remote -v failed",
-        });
-      }
+          if (result.exitCode !== 0) {
+            return yield* new VcsProcessExitError({
+              operation: "GitVcsDriver.listRemotes",
+              command: "git remote -v",
+              cwd,
+              exitCode: result.exitCode,
+              detail: result.stderr.trim() || "git remote -v failed",
+            });
+          }
 
-      const parsed = parseGitRemoteVerboseOutput(result.stdout);
-      const remotes = Array.from(parsed.entries()).flatMap(([name, remote]) => {
-        if (!remote.url) {
-          return [];
-        }
-        return [
-          {
-            name,
-            url: remote.url,
-            pushUrl: remote.pushUrl ? Option.some(remote.pushUrl) : Option.none(),
-            isPrimary: name === "origin",
-          },
-        ];
-      });
+          const parsed = parseGitRemoteVerboseOutput(result.stdout);
+          return Array.from(parsed.entries()).flatMap(([name, remote]) => {
+            if (!remote.url) {
+              return [];
+            }
+            return [
+              {
+                name,
+                url: remote.url,
+                pushUrl: remote.pushUrl ? Option.some(remote.pushUrl) : Option.none(),
+                isPrimary: name === "origin",
+              },
+            ];
+          });
+        }),
+      );
 
       return {
         remotes,

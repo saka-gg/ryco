@@ -320,6 +320,16 @@ const minorVersionSupportsAuthorizedChannel = (input: {
     : "channel authorization metadata requires protocol minor version 2 or newer";
 };
 
+/**
+ * The node's software version, for the Hub's record of the node. Display metadata only: it is not
+ * part of the signed transcript and grants nothing. Hubs that predate the field ignore it.
+ */
+export const RelayNodeClientVersion = Schema.String.check(
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(64),
+  Schema.isTrimmed(),
+);
+
 export const RelayNodeAuthHandshake = Schema.Struct({
   type: Schema.Literal("auth"),
   peer: Schema.Literal("node"),
@@ -327,6 +337,7 @@ export const RelayNodeAuthHandshake = Schema.Struct({
   nodeId: RelayNodeId,
   nonce: RelayAuthenticationNonce,
   signature: RelaySignatureMaterial,
+  clientVersion: Schema.optionalKey(RelayNodeClientVersion),
 });
 export type RelayNodeAuthHandshake = typeof RelayNodeAuthHandshake.Type;
 

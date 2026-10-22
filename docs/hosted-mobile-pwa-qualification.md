@@ -18,7 +18,7 @@ Do not record account names, deployment URLs, node or grant identifiers, project
 conversations, terminal output, credentials, cookies, tickets, proofs, session verification codes,
 request bodies, relay payloads, or browser storage containing user data. Session verification codes
 are ephemeral display state and must not reach evidence, including inside a screenshot: redact the
-node menu rather than capturing one.
+thread connection popover rather than capturing one.
 
 ## Shared prerequisites
 
@@ -32,11 +32,11 @@ node menu rather than capturing one.
 - [ ] On a channel that negotiated encryption, the disclosure states the browser ceiling in the same
       breath as the claim: that the tab pins no node identity, and that it cannot protect against
       the Hub operator, who serves the page's code.
-- [ ] Where a connected node's menu shows a session verification code — the desktop-width menu does,
-      the narrow phone presentation does not — the accompanying text states that comparing it
-      catches accidental wrong-node routing and some network interposition while the loaded code is
-      honest, and cannot protect against the Hub operator who serves that code. Verify the wording
-      only; do not record the code.
+- [ ] Where an open thread's connection popover shows a session verification code — the desktop
+      workspace does, the narrow phone presentation does not — the accompanying text states that
+      comparing it catches accidental wrong-node routing and some network interposition while the
+      loaded code is honest, and cannot protect against the Hub operator who serves that code.
+      Verify the wording only; do not record the code.
 - [ ] Browser inspection shows the Ryco shell cache contains only the generated immutable allowlist
       and static offline document.
 - [ ] Cache inspection finds no live HTML, API, RPC, relay, attachment, project, file, terminal,

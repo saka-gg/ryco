@@ -34,6 +34,7 @@ import {
   type ThreadPriorityFocusMetadata,
 } from "@ryco/shared/threadPriority";
 
+import type { ThreadCapabilitySupport } from "../../rpc/environmentServerConfigs.ts";
 import { scopeThreadRef, scopedProjectKey, scopedThreadKey } from "../../scoped.ts";
 import { CHAT_PROJECT_LABEL } from "../composer/chatDrafts.ts";
 import {
@@ -47,8 +48,21 @@ import {
 export interface ThreadInboxEnvironment {
   readonly environmentId: EnvironmentId;
   readonly label: string;
-  readonly threadSettlementSupported: boolean;
-  readonly threadSnoozeSupported?: boolean | undefined;
+  /**
+   * The environment's own answer (`resolveEnvironmentThreadCapabilities`). An
+   * explicit `false` keeps every thread Active, as on nodes that predate
+   * settlement; `"unknown"` classifies by what the node recorded and allows no
+   * settlement or snooze change.
+   */
+  readonly threadSettlementSupported: ThreadCapabilitySupport;
+  readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
+  /**
+   * The node's own automatic settlement rule, so every client lists its threads
+   * alike. Undefined for a node that leaves the rule to clients (an older one)
+   * or one this client knows no rule of: its threads follow the client's
+   * `autoSettleAfterDays`.
+   */
+  readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly connected: boolean;
   readonly mutationReady: boolean;
   readonly shellCurrent: boolean;
@@ -122,6 +136,7 @@ export interface BuildThreadInboxInput {
   readonly filters?: ThreadInboxFilters | undefined;
   readonly currentThreadKey?: string | null | undefined;
   readonly aiFocusEnabled?: boolean | undefined;
+  /** This client's rule, for environments whose node states none of its own. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly nowMs: number;
 }
@@ -152,7 +167,7 @@ function fallbackEnvironment(environmentId: EnvironmentId): ThreadInboxEnvironme
   return {
     environmentId,
     label: environmentId,
-    threadSettlementSupported: false,
+    threadSettlementSupported: "unknown",
     connected: false,
     mutationReady: false,
     shellCurrent: false,
@@ -194,11 +209,23 @@ function mutationBlocker(
   isDraft: boolean,
 ): ThreadInboxMutationBlocker | null {
   if (isDraft) return "client-draft";
-  if (!environment.threadSettlementSupported) return "unsupported";
+  if (environment.threadSettlementSupported === false) return "unsupported";
   if (!environment.connected) return "disconnected";
   if (!environment.shellCurrent) return "shell-stale";
   if (!environment.mutationReady) return "read-only";
+  // Connected, but the node's own capabilities have not arrived yet.
+  if (environment.threadSettlementSupported === "unknown") return "shell-stale";
   return null;
+}
+
+/**
+ * The settlement policy's capability input, decided here only. A node's own
+ * `false` turns settlement off; an environment not heard from yet still
+ * classifies by what its node recorded (manual settlement, the automatic
+ * rule), while its mutations stay blocked by {@link mutationBlocker}.
+ */
+function policySettlementSupported(support: ThreadCapabilitySupport): boolean {
+  return support !== false;
 }
 
 /**
@@ -260,7 +287,9 @@ function settlementInput(input: {
   readonly nowMs: number;
 }): ThreadSettlementInput {
   return {
-    threadSettlementSupported: input.environment.threadSettlementSupported,
+    threadSettlementSupported: policySettlementSupported(
+      input.environment.threadSettlementSupported,
+    ),
     archivedAt: input.thread.archivedAt,
     deletedAt: null,
     worktreeArchivedAt: input.worktree?.archivedAt ?? null,
@@ -298,7 +327,11 @@ export interface ThreadSnoozeEligibilityInput {
   readonly nowMs: number;
 }
 
-/** The inbox's snooze eligibility for one thread, for surfaces outside the inbox. */
+/**
+ * The inbox's snooze eligibility for one thread, for surfaces outside the
+ * inbox. Snoozing is a change, so only a node that stated settlement support
+ * allows it.
+ */
 export function deriveThreadSnoozeEligibility(
   input: ThreadSnoozeEligibilityInput,
 ): ReturnType<typeof canSnoozeThread> {
@@ -306,7 +339,9 @@ export function deriveThreadSnoozeEligibility(
     settlementInput({
       thread: input.thread,
       worktree: input.worktree ?? null,
-      environment: input.environment,
+      environment: {
+        threadSettlementSupported: input.environment.threadSettlementSupported === true,
+      },
       pinned: false,
       hasLocalQueuedMessage: input.hasLocalQueuedMessage,
       deliveryUnknown: input.deliveryUnknown ?? false,
@@ -424,6 +459,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
     input.threads.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );
 
+  const clientAutoSettleAfterDays = resolveAutoSettleAfterDays(input.autoSettleAfterDays);
   let excludedCount = 0;
   let nextSettlementEvaluationAtMs: number | null = null;
   const entries: ThreadInboxEntry[] = [];
@@ -453,7 +489,11 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       pinned,
       hasLocalQueuedMessage: localQueueKeys.has(key),
       deliveryUnknown: deliveryUnknownKeys.has(key),
-      autoSettleAfterDays: resolveAutoSettleAfterDays(input.autoSettleAfterDays),
+      // Each node's threads by its own rule; time boundaries use this client's clock.
+      autoSettleAfterDays:
+        environment.autoSettleAfterDays === undefined
+          ? clientAutoSettleAfterDays
+          : environment.autoSettleAfterDays,
       nowMs: input.nowMs,
     });
     const nextEvaluationAtMs = getNextThreadSettlementEvaluationAtMs(policyInput);
@@ -501,10 +541,8 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       current: input.currentThreadKey === key,
       isDraft: false,
       canSnooze:
+        blocker === null &&
         environment.threadSnoozeSupported === true &&
-        environment.connected &&
-        environment.shellCurrent &&
-        environment.mutationReady &&
         canSnoozeThread(policyInput).canSnooze,
       focus: null,
     });

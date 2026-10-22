@@ -16,15 +16,25 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "./environments/runtime";
 import { readHostedRpcCapability } from "./hostedHub/capabilities";
-import { useHostedHubStore } from "./hostedHub/state";
+import { getHostedEnvironmentSessions, useHostedHubStore } from "./hostedHub/state";
 import { selectEnvironmentShellLive, type AppState } from "@ryco/client-runtime/state/threads";
 import { useStore } from "./store";
 
 /**
+ * Whether a hosted environment admits queued sends: the environment's own
+ * session record decides, selected or not.
+ */
+function hostedMutationReady(environmentId: EnvironmentId): boolean {
+  return readHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand, environmentId).allowed;
+}
+
+/**
  * Whether the queue drain may trust and mutate an environment. It only READS
  * readiness: it never creates hosted connection demand or selects a node, so a
- * queue on a non-selected hosted node waits until that node is selected.
- * A dropped socket makes the queue wait; it never fails the head.
+ * queue on a hosted node whose session is not ready waits until it is. The
+ * demand that connects such a node is the workspace coordinator's queued-send
+ * scope, held while the queue has messages for one of the node's server
+ * threads. A dropped socket makes the queue wait; it never fails the head.
  */
 export function readWebQueueEnvironment(
   environmentId: EnvironmentId,
@@ -33,14 +43,7 @@ export function readWebQueueEnvironment(
   const shellLive = selectEnvironmentShellLive(state, environmentId);
   if (!shellLive) return { shellLive, mutationReady: false };
   if (readEnvironmentApi(environmentId) === undefined) return { shellLive, mutationReady: false };
-  if (isHostedHubMode()) {
-    return {
-      shellLive,
-      mutationReady:
-        useHostedHubStore.getState().selectedNode?.environmentId === environmentId &&
-        readHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand).allowed,
-    };
-  }
+  if (isHostedHubMode()) return { shellLive, mutationReady: hostedMutationReady(environmentId) };
   const socketConnected =
     getWsConnectionUiState(getWsConnectionStatusForEnvironment(environmentId)) === "connected";
   const savedEnvironmentConnected =
@@ -50,9 +53,11 @@ export function readWebQueueEnvironment(
 }
 
 /**
- * Readiness inputs that live outside the threads store. Per-environment socket
- * closes without a global status change are covered by the coordinator's
- * periodic environment re-check.
+ * Readiness inputs that live outside the threads store. Each hosted
+ * environment's readiness changes in the session registry, not in the hosted
+ * store, so the registry wakes the drain too. Per-environment socket closes
+ * without a global status change are covered by the coordinator's periodic
+ * environment re-check.
  */
 export function subscribeWebQueueEnvironmentReadiness(listener: () => void): () => void {
   const unsubscribers = [
@@ -62,6 +67,7 @@ export function subscribeWebQueueEnvironmentReadiness(listener: () => void): () 
     appAtomRegistry.subscribe(wsConnectionOpenedCountAtom, listener),
     appAtomRegistry.subscribe(wsConnectionStatusAtom, listener),
   ];
+  if (isHostedHubMode()) unsubscribers.push(getHostedEnvironmentSessions().subscribe(listener));
   return () => {
     for (const unsubscribe of unsubscribers) unsubscribe();
   };

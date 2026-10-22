@@ -19,8 +19,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 // Deliberately NOT mocked into hosted mode, unlike the other hosted browser
-// suites. The desktop menu, the phone sheet and the pill all gate on
-// `selectedNode` rather than on the mode; the one thing under this file that
+// suites. The thread badge, the phone sheet and the pill all gate on the
+// hosted state rather than on the mode; the one thing under this file that
 // reads `isHostedHubMode()` is §13.5's session code, choosing which length to
 // draw, and the standard-client answer is the one that needs no role at all —
 // `HostedE2eeVerificationHosted.browser.tsx` is where the hosted role gate is
@@ -54,9 +54,19 @@ import {
 } from "../../../test/hostedConnectionVocabulary";
 import { hostedConnectionStatusPresentation } from "./HostedConnectionControls.logic";
 import { E2EE_WEB_SAS_DETAIL } from "./HostedE2eeVerification.logic";
-import { resetWebE2eeSession } from "../../hostedHub/e2eeSession";
-import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
+import { resetWebE2eeSession, setDisplayedWebE2eeEnvironment } from "../../hostedHub/e2eeSession";
+import { hostedRelayTrustDisclosure } from "./HostedRelayTrustNotice.logic";
+import {
+  getHostedEnvironmentSessions,
+  hostedHubController,
+  useHostedHubStore,
+} from "../../hostedHub/state";
 import { resetHubRoutesForTests } from "../../hostedHub/hubRoutes";
+import {
+  installHostedNodeHistory,
+  resetHostedNodeRoutesForTests,
+} from "../../hostedHub/nodeRoutes";
+import { createFakeHistoryWindow } from "../../../test/fakeHistoryWindow";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { getPresentationTier, syncDocumentPresentationTier } from "../../lib/presentationTier";
@@ -67,10 +77,12 @@ import {
 } from "../../themes/appearancePreferences";
 import { SidebarProvider } from "../ui/sidebar";
 import { ChatHeader } from "../chat/ChatHeader";
+import { NoActiveThreadState } from "../NoActiveThreadState";
+import { NoActiveThreadHostedStatus } from "../NoActiveThreadHostedStatus";
 import {
   HostedConnectionPill,
   HostedConnectionSheet,
-  HostedNodeMenu,
+  HostedThreadConnectionBadge,
 } from "./HostedConnectionControls";
 
 const account = {
@@ -112,8 +124,9 @@ function node(id: string, label: string, online = true): HostedHubNode {
 const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", "Studio node");
 const otherNode = node("node_bbbbbbbbbbbbbbbbbbbbbb", "Second node");
 
-/** A well-formed §13.5 rendering (`E2EE_WEB_SAS_CHARS`: 8 Crockford, 4-4). */
+/** Well-formed §13.5 renderings (`E2EE_WEB_SAS_CHARS`: 8 Crockford, 4-4). */
 const MENU_WEB_SAS = "5TCV-8M2N";
+const SELECTED_WEB_SAS = "W1XE-BF7H";
 
 function seedConnectedState() {
   useHostedHubStore.setState({
@@ -166,6 +179,70 @@ function computedAlpha(color: string): number {
 
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
+/** Puts the address on a node route, as an in-app switch does before the selection follows. */
+function routeTo(node: HostedHubNode) {
+  const fakeWindow = createFakeHistoryWindow(`/node/${node.id}/`);
+  installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
+}
+
+/** `node`'s own session, live and ready, while the selection stays where it is. */
+function seedReadySession(node: HostedHubNode): void {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.ensureRecord(node);
+  sessions.markConnectRequested(node.environmentId, generation);
+  sessions.transportStatus(node.environmentId, generation, "online");
+  sessions.markSessionReady(node.environmentId, generation);
+}
+
+/** The workspace header of an open thread on `environmentId`'s node. */
+function renderThreadHeader(environmentId: EnvironmentId) {
+  writePrimaryEnvironmentDescriptor({
+    environmentId: selectedNode.environmentId,
+    label: selectedNode.label,
+    platform: { os: "linux", arch: "x64" },
+    serverVersion: "0.9.0",
+    capabilities: {
+      repositoryIdentity: false,
+      threadSettlement: false,
+      threadPriorityRanking: false,
+    },
+  });
+  return render(
+    <SidebarProvider>
+      <header className="w-full border-b border-border px-5">
+        <ChatHeader
+          activeThreadEnvironmentId={environmentId}
+          activeThreadTitle="Phone shell implementation"
+          activeProjectName="Ryco"
+          isGitRepo
+          openInCwd="/repo/project"
+          activeProjectScripts={[
+            {
+              id: "build",
+              name: "Build",
+              command: "bun run build",
+              icon: "build",
+              runOnWorktreeCreate: false,
+            },
+          ]}
+          preferredScriptId={null}
+          keybindings={{} as ResolvedKeybindingsConfig}
+          availableEditors={["vscode"]}
+          workspacePanelOpen={false}
+          liveAgentCount={0}
+          onToggleWorkspacePanel={vi.fn()}
+          overviewSidebarOpen={false}
+          onToggleOverviewSidebar={vi.fn()}
+          onRunProjectScript={vi.fn()}
+          onAddProjectScript={vi.fn()}
+          onUpdateProjectScript={vi.fn()}
+          onDeleteProjectScript={vi.fn()}
+        />
+      </header>
+    </SidebarProvider>,
+  );
+}
+
 describe("hosted connection controls", () => {
   beforeAll(() => {
     syncDocumentPresentationTier();
@@ -183,7 +260,9 @@ describe("hosted connection controls", () => {
     await mounted?.unmount();
     mounted = null;
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
     resetHubRoutesForTests();
+    resetHostedNodeRoutesForTests();
     useSettingsDialogStore.setState({ open: false, section: "general" });
     resetPrimaryEnvironmentDescriptorForTests();
     // The §13 projection is module state, not store state, so
@@ -197,52 +276,7 @@ describe("hosted connection controls", () => {
 
   it("renders inside the workspace header without a fixed overlay or control overlap at supported widths", async () => {
     seedConnectedState();
-    writePrimaryEnvironmentDescriptor({
-      environmentId: selectedNode.environmentId,
-      label: selectedNode.label,
-      platform: { os: "linux", arch: "x64" },
-      serverVersion: "0.9.0",
-      capabilities: {
-        repositoryIdentity: false,
-        threadSettlement: false,
-        threadPriorityRanking: false,
-      },
-    });
-
-    mounted = await render(
-      <SidebarProvider>
-        <header className="w-full border-b border-border px-5">
-          <ChatHeader
-            activeThreadEnvironmentId={selectedNode.environmentId}
-            activeThreadTitle="Phone shell implementation"
-            activeProjectName="Ryco"
-            isGitRepo
-            openInCwd="/repo/project"
-            activeProjectScripts={[
-              {
-                id: "build",
-                name: "Build",
-                command: "bun run build",
-                icon: "build",
-                runOnWorktreeCreate: false,
-              },
-            ]}
-            preferredScriptId={null}
-            keybindings={{} as ResolvedKeybindingsConfig}
-            availableEditors={["vscode"]}
-            workspacePanelOpen={false}
-            liveAgentCount={0}
-            onToggleWorkspacePanel={vi.fn()}
-            overviewSidebarOpen={false}
-            onToggleOverviewSidebar={vi.fn()}
-            onRunProjectScript={vi.fn()}
-            onAddProjectScript={vi.fn()}
-            onUpdateProjectScript={vi.fn()}
-            onDeleteProjectScript={vi.fn()}
-          />
-        </header>
-      </SidebarProvider>,
-    );
+    mounted = await renderThreadHeader(selectedNode.environmentId);
 
     for (const [width, height] of [
       [1_280, 720],
@@ -261,6 +295,7 @@ describe("hosted connection controls", () => {
         ancestor = ancestor.parentElement;
       }
       expect(summary!.closest("header")).not.toBeNull();
+      expect(summary!.textContent).toContain(selectedNode.label);
 
       const summaryRect = summary!.getBoundingClientRect();
       expect(summaryRect.width).toBeGreaterThan(0);
@@ -284,7 +319,11 @@ describe("hosted connection controls", () => {
     }
   });
 
-  it("offers the All nodes return action from the desktop menu", async () => {
+  it("offers Manage devices from the thread connection badge, closing it first", async () => {
+    // Node switching and the node list left the header with the global node
+    // menu; the way to them from a thread is this one link. Like every control
+    // that leaves the popover, it closes the disclosure before navigating, so
+    // there are never two owners of one dismissal.
     seedConnectedState();
     // A status distinct from the node-presence badges keeps the summary
     // locator unambiguous.
@@ -292,35 +331,112 @@ describe("hosted connection controls", () => {
     const returnToDirectory = vi
       .spyOn(hostedHubController, "returnToDirectory")
       .mockResolvedValue();
-    mounted = await render(<HostedNodeMenu />);
+    mounted = await render(
+      <HostedThreadConnectionBadge environmentId={selectedNode.environmentId} />,
+    );
 
-    await page.getByText("Unavailable", { exact: true }).click();
-    await page.getByRole("button", { name: "All nodes" }).click();
+    await page.getByText("Connecting…", { exact: true }).click();
+    const disclosure = document.querySelector<HTMLDetailsElement>("details");
+    expect(disclosure, "no thread badge rendered").not.toBeNull();
+    expect(disclosure!.open, "the badge did not open, so this proves nothing").toBe(true);
+    // The global menu's controls are gone from it.
+    for (const retired of ["All nodes", "Refresh", "Sign out", otherNode.label]) {
+      expect(disclosure!.textContent, retired).not.toContain(retired);
+    }
+
+    await page.getByRole("button", { name: "Manage devices" }).click();
+    expect(disclosure!.open, "the badge stayed open behind the directory").toBe(false);
     // No hosted history is installed in this suite, so the control falls back
     // to the router navigation plus the controller primitive.
     await vi.waitFor(() => expect(returnToDirectory).toHaveBeenCalledOnce());
     expect(navigate).toHaveBeenCalledWith({ to: "/", replace: true });
   });
 
-  it("closes the desktop menu before navigating to security details", async () => {
-    // The phone twin closes its sheet before leaving for account settings and
-    // says why. The desktop menu did not, so the settings surface opened on top
-    // of a still-open disclosure: two owners of one dismissal, and an Escape
-    // that returns focus into a popover the user believes they already left.
-    // The destination is a Hub page now rather than a modal dialog; the menu
-    // must still close before the navigation.
+  it("names the open thread's node rather than the selected one, with that node's own channel", async () => {
+    // The selection cursor is on the studio; the thread is on the second node,
+    // which stays warm with its own session and its own channel.
     seedConnectedState();
-    useHostedHubStore.setState({ transportStatus: "reconnecting", sessionStatus: "stale" });
-    mounted = await render(<HostedNodeMenu />);
+    seedReadySession(otherNode);
+    applyWebE2eeChannelStatus("web-unsigned", selectedNode.environmentId);
+    applyWebE2eeChannelStatus("legacy", otherNode.environmentId);
+    mounted = await renderThreadHeader(otherNode.environmentId);
+    const summary = () => document.querySelector<HTMLElement>("details > summary")!;
 
-    await page.getByText("Unavailable", { exact: true }).click();
-    const disclosure = document.querySelector<HTMLDetailsElement>("details");
-    expect(disclosure, "no desktop menu rendered").not.toBeNull();
-    expect(disclosure!.open, "the menu did not open, so this proves nothing").toBe(true);
+    await vi.waitFor(() => {
+      expect(summary().textContent).toContain(otherNode.label);
+    });
+    expect(summary().textContent).not.toContain(selectedNode.label);
+    // §12.2: its fallback is labelled in words, and never drawn quietly.
+    expect(summary().textContent).toContain("Legacy connection");
+    expect(summary().getAttribute("data-quiet")).toBe("false");
+    expect(summary().querySelector("svg[data-guarantee]")?.getAttribute("data-guarantee")).toBe(
+      "legacy",
+    );
 
-    await page.getByRole("button", { name: "Security details" }).click();
-    expect(window.location.pathname).toBe("/account/security");
-    expect(disclosure!.open, "the menu stayed open behind the account page").toBe(false);
+    // Its own channel locking encrypted is the one state drawn quietly — still
+    // with its word and its glyph — and never in the success colour.
+    applyWebE2eeChannelStatus("web-unsigned", otherNode.environmentId);
+    await vi.waitFor(() => {
+      expect(summary().textContent).toContain("Encrypted web");
+    });
+    expect(summary().getAttribute("data-quiet")).toBe("true");
+    const glyph = summary().querySelector<SVGElement>("svg[data-guarantee]")!;
+    expect(glyph.getAttribute("data-guarantee")).toBe("web");
+    expect(glyph.getAttribute("class")).not.toContain("emerald");
+    expect(summary().textContent).toContain(otherNode.label);
+
+    // The selection's own channel falling back changes nothing about this one.
+    applyWebE2eeChannelStatus("legacy", selectedNode.environmentId);
+    await expect.poll(() => summary().textContent).toContain("Encrypted web");
+  });
+
+  it("keeps the home header free of a node chip on desktop and keeps the phone pill", async () => {
+    // Nothing is foreground on desktop without a thread: nodes stay connected
+    // in the background and no header names one. The frozen phone tier keeps
+    // its pill exactly where it was.
+    seedConnectedState();
+    mounted = await render(
+      <SidebarProvider>
+        <NoActiveThreadState />
+      </SidebarProvider>,
+    );
+    await expect.element(page.getByText("Pick a thread to continue")).toBeVisible();
+    expect(document.querySelector("details > summary")).toBeNull();
+    expect(document.querySelector('[data-testid="hosted-connection-pill"]')).toBeNull();
+    expect(document.body.textContent).not.toContain(selectedNode.label);
+
+    await page.viewport(390, 844);
+    await vi.waitFor(() => expect(getPresentationTier()).toBe("phone"));
+    await expect.element(page.getByTestId("hosted-connection-pill")).toBeVisible();
+    expect(page.getByTestId("hosted-connection-pill").element().getAttribute("aria-label")).toBe(
+      `Connection: ${selectedNode.label}, Online`,
+    );
+  });
+
+  it("never tells home no node channel is open while another node's channel is", async () => {
+    // The cursor stays on a node whose channel is not open, while the tab
+    // holds another node's.
+    seedConnectedState();
+    setDisplayedWebE2eeEnvironment(selectedNode.environmentId);
+    // The hosted part of the home empty state, which the standard build omits.
+    mounted = await render(<NoActiveThreadHostedStatus />);
+    const notice = () => document.querySelector<HTMLElement>("[data-hosted-relay-trust-notice]");
+    await vi.waitFor(() => expect(notice()).not.toBeNull());
+    expect(notice()!.getAttribute("data-e2ee-status")).toBe("unavailable");
+    expect(notice()!.textContent).toContain(hostedRelayTrustDisclosure("unavailable").body);
+
+    applyWebE2eeChannelStatus("web-unsigned", otherNode.environmentId);
+    await expect.poll(() => notice()!.getAttribute("data-e2ee-status")).toBe("web-unsigned");
+    expect(notice()!.textContent).not.toContain("No node channel is open");
+
+    // The weakest channel open is the one disclosed.
+    applyWebE2eeChannelStatus("legacy", EnvironmentId.make("env_cccccccccccccccccccccc"));
+    await expect.poll(() => notice()!.getAttribute("data-e2ee-status")).toBe("legacy");
+
+    // The cursor's own channel speaks for itself once it opens.
+    applyWebE2eeChannelStatus("web-unsigned", selectedNode.environmentId);
+    await expect.poll(() => notice()!.getAttribute("data-e2ee-status")).toBe("web-unsigned");
+    setDisplayedWebE2eeEnvironment(null);
   });
 
   it("opens the phone connection sheet from the pill with the full bounded control set", async () => {
@@ -446,12 +562,22 @@ describe("hosted connection controls", () => {
     expect(region!.textContent).toContain("Online");
 
     // Every derived status change re-renders the region content, which is
-    // what triggers a live-region announcement.
+    // what triggers a live-region announcement. A reconnect that is merely
+    // under way is one quiet word; the same drop with an error behind it is not.
     useHostedHubStore.setState({ transportStatus: "reconnecting" });
+    await vi.waitFor(() => {
+      expect(announcer()!.textContent).toContain("Connecting…");
+    });
+    expect(announcer()!.textContent).not.toContain("Unavailable");
+    useHostedHubStore.setState({ errorMessage: "The relay connection dropped." });
     await vi.waitFor(() => {
       expect(announcer()!.textContent).toContain("Unavailable");
     });
-    useHostedHubStore.setState({ browserStatus: "synchronizing" });
+    useHostedHubStore.setState({
+      errorMessage: null,
+      transportStatus: "online",
+      browserStatus: "synchronizing",
+    });
     await vi.waitFor(() => {
       expect(announcer()!.textContent).toContain("Synchronizing");
     });
@@ -595,6 +721,158 @@ describe("hosted connection controls", () => {
     );
   });
 
+  it("says Connecting… and never a transport step on any surface while a connection is established", async () => {
+    await page.viewport(390, 844);
+    seedConnectedState();
+    mounted = await render(
+      <>
+        <HostedThreadConnectionBadge environmentId={selectedNode.environmentId} />
+        <HostedConnectionPill />
+      </>,
+    );
+    const summary = () => document.querySelector<HTMLElement>("details > summary")!;
+    const statusPart = () =>
+      document.querySelector<HTMLElement>('[data-slot="mobile-status-chip-status"]')!;
+    const pill = () =>
+      document.querySelector<HTMLElement>('[data-testid="hosted-connection-pill"]')!;
+
+    for (const transportStatus of [
+      "idle",
+      "requesting-ticket",
+      "connecting",
+      "authenticating",
+      "opening-channel",
+      "reconnecting",
+    ] as const) {
+      useHostedHubStore.setState({
+        transportStatus,
+        sessionStatus: "synchronizing",
+        selectionStatus: "online",
+        browserStatus: "current",
+      });
+      await vi.waitFor(() => {
+        expect(statusPart().textContent, transportStatus).toBe("Connecting");
+      });
+      expect(summary().textContent, transportStatus).toContain("Connecting…");
+      expect(pill().getAttribute("aria-label"), transportStatus).toContain("Connecting…");
+      const spoken = `${summary().textContent} ${pill().getAttribute("aria-label")}`;
+      for (const rawWord of [
+        "ticket",
+        "authenticating",
+        "opening channel",
+        "idle",
+        "Unavailable",
+      ]) {
+        expect(spoken, `${transportStatus} leaked "${rawWord}"`).not.toContain(rawWord);
+      }
+    }
+  });
+
+  it("names the node the route is opening instead of the one still selected", async () => {
+    await page.viewport(390, 844);
+    seedConnectedState();
+    routeTo(otherNode);
+    mounted = await render(<HostedConnectionPill />);
+    const label = () =>
+      document
+        .querySelector<HTMLElement>('[data-testid="hosted-connection-pill"]')!
+        .getAttribute("aria-label") ?? "";
+
+    await vi.waitFor(() => {
+      expect(label()).toContain(otherNode.label);
+    });
+    expect(label()).toContain("Connecting…");
+    expect(label()).not.toContain(selectedNode.label);
+    expect(document.body.textContent).not.toContain("Saved view");
+    expect(document.body.textContent).not.toContain("Reconnecting");
+
+    // The selection catching up with the route changes nothing the reader sees.
+    useHostedHubStore.setState({
+      selectedNode: otherNode,
+      selectionStatus: "online",
+      transportStatus: "authenticating",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+    });
+    await vi.waitFor(() => {
+      expect(label()).toContain(otherNode.label);
+    });
+    expect(label()).toContain("Connecting…");
+    useHostedHubStore.setState({
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    await vi.waitFor(() => {
+      expect(label()).toContain("Online");
+    });
+    expect(label()).toContain(otherNode.label);
+  });
+
+  it.each([
+    ["the phone pill", "pill"],
+    ["the phone connection sheet", "sheet"],
+  ] as const)("names the opening node on %s with no node selected yet", async (_name, surface) => {
+    await page.viewport(390, 844);
+    seedConnectedState();
+    useHostedHubStore.setState({
+      selectedNode: null,
+      selectionStatus: "none",
+      transportStatus: "idle",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+      effectiveRole: null,
+    });
+    routeTo(otherNode);
+    mounted = await render(
+      surface === "pill" ? (
+        <HostedConnectionPill />
+      ) : (
+        <HostedConnectionSheet open onOpenChange={() => undefined} />
+      ),
+    );
+
+    // The header names the target; the node left behind is only a destination
+    // in the sheet's list. The collapsed pill names its node in its accessible
+    // label.
+    const heading = () => {
+      const pill = document.querySelector<HTMLElement>('[data-testid="hosted-connection-pill"]');
+      return surface === "pill"
+        ? (pill?.getAttribute("aria-label") ?? "")
+        : (document.querySelector<HTMLElement>('[data-slot="mobile-sheet-header"]')?.textContent ??
+            "");
+    };
+    await vi.waitFor(() => {
+      expect(heading()).toContain(otherNode.label);
+    });
+    expect(heading()).toContain("Connecting…");
+    expect(heading()).not.toContain(selectedNode.label);
+    expect(document.body.textContent).not.toContain("Saved view");
+    if (surface === "pill") {
+      expect(heading()).toBe(`Connection: ${otherNode.label}, Connecting…`);
+    }
+  });
+
+  it("does not call a problem a switch", async () => {
+    // The route names another node, but the browser is not current: the chip
+    // keeps describing the selection, with the honest word for that state.
+    await page.viewport(390, 844);
+    seedConnectedState();
+    useHostedHubStore.setState({ browserStatus: "stale" });
+    routeTo(otherNode);
+    mounted = await render(<HostedConnectionPill />);
+    const label = () =>
+      document
+        .querySelector<HTMLElement>('[data-testid="hosted-connection-pill"]')!
+        .getAttribute("aria-label") ?? "";
+
+    await vi.waitFor(() => {
+      expect(label()).toContain("Stale");
+    });
+    expect(label()).toContain(selectedNode.label);
+    expect(label()).not.toContain("Connecting");
+  });
+
   it("never shows a connected glyph while the ryco session is not ready", async () => {
     // The three states the transport-only glyph rule got wrong. Each is
     // reachable with the relay transport online, which is exactly why the
@@ -683,16 +961,18 @@ describe("hosted connection controls", () => {
   });
 
   it.each([
-    ["the desktop menu", "menu"],
+    ["the thread connection badge", "badge"],
     ["the phone connection sheet", "sheet"],
   ] as const)("keeps detailed security prose out of %s", async (_name, surface) => {
     seedConnectedState();
-    if (surface === "menu") {
-      mounted = await render(<HostedNodeMenu />);
-      // The menu keeps its disclosure inside a `<details>`; opened directly
+    if (surface === "badge") {
+      mounted = await render(
+        <HostedThreadConnectionBadge environmentId={selectedNode.environmentId} />,
+      );
+      // The badge keeps its popover inside a `<details>`; opened directly
       // rather than by click, which is asserted by its own case above.
       const disclosure = document.querySelector<HTMLDetailsElement>("details");
-      expect(disclosure, "no desktop menu rendered").not.toBeNull();
+      expect(disclosure, "no thread badge rendered").not.toBeNull();
       disclosure!.open = true;
     } else {
       await page.viewport(390, 844);
@@ -700,7 +980,10 @@ describe("hosted connection controls", () => {
     }
 
     for (const status of WEB_HOSTED_E2EE_CHANNEL_STATUSES) {
-      applyWebE2eeChannelStatus(status);
+      applyWebE2eeChannelStatus(
+        status,
+        surface === "badge" ? selectedNode.environmentId : undefined,
+      );
       await vi.waitFor(() => {
         expect(document.querySelectorAll("[data-hosted-relay-trust-notice]").length, status).toBe(
           0,
@@ -708,11 +991,17 @@ describe("hosted connection controls", () => {
       });
       expect(document.body.textContent, status).not.toContain(RETIRED_HOSTED_RELAY_TRUST_SENTENCE);
     }
-    await expect.element(page.getByRole("button", { name: "Security details" })).toBeVisible();
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: surface === "badge" ? "Manage devices" : "Security details",
+        }),
+      )
+      .toBeVisible();
   });
 
   it.each([
-    ["the desktop menu", "menu"],
+    ["the thread connection badge", "badge"],
     ["the phone connection sheet", "sheet"],
   ] as const)("labels the live channel on the status line of %s", async (_name, surface) => {
     // §12.2: "A client that falls back MUST label the channel **legacy** in
@@ -722,10 +1011,12 @@ describe("hosted connection controls", () => {
     // fallback with the whole suite green. The source regex in the node test
     // catches a DROPPED field; nothing caught a substituted one.
     seedConnectedState();
-    if (surface === "menu") {
-      mounted = await render(<HostedNodeMenu />);
+    if (surface === "badge") {
+      mounted = await render(
+        <HostedThreadConnectionBadge environmentId={selectedNode.environmentId} />,
+      );
       const disclosure = document.querySelector<HTMLDetailsElement>("details");
-      expect(disclosure, "no desktop menu rendered").not.toBeNull();
+      expect(disclosure, "no thread badge rendered").not.toBeNull();
       disclosure!.open = true;
     } else {
       await page.viewport(390, 844);
@@ -734,16 +1025,19 @@ describe("hosted connection controls", () => {
 
     const store = useHostedHubStore.getState();
     const statusLine = () =>
-      surface === "menu"
+      surface === "badge"
         ? document.querySelector<HTMLElement>("details > div > p.capitalize")
         : document.querySelector<HTMLElement>('[data-slot="mobile-sheet-description"]');
     const glyph = () =>
       document.querySelector<HTMLElement>(
-        surface === "menu" ? "details > summary svg[data-guarantee]" : "svg[data-guarantee]",
+        surface === "badge" ? "details > summary svg[data-guarantee]" : "svg[data-guarantee]",
       );
 
     for (const status of WEB_HOSTED_E2EE_CHANNEL_STATUSES) {
-      applyWebE2eeChannelStatus(status);
+      applyWebE2eeChannelStatus(
+        status,
+        surface === "badge" ? selectedNode.environmentId : undefined,
+      );
       const expected = deriveHostedConnectionStatusText({
         browserStatus: store.browserStatus,
         sessionStatus: store.sessionStatus,
@@ -785,14 +1079,19 @@ describe("hosted connection controls", () => {
     expect([...WEB_HOSTED_E2EE_CHANNEL_STATUSES]).toContain("web-unsigned");
   });
 
-  it("shows the code without disclosure prose in the desktop menu, and only on a locked channel", async () => {
+  it("shows the thread node's own code without disclosure prose in the badge, and only on a locked channel", async () => {
     // §13.5: "Shown in the web UI for the active session … the owner compares
     // the two out of band", and the accompanying text "MUST state that the
-    // comparison … cannot protect against the Hub operator".
+    // comparison … cannot protect against the Hub operator". The session is
+    // the thread's node's, so the code is the one that node's CLI shows even
+    // while the selection is elsewhere.
     seedConnectedState();
-    mounted = await render(<HostedNodeMenu />);
+    seedReadySession(otherNode);
+    // The selection holds a code of its own, which this badge must not show.
+    applyWebE2eeVerificationCode(SELECTED_WEB_SAS, selectedNode.environmentId);
+    mounted = await render(<HostedThreadConnectionBadge environmentId={otherNode.environmentId} />);
     const disclosure = document.querySelector<HTMLDetailsElement>("details");
-    expect(disclosure, "no desktop menu rendered").not.toBeNull();
+    expect(disclosure, "no thread badge rendered").not.toBeNull();
     disclosure!.open = true;
 
     const verification = () =>
@@ -801,20 +1100,20 @@ describe("hosted connection controls", () => {
     // Nothing is drawn for a channel that has not locked, and nothing for one
     // that fell back (§12.2 forbids any E2EE claim for it).
     for (const status of ["unavailable", "negotiating", "legacy"] as const) {
-      applyWebE2eeChannelStatus(status);
+      applyWebE2eeChannelStatus(status, otherNode.environmentId);
       await vi.waitFor(() => {
         expect(verification(), status).toBeNull();
       });
     }
 
-    applyWebE2eeVerificationCode(MENU_WEB_SAS);
+    applyWebE2eeVerificationCode(MENU_WEB_SAS, otherNode.environmentId);
     await vi.waitFor(() => {
       expect(verification()).not.toBeNull();
     });
     expect(verification()!.textContent).toContain(MENU_WEB_SAS);
+    expect(document.body.textContent).not.toContain(SELECTED_WEB_SAS);
     expect(verification()!.querySelectorAll("p")).toHaveLength(2);
     expect(verification()!.textContent).toContain("Copy");
-    expect(document.body.textContent).toContain("Security details");
     expect(document.body.textContent).not.toContain(E2EE_WEB_SAS_DETAIL);
     expect(verification()!.querySelector("details")).toBeNull();
   });

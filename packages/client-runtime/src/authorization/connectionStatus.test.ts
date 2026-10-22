@@ -3,12 +3,15 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   deriveHostedConnectionStatusIndicator,
   deriveHostedConnectionStatusText,
+  describeHostedConnectionPhase,
   HOSTED_CONNECTION_STATUS_INDICATORS,
   HOSTED_CONNECTION_STATUS_TEXTS,
   HOSTED_E2EE_CHANNEL_STATUSES,
+  type HostedConnectionPhaseInput,
   type HostedConnectionStatusInput,
   type HostedConnectionStatusText,
 } from "./connectionStatus.ts";
+import { isHostedConnectionEstablishing } from "./capabilities.ts";
 import {
   everyHostedConnectionStatusInput,
   hostedConnectionConnectedByGateOrder,
@@ -431,5 +434,124 @@ describe("the web NX row (§2.2, §2.3, §13.1)", () => {
         deriveHostedConnectionStatusIndicator(value),
       );
     }
+  });
+});
+
+describe("describeHostedConnectionPhase", () => {
+  function phaseInput(overrides: Partial<HostedConnectionPhaseInput>): HostedConnectionPhaseInput {
+    return {
+      ...input({}),
+      accountAuthenticated: true,
+      directoryReady: true,
+      quiet: true,
+      ...overrides,
+    };
+  }
+
+  it.each([
+    "idle",
+    "requesting-ticket",
+    "connecting",
+    "authenticating",
+    "opening-channel",
+    "reconnecting",
+  ] as const)("calls a quiet %s transport Connecting", (transportStatus) => {
+    expect(
+      describeHostedConnectionPhase(phaseInput({ transportStatus, sessionStatus: "stale" })),
+    ).toBe("Connecting");
+  });
+
+  it("calls an online transport with a catching-up session Connecting", () => {
+    for (const sessionStatus of ["synchronizing", "replaying"] as const) {
+      expect(describeHostedConnectionPhase(phaseInput({ sessionStatus }))).toBe("Connecting");
+    }
+  });
+
+  it("keeps the browser still synchronizing the selection quiet as well", () => {
+    expect(
+      describeHostedConnectionPhase(
+        phaseInput({
+          browserStatus: "synchronizing",
+          transportStatus: "connecting",
+          sessionStatus: "synchronizing",
+        }),
+      ),
+    ).toBe("Connecting");
+  });
+
+  it("leaves failures, offline, delivery and channel labels exactly as derived", () => {
+    const unchanged = (overrides: Partial<HostedConnectionPhaseInput>, expected: string) =>
+      expect(describeHostedConnectionPhase(phaseInput(overrides))).toBe(expected);
+    unchanged({}, "Online");
+    unchanged({ e2eeStatus: "web-unsigned" }, "Encrypted web");
+    unchanged({ e2eeStatus: "negotiating" }, "Securing");
+    unchanged(
+      { quiet: false, transportStatus: "reconnecting", sessionStatus: "stale" },
+      "Unavailable",
+    );
+    unchanged({ transportStatus: "terminal-failure", sessionStatus: "closed" }, "terminal failure");
+    unchanged({ transportStatus: "draining", sessionStatus: "stale" }, "draining");
+    unchanged({ browserStatus: "offline", transportStatus: "connecting" }, "Offline");
+    unchanged(
+      { browserStatus: "checking-access", transportStatus: "connecting" },
+      "Checking access",
+    );
+    unchanged({ browserStatus: "stale", transportStatus: "connecting" }, "Stale");
+    unchanged({ selectionStatus: "offline", transportStatus: "connecting" }, "Offline");
+    unchanged({ selectionStatus: "revoked", transportStatus: "connecting" }, "Revoked");
+    unchanged({ selectionStatus: "incompatible", transportStatus: "idle" }, "Incompatible");
+    unchanged(
+      { selectionStatus: "authorization-removed", transportStatus: "idle" },
+      "Authorization removed",
+    );
+    unchanged(
+      { sessionStatus: "delivery-unknown", transportStatus: "reconnecting" },
+      "Delivery unknown",
+    );
+    unchanged({ nativeDeviceSecurityStatus: "revoked", transportStatus: "idle" }, "Device removed");
+    unchanged(
+      { nativeDeviceSecurityStatus: "securing", transportStatus: "connecting" },
+      "Securing this device",
+    );
+    unchanged(
+      { nativeDeviceSecurityStatus: "unavailable", transportStatus: "connecting" },
+      "Device encryption unavailable",
+    );
+    unchanged({ accountAuthenticated: false, transportStatus: "connecting" }, "connecting");
+    unchanged({ directoryReady: false, transportStatus: "connecting" }, "connecting");
+  });
+
+  it("only ever replaces the in-progress texts, never a problem label", () => {
+    const inProgress = new Set<HostedConnectionStatusText>([
+      "Synchronizing",
+      "Unavailable",
+      "idle",
+      "requesting ticket",
+      "connecting",
+      "authenticating",
+      "opening channel",
+      "online",
+    ]);
+    for (const value of everyHostedConnectionStatusInput()) {
+      for (const quiet of [true, false]) {
+        const phaseValue: HostedConnectionPhaseInput = {
+          ...value,
+          accountAuthenticated: true,
+          directoryReady: true,
+          quiet,
+        };
+        const derived = deriveHostedConnectionStatusText(value);
+        const described = describeHostedConnectionPhase(phaseValue);
+        if (described === derived) continue;
+        expect(described).toBe("Connecting");
+        expect(isHostedConnectionEstablishing(phaseValue)).toBe(true);
+        expect(quiet).toBe(true);
+        expect(inProgress.has(derived)).toBe(true);
+      }
+    }
+  });
+
+  it("adds no Connecting to the bounded vocabulary the indicator renders", () => {
+    expect(HOSTED_CONNECTION_STATUS_TEXTS).not.toContain("Connecting");
   });
 });

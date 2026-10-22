@@ -6,10 +6,6 @@ export interface ThreadSnoozeState {
   readonly hasPendingApprovals?: boolean | undefined;
   readonly hasPendingUserInput?: boolean | undefined;
   readonly latestUserMessageAt?: string | null | undefined;
-  readonly session?:
-    | { readonly status: string; readonly updatedAt?: string | undefined }
-    | null
-    | undefined;
   readonly latestTurn?:
     | { readonly state?: string | undefined; readonly completedAt?: string | null | undefined }
     | null
@@ -28,7 +24,14 @@ export function canSnoozeThread(input: ThreadSettlementInput) {
   return { canSnooze: eligibility.canSettle, blocker: eligibility.blocker };
 }
 
-/** Derived from timestamps, so suspended clients and restarted servers need no timer event. */
+/**
+ * Derived from timestamps, so suspended clients and restarted servers need no timer event.
+ *
+ * A session error is not read here. The node decides whether an error wakes the thread and
+ * clears the snooze when it does; every node that can snooze does that for provider errors. A
+ * thread the node keeps snoozed through an error it decided on itself (a restart release, a
+ * context handoff rollback) shows snoozed, as it is on the node.
+ */
 export function isThreadSnoozed(thread: ThreadSnoozeState, nowMs: number): boolean {
   const until = Date.parse(thread.snoozedUntil ?? "");
   const since = Date.parse(thread.snoozedAt ?? "");
@@ -42,8 +45,6 @@ export function isThreadSnoozed(thread: ThreadSnoozeState, nowMs: number): boole
   if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
   if (Date.parse(thread.latestUserMessageAt ?? "") > since) return false;
   if (Date.parse(thread.latestTurn?.completedAt ?? "") > since) return false;
-  if (thread.session?.status === "error" && Date.parse(thread.session.updatedAt ?? "") > since)
-    return false;
   return true;
 }
 

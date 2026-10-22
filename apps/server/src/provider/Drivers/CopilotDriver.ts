@@ -1,8 +1,10 @@
 import { CopilotSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
 import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
+import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import { ServerConfig } from "../../config.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeCopilotTextGeneration } from "../../textGeneration/CopilotTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCopilotAdapter } from "../Layers/CopilotAdapter.ts";
@@ -19,18 +21,44 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import {
+  enrichProviderSnapshotWithVersionAdvisory,
+  makeLazyProviderMaintenanceCapabilities,
+  makePackageManagedProviderMaintenanceResolver,
+  normalizeCommandPath,
+} from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("copilot");
 
+/** The install script puts the CLI in `$PREFIX/bin`, `~/.local` for a non-root install. */
+function isCopilotNativeCommandPath(commandPath: string): boolean {
+  const normalized = normalizeCommandPath(commandPath);
+  return (
+    normalized.endsWith("/.local/bin/copilot") || normalized.endsWith("/.local/bin/copilot.exe")
+  );
+}
+
+// Ryco spawns the user's own `copilot` binary, so its install decides the update: script installs
+// update themselves, the `copilot-cli` cask is found from its keg, and WinGet stays manual.
+const UPDATE = makePackageManagedProviderMaintenanceResolver({
+  provider: DRIVER_KIND,
+  npmPackageName: "@github/copilot",
+  nativeUpdate: {
+    args: ["update"],
+    isCommandPath: isCopilotNativeCommandPath,
+  },
+});
+
 export type CopilotDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
+  | HttpClient.HttpClient
   | Path.Path
   | ProviderEventLoggers
-  | ServerConfig;
+  | ServerConfig
+  | ServerSettingsService;
 
 const withInstanceIdentity =
   (input: {
@@ -58,6 +86,8 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
   defaultConfig: (): CopilotSettings => Schema.decodeSync(CopilotSettings)({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const httpClient = yield* HttpClient.HttpClient;
+      const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
       const agentControl = yield* Effect.serviceOption(AgentControlSessionRegistry);
       const processEnv = mergeProviderInstanceEnvironment(environment);
@@ -85,12 +115,10 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
         Effect.map(stampIdentity),
       );
 
-      const maintenanceCapabilities = Effect.succeed(
-        makeManualOnlyProviderMaintenanceCapabilities({
-          provider: DRIVER_KIND,
-          packageName: null,
-        }),
-      );
+      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(UPDATE, {
+        binaryPath: effectiveConfig.binaryPath,
+        env: processEnv,
+      });
       const probeFingerprint = yield* makeProviderProbeFingerprint({
         driverKind: DRIVER_KIND,
         binaryPaths: [effectiveConfig.binaryPath],
@@ -106,6 +134,15 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) => stampIdentity(makePendingCopilotProvider(settings)),
         checkProvider,
+        enrichSnapshot: ({ snapshot: currentSnapshot, publishSnapshot }) =>
+          maintenanceCapabilities.pipe(
+            Effect.flatMap((capabilities) =>
+              enrichProviderSnapshotWithVersionAdvisory(currentSnapshot, capabilities),
+            ),
+            Effect.provideService(HttpClient.HttpClient, httpClient),
+            Effect.provideService(ServerSettingsService, serverSettings),
+            Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
+          ),
         refreshInterval: null,
       }).pipe(
         Effect.mapError(

@@ -96,6 +96,32 @@ function node(id: string, online = true): HostedHubNode {
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 let fakeWindow: FakeHistoryWindow | null = null;
 
+/** The store already holds rows for the node's environment, restored from a cache. */
+function seedCachedShell(target: HostedHubNode) {
+  useStore.setState({
+    activeEnvironmentId: target.environmentId,
+    environmentStateById: {
+      [target.environmentId]: {
+        hydratedFromCacheAt: 1,
+        threadShellById: {},
+      } as unknown as EnvironmentState,
+    },
+  });
+}
+
+/** `selectNode` as the lifecycle owner starts it: selected, relay not established yet. */
+function selectingNode() {
+  return vi.spyOn(hostedHubController, "selectNode").mockImplementation(async (nodeId: string) => {
+    const found = useHostedHubStore.getState().nodes.find((entry) => entry.id === nodeId);
+    useHostedHubStore.setState({
+      selectedNode: found ?? null,
+      selectionStatus: "online",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+    });
+  });
+}
+
 function installRoute(initialUrl: string): FakeHistoryWindow {
   fakeWindow = createFakeHistoryWindow(initialUrl);
   installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
@@ -117,6 +143,12 @@ beforeEach(() => {
   vi.spyOn(hostedHubApi, "readThreadCacheThread").mockRejectedValue(
     new HostedHubApiError("not_found", 404),
   );
+  // These cases fake the lifecycle owner: `selectNode` and the session fields
+  // are stubbed per case, and so are the ports the workspace coordinator
+  // connects and releases a route's environment through, so no case opens a
+  // relay channel of its own.
+  vi.spyOn(hostedHubController, "acquireEnvironment").mockResolvedValue("connecting");
+  vi.spyOn(hostedHubController, "releaseEnvironment").mockResolvedValue();
 });
 
 afterEach(async () => {
@@ -396,6 +428,160 @@ describe("hosted node route surfaces", () => {
     expect(fakeWindow!.location.search).toBe("?workspaceTab=diff");
   });
 
+  it.each([
+    ["the node root", "", "/"],
+    ["projects", "/projects", "/projects"],
+    ["tasks", "/tasks", "/tasks"],
+    ["settings", "/settings", "/settings"],
+  ] as const)(
+    "opens an older node address of %s on that page, node-less, with the cursor moved to the node",
+    async (_name, path, pagePathname) => {
+      const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
+      installRoute(`/node/${target.id}${path}`);
+      // The selection has not followed yet: the shell cannot wait for it.
+      const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
+      seedCachedShell(target);
+      useHostedHubStore.setState({
+        accountStatus: "authenticated",
+        account,
+        session,
+        directoryStatus: "ready",
+        browserStatus: "current",
+        nodes: [target],
+      });
+
+      mounted = await render(<HostedHubRoot />);
+
+      await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
+      await expect
+        .element(page.getByRole("heading", { name: "Restoring your node" }))
+        .not.toBeInTheDocument();
+      expect(selectNode).toHaveBeenCalledWith(target.id);
+      // Only a thread or a draft names a node: the segment is dropped in place.
+      await vi.waitFor(() => expect(fakeWindow!.location.pathname).toBe(pagePathname));
+      expect(fakeWindow!.entries()).toHaveLength(1);
+    },
+  );
+
+  it("keeps the shell mounted from the first pass to the established session", async () => {
+    const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
+    installRoute(`/node/${target.id}/${target.environmentId}/t_1`);
+    selectingNode();
+    seedCachedShell(target);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      nodes: [target],
+    });
+
+    mounted = await render(<HostedHubRoot />);
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
+    const shell = page.getByTestId("root-app-shell").element();
+
+    useHostedHubStore.setState({
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-hub");
+    // The same element all along: the workspace was never torn down.
+    expect(page.getByTestId("root-app-shell").element()).toBe(shell);
+  });
+
+  it("checks access before showing any shell on cold boot or resume", async () => {
+    const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
+    installRoute(`/node/${target.id}/${target.environmentId}/t_1`);
+    const selectNode = selectingNode();
+    seedCachedShell(target);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "checking-access",
+      nodes: [target],
+    });
+
+    mounted = await render(<HostedHubRoot />);
+
+    await expect.element(page.getByRole("heading", { name: "Restoring your node" })).toBeVisible();
+    await expect.element(page.getByRole("status")).toMatchTextContent(/Checking your access/);
+    await expect.element(page.getByTestId("root-app-shell")).not.toBeInTheDocument();
+    expect(selectNode).not.toHaveBeenCalled();
+
+    useHostedHubStore.setState({ browserStatus: "current" });
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
+  });
+
+  it("names the node it is opening when no shell can be shown for it yet", async () => {
+    const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
+    installRoute(`/node/${target.id}/${target.environmentId}/t_1`);
+    // The selection has not followed the route and the store holds nothing for
+    // the node, so the page waits, and says what for.
+    vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [target],
+    });
+
+    mounted = await render(<HostedHubRoot />);
+
+    await expect.element(page.getByRole("heading", { name: "Restoring your node" })).toBeVisible();
+    await expect.element(page.getByRole("status")).toMatchTextContent(`Opening ${target.label}…`);
+    expect(document.body.textContent).not.toContain("Checking your access");
+    await expect.element(page.getByTestId("root-app-shell")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "revoked",
+      (target: HostedHubNode): HostedHubNode => ({
+        ...target,
+        revokedAt: 2,
+        revocationReasonCode: "administrative",
+      }),
+      /Access to the node from this link was revoked/,
+    ],
+    [
+      "native-only",
+      (target: HostedHubNode): HostedHubNode => ({
+        ...target,
+        capabilities: { repositoryIdentity: true, nativeClientRequired: true },
+      }),
+      /not in your authorized node directory/,
+    ],
+  ] as const)(
+    "still fails a %s node closed to the directory when the store holds its shell",
+    async (_name, restrict, notice) => {
+      const target = restrict(node("node_aaaaaaaaaaaaaaaaaaaaaa"));
+      installRoute(`/node/${target.id}/projects`);
+      const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
+      seedCachedShell(target);
+      useHostedHubStore.setState({
+        accountStatus: "authenticated",
+        account,
+        session,
+        directoryStatus: "ready",
+        browserStatus: "current",
+        nodes: [target],
+      });
+
+      mounted = await render(<HostedHubRoot />);
+
+      await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
+      await expect.element(page.getByRole("alert")).toMatchTextContent(notice);
+      await expect.element(page.getByTestId("root-app-shell")).not.toBeInTheDocument();
+      expect(selectNode).not.toHaveBeenCalled();
+      expect(fakeWindow!.location.pathname).toBe("/");
+    },
+  );
+
   it("fails an unknown routed node closed to the directory with a bounded explanation", async () => {
     const other = node("node_bbbbbbbbbbbbbbbbbbbbbb");
     installRoute("/node/node_gone");
@@ -454,21 +640,11 @@ describe("hosted node route surfaces", () => {
     expect(fakeWindow!.location.pathname).toBe("/");
   });
 
-  it("selects a node by navigating into its node-scoped route", async () => {
+  it("opens home with the cursor on a node chosen from the directory", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
     installRoute("/nodes");
     navigateHub({ kind: "nodes" }, { replace: true });
-    const selectNode = vi
-      .spyOn(hostedHubController, "selectNode")
-      .mockImplementation(async (nodeId: string) => {
-        const found = useHostedHubStore.getState().nodes.find((entry) => entry.id === nodeId);
-        useHostedHubStore.setState({
-          selectedNode: found ?? null,
-          selectionStatus: "online",
-          sessionStatus: "synchronizing",
-          sessionEstablished: false,
-        });
-      });
+    const selectNode = selectingNode();
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
@@ -480,29 +656,52 @@ describe("hosted node route surfaces", () => {
 
     await page.getByRole("button", { name: /^Studio online/ }).click();
     expect(selectNode).toHaveBeenCalledWith(target.id);
+    // Home names no node: the workspace opens even though the store holds
+    // nothing for the node yet, and no full-page connection surface takes over.
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
     await expect
       .element(page.getByRole("heading", { name: `Connecting to ${target.label}` }))
-      .toBeVisible();
-    expect(fakeWindow!.location.pathname).toBe(`/node/${target.id}`);
+      .not.toBeInTheDocument();
+    expect(fakeWindow!.location.pathname).toBe("/");
     expect(fakeWindow!.entries()).toHaveLength(2);
     // Selection is never persisted outside the URL.
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
   });
 
-  it("returns to the directory when history navigates back from a node route", async () => {
+  it("selects a node on the shell the store already holds for it", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
     installRoute("/nodes");
     navigateHub({ kind: "nodes" }, { replace: true });
-    vi.spyOn(hostedHubController, "selectNode").mockImplementation(async (nodeId: string) => {
-      const found = useHostedHubStore.getState().nodes.find((entry) => entry.id === nodeId);
-      useHostedHubStore.setState({
-        selectedNode: found ?? null,
-        selectionStatus: "online",
-        sessionStatus: "synchronizing",
-        sessionEstablished: false,
-      });
+    const selectNode = selectingNode();
+    seedCachedShell(target);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      nodes: [target],
     });
+    mounted = await render(<HostedHubRoot />);
+
+    await page.getByRole("button", { name: /^Studio online/ }).click();
+    expect(selectNode).toHaveBeenCalledWith(target.id);
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
+    await expect
+      .element(page.getByRole("heading", { name: `Connecting to ${target.label}` }))
+      .not.toBeInTheDocument();
+    expect(fakeWindow!.location.pathname).toBe("/");
+    expect(fakeWindow!.entries()).toHaveLength(2);
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it("keeps the cursor when history navigates back from home to the directory", async () => {
+    const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
+    installRoute("/nodes");
+    navigateHub({ kind: "nodes" }, { replace: true });
+    selectingNode();
+    seedCachedShell(target);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
@@ -512,14 +711,14 @@ describe("hosted node route surfaces", () => {
     });
     mounted = await render(<HostedHubRoot />);
     await page.getByRole("button", { name: /^Studio online/ }).click();
-    await expect
-      .element(page.getByRole("heading", { name: `Connecting to ${target.label}` }))
-      .toBeVisible();
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
 
     fakeWindow!.history.back();
     await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
+    // The directory names no node either: the cursor stays and nothing is
+    // released, so going back to the node is immediate.
     expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
-    expect(useHostedHubStore.getState().selectionStatus).toBe("online");
+    expect(hostedHubController.releaseEnvironment).not.toHaveBeenCalled();
     expect(fakeWindow!.location.pathname).toBe("/nodes");
   });
 
@@ -527,15 +726,8 @@ describe("hosted node route surfaces", () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
     installRoute("/nodes");
     navigateHub({ kind: "nodes" }, { replace: true });
-    vi.spyOn(hostedHubController, "selectNode").mockImplementation(async (nodeId: string) => {
-      const found = useHostedHubStore.getState().nodes.find((entry) => entry.id === nodeId);
-      useHostedHubStore.setState({
-        selectedNode: found ?? null,
-        selectionStatus: "online",
-        sessionStatus: "synchronizing",
-        sessionEstablished: false,
-      });
-    });
+    selectingNode();
+    seedCachedShell(target);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
@@ -545,9 +737,7 @@ describe("hosted node route surfaces", () => {
     });
     mounted = await render(<HostedHubRoot />);
     await page.getByRole("button", { name: /^Studio online/ }).click();
-    await expect
-      .element(page.getByRole("heading", { name: `Connecting to ${target.label}` }))
-      .toBeVisible();
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
 
     const serializedEntries = JSON.stringify(fakeWindow!.entries());
     for (const sensitive of ["sensitive-route-browser-canary", account.id, session.id]) {

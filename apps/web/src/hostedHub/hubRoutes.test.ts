@@ -83,8 +83,8 @@ describe("hub routes", () => {
       const pathname = hubRoutePathname(route);
       expect(buildHostedNodeHref(pathname, "node_abc"), pathname).toBe(pathname);
     }
-    // The node workspace's own routes are still scoped.
-    expect(buildHostedNodeHref("/", "node_abc")).toBe("/node/node_abc");
+    // Of the node workspace's own routes, a draft is still scoped; home is not.
+    expect(buildHostedNodeHref("/", "node_abc")).toBe("/");
     expect(buildHostedNodeHref("/draft/d1", "node_abc")).toBe("/node/node_abc/draft/d1");
   });
 

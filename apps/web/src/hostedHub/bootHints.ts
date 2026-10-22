@@ -2,10 +2,14 @@ import type { HostedHubState } from "./state";
 
 /**
  * A non-secret boot hint: whether this browser's last settled hosted access
- * check was signed in. It only decides how early the boot gate starts
- * downloading the workspace shell code (beside the access check rather than
- * after it); it never grants, skips or delays access, which the access check
- * alone decides. A stale hint costs one unneeded (or one later) code download.
+ * check was signed in. It only decides how early the boot gate starts two
+ * things, beside the access check rather than after it: downloading the
+ * workspace shell code, and opening the Hub account socket. That socket is
+ * bound to no account, granted nothing and opens no stream until the access
+ * check answers authenticated, and any other answer closes it (see
+ * `openWebHubSessionBesideAccessCheck`). The hint never grants, skips or
+ * delays access, which the access check alone decides. A stale hint costs one
+ * unneeded (or one later) code download and socket.
  *
  * It is kept regardless of "Remember this browser": that preference governs
  * the offline read cache (conversation content and workspace metadata), while

@@ -2,7 +2,10 @@ import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
-import { attachDesktopResourceTelemetry } from "./desktopResourceTelemetry.ts";
+import {
+  attachDesktopResourceTelemetry,
+  type DesktopBackendPipe,
+} from "./desktopResourceTelemetry.ts";
 import * as ChildProcess from "node:child_process";
 import * as Crypto from "node:crypto";
 import * as FS from "node:fs";
@@ -44,13 +47,17 @@ import {
   type PersistedSavedEnvironmentRecord,
   type DesktopUpdateActionResult,
   type DesktopUpdateCheckResult,
+  type DesktopRemoteInstallState,
   type DesktopUpdateState,
   type DesktopWorkspaceTransportActivation,
 } from "@ryco/contracts";
 import type { AppUpdater, UpdateDownloadedEvent } from "electron-updater";
 
 import type { ContextMenuItem } from "@ryco/contracts";
-import type { DesktopBackendLifecycleFrame } from "@ryco/shared/desktopResourceTelemetry";
+import type {
+  DesktopAppUpdateRequestFrame,
+  DesktopBackendLifecycleFrame,
+} from "@ryco/shared/desktopResourceTelemetry";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 import { readEnv } from "@ryco/shared/runtimeEnv";
@@ -113,6 +120,7 @@ import {
   createBackendFailurePolicy,
 } from "./backendStartup.ts";
 import { pruneStaleDesktopCompileCaches } from "./compileCacheDirectory.ts";
+import { createDesktopWorkspaceActivity } from "./desktopBackgroundSignal.ts";
 import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
 import { registerDeferredIpcHandlers } from "./deferredIpc.ts";
 import {
@@ -173,6 +181,11 @@ import { waitForBackendStartupReady } from "./backendStartupReadiness.ts";
 import { getAutoUpdateDisabledReason, shouldBroadcastDownloadProgress } from "./updateState.ts";
 import { doesVersionMatchDesktopUpdateChannel } from "./updateChannels.ts";
 import {
+  createRemoteAppInstaller,
+  parseRemoteInstallResponse,
+  REMOTE_INSTALL_COUNTDOWN_MS,
+} from "./remoteAppInstall.ts";
+import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
@@ -184,7 +197,6 @@ import {
   reduceDesktopUpdateStateOnNoUpdate,
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine.ts";
-import { isArm64HostRunningIntelBuild, resolveDesktopRuntimeInfo } from "./runtimeArch.ts";
 import { resolveDesktopAppBranding } from "./appBranding.ts";
 import { bindFirstRevealTrigger, type RevealSubscription } from "./windowReveal.ts";
 import {
@@ -225,6 +237,7 @@ import type {
 } from "./desktopHostedIdentity.ts";
 import type * as DesktopHubStack from "./desktopHubStack.ts";
 import type { DesktopNativeE2eeHandshakeService } from "./desktopNativeE2eeHandshake.ts";
+import type { DesktopThreadContentCache } from "./desktopThreadContentCache.ts";
 import type {
   DesktopWorkspaceClient,
   DesktopWorkspaceClientSnapshot,
@@ -265,6 +278,7 @@ const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const UPDATE_CHECK_CHANNEL = "desktop:update-check";
+const UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL = "desktop:update-remote-install-response";
 const GET_APP_BRANDING_CHANNEL = "desktop:get-app-branding";
 const GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL = "desktop:get-local-environment-bootstrap";
 const GET_CLIENT_SETTINGS_CHANNEL = "desktop:get-client-settings";
@@ -305,11 +319,8 @@ const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
 const SAVED_ENVIRONMENT_REGISTRY_PATH = Path.join(STATE_DIR, "saved-environments.json");
 const SHELL_ENVIRONMENT_CACHE_PATH = DESKTOP_PATHS.shellEnvironmentCachePath;
-const DESKTOP_WORKSPACE_CACHE_PATH = Path.join(
-  STATE_DIR,
-  "desktop-workspace-client",
-  "metadata-v1.json",
-);
+const DESKTOP_WORKSPACE_CLIENT_DIR = Path.join(STATE_DIR, "desktop-workspace-client");
+const DESKTOP_WORKSPACE_CACHE_PATH = Path.join(DESKTOP_WORKSPACE_CLIENT_DIR, "metadata-v1.json");
 const DESKTOP_SCHEME = "ryco";
 const DESKTOP_BOOT_HOST = "app";
 const DESKTOP_BOOT_PATH = "/desktop-boot.html";
@@ -465,6 +476,20 @@ let desktopWorkspaceClient: DesktopWorkspaceClient | null = null;
 let desktopWorkspaceRelayManager: DesktopWorkspaceRelayManager | null = null;
 let disposeDesktopWorkspaceSubscription: (() => void) | null = null;
 let desktopKeepAwake: DesktopKeepAwakeController | null = null;
+// Window and power lifecycle for the workspace client: it backgrounds a while
+// after the window leaves sight, never on blur, and keeps machine presence fresh.
+const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
+  setBackgrounded: (backgrounded) => {
+    void desktopWorkspaceClient?.setBackgrounded(backgrounded).catch(() => undefined);
+  },
+  refreshCatalog: () => {
+    void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
+  },
+  isWindowInSight: () =>
+    BrowserWindow.getAllWindows().some(
+      (window) => !window.isDestroyed() && window.isVisible() && !window.isMinimized(),
+    ),
+});
 // The Hub connector configuration the running backend was launched with.
 let backendHubLaunch: DesktopHubConnectorLaunch | null = null;
 // The Tailscale Serve configuration the running backend was launched with. A
@@ -577,17 +602,8 @@ let desktopServerExposureMode: DesktopServerExposureMode = desktopSettings.serve
 
 let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
 const expectedBackendExitChildren = new WeakSet<ChildProcess.ChildProcess>();
-const desktopRuntimeInfo = resolveDesktopRuntimeInfo({
-  platform: process.platform,
-  processArch: process.arch,
-  runningUnderArm64Translation: app.runningUnderARM64Translation === true,
-});
 const initialUpdateState = (): DesktopUpdateState =>
-  createInitialDesktopUpdateState(
-    app.getVersion(),
-    desktopRuntimeInfo,
-    desktopSettings.updateChannel,
-  );
+  createInitialDesktopUpdateState(app.getVersion(), desktopSettings.updateChannel);
 
 function logTimestamp(): string {
   return new Date().toISOString();
@@ -1123,12 +1139,41 @@ function emitDesktopWorkspaceState(snapshot: DesktopWorkspaceClientSnapshot): vo
   );
 }
 
+/**
+ * Recent conversation text for the signed-in account's machines, encrypted
+ * with the OS-protected key and bounded by the shared display-content policy.
+ * Its module is small and has no Hub dependencies, but is only needed once a
+ * Hub origin is configured.
+ */
+const loadDesktopThreadContentModule = lazyAsyncResource(
+  () => import("./desktopThreadContentCache.ts"),
+);
+const ensureDesktopThreadContentCache = lazyAsyncResource(
+  async (): Promise<DesktopThreadContentCache> => {
+    const origin = desktopSettings.hubOrigin;
+    if (origin === null) throw new Error("Desktop Hub is unavailable.");
+    const { createDesktopThreadContentCache } = await loadDesktopThreadContentModule();
+    return createDesktopThreadContentCache({
+      directory: DESKTOP_WORKSPACE_CLIENT_DIR,
+      hubOrigin: origin,
+      protection: getDesktopSecretStorage(),
+    });
+  },
+);
+
 async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
   if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
   const origin = desktopSettings.hubOrigin;
   if (origin === null) throw new Error("Desktop Hub is unavailable.");
-  const { createDesktopWorkspaceMetadataCache, DesktopWorkspaceClient } =
-    await loadDesktopHubStack();
+  const [
+    { createDesktopWorkspaceMetadataCache, DesktopWorkspaceClient },
+    { withThreadContentPurges },
+    threadContent,
+  ] = await Promise.all([
+    loadDesktopHubStack(),
+    loadDesktopThreadContentModule(),
+    ensureDesktopThreadContentCache(),
+  ]);
   // Another caller may have finished while the stack loaded.
   if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
   // Constructing the workspace (including getState IPC) must not create keys.
@@ -1155,7 +1200,11 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
     trust: {
       read: async (...args) => (await ensureDesktopNativeIdentityContext()).trust.read(...args),
     },
-    cache: createDesktopWorkspaceMetadataCache(DESKTOP_WORKSPACE_CACHE_PATH),
+    // Conversation text is forgotten wherever the metadata cache forgets.
+    cache: withThreadContentPurges(
+      createDesktopWorkspaceMetadataCache(DESKTOP_WORKSPACE_CACHE_PATH),
+      threadContent,
+    ),
     connection: {
       connect: async ({ environmentId, delayMs }) => {
         mainWindow?.webContents.send(DESKTOP_WORKSPACE_IPC.connectionCommand, {
@@ -1229,7 +1278,13 @@ const ensureDesktopNativeE2eeHandshakeService = lazyAsyncResource(
 );
 
 function invalidateDesktopNativeE2eeAccess(): void {
+  const revokedIdentity = desktopHostedIdentityStatus;
   desktopHostedIdentityStatus = { status: "unavailable" };
+  if (revokedIdentity.status === "ready") {
+    void ensureDesktopThreadContentCache()
+      .then((threadContent) => threadContent.purgeAccount(revokedIdentity.accountId))
+      .catch(() => undefined);
+  }
   desktopWorkspaceClient?.invalidateAccess();
   desktopNativeE2eeHandshakeService?.dispose();
   desktopWorkspaceRelayManager?.dispose();
@@ -2079,6 +2134,52 @@ function loadElectronUpdater(): typeof import("electron-updater") {
 let updateState: DesktopUpdateState = initialUpdateState();
 let downloadedUpdateFilePath: string | null = null;
 let macCodeSignatureKindCache: MacCodeSignatureKind | null = null;
+// The running check and download, so a remote install can wait for their outcome.
+let updateCheckTask: Promise<boolean> | null = null;
+let updateDownloadTask: Promise<{ accepted: boolean; completed: boolean }> | null = null;
+// One per live backend generation (normally one); each hears every updater state.
+const backendUpdatePipes = new Set<DesktopBackendPipe>();
+// Retained so its click handler survives GC, and closed once the countdown ends.
+let remoteInstallNotification: Notification | null = null;
+// Owns `updateState.remoteInstall`: an update another device asked this app to install.
+const remoteAppInstaller = createRemoteAppInstaller({
+  updateState: () => updateState,
+  publish: (remoteInstall) => {
+    if (remoteInstall !== null) {
+      console.info(
+        `[desktop-updater] Remote install ${remoteInstall.requestId} of ${remoteInstall.targetVersion}: ${remoteInstall.phase}${remoteInstall.message ? ` (${remoteInstall.message})` : ""}.`,
+      );
+    }
+    if (remoteInstall?.phase !== "countdown") closeRemoteInstallNotification();
+    setUpdateState({});
+  },
+  reportRefused: (refused) => {
+    console.info(
+      `[desktop-updater] Remote install ${refused.requestId} of ${refused.targetVersion} refused: ${refused.message ?? "unknown reason"}.`,
+    );
+    // The refusal names its own request; the next report restores the running one.
+    for (const pipe of backendUpdatePipes) {
+      pipe.sendAppUpdateState({ ...updateState, remoteInstall: refused });
+      pipe.sendAppUpdateState(updateState);
+    }
+  },
+  prepareUpdater: prepareUpdaterForRemoteInstall,
+  checkForUpdate: () => checkForUpdatesOrJoin("remote"),
+  downloadUpdate: async () => {
+    await downloadAvailableUpdateOrJoin();
+  },
+  installUpdate: async () => {
+    const result = await installDownloadedUpdate();
+    if (result.accepted) return null;
+    return isQuitting ? "Ryco is already shutting down." : "The update is not ready to install.";
+  },
+  countdownStarted: notifyRemoteInstallCountdown,
+  now: () => Date.now(),
+  schedule: (callback, delayMs) => {
+    const timer = setTimeout(callback, delayMs);
+    return () => clearTimeout(timer);
+  },
+});
 
 // The SSH bridge (Effect platform, undici, the SSH package) loads on the first
 // SSH request; its IPC channels are registered up front.
@@ -2326,16 +2427,7 @@ function dispatchMenuAction(action: string): void {
 }
 
 function handleCheckForUpdatesMenuClick(): void {
-  const hasUpdateFeedConfig =
-    readAppUpdateYml() !== null || Boolean(readEnv("RYCO_DESKTOP_MOCK_UPDATES"));
-  const disabledReason = getAutoUpdateDisabledReason({
-    isDevelopment,
-    isPackaged: app.isPackaged,
-    platform: process.platform,
-    appImage: process.env.APPIMAGE,
-    disabledByEnv: readEnv("RYCO_DISABLE_AUTO_UPDATE") === "1",
-    hasUpdateFeedConfig,
-  });
+  const disabledReason = resolveAutoUpdateDisabledReason();
   if (disabledReason) {
     console.info("[desktop-updater] Manual update check requested, but updates are disabled.");
     void dialog.showMessageBox({
@@ -2566,6 +2658,20 @@ function revealWindow(window: BrowserWindow): void {
   window.focus();
 }
 
+/** Bring the main window forward, opening one when none exists (dock or notification click). */
+function revealOrOpenMainWindow(): void {
+  const existingWindow = mainWindow ?? BrowserWindow.getAllWindows()[0];
+  if (existingWindow) {
+    revealWindow(existingWindow);
+    return;
+  }
+  if (isDevelopment) {
+    ensureDevelopmentInitialWindowOpen();
+    return;
+  }
+  ensureInitialBackendWindowOpen();
+}
+
 function schedulePackagedBootReveal(window: BrowserWindow): void {
   const timer = setTimeout(() => {
     if (window.isDestroyed() || window.isVisible()) {
@@ -2701,10 +2807,13 @@ function emitUpdateState(): void {
     if (window.isDestroyed()) continue;
     window.webContents.send(UPDATE_STATE_CHANNEL, updateState);
   }
+  // Repeats are dropped per pipe, so re-emitting for a loaded window sends nothing.
+  for (const pipe of backendUpdatePipes) pipe.sendAppUpdateState(updateState);
 }
 
 function setUpdateState(patch: Partial<DesktopUpdateState>): void {
-  updateState = { ...updateState, ...patch };
+  // The remote installer owns `remoteInstall`; resets of the updater state keep it.
+  updateState = { ...updateState, ...patch, remoteInstall: remoteAppInstaller.current() };
   emitUpdateState();
 }
 
@@ -2713,7 +2822,7 @@ function createBaseUpdateState(
   enabled: boolean,
 ): DesktopUpdateState {
   return {
-    ...createInitialDesktopUpdateState(app.getVersion(), desktopRuntimeInfo, channel),
+    ...createInitialDesktopUpdateState(app.getVersion(), channel),
     enabled,
     status: enabled ? "idle" : "disabled",
   };
@@ -2729,19 +2838,34 @@ function applyAutoUpdaterChannel(channel: DesktopUpdateChannel): void {
   );
 }
 
-function shouldEnableAutoUpdates(): boolean {
+/** Why this build cannot update itself, or `null` when it can. */
+function resolveAutoUpdateDisabledReason(): string | null {
   const hasUpdateFeedConfig =
     readAppUpdateYml() !== null || Boolean(readEnv("RYCO_DESKTOP_MOCK_UPDATES"));
-  return (
-    getAutoUpdateDisabledReason({
-      isDevelopment,
-      isPackaged: app.isPackaged,
-      platform: process.platform,
-      appImage: process.env.APPIMAGE,
-      disabledByEnv: readEnv("RYCO_DISABLE_AUTO_UPDATE") === "1",
-      hasUpdateFeedConfig,
-    }) === null
-  );
+  return getAutoUpdateDisabledReason({
+    isDevelopment,
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    appImage: process.env.APPIMAGE,
+    disabledByEnv: readEnv("RYCO_DISABLE_AUTO_UPDATE") === "1",
+    hasUpdateFeedConfig,
+  });
+}
+
+function shouldEnableAutoUpdates(): boolean {
+  return resolveAutoUpdateDisabledReason() === null;
+}
+
+/** Ready the updater for a remote install; resolves with why it cannot run, or `null`. */
+async function prepareUpdaterForRemoteInstall(): Promise<string | null> {
+  if (isQuitting) return "Ryco is shutting down on this device.";
+  const disabledReason = resolveAutoUpdateDisabledReason();
+  if (disabledReason !== null) return disabledReason;
+  await ensureAutoUpdaterConfigured();
+  if (updaterConfigured) return null;
+  return isQuitting
+    ? "Ryco is shutting down on this device."
+    : "The updater is not available right now.";
 }
 
 async function checkForUpdates(reason: string): Promise<boolean> {
@@ -2755,7 +2879,21 @@ async function checkForUpdates(reason: string): Promise<boolean> {
   updateCheckInFlight = true;
   setUpdateState(reduceDesktopUpdateStateOnCheckStart(updateState, new Date().toISOString()));
   console.info(`[desktop-updater] Checking for updates (${reason})...`);
+  const task = runUpdateCheck();
+  updateCheckTask = task;
+  return task;
+}
 
+/** Check now, or wait for the check already running; either way its outcome is in the state. */
+async function checkForUpdatesOrJoin(reason: string): Promise<void> {
+  if (updateCheckInFlight && updateCheckTask !== null) {
+    await updateCheckTask;
+    return;
+  }
+  await checkForUpdates(reason);
+}
+
+async function runUpdateCheck(): Promise<boolean> {
   try {
     await requireAutoUpdater().checkForUpdates();
     return true;
@@ -2781,8 +2919,22 @@ async function downloadAvailableUpdate(): Promise<{
   downloadedUpdateFilePath = null;
   updateDownloadInFlight = true;
   setUpdateState(reduceDesktopUpdateStateOnDownloadStart(updateState));
+  const task = runUpdateDownload();
+  updateDownloadTask = task;
+  return task;
+}
+
+/** Download now, or wait for the download already running; its outcome is in the state. */
+async function downloadAvailableUpdateOrJoin(): Promise<void> {
+  if (updateDownloadInFlight && updateDownloadTask !== null) {
+    await updateDownloadTask;
+    return;
+  }
+  await downloadAvailableUpdate();
+}
+
+async function runUpdateDownload(): Promise<{ accepted: boolean; completed: boolean }> {
   const autoUpdater = requireAutoUpdater();
-  autoUpdater.disableDifferentialDownload = isArm64HostRunningIntelBuild(desktopRuntimeInfo);
   console.info("[desktop-updater] Downloading update...");
 
   try {
@@ -2917,6 +3069,8 @@ async function installDownloadedUpdate(): Promise<{
   isQuitting = true;
   updateInstallInFlight = true;
   clearUpdatePollTimer();
+  // Ends a remote install's countdown, whoever started this install.
+  remoteAppInstaller.installStarting();
   try {
     const unsignedMacInstallPlan = shouldInstallUpdateWithUnsignedMacInstaller()
       ? prepareUnsignedMacUpdateInstaller()
@@ -2949,9 +3103,62 @@ async function installDownloadedUpdate(): Promise<{
     updateInstallInFlight = false;
     isQuitting = false;
     setUpdateState(reduceDesktopUpdateStateOnInstallFailure(updateState, message));
+    remoteAppInstaller.installFailed(message);
     console.error(`[desktop-updater] Failed to install update: ${message}`);
     return { accepted: true, completed: false };
   }
+}
+
+/** A client's update request, relayed by a backend over its pipe. */
+function handleAppUpdateRequest(
+  frame: DesktopAppUpdateRequestFrame,
+  pipe: DesktopBackendPipe,
+): void {
+  if (frame.type === "app-update-install") {
+    console.info(
+      `[desktop-updater] Install of ${frame.targetVersion} requested from another device (request ${frame.requestId}).`,
+    );
+    void remoteAppInstaller.request(frame.requestId, frame.targetVersion);
+    return;
+  }
+  void ensureAutoUpdaterConfigured()
+    .catch(() => undefined)
+    .then(() => checkForUpdatesOrJoin("remote"))
+    .catch(() => undefined)
+    .finally(() => {
+      // Answer even when the check changed nothing (no feed, a download under way), so
+      // the backend never waits for a report that would not come.
+      pipe.sendAppUpdateState(updateState, { force: true });
+    });
+}
+
+/** Nobody may see the window's countdown: say so natively. The countdown runs either way. */
+function notifyRemoteInstallCountdown(remoteInstall: DesktopRemoteInstallState): void {
+  const windowShown = BrowserWindow.getAllWindows().some(
+    (window) => !window.isDestroyed() && window.isVisible() && !window.isMinimized(),
+  );
+  if (windowShown || !Notification.isSupported()) return;
+  closeRemoteInstallNotification();
+  const native = new Notification({
+    title: "Ryco is about to update",
+    body: `Ryco will restart in ${Math.round(REMOTE_INSTALL_COUNTDOWN_MS / 1000)} s to install ${remoteInstall.targetVersion}, requested from another device.`,
+  });
+  remoteInstallNotification = native;
+  native.on("click", () => {
+    if (remoteInstallNotification === native) remoteInstallNotification = null;
+    revealOrOpenMainWindow();
+  });
+  native.on("close", () => {
+    if (remoteInstallNotification === native) remoteInstallNotification = null;
+  });
+  native.show();
+}
+
+function closeRemoteInstallNotification(): void {
+  const native = remoteInstallNotification;
+  if (native === null) return;
+  remoteInstallNotification = null;
+  native.close();
 }
 
 /**
@@ -2997,14 +3204,7 @@ async function configureAutoUpdater(): Promise<void> {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   applyAutoUpdaterChannel(desktopSettings.updateChannel);
-  autoUpdater.disableDifferentialDownload = isArm64HostRunningIntelBuild(desktopRuntimeInfo);
   let lastLoggedDownloadMilestone = -1;
-
-  if (isArm64HostRunningIntelBuild(desktopRuntimeInfo)) {
-    console.info(
-      "[desktop-updater] Apple Silicon host detected while running Intel build; updates will switch to arm64 packages.",
-    );
-  }
 
   autoUpdater.on("checking-for-update", () => {
     console.info("[desktop-updater] Looking for updates...");
@@ -3042,6 +3242,7 @@ async function configureAutoUpdater(): Promise<void> {
       updateInstallInFlight = false;
       isQuitting = false;
       setUpdateState(reduceDesktopUpdateStateOnInstallFailure(updateState, message));
+      remoteAppInstaller.installFailed(message);
       console.error(`[desktop-updater] Updater error: ${message}`);
       return;
     }
@@ -3382,10 +3583,16 @@ function startBackend(): void {
   const outputTail = new BackendOutputTail();
   const telemetryPipe = child.stdio[DESKTOP_BACKEND_TELEMETRY_FD];
   if (telemetryPipe instanceof Duplex) {
-    const stopTelemetry = attachDesktopResourceTelemetry(telemetryPipe, (frame) =>
-      handleBackendFrame(readiness, frame),
-    );
-    child.once("exit", stopTelemetry);
+    const backendPipe = attachDesktopResourceTelemetry(telemetryPipe, {
+      onLifecycleFrame: (frame) => handleBackendFrame(readiness, frame),
+      onAppUpdateRequest: (frame) => handleAppUpdateRequest(frame, backendPipe),
+      appUpdateState: () => updateState,
+    });
+    backendUpdatePipes.add(backendPipe);
+    child.once("exit", () => {
+      backendUpdatePipes.delete(backendPipe);
+      backendPipe.close();
+    });
   }
   // An early child can have failed before this bundle adopted it; that exit is
   // handled (and counted) below like any other, not as a missing pipe.
@@ -3881,7 +4088,9 @@ function registerIpcHandlers(): void {
   ): Promise<A> => {
     const client = await ensureDesktopWorkspaceClient();
     const { createDesktopWorkspaceIpcHandlers } = await loadDesktopHubStack();
-    return operation(createDesktopWorkspaceIpcHandlers(client));
+    return operation(
+      createDesktopWorkspaceIpcHandlers(client, await ensureDesktopThreadContentCache()),
+    );
   };
   for (const channel of [
     DESKTOP_WORKSPACE_IPC.getState,
@@ -3896,9 +4105,13 @@ function registerIpcHandlers(): void {
     DESKTOP_WORKSPACE_IPC.beginVerification,
     DESKTOP_WORKSPACE_IPC.cancelVerification,
     DESKTOP_WORKSPACE_IPC.verifyApproval,
+    DESKTOP_WORKSPACE_IPC.getThreadContent,
+    DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled,
+    DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled,
   ]) {
     ipcMain.removeHandler(channel);
   }
+  ipcMain.removeAllListeners(DESKTOP_WORKSPACE_IPC.publishThreadContent);
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.getState, () =>
     withDesktopWorkspace((handlers) => handlers.getState()),
   );
@@ -3934,6 +4147,24 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.verifyApproval, (_event, raw: unknown) =>
     withDesktopWorkspace((handlers) => handlers.verifyApproval(raw)),
+  );
+  // One-way: a refused or failed publication only means the cache keeps what it had.
+  ipcMain.on(
+    DESKTOP_WORKSPACE_IPC.publishThreadContent,
+    (_event, rawEnvironmentId: unknown, rawContent: unknown) => {
+      void withDesktopWorkspace((handlers) =>
+        handlers.publishThreadContent(rawEnvironmentId, rawContent),
+      ).catch(() => undefined);
+    },
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getThreadContent, (_event, raw: unknown) =>
+    withDesktopWorkspace((handlers) => handlers.getThreadContent(raw)),
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled, () =>
+    withDesktopWorkspace((handlers) => handlers.getThreadContentCacheEnabled()),
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled, (_event, raw: unknown) =>
+    withDesktopWorkspace((handlers) => handlers.setThreadContentCacheEnabled(raw)),
   );
   for (const channel of [
     DESKTOP_WORKSPACE_IPC.prepareTransport,
@@ -4004,10 +4235,8 @@ function registerIpcHandlers(): void {
         return;
       }
       try {
-        desktopWorkspaceRelayManager?.send(
-          workspaceTransportId(rawTransportId),
-          Uint8Array.from(rawData),
-        );
+        // IPC already delivered a private copy; the relay keeps what it needs.
+        desktopWorkspaceRelayManager?.send(workspaceTransportId(rawTransportId), rawData);
       } catch {
         // The transport emits its own bounded close; never surface relay details over IPC.
       }
@@ -4384,7 +4613,12 @@ function registerIpcHandlers(): void {
     if (rawChannel !== "latest" && rawChannel !== "nightly") {
       throw new Error("Invalid desktop update channel input.");
     }
-    if (updateCheckInFlight || updateDownloadInFlight || updateInstallInFlight) {
+    if (
+      updateCheckInFlight ||
+      updateDownloadInFlight ||
+      updateInstallInFlight ||
+      remoteAppInstaller.isActive()
+    ) {
       throw new Error("Cannot change update tracks while an update action is in progress.");
     }
 
@@ -4459,6 +4693,16 @@ function registerIpcHandlers(): void {
       checked,
       state: updateState,
     } satisfies DesktopUpdateCheckResult;
+  });
+
+  ipcMain.removeHandler(UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL);
+  ipcMain.handle(UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL, async (_event, rawAction: unknown) => {
+    const action = parseRemoteInstallResponse(rawAction);
+    if (action === null) {
+      throw new Error("Invalid remote install response.");
+    }
+    remoteAppInstaller.respond(action);
+    return updateState;
   });
 }
 
@@ -4668,12 +4912,7 @@ function createWindow(): BrowserWindow {
     event.preventDefault();
     window.setTitle(APP_DISPLAY_NAME);
   });
-  window.on("blur", () => {
-    void desktopWorkspaceClient?.setBackgrounded(true);
-  });
-  window.on("focus", () => {
-    void desktopWorkspaceClient?.setBackgrounded(false);
-  });
+  desktopWorkspaceActivity.attachWindow(window);
   window.webContents.on("dom-ready", () => {
     const currentUrl = window.webContents.getURL();
     markDesktopWindowStartupLoad("dom-ready", currentUrl);
@@ -5102,6 +5341,7 @@ async function bootstrap(): Promise<void> {
   registerIpcHandlers();
   if (computerUseRuntime) registerComputerUseStackIpc?.(computerUseRuntime);
   forwardSystemResumeToRenderers();
+  desktopWorkspaceActivity.attachPower(powerMonitor);
   startDesktopKeepAwake();
   writeDesktopLogHeader("bootstrap ipc handlers registered");
   configureDeferredDesktopIntegration();
@@ -5124,6 +5364,7 @@ app.on(
       computerUseRuntime?.dispose();
       desktopKeepAwake?.dispose();
       updateInstallInFlight = false;
+      remoteAppInstaller.dispose();
       writeDesktopLogHeader("before-quit received");
       clearUpdatePollTimer();
       cancelBackendReadinessWait();
@@ -5160,18 +5401,7 @@ app
       handleFatalStartupError("bootstrap", error);
     });
 
-    app.on("activate", () => {
-      const existingWindow = mainWindow ?? BrowserWindow.getAllWindows()[0];
-      if (existingWindow) {
-        revealWindow(existingWindow);
-        return;
-      }
-      if (isDevelopment) {
-        ensureDevelopmentInitialWindowOpen();
-        return;
-      }
-      ensureInitialBackendWindowOpen();
-    });
+    app.on("activate", revealOrOpenMainWindow);
   })
   .catch((error) => {
     handleFatalStartupError("whenReady", error);

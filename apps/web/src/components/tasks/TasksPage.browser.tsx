@@ -21,6 +21,7 @@ import {
   type EnvironmentApi,
   type LocalTask,
   type LocalTaskAddFileInput,
+  type LocalTaskChange,
   type LocalTaskCreateInput,
   type LocalTaskDelegateInput,
   type LocalTaskUpdateInput,
@@ -183,6 +184,50 @@ function fakeNode(initial: ReadonlyArray<LocalTask>) {
   return { tasks, server, git, vcs, api: { server, git, vcs } as unknown as EnvironmentApi };
 }
 
+/**
+ * Gives `node` a change stream the way the server runs one: list pages and the stream's word to
+ * read everything carry the node's change position, and the word comes half a round trip after
+ * the subscription, while the first list read is still out (as on a node switch). Call it before
+ * `mount`, which binds the node's methods.
+ */
+function withChangeStream(
+  node: ReturnType<typeof fakeNode>,
+  { roundTripMs = 30 }: { readonly roundTripMs?: number } = {},
+) {
+  const feed = "feed-1";
+  let sequence = 0;
+  let listener: ((change: LocalTaskChange) => void) | null = null;
+  const emit = (change: LocalTaskChange) => listener?.(change);
+  const server = node.server as unknown as Record<string, unknown>;
+  server.listLocalTasks = vi.fn(() => {
+    // The position is read before the page's query, as the node does.
+    const result = {
+      tasks: [...node.tasks.values()],
+      nextCursor: null,
+      position: { feed, sequence },
+    };
+    return new Promise((resolve) => setTimeout(() => resolve(result), roundTripMs));
+  });
+  server.subscribeLocalTaskChanges = vi.fn((next: (change: LocalTaskChange) => void) => {
+    listener = next;
+    const timer = setTimeout(() => emit({ position: { feed, sequence } }), roundTripMs / 2);
+    return () => {
+      clearTimeout(timer);
+      if (listener === next) listener = null;
+    };
+  });
+  return {
+    position: () => ({ feed, sequence }),
+    emit,
+    /** A change on the node: the task is saved, then its change goes out. */
+    publish: (taskId: string, next: LocalTask) => {
+      node.tasks.set(taskId, next);
+      sequence += 1;
+      emit({ taskId });
+    },
+  };
+}
+
 function seedNode(localTasks: boolean) {
   const environment = {
     environmentId: ENV,
@@ -251,8 +296,18 @@ function rowButton(taskId: string, name: string): HTMLButtonElement {
   return found;
 }
 
+/**
+ * Opens a row from its title, where a person clicks it. The line's middle can
+ * fall on the row's hidden Start, which then takes the click (CI's Linux font
+ * metrics put it there for a row with a linked branch).
+ */
 async function openRow(taskId: string, title: string) {
-  await userEvent.click(rowButton(taskId, title));
+  const line = rowButton(taskId, title);
+  const lineBox = line.getBoundingClientRect();
+  const titleBox = rowElement(taskId)!.querySelector(".tsk-title")!.getBoundingClientRect();
+  await userEvent.click(line, {
+    position: { x: titleBox.left + titleBox.width / 2 - lineBox.left, y: lineBox.height / 2 },
+  });
   await vi.waitFor(() => expect(rowElement(taskId)?.hasAttribute("data-open")).toBe(true));
 }
 
@@ -302,6 +357,49 @@ describe("TasksPage", () => {
     await expect.element(page.getByRole("button", { name: "Completed · 1" })).toBeVisible();
     expect(rowElement("t-open")!.textContent).toContain("ryco");
     expect(node.server.listLocalTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the node's tasks once when the page opens on a node, and again only for what changes", async () => {
+    const node = fakeNode([
+      task({ taskId: "t-open", title: "Fix login redirect loop" }),
+      task({ taskId: "t-next", title: "Simplify chat header" }),
+    ]);
+    seedNode(true);
+    const roundTripMs = 30;
+    const stream = withChangeStream(node, { roundTripMs });
+    await mount(node);
+    const roundTrips = (count: number) =>
+      new Promise((resolve) => setTimeout(resolve, count * roundTripMs));
+
+    await vi.waitFor(() => expect(rowElement("t-open")).not.toBeNull());
+    await roundTrips(4);
+    // The stream's first word came while the list read was out, and that read covered it.
+    expect(node.server.listLocalTasks).toHaveBeenCalledTimes(1);
+
+    // Listening again with nothing new since reads nothing.
+    stream.emit({ position: stream.position() });
+    await roundTrips(2);
+    expect(node.server.listLocalTasks).toHaveBeenCalledTimes(1);
+
+    // A change reads the task it names, not the list.
+    stream.publish("t-open", {
+      ...node.tasks.get("t-open")!,
+      revision: 2,
+      title: "Fix the login loop",
+    });
+    await vi.waitFor(() =>
+      expect(rowElement("t-open")!.textContent).toContain("Fix the login loop"),
+    );
+    expect(node.server.getLocalTask).toHaveBeenCalledTimes(1);
+    expect(node.server.listLocalTasks).toHaveBeenCalledTimes(1);
+
+    // A word after that change is past what the list read covers: it reads the list.
+    stream.emit({ position: stream.position() });
+    await vi.waitFor(() => expect(node.server.listLocalTasks).toHaveBeenCalledTimes(2));
+
+    // So does a restarted node's.
+    stream.emit({ position: { feed: "feed-2", sequence: 0 } });
+    await vi.waitFor(() => expect(node.server.listLocalTasks).toHaveBeenCalledTimes(3));
   });
 
   it("shows the owner-only panel when the node refuses this session its tasks", async () => {

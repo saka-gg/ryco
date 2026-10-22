@@ -1,12 +1,18 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Sink, Stream } from "effect";
+import { ChildProcessSpawner } from "effect/process";
 import { vi } from "vitest";
 
-import { cursorAgentCommandCandidates, resolveCursorAgentCommand } from "./CursorAgentCommand.ts";
+import {
+  cursorAgentCommandCandidates,
+  resolveCursorAgentCommand,
+  resolveCursorMaintenanceCapabilities,
+} from "./CursorAgentCommand.ts";
 
 // Probes and session spawns must not search PATH synchronously: a stalled mount on PATH would
 // block the event loop.
@@ -73,5 +79,84 @@ describe("resolveCursorAgentCommand", () => {
         "cursor-agent",
       );
     }),
+  );
+});
+
+describe("resolveCursorMaintenanceCapabilities", () => {
+  const spawnerReportingPrefix = (prefix: string, calls: Array<string>) =>
+    ChildProcessSpawner.make((command) => {
+      const { command: executable, args } = command as unknown as {
+        readonly command: string;
+        readonly args: ReadonlyArray<string>;
+      };
+      calls.push([executable, ...args].join(" "));
+      return Effect.succeed(
+        ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(1),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.encodeText(Stream.make(`${prefix}\n`)),
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        }),
+      );
+    });
+
+  it.effect.skipIf(process.platform === "win32")(
+    "upgrades the cursor-cli cask with brew and keeps self-update for other installs",
+    () =>
+      Effect.gen(function* () {
+        const prefix = path.join(
+          realpathSync(os.tmpdir()),
+          `ryco-cursor-cask-${crypto.randomUUID()}`,
+        );
+        const brewPath = path.join(prefix, "bin", "brew");
+        const caskBinary = path.join(
+          prefix,
+          "Caskroom",
+          "cursor-cli",
+          "2025.10.02",
+          "cursor-agent",
+        );
+        for (const file of [brewPath, caskBinary]) {
+          mkdirSync(path.dirname(file), { recursive: true });
+          writeFileSync(file, "#!/bin/sh\n");
+          chmodSync(file, 0o755);
+        }
+        const calls: Array<string> = [];
+        const resolve = (resolvedPath: string) =>
+          resolveCursorMaintenanceCapabilities({ command: "cursor-agent", resolvedPath }, {}).pipe(
+            Effect.provideService(
+              ChildProcessSpawner.ChildProcessSpawner,
+              spawnerReportingPrefix(prefix, calls),
+            ),
+            Effect.provide(NodeServices.layer),
+          );
+
+        const cask = yield* resolve(caskBinary);
+        expect(cask.update).toEqual({
+          command: "brew upgrade --cask cursor-cli",
+          executable: brewPath,
+          args: ["upgrade", "--cask", "cursor-cli"],
+          lockKey: "homebrew",
+        });
+        // Cursor's date-stamped versions are never compared, from brew or anywhere else.
+        expect(cask.latestVersion).toBeNull();
+        expect(cask.lookupLatestVersion).toBeUndefined();
+        expect(calls).toEqual([`${brewPath} --prefix`]);
+
+        const binDir = makeBinDir(["cursor-agent"]);
+        const native = yield* resolve(path.join(binDir, "cursor-agent"));
+        expect(native.update).toMatchObject({
+          executable: path.join(binDir, "cursor-agent"),
+          args: ["update"],
+          lockKey: "cursor-agent",
+        });
+      }),
   );
 });

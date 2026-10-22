@@ -10,14 +10,25 @@ import type { EnvironmentId } from "@ryco/contracts";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { forgetRememberedProjectPreferences } from "../hooks/newDraftDefaults";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { setModelPickerOpen } from "../modelPickerOpenState";
 import { clearKeyedQueriesForEnvironment } from "../rpc/keyedQuery";
-import { clearProjectAtomState } from "../rpc/projectAtoms";
-import { clearGitAtomState } from "../rpc/gitAtoms";
-import { clearCheckpointDiffState } from "../rpc/providerAtoms";
-import { clearServerState } from "../rpc/serverState";
+import { clearProjectAtomState, clearProjectAtomStateForEnvironment } from "../rpc/projectAtoms";
+import { clearGitAtomState, clearGitAtomStateForEnvironment } from "../rpc/gitAtoms";
+import {
+  clearCheckpointDiffCacheForEnvironment,
+  clearCheckpointDiffState,
+} from "../rpc/providerAtoms";
+import {
+  clearEnvironmentServerConfigs,
+  clearServerConfigState,
+  clearServerState,
+  clearWelcomeState,
+  forgetEnvironmentServerConfig,
+  isEnvironmentServerConfigShown,
+} from "../rpc/serverState";
 import { defaultQueryClient } from "../rpc/queryClient";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { clearShortcutModifierState } from "../shortcutModifierState";
@@ -31,7 +42,8 @@ import { resetWebE2eeSession } from "./e2eeSession";
 export function clearWebHostedNodeScopedState(environmentId: EnvironmentId): void {
   // docs/relay-e2ee-protocol.md §13's per-channel projection is node-scoped and
   // belongs here: a status that outlives the channel that earned it describes a
-  // connection that no longer exists.
+  // connection that no longer exists. Only this environment's entry goes; a
+  // channel to another node keeps its own.
   //
   // §12.1'S LATCH DELIBERATELY DOES NOT. It is APPLICATION-SESSION state, and
   // this catalog runs on every node teardown — `deactivateCurrentHostedNode`
@@ -44,18 +56,29 @@ export function clearWebHostedNodeScopedState(environmentId: EnvironmentId): voi
   // already proven the node speaks §4 in this same session. The latch ends where
   // §12.1 says it ends — with the application session — and
   // `watchWebHostedSessionForE2ee` is what ends it, on sign-out.
-  resetWebE2eeSession();
+  resetWebE2eeSession(environmentId);
   clearKeyedQueriesForEnvironment(environmentId);
-  clearProjectAtomState();
-  clearGitAtomState();
-  clearCheckpointDiffState();
+  // Project search, branch and checkpoint-diff caches of the other environments
+  // survive the teardown of this one.
+  clearProjectAtomStateForEnvironment(environmentId);
+  clearGitAtomStateForEnvironment(environmentId);
+  clearCheckpointDiffCacheForEnvironment(environmentId);
   // A hosted node switch is a transport disposal, not account teardown. Keep
   // list-safe rows and environment-keyed drafts/UI while stripping live
   // sessions and liveness from only the environment that lost its channel.
   useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, Date.now());
   // Owner-only analytics are not list-safe: never repaint them after leaving the node.
   statisticsSnapshotCache.forget(environmentId);
-  clearServerState();
+  // Only the left environment's config goes; another environment's entry
+  // survives the switch. The global config atoms follow the active entry while
+  // the shell's projection is mounted, but a switch can render without it, so
+  // the left environment's config leaves the atoms here too.
+  if (isEnvironmentServerConfigShown(environmentId)) clearServerConfigState();
+  forgetEnvironmentServerConfig(environmentId);
+  // The welcome is the primary connection's, and the node being left is that
+  // primary (its descriptor is replaced only after this runs): its bootstrap
+  // thread, project and cwd must not be replayed against the next node.
+  if (readPrimaryEnvironmentDescriptor()?.environmentId === environmentId) clearWelcomeState();
 }
 
 /** Account-session teardown. Unlike a node switch, this may clear every environment-keyed UI. */
@@ -98,7 +121,11 @@ export function clearWebHostedAccountScopedState(): void {
     defaultAdvertisedEndpointKey: null,
   });
   defaultQueryClient.clear();
+  clearProjectAtomState();
+  clearGitAtomState();
+  clearCheckpointDiffState();
   statisticsSnapshotCache.clear();
+  clearEnvironmentServerConfigs();
   clearServerState();
   // Project artwork outlives a connection (it is keyed by node), not an account.
   clearAllProjectIconCaches();

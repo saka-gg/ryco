@@ -526,6 +526,26 @@ describe("relay E2EE client channel: §9.3 admission before assignment", () => {
     expect(channel.sendPosition()).toEqual({ epoch: 0n, counter: 3n });
   });
 
+  it("transmits a submitted record within the submitting task's microtasks, before any timer runs", async () => {
+    const { channel, wire } = makeChannel();
+    const peer = makePeer();
+    const drainMicrotasks = async () => {
+      // Only microtasks run here: no timer fires and no later task starts.
+      for (let turn = 0; turn < 1_000; turn += 1) await Promise.resolve();
+    };
+
+    expect(channel.submit(RPC)).toBe(true);
+    await drainMicrotasks();
+    expect(wire.sent).toHaveLength(1);
+    expect(peer.authenticate(wire.sent[0]!).body).toEqual(RPC);
+
+    // A record queued behind another send waits for no timer either.
+    expect(channel.submit(RPC)).toBe(true);
+    await drainMicrotasks();
+    expect(wire.sent).toHaveLength(2);
+    expect(peer.authenticate(wire.sent[1]!).body).toEqual(RPC);
+  });
+
   it("protects nothing further and emits no E2EEError after a zero-byte send failure", async () => {
     const { channel, wire, diagnostics } = makeChannel();
     wire.refuseSend = true;

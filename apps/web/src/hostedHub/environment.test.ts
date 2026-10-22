@@ -7,18 +7,67 @@ import { statisticsSnapshotCache } from "@ryco/client-runtime/usage";
 import {
   EnvironmentId,
   ProjectId,
+  ThreadId,
   type EnvironmentApi,
+  type ExecutionEnvironmentDescriptor,
+  type ProjectSearchEntriesResult,
+  type ServerConfig,
+  type ServerLifecycleWelcomePayload,
   type StatisticsSnapshot,
+  type VcsListRefsResult,
 } from "@ryco/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import * as environmentApi from "../environmentApi";
+import {
+  resetPrimaryEnvironmentDescriptorForTests,
+  writePrimaryEnvironmentDescriptor,
+} from "../environments/primary";
 import { useMessageQueueStore } from "../messageQueueStore";
+import {
+  getBranchesSnapshot,
+  getBranchesTargetKey,
+  resetGitAtomsForTests,
+  watchBranches,
+} from "../rpc/gitAtoms";
+import {
+  EMPTY_PROJECT_SEARCH_ENTRIES_STATE,
+  getProjectSearchEntriesSnapshot,
+  requestProjectSearchEntries,
+  resetProjectAtomsForTests,
+} from "../rpc/projectAtoms";
+import {
+  checkpointDiffCacheKey,
+  checkpointDiffStateAtom,
+  resetCheckpointDiffStateForTests,
+  watchCheckpointDiff,
+  type CheckpointDiffInput,
+} from "../rpc/providerAtoms";
+import {
+  appAtomRegistry,
+  emitWelcome,
+  getServerConfig,
+  getServerConfigUpdatedNotification,
+  readEnvironmentServerConfig,
+  resetEnvironmentServerConfigsForTests,
+  resetServerStateForTests,
+  startActiveEnvironmentServerConfigProjection,
+  welcomeAtom,
+  writeEnvironmentServerConfig,
+} from "../rpc/serverState";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useStore } from "../store";
 import { useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
+import { clearWebE2eeLatches, isWebE2eeSelectionLatched, latchWebE2eeSelection } from "./e2eeLatch";
+import {
+  beginWebE2eeChannelAttempt,
+  lockWebE2eeChannelMode,
+  resetWebE2eeSession,
+  webE2eeSessionStateFor,
+} from "./e2eeSession";
 import { clearWebHostedAccountScopedState, clearWebHostedNodeScopedState } from "./environment";
 
 /**
@@ -42,6 +91,114 @@ function cacheStatistics(target: EnvironmentId): Promise<StatisticsSnapshot> {
         generatedAt: `statistics-${target}`,
       }) as StatisticsSnapshot,
   );
+}
+
+function serverConfigFor(target: EnvironmentId): ServerConfig {
+  return {
+    environment: { environmentId: target, label: target, capabilities: {} },
+    issues: [],
+    providers: [],
+    settings: {},
+  } as unknown as ServerConfig;
+}
+
+beforeEach(() => {
+  resetServerStateForTests();
+  resetEnvironmentServerConfigsForTests();
+  resetPrimaryEnvironmentDescriptorForTests();
+});
+
+afterEach(() => {
+  resetServerStateForTests();
+  resetEnvironmentServerConfigsForTests();
+  resetPrimaryEnvironmentDescriptorForTests();
+  resetProjectAtomsForTests();
+  resetGitAtomsForTests();
+  resetCheckpointDiffStateForTests();
+  resetWebE2eeSession();
+  clearWebE2eeLatches();
+  vi.restoreAllMocks();
+});
+
+const CWD = "/workspace";
+const threadId = ThreadId.make("thread-id");
+
+/**
+ * One environment's project search, branch and checkpoint-diff caches, each
+ * holding a fetched answer, through a fake environment API.
+ */
+async function cacheNodeContent(target: EnvironmentId): Promise<() => void> {
+  const api = {
+    projects: {
+      searchEntries: async () =>
+        ({
+          entries: [{ kind: "file", path: `${target}.ts` }],
+          truncated: true,
+        }) as unknown as ProjectSearchEntriesResult,
+    },
+    vcs: {
+      listRefs: async (): Promise<VcsListRefsResult> => ({
+        refs: [],
+        isRepo: true,
+        hasPrimaryRemote: true,
+        nextCursor: null,
+        totalCount: 0,
+      }),
+    },
+    orchestration: {
+      getTurnDiff: async (request: { fromTurnCount: number; toTurnCount: number }) => ({
+        diff: `patch-${target}`,
+        threadId,
+        fromTurnCount: request.fromTurnCount,
+        toTurnCount: request.toTurnCount,
+      }),
+    },
+  } as unknown as EnvironmentApi;
+  vi.spyOn(environmentApi, "ensureEnvironmentApi").mockReturnValue(api);
+  vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue(api);
+
+  requestProjectSearchEntries({ environmentId: target, cwd: CWD, query: "a" });
+  const releaseBranches = watchBranches({ environmentId: target, cwd: CWD, query: "" });
+  // Released once fetched, so it stays cached as an unwatched diff.
+  const releaseDiff = watchCheckpointDiff(diffInput(target));
+  await vi.waitFor(() => {
+    expect(projectSearch(target).data).not.toBeNull();
+    expect(branches(target).pages).toHaveLength(1);
+    expect(diff(target).data?.diff).toBe(`patch-${target}`);
+  });
+  releaseDiff();
+  vi.restoreAllMocks();
+  return releaseBranches;
+}
+
+function projectSearch(target: EnvironmentId) {
+  return getProjectSearchEntriesSnapshot({ environmentId: target, cwd: CWD, query: "a" });
+}
+
+function branches(target: EnvironmentId) {
+  return getBranchesSnapshot(getBranchesTargetKey({ environmentId: target, cwd: CWD, query: "" }));
+}
+
+function diffInput(target: EnvironmentId): CheckpointDiffInput {
+  return {
+    environmentId: target,
+    threadId,
+    fromTurnCount: 1,
+    toTurnCount: 2,
+    ignoreWhitespace: false,
+    cacheScope: "turn:2",
+  };
+}
+
+function diff(target: EnvironmentId) {
+  return appAtomRegistry.get(checkpointDiffStateAtom(checkpointDiffCacheKey(diffInput(target))));
+}
+
+/** A channel to `target` that locked `e2ee`, as the §4.4 machine drives it. */
+function lockE2eeChannel(target: EnvironmentId): void {
+  const channel = {};
+  beginWebE2eeChannelAttempt(target, channel);
+  lockWebE2eeChannelMode("e2ee", target, channel);
 }
 
 function cacheProjectIcon(): Promise<string | null> {
@@ -96,6 +253,123 @@ describe("clearWebHostedNodeScopedState", () => {
     );
   });
 
+  it("clears only the left environment's E2EE entry and node caches", async () => {
+    const releaseA = await cacheNodeContent(environmentId);
+    const releaseB = await cacheNodeContent(otherEnvironmentId);
+    lockE2eeChannel(environmentId);
+    lockE2eeChannel(otherEnvironmentId);
+    const selection = {
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_0123456789",
+      nodeId: "node_AAAAAAAAAAAAAAAAAAAAAA",
+    };
+    latchWebE2eeSelection(selection);
+
+    clearWebHostedNodeScopedState(environmentId);
+
+    expect(webE2eeSessionStateFor(environmentId).status).toBe("unavailable");
+    expect(projectSearch(environmentId)).toEqual(EMPTY_PROJECT_SEARCH_ENTRIES_STATE);
+    expect(branches(environmentId).pages).toHaveLength(0);
+    expect(diff(environmentId).data).toBeNull();
+    // Another node's channel and caches did not end with this one.
+    expect(webE2eeSessionStateFor(otherEnvironmentId).status).toBe("web-unsigned");
+    expect(projectSearch(otherEnvironmentId).data).not.toBeNull();
+    expect(branches(otherEnvironmentId).pages).toHaveLength(1);
+    expect(diff(otherEnvironmentId).data?.diff).toBe(`patch-${otherEnvironmentId}`);
+    // docs/relay-e2ee-protocol.md §12.1's latch is application-session state and
+    // outlives every node teardown.
+    expect(isWebE2eeSelectionLatched(selection)).toBe(true);
+    releaseA();
+    releaseB();
+  });
+
+  it("forgets only the left environment's server config entry", () => {
+    const leftConfig = serverConfigFor(environmentId);
+    const keptConfig = serverConfigFor(otherEnvironmentId);
+    writeEnvironmentServerConfig(environmentId, leftConfig);
+    writeEnvironmentServerConfig(otherEnvironmentId, keptConfig);
+
+    clearWebHostedNodeScopedState(environmentId);
+
+    expect(readEnvironmentServerConfig(environmentId)).toBeNull();
+    expect(readEnvironmentServerConfig(otherEnvironmentId)).toBe(keptConfig);
+  });
+
+  it("leaves the global server config on the environment that is shown", () => {
+    const keptConfig = serverConfigFor(otherEnvironmentId);
+    writeEnvironmentServerConfig(environmentId, serverConfigFor(environmentId));
+    writeEnvironmentServerConfig(otherEnvironmentId, keptConfig);
+    const stop = startActiveEnvironmentServerConfigProjection({
+      readActive: () => otherEnvironmentId,
+      subscribeActive: () => () => undefined,
+    });
+
+    // The previous node's teardown during a switch: no global config clear.
+    clearWebHostedNodeScopedState(environmentId);
+    expect(getServerConfig()).toBe(keptConfig);
+
+    // Forgetting the shown environment's own entry resets what is shown.
+    clearWebHostedNodeScopedState(otherEnvironmentId);
+    expect(getServerConfig()).toBeNull();
+    stop();
+  });
+
+  it("resets the shown server config of the environment left while no projection runs", () => {
+    const leftConfig = serverConfigFor(environmentId);
+    writeEnvironmentServerConfig(environmentId, leftConfig);
+    writeEnvironmentServerConfig(otherEnvironmentId, serverConfigFor(otherEnvironmentId));
+    // The projection showed the left node, then went away with the shell
+    // surface a node switch renders without.
+    startActiveEnvironmentServerConfigProjection({
+      readActive: () => environmentId,
+      subscribeActive: () => () => undefined,
+    })();
+    expect(getServerConfig()).toBe(leftConfig);
+
+    clearWebHostedNodeScopedState(environmentId);
+
+    expect(getServerConfig()).toBeNull();
+    expect(getServerConfigUpdatedNotification()).toBeNull();
+    expect(readEnvironmentServerConfig(otherEnvironmentId)).not.toBeNull();
+  });
+
+  it("keeps the shown server config when another environment is left with no projection", () => {
+    const shownConfig = serverConfigFor(otherEnvironmentId);
+    writeEnvironmentServerConfig(environmentId, serverConfigFor(environmentId));
+    writeEnvironmentServerConfig(otherEnvironmentId, shownConfig);
+    startActiveEnvironmentServerConfigProjection({
+      readActive: () => otherEnvironmentId,
+      subscribeActive: () => () => undefined,
+    })();
+
+    clearWebHostedNodeScopedState(environmentId);
+
+    expect(getServerConfig()).toBe(shownConfig);
+  });
+
+  it("drops the welcome of the primary node being left and keeps it for any other", () => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId,
+      label: "node",
+    } as unknown as ExecutionEnvironmentDescriptor);
+    const welcome = {
+      environment: { environmentId: "legacy-node-id", label: "node" },
+      cwd: "/workspace",
+      bootstrapProjectId: "project",
+      bootstrapThreadId: "thread",
+    } as unknown as ServerLifecycleWelcomePayload;
+    emitWelcome(welcome);
+
+    // Leaving an environment that is not the primary does not touch its welcome.
+    clearWebHostedNodeScopedState(otherEnvironmentId);
+    expect(appAtomRegistry.get(welcomeAtom)).toBe(welcome);
+
+    // The welcome names the node by its own id, not the Hub's: the primary
+    // descriptor tells which environment it belongs to.
+    clearWebHostedNodeScopedState(environmentId);
+    expect(appAtomRegistry.get(welcomeAtom)).toBeNull();
+  });
+
   it("clears preserved cross-node state at the account-session boundary", async () => {
     await cacheProjectIcon();
     await cacheStatistics(environmentId);
@@ -130,5 +404,30 @@ describe("clearWebHostedNodeScopedState", () => {
     expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBeUndefined();
     expect(projectIconCacheBytes(environmentId)).toBe(0);
     expect(statisticsSnapshotCache.peek(environmentId)).toBeUndefined();
+  });
+
+  it("clears every environment's node caches at the account-session boundary", async () => {
+    const releaseA = await cacheNodeContent(environmentId);
+    const releaseB = await cacheNodeContent(otherEnvironmentId);
+
+    clearWebHostedAccountScopedState();
+
+    for (const target of [environmentId, otherEnvironmentId]) {
+      expect(projectSearch(target)).toEqual(EMPTY_PROJECT_SEARCH_ENTRIES_STATE);
+      expect(branches(target).pages).toHaveLength(0);
+      expect(diff(target).data).toBeNull();
+    }
+    releaseA();
+    releaseB();
+  });
+
+  it("purges every environment's server config entry at the account-session boundary", () => {
+    writeEnvironmentServerConfig(environmentId, serverConfigFor(environmentId));
+    writeEnvironmentServerConfig(otherEnvironmentId, serverConfigFor(otherEnvironmentId));
+
+    clearWebHostedAccountScopedState();
+
+    expect(readEnvironmentServerConfig(environmentId)).toBeNull();
+    expect(readEnvironmentServerConfig(otherEnvironmentId)).toBeNull();
   });
 });

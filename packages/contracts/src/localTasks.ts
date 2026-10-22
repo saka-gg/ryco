@@ -218,9 +218,25 @@ export const LocalTaskListInput = Schema.Struct({
   afterId: Schema.optional(LocalTaskId),
 });
 export type LocalTaskListInput = typeof LocalTaskListInput.Type;
+/**
+ * Where the node's task changes stood: `feed` names the node process's change feed (a
+ * restarted node has a new one) and `sequence` counts the changes it had published. A list
+ * page stamped at or past a read-all word's position, from the same feed, already holds
+ * every change that word stands for.
+ */
+export const LocalTaskChangePosition = Schema.Struct({
+  feed: TrimmedNonEmptyString,
+  sequence: NonNegativeInt,
+});
+export type LocalTaskChangePosition = typeof LocalTaskChangePosition.Type;
 export const LocalTaskListResult = Schema.Struct({
   tasks: Schema.Array(LocalTask),
   nextCursor: Schema.NullOr(LocalTaskId),
+  /**
+   * The node's change position read before this page was: every later change reaches a change
+   * stream that was listening by then. Absent from older nodes.
+   */
+  position: Schema.optional(LocalTaskChangePosition),
 });
 export type LocalTaskListResult = typeof LocalTaskListResult.Type;
 
@@ -284,13 +300,17 @@ export type LocalTaskRemoveFileInput = typeof LocalTaskRemoveFileInput.Type;
 
 /**
  * A task changed on the node (created, edited, deleted, a file or a chat
- * start): clients that show tasks read it again, or drop it when `deleted`.
- * Every subscription starts with a change without a `taskId`, sent once it
- * listens: read every task then, since nothing changed before it was heard.
+ * start). A change with a `taskId` names a task to read again (or to drop
+ * when `deleted`). One without is the word to read every task: every
+ * subscription starts with it once it listens, and a listener that fell too
+ * far behind gets it again. It carries the `position` it covers: a list read
+ * stamped at or past it, from the same feed, already holds everything it
+ * stands for.
  */
 export const LocalTaskChange = Schema.Struct({
   taskId: Schema.optional(LocalTaskId),
   deleted: Schema.optional(Schema.Boolean),
+  position: Schema.optional(LocalTaskChangePosition),
 });
 export type LocalTaskChange = typeof LocalTaskChange.Type;
 

@@ -4,6 +4,7 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { ensureLocalApi } from "../../localApi";
 import { useSettingsTarget } from "../../settingsTarget";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Badge } from "../ui/badge";
@@ -16,7 +17,10 @@ export function AcpRegistrySettings({
   readonly onChange: (config: Record<string, unknown>) => void;
 }) {
   const target = useSettingsTarget();
-  const capability = useHostedRpcCapability(WS_METHODS.serverInstallAcpRegistry);
+  const capability = useHostedRpcCapability(
+    WS_METHODS.serverInstallAcpRegistry,
+    target?.environmentId ?? null,
+  );
   const server = target
     ? readEnvironmentApi(target.environmentId)?.server
     : ensureLocalApi().server;
@@ -180,7 +184,7 @@ export function AcpRegistrySettings({
       </div>
       {!canInstall ? (
         <p className="text-xs text-muted-foreground">
-          {capability.reason ??
+          {hostedCapabilityCopy(capability, target?.nodeLabel) ??
             "Node management access and a current connection are required to install agents."}
         </p>
       ) : null}

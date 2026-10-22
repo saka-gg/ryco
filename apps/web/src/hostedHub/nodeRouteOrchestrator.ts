@@ -1,13 +1,16 @@
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@ryco/contracts";
-import { useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
 import {
   adoptRoutedHostedNode,
   clearHostedNodeRoute,
-  enterHostedNodeRoute,
+  dropHostedNodeRouteSegment,
+  enterHostedHomeRoute,
   getInstalledHostedNodeHistory,
   getRoutedHostedNode,
+  isHostedNodeScopedPathname,
   leaveHostedNodeRouteToHubDirectory,
+  setHostedNodeRouteDraftResolver,
   subscribeRoutedHostedNode,
   type RoutedHostedNode,
 } from "./nodeRoutes";
@@ -17,8 +20,12 @@ import {
   hostedHubController,
   useHostedHubStore,
 } from "./state";
-import { hasActiveHostedWorkspaceCoordinator } from "./hostedConnectionCoordinator";
-import { retainHostedWorkspaceThreadScope } from "./hostedConnectionScopes";
+import {
+  hostedWebConnectionScopes,
+  retainHostedIntentScope,
+  retainHostedWorkspaceThreadScope,
+} from "./hostedConnectionScopes";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { selectThreadExistsByRef, useStore } from "../store";
 import { canShowHostedReadPreview, readHostedReadCache } from "./readCache";
 
@@ -26,13 +33,21 @@ import { canShowHostedReadPreview, readHostedReadCache } from "./readCache";
  * Orchestrates the routed node segment against the hosted lifecycle owner.
  *
  * This module adds no second activation or readiness path: it only decides
- * *when* to invoke the existing controller primitives. A routed node is
- * restored strictly through the ordered fail-closed pipeline — restore Hub
- * session and refresh the authorized directory (existing bootstrap), validate
- * the routed id against the directory, then `selectNode`, which runs the
- * existing activation path (fresh one-use ticket → relay channel → canonical
- * state sync → mutation readiness gates). Routes that cannot be validated
- * fail closed to the node directory with a bounded notice.
+ * *when* to invoke the existing controller primitives. Only a thread or a draft
+ * routes a node. A routed node is restored strictly through the ordered
+ * fail-closed pipeline — restore Hub session and refresh the authorized
+ * directory (existing bootstrap), validate the routed id against the
+ * directory, then `selectNode`, which moves the selection onto the
+ * environment's own session: adopted as it is when it is continuously live,
+ * otherwise connected by the workspace coordinator for the route's demand
+ * (fresh one-use ticket → relay channel → canonical state sync → mutation
+ * readiness gates). Routes that cannot be validated fail closed to the node
+ * directory with a bounded notice.
+ *
+ * Every other page names no node. It neither moves nor clears the selection
+ * cursor and holds no demand, so the cursor stays on the node of the last
+ * opened thread for the pages that act on one node, and the warm set stays the
+ * coordinator's to manage.
  */
 
 export type HostedNodeRouteNoticeKind = "unavailable" | "revoked" | "offline" | "invalid-link";
@@ -121,12 +136,17 @@ function isLegacyDraftPathname(pathname: string): boolean {
   return pathname.startsWith("/draft/");
 }
 
+/** Selection statuses that end a node's use until its directory entry changes or the user retries. */
+function isTerminalSelectionStatus(
+  status: ReturnType<typeof useHostedHubStore.getState>["selectionStatus"],
+): boolean {
+  return status === "revoked" || status === "authorization-removed" || status === "incompatible";
+}
+
 /** Node id whose `selectNode` dispatch is currently in flight. */
 let restoreRequestedNodeId: string | null = null;
-/** Node id whose current selection was initiated by URL restore (not a click). */
+/** Node id whose current selection a routed address started. */
 let restoreOriginNodeId: string | null = null;
-/** Node id the user just picked interactively (distinguishes failure ownership). */
-let interactiveNodeId: string | null = null;
 /** Guards compound transitions so reconcile observes only their final state. */
 let reconcileSuspended = false;
 /** Last observed account status, for clearing stale notices on sign-out. */
@@ -136,27 +156,56 @@ let activeOrchestratorCount = 0;
 let reconcilePending = false;
 let routeScopeKey: string | null = null;
 let releaseRouteScope: (() => void) | null = null;
+let resetDraftResolver: (() => void) | null = null;
+/** The short demand of the last node chosen from the directory; one at a time. */
+let releaseChosenNodeDemand: (() => void) | null = null;
 
-function replaceRouteScope(scopedThread: ReturnType<typeof parseHostedScopedThreadPath>): void {
-  const nextKey = scopedThread
-    ? JSON.stringify([scopedThread.environmentId, scopedThread.threadId])
-    : null;
+function releaseChosenNode(): void {
+  releaseChosenNodeDemand?.();
+  releaseChosenNodeDemand = null;
+}
+
+/** The environment a draft belongs to, which routes a link to it under that environment's node. */
+function draftEnvironmentId(draftId: string): EnvironmentId | null {
+  return (
+    useComposerDraftStore.getState().getDraftSession(DraftId.make(draftId))?.environmentId ?? null
+  );
+}
+
+/**
+ * The connection demand a route holds: its thread's detail, or for a draft the
+ * routed environment itself, since selecting a node only moves the cursor and
+ * connects nothing. A page no node owns holds none.
+ */
+interface RouteScope {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId | null;
+}
+
+function routeScopeFor(
+  environmentId: EnvironmentId | null,
+  scopedThread: ReturnType<typeof parseHostedScopedThreadPath>,
+): RouteScope | null {
+  if (scopedThread) return scopedThread;
+  return environmentId !== null ? { environmentId, threadId: null } : null;
+}
+
+function routeScopeKeyFor(scope: RouteScope | null): string | null {
+  return scope ? JSON.stringify([scope.environmentId, scope.threadId]) : null;
+}
+
+function replaceRouteScope(scope: RouteScope | null): void {
+  const nextKey = routeScopeKeyFor(scope);
   if (nextKey === routeScopeKey) return;
   releaseRouteScope?.();
   releaseRouteScope = null;
   routeScopeKey = nextKey;
-  if (scopedThread) {
-    releaseRouteScope = retainHostedWorkspaceThreadScope(
-      scopedThread.environmentId,
-      scopedThread.threadId,
-    );
+  if (scope) {
+    releaseRouteScope =
+      scope.threadId === null
+        ? hostedWebConnectionScopes.retain(scope.environmentId, { type: "interactive" })
+        : retainHostedWorkspaceThreadScope(scope.environmentId, scope.threadId);
   }
-}
-
-function routeScopeKeyFor(
-  scopedThread: ReturnType<typeof parseHostedScopedThreadPath>,
-): string | null {
-  return scopedThread ? JSON.stringify([scopedThread.environmentId, scopedThread.threadId]) : null;
 }
 
 /**
@@ -192,7 +241,6 @@ function failClosed(
 ): void {
   restoreRequestedNodeId = null;
   restoreOriginNodeId = null;
-  interactiveNodeId = null;
   // When the store already reports a terminal selection state the directory
   // renders its own bounded alert; avoid duplicate messaging.
   if (selectionStatus === "none" || selectionStatus === "online" || selectionStatus === "offline") {
@@ -233,18 +281,16 @@ function reconcile(): void {
   const nodeId = routed.nodeId;
 
   if (nodeId === null) {
-    interactiveNodeId = null;
     replaceRouteScope(null);
     restoreRequestedNodeId = null;
     restoreOriginNodeId = null;
-    if (state.selectedNode && !hasActiveHostedWorkspaceCoordinator()) {
-      const terminalSelection =
-        state.selectionStatus === "revoked" ||
-        state.selectionStatus === "authorization-removed" ||
-        state.selectionStatus === "incompatible";
-      void hostedHubController.returnToDirectory(
-        terminalSelection ? { preserveTerminalSelection: true } : undefined,
-      );
+    // A page no node owns keeps the cursor where the last thread put it, so
+    // the pages that act on one node keep their target, and it releases
+    // nothing: the environment stays warm until the coordinator needs its
+    // slot. Only a terminal selection is left here, keeping its status so the
+    // directory can explain it.
+    if (state.selectedNode && isTerminalSelectionStatus(state.selectionStatus)) {
+      void hostedHubController.returnToDirectory({ preserveTerminalSelection: true });
       return;
     }
     // Use the logical pathname published together with the segment. Never
@@ -255,9 +301,15 @@ function reconcile(): void {
     return;
   }
 
+  if (!isHostedNodeScopedPathname(routed.logicalPathname)) {
+    openNodePageWithoutSegment(nodeId, routed.logicalPathname, state);
+    return;
+  }
+
   const scopedThread = parseHostedScopedThreadPath(routed.logicalPathname);
-  if (routeScopeKeyFor(scopedThread) !== routeScopeKey) replaceRouteScope(null);
   const directoryNode = state.nodes.find((candidate) => candidate.id === nodeId) ?? null;
+  const routeScope = routeScopeFor(directoryNode?.environmentId ?? null, scopedThread);
+  if (routeScopeKeyFor(routeScope) !== routeScopeKey) replaceRouteScope(null);
   const hasCachedView =
     scopedThread !== null &&
     selectThreadExistsByRef(useStore.getState(), scopedThread) &&
@@ -279,9 +331,8 @@ function reconcile(): void {
     return;
   }
   if (state.selectedNode?.id === nodeId) {
-    replaceRouteScope(scopedThread);
+    replaceRouteScope(routeScope);
     restoreRequestedNodeId = null;
-    interactiveNodeId = null;
     if (state.sessionEstablished) {
       restoreOriginNodeId = null;
       setNotice(null);
@@ -290,9 +341,7 @@ function reconcile(): void {
     if (
       restoreOriginNodeId === nodeId &&
       state.transportStatus === "terminal-failure" &&
-      (state.selectionStatus === "revoked" ||
-        state.selectionStatus === "authorization-removed" ||
-        state.selectionStatus === "incompatible")
+      isTerminalSelectionStatus(state.selectionStatus)
     ) {
       // A URL-initiated restore ended in a terminal authorization or
       // compatibility failure before the session was established: fail closed
@@ -346,19 +395,14 @@ function reconcile(): void {
     failClosed(state.selectionStatus, "revoked");
     return;
   }
-  const interactive = interactiveNodeId === nodeId;
-  replaceRouteScope(scopedThread);
-  // Scoped thread demand is acquired above. The environment-keyed
-  // coordinator owns normal activation and eviction. Its catalog eligibility
-  // intentionally excludes offline nodes, so a URL-originated offline restore
-  // enters the same singular controller lifecycle here instead of being
-  // stranded on the pre-selection surface.
-  const urlOfflineRestore = scopedThread !== null && !node.presence.online && !interactive;
-  if (scopedThread && hasActiveHostedWorkspaceCoordinator() && !urlOfflineRestore) return;
+  replaceRouteScope(routeScopeFor(node.environmentId, scopedThread));
+  // Selecting only moves the cursor: the route scope retained above is the
+  // demand the environment-keyed coordinator connects, so a swap never waits
+  // for, or releases, another environment, and never returns to the
+  // directory. A continuously live session is adopted as it is.
   if (restoreRequestedNodeId === nodeId) return;
   restoreRequestedNodeId = nodeId;
-  restoreOriginNodeId = interactive ? null : nodeId;
-  interactiveNodeId = null;
+  restoreOriginNodeId = nodeId;
   setNotice(null);
   void hostedHubController.selectNode(node.id).finally(() => {
     if (restoreRequestedNodeId === nodeId) restoreRequestedNodeId = null;
@@ -397,24 +441,80 @@ function maybeRedirectLegacyLocation(
 }
 
 /**
- * Select a node from the directory or node menu by navigating into its
- * node-scoped route. Returns false when no hosted history is installed.
+ * A node segment on a page no node owns: an address from before only threads
+ * and drafts named a node, such as a bookmarked node home or settings page.
+ * The node is validated as a routed one is, then the selection cursor moves to
+ * it through the lifecycle owner's own select and the segment is dropped,
+ * keeping the page. It holds no demand, so it connects nothing.
  */
-export function selectHostedNodeRoute(nodeId: string): boolean {
-  if (!getInstalledHostedNodeHistory()) return false;
-  interactiveNodeId = nodeId;
+function openNodePageWithoutSegment(
+  nodeId: string,
+  logicalPathname: string,
+  state: ReturnType<typeof useHostedHubStore.getState>,
+): void {
+  replaceRouteScope(null);
+  restoreRequestedNodeId = null;
+  restoreOriginNodeId = null;
+  // The entry is rewritten from the history's own location, so wait until it
+  // has settled on the address this route was parsed from.
+  if (getInstalledHostedNodeHistory()?.location.pathname !== logicalPathname) return;
+  if (state.selectedNode?.id === nodeId) {
+    setNotice(null);
+    runExclusive(dropHostedNodeRouteSegment);
+    return;
+  }
+  const node = state.nodes.find((candidate) => candidate.id === nodeId);
+  if (node?.capabilities?.nativeClientRequired === true || state.directoryStatus === "stale") {
+    failClosed(state.selectionStatus, "unavailable");
+    return;
+  }
+  if (state.directoryStatus !== "ready") return;
+  if (state.browserStatus !== "current" && state.browserStatus !== "synchronizing") return;
+  if (!node) {
+    failClosed(state.selectionStatus, "unavailable");
+    return;
+  }
+  if (node.revokedAt !== null) {
+    failClosed(state.selectionStatus, "revoked");
+    return;
+  }
   setNotice(null);
-  return enterHostedNodeRoute(nodeId);
+  runExclusive(() => {
+    void hostedHubController.selectNode(node.id);
+    dropHostedNodeRouteSegment();
+  });
 }
 
 /**
- * User-facing "All nodes": leave the scoped route for the Hub catalog. This
- * releases only the route's lease; retained work and the bounded LRU transport
- * remain owned by the hosted workspace coordinator.
+ * Choose a node from the node directory or the phone connection sheet: open
+ * the workspace home with the selection cursor on that node. Home names no
+ * node, so the address carries no segment, and the cursor moves through the
+ * lifecycle owner's own select. The choice holds the node's demand for a few
+ * seconds, as a press on one of its thread rows does, so it starts connecting
+ * ahead of whatever is opened on it next. Returns false when no hosted history
+ * is installed.
+ */
+export function selectHostedNodeRoute(nodeId: string): boolean {
+  if (!getInstalledHostedNodeHistory()) return false;
+  setNotice(null);
+  runExclusive(() => {
+    enterHostedHomeRoute();
+    void hostedHubController.selectNode(nodeId);
+  });
+  releaseChosenNode();
+  const selected = useHostedHubStore.getState().selectedNode;
+  releaseChosenNodeDemand =
+    selected?.id === nodeId ? retainHostedIntentScope(selected.environmentId) : null;
+  return true;
+}
+
+/**
+ * User-facing "All nodes": open the Hub catalog. The selection cursor stays
+ * where it is and this releases only the route's lease; retained work and the
+ * bounded LRU transport remain owned by the hosted workspace coordinator.
  */
 export function leaveHostedNodeRouteToDirectory(): boolean {
   if (!getInstalledHostedNodeHistory()) return false;
-  interactiveNodeId = null;
   setNotice(null);
   // Already on the directory route (for example a second tap while the
   // teardown is in flight): the leave is handled without pushing a duplicate
@@ -426,6 +526,9 @@ export function leaveHostedNodeRouteToDirectory(): boolean {
 
 export function startHostedNodeRouteOrchestrator(): () => void {
   activeOrchestratorCount += 1;
+  if (activeOrchestratorCount === 1) {
+    resetDraftResolver = setHostedNodeRouteDraftResolver(draftEnvironmentId);
+  }
   const unsubscribeRouted = subscribeRoutedHostedNode(scheduleReconcile);
   const unsubscribeStore = useHostedHubStore.subscribe(scheduleReconcile);
   const history = getInstalledHostedNodeHistory();
@@ -439,17 +542,20 @@ export function startHostedNodeRouteOrchestrator(): () => void {
     unsubscribeRouted();
     unsubscribeStore();
     unsubscribeHistory?.();
+    // Without an orchestrator nothing follows the route, so it holds no demand.
+    if (activeOrchestratorCount === 0) {
+      replaceRouteScope(null);
+      releaseChosenNode();
+      resetDraftResolver?.();
+      resetDraftResolver = null;
+    }
   };
-}
-
-export function useHostedNodeRouteOrchestrator(): void {
-  useEffect(() => startHostedNodeRouteOrchestrator(), []);
 }
 
 export function resetHostedNodeRouteOrchestratorForTests(): void {
   restoreRequestedNodeId = null;
   restoreOriginNodeId = null;
-  interactiveNodeId = null;
+  releaseChosenNode();
   reconcileSuspended = false;
   lastAccountStatus = null;
   replaceRouteScope(null);

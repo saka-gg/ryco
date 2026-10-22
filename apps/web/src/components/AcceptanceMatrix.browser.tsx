@@ -42,7 +42,11 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useParams: () => undefined,
 }));
 
-import { hostedHubController, useHostedHubStore } from "../hostedHub/state";
+import {
+  getHostedEnvironmentSessions,
+  hostedHubController,
+  useHostedHubStore,
+} from "../hostedHub/state";
 import { installHostedNodeHistory, resetHostedNodeRoutesForTests } from "../hostedHub/nodeRoutes";
 import { navigateHub, resetHubRoutesForTests } from "../hostedHub/hubRoutes";
 import type { HostedHubNode } from "../hostedHub/types";
@@ -190,17 +194,23 @@ const ENTRY_SURFACES: readonly EntrySurface[] = [
   {
     name: "connecting",
     seed: () => {
-      window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+      );
       installHostedNodeHistory();
+      // The shared session fields show the selected node's own session: its
+      // relay channel is online and its shell snapshot has not arrived.
+      seedSelectedSession();
       useHostedHubStore.setState({
         accountStatus: "authenticated",
         account,
         session,
         directoryStatus: "ready",
+        browserStatus: "current",
         nodes: [selectedNode],
         selectedNode,
-        transportStatus: "online",
-        sessionEstablished: false,
       });
     },
     marker: () => waitForVisibleByText(/Connecting to Studio node/),
@@ -208,22 +218,39 @@ const ENTRY_SURFACES: readonly EntrySurface[] = [
   {
     name: "failure",
     seed: () => {
-      window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+      );
       installHostedNodeHistory();
+      const generation = seedSelectedSession();
+      getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {
+        kind: "authentication",
+        retryable: false,
+      });
       useHostedHubStore.setState({
         accountStatus: "authenticated",
         account,
         session,
         directoryStatus: "ready",
+        browserStatus: "current",
         nodes: [selectedNode],
         selectedNode,
-        transportStatus: "terminal-failure",
-        errorMessage: "The hosted authentication attempt expired or was rejected.",
       });
     },
     marker: () => waitForVisibleByText(/Unable to connect to Studio node/),
   },
 ];
+
+/** The selected node's own session, requested and with its relay channel online. */
+function seedSelectedSession(): number {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.ensureRecord(selectedNode);
+  sessions.markConnectRequested(selectedNode.environmentId, generation);
+  sessions.transportStatus(selectedNode.environmentId, generation, "online");
+  return generation;
+}
 
 function expectNoDocumentHorizontalOverflow(width: number): void {
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width);
@@ -249,6 +276,7 @@ async function sweepEntrySurfaces(options: {
   expect(surfaces.length).toBeGreaterThan(0);
   for (const surface of surfaces) {
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
     resetHostedNodeRoutesForTests();
     resetHubRoutesForTests();
     surface.seed();
@@ -305,6 +333,7 @@ describe("acceptance matrix — hosted entry surfaces and connection controls", 
     localStorage.clear();
     sessionStorage.clear();
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
     resetHostedNodeRoutesForTests();
     resetHubRoutesForTests();
     navigate.mockClear();
@@ -314,6 +343,7 @@ describe("acceptance matrix — hosted entry surfaces and connection controls", 
     await mounted?.unmount();
     mounted = null;
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
     resetHostedNodeRoutesForTests();
     resetHubRoutesForTests();
     vi.restoreAllMocks();
@@ -606,6 +636,7 @@ const SUITE_FILES = {
   DP: "./DiffPanel.browser.tsx",
   SH: "./ui/sheet.browser.tsx",
   SP: "./settings/SettingsPanels.browser.tsx",
+  SPH: "./settings/SettingsPageHosted.browser.tsx",
   MSHEET: "./mobile/MobileSheet.browser.tsx",
   MSEL: "./mobile/MobileSelectSheet.browser.tsx",
   MSEG: "./mobile/MobileSegmentedControl.browser.tsx",
@@ -707,12 +738,12 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   {
     cell: "node directory desktop route",
     file: "HN",
-    test: "selects a node by navigating into its node-scoped route",
+    test: "opens home with the cursor on a node chosen from the directory",
   },
   {
     cell: "node directory route back",
     file: "HN",
-    test: "returns to the directory when history navigates back from a node route",
+    test: "keeps the cursor when history navigates back from home to the directory",
   },
   {
     cell: "node directory no-secret-in-url",
@@ -868,9 +899,39 @@ const PROVING_TESTS: readonly ProvingCell[] = [
     test: "renders inside the workspace header without a fixed overlay or control overlap",
   },
   {
-    cell: "connection desktop all-nodes",
+    cell: "connection desktop header names the thread's node",
     file: "HC",
-    test: "offers the All nodes return action from the desktop menu",
+    test: "names the open thread's node rather than the selected one",
+  },
+  {
+    cell: "connection desktop manage devices",
+    file: "HC",
+    test: "offers Manage devices from the thread connection badge",
+  },
+  {
+    cell: "connection desktop home without a node chip",
+    file: "HC",
+    test: "keeps the home header free of a node chip on desktop",
+  },
+  {
+    cell: "connection desktop session code for every role",
+    file: "HR",
+    test: "draws the thread badge's session code for every hosted role",
+  },
+  {
+    cell: "connection desktop failure escape",
+    file: "HR",
+    test: "offers Manage devices and Sign out on the desktop failure surface",
+  },
+  {
+    cell: "connection desktop account sign-out",
+    file: "HR",
+    test: "reaches the account page from the sidebar footer and signs out there",
+  },
+  {
+    cell: "connection desktop settings device",
+    file: "SPH",
+    test: "moves the settings target to another node through the selection cursor",
   },
 
   // ── Cross-cutting properties ───────────────────────────────────────────

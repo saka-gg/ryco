@@ -4,6 +4,9 @@
   "tasks": {
     "dev": {
       "persistent": true,
+      // Lets `RYCO_REACT_COMPILER_CACHE=off bun dev:web` and a custom cache
+      // directory reach Vite (src/viteBuild/reactCompilerCache.ts).
+      "passThroughEnv": ["RYCO_REACT_COMPILER_CACHE", "RYCO_REACT_COMPILER_CACHE_DIR"],
     },
   },
 }

@@ -19,25 +19,19 @@ import {
   type DiagnosticsTraceSummary,
   type DiagnosticsWarning,
 } from "@ryco/contracts";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 
 import type { ServerConfigShape } from "../../config.ts";
-import { ServerConfig } from "../../config.ts";
 import {
   isCurrentCanonicalProviderEventLog,
   parseProviderEventLogLine,
 } from "../../provider/providerEventLogRecords.ts";
 import type { TraceSinkHealth } from "../../observability/TraceSink.ts";
 import type { TraceRecord } from "../../observability/TraceRecord.ts";
-import { nativeResourceMonitor } from "../NativeResourceMonitor.ts";
 import { readResourceTelemetry, recordResourceAttribution } from "../ResourceTelemetry.ts";
 import { readProcessDiagnostics } from "../ProcessDiagnostics.ts";
 import { summarizeOperationalMetrics } from "../OperationalMetrics.ts";
-import {
-  Diagnostics,
-  type DiagnosticsShape,
-  type DiagnosticsSnapshotInput,
-} from "../Services/Diagnostics.ts";
+import type { DiagnosticsShape, DiagnosticsSnapshotInput } from "../Services/Diagnostics.ts";
 
 const TRACE_RECORD_LIMIT = 2_000;
 const RESOURCE_SAMPLE_LIMIT = 240;
@@ -1121,13 +1115,4 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
         },
       } satisfies DiagnosticsShape;
     }),
-);
-
-export const DiagnosticsLive = Layer.effect(
-  Diagnostics,
-  Effect.gen(function* () {
-    const config = yield* ServerConfig;
-    yield* Effect.addFinalizer(() => Effect.sync(() => nativeResourceMonitor.close()));
-    return yield* makeDiagnosticsService(config);
-  }),
 );

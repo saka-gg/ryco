@@ -1,14 +1,37 @@
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { playwright } from "@vitest/browser-playwright";
-import { defineConfig, mergeConfig } from "vitest/config";
+import { defineConfig, mergeConfig, type Plugin } from "vitest/config";
 
+import { BrowserShardSequencer } from "./test/browserShardSequencer";
 import viteConfig from "./vite.config";
 
 const srcPath = fileURLToPath(new URL("./src", import.meta.url));
+const mswWorkerPath = fileURLToPath(new URL("./test/public/mockServiceWorker.js", import.meta.url));
+const MSW_WORKER_URL = "/mockServiceWorker.js";
+
+/**
+ * Serves the MSW service worker at the site root. The generated worker lives
+ * under `test/public` instead of `public` so production builds never copy it
+ * into `dist`, while the regular `public` assets stay available to the tests.
+ */
+function serveMswWorker(): Plugin {
+  return {
+    name: "ryco:serve-msw-worker",
+    configureServer(server) {
+      server.middlewares.use(MSW_WORKER_URL, (_request, response) => {
+        response.setHeader("Content-Type", "text/javascript");
+        response.setHeader("Cache-Control", "no-cache");
+        response.end(readFileSync(mswWorkerPath));
+      });
+    },
+  };
+}
 
 export default mergeConfig(
   viteConfig,
   defineConfig({
+    plugins: [serveMswWorker()],
     resolve: {
       alias: {
         "~": srcPath,
@@ -29,6 +52,11 @@ export default mergeConfig(
       // them avoids scheduler-driven timing failures in interaction tests.
       fileParallelism: false,
       maxWorkers: 1,
+      // `--shard` balances CI shards by measured file duration instead of
+      // splitting them by file count.
+      sequence: {
+        sequencer: BrowserShardSequencer,
+      },
       // Vitest 5 serves browser mode from the single top-level API server.
       api: {
         strictPort: false,

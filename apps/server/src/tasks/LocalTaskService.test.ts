@@ -8,6 +8,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
   LOCAL_TASK_MAX_FILES,
+  type LocalTaskChange,
   type LocalTaskFile,
   type LocalTaskLink,
   MessageId,
@@ -752,6 +753,39 @@ describe("local task service", () => {
         .pipe(Effect.flip);
       yield* tasks.create(create("three"));
       assert.equal(yield* next, "three");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("stamps each list page with the change position read before it", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const tasks = yield* LocalTaskService;
+      const before = (yield* tasks.list({})).position!;
+      yield* tasks.create(create("one"));
+      const after = (yield* tasks.list({})).position!;
+      assert.equal(after.feed, before.feed);
+      assert.equal(after.sequence, before.sequence + 1);
+
+      yield* tasks.create(create("two"));
+      const first = yield* tasks.list({ limit: 1 });
+      assert.equal(first.nextCursor, "one");
+      const second = yield* tasks.list({ limit: 1, afterId: first.nextCursor! });
+      assert.deepEqual(
+        [first.position, second.position],
+        [
+          { feed: before.feed, sequence: before.sequence + 2 },
+          { feed: before.feed, sequence: before.sequence + 2 },
+        ],
+      );
+
+      // The change stream's word to read everything comes from the same feed.
+      const received = yield* Queue.unbounded<LocalTaskChange>();
+      yield* tasks.changes.pipe(
+        Stream.runForEach((change) => Queue.offer(received, change)),
+        Effect.forkScoped,
+      );
+      const word = yield* Queue.take(received);
+      assert.deepEqual(word, { position: { feed: before.feed, sequence: before.sequence + 2 } });
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 

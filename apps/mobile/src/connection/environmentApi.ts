@@ -33,8 +33,6 @@ const lookup = createEnvironmentApiLookup({
   readClient: readClientForEnvironment,
 });
 
-const rpcClientOverridesForTests = new Map<EnvironmentId, WsRpcClient>();
-
 /**
  * The raw RPC client, for methods the typed `EnvironmentApi` facade omits.
  *
@@ -49,18 +47,7 @@ const rpcClientOverridesForTests = new Map<EnvironmentId, WsRpcClient>();
  * Prefer `readEnvironmentApi()` for anything the facade already covers.
  */
 export function readRpcClient(environmentId: EnvironmentId): WsRpcClient | null {
-  return rpcClientOverridesForTests.get(environmentId) ?? readClientForEnvironment(environmentId);
-}
-
-export function __setRpcClientOverrideForTests(
-  environmentId: EnvironmentId,
-  client: WsRpcClient,
-): void {
-  rpcClientOverridesForTests.set(environmentId, client);
-}
-
-export function __resetRpcClientOverridesForTests(): void {
-  rpcClientOverridesForTests.clear();
+  return readClientForEnvironment(environmentId);
 }
 
 export function readEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi | undefined {

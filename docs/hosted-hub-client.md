@@ -142,7 +142,10 @@ report them even by mistake.
 The account-scoped Hub session pushes directory changes immediately. Directory refresh retains
 a two-minute visible-page backstop while the subscription is online. Without a live subscription,
 it runs every 20 seconds, or every 5 seconds while demand waits on an offline node for at most five
-minutes. The faster cadence never shortens a failure backoff. Failures retain the last bounded directory as stale, clear role
+minutes. A client that opts in (the native app, whose every directory read is signed with its device
+key) keeps the 20-second cadence only while a screen that shows node presence is in front, and
+otherwise uses the two-minute backstop; returning to such a screen refreshes at once when the last
+read is older than 20 seconds. The faster cadence never shortens a failure backoff. Failures retain the last bounded directory as stale, clear role
 authority, disable selection/actions, and retry with a capped delay.
 Machine-detail focus is preserved only while both node ID and environment ID match. Authorization
 removal or an identity change closes that exact environment's live demand.
@@ -156,9 +159,9 @@ grant internals, or unbounded operations metadata.
 
 Two other surfaces deliberately do show identity material, and neither is the selector: node
 enrollment shows the enrolling node's public-key fingerprint for the owner to compare out of band
-(see **First-owner and node onboarding**), and a connected node's menu shows the current channel's
-session verification code for the same purpose (see **Relay payload encryption in the browser**).
-Both are comparison values an owner is asked to read, not directory metadata.
+(see **First-owner and node onboarding**), and an open thread's connection popover shows the current
+session verification code of that thread's node for the same purpose (see **Relay payload encryption
+in the browser**). Both are comparison values an owner is asked to read, not directory metadata.
 
 The shared RPC access table drives both the server RPC principal and hosted client affordances.
 Viewer can read supported projections, Operator can run node mutations, approvals, and terminals,
@@ -168,7 +171,7 @@ never available through Hub relay sessions.
 
 Opening mounted work creates an exact-environment scope. Releasing that work removes only its own
 scope; it does not globally tear down another retained environment. When capacity requires an
-environment to close, teardown is ordered:
+environment to close, teardown releases that one environment and no other, in order:
 
 1. cancel ticket/reconnect work and close the previous relay channel;
 2. unsubscribe shell, thread-detail, lifecycle, config, and terminal listeners;
@@ -176,26 +179,184 @@ environment to close, teardown is ordered:
    caches, timers, and the previous environment projection;
 4. start any queued replacement as a new environment generation.
 
-Hosted Web keeps the shared absolute ceiling of three but uses a qualified platform ceiling of one.
-Cached directory, Inbox, Projects, and search hydration acquire no relay connection. A mounted
-thread detail, VCS status, or provider status scope acquires its owner automatically. Excess demand
-waits without evicting retained work or exceeding the bound. This ceiling counts logical node
-channels; the account-owned Hub socket remains open across selections. Ordinary tab hiding
-preserves live channels. Offline, freeze, and page history suspension invalidate readiness;
-restoration uses the authoritative hosted recovery path.
+The server config the UI shows comes from a per-environment store. Each connection writes its own
+node's config there from the moment it connects (its config stream is a session-sync subscription,
+fenced by the hosted generation like the rest of its state), and the global config the UI reads is
+derived from the active environment's entry while the shell is mounted. An entry lasts until its
+environment is left: leaving an environment forgets only its own entry, and the shown config resets
+with it when that environment's config was the one shown, whether or not the shell is mounted.
+After a switch the shown config is the new environment's entry, once its connection has written
+one; until then no config is shown. Sign-out purges all entries. `welcome` is not per-environment
+state: it comes from the primary connection's lifecycle stream only, and leaving the primary node
+drops it.
+
+The Inbox classifies each environment's threads with that environment's own thread capabilities
+(settlement and snooze), never with the shown config or the selected node's descriptor, so moving
+the selection does not reclassify another node's threads. The store keeps what each node reported in
+memory, past the entry itself: an environment released from the warm set keeps classifying by its
+node's last answer until sign-out. A node this tab has not heard from, and whose Hub directory entry
+does not state the capability, is unknown: its threads are classified by what the node recorded
+(manual settlement, snooze and the automatic rule), and settlement and snooze changes stay disabled
+until the node answers. Only a node's explicit `false` keeps every thread Active, as on nodes that
+predate settlement.
+
+The automatic settlement rule ("settle after N days without activity") belongs to each node, so every
+device lists a node's threads the same way. A node that advertises `nodeAutoSettlement` keeps the rule
+in its settings (`threadAutoSettleAfterDays`; absent means the shared default of seven days, `null`
+means off) and carries the resolved rule in its shell snapshot (`settlementPolicy`), which the cloud
+history index publishes too: the node republishes its index when the rule changes. Each environment's
+threads are classified with its own node's rule: from the node's live config, else the latest shell
+snapshot of it (a cold node's cached index), else the rule it last reported this session. Rows painted
+from this browser's own startup cache follow this browser's rule until one of those arrives, since
+that cache keeps no rule. Time boundaries are still evaluated with this tab's clock. A node that keeps no rule (an older one) follows
+this browser's own choice. When an owner first connects to a node that keeps the rule but has none
+set, a browser whose own choice differs from the default writes it to the node once; a node that
+already has a value keeps it, and of two clients doing so at once the first one's stands. Inbox
+settings edit the rule on the node they show, read-only without the owner role, and can apply it to
+every connected node, naming those it could not reach.
+
+Hosted Web keeps a warm set of up to three environments per tab, the shared absolute ceiling,
+qualified for browsers in the "Hosted Web warm set qualification (measured)" section of
+[relay-capacity-assessment-3b.md](relay-capacity-assessment-3b.md); a tab samples at most one device
+preview at a time, which bounds the full-PNG fallback. Cached directory, Inbox, Projects, and search
+hydration acquire no relay connection. A mounted thread detail, VCS status, or provider status scope
+acquires its owner automatically. Excess demand waits without evicting retained work or exceeding
+the bound; when a slot is needed, the least recently used environment that nothing demands is
+released. Releasing an environment from the warm set — a demotion — keeps its cached rows visible as
+cached until it is demanded again. This ceiling counts logical node channels; the account-owned Hub
+socket remains open across selections.
+
+Two more kinds of demand hold an environment while they last. An environment with queued messages
+for one of its server threads stays demanded until its queue drains or is cleared, so it connects,
+or stays warm, to send them; a draft's queued first send holds nothing (it is sent only from the
+open draft). A navigation press on a thread row of an environment without a live session holds that
+environment for three seconds, so its relay attempt overlaps the click; it follows only primary
+mouse or pen presses, never touch, connects at most one environment per five seconds and each
+environment at most once per 30 seconds, never displaces mounted work, and does nothing on the phone
+presentation. Hovering a row warms its route. A hover (after its dwell) or a press reads the
+thread's window only from a session that is ready to adopt, and never on the phone presentation;
+for any other environment only the press pre-connect acts.
+
+Ordinary tab hiding preserves live channels for a grace period: a tab hidden for 90 seconds plans as
+backgrounded and releases every environment nothing demands. Offline, freeze, and page history
+suspension invalidate readiness; restoration uses the authoritative hosted recovery path, and
+foreground or visibility recovery restores retained demand and then, as preemptible demand, the
+last warm set of up to three recently used environments (see
+[unified-workspace.md](unified-workspace.md)).
+
+Hosted connections are created only through the lifecycle owner's connect port, for one session
+record generation. The generic primary-connection path never builds one: in hosted mode it returns
+the connection already registered for the active environment, or nothing (a caller that requires a
+connection gets an error), so no second constructor can bypass the ceiling or the record fencing.
 
 Tabs do not share tickets, sockets, queues, reconnect timers, or store instances. Closing a hosted
 channel cannot close direct clients or another tab.
 
+### Retained environment sessions
+
+Hosted Web keeps several node sessions alive side by side instead of one session for the selected
+node. The hosted lifecycle owner stays the same single owner; the session state moves into one
+record per environment.
+
+- **Records and fencing.** Each environment's record carries its own transport status, session
+  status, role, failure, and snapshot. Every record generation is drawn from one monotonic counter
+  shared by all environments, and every relay callback names the environment and generation it
+  belongs to, so a stale connection can never publish readiness, a role, a snapshot, or mutation
+  authority into another generation's or another environment's record. Each environment's connect,
+  release, and suspension run on that environment's own queue and name the generation they act
+  for: nothing of one environment ever waits for another.
+- **Selection is a cursor.** Selecting a node moves the selection and the shared session fields,
+  which show the selected record, and nothing else. It never opens a connection. Connections are
+  created only when the platform's bounded demand executor acquires an environment, so the
+  executor's connection ceiling is the only place a slot is granted; a routed environment it cannot
+  admit stays queued and is shown as such. The browser never selects a node that requires a native
+  client.
+- **Adopt, join, restart.** Acquiring an environment adopts its session when that session completed
+  its own fresh relay attempt and accepted its own current shell snapshot and has not been
+  suspended or interrupted since; selecting it then shows it ready at once, without a network
+  request. Switching back to an environment of the warm set is therefore a cursor move: no Hub
+  stream is opened and the node is not asked for its shell again. An acquisition joins a
+  connection already requested for the record's generation, so a press followed by a click buys
+  one attempt. A terminal failure refuses it until the node's
+  directory entry changes or the user retries. Anything else starts over with a fresh generation, a
+  fresh relay attempt, and a fresh snapshot. Selecting an environment whose session can be neither
+  adopted nor joined starts it over in the same way. A connect that waited behind the
+  environment's own release or suspension opens nothing once a withdrawal, a sign-out, or anything
+  else has replaced its generation.
+- **Suspension and withdrawal.** Page freeze, page hide, going offline, and backgrounding suspend
+  every record, not only the selected one: each takes a fresh generation and none stays adoptable.
+  A second suspension before a resume (hidden, then offline) leaves the records already suspended
+  alone. Revoking native account authorization withdraws every record's role and session before
+  the call returns, ahead of any asynchronous channel teardown. A terminal failure of the account's
+  Hub session reaches every record.
+- **Resume.** No record keeps its authority across a resume: one that no suspension reached, as
+  after a rotated Hub session, is suspended when the resume starts. Resuming revalidates the Hub
+  session and the authorized directory first. Only then does the platform re-plan its connections —
+  the selected environment first, the others staggered — and each suspended record regains
+  authority only through its own fresh attempt and snapshot.
+- **Refused acquisitions.** The demand executor holds back an environment whose acquisition was
+  refused. One refused only for a cause that passes — the account not yet restored, the browser not
+  yet revalidated, the directory not current (before its first load the directory knows no node at
+  all), or its generation replaced during the call — is re-planned once, when a resume succeeds or
+  when the directory becomes current, its first load included, while the browser is revalidated;
+  if it is refused again, it waits for the next such recovery. The node is looked up in the
+  directory current by then: a recovery never re-plans one whose node is gone, revoked, or requires
+  a native client, nor one a terminal failure blocks (that waits for its directory entry to change
+  or for a retry), nor anything refused before signing out or for another account.
+- **Readiness per record.** An environment admits requests once the browser is revalidated and its
+  own session is current. Observe-only unary reads — project lists, files, local changes, thread
+  history and diffs, the node's config and settings — do not wait for the session: they are
+  admitted once the environment's own channel is online (its mode locked) while its session is
+  synchronizing or replaying. Every other request, mutations included, waits for the session to
+  be current. While the selected environment is still synchronizing the browser reports
+  `synchronizing`, which never holds back another environment whose own session is ready; a slow
+  or offline selection does not trigger a fresh access check on every foreground signal either.
+- **Release.** The demand executor releases environments; returning to the node directory releases
+  nothing. A relay drop of a live environment that nothing demands releases it instead of
+  reconnecting it; it reconnects when it is demanded again. A rate limit hit by background demand
+  (drafts, home discovery, queued sends, a press) stands that demand down instead of retrying it,
+  while a mounted view keeps its transport's backoff. A directory refresh releases every
+  environment whose node is gone, revoked, or (in the browser) requires a native client, without
+  waiting for those releases, and leaves the selection
+  when it is one of them. Releasing an environment ends the commands waiting to replay there and
+  clears only that environment's node-scoped state — its queries, project, git, and checkpoint-diff
+  caches, its encryption projection, and its config entry — unless a newer session of the same
+  environment has already started. Signing out or an expired Hub session releases every environment
+  and always clears that state, so no account's cached state reaches the next session; it never
+  waits for those releases, and an expired session's explanation is never published onto a session
+  that signed in meanwhile.
+
+Hosted Web runs retained environment sessions. Clients that do not opt in still run one session
+for the selected node.
+
 ## Stable node routes
 
-The owning node is a stable URL segment: hosted browser URLs take the shape
-`/node/<node id>` for the node root and `/node/<node id>/<environmentId>/<threadId>` (plus the
-existing panel search parameters) for nested views. The segment value is the bounded node
-identifier the authorized directory already renders to signed-in users — directory metadata, never
-node-owned content or authentication material. The mapping lives in the history layer of the
-hosted build only; the shared logical route tree is unchanged and direct-browser, desktop-local,
-and SSH-assisted routing keep their current URL shapes.
+Only a page a node owns names that node, as a stable URL segment: a thread takes the shape
+`/node/<node id>/<environmentId>/<threadId>` (plus the existing panel search parameters), its own
+environment's node, and a draft takes `/node/<node id>/draft/<draftId>`, the node it targets. Every
+other page — home, settings, projects, tasks, statistics, pull requests, diagnostics — belongs to
+no node and keeps its plain address whichever node a thread was last opened on. The segment value is
+the bounded node identifier the authorized directory already renders to signed-in users — directory
+metadata, never node-owned content or authentication material. The mapping lives in the history
+layer of the hosted build only; the shared logical route tree is unchanged and direct-browser,
+desktop-local, and SSH-assisted routing keep their current URL shapes.
+
+Opening a thread moves the selection cursor to its node (see **Selection is a cursor** above). The
+pages no node owns leave the cursor where the last thread put it, so the pages that act on one node —
+Settings, Tasks, Statistics, adding a project, a new thread — keep that node as their target without
+the address naming it, and Settings → **Switch device** moves the cursor in place. Opened with the
+cursor on no node, as after a reload or in a new tab, Settings and Tasks offer the nodes to choose
+from instead, and a choice moves the cursor in place the same way.
+
+An address holds no demand of its own: going to a page no node owns connects nothing and releases
+only the demand of the view that was left, and the warm set stays the demand executor's to manage. A
+mounted view holds the demand of the node it shows: a thread view its own node's, and Settings and
+Tasks that of the node under the cursor, so a reload on either connects that node once one is
+chosen. Beside them, a choice holds a short demand: choosing a node in the node directory opens home
+with the cursor on that node and holds that node's demand for a few seconds, as a press on one of
+its thread rows does for the row's node. The cursor is cleared only where it always was: sign-out,
+an account change, and a node that is revoked, removed from the directory, or ends in a terminal
+failure.
 
 Refresh, deep links, and history restore the routed node strictly through the ordered fail-closed
 pipeline: restore the Hub session → refresh the authorized directory → validate the routed node id
@@ -210,7 +371,8 @@ or discarded unflushed when the channel fails closed. The legacy branch is the o
 buffer to the Hub in readable form, and it is reached whenever a channel falls back — against an
 un-upgraded node, or against any node whose capability advertisement did not arrive. The UI stays on
 read-only until each stage completes. A remembered browser can show its saved conversation text and
-allow local draft editing during that interval. Possession of a node URL grants nothing.
+allow local draft editing during that interval, and messages sent then wait in the tab (see
+**Sending while a node connects**). Possession of a node URL grants nothing.
 
 A reload starts a fresh application session, and the tab's downgrade check starts empty again with
 it. That check is set on the first capability statement the session validates for a node and is held
@@ -225,13 +387,54 @@ closed to the node directory with a bounded explanation. An offline node or temp
 directory can keep an already known cached thread visible without acquiring mutation authority.
 A signed-out or expired
 session shows the normal passkey surface; the routed node resumes only after re-authentication and
-revalidation. Back and Forward navigate between the directory and selected-node views: returning
-to the directory releases exactly that route's scope. A non-retained connection may remain warm as
-LRU state until backgrounding or capacity requires its slot; unrelated retained work is unchanged.
-Forward re-enters through the restore pipeline with a fresh ticket when acquisition is required. Legacy hosted URLs
-without the node segment redirect to the node-scoped shape when the directory can identify the
-node, otherwise to the directory. No session, ticket, credential, challenge, or signature material
-appears in URLs, history state, or browser storage.
+revalidation. Back and Forward navigate between threads and the pages no node owns: leaving a
+thread releases exactly that route's scope and keeps the cursor. A non-retained connection may
+remain warm as LRU state until backgrounding or capacity requires its slot; unrelated retained work
+is unchanged. Forward adopts a session that stayed live; it re-enters through the restore pipeline
+with a fresh ticket when acquisition is required. Legacy hosted thread URLs without the node segment
+redirect to the node-scoped shape when the directory can identify the node, otherwise to the
+directory. Older addresses that put a node segment on a page no node owns — `/node/<node id>` for a
+node's home, `/node/<node id>/settings` and the like — are validated the same way, then move the
+cursor to that node and drop the segment in place, opening the page itself (`/`, `/settings`). The
+address holds no demand; the page it opens holds its own, as above. No session, ticket, credential, challenge, or signature material appears in URLs,
+history state, or browser storage.
+
+## Sending while a node connects
+
+While a node's connection is being established — an intentional switch, or a connection that is on
+its way without any error — the chat stays usable and quiet. It shows "Syncing with <node>…" as a
+note rather than a warning, and the composer accepts a send at once.
+
+- **Queued sends are local draft state.** A plain message sent while the node is being established
+  waits in the tab's message queue, image attachments included. Nothing leaves the tab: the queue
+  sends it only once that environment has made a fresh relay attempt, accepted a current shell
+  snapshot, and admits mutations. The send button keeps its usual look with the caption "Sends when
+  <node> is ready", and the queued message says the same. If the node is still not ready after the
+  session's synchronization deadline (30 seconds), the queued message shows the connection's own
+  reason instead; a role that does not allow sending reads "Can't send — your role on <node> doesn't
+  allow it". A stale connection, a role refusal, or an unconfirmed delivery refuses new sends as
+  before.
+- **A draft's first send** waits under the draft. Only the draft's own open view sends it, creating
+  its thread with the same receipt-idempotent bootstrap as any first send. Leaving the draft before
+  the node is ready leaves the message queued: nothing is sent in the background and no thread is
+  created. It is sent once, when the user returns to the draft and the node is ready. A draft's queue
+  is therefore only ever shown from the open draft. While a draft has a queued send, its device
+  cannot be changed.
+- **Never queued.** Actions whose meaning depends on the moment they reach the node are not held
+  for later: stop, approval decisions and user-input answers (moving between questions stays local;
+  the answer to the last one is what reaches the node), steering a running turn, reverts,
+  terminal input, git and file writes (saving open editor changes included), Agent Control decisions,
+  project and settings writes, plan follow-ups, goals, side questions, and non-image uploads. While
+  the connection is being established they are disabled or refused with "Available when <node> is
+  connected"; any other refusal keeps its own reason.
+- **Attachments.** Images travel inside the queued message. A non-image upload is never queued with
+  a send: while the node connects the composer keeps it pending as "Syncing" ("Waiting for this node
+  to connect."), and a message that includes it cannot be sent until the upload is resolved. Hosted
+  builds do not stream non-image uploads to a node, so once the connection is established the
+  attachment shows the usual "Authorize" state and has to be removed before the message can be sent.
+- **Waiting for a free connection.** A routed node can wait for one of the limited connection slots
+  when every slot is held by an open view. The chat then reads "Waiting for a free connection to
+  <node>…", and sends wait in the queue the same way.
 
 ## Relay transport and ticket custody
 
@@ -348,16 +551,19 @@ the owner re-pairs.
 The relay-trust disclosure is a function of the channel state, and it is shown on the hosted
 authentication, node-selection, connection, and installation surfaces. It takes no state from the
 surface it mounts on: every mount site reads the live channel projection, so install help opened
-from a connected node's menu or from the phone connection sheet states that channel's disclosure and
-not the no-channel one. The paragraphs below are the shipped strings, quoted verbatim from
-`apps/web/src/components/hostedHub/HostedRelayTrustNotice.logic.ts`. They are quoted rather than
-paraphrased on purpose: a paraphrase here would be a second copy of a security claim, free to drift
-away from the one the application renders. `HostedRelayTrustNotice.logic.test.ts` reads this file
-and asserts that each quotation below is exactly the shipped copy for its state, so a divergence
-fails a test instead of surviving a review.
+from the account page or from the phone connection sheet states the selected node's channel
+disclosure and not the no-channel one. When the selected node has no channel open — the cursor is
+on no node yet, or on one this tab is not connected to — the disclosure states the weakest channel
+this tab does hold, and says that no node channel is open only while none is. The paragraphs below
+are the shipped strings, quoted verbatim from
+`apps/web/src/components/hostedHub/HostedRelayTrustNotice.logic.ts`. They are quoted rather
+than paraphrased on purpose: a paraphrase here would be a second copy of a security claim, free to
+drift away from the one the application renders. `HostedRelayTrustNotice.logic.test.ts` reads this
+file and asserts that each quotation below is exactly the shipped copy for its state, so a
+divergence fails a test instead of surviving a review.
 
-No node channel open in this tab — the sign-in surface, the node directory, and install help reached
-from the directory:
+No node channel open in this tab — the sign-in surface, and any other surface while this tab holds
+no channel:
 
 <!-- shipped-copy:unavailable -->
 
@@ -430,10 +636,12 @@ with the other admission options in the [hub connector guide](./hub-connector.md
 
 ## Comparing the session code with your node
 
-On an encrypted channel the connected node's menu shows a short per-session verification code
-together with the sentence that bounds it. The code is derived from the node's identity key and this
-tab's ephemeral key and is bound to the single channel that produced it, so it changes on every
-channel and is meaningless once that channel closes.
+On an encrypted channel the open thread's connection popover — opened from the node name in the
+desktop workspace header — shows a short per-session verification code for that thread's node,
+together with the sentence that bounds it. It is that node's own session's code even while the
+selection is on another node, so it is always the one that node's CLI shows. The code is derived
+from the node's identity key and this tab's ephemeral key and is bound to the single channel that
+produced it, so it changes on every channel and is meaningless once that channel closes.
 
 Compare it out of band with the node's own view of the same session:
 
@@ -445,8 +653,8 @@ The sentence shown beside the code states what a match is worth. It ships at two
 quoted here for the reason the disclosure above is, and the same test holds each to the shipped
 string.
 
-Beside the code in the node menu — where an owner is mid-comparison — the accompanying text is one
-line and the pointer at the rest of it:
+Beside the code in the connection popover — where an owner is mid-comparison — the accompanying text
+is one line and the pointer at the rest of it:
 
 <!-- shipped-text:web-sas-advisory -->
 
@@ -496,21 +704,28 @@ analytics, and it must not be captured into qualification evidence, screenshots,
 a channel locked encrypted but produced no code, the surface says so rather than rendering nothing —
 an absent comparison value is reported, not silently dropped.
 
-The code renders in the desktop-width node menu and again in Settings → Security, which is where the
-menu's pointer leads. That section is owner-only in hosted mode, so the menu asks whether this
-reader can open it before it points there: a viewer, an operator, or an owner whose role snapshot
-has gone stale is shown the longer account in the menu itself, with the `ryco e2ee sessions`
-sentence in place of a pointer at a section their settings list does not have. The narrow phone
-presentation does not draw the code at all, and its disclosure deliberately points at no comparison
-it cannot show; on a phone, use the Ryco mobile app.
+The code renders in the desktop thread connection popover and again in Settings → Security, which is
+where the popover's pointer leads. That section is owner-only in hosted mode, so the popover asks
+whether this reader can open it before it points there: a viewer, an operator, or an owner whose
+role snapshot has gone stale is shown the longer account in the popover itself, with the `ryco e2ee
+sessions` sentence in place of a pointer at a section their settings list does not have. The narrow
+phone presentation does not draw the code at all, and its disclosure deliberately points at no
+comparison it cannot show; on a phone, use the Ryco mobile app.
 
 ## Reconnect, replay, and delivery uncertainty
 
 Each demanded environment has at most one active connection attempt in a tab, and the hosted Web
-platform ceiling permits only one active environment. Reconnect uses exponential
+platform ceiling permits at most three connected environments. Only demanded environments
+reconnect after a relay drop or a Hub session loss (a deploy, a restart, a proxy interruption): a
+warm environment nothing demands is released and reconnects on demand, so a Hub restart does not
+spend a reconnect, and a ticket, per warm environment of every tab. Reconnect uses exponential
 backoff from one second to 60 seconds with bounded ±20% jitter and bounded Hub `retryAfterMs` input.
-The delay resets only after a session remains stable for 60 seconds. Every retry obtains a fresh
-ticket.
+The delay resets only after a session remains stable for 60 seconds. A demanded environment
+waiting in that backoff retries after a short random delay when the directory reports its node
+online again: at most once per presence change and per ten seconds, never before a Hub
+`retryAfterMs`, and not while the Hub rate-limits the connection, has closed it as a slow consumer,
+or is draining. The backoff itself keeps growing until a session stays stable. Every retry obtains
+a fresh ticket.
 
 Retryable cases include generic browser network failure, node offline, Hub draining, connection
 replacement, rate limiting, slow-consumer closure, and retryable ticket expiry. Revocation,
@@ -553,7 +768,12 @@ classified counts as a mutation.
   accepted its snapshot) from one refused for good (a role below the method's tier, a method no
   hosted role may call, or a terminally failed transport). A subscription refused only for now —
   such as the Agent Control queue on a client rebuilt during recovery — keeps re-checking locally
-  with a capped backoff and starts once the session is current, instead of ending.
+  with a capped backoff and starts once the session is current, instead of ending. Observe-only
+  unary reads do not wait that long: they are admitted as soon as the replacement channel is
+  online, before its session has accepted the snapshot. A read that refreshes derived state or
+  reaches out (a fetch, a model call, a credential) still waits for the session to be current, as
+  do read streams other than the session's own subscriptions, and an unconfirmed delivery holds
+  every read until the replacement session has accepted its snapshot.
 - **Orchestration commands** (`orchestration.dispatchCommand`) are idempotent by receipt: the node
   persists a receipt for each `commandId` in the same transaction as the command's events and
   answers a repeated id from it — before normalizing the command again — with the original result
@@ -668,7 +888,9 @@ does not establish a session or role; fresh snapshots reconcile the saved displa
 A separate, schema-validated inbox
 preference record stores only three finite user choices: the auto-settle interval, whether AI Focus
 is enabled, and its refresh interval. It contains no node identifiers, rankings, model/provider
-preferences, content, or authentication material. These browser-local choices survive reloads.
+preferences, content, or authentication material. These browser-local choices survive reloads. The
+auto-settle interval there applies only to nodes that keep no rule of their own, and is what a first
+connection hands to a node that keeps the rule but has none set.
 The hosted root installs a fail-closed
 console sink before authentication because older local-client feature paths may log caught values.
 Relay payloads are never persisted or sent to client analytics — which is not the same as the Hub
@@ -709,17 +931,30 @@ for upload bounds and removal behavior.
 
 ## Accessibility and layout
 
-Authentication, invitation, directory, and node menus use native keyboard controls, explicit labels,
-focus-visible indicators, focus movement on flow changes, validation messages, and polite/assertive
-live regions. Online, offline, stale, reconnecting, delivery-unknown, and relay-encryption states use
-text and icons in addition to color, and an encrypted browser channel is given an advisory rather
-than a success treatment, so the weaker configuration is not dressed as the stronger one through
-styling. The same shell adapts from narrow browser widths through tablet and desktop; there is no
-second hosted feature UI, with one deliberate exception — the session verification code renders only
-in the desktop-width node menu, so the narrow presentation offers no comparison to make and its
-disclosure points at none. That sameness is otherwise about presentation and feature surface only.
-It says nothing about the encryption tier, which does fork between this browser client and the Ryco
-mobile app, as stated at the top of this document.
+Authentication, invitation, directory, and connection popovers use native keyboard controls,
+explicit labels, focus-visible indicators, focus movement on flow changes, validation messages, and
+polite/assertive live regions. Online, offline, stale, reconnecting, delivery-unknown, and
+relay-encryption states use text and icons in addition to color, and an encrypted browser channel is
+given an advisory rather than a success treatment, so the weaker configuration is not dressed as the
+stronger one through styling. The same shell adapts from narrow browser widths through tablet and
+desktop; there is no second hosted feature UI, with one deliberate exception — the session
+verification code renders only in the desktop thread connection popover, so the narrow presentation
+offers no comparison to make and its disclosure points at none. That sameness is otherwise about
+presentation and feature surface only. It says nothing about the encryption tier, which does fork
+between this browser client and the Ryco mobile app, as stated at the top of this document.
+
+The desktop workspace has no global connected-node control. Nodes stay connected in the background,
+so pages that belong to no thread — home, Settings, Diagnostics — name no node, and an open thread's
+header names that thread's own node and its connection: where the thread runs and over what channel,
+whichever node the selection is on. Every state keeps its word and its glyph; only a steady
+encrypted browser channel is drawn quietly, and a fallen-back channel always reads "Legacy
+connection". Its popover holds the role and full status, an unconfirmed delivery to acknowledge, the
+session verification code, and **Manage devices**, which opens the device directory. Switching nodes
+is opening another node's thread from the inbox, or a node from that directory; hosted Settings
+chooses which node it edits with its own **Switch device** control. Signing out and installing or
+updating the app live on the account page, one **Account** entry away in the sidebar footer, and a
+node that failed to connect offers **Manage devices** and **Sign out** on its own page. The phone
+presentation keeps its connection pill and sheet.
 
 ## First-owner and node onboarding
 

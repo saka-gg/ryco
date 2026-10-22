@@ -1,6 +1,8 @@
+import type { ThreadCapabilitySupport } from "@ryco/client-runtime/rpc";
 import {
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
+  isThreadFailed,
 } from "@ryco/client-runtime/state/threads";
 import type {
   Project,
@@ -66,8 +68,10 @@ export interface InboxEnvironment {
   readonly trust?: NodeTrust;
   /** Wave 3b: this environment, not the whole app, has an unconfirmed send. */
   readonly deliveryUnknown?: boolean;
-  readonly threadSettlementSupported?: boolean;
-  readonly threadSnoozeSupported?: boolean;
+  readonly threadSettlementSupported?: ThreadCapabilitySupport;
+  readonly threadSnoozeSupported?: ThreadCapabilitySupport;
+  /** The node's own auto-settle rule; absent lists its threads by this device's rule. */
+  readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly mutationReady?: boolean;
   readonly shellCurrent?: boolean;
 }
@@ -167,7 +171,8 @@ function threadState(
   if (activity === "connecting") return "connecting";
   // Same predicate as web: a usage limit outranks the generic error it ended in.
   if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
-  if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
+  // Same rule as web: a restart release is an interruption, not a failure.
+  if (isThreadFailed(thread)) return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
   return "idle";
 }
@@ -221,6 +226,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       label: environment.label,
       threadSettlementSupported: environment.threadSettlementSupported ?? false,
       threadSnoozeSupported: environment.threadSnoozeSupported ?? false,
+      autoSettleAfterDays: environment.autoSettleAfterDays,
       connected: environment.connectionState === "connected",
       mutationReady: environment.mutationReady ?? false,
       shellCurrent: environment.shellCurrent ?? false,

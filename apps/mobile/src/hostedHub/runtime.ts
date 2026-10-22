@@ -1,9 +1,14 @@
 import {
+  configureHostedEnvironmentSessions,
   configureHostedRuntime,
+  getHostedEnvironmentSessions,
   getHostedHubApi,
   hostedHubController,
   hostedHubStore,
+  type HostedEnvironmentSessionRecord,
+  type HostedEnvironmentSessions,
 } from "@ryco/client-runtime/authorization";
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   createNativeE2eeEnrollmentCoordinator,
   type NativeE2eeEnrollmentCoordinator,
@@ -23,34 +28,33 @@ import { mobileKV } from "../platform/kv";
 import { mobileNativeAuthorization } from "../platform/nativeAuthorization";
 import { mobileNativeE2eePlatform } from "../platform/nativeE2ee";
 import { mobilePasskeyCeremony } from "../platform/passkeyCeremony";
-import { getMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
+import { readMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
 import {
   hydrateMobileHostedSessionToken,
   mobileSessionCredentials,
 } from "../platform/sessionCredentials";
-import { disposeMobileRelayE2eeAttempt, prepareMobileRelayE2eeAttempt } from "./e2eeAttempt";
+import {
+  disposeMobileRelayE2eeAttempt,
+  disposeMobileRelayE2eeAttemptFor,
+  prepareMobileRelayE2eeAttempt,
+  type MobileE2eeAttemptTarget,
+} from "./e2eeAttempt";
 import {
   getMobileE2eeSessionState,
   resetMobileE2eeSession,
   subscribeMobileE2eeSession,
 } from "./e2eeSession";
 import { setMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
-import {
-  disposeMobileRelaySocketContext,
-  issueMobileRelayAttempt,
-  prepareMobileRelaySocketContext,
-  providerForMobileRelaySocketContext,
-} from "./accountE2eeAttempt";
 import { hydrateMobileHubProfile } from "./hubProfile";
 import { mobileHostedNodeLifecycle } from "./nodeLifecycle";
-import { createHostedPrimaryConnection } from "./primaryConnection";
-import { installHostedPrimaryConnectionFactory } from "./primaryConnectionFactory";
-import { configureAuthoritativeNodeTrustSource } from "../features/home/authoritativeNodeTrustSource";
 import {
-  MobileHostedRelaySocket,
-  mobileHostedRelayUrl,
-  openMobileEarlyRelaySocket,
-} from "./relaySocket";
+  disposeMobileRelaySocketContext,
+  providerForMobileRelaySocketContext,
+} from "./accountE2eeAttempt";
+import { createHostedEnvironmentConnection } from "./primaryConnection";
+import { installHostedEnvironmentConnectionFactory } from "./primaryConnectionFactory";
+import { configureAuthoritativeNodeTrustSource } from "../features/home/authoritativeNodeTrustSource";
+import { MobileHostedRelaySocket, mobileHostedRelayUrl } from "./relaySocket";
 import {
   getMobileHostedEndpoint,
   getMobileHostedHttpClient,
@@ -79,11 +83,13 @@ configureAuthoritativeNodeTrustSource({
   },
 });
 
-// The connection driver is on the launch path and reaches the relay connection
-// only through this seam. It is installed when this module loads, before the
-// Hub API is configured, so no session can be restored and no node selected
-// without it.
-installHostedPrimaryConnectionFactory(createHostedPrimaryConnection);
+// The connection code on the launch path reaches the relay connection only
+// through this seam. It is installed when this module loads, before the Hub API
+// is configured, so no session can be restored and no node connected without
+// it. Every hosted environment connects through the controller's
+// `acquireEnvironment` and the node lifecycle's `connectEnvironment` port; the
+// driver's single primary connection is never installed.
+installHostedEnvironmentConnectionFactory(createHostedEnvironmentConnection);
 
 /**
  * Hosted runtime wiring.
@@ -224,6 +230,12 @@ export async function configureMobileHostedRuntime(
     if (configured) return isMobileHostedModeAvailable();
   }
 
+  // The session registry keeps its deadlines on the same bound timers.
+  configureHostedEnvironmentSessions({
+    now: timers.now,
+    setTimeout: (callback, delayMs) => timers.setTimeout(callback, delayMs),
+    clearTimeout: (timer) => timers.clearTimeout(timer as ReturnType<typeof setTimeout>),
+  });
   configureHostedRuntime({
     endpoint,
     httpClient,
@@ -231,29 +243,36 @@ export async function configureMobileHostedRuntime(
     sessionCredentials: mobileSessionCredentials,
     dpopSigner,
     nativeAuthorization: mobileNativeAuthorization,
+    // One session per environment: selection is a cursor, and the demand
+    // executor connects environments through the controller.
+    environmentSessions: "retained",
     nodeLifecycle: mobileHostedNodeLifecycle,
     timers,
     isForeground: () => mobileAppLifecycle.isForeground(),
     subscribeForeground,
     hasPendingRelayRequests: hasHostedRelayPendingRequests,
+    // No account subscription here, and every directory read is device-key
+    // signed: poll quickly only while a screen shows node presence.
+    demandDrivenDirectoryRefresh: true,
     resetRelayAttemptFactory: resetHostedRelayAttemptFactory,
     relayUrl: mobileHostedRelayUrl,
-    prepareRelaySocketContext: prepareMobileRelaySocketContext,
-    issueRelayAttempt: (input) => issueMobileRelayAttempt(input),
-    disposeRelaySocketContext: disposeMobileRelaySocketContext,
-    openEarlyRelaySocket: () => openMobileEarlyRelaySocket(),
+    // Each environment's relay binding prepares its E2EE context and issues its
+    // ticket for its own node and record generation
+    // (`createHostedEnvironmentConnection`), so the runtime offers no
+    // selection-following preparation to fall back on. Every channel's socket
+    // is built here.
+    //
     // docs/relay-e2ee-protocol.md §4: THIS IS WHERE NATIVE E2EE IS ON.
     //
     // Every relay channel this app opens is built with the §4.4 mode machine,
     // and the guards it consults were resolved before this call — §4.4 requires
     // them "before it has received any payload", and this call is synchronous.
-    // `resolveMobileRelayE2eeProvider` returns `undefined` only when credential
-    // preparation failed for an explicitly legacy-eligible selection. Issuing,
-    // renewing, or replacing an invalid certificate may transiently derive or
-    // generate the agreement public key and keeps that existing failure rule.
-    // On the common valid-certificate restore path, preparation is public-only;
-    // the first scalar access is K1 after validated evidence, where failure is
-    // FATAL-PRE and can no longer authorize plaintext.
+    // A socket whose prepared context carries no provider fails closed here.
+    // Issuing, renewing, or replacing an invalid certificate may transiently
+    // derive or generate the agreement public key and keeps that existing
+    // failure rule. On the common valid-certificate restore path, preparation is
+    // public-only; the first scalar access is K1 after validated evidence, where
+    // failure is FATAL-PRE and can no longer authorize plaintext.
     createRelaySocket: (input) =>
       new MobileHostedRelaySocket({
         ...input,
@@ -281,12 +300,11 @@ export async function configureMobileHostedRuntime(
     invalidateHostedGeneration: () => {
       disposeMobileRelayE2eeAttempt();
       resetMobileE2eeSession();
+      // Every environment session loses its authority before this returns; the
+      // connections are torn down after it.
       hostedHubController.invalidateNativeE2eeAuthorization();
-      try {
-        void getMobileHostedConnectionCoordinator().releaseAll();
-      } catch {
-        // Runtime bootstrap can invalidate before the multi-node coordinator exists.
-      }
+      // Runtime bootstrap can invalidate before the connection coordinator exists.
+      void readMobileHostedConnectionCoordinator()?.releaseAll();
     },
   });
   setMobileNativeE2eeEnrollmentCoordinator(enrollmentCoordinator);
@@ -297,8 +315,8 @@ export async function configureMobileHostedRuntime(
 }
 
 /**
- * Keep the §4.4 attempt warm for whatever selection is current, and for whatever
- * the owner has since decided about it.
+ * Keep the §4.4 attempt warm for every environment with a connection requested,
+ * and for whatever the owner has since decided about it.
  *
  * The relay transport creates its socket the instant a ticket resolves, and
  * resolving an attempt reads the public certificate, identity, and trust stores.
@@ -306,10 +324,10 @@ export async function configureMobileHostedRuntime(
  * issuance or renewal may transiently derive or generate its public half. No
  * warm attempt retains the scalar: the handshake still borrows it for one K1
  * operation. Priming on every
- * change of the `(account, node)` pair is what makes the synchronous read at
- * `createRelaySocket` find a complete attempt rather than fail the channel
- * closed — and the failure IS closed, never a silent fallback, so a miss costs
- * one channel rather than the guarantee.
+ * change of the `(account, node, generation)` triple is what makes the
+ * synchronous read at `createRelaySocket` find a complete attempt rather than
+ * fail the channel closed — and the failure IS closed, never a silent fallback,
+ * so a miss costs one channel rather than the guarantee.
  *
  * THE TRUST DOCUMENT IS THE SECOND INPUT, and it is the one the selection cannot
  * stand in for. §13.2 step 5's promotion, §13.3's re-pair and §12.1.1's consent
@@ -317,80 +335,167 @@ export async function configureMobileHostedRuntime(
  * account or the node, so the store's own revision is subscribed to as well. The
  * attempt slot is keyed on it too, so a decision that lands between this
  * notification and the re-preparation completing still cannot be used.
+ *
+ * The selection is only a cursor over retained environment sessions, so the
+ * environment records are watched: see {@link watchEnvironmentSessionsForE2ee}.
  */
 function watchSelectionForE2ee(): void {
   if (selectionWatch !== undefined) return;
-  interface SelectionSnapshot {
+  selectionWatch = watchEnvironmentSessionsForE2ee();
+}
+
+/**
+ * Retained environment sessions: every environment keeps its own attempt and
+ * projection, whatever is selected.
+ *
+ * Each record that is not suspended and has a connection requested is primed
+ * for its own node and record generation, so a warm environment that reconnects
+ * while another node is selected — or while none is — finds a complete attempt
+ * of its own. A record that disappears or takes a new generation loses exactly
+ * its own attempt and projection; clearing the selection resets nothing. Only
+ * sign-out and an enrollment that is not ready revoke everything.
+ */
+function watchEnvironmentSessionsForE2ee(): () => void {
+  const sessions = getHostedEnvironmentSessions();
+  interface AccountSnapshot {
     readonly accountStatus: ReturnType<typeof hostedHubStore.getState>["accountStatus"];
     readonly accountId: string | null;
-    readonly nodeId: string | null;
-    readonly generation: number;
     readonly trustRevision: number;
     readonly enrollmentGeneration: number;
     readonly enrollmentStatus: string;
   }
-  const sameSnapshot = (left: SelectionSnapshot, right: SelectionSnapshot): boolean =>
+  interface RecordSnapshot {
+    readonly nodeId: string;
+    readonly generation: number;
+    /** Not suspended, and a connection was requested for this generation. */
+    readonly warm: boolean;
+  }
+  const sameAccount = (left: AccountSnapshot, right: AccountSnapshot): boolean =>
     left.accountStatus === right.accountStatus &&
     left.accountId === right.accountId &&
-    left.nodeId === right.nodeId &&
-    left.generation === right.generation &&
     left.trustRevision === right.trustRevision &&
     left.enrollmentGeneration === right.enrollmentGeneration &&
     left.enrollmentStatus === right.enrollmentStatus;
+  const sameRecord = (left: RecordSnapshot, right: RecordSnapshot): boolean =>
+    left.nodeId === right.nodeId &&
+    left.generation === right.generation &&
+    left.warm === right.warm;
 
-  let last: SelectionSnapshot | undefined;
+  let lastAccount: AccountSnapshot | undefined;
+  let lastRecords = new Map<EnvironmentId, RecordSnapshot>();
   const evaluate = () => {
     const state = hostedHubStore.getState();
     const enrollment = enrollmentCoordinator?.getState();
-    const next: SelectionSnapshot = {
+    const account: AccountSnapshot = {
       accountStatus: state.accountStatus,
       accountId: state.account?.id ?? null,
-      nodeId: state.selectedNode?.id ?? null,
-      generation: state.generation,
       trustRevision: mobileE2eeTrustStore.revision(),
       enrollmentGeneration: enrollment?.generation ?? 0,
       enrollmentStatus: enrollment?.status ?? "idle",
     };
-    if (last !== undefined && sameSnapshot(next, last)) return;
-    last = next;
-    if (state.accountStatus === "authenticated" && state.account !== null) {
-      if (
-        enrollment?.status === "idle" ||
-        (enrollment?.status === "ready" &&
-          enrollment.ready !== null &&
-          enrollment.ready.namespace.accountId !== state.account.id)
-      ) {
-        void enrollmentCoordinator?.ensure(state.account.id).catch(() => undefined);
+    const accountChanged = lastAccount === undefined || !sameAccount(account, lastAccount);
+    if (accountChanged) {
+      lastAccount = account;
+      syncNativeEnrollment();
+    }
+    if (
+      state.accountStatus !== "authenticated" ||
+      enrollmentCoordinator?.getState().status !== "ready"
+    ) {
+      if (accountChanged) releaseEveryE2eeAttempt();
+      lastRecords = new Map();
+      return;
+    }
+
+    const records = new Map<EnvironmentId, HostedEnvironmentSessionRecord>();
+    for (const record of sessions.list()) records.set(record.environmentId, record);
+    for (const [environmentId, previous] of lastRecords) {
+      const record = records.get(environmentId);
+      if (record !== undefined && record.generation === previous.generation) continue;
+      // The attempt and the claim belonged to the generation that just ended.
+      disposeMobileRelayE2eeAttemptFor(environmentId);
+      resetMobileE2eeSession(environmentId);
+    }
+    const next = new Map<EnvironmentId, RecordSnapshot>();
+    for (const record of records.values()) {
+      const snapshot: RecordSnapshot = {
+        nodeId: record.nodeId,
+        generation: record.generation,
+        warm: !record.suspended && record.connectRequested,
+      };
+      next.set(record.environmentId, snapshot);
+      const previous = lastRecords.get(record.environmentId);
+      if (!snapshot.warm) continue;
+      if (accountChanged || previous === undefined || !sameRecord(previous, snapshot)) {
+        void prepareMobileRelayE2eeAttempt(attemptTargetFor(sessions, record));
       }
-      // `unavailable` and `revoked` recover inside the coordinator, on the
-      // lifecycle wired at construction.
-    } else if (enrollment && enrollment.status !== "idle") {
-      void enrollmentCoordinator?.invalidate("signed-out");
     }
-    if (state.accountStatus !== "authenticated" || state.selectedNode === null) {
-      disposeMobileRelayE2eeAttempt();
-      // The projection describes a channel for a selection that no longer
-      // exists. Leaving it standing kept a sign-out — and a node deselect —
-      // looking like a live, possibly verified, connection on every §13 surface.
-      resetMobileE2eeSession();
-      return;
-    }
-    if (enrollmentCoordinator?.getState().status !== "ready") {
-      disposeMobileRelayE2eeAttempt();
-      resetMobileE2eeSession();
-      return;
-    }
-    void prepareMobileRelayE2eeAttempt();
+    lastRecords = next;
   };
+  const unsubscribeInputs = subscribeE2eeInputs(evaluate);
+  const unsubscribeSessions = sessions.subscribe(evaluate);
+  evaluate();
+  return () => {
+    unsubscribeInputs();
+    unsubscribeSessions();
+  };
+}
+
+/** The channel target of one environment record's current generation. */
+function attemptTargetFor(
+  sessions: HostedEnvironmentSessions,
+  record: HostedEnvironmentSessionRecord,
+): MobileE2eeAttemptTarget {
+  return {
+    nodeId: record.nodeId,
+    nodeLabel: record.label,
+    environmentId: record.environmentId,
+    generation: record.generation,
+    isCurrent: () => sessions.isCurrentGeneration(record.environmentId, record.generation),
+  };
+}
+
+/**
+ * Start native enrollment for the signed-in account, or cancel it once nobody
+ * is signed in. `unavailable` and `revoked` recover inside the coordinator, on
+ * the lifecycle wired at construction.
+ */
+function syncNativeEnrollment(): void {
+  const state = hostedHubStore.getState();
+  const enrollment = enrollmentCoordinator?.getState();
+  if (state.accountStatus === "authenticated" && state.account !== null) {
+    if (
+      enrollment?.status === "idle" ||
+      (enrollment?.status === "ready" &&
+        enrollment.ready !== null &&
+        enrollment.ready.namespace.accountId !== state.account.id)
+    ) {
+      void enrollmentCoordinator?.ensure(state.account.id).catch(() => undefined);
+    }
+  } else if (enrollment && enrollment.status !== "idle") {
+    void enrollmentCoordinator?.invalidate("signed-out");
+  }
+}
+
+/** Revoke every environment's warm attempt and clear every projection. */
+function releaseEveryE2eeAttempt(): void {
+  disposeMobileRelayE2eeAttempt();
+  resetMobileE2eeSession();
+}
+
+/**
+ * Re-evaluate on every input an attempt is resolved from: the account and its
+ * selection, the trust document, and the enrollment.
+ */
+function subscribeE2eeInputs(evaluate: () => void): () => void {
   const unsubscribeStore = hostedHubStore.subscribe(evaluate);
   const unsubscribeTrust = mobileE2eeTrustStore.subscribe(evaluate);
   const unsubscribeEnrollment = enrollmentCoordinator?.subscribe(evaluate) ?? (() => undefined);
-  selectionWatch = () => {
+  return () => {
     unsubscribeStore();
     unsubscribeTrust();
     unsubscribeEnrollment();
   };
-  evaluate();
 }
 
 /**

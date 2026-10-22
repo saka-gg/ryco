@@ -11,7 +11,7 @@ import {
   Undo2Icon,
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import { endPaneDrag, startPaneDrag } from "../../chatPanesStore";
 import { readEnvironmentApi } from "../../environmentApi";
@@ -158,14 +158,17 @@ function RunningClock(props: { readonly since: string }) {
  * Glyph row. Line 1: status glyph · title. Line 2: the project icon sits under
  * the glyph, then the state line, the change request and the time. Settled and
  * snoozed rows collapse to one line led by the project icon.
+ *
+ * Memoized: the list passes the same props to a row that did not change, so
+ * every callback it receives takes the row and must be stable.
  */
-export function InboxThreadRow(props: {
+export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly threadActions?: InboxThreadActions | undefined;
   readonly row: InboxSidebarRow;
   readonly active: boolean;
   readonly motionEnabled: boolean;
   readonly previewHandle: InboxPreviewHandle;
-  readonly onOpen: () => void;
+  readonly onOpenRow: (row: InboxSidebarRow) => void;
   readonly onSetSettlement: (row: InboxSidebarRow, settled: boolean) => Promise<boolean>;
 }) {
   const { row } = props;
@@ -382,7 +385,7 @@ export function InboxThreadRow(props: {
       )}
       data-testid="inbox-thread-row"
       draggable={!isPhone}
-      onClick={props.onOpen}
+      onClick={() => props.onOpenRow(row)}
       onPointerEnter={() => {
         workingTreeWanted.start();
         // The row navigates imperatively: warm the route and the thread's
@@ -586,4 +589,4 @@ export function InboxThreadRow(props: {
       <ContextMenuPopup className="min-w-56">{menuItems}</ContextMenuPopup>
     </ContextMenu>
   );
-}
+});

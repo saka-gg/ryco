@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import type { ApprovalRequestId, ProviderApprovalDecision } from "@ryco/contracts";
+import type { ApprovalRequestId, EnvironmentId, ProviderApprovalDecision } from "@ryco/contracts";
 import { ExpandIcon } from "lucide-react";
 
 import { type PendingApproval } from "../../session-logic";
@@ -20,6 +20,8 @@ import {
 } from "./ComposerPendingApprovalPanel";
 
 interface ApprovalCardProps {
+  /** The environment the approval belongs to; `null` for the routed node. */
+  environmentId: EnvironmentId | null;
   approval: PendingApproval;
   pendingCount: number;
   isResponding: boolean;
@@ -40,6 +42,7 @@ interface ApprovalCardProps {
  * the existing panel and actions.
  */
 export const ApprovalCard = memo(function ApprovalCard({
+  environmentId,
   approval,
   pendingCount,
   isResponding,
@@ -57,6 +60,7 @@ export const ApprovalCard = memo(function ApprovalCard({
 
   const actions = (
     <ComposerPendingApprovalActions
+      environmentId={environmentId}
       requestId={approval.requestId}
       approvalIdentity={approval.approvalIdentity}
       isResponding={

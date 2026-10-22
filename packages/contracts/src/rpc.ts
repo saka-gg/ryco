@@ -313,6 +313,12 @@ import {
   KeybindingsReplaceCustomResult,
   ProviderProjectCommands,
 } from "./server.ts";
+import {
+  NodeUpdateCheckInput,
+  NodeUpdateError,
+  NodeUpdateInput,
+  NodeUpdateState,
+} from "./nodeUpdate.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
   ThreadPriorityEnsureCurrentInput,
@@ -542,6 +548,9 @@ export const WS_METHODS = {
   providerPrewarmSession: "provider.prewarmSession",
   providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
+  serverSubscribeNodeUpdate: "server.subscribeNodeUpdate",
+  serverCheckNodeUpdate: "server.checkNodeUpdate",
+  serverUpdateNode: "server.updateNode",
   serverUpsertKeybinding: "server.upsertKeybinding",
   keybindingsReplaceCustom: "keybindings.replaceCustom",
   serverGetSettings: "server.getSettings",
@@ -1031,6 +1040,26 @@ export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvide
   payload: ServerProviderUpdateInput,
   success: ServerProviderUpdatedPayload,
   error: Schema.Union([ServerProviderUpdateError, AuthRpcError]),
+});
+
+export const WsServerSubscribeNodeUpdateRpc = Rpc.make(WS_METHODS.serverSubscribeNodeUpdate, {
+  payload: Schema.Struct({}),
+  success: NodeUpdateState,
+  error: Schema.Union([NodeUpdateError, AuthRpcError]),
+  stream: true,
+});
+
+export const WsServerCheckNodeUpdateRpc = Rpc.make(WS_METHODS.serverCheckNodeUpdate, {
+  payload: NodeUpdateCheckInput,
+  success: NodeUpdateState,
+  error: Schema.Union([NodeUpdateError, AuthRpcError]),
+});
+
+/** Starts the update and answers once it is accepted; the node then restarts on its own. */
+export const WsServerUpdateNodeRpc = Rpc.make(WS_METHODS.serverUpdateNode, {
+  payload: NodeUpdateInput,
+  success: NodeUpdateState,
+  error: Schema.Union([NodeUpdateError, AuthRpcError]),
 });
 
 export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
@@ -2481,6 +2510,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsProviderPrewarmSessionRpc
   | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
+  | typeof WsServerSubscribeNodeUpdateRpc
+  | typeof WsServerCheckNodeUpdateRpc
+  | typeof WsServerUpdateNodeRpc
   | typeof WsServerUpsertKeybindingRpc
   | typeof WsKeybindingsReplaceCustomRpc
   | typeof WsServerGetProjectPreferencesRpc
@@ -2699,6 +2731,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsProviderPrewarmSessionRpc,
   WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
+  WsServerSubscribeNodeUpdateRpc,
+  WsServerCheckNodeUpdateRpc,
+  WsServerUpdateNodeRpc,
   WsServerUpsertKeybindingRpc,
   WsKeybindingsReplaceCustomRpc,
   WsServerGetProjectPreferencesRpc,

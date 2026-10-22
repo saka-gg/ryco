@@ -16,15 +16,23 @@ import {
   decodeStoredHubNodeRoster,
 } from "../hostedHub/nodeRoster";
 import { installHubSelectionPersistence } from "../hostedHub/selectionPersistence";
+import {
+  isPreferencesHydrated,
+  isThreadContentCacheEnabled,
+  subscribePreferences,
+  whenPreferencesHydrated,
+} from "../state/preferencesStore";
 import { useStore, type EnvironmentState } from "../state/threadsRuntime";
 import {
   createEnvironmentSnapshotSerializer,
   decodeStoredEnvironmentSnapshot,
   type EnvironmentSnapshotSerializer,
+  mayHoldStoredContent,
   toCachedEnvironmentShellSnapshot,
+  withoutStoredContent,
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
 } from "./environmentSnapshotCodec";
-import { createSnapshotDb, type SnapshotDb } from "./snapshotDb";
+import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshotDb";
 
 /**
  * Orchestrates the per-environment snapshot cache (wave 2): debounced capture
@@ -33,6 +41,11 @@ import { createSnapshotDb, type SnapshotDb } from "./snapshotDb";
  * revocation/removal invalidation. All I/O failures degrade to a cache miss
  * with a console warning — persistence must never take the live sync path
  * down with it.
+ *
+ * Bounded recent message text is stored with each environment's shell while
+ * the "keep recent conversations" device setting is on. It is display-only:
+ * hydrated as cached message bodies that live data replaces, and removed
+ * wherever the shell is, and when the setting is turned off.
  */
 
 /**
@@ -70,6 +83,7 @@ const MAX_CACHED_ENVIRONMENT_SNAPSHOT_TOTAL_BYTES = MAX_WORKSPACE_SNAPSHOT_TOTAL
 const HYDRATION_SLICE_BYTES = 64 * 1024;
 
 interface ThreadsStoreLike {
+  readonly subscribe: (listener: () => void) => () => void;
   readonly getState: () => {
     readonly environmentStateById: Record<string, EnvironmentState>;
     readonly hydrateEnvironmentStatesFromCache: (
@@ -86,6 +100,16 @@ interface ThreadsStoreLike {
 interface HostedStoreLike {
   readonly getState: () => HostedHubState;
   readonly subscribe: (listener: () => void) => () => void;
+}
+
+/** The device setting that lets recent conversation text be kept on this device. */
+export interface ThreadContentCacheSetting {
+  /** Whether message text may be stored and shown from storage right now. */
+  readonly isEnabled: () => boolean;
+  /** Resolves once `isEnabled` reflects the saved choice rather than a default. */
+  readonly ready?: Promise<void>;
+  /** Calls `listener` whenever `isEnabled` may have changed. */
+  readonly subscribe?: (listener: () => void) => () => void;
 }
 
 export interface SnapshotPersistenceDeps {
@@ -105,6 +129,8 @@ export interface SnapshotPersistenceDeps {
    * so decoding a large cache does not hold the JS thread in one long task.
    */
   readonly yieldToEventLoop?: () => Promise<void>;
+  /** Message text is never stored or shown from storage unless this says so. */
+  readonly contentCache?: ThreadContentCacheSetting;
   readonly debounceMs?: number;
   readonly maxWaitMs?: number;
   readonly rosterDebounceMs?: number;
@@ -133,9 +159,12 @@ interface PersistedSlices {
   readonly threadIds: unknown;
   readonly threadShellById: unknown;
   readonly sidebarThreadSummaryById: unknown;
+  /** Null while message text is not stored, so a change of the setting is a change here. */
+  readonly messageIdsByThreadId: unknown;
+  readonly messageByThreadId: unknown;
 }
 
-function persistedSlices(state: EnvironmentState): PersistedSlices {
+function persistedSlices(state: EnvironmentState, includeContent: boolean): PersistedSlices {
   return {
     projectIds: state.projectIds,
     projectById: state.projectById,
@@ -144,6 +173,8 @@ function persistedSlices(state: EnvironmentState): PersistedSlices {
     threadIds: state.threadIds,
     threadShellById: state.threadShellById,
     sidebarThreadSummaryById: state.sidebarThreadSummaryById,
+    messageIdsByThreadId: includeContent ? state.messageIdsByThreadId : null,
+    messageByThreadId: includeContent ? state.messageByThreadId : null,
   };
 }
 
@@ -155,7 +186,9 @@ function samePersistedSlices(left: PersistedSlices, right: PersistedSlices): boo
     left.worktreeById === right.worktreeById &&
     left.threadIds === right.threadIds &&
     left.threadShellById === right.threadShellById &&
-    left.sidebarThreadSummaryById === right.sidebarThreadSummaryById
+    left.sidebarThreadSummaryById === right.sidebarThreadSummaryById &&
+    left.messageIdsByThreadId === right.messageIdsByThreadId &&
+    left.messageByThreadId === right.messageByThreadId
   );
 }
 
@@ -191,6 +224,9 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   let rosterTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   const uninstallers: Array<() => void> = [];
+
+  const contentCache = deps.contentCache;
+  const contentEnabled = (): boolean => contentCache?.isEnabled() ?? false;
 
   const caps = deps.caps ?? {
     maxEntries: MAX_CACHED_ENVIRONMENT_SNAPSHOTS,
@@ -242,7 +278,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     // stream gives the active thread a fresh `updatedAt` (and session) several
     // times a second, replacing its shell and summary, so the serializer
     // re-stringifies only those rows and reuses every other thread's fragment.
-    const slices = persistedSlices(environmentState);
+    const includeContent = contentEnabled();
+    const slices = persistedSlices(environmentState, includeContent);
     const previous = written.get(environmentId);
     const epoch = removalEpochOf(environmentId);
     if (
@@ -265,6 +302,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       environmentState,
       environmentId,
       deps.now(),
+      { content: includeContent },
     );
     await deps.db.saveEnvironmentSnapshot({
       environmentId,
@@ -319,6 +357,97 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     dirtySince.delete(environmentId);
     await serialize(environmentId, () => removeStoredSnapshot(environmentId));
   };
+
+  /**
+   * Rewrites an environment's stored row without its message text. The shell
+   * stays as written, and so does the row's timestamp: eviction order follows
+   * the last real capture.
+   */
+  const removeStoredContent = (environmentId: EnvironmentId): Promise<void> =>
+    serialize(environmentId, async () => {
+      const row = await deps.db.loadEnvironmentSnapshot(environmentId);
+      const payload = row ? withoutStoredContent(row.payload) : null;
+      if (!row || payload === null) return;
+      await deps.db.saveEnvironmentSnapshot({
+        environmentId,
+        schemaVersion: row.schemaVersion,
+        payload,
+        payloadBytes: payloadByteLength(payload),
+        updatedAt: row.updatedAt,
+      });
+      // The stored row is no longer what the last capture wrote.
+      written.delete(environmentId);
+    });
+
+  /** Turning the setting off removes every environment's stored message text at once. */
+  const purgeAllStoredContent = async (): Promise<void> => {
+    const stats = await deps.db.listEnvironmentSnapshotStats();
+    // A row being written right now may not be listed yet. Each removal waits
+    // for that environment's writes and then reads its row again.
+    const environmentIds = new Set([
+      ...stats.map((stat) => stat.environmentId),
+      ...writes.keys(),
+      ...written.keys(),
+    ]);
+    await Promise.all(
+      [...environmentIds].map((environmentId) =>
+        removeStoredContent(environmentId as EnvironmentId).catch(
+          warn("could not remove stored conversation text"),
+        ),
+      ),
+    );
+  };
+
+  // The setting turned on captures what is already live; turned off, it purges.
+  let contentWasEnabled = contentEnabled();
+  if (contentCache?.subscribe) {
+    uninstallers.push(
+      contentCache.subscribe(() => {
+        const enabled = contentEnabled();
+        if (enabled === contentWasEnabled) return;
+        contentWasEnabled = enabled;
+        if (!enabled) {
+          void purgeAllStoredContent().catch(warn("could not remove stored conversation text"));
+          return;
+        }
+        for (const [environmentId, state] of Object.entries(
+          deps.store.getState().environmentStateById,
+        )) {
+          if (state.bootstrapComplete && state.hydratedFromCacheAt === undefined) {
+            markDirty(environmentId as EnvironmentId);
+          }
+        }
+      }),
+    );
+  }
+
+  // A thread's messages can change without a shell or orchestration event
+  // marking the environment dirty (its detail snapshot, an older page of
+  // history), so a change to an environment's message slices marks it too.
+  const observedMessages = new Map<string, { readonly ids: unknown; readonly byId: unknown }>();
+  const noticeMessageChanges = () => {
+    const environments = deps.store.getState().environmentStateById;
+    const included = contentEnabled();
+    for (const [environmentId, state] of Object.entries(environments)) {
+      const seen = observedMessages.get(environmentId);
+      if (seen?.ids === state.messageIdsByThreadId && seen.byId === state.messageByThreadId) {
+        continue;
+      }
+      observedMessages.set(environmentId, {
+        ids: state.messageIdsByThreadId,
+        byId: state.messageByThreadId,
+      });
+      // An environment seen for the first time is marked by the write that created it.
+      if (seen && included && state.bootstrapComplete && state.hydratedFromCacheAt === undefined) {
+        markDirty(environmentId as EnvironmentId);
+      }
+    }
+    for (const environmentId of observedMessages.keys()) {
+      if (!Object.hasOwn(environments, environmentId)) observedMessages.delete(environmentId);
+    }
+  };
+  noticeMessageChanges();
+  uninstallers.push(deps.store.subscribe(noticeMessageChanges));
 
   const persistRosterDebounced = (): void => {
     if (rosterTimer) clearTimeout(rosterTimer);
@@ -423,6 +552,9 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       warn("could not load environment snapshots")(error);
       return;
     }
+    // Stored message text is shown only while the saved choice allows it.
+    await contentCache?.ready?.catch(() => undefined);
+    const includeContent = contentEnabled();
     // The direct supervisor may already be connected (it starts once the
     // catalog is hydrated). A row a live capture has replaced since the read
     // above is not this hydration's to discard.
@@ -466,6 +598,12 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
           await discardRow(environmentId);
           continue;
         }
+        if (!includeContent && mayHoldStoredContent(row.payload)) {
+          // Left from before the setting was turned off, whether or not it decodes.
+          void removeStoredContent(environmentId).catch(
+            warn("could not remove stored conversation text"),
+          );
+        }
         // Live data wins: a cached projection would be ignored at commit, so
         // decoding it is wasted work on the launch path.
         if (hasState(environmentId)) continue;
@@ -475,7 +613,10 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
           await discardRow(environmentId);
           continue;
         }
-        batch.push({ environmentId, cached: toCachedEnvironmentShellSnapshot(record) });
+        batch.push({
+          environmentId,
+          cached: toCachedEnvironmentShellSnapshot(record, { includeContent }),
+        });
         batchBytes += row.payload.length;
       } catch (error) {
         warn("could not hydrate environment snapshot")(error);
@@ -490,6 +631,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     dirtyTimers.clear();
     dirtySince.clear();
     serializers.clear();
+    observedMessages.clear();
     if (rosterTimer) clearTimeout(rosterTimer);
     rosterTimer = null;
     for (const uninstall of uninstallers.splice(0)) uninstall();
@@ -546,6 +688,15 @@ export function purgeEnvironmentSnapshot(environmentId: EnvironmentId): void {
     .catch(warn("could not purge snapshot"));
 }
 
+/** The device setting as persistence reads it: off until the preferences have loaded. */
+function createPreferencesContentCache(): ThreadContentCacheSetting {
+  return {
+    isEnabled: () => isPreferencesHydrated() && isThreadContentCacheEnabled(),
+    ready: whenPreferencesHydrated(),
+    subscribe: subscribePreferences,
+  };
+}
+
 /**
  * One-time cold-start initialization: hydrate the roster and every cached
  * environment into the threads store before connections exist, then install
@@ -559,6 +710,8 @@ export async function initializeMobileSnapshotPersistence(deps: {
   readonly subscribeBackground?: (listener: () => void) => () => void;
 }): Promise<void> {
   if (activeRuntime) return;
+  // Loading the saved setting overlaps the SQLite open and decode below.
+  const contentCache = createPreferencesContentCache();
   // Selection persistence needs only its own KV record, not the snapshot cache:
   // installed first, its read overlaps the SQLite open and decode, and the
   // restore can act the moment the directory is authoritative.
@@ -571,6 +724,7 @@ export async function initializeMobileSnapshotPersistence(deps: {
     store: useStore,
     now: () => Date.now(),
     hasDirectEnvironment: deps.hasDirectEnvironment,
+    contentCache,
     ...(deps.subscribeBackground ? { subscribeBackground: deps.subscribeBackground } : {}),
   });
   activeRuntime = runtime;

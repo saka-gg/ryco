@@ -165,7 +165,8 @@ import { Kbd, KbdGroup } from "./ui/kbd";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { useComposerHandleContext } from "../composerHandleContext";
-import { useHostedRpcCapability } from "../hostedHub/capabilities";
+import { useHostedRpcCapability, type HostedRpcCapability } from "../hostedHub/capabilities";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../hostedHub/switchTarget";
 import { openAutomationsDialog } from "./automations/automationsDialogStore";
 import { openPromoteChatDialog, useCanPromoteChat } from "./chat/promoteChatDialogStore";
 import { getPresentationTier } from "../lib/presentationTier";
@@ -413,6 +414,15 @@ function errorMessage(error: unknown): string {
   return "An error occurred.";
 }
 
+/** The description of a palette item whose action the connection cannot run right now. */
+function unavailableDescription(
+  capability: HostedRpcCapability,
+  nodeLabel: string | null,
+): { description?: string } {
+  const reason = hostedCapabilityCopy(capability, nodeLabel);
+  return reason ? { description: reason } : {};
+}
+
 export function CommandPaletteDialog() {
   const open = useCommandPaletteStore((store) => store.open);
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
@@ -453,15 +463,30 @@ export function CommandPaletteDialog() {
 }
 
 function OpenCommandPaletteDialog() {
-  const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
-  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
-  const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics);
-  const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
-  const projectsCapability = useHostedRpcCapability(WS_METHODS.projectsList);
-  const automationsCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCentre);
+  // hosted-capability: routed node
+  const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand, null);
+  // hosted-capability: routed node
+  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
+  // hosted-capability: routed node
+  const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics, null);
+  // hosted-capability: routed node
+  const pullRequestsCapability = useHostedRpcCapability(
+    WS_METHODS.sourceControlListChangeRequests,
+    null,
+  );
+  // hosted-capability: routed node
+  const projectsCapability = useHostedRpcCapability(WS_METHODS.projectsList, null);
+  // hosted-capability: routed node
+  const automationsCapability = useHostedRpcCapability(
+    AGENT_CONTROL_WS_METHODS.automationCentre,
+    null,
+  );
+  // hosted-capability: routed node
   const createPullRequestCapability = useHostedRpcCapability(
     WS_METHODS.sourceControlCreateChangeRequest,
+    null,
   );
+  const routedNodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state));
   const openCreatePullRequest = useCreatePullRequestDialogStore((store) => store.openFor);
   const navigate = useNavigate();
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
@@ -1339,7 +1364,9 @@ function OpenCommandPaletteDialog() {
         stackedThreadToast({
           type: "error",
           title: "Unable to add project",
-          description: addProjectCapability.reason ?? "This action is unavailable.",
+          description:
+            hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ??
+            "This action is unavailable.",
         }),
       );
       return;
@@ -1366,11 +1393,11 @@ function OpenCommandPaletteDialog() {
 
     void startAddProjectSourceSelection(environmentId);
   }, [
-    addProjectCapability.allowed,
-    addProjectCapability.reason,
+    addProjectCapability,
     addProjectEnvironmentGroups,
     addProjectEnvironmentOptions.length,
     defaultAddProjectEnvironmentId,
+    routedNodeLabel,
     startAddProjectSourceSelection,
   ]);
 
@@ -1497,7 +1524,7 @@ function OpenCommandPaletteDialog() {
       title: "New chat without a project",
       icon: <MessageCircleDashedIcon className={ITEM_ICON_CLASS} />,
       shortcutCommand: "chat.newWithoutProject",
-      ...(dispatchCapability.reason ? { description: dispatchCapability.reason } : {}),
+      ...unavailableDescription(dispatchCapability, routedNodeLabel),
       disabled: !dispatchCapability.allowed,
       run: async () => {
         await startNewChatFromContext(threadActionContext);
@@ -1547,7 +1574,7 @@ function OpenCommandPaletteDialog() {
         ),
         icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
         shortcutCommand: "chat.new",
-        ...(dispatchCapability.reason ? { description: dispatchCapability.reason } : {}),
+        ...unavailableDescription(dispatchCapability, routedNodeLabel),
         disabled: !dispatchCapability.allowed,
         run: async () => {
           await startNewThreadFromContext(threadActionContext);
@@ -1563,7 +1590,7 @@ function OpenCommandPaletteDialog() {
       icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
       addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
       groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
-      ...(dispatchCapability.reason ? { description: dispatchCapability.reason } : {}),
+      ...unavailableDescription(dispatchCapability, routedNodeLabel),
       disabled: !dispatchCapability.allowed,
     });
   }
@@ -1592,7 +1619,7 @@ function OpenCommandPaletteDialog() {
       "environment",
     ],
     title: "Add project",
-    ...(addProjectCapability.reason ? { description: addProjectCapability.reason } : {}),
+    ...unavailableDescription(addProjectCapability, routedNodeLabel),
     disabled: !addProjectCapability.allowed,
     icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
     keepOpen: true,
@@ -1607,7 +1634,7 @@ function OpenCommandPaletteDialog() {
       value: "action:statistics",
       searchTerms: ["statistics", "usage", "activity", "tokens", "cost", "history"],
       title: "Open statistics",
-      ...(statisticsCapability.reason ? { description: statisticsCapability.reason } : {}),
+      ...unavailableDescription(statisticsCapability, routedNodeLabel),
       disabled: !statisticsCapability.allowed,
       icon: <BarChart3Icon className={ITEM_ICON_CLASS} />,
       run: async () => {
@@ -1620,7 +1647,7 @@ function OpenCommandPaletteDialog() {
       value: "action:pull-requests",
       searchTerms: ["pull requests", "prs", "review", "merge", "stack", "checks", "code review"],
       title: "Open pull requests",
-      ...(pullRequestsCapability.reason ? { description: pullRequestsCapability.reason } : {}),
+      ...unavailableDescription(pullRequestsCapability, routedNodeLabel),
       disabled: !pullRequestsCapability.allowed,
       icon: <GitPullRequestIcon className={ITEM_ICON_CLASS} />,
       shortcutCommand: "pullRequests.open",
@@ -1640,7 +1667,7 @@ function OpenCommandPaletteDialog() {
         groups: [
           { value: "repositories", label: "Repositories", items: pullRequestRepositoryItems },
         ],
-        ...(pullRequestsCapability.reason ? { description: pullRequestsCapability.reason } : {}),
+        ...unavailableDescription(pullRequestsCapability, routedNodeLabel),
         disabled: !pullRequestsCapability.allowed,
       });
     }
@@ -1656,9 +1683,7 @@ function OpenCommandPaletteDialog() {
       ],
       title: "New pull request…",
       icon: <GitPullRequestCreateIcon className={ITEM_ICON_CLASS} />,
-      ...(createPullRequestCapability.reason
-        ? { description: createPullRequestCapability.reason }
-        : {}),
+      ...unavailableDescription(createPullRequestCapability, routedNodeLabel),
       disabled: !createPullRequestCapability.allowed,
     };
     if (onlyPullRequestRepository) {
@@ -1684,7 +1709,7 @@ function OpenCommandPaletteDialog() {
 
     // Viewers may look; the page itself makes its controls read-only.
     const projectsDisabled = {
-      ...(projectsCapability.reason ? { description: projectsCapability.reason } : {}),
+      ...unavailableDescription(projectsCapability, routedNodeLabel),
       disabled: !projectsCapability.allowed,
     };
     actionItems.push({
@@ -1756,7 +1781,7 @@ function OpenCommandPaletteDialog() {
           ...(currentProjectTitle ? [currentProjectTitle] : []),
         ],
         title: "Automations…",
-        ...(automationsCapability.reason ? { description: automationsCapability.reason } : {}),
+        ...unavailableDescription(automationsCapability, routedNodeLabel),
         disabled: !automationsCapability.allowed,
         icon: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
         run: async () => {

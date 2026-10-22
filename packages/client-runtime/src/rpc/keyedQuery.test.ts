@@ -4,7 +4,9 @@ import type { AppLifecycleEvent, AppLifecycleService } from "../platform/index.t
 
 import {
   createKeyedQueryRegistry,
+  createRetainedKeyTracker,
   defineKeyedQueryByInput,
+  KEY_SEP,
   type KeyedQueryRegistryConfig,
 } from "./keyedQuery.ts";
 
@@ -65,12 +67,13 @@ function createLifecycleHarness() {
 function makeBinding(
   registry: ReturnType<typeof makeRegistry>,
   run: (key: string) => Promise<string>,
+  staleTime = 60_000,
 ) {
   return defineKeyedQueryByInput(
     registry,
     {
       label: "family",
-      staleTime: 60_000,
+      staleTime,
       isEnabled: () => true,
       buildKey: (input: { readonly key: string }) => `${environmentId}\u0000${input.key}`,
       resolveEnvironmentId: () => environmentId,
@@ -164,6 +167,80 @@ describe("keyed query retention", () => {
   });
 });
 
+describe("retained key tracker", () => {
+  const otherEnvironmentId = EnvironmentId.make("environment-keyed-query-other");
+
+  function makeTracker(limit: number) {
+    const evicted: string[] = [];
+    const tracker = createRetainedKeyTracker({
+      limit,
+      onEvict: (compositeKey) => evicted.push(compositeKey),
+      environmentPrefix: (id) => `${id}${KEY_SEP}`,
+    });
+    return { tracker, evicted };
+  }
+
+  it("keeps released keys up to the limit and evicts the oldest beyond it", () => {
+    const { tracker, evicted } = makeTracker(2);
+
+    tracker.release("a");
+    tracker.release("b");
+    expect(evicted).toEqual([]);
+
+    tracker.release("c");
+    expect(evicted).toEqual(["a"]);
+    tracker.release("d");
+    expect(evicted).toEqual(["a", "b"]);
+  });
+
+  it("moves a re-released key to the back of the eviction order", () => {
+    const { tracker, evicted } = makeTracker(2);
+
+    tracker.release("a");
+    tracker.release("b");
+    tracker.release("a");
+    tracker.release("c");
+
+    expect(evicted).toEqual(["b"]);
+  });
+
+  it("never evicts a key that was retained again after its release", () => {
+    const { tracker, evicted } = makeTracker(1);
+
+    tracker.release("a");
+    tracker.retain("a");
+    tracker.release("b");
+    tracker.release("c");
+
+    expect(evicted).toEqual(["b"]);
+  });
+
+  it("forgets one environment's released keys without evicting them", () => {
+    const { tracker, evicted } = makeTracker(2);
+    const kept = `${otherEnvironmentId}${KEY_SEP}kept`;
+
+    tracker.release(`${environmentId}${KEY_SEP}one`);
+    tracker.release(kept);
+    tracker.forgetEnvironment(environmentId);
+    expect(evicted).toEqual([]);
+
+    // The forgotten key no longer counts toward the limit.
+    tracker.release(`${otherEnvironmentId}${KEY_SEP}second`);
+    tracker.release(`${otherEnvironmentId}${KEY_SEP}third`);
+    expect(evicted).toEqual([kept]);
+  });
+
+  it("drops every released key on clear", () => {
+    const { tracker, evicted } = makeTracker(1);
+
+    tracker.release("a");
+    tracker.clear();
+    tracker.release("b");
+
+    expect(evicted).toEqual([]);
+  });
+});
+
 describe("keyed query reconnect refresh", () => {
   it("retries an active failed query once across duplicate refresh requests", async () => {
     const registry = makeRegistry();
@@ -213,6 +290,135 @@ describe("keyed query reconnect refresh", () => {
     await stale;
 
     expect(binding.snapshotFor(input).data).toBe("current");
+    release();
+    registry.dispose();
+  });
+
+  async function settle(registry: ReturnType<typeof makeRegistry>, compositeKey: string) {
+    await registry.controllers.get(compositeKey)?.inFlightPromise;
+  }
+
+  it("does not re-run a read published after the environment's fence", async () => {
+    const registry = makeRegistry();
+    const run = vi.fn((key: string) => Promise.resolve(`value:${key}`));
+    const binding = makeBinding(registry, run, 0);
+    const input = { key: "current-epoch" };
+    const compositeKey = binding.targetKey(input) as string;
+
+    registry.fenceActiveEnvironment(environmentId);
+    const release = binding.watch(input);
+    await settle(registry, compositeKey);
+    await registry.refreshActiveEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(binding.snapshotFor(input).data).toBe("value:current-epoch");
+    release();
+    registry.dispose();
+  });
+
+  it("re-runs a read published before the fence", async () => {
+    const registry = makeRegistry();
+    const run = vi
+      .fn<(key: string) => Promise<string>>()
+      .mockResolvedValueOnce("before")
+      .mockResolvedValue("after");
+    const binding = makeBinding(registry, run, 0);
+    const input = { key: "before-fence" };
+    const compositeKey = binding.targetKey(input) as string;
+
+    const release = binding.watch(input);
+    await settle(registry, compositeKey);
+    registry.fenceActiveEnvironment(environmentId);
+    await registry.refreshActiveEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(binding.snapshotFor(input).data).toBe("after");
+    release();
+    registry.dispose();
+  });
+
+  it("re-runs after a local write", async () => {
+    const registry = makeRegistry();
+    const run = vi.fn(() => Promise.resolve("server"));
+    const binding = makeBinding(registry, run, 0);
+    const input = { key: "local-write" };
+    const compositeKey = binding.targetKey(input) as string;
+
+    registry.fenceActiveEnvironment(environmentId);
+    const release = binding.watch(input);
+    await settle(registry, compositeKey);
+    binding.updateData(input, () => "local");
+    await registry.refreshActiveEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(binding.snapshotFor(input).data).toBe("server");
+    release();
+    registry.dispose();
+  });
+
+  it("re-runs after an explicit refresh reset that did not complete", async () => {
+    const registry = makeRegistry();
+    const run = vi.fn(() => Promise.resolve("server"));
+    const binding = makeBinding(registry, run, 0);
+    const input = { key: "refresh-reset" };
+    const compositeKey = binding.targetKey(input) as string;
+
+    registry.fenceActiveEnvironment(environmentId);
+    const release = binding.watch(input);
+    await settle(registry, compositeKey);
+    // What an explicit refresh or an admission change does before its own read.
+    registry.controllers.get(compositeKey)!.lastFetchedAt = 0;
+    await registry.refreshActiveEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    release();
+    registry.dispose();
+  });
+
+  it("re-runs a read that failed in the current epoch", async () => {
+    const registry = makeRegistry();
+    const run = vi
+      .fn<(key: string) => Promise<string>>()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue("ready");
+    const binding = makeBinding(registry, run, 0);
+    const input = { key: "failed-current-epoch" };
+    const compositeKey = binding.targetKey(input) as string;
+
+    registry.fenceActiveEnvironment(environmentId);
+    const release = binding.watch(input);
+    await settle(registry, compositeKey);
+    expect(binding.snapshotFor(input).error?.message).toBe("offline");
+    await registry.refreshActiveEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(binding.snapshotFor(input)).toEqual({ data: "ready", fetching: false, error: null });
+    release();
+    registry.dispose();
+  });
+
+  it("re-runs a read whose later run in the current epoch failed", async () => {
+    const registry = makeRegistry();
+    const run = vi
+      .fn<(key: string) => Promise<string>>()
+      .mockResolvedValueOnce("first")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue("ready");
+    const binding = makeBinding(registry, run, 0);
+    const input = { key: "later-failure" };
+    const compositeKey = binding.targetKey(input) as string;
+
+    registry.fenceActiveEnvironment(environmentId);
+    const release = binding.watch(input);
+    await settle(registry, compositeKey);
+    // A poll that fails keeps the data it had and reports the error.
+    await registry.runController(registry.controllers.get(compositeKey)!);
+    expect(binding.snapshotFor(input)).toMatchObject({ data: "first" });
+    expect(binding.snapshotFor(input).error?.message).toBe("offline");
+    await registry.refreshActiveEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(binding.snapshotFor(input)).toEqual({ data: "ready", fetching: false, error: null });
     release();
     registry.dispose();
   });

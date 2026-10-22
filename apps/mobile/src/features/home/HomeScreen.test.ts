@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const navigationMock = vi.hoisted(() => ({ setOptions: vi.fn(), navigate: vi.fn() }));
 const dispatchMock = vi.hoisted(() => vi.fn());
+const directoryDemandMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -17,6 +18,7 @@ vi.mock("react", async (importOriginal) => {
     useEffect: () => undefined,
     useLayoutEffect: (effect: () => void) => effect(),
     useMemo: <T>(factory: () => T) => factory(),
+    useRef: <T>(initial: T) => ({ current: initial }),
     useReducer: <T>(
       _reducer: unknown,
       initial: T,
@@ -27,7 +29,10 @@ vi.mock("react", async (importOriginal) => {
     useSyncExternalStore: <T>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
   };
 });
-vi.mock("@react-navigation/native", () => ({ useNavigation: () => navigationMock }));
+vi.mock("@react-navigation/native", () => ({
+  useIsFocused: () => true,
+  useNavigation: () => navigationMock,
+}));
 vi.mock("@react-navigation/elements", () => ({ useHeaderHeight: () => 96 }));
 vi.mock("zustand/react/shallow", () => ({ useShallow: (selector: unknown) => selector }));
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#ededed" }));
@@ -46,6 +51,8 @@ vi.mock("./NeedsVerificationSection", () => ({
   NeedsVerificationSection: "NeedsVerificationSection",
 }));
 vi.mock("./useHomeEnvironments", () => ({ useHomeEnvironments: () => [] }));
+// The auto-settle hand-over writes through the connection layer; its decisions are the client runtime's.
+vi.mock("./useAutoSettleRuleHandOver", () => ({ useAutoSettleRuleHandOver: () => undefined }));
 // preferencesStore reaches expo-sqlite's KV store; it must stop at the module
 // boundary in the node test environment.
 vi.mock("../../state/preferencesStore", () => ({ usePreferences: () => ({}) }));
@@ -55,6 +62,9 @@ vi.mock("../connection/useConnectionController", () => ({
 vi.mock("../../hostedHub/state", () => ({
   useMobileHostedConnectionsStore: (selector: (state: Record<string, unknown>) => unknown) =>
     selector({ selectedNodes: [], deliveryUnknownEnvironmentIds: [] }),
+}));
+vi.mock("../../hostedHub/directoryDemand", () => ({
+  useDirectoryPresenceDemand: directoryDemandMock,
 }));
 vi.mock("../../state/homeData", () => ({
   useHomeWorkspaceData: () => ({ projects: [], worktrees: [], threads: [] }),
@@ -90,6 +100,12 @@ describe("C1 Home header", () => {
     navigationMock.setOptions.mockClear();
     navigationMock.navigate.mockClear();
     dispatchMock.mockClear();
+    directoryDemandMock.mockClear();
+  });
+
+  it("holds directory presence demand while focused", () => {
+    HomeScreen();
+    expect(directoryDemandMock).toHaveBeenCalledWith(true);
   });
 
   it("labels the initial workspace Inbox and registers both header sides", () => {

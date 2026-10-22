@@ -66,3 +66,23 @@ it("supports custom answers and explicit dismissal, and locks disconnected cards
   await expect.element(view.getByRole("button", { name: "Dismiss" })).toBeDisabled();
   await view.unmount();
 });
+it("says why a disabled card cannot be answered", async () => {
+  const onRespond = vi.fn(async () => {});
+  const reason = "Available when Studio Mac is connected";
+  const view = await render(
+    <OptionalQuestionCard input={input} disabled disabledReason={reason} onRespond={onRespond} />,
+  );
+  await view.getByText("Optional question · agent continues working").click();
+  await expect.element(view.getByText(reason)).toBeVisible();
+  await expect.element(view.getByRole("button", { name: "Dismiss" })).toBeDisabled();
+  await view.rerender(
+    <OptionalQuestionCard
+      input={input}
+      disabled={false}
+      disabledReason={null}
+      onRespond={onRespond}
+    />,
+  );
+  await expect.element(view.getByText(reason)).not.toBeInTheDocument();
+  await view.unmount();
+});

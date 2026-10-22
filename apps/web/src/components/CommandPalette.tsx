@@ -62,10 +62,13 @@ export function CommandPalette({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   // `pullRequests.open` and `projects.open` (no default keys) open their pages
   // wherever the user is.
+  // hosted-capability: routed node
   const pullRequestsAllowed = useHostedRpcCapability(
     WS_METHODS.sourceControlListChangeRequests,
+    null,
   ).allowed;
-  const projectsAllowed = useHostedRpcCapability(WS_METHODS.projectsList).allowed;
+  // hosted-capability: routed node
+  const projectsAllowed = useHostedRpcCapability(WS_METHODS.projectsList, null).allowed;
   const pageAllowedRef = useRef({ pullRequests: pullRequestsAllowed, projects: projectsAllowed });
   pageAllowedRef.current = { pullRequests: pullRequestsAllowed, projects: projectsAllowed };
   const terminalOpen = useTerminalStateStore((state) =>

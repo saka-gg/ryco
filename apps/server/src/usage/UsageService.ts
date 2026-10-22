@@ -228,8 +228,6 @@ export const UsageServiceTest = UsageService.of({
   readSummary: (input) => Effect.succeed(makeEmptyUsageSummary(input)),
 });
 
-export const UsageServiceTestLayer = Layer.succeed(UsageService, UsageServiceTest);
-
 function isValidCalendarDate(value: UsageCalendarDate): boolean {
   const timestamp = Date.parse(`${value}T00:00:00.000Z`);
   return !Number.isNaN(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value;

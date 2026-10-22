@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ScopedThreadRef } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS, type ScopedThreadRef } from "@ryco/contracts";
 const mocks = vi.hoisted(() => ({
   native: false,
+  capability: vi.fn(),
   connection: {},
   status: { phase: "connected", connectedAt: "first", disconnectedAt: null },
   load: vi.fn(),
@@ -21,12 +22,8 @@ vi.mock("../env", () => ({
   get isElectron() {
     return mocks.native;
   },
-  isHostedHubMode: () => false,
 }));
-vi.mock("../hostedHub/capabilities", () => ({
-  resolveHostedRpcCapability: () => ({ allowed: true }),
-}));
-vi.mock("../hostedHub/state", () => ({ useHostedHubStore: { getState: () => ({}) } }));
+vi.mock("../hostedHub/capabilities", () => ({ readHostedRpcCapability: mocks.capability }));
 vi.mock("../proposedPlan", () => ({ downloadPlanAsTextFile: mocks.download }));
 import { exportThreadMarkdown } from "./threadExport";
 const ref = { environmentId: "env", threadId: "thread" } as ScopedThreadRef;
@@ -44,6 +41,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.native = false;
   mocks.status.connectedAt = "first";
+  mocks.capability.mockReturnValue({ allowed: true });
   mocks.load.mockResolvedValue(thread);
   vi.stubGlobal("window", { desktopBridge: { saveThreadExport: mocks.save } });
 });
@@ -79,6 +77,31 @@ describe("export delivery", () => {
       return thread;
     });
     await expect(exportThreadMarkdown(ref, controller.signal)).rejects.toThrow();
+    expect(mocks.download).not.toHaveBeenCalled();
+  });
+  it("checks the capability of the thread's own environment", async () => {
+    const other = { environmentId: "other-env", threadId: "thread" } as ScopedThreadRef;
+    mocks.capability.mockImplementation((_method, environmentId) => ({
+      allowed: environmentId === "other-env",
+    }));
+    expect(await exportThreadMarkdown(other, new AbortController().signal)).toBe("downloaded");
+    expect(mocks.capability).toHaveBeenCalledWith(
+      ORCHESTRATION_WS_METHODS.getThreadWindow,
+      "other-env",
+    );
+    expect(mocks.capability).not.toHaveBeenCalledWith(
+      ORCHESTRATION_WS_METHODS.getThreadWindow,
+      "env",
+    );
+  });
+  it("refuses an export whose own environment is not currently allowed", async () => {
+    mocks.capability.mockImplementation((_method, environmentId) => ({
+      allowed: environmentId !== "env",
+    }));
+    await expect(exportThreadMarkdown(ref, new AbortController().signal)).rejects.toThrow(
+      "changed",
+    );
+    expect(mocks.load).not.toHaveBeenCalled();
     expect(mocks.download).not.toHaveBeenCalled();
   });
   it.each(["saved", "cancelled"])("returns desktop %s without browser fallback", async (status) => {

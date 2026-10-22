@@ -1,10 +1,9 @@
-import type { DesktopRuntimeInfo, DesktopUpdateChannel, DesktopUpdateState } from "@ryco/contracts";
+import type { DesktopUpdateChannel, DesktopUpdateState } from "@ryco/contracts";
 
 import { getCanRetryAfterDownloadFailure, nextStatusAfterDownloadFailure } from "./updateState.ts";
 
 export function createInitialDesktopUpdateState(
   currentVersion: string,
-  runtimeInfo: DesktopRuntimeInfo,
   channel: DesktopUpdateChannel,
 ): DesktopUpdateState {
   return {
@@ -12,9 +11,6 @@ export function createInitialDesktopUpdateState(
     status: "disabled",
     channel,
     currentVersion,
-    hostArch: runtimeInfo.hostArch,
-    appArch: runtimeInfo.appArch,
-    runningUnderArm64Translation: runtimeInfo.runningUnderArm64Translation,
     availableVersion: null,
     downloadedVersion: null,
     downloadPercent: null,
@@ -22,6 +18,7 @@ export function createInitialDesktopUpdateState(
     message: null,
     errorContext: null,
     canRetry: false,
+    remoteInstall: null,
   };
 }
 

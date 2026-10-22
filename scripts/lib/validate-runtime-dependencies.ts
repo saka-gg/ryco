@@ -4,6 +4,8 @@ import { isBuiltin } from "node:module";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { parse, type AnyNode } from "acorn";
 
+import type { BuildArch } from "./build-target-arch.ts";
+
 export interface RuntimeImport {
   readonly specifier: string;
   readonly kind: "import" | "require";
@@ -139,7 +141,7 @@ function isStagedFile(stageRoot: string, file: string): boolean {
 export function validateStagedNativePayloads(
   stageAppDir: string,
   platform: "darwin" | "linux" | "win32",
-  arch: "arm64" | "x64" | "universal",
+  arch: BuildArch,
 ): void {
   const stageRoot = realpathSync(stageAppDir);
   const modules = join(stageRoot, "node_modules");
@@ -150,45 +152,43 @@ export function validateStagedNativePayloads(
       );
     }
   };
-  for (const targetArch of arch === "universal" ? ["arm64", "x64"] : [arch]) {
-    for (const [dependency, names, directories] of [
-      [
-        "node-pty",
-        platform === "win32" ? ["conpty", "conpty_console_list"] : ["pty"],
-        ["build/Release", "build/Debug", `prebuilds/${platform}-${targetArch}`],
-      ],
-      ["@github/keytar", ["keytar"], ["build/Release", `prebuilds/${platform}-${targetArch}`]],
-    ] as const) {
-      for (const name of names) {
-        requirePayload(
-          `${dependency}/${name}.node`,
-          directories.map((directory) => join(modules, dependency, directory, `${name}.node`)),
-        );
-      }
+  for (const [dependency, names, directories] of [
+    [
+      "node-pty",
+      platform === "win32" ? ["conpty", "conpty_console_list"] : ["pty"],
+      ["build/Release", "build/Debug", `prebuilds/${platform}-${arch}`],
+    ],
+    ["@github/keytar", ["keytar"], ["build/Release", `prebuilds/${platform}-${arch}`]],
+  ] as const) {
+    for (const name of names) {
+      requirePayload(
+        `${dependency}/${name}.node`,
+        directories.map((directory) => join(modules, dependency, directory, `${name}.node`)),
+      );
     }
-    // sharp's platform package contains a JS entry shim as well as the actual addon.
-    // Checking require.resolve("sharp") or its shim alone misses a deleted native payload.
-    const sharpDir = join(modules, `@img/sharp-${platform}-${targetArch}`, "lib");
-    requirePayload(
-      `sharp/${targetArch}`,
-      existsSync(sharpDir)
-        ? readdirSync(sharpDir)
-            .filter((name) => name.endsWith(".node"))
-            .map((name) => resolve(sharpDir, name))
-        : [],
-    );
-    // Windows ships libvips DLLs alongside the addon rather than in a separate package.
-    const vipsDir =
-      platform === "win32"
-        ? sharpDir
-        : join(modules, `@img/sharp-libvips-${platform}-${targetArch}`, "lib");
-    requirePayload(
-      `sharp-libvips/${targetArch}`,
-      existsSync(vipsDir)
-        ? readdirSync(vipsDir)
-            .filter((name) => /^libvips.*(?:\.(?:dylib|dll)|\.so(?:\..*)?)$/u.test(name))
-            .map((name) => resolve(vipsDir, name))
-        : [],
-    );
   }
+  // sharp's platform package contains a JS entry shim as well as the actual addon.
+  // Checking require.resolve("sharp") or its shim alone misses a deleted native payload.
+  const sharpDir = join(modules, `@img/sharp-${platform}-${arch}`, "lib");
+  requirePayload(
+    `sharp/${arch}`,
+    existsSync(sharpDir)
+      ? readdirSync(sharpDir)
+          .filter((name) => name.endsWith(".node"))
+          .map((name) => resolve(sharpDir, name))
+      : [],
+  );
+  // Windows ships libvips DLLs alongside the addon rather than in a separate package.
+  const vipsDir =
+    platform === "win32"
+      ? sharpDir
+      : join(modules, `@img/sharp-libvips-${platform}-${arch}`, "lib");
+  requirePayload(
+    `sharp-libvips/${arch}`,
+    existsSync(vipsDir)
+      ? readdirSync(vipsDir)
+          .filter((name) => /^libvips.*(?:\.(?:dylib|dll)|\.so(?:\..*)?)$/u.test(name))
+          .map((name) => resolve(vipsDir, name))
+      : [],
+  );
 }

@@ -194,16 +194,25 @@ describe("restartCandidateShape + classifyRestartCandidate", () => {
     expect(classify(thread(), { resumable: false })).toEqual(skipped("not-resumable"));
   });
 
-  it("(k) reports disabled before every other reason", () => {
+  it("(k) reports disabled before every reason that needs IO or continuation", () => {
     expect(
-      classify(thread({ latestTurnState: "error", activities: pendingApproval }), {
+      classify(thread({ activities: pendingApproval }), {
         settingEnabled: false,
-        signals: { interruptRequested: true, unresolvedSteer: true, computerUse: true },
+        signals: { interruptRequested: false, unresolvedSteer: true, computerUse: true },
         pendingDelegatedReturn: true,
         usageLimited: true,
         resumable: false,
       }),
     ).toEqual(skipped("disabled"));
+  });
+
+  it("keeps a stopped or failed turn's own reason when continuation is off", () => {
+    expect(classify(thread({ latestTurnState: "interrupted" }), { settingEnabled: false })).toEqual(
+      skipped("user-interrupted"),
+    );
+    expect(classify(thread({ latestTurnState: "error" }), { settingEnabled: false })).toEqual(
+      skipped("turn-failed"),
+    );
   });
 
   it("never continues a thread one of whose checks could not be read", () => {
@@ -233,7 +242,7 @@ describe("restartCandidateShape + classifyRestartCandidate", () => {
         usageLimited: true,
       }),
     ).toEqual(skipped("pending-steer"));
-    expect(restartSkipNotice("check-failed")).toBeNull();
+    expect(restartSkipNotice("check-failed", "in-flight")).toBeNull();
   });
 
   it("(l) refuses to continue an automatic continuation again", () => {
@@ -510,18 +519,26 @@ describe("restartContinuationIds", () => {
 describe("restartSkipNotice", () => {
   it("stays silent for user-caused and closed-thread outcomes", () => {
     for (const reason of [
-      "disabled",
       "user-interrupted",
       "turn-failed",
       "thread-closed",
       "thread-changed",
       "turn-start-cancelled",
     ] as const) {
-      expect(restartSkipNotice(reason)).toBeNull();
+      expect(restartSkipNotice(reason, "in-flight")).toBeNull();
     }
-    expect(restartSkipNotice("expired")).toEqual({
+    expect(restartSkipNotice("expired", "in-flight")).toEqual({
       summary: "Not continued automatically: Ryco was down for more than 30 minutes.",
       tone: "info",
     });
+  });
+
+  it("explains an interrupted turn when continuation is off", () => {
+    expect(restartSkipNotice("disabled", "in-flight")).toEqual({
+      summary: "Interrupted by a server restart. Send a message to continue.",
+      tone: "info",
+    });
+    // The stopped-work note already explains a settled thread's background work.
+    expect(restartSkipNotice("disabled", "background-only")).toBeNull();
   });
 });

@@ -48,7 +48,8 @@ export interface WorkspaceMachineCatalogEntry {
   readonly capabilities: {
     readonly repositoryIdentity: boolean;
     readonly nativeClientRequired: boolean;
-    readonly threadSettlement: boolean;
+    /** Absent while the directory does not state it: unknown, not unsupported. */
+    readonly threadSettlement?: boolean;
     readonly threadSnooze?: boolean;
   };
   readonly clientTier: WorkspaceClientTier;

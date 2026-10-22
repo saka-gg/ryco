@@ -85,6 +85,87 @@ describe("resolveInboxStateLine", () => {
       resolveInboxStateLine(row({ state: "reconnecting", statusLabel: "Reconnecting" })),
     ).toEqual({ kind: "status", text: "Reconnecting" });
   });
+
+  it("says Waiting for a thread whose machine waits for a free connection slot", () => {
+    const waiting = row({ state: "reconnecting", statusLabel: "Waiting" });
+    expect(resolveInboxStateLine(waiting)).toEqual({ kind: "status", text: "Waiting" });
+    expect(inboxGlyphLabel(waiting, false)).toBe("Waiting");
+    expect(resolveInboxGlyph(waiting, false)).toBe("connecting");
+  });
+});
+
+describe("formatInboxDayTime", () => {
+  const OPTIONS: Intl.DateTimeFormatOptions = {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  };
+  const moments = [
+    "2026-10-02T00:00:00.000Z",
+    "2026-10-02T14:26:00.000Z",
+    "2026-10-02T23:59:00.000Z",
+    // Daylight saving transitions in the United States and the European Union.
+    "2026-03-08T06:59:00.000Z",
+    "2026-03-08T07:00:00.000Z",
+    "2026-03-29T00:59:00.000Z",
+    "2026-03-29T01:00:00.000Z",
+    "2026-10-25T00:59:00.000Z",
+    "2026-10-25T01:00:00.000Z",
+    "2026-11-01T05:59:00.000Z",
+    "2026-11-01T06:00:00.000Z",
+  ];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("reads like toLocaleString with the same options", () => {
+    for (const moment of moments) {
+      expect(formatInboxDayTime(moment)).toBe(new Date(moment).toLocaleString(undefined, OPTIONS));
+    }
+  });
+
+  it("does not throw on an unreadable date", () => {
+    expect(formatInboxDayTime("not a date")).toBe(
+      new Date("not a date").toLocaleString(undefined, OPTIONS),
+    );
+  });
+
+  it("builds one formatter for many rows", () => {
+    formatInboxDayTime(moments[0]!);
+    const constructed = vi.spyOn(Intl, "DateTimeFormat");
+    for (let index = 0; index < 200; index += 1) {
+      formatInboxDayTime(moments[index % moments.length]!);
+    }
+    expect(constructed).not.toHaveBeenCalled();
+  });
+
+  it("follows a changed default locale after the next locale check", () => {
+    // Only the clock: faked timers would also wrap `Intl.DateTimeFormat`.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-02T14:32:00.000Z"));
+    const RealDateTimeFormat = Intl.DateTimeFormat;
+    let defaultLocale = "en-US";
+    vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function (
+      this: unknown,
+      locales?: Intl.LocalesArgument,
+      options?: Intl.DateTimeFormatOptions,
+    ) {
+      return new RealDateTimeFormat(locales ?? defaultLocale, options);
+    } as never);
+    const at = "2026-10-02T14:26:00.000Z";
+    const inLocale = (locale: string) => new Date(at).toLocaleString(locale, OPTIONS);
+
+    vi.advanceTimersByTime(2_000);
+    expect(formatInboxDayTime(at)).toBe(inLocale("en-US"));
+
+    defaultLocale = "de-DE";
+    expect(formatInboxDayTime(at)).toBe(inLocale("en-US"));
+    vi.advanceTimersByTime(2_000);
+    expect(formatInboxDayTime(at)).toBe(inLocale("de-DE"));
+    expect(inLocale("de-DE")).not.toBe(inLocale("en-US"));
+  });
 });
 
 describe("formatInboxAge", () => {

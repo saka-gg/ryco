@@ -387,6 +387,8 @@ export type HostedRelayFailureKind =
   | "replacement"
   | "rate-limited"
   | "slow-consumer"
+  /** The Hub ended this channel's transfer budget; reconnect with a fresh channel. */
+  | "budget"
   | "protocol"
   | "internal";
 

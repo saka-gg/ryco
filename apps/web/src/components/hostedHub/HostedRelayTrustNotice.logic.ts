@@ -56,11 +56,12 @@
 // AND IT MAY NOT POINT AT WHAT THE SURFACE UNDER IT DOES NOT DRAW
 // ─────────────────────────────────────────────────────────────────────────────
 // This notice mounts at five sites across BOTH presentation tiers, and §13.5's
-// `WebSAS` renders at exactly one of them (the desktop node menu; `AGENTS.md`
-// freezes the web phone tier, so the phone connection sheet draws none). Copy
-// here therefore states the ceiling without presupposing a comparison value on
-// the page: a sentence about "the same session code" read identically on that
-// sheet, telling a reader they held a check they did not have. The pointer at
+// `WebSAS` renders at none of them: it is drawn in the desktop thread
+// connection popover, which carries no notice, and `AGENTS.md` freezes the web
+// phone tier, so the phone connection sheet draws none. Copy here therefore
+// states the ceiling without presupposing a comparison value on the page: a
+// sentence about "the same session code" read identically on that sheet,
+// telling a reader they held a check they did not have. The pointer at
 // the comparison lives WITH the comparison, in `HostedE2eeVerification.logic.ts`,
 // which by construction renders only where the characters do.
 // `HostedRelayTrustNotice.logic.test.ts` scans these bodies for that reference so
@@ -151,6 +152,47 @@ const HOSTED_RELAY_TRUST_DISCLOSURES = {
     body: "This channel fell back to legacy plaintext. This tab cannot tell whether your node offered no encrypted channel or something on the path removed the offer, so treat everything sent over it as readable by the Hub, which is expected not to log or keep it. Only your node can refuse plaintext for browsers.",
   },
 } as const satisfies Record<WebHostedE2eeChannelStatus, HostedRelayTrustDisclosure>;
+
+/**
+ * How much a channel state protects, weakest first. A `Record` over every
+ * state but `unavailable`, so a state added to the tier cannot be left
+ * unranked: §12.2's fallback carries plaintext, a negotiating channel has
+ * released nothing yet, and only `web-unsigned` encrypted anything.
+ */
+const HOSTED_RELAY_CHANNEL_STRENGTH = {
+  legacy: 0,
+  negotiating: 1,
+  "web-unsigned": 2,
+} as const satisfies Record<Exclude<WebHostedE2eeChannelStatus, "unavailable">, number>;
+
+/**
+ * The channel state the notice discloses: the displayed channel's — the
+ * selected node's — while it has one.
+ *
+ * Without one, `unavailable`'s sentence says no node channel is open in this
+ * tab, and that is only true while none is. The selection cursor can sit on a
+ * node with no channel while other nodes' channels stay open (a warm set, home
+ * discovery, a fresh tab before anything is selected), so the notice then
+ * discloses the weakest channel this tab holds: never a stronger claim than
+ * the weakest configuration in use (§2.2), and never "none" while one is open.
+ */
+export function hostedRelayTrustDisclosureStatus(
+  displayed: WebHostedE2eeChannelStatus,
+  openChannels: ReadonlyArray<WebHostedE2eeChannelStatus>,
+): WebHostedE2eeChannelStatus {
+  if (displayed !== "unavailable") return displayed;
+  let weakest: Exclude<WebHostedE2eeChannelStatus, "unavailable"> | null = null;
+  for (const status of openChannels) {
+    if (status === "unavailable") continue;
+    if (
+      weakest === null ||
+      HOSTED_RELAY_CHANNEL_STRENGTH[status] < HOSTED_RELAY_CHANNEL_STRENGTH[weakest]
+    ) {
+      weakest = status;
+    }
+  }
+  return weakest ?? "unavailable";
+}
 
 /** The claim this tier is entitled to make about the channel it is on. */
 export function hostedRelayTrustDisclosure(

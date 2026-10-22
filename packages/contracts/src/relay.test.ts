@@ -154,6 +154,18 @@ describe("relay schemas", () => {
     expect("futureLimit" in decoded.limits).toBe(false);
   });
 
+  it("carries an optional, bounded node version on the node handshake", () => {
+    const nodeAuth = validFrames[0]!;
+    expect(decodeFrame({ ...nodeAuth, clientVersion: "0.1.33" })).toMatchObject({
+      peer: "node",
+      clientVersion: "0.1.33",
+    });
+    expect("clientVersion" in decodeFrame(nodeAuth)).toBe(false);
+    for (const clientVersion of ["", " 0.1.33", "x".repeat(65), 33]) {
+      expect(() => decodeFrame({ ...nodeAuth, clientVersion })).toThrow();
+    }
+  });
+
   it("rejects missing and unknown discriminants", () => {
     expect(() => decodeFrame({ ...version })).toThrow();
     expect(() => decodeFrame({ type: "future.frame", ...version })).toThrow();

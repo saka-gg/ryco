@@ -1,5 +1,10 @@
 import "../../index.css";
-import { AgentControlProposal, EnvironmentId, ThreadId } from "@ryco/contracts";
+import {
+  AGENT_CONTROL_WS_METHODS,
+  AgentControlProposal,
+  EnvironmentId,
+  ThreadId,
+} from "@ryco/contracts";
 import { useAgentControlStore } from "@ryco/client-runtime/state/agentControl";
 import { Schema } from "effect";
 import { afterEach, expect, it, vi } from "vite-plus/test";
@@ -10,6 +15,10 @@ import { AgentControlApprovals } from "./AgentControlApprovals";
 const fixture = vi.hoisted(() => ({
   acceptProposal: vi.fn().mockResolvedValue(undefined),
   rejectProposal: vi.fn().mockResolvedValue(undefined),
+  capability: vi.fn((_method: string, _environmentId?: string | null) => ({
+    allowed: true,
+    reason: null,
+  })),
 }));
 vi.mock("../../environmentApi", () => ({
   readEnvironmentApi: () => ({ agentControl: fixture }),
@@ -21,8 +30,15 @@ vi.mock("../../environments/runtime", () => ({
   useSavedEnvironmentRuntimeStore: (selector: (state: { byId: object }) => unknown) =>
     selector({ byId: {} }),
 }));
-vi.mock("../../hostedHub/capabilities", () => ({
-  useHostedRpcCapability: () => ({ allowed: true, reason: null }),
+vi.mock("../../hostedHub/capabilities", () => ({ useHostedRpcCapability: fixture.capability }));
+// Node labels come from the hosted directory; the decisions only need the copy rule.
+vi.mock("../../hostedHub/state", () => ({
+  useHostedHubStore: (selector: (state: object) => unknown) =>
+    selector({ nodes: [], selectedNode: null }),
+}));
+vi.mock("../../hostedHub/switchTarget", () => ({
+  hostedCapabilityCopy: (capability: { readonly reason: string | null }) => capability.reason,
+  hostedSwitchTargetLabel: () => null,
 }));
 vi.mock("../../store", () => ({
   useStore: () => undefined,
@@ -91,6 +107,11 @@ it("keeps external approvals actionable and other threads' requests out of the b
   });
   const view = () => <AgentControlApprovals environmentId={environmentId} />;
   const screen = await render(view());
+  // The decision is gated by the role on the environment the proposal belongs to.
+  expect(fixture.capability).toHaveBeenCalledWith(
+    AGENT_CONTROL_WS_METHODS.acceptProposal,
+    environmentId,
+  );
   await expect
     .element(screen.getByRole("region", { name: "External Agent Control approval requests" }))
     .toBeVisible();

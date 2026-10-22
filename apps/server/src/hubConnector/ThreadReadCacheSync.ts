@@ -1,4 +1,4 @@
-import type { OrchestrationEvent } from "@ryco/contracts";
+import type { OrchestrationEvent, OrchestrationShellSettlementPolicy } from "@ryco/contracts";
 import { Effect, Option, Schema } from "effect";
 import { ThreadReadCacheBeginResponse } from "@ryco/contracts/thread-read-cache";
 import { RELAY_PROTOCOL_MAJOR, RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
@@ -29,6 +29,8 @@ export function startThreadReadCacheSync(deps: {
   readonly identity: HubIdentityRuntimeShape;
   readonly connector: HubConnector;
   readonly query: ProjectionSnapshotQueryShape;
+  /** The node's settlement rule, which the published shell carries for cold clients. */
+  readonly readSettlementPolicy?: () => Promise<OrchestrationShellSettlementPolicy | undefined>;
   readonly reportFailure: () => void;
 }) {
   let stopped = false;
@@ -125,7 +127,11 @@ export function startThreadReadCacheSync(deps: {
     readSequence: async () =>
       (await Effect.runPromise(deps.query.getSnapshotSequence(), { signal: abort.signal }))
         .snapshotSequence,
-    readShell: () => Effect.runPromise(shellMirror.read(), { signal: abort.signal }),
+    readShell: async () => {
+      const shell = await Effect.runPromise(shellMirror.read(), { signal: abort.signal });
+      const settlementPolicy = await deps.readSettlementPolicy?.();
+      return settlementPolicy === undefined ? shell : { ...shell, settlementPolicy };
+    },
     readThread: async (threadId) => {
       // Never load the full history merely to populate a bounded cloud preview.
       if (!deps.query.getThreadWindow) return null;
@@ -216,6 +222,13 @@ export function startThreadReadCacheSync(deps: {
     // A domain-event storm must never bypass the failed upload's retry budget.
     if (inFlight === null && failures === 0) schedule(changeDelay());
   };
+  /** The node's settlement rule changed: the published shell must carry the new one. */
+  const notifySettlementPolicyChanged = () => {
+    if (stopped) return;
+    publisher.invalidateShell();
+    changed = true;
+    if (inFlight === null && failures === 0) schedule(changeDelay());
+  };
   schedule(THREAD_READ_CACHE_PUBLISH_INTERVAL_MS);
   const stop = async () => {
     stopped = true;
@@ -224,5 +237,5 @@ export function startThreadReadCacheSync(deps: {
     if (timer !== undefined) clearTimeout(timer);
     await inFlight;
   };
-  return Object.assign(stop, { notifyChanged });
+  return Object.assign(stop, { notifyChanged, notifySettlementPolicyChanged });
 }

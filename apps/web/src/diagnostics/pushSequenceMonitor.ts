@@ -31,7 +31,6 @@ interface PushSequenceMonitorState {
   readonly byEnvironment: Record<EnvironmentId, PushSequenceEnvironmentState>;
   readonly recordSnapshot: (environmentId: EnvironmentId, snapshotSequence: number) => void;
   readonly recordEvent: (environmentId: EnvironmentId, sequence: number) => void;
-  readonly reset: () => void;
 }
 
 const DEFAULT_ENVIRONMENT_STATE: PushSequenceEnvironmentState = Object.freeze({
@@ -122,7 +121,6 @@ export const usePushSequenceMonitor = create<PushSequenceMonitorState>()((set) =
         [environmentId]: reduceEvent(state.byEnvironment[environmentId], sequence, nowIso()),
       },
     })),
-  reset: () => set({ byEnvironment: {} }),
 }));
 
 /**
@@ -150,15 +148,4 @@ export function recordPushSequenceEvent(environmentId: EnvironmentId, sequence: 
   } catch {
     // Diagnostics is best-effort; never disturb stream processing.
   }
-}
-
-export function getPushSequenceMonitorSnapshot(): Record<
-  EnvironmentId,
-  PushSequenceEnvironmentState
-> {
-  return usePushSequenceMonitor.getState().byEnvironment;
-}
-
-export function resetPushSequenceMonitorForTests(): void {
-  usePushSequenceMonitor.getState().reset();
 }

@@ -1,4 +1,9 @@
-import type { EnvironmentApi, EnvironmentId, LocalTask } from "@ryco/contracts";
+import type {
+  EnvironmentApi,
+  EnvironmentId,
+  LocalTask,
+  LocalTaskChangePosition,
+} from "@ryco/contracts";
 
 import { createSingleFlightReader, type SingleFlightReader } from "../singleFlightReader.ts";
 import { delegatedThreadSignature } from "./logic.ts";
@@ -92,12 +97,19 @@ export function requireLocalTaskMethod<K extends keyof LocalTasksApi>(
  * Every task of the node, page by page. `coveredThrough` is the last id read
  * when the read stopped early (see `LOCAL_TASKS_MAX_PAGES`); the node lists
  * ids in ascending order, so the tasks it did not reach sort after it.
+ * `position` is the node's change position the read holds every change up
+ * to: the first page's, since every later page is queried after it, or null
+ * when a page carries none (an older node) or another feed's (the node
+ * restarted while paging).
  */
-async function readAllLocalTasks(
-  list: NonNullable<LocalTasksApi["listLocalTasks"]>,
-): Promise<{ readonly tasks: LocalTask[]; readonly coveredThrough: string | null }> {
+async function readAllLocalTasks(list: NonNullable<LocalTasksApi["listLocalTasks"]>): Promise<{
+  readonly tasks: LocalTask[];
+  readonly coveredThrough: string | null;
+  readonly position: LocalTaskChangePosition | null;
+}> {
   const tasks: LocalTask[] = [];
   let afterId: string | undefined;
+  let position: LocalTaskChangePosition | null = null;
   for (let page = 1; ; page += 1) {
     const result = await list(
       afterId === undefined
@@ -105,11 +117,21 @@ async function readAllLocalTasks(
         : { limit: LOCAL_TASKS_PAGE_SIZE, afterId },
     );
     tasks.push(...result.tasks);
-    if (result.nextCursor === null) return { tasks, coveredThrough: null };
+    if (page === 1) position = result.position ?? null;
+    else if (result.position?.feed !== position?.feed) position = null;
+    if (result.nextCursor === null) return { tasks, coveredThrough: null, position };
     if (page >= LOCAL_TASKS_MAX_PAGES || (afterId !== undefined && result.nextCursor <= afterId))
-      return { tasks, coveredThrough: result.nextCursor };
+      return { tasks, coveredThrough: result.nextCursor, position };
     afterId = result.nextCursor;
   }
+}
+
+/** Whether a read stamped at `read` holds every change a read-all word at `word` stands for. */
+function positionCovers(
+  read: LocalTaskChangePosition | null,
+  word: LocalTaskChangePosition,
+): boolean {
+  return read !== null && read.feed === word.feed && read.sequence >= word.sequence;
 }
 
 export interface LocalTasksRefreshOptions {
@@ -159,17 +181,32 @@ interface RetainedTasks {
   threadWatch: ThreadWatch | null;
   /** The node's change stream on the current connection, while it has one. */
   stopChanges: (() => void) | null;
+  /** The change position the last landed read holds every change up to, when known. */
+  covered: LocalTaskChangePosition | null;
+  /** A read is out on the current reader. */
+  reading: boolean;
+  /** A read-all word that came while a read was out; decided once that read lands. */
+  deferredReadAll: LocalTaskChangePosition | null;
 }
 
 const retained = new Map<EnvironmentId, RetainedTasks>();
 
+interface ReaderHooks {
+  /** A read goes out. */
+  readonly started: () => void;
+  /** A read landed and was applied, holding every change up to `position` when known. */
+  readonly landed: (position: LocalTaskChangePosition | null) => void;
+  readonly failed: () => void;
+}
+
 function startReader(
   environmentId: EnvironmentId,
   api: LocalTasksApi,
-  afterRead: () => void,
+  hooks: ReaderHooks,
 ): SingleFlightReader {
   return createSingleFlightReader({
     read: async () => {
+      hooks.started();
       const list = requireLocalTaskMethod(api, "listLocalTasks");
       // Recorded before the first page goes out: anything applied after
       // this is newer than the read.
@@ -179,13 +216,13 @@ function startReader(
       ).writeEpoch;
       return { ...(await readAllLocalTasks(list)), since };
     },
-    onValue: ({ tasks, coveredThrough, since }) => {
+    onValue: ({ tasks, coveredThrough, position, since }) => {
       useLocalTasksStore
         .getState()
         .applyList(environmentId, tasks, { since, readAt: Date.now(), coveredThrough });
-      afterRead();
+      hooks.landed(position);
     },
-    onError: (cause) =>
+    onError: (cause) => {
       useLocalTasksStore
         .getState()
         .setError(
@@ -195,8 +232,44 @@ function startReader(
             : isAuthRpcError(cause)
               ? LOCAL_TASKS_FORBIDDEN_ERROR
               : LOCAL_TASKS_READ_ERROR,
-        ),
+        );
+      hooks.failed();
+    },
   });
+}
+
+/**
+ * What a retained environment's reader tells the sync about its reads: what
+ * the last landed read covers, and whether a read is out. A read-all word
+ * that waited on the read is decided once it lands, and read anyway when it
+ * failed. `entryOf` is read on every call, so the hooks can be made before
+ * the entry they belong to.
+ */
+function readerHooks(environmentId: EnvironmentId, entryOf: () => RetainedTasks): ReaderHooks {
+  const takeDeferred = (held: RetainedTasks) => {
+    const word = held.deferredReadAll;
+    held.deferredReadAll = null;
+    return word;
+  };
+  return {
+    started: () => {
+      entryOf().reading = true;
+    },
+    landed: (position) => {
+      const held = entryOf();
+      held.reading = false;
+      held.covered = position;
+      held.threadWatch?.rebase();
+      const word = takeDeferred(held);
+      // Read from inside the landing read: the reader reads once more after it.
+      if (word !== null && !positionCovers(position, word)) void refreshEntry(environmentId, held);
+    },
+    failed: () => {
+      const held = entryOf();
+      held.reading = false;
+      if (takeDeferred(held) !== null) void refreshEntry(environmentId, held);
+    },
+  };
 }
 
 function refreshEntry(
@@ -255,7 +328,8 @@ function watchThreads(
 /**
  * Follows the node's task changes (another client, an agent through Agent
  * Control): each burst reads the tasks it names, and a task that cannot be
- * read (deleted) or a large burst reads the whole list. `isCurrent` says
+ * read (deleted) or a large burst reads the whole list. The word to read
+ * every task goes to `readAll` with the position it covers. `isCurrent` says
  * whether the read still belongs to the retained connection.
  */
 function watchChanges(
@@ -263,6 +337,7 @@ function watchChanges(
   api: LocalTasksApi,
   isCurrent: () => boolean,
   refresh: () => void,
+  readAll: (position: LocalTaskChangePosition | undefined) => void,
 ): (() => void) | null {
   const subscribe = api.subscribeLocalTaskChanges;
   if (!subscribe) return null;
@@ -299,9 +374,10 @@ function watchChanges(
   };
   const unsubscribe = subscribe((change) => {
     if (!isCurrent()) return;
-    // The stream's first word, once it listens (again, after a reconnect): read everything.
+    // The stream's first word, once it listens (again, after a reconnect), or in place of
+    // changes it fell too far behind on: read everything a read already out or landed misses.
     if (change.taskId === undefined) {
-      refresh();
+      readAll(change.position);
       return;
     }
     if (change.deleted) {
@@ -326,10 +402,12 @@ function watchChanges(
  * `api` swaps the reader for all of them and reads again. The last release
  * stops at the end of the task, so an effect re-running hands the sync over
  * instead of dropping the tasks. Changes the node reports on its change stream
- * are read as they come (`watchChanges`). The first retainer's `triggers` and
- * `threadActivity` are installed once and re-read once per signal. A node
- * without `listLocalTasks` leaves the environment in `error` with
- * `LOCAL_TASKS_UNSUPPORTED_ERROR`. Returns the (idempotent) release.
+ * are read as they come (`watchChanges`); the stream's word to read every task
+ * reads the list only when no read already covers its position (one that
+ * landed, or the one out, decided once it lands). The first retainer's
+ * `triggers` and `threadActivity` are installed once and re-read once per
+ * signal. A node without `listLocalTasks` leaves the environment in `error`
+ * with `LOCAL_TASKS_UNSUPPORTED_ERROR`. Returns the (idempotent) release.
  */
 export function retainLocalTasks(
   api: LocalTasksApi,
@@ -344,18 +422,33 @@ export function retainLocalTasks(
     const created: RetainedTasks = {
       count: 0,
       api,
-      reader: startReader(environmentId, api, () => created.threadWatch?.rebase()),
+      reader: startReader(
+        environmentId,
+        api,
+        readerHooks(environmentId, () => created),
+      ),
       teardownScheduled: false,
       stopTriggers: null,
       threadWatch: null,
       stopChanges: null,
+      covered: null,
+      reading: false,
+      deferredReadAll: null,
     };
     entry = created;
     retained.set(environmentId, created);
   } else if (fresh) {
     const swapped = entry;
     swapped.reader.stop();
-    swapped.reader = startReader(environmentId, api, () => swapped.threadWatch?.rebase());
+    // What the old connection's reads covered says nothing about the new one's.
+    swapped.covered = null;
+    swapped.reading = false;
+    swapped.deferredReadAll = null;
+    swapped.reader = startReader(
+      environmentId,
+      api,
+      readerHooks(environmentId, () => swapped),
+    );
   }
   entry.api = api;
   entry.count += 1;
@@ -363,6 +456,18 @@ export function retainLocalTasks(
 
   const refresh = (refreshOptions?: LocalTasksRefreshOptions) =>
     void refreshEntry(environmentId, held, refreshOptions);
+  const readAll = (position: LocalTaskChangePosition | undefined) => {
+    if (position !== undefined) {
+      // A read stamped at or past the word already holds what it stands for.
+      if (positionCovers(held.covered, position)) return;
+      // The read out may: decide once it lands.
+      if (held.reading) {
+        held.deferredReadAll = position;
+        return;
+      }
+    }
+    refresh();
+  };
   if (fresh) {
     held.stopChanges?.();
     const listing = api.listLocalTasks;
@@ -371,6 +476,7 @@ export function retainLocalTasks(
       api,
       () => retained.get(environmentId) === held && held.api.listLocalTasks === listing,
       () => refresh(),
+      readAll,
     );
   }
   if (options.triggers && held.stopTriggers === null) held.stopTriggers = options.triggers(refresh);

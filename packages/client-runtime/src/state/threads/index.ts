@@ -1,5 +1,6 @@
 export * from "./runtime.ts";
 export * from "./readCache.ts";
+export * from "./threadContentCachePolicy.ts";
 export * from "./store.ts";
 export * from "./eventBatching.ts";
 export * from "./storeSelectors.ts";
@@ -15,6 +16,7 @@ export * from "./checkpointSummary.ts";
 export * from "./waitForThreadShell.ts";
 export * from "./types.ts";
 export * from "./threadActivityStatus.ts";
+export * from "./threadFailure.ts";
 
 export * from "./sidebarUndo.ts";
 export * from "./threadNotifications.ts";

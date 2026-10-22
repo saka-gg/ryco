@@ -1,20 +1,25 @@
 import {
   EnvironmentId,
+  EventId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   WorktreeId,
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
+  type OrchestrationThreadWindowSnapshot,
 } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deepFreeze } from "../../../test/deepFreeze.ts";
+import { scopeThreadRef } from "../../scoped.ts";
 import { createEnvironmentEventBatcher } from "./eventBatching.ts";
 import {
   applyOrchestrationEvent,
   applyOrchestrationEvents,
   applyShellEvent,
+  demoteEnvironmentStateToCachedSnapshot,
   registerThreadStoreMutationBarrier,
   selectDelegatedChildThreadsForThreadRef,
   selectProjectsAcrossEnvironments,
@@ -23,8 +28,10 @@ import {
   selectSidebarWorktreesAcrossEnvironments,
   selectSidebarWorktreesForProjectRef,
   selectSidebarWorktreesForProjectRefs,
+  selectThreadByRef,
   selectThreadShellsAcrossEnvironments,
   syncServerShellSnapshot,
+  syncServerThreadWindow,
   useStore,
   type AppState,
 } from "./store.ts";
@@ -736,5 +743,319 @@ describe("batch-owned containers", () => {
       environmentOf(published).sidebarThreadSummaryById,
     );
     expect(environmentOf(published).threadShellById[ThreadId.make("a")]?.title).toBe("Thread a");
+  });
+});
+
+describe("thread window structural sharing", () => {
+  const windowThreadId = ThreadId.make("window-thread");
+  const ref = scopeThreadRef(environmentId, windowThreadId);
+  const windowSize = 150;
+  const at = (second: number) => new Date(Date.UTC(2026, 9, 1, 0, 0, second)).toISOString();
+
+  function windowMessages() {
+    return Array.from({ length: windowSize }, (_, index) => ({
+      id: MessageId.make(`window-message-${index}`),
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      text: `Message ${index}`,
+      turnId: null,
+      streaming: false,
+      createdAt: at(index),
+      updatedAt: at(index),
+    }));
+  }
+
+  function windowActivities() {
+    return Array.from({ length: windowSize }, (_, index) => ({
+      id: EventId.make(`window-activity-${index}`),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: `Tool ${index}`,
+      payload: { index, detail: { nested: [index] } },
+      turnId: null,
+      sequence: index,
+      createdAt: at(index),
+    }));
+  }
+
+  // Every call decodes fresh objects, like a window arriving over the wire again.
+  function makeWindow(
+    content: {
+      messages?: ReturnType<typeof windowMessages>;
+      activities?: ReturnType<typeof windowActivities>;
+    } = {},
+  ): OrchestrationThreadWindowSnapshot {
+    const historyPage = { oldestCursor: null, newestCursor: null, hasMoreBefore: false };
+    return {
+      snapshotSequence: 10,
+      thread: {
+        id: windowThreadId,
+        projectId,
+        title: "Window thread",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        worktreeId: null,
+        manualStatusBucket: null,
+        manualPosition: 0,
+        latestTurn: null,
+        createdAt: at(0),
+        updatedAt: at(0),
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        deletedAt: null,
+        messages: content.messages ?? windowMessages(),
+        proposedPlans: [
+          {
+            id: "window-plan",
+            turnId: null,
+            planMarkdown: "# Plan",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: at(1),
+            updatedAt: at(1),
+          },
+        ],
+        activities: content.activities ?? windowActivities(),
+        checkpoints: [
+          {
+            turnId: "window-turn",
+            checkpointTurnCount: 1,
+            checkpointRef: "window-ref",
+            status: "ready",
+            files: [{ path: "src/a.ts", kind: "added", additions: 3, deletions: 0 }],
+            assistantMessageId: null,
+            completedAt: at(2),
+          },
+        ],
+        session: null,
+      },
+      history: {
+        messages: historyPage,
+        proposedPlans: historyPage,
+        activities: historyPage,
+        checkpoints: historyPage,
+      },
+    } as unknown as OrchestrationThreadWindowSnapshot;
+  }
+
+  const applyWindow = (state: AppState, window = makeWindow()) =>
+    syncServerThreadWindow(state, window, environmentId);
+
+  const sliceRecordKeys = [
+    "messageIdsByThreadId",
+    "messageByThreadId",
+    "activityIdsByThreadId",
+    "activityByThreadId",
+    "proposedPlanIdsByThreadId",
+    "proposedPlanByThreadId",
+    "turnDiffIdsByThreadId",
+    "turnDiffSummaryByThreadId",
+  ] as const;
+
+  it("keeps every message, activity and container when an identical window is re-applied", () => {
+    const first = deepFreeze(applyWindow(emptyState));
+    const second = applyWindow(first);
+    const before = environmentOf(first);
+    const after = environmentOf(second);
+
+    expect(before.messageIdsByThreadId[windowThreadId]).toHaveLength(windowSize);
+    expect(before.activityIdsByThreadId[windowThreadId]).toHaveLength(windowSize);
+    for (const key of sliceRecordKeys) {
+      expect(after[key]).toBe(before[key]);
+      expect(after[key][windowThreadId]).toBe(before[key][windowThreadId]);
+    }
+    expect(after.threadHistoryByThreadId).toBe(before.threadHistoryByThreadId);
+    expect(after).toBe(before);
+    expect(second).toBe(first);
+    const thread = selectThreadByRef(first, ref)!;
+    expect(selectThreadByRef(second, ref)).toBe(thread);
+    expect(thread.messages).toHaveLength(windowSize);
+    expect(thread.activities).toHaveLength(windowSize);
+  });
+
+  it("replaces only the message whose text changed, and its by-id record", () => {
+    const first = deepFreeze(applyWindow(emptyState));
+    const edited = windowMessages();
+    edited[75]!.text = "Edited";
+    const second = applyWindow(first, makeWindow({ messages: edited }));
+    const before = environmentOf(first);
+    const after = environmentOf(second);
+    const changedId = MessageId.make("window-message-75");
+
+    expect(after.messageIdsByThreadId).toBe(before.messageIdsByThreadId);
+    expect(after.messageIdsByThreadId[windowThreadId]).toBe(
+      before.messageIdsByThreadId[windowThreadId],
+    );
+    expect(after.messageByThreadId[windowThreadId]).not.toBe(
+      before.messageByThreadId[windowThreadId],
+    );
+    expect(after.messageByThreadId[windowThreadId]?.[changedId]).not.toBe(
+      before.messageByThreadId[windowThreadId]?.[changedId],
+    );
+    expect(after.messageByThreadId[windowThreadId]?.[changedId]?.text).toBe("Edited");
+    for (const id of before.messageIdsByThreadId[windowThreadId]!) {
+      if (id === changedId) continue;
+      expect(after.messageByThreadId[windowThreadId]?.[id]).toBe(
+        before.messageByThreadId[windowThreadId]?.[id],
+      );
+    }
+    for (const key of sliceRecordKeys.filter((entry) => entry !== "messageByThreadId")) {
+      expect(after[key]).toBe(before[key]);
+    }
+    // The activities collection is untouched, so its thread-level array is too.
+    expect(selectThreadByRef(second, ref)?.activities).toBe(
+      selectThreadByRef(first, ref)?.activities,
+    );
+    expect(selectThreadByRef(second, ref)?.messages).not.toBe(
+      selectThreadByRef(first, ref)?.messages,
+    );
+  });
+
+  it("keeps existing activities when one is appended or changed", () => {
+    const first = deepFreeze(applyWindow(emptyState));
+    const activities = windowActivities();
+    activities[10]!.summary = "Changed";
+    activities.push({
+      ...activities[0]!,
+      id: EventId.make("window-activity-extra"),
+      sequence: 999,
+    });
+    const appended = applyWindow(first, makeWindow({ activities }));
+    const before = environmentOf(first);
+    const after = environmentOf(appended);
+    const changedId = EventId.make("window-activity-10");
+
+    expect(after.activityIdsByThreadId[windowThreadId]).toHaveLength(windowSize + 1);
+    expect(after.activityIdsByThreadId[windowThreadId]).not.toBe(
+      before.activityIdsByThreadId[windowThreadId],
+    );
+    expect(after.activityByThreadId[windowThreadId]?.[changedId]?.summary).toBe("Changed");
+    for (const id of before.activityIdsByThreadId[windowThreadId]!) {
+      if (id === changedId) continue;
+      expect(after.activityByThreadId[windowThreadId]?.[id]).toBe(
+        before.activityByThreadId[windowThreadId]?.[id],
+      );
+    }
+    expect(after.messageIdsByThreadId).toBe(before.messageIdsByThreadId);
+    expect(after.messageByThreadId).toBe(before.messageByThreadId);
+  });
+
+  it("drops a message that left the window and keeps the rest", () => {
+    const first = deepFreeze(applyWindow(emptyState));
+    const second = applyWindow(first, makeWindow({ messages: windowMessages().slice(1) }));
+    const before = environmentOf(first);
+    const after = environmentOf(second);
+    const droppedId = MessageId.make("window-message-0");
+
+    expect(after.messageIdsByThreadId[windowThreadId]).toEqual(
+      before.messageIdsByThreadId[windowThreadId]!.slice(1),
+    );
+    expect(Object.hasOwn(after.messageByThreadId[windowThreadId]!, droppedId)).toBe(false);
+    for (const id of after.messageIdsByThreadId[windowThreadId]!) {
+      expect(after.messageByThreadId[windowThreadId]?.[id]).toBe(
+        before.messageByThreadId[windowThreadId]?.[id],
+      );
+    }
+  });
+
+  it("ends the cached-body state even when the live messages match the cached ones", () => {
+    const first = deepFreeze(applyWindow(emptyState));
+    const cachedState: AppState = {
+      ...first,
+      environmentStateById: {
+        ...first.environmentStateById,
+        [environmentId]: {
+          ...environmentOf(first),
+          cachedMessageThreadIds: { [windowThreadId]: true },
+        },
+      },
+    };
+    const second = applyWindow(cachedState);
+    const before = environmentOf(cachedState);
+    const after = environmentOf(second);
+
+    expect(after.cachedMessageThreadIds?.[windowThreadId]).toBeUndefined();
+    expect(after.messageIdsByThreadId).toBe(before.messageIdsByThreadId);
+    expect(after.messageByThreadId).toBe(before.messageByThreadId);
+  });
+});
+
+describe("demotion structural sharing", () => {
+  const sessionOf = (threadId: string) => ({
+    threadId,
+    status: "running",
+    providerName: "codex",
+    runtimeMode: "full-access",
+    activeTurnId: "turn-1",
+    lastError: null,
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  });
+  const a = ThreadId.make("a");
+  const b = ThreadId.make("b");
+  const c = ThreadId.make("c");
+
+  it("keeps every summary and session when no thread holds a session", () => {
+    const live = deepFreeze(
+      syncServerShellSnapshot(
+        emptyState,
+        makeSnapshot([makeThreadShell("a"), makeThreadShell("b")]),
+        environmentId,
+      ),
+    );
+    const demoted = demoteEnvironmentStateToCachedSnapshot(live, environmentId, 42);
+    const before = environmentOf(live);
+    const after = environmentOf(demoted);
+
+    expect(after.sidebarThreadSummaryById).toBe(before.sidebarThreadSummaryById);
+    expect(after.threadSessionById).toBe(before.threadSessionById);
+    expect(after.threadShellById).toBe(before.threadShellById);
+    for (const id of [a, b]) {
+      expect(after.sidebarThreadSummaryById[id]).toBe(before.sidebarThreadSummaryById[id]);
+    }
+    // The provenance of the environment itself still changes.
+    expect(after.bootstrapComplete).toBe(false);
+    expect(after.hydratedFromCacheAt).toBe(42);
+    expect(after.retainedLiveSnapshot).toBe(true);
+    expect(selectSidebarThreadsAcrossEnvironments(demoted)).toHaveLength(2);
+  });
+
+  it("strips only the threads that hold a session or background liveness", () => {
+    const live = deepFreeze(
+      syncServerShellSnapshot(
+        emptyState,
+        makeSnapshot([
+          makeThreadShell("a"),
+          makeThreadShell("b", { session: sessionOf("b") }),
+          makeThreadShell("c", { backgroundLiveness: "working" }),
+        ]),
+        environmentId,
+      ),
+    );
+    const demoted = demoteEnvironmentStateToCachedSnapshot(live, environmentId, 42);
+    const before = environmentOf(live);
+    const after = environmentOf(demoted);
+
+    expect(before.threadSessionById[b]).not.toBeNull();
+    expect(before.sidebarThreadSummaryById[b]).toMatchObject({ session: expect.anything() });
+    expect(before.sidebarThreadSummaryById[c]).toMatchObject({ backgroundLiveness: "working" });
+
+    expect(after.sidebarThreadSummaryById[a]).toBe(before.sidebarThreadSummaryById[a]);
+    expect(after.sidebarThreadSummaryById[b]).not.toBe(before.sidebarThreadSummaryById[b]);
+    expect(after.sidebarThreadSummaryById[b]).toEqual({
+      ...before.sidebarThreadSummaryById[b],
+      session: null,
+      backgroundLiveness: null,
+    });
+    expect(after.sidebarThreadSummaryById[c]).toEqual({
+      ...before.sidebarThreadSummaryById[c],
+      session: null,
+      backgroundLiveness: null,
+    });
+    expect(after.threadSessionById).toEqual({ [a]: null, [b]: null, [c]: null });
+    expect(after.threadShellById).toBe(before.threadShellById);
+    expect(after.threadTurnStateById).toBe(before.threadTurnStateById);
   });
 });

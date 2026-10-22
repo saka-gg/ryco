@@ -1,6 +1,6 @@
 {
   "name": "@ryco/desktop",
-  "version": "0.1.32",
+  "version": "0.1.35",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",
@@ -13,6 +13,7 @@
     "build:native": "node scripts/build-native-security-helper.mjs && node scripts/build-window-material-addon.mjs && node scripts/build-computer-use-helper.mjs && node scripts/build-computer-beta.mjs",
     "start": "node scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
+    "typecheck:fast": "tsc-rs --noEmit --composite false --declaration false --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo",
     "test": "vp test run --passWithNoTests",
     "smoke-test": "node scripts/smoke-test.mjs",
     "startup-timing-smoke": "node scripts/startup-timing-smoke.mjs",

@@ -323,7 +323,6 @@ export type DesktopUpdateStatus =
   | "downloaded"
   | "error";
 
-export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
 export type DesktopAppStageLabel = "Beta" | "Dev" | "Nightly";
@@ -334,10 +333,18 @@ export interface DesktopAppBranding {
   displayName: string;
 }
 
-export interface DesktopRuntimeInfo {
-  hostArch: DesktopRuntimeArch;
-  appArch: DesktopRuntimeArch;
-  runningUnderArm64Translation: boolean;
+/**
+ * An update another device asked this desktop app to install (Update everything on a
+ * remote client). The app downloads it, then counts down to its relaunch so someone at
+ * this machine can postpone it.
+ */
+export interface DesktopRemoteInstallState {
+  requestId: string;
+  targetVersion: string;
+  phase: "downloading" | "countdown" | "installing" | "postponed" | "failed";
+  /** `countdown` only: when the app relaunches unless it is postponed. */
+  restartAt: string | null;
+  message: string | null;
 }
 
 export interface DesktopUpdateState {
@@ -345,9 +352,6 @@ export interface DesktopUpdateState {
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
   currentVersion: string;
-  hostArch: DesktopRuntimeArch;
-  appArch: DesktopRuntimeArch;
-  runningUnderArm64Translation: boolean;
   availableVersion: string | null;
   downloadedVersion: string | null;
   downloadPercent: number | null;
@@ -355,6 +359,8 @@ export interface DesktopUpdateState {
   message: string | null;
   errorContext: "check" | "download" | "install" | null;
   canRetry: boolean;
+  /** Absent or `null` unless another device asked this app to update. */
+  remoteInstall?: DesktopRemoteInstallState | null;
 }
 
 export interface DesktopUpdateActionResult {
@@ -550,7 +556,8 @@ export interface DesktopWorkspaceMachineProjection {
   readonly canConnect: boolean;
   readonly canMutate: boolean;
   readonly effectiveRole: RelayEffectiveRole | null;
-  readonly threadSettlementSupported: boolean;
+  /** As the Hub directory states it; absent when it does not (unknown, not unsupported). */
+  readonly threadSettlementSupported?: boolean;
   readonly accessReasons: ReadonlyArray<string>;
 }
 
@@ -579,6 +586,30 @@ export interface DesktopWorkspaceStateProjection {
    */
   readonly accountE2ee?: "ready" | "securing" | "unavailable" | "revoked";
 }
+
+/** The state without its snapshot bodies, which can reach megabytes. */
+export type DesktopWorkspaceStateSummary = Omit<DesktopWorkspaceStateProjection, "snapshots">;
+
+/**
+ * A state pushed to the renderer. `snapshots` is absent when they are the same
+ * as in the previous push, so the renderer keeps the ones it holds.
+ */
+export type DesktopWorkspaceStatePush = DesktopWorkspaceStateSummary &
+  Partial<Pick<DesktopWorkspaceStateProjection, "snapshots">>;
+
+/**
+ * Display-only content of one thread (its recent messages) as it crosses the
+ * isolated Desktop preload. Main validates what it is handed and what it
+ * stores; the renderer validates what it reads back.
+ */
+export interface DesktopThreadContentProjection {
+  readonly messages: ReadonlyArray<unknown>;
+}
+
+/** Thread content by thread id, least recently visited first. */
+export type DesktopThreadContentProjectionMap = Readonly<
+  Record<string, DesktopThreadContentProjection>
+>;
 
 export type DesktopWorkspaceScopeProjection =
   | { readonly type: "interactive" }
@@ -840,31 +871,35 @@ export interface DesktopBridge {
     readonly totpCode?: string;
   }) => Promise<DesktopHostedIdentityActionResult>;
   cancelHostedGitHubConnection?: () => Promise<void>;
-  /** Secret-free native workspace client projection and scoped operations. */
+  /**
+   * Secret-free native workspace client projection and scoped operations. Only
+   * the state read carries snapshot bodies; the replies to commands are
+   * summaries, and changed snapshots arrive through `onDesktopWorkspaceState`.
+   */
   getDesktopWorkspaceState?: () => Promise<DesktopWorkspaceStateProjection>;
   renameDesktopWorkspaceDevice?: (input: {
     readonly environmentId: EnvironmentId;
     readonly label: string;
-  }) => Promise<DesktopWorkspaceStateProjection>;
-  refreshDesktopWorkspaceCatalog?: () => Promise<DesktopWorkspaceStateProjection>;
+  }) => Promise<DesktopWorkspaceStateSummary>;
+  refreshDesktopWorkspaceCatalog?: () => Promise<DesktopWorkspaceStateSummary>;
   publishDesktopWorkspaceSnapshot?: (
     snapshot: DesktopWorkspaceMetadataProjection,
-  ) => Promise<DesktopWorkspaceStateProjection>;
+  ) => Promise<DesktopWorkspaceStateSummary>;
   retainDesktopWorkspaceScope?: (input: {
     readonly environmentId: EnvironmentId;
     readonly scope: DesktopWorkspaceScopeProjection;
   }) => Promise<{
     readonly leaseId: string;
-    readonly state: DesktopWorkspaceStateProjection;
+    readonly state: DesktopWorkspaceStateSummary;
   }>;
-  renewDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateProjection>;
-  releaseDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateProjection>;
+  renewDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateSummary>;
+  releaseDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateSummary>;
   setDesktopWorkspaceBackgrounded?: (
     backgrounded: boolean,
-  ) => Promise<DesktopWorkspaceStateProjection>;
+  ) => Promise<DesktopWorkspaceStateSummary>;
   purgeDesktopWorkspaceCache?: (
     environmentId?: EnvironmentId,
-  ) => Promise<DesktopWorkspaceStateProjection>;
+  ) => Promise<DesktopWorkspaceStateSummary>;
   beginDesktopWorkspaceVerification?: (input: {
     readonly nodeId: string;
     readonly environmentId: EnvironmentId;
@@ -874,10 +909,23 @@ export interface DesktopBridge {
     readonly nodeId: string;
     readonly environmentId: EnvironmentId;
     readonly payload: string;
-  }) => Promise<DesktopWorkspaceStateProjection>;
-  onDesktopWorkspaceState?: (
-    listener: (state: DesktopWorkspaceStateProjection) => void,
-  ) => () => void;
+  }) => Promise<DesktopWorkspaceStateSummary>;
+  /**
+   * The Desktop-local cache of recent conversation text. Main keeps it
+   * encrypted and bounded; the renderer hands it display content and reads it
+   * back to paint a cold start. Publishing is fire-and-forget.
+   */
+  publishDesktopThreadContent?: (
+    environmentId: EnvironmentId,
+    content: DesktopThreadContentProjectionMap,
+  ) => void;
+  getDesktopThreadContent?: (
+    environmentId: EnvironmentId,
+  ) => Promise<DesktopThreadContentProjectionMap>;
+  getDesktopThreadContentCacheEnabled?: () => Promise<boolean>;
+  /** Turning the cache off deletes what it holds. Resolves to the setting now in effect. */
+  setDesktopThreadContentCacheEnabled?: (enabled: boolean) => Promise<boolean>;
+  onDesktopWorkspaceState?: (listener: (state: DesktopWorkspaceStatePush) => void) => () => void;
   onDesktopWorkspaceConnectionCommand?: (
     listener: (command: DesktopWorkspaceConnectionCommand) => void,
   ) => () => void;
@@ -955,6 +1003,8 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  /** Answer a remote install's countdown: relaunch now, or postpone it (the download stays). */
+  respondToRemoteInstall: (action: "now" | "postpone") => Promise<DesktopUpdateState>;
   /** Show a native notification when a turn completes and the window is unfocused. */
   notifyTurnComplete: (notification: DesktopTurnCompleteNotification) => Promise<void>;
   /** Subscribe to notification clicks so the renderer can navigate to the thread. */

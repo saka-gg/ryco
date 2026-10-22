@@ -49,7 +49,14 @@ export class DesktopNativeSecurityError extends Error {
   }
 }
 
-export type NativeSecurityHelperRunner = (request: NativeSecurityRequest) => Promise<unknown>;
+export type NativeSecurityHelperRunner = ((request: NativeSecurityRequest) => Promise<unknown>) & {
+  /**
+   * Keeps the helper process up, even when idle, until the returned release
+   * runs. Holds are counted: the idle exit applies again once the last one is
+   * released. For a runner without a long-lived process this is absent.
+   */
+  readonly holdForRelay?: () => () => void;
+};
 
 function failure(code: DesktopNativeSecurityErrorCode): never {
   throw new DesktopNativeSecurityError(code);
@@ -156,9 +163,10 @@ interface HelperSession {
 /**
  * Runs helper requests one at a time over a helper process that answers one
  * JSON line per request and exits when stdin closes. The process is kept for
- * {@link HELPER_IDLE_MS} after its last answer; any timeout, oversized or
- * malformed answer, or unexpected exit discards it, so a later request always
- * starts from a fresh process. No request, response, or stderr is ever logged.
+ * {@link HELPER_IDLE_MS} after its last answer, and for as long as a relay
+ * session holds it (`holdForRelay`); any timeout, oversized or malformed
+ * answer, or unexpected exit discards it, so a later request always starts from
+ * a fresh process. No request, response, or stderr is ever logged.
  */
 export function createNativeSecurityHelperRunner(
   helperPath: string,
@@ -167,12 +175,13 @@ export function createNativeSecurityHelperRunner(
     readonly timeoutMs?: number;
     readonly spawn?: typeof ChildProcess.spawn;
   } = {},
-): NativeSecurityHelperRunner {
+): NativeSecurityHelperRunner & { readonly holdForRelay: () => () => void } {
   const idleMs = options.idleMs ?? HELPER_IDLE_MS;
   const timeoutMs = options.timeoutMs ?? HELPER_TIMEOUT_MS;
   const spawn = options.spawn ?? ChildProcess.spawn;
   let session: HelperSession | null = null;
   let queue: Promise<unknown> = Promise.resolve();
+  let relayHolds = 0;
 
   const discard = (current: HelperSession, error: Error) => {
     if (current.closed) return;
@@ -249,11 +258,44 @@ export function createNativeSecurityHelperRunner(
     }
   };
 
+  const clearIdleExit = (current: HelperSession) => {
+    if (current.idleTimer) clearTimeout(current.idleTimer);
+    current.idleTimer = null;
+  };
+
+  /** Ends the helper's input once it has been idle for `idleMs` and nothing holds it. */
+  const scheduleIdleExit = (current: HelperSession) => {
+    clearIdleExit(current);
+    current.idleTimer = setTimeout(() => {
+      current.idleTimer = null;
+      if (current.closed || current.pending !== null || relayHolds > 0) return;
+      // End of input: the helper answers nothing further and exits.
+      current.closed = true;
+      if (session === current) session = null;
+      current.child.stdin?.end();
+    }, idleMs);
+    current.idleTimer.unref();
+  };
+
+  const holdForRelay = (): (() => void) => {
+    relayHolds += 1;
+    if (session) clearIdleExit(session);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      relayHolds -= 1;
+      // A request in flight schedules the exit itself when it answers.
+      if (relayHolds === 0 && session && !session.closed && session.pending === null) {
+        scheduleIdleExit(session);
+      }
+    };
+  };
+
   const request = (input: NativeSecurityRequest): Promise<unknown> =>
     new Promise<unknown>((resolve, reject) => {
       const current = session && !session.closed ? session : (session = open());
-      if (current.idleTimer) clearTimeout(current.idleTimer);
-      current.idleTimer = null;
+      clearIdleExit(current);
       holdOpen(current, true);
       const timer = setTimeout(
         () => discard(current, new DesktopNativeSecurityError("operation_failed")),
@@ -264,15 +306,7 @@ export function createNativeSecurityHelperRunner(
         resolve: (value) => {
           clearTimeout(timer);
           holdOpen(current, false);
-          current.idleTimer = setTimeout(() => {
-            current.idleTimer = null;
-            if (current.closed || current.pending !== null) return;
-            // End of input: the helper answers nothing further and exits.
-            current.closed = true;
-            if (session === current) session = null;
-            current.child.stdin?.end();
-          }, idleMs);
-          current.idleTimer.unref();
+          if (relayHolds === 0) scheduleIdleExit(current);
           resolve(value);
         },
         reject: (error) => {
@@ -283,12 +317,13 @@ export function createNativeSecurityHelperRunner(
       current.child.stdin?.write(`${JSON.stringify(input)}\n`);
     });
 
-  return (input) => {
+  const run: NativeSecurityHelperRunner = (input) => {
     // One request at a time per helper: answers are matched to requests by order.
     const result = queue.then(() => request(input));
     queue = result.catch(() => undefined);
     return result;
   };
+  return Object.assign(run, { holdForRelay });
 }
 
 export class DesktopNativeSecurityHelper {
@@ -296,6 +331,7 @@ export class DesktopNativeSecurityHelper {
   readonly #store: DesktopNativeSecretStore;
   #signingKeyPromise: Promise<DpopSigningKey> | undefined;
   #agreementRecordPromise: Promise<string> | undefined;
+  readonly #publicKeyListeners = new Set<() => void>();
 
   constructor(input: {
     readonly run: NativeSecurityHelperRunner;
@@ -303,6 +339,25 @@ export class DesktopNativeSecurityHelper {
   }) {
     this.#run = input.run;
     this.#store = input.store;
+  }
+
+  /**
+   * Keeps the helper process up while a relay session may still sign or borrow
+   * a key, so it is not respawned (and its Secure Enclave key reloaded) after
+   * the idle exit. Release when the session ends; holds are counted.
+   */
+  holdForRelay(): () => void {
+    return this.#run.holdForRelay?.() ?? (() => undefined);
+  }
+
+  /** Calls `listener` when a key reset makes a read public key stale; returns the unsubscribe. */
+  onPublicKeysChanged(listener: () => void): () => void {
+    this.#publicKeyListeners.add(listener);
+    return () => void this.#publicKeyListeners.delete(listener);
+  }
+
+  #publicKeysChanged(): void {
+    for (const listener of this.#publicKeyListeners) listener();
   }
 
   async #createOrReadRecord(
@@ -439,11 +494,13 @@ export class DesktopNativeSecurityHelper {
   async deleteAgreementKey(): Promise<void> {
     await this.#store.delete("agreement");
     this.#agreementRecordPromise = undefined;
+    this.#publicKeysChanged();
   }
 
   /** Explicit secure-store reset only. Ordinary signout must retain this identity. */
   async deleteSigningKey(): Promise<void> {
     await this.#store.delete("signing");
     this.#signingKeyPromise = undefined;
+    this.#publicKeysChanged();
   }
 }

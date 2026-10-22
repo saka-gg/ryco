@@ -7,6 +7,7 @@ import {
   createWebHubServerAuthenticatedRelaySocket,
   isWebHubServerAuthenticatedRelayAvailable,
   isWebHubSessionOnline,
+  openWebHubSessionBesideAccessCheck,
   subscribeWebHubInvalidation,
   watchWebHostedHubSession,
 } from "./hubSession";
@@ -19,6 +20,7 @@ const created = vi.hoisted(
       dispose: ReturnType<typeof vi.fn>;
       createSocket: ReturnType<typeof vi.fn>;
       serverMintedOpenAvailable: ReturnType<typeof vi.fn>;
+      bindExpectedIdentity: ReturnType<typeof vi.fn>;
     }>,
 );
 vi.mock("@ryco/client-runtime/relay", async (importOriginal) => ({
@@ -28,6 +30,8 @@ vi.mock("@ryco/client-runtime/relay", async (importOriginal) => ({
     dispose = vi.fn(() => this.options.onStatus?.("closed"));
     createSocket = vi.fn(() => ({}));
     serverMintedOpenAvailable = vi.fn(() => true);
+    // Accepts the identity unless the test made the connection's `ready` name someone else.
+    bindExpectedIdentity = vi.fn(() => true);
     constructor(readonly options: HostedHubSessionOptions) {
       created.push(this);
     }
@@ -141,17 +145,22 @@ describe("browser Hub connection ownership", () => {
     expect(isWebHubSessionOnline()).toBe(true);
   });
 
-  it("publishes terminal protocol failure without granting or expiring account authority", () => {
+  it("reports a terminal failure to every environment session without expiring account authority", () => {
+    const report = vi
+      .spyOn(hostedHubController, "reportHubSessionFailure")
+      .mockImplementation(() => undefined);
     const failure = vi.spyOn(hostedHubController, "failure").mockImplementation(() => undefined);
     const expire = vi.spyOn(hostedHubController, "expireSession").mockResolvedValue();
     authenticate();
     stop = watchWebHostedHubSession();
     created[0]!.options.onFailure?.({ kind: "protocol", retryable: false });
-    expect(failure).toHaveBeenCalledExactlyOnceWith(hostedHubStore.getState().generation, {
-      kind: "protocol",
-      retryable: false,
-    });
+    expect(report).toHaveBeenCalledExactlyOnceWith({ kind: "protocol", retryable: false });
+    // Not the shared generation's selected session alone: retained records each get it.
+    expect(failure).not.toHaveBeenCalled();
     expect(expire).not.toHaveBeenCalled();
+    // A failure the session retries on its own reaches nobody.
+    created[0]!.options.onFailure?.({ kind: "network", retryable: true });
+    expect(report).toHaveBeenCalledOnce();
   });
 
   it("disposes account watching and physical connection together", () => {
@@ -231,5 +240,162 @@ describe("browser Hub connection ownership", () => {
     created[0]!.options.onIdentityMismatch?.();
     expect(resume).toHaveBeenCalledOnce();
     expect(created[1]!.options.expectedIdentity?.sessionId).toBe("session-b");
+  });
+});
+
+describe("account socket opened beside the access check", () => {
+  /** An access check still on the wire, answered by the test. */
+  function pendingAccessCheck() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((settle) => {
+      resolve = settle;
+    });
+    const answer = async () => {
+      resolve();
+      await promise;
+    };
+    return { promise, answer };
+  }
+
+  it("opens before the answer and is bound to the account the answer names", async () => {
+    stop = watchWebHostedHubSession();
+    const check = pendingAccessCheck();
+    openWebHubSessionBesideAccessCheck(check.promise);
+    expect(created).toHaveLength(1);
+    expect(created[0]!.start).toHaveBeenCalledOnce();
+    // Nobody to bind it to yet: no server-minted opens can be offered.
+    expect(created[0]!.options.expectedIdentity).toBeUndefined();
+
+    authenticate();
+    expect(created).toHaveLength(1);
+    expect(created[0]!.bindExpectedIdentity).toHaveBeenCalledExactlyOnceWith({
+      accountId: account.id,
+      sessionId: session.id,
+    });
+    expect(isWebHubSessionOnline()).toBe(true);
+    createWebHubRelaySocket();
+    expect(created[0]!.createSocket).toHaveBeenCalledOnce();
+
+    await check.answer();
+    expect(created[0]!.dispose).not.toHaveBeenCalled();
+  });
+
+  it("grants nothing before the answer and holds its invalidations until it is bound", async () => {
+    stop = watchWebHostedHubSession();
+    const listener = vi.fn();
+    const unsubscribe = subscribeWebHubInvalidation(listener);
+    openWebHubSessionBesideAccessCheck(pendingAccessCheck().promise);
+    const early = created[0]!;
+    // Online at the Hub, but no live subscription, stream or server-minted open for anyone.
+    expect(isWebHubSessionOnline()).toBe(false);
+    expect(isWebHubServerAuthenticatedRelayAvailable()).toBe(false);
+    expect(() => createWebHubRelaySocket()).toThrow("authenticated");
+    early.options.onInvalidate?.({ directory: true, threadCache: false });
+    early.options.onInvalidate?.({ directory: false, threadCache: true });
+    // Store changes before the answer (the account still shows as signed out) keep it open.
+    hostedHubStore.setState({ directoryStatus: "loading" });
+    expect(early.dispose).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+    expect(hostedHubController.notifyDirectoryInvalidated).not.toHaveBeenCalled();
+
+    authenticate();
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledExactlyOnceWith({ directory: true, threadCache: true });
+    expect(hostedHubController.notifyDirectoryInvalidated).toHaveBeenCalledOnce();
+    unsubscribe();
+  });
+
+  it("delivers held invalidations after the authenticated publish, not inside it", async () => {
+    stop = watchWebHostedHubSession();
+    const listener = vi.fn();
+    const unsubscribe = subscribeWebHubInvalidation(listener);
+    openWebHubSessionBesideAccessCheck(pendingAccessCheck().promise);
+    created[0]!.options.onInvalidate?.({ directory: true, threadCache: true });
+
+    // The access check commits the directory read it sent beside the restore
+    // right after this publish; a directory read started inside it would
+    // replace that read instead of following it.
+    authenticate();
+    expect(hostedHubController.notifyDirectoryInvalidated).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+
+    await Promise.resolve();
+    expect(hostedHubController.notifyDirectoryInvalidated).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledExactlyOnceWith({ directory: true, threadCache: true });
+    unsubscribe();
+  });
+
+  it("drops a held invalidation when the account changes before it is delivered", async () => {
+    stop = watchWebHostedHubSession();
+    const listener = vi.fn();
+    const unsubscribe = subscribeWebHubInvalidation(listener);
+    openWebHubSessionBesideAccessCheck(pendingAccessCheck().promise);
+    created[0]!.options.onInvalidate?.({ directory: true, threadCache: true });
+    authenticate();
+    hostedHubStore.setState({ accountStatus: "signed-out", account: null, session: null });
+
+    await Promise.resolve();
+    expect(created[0]!.dispose).toHaveBeenCalledOnce();
+    expect(hostedHubController.notifyDirectoryInvalidated).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("is replaced when the Hub authenticated it as someone else", () => {
+    stop = watchWebHostedHubSession();
+    openWebHubSessionBesideAccessCheck(pendingAccessCheck().promise);
+    const early = created[0]!;
+    early.bindExpectedIdentity.mockReturnValue(false);
+    authenticate();
+    expect(early.dispose).toHaveBeenCalledOnce();
+    expect(created).toHaveLength(2);
+    expect(created[1]!.options.expectedIdentity).toEqual({
+      accountId: account.id,
+      sessionId: session.id,
+    });
+  });
+
+  it.each([
+    ["signed out", () => hostedHubStore.setState({ accountStatus: "signed-out" })],
+    ["unavailable", () => hostedHubStore.setState({ accountStatus: "unavailable" })],
+    ["expired", () => hostedHubStore.setState({ accountStatus: "session-expired" })],
+  ])("closes when the access check answers %s", async (_answer, publish) => {
+    stop = watchWebHostedHubSession();
+    const check = pendingAccessCheck();
+    openWebHubSessionBesideAccessCheck(check.promise);
+    publish();
+    await check.answer();
+    expect(created[0]!.dispose).toHaveBeenCalledOnce();
+    expect(created).toHaveLength(1);
+    expect(isWebHubSessionOnline()).toBe(false);
+  });
+
+  it("closes on a rejection without expiring the session the access check is deciding", () => {
+    const expire = vi.spyOn(hostedHubController, "expireSession").mockResolvedValue();
+    const report = vi
+      .spyOn(hostedHubController, "reportHubSessionFailure")
+      .mockImplementation(() => undefined);
+    stop = watchWebHostedHubSession();
+    openWebHubSessionBesideAccessCheck(pendingAccessCheck().promise);
+    created[0]!.options.onFailure?.({ kind: "network", retryable: true });
+    expect(created[0]!.dispose).not.toHaveBeenCalled();
+    created[0]!.options.onFailure?.({ kind: "authentication", retryable: false });
+    expect(created[0]!.dispose).toHaveBeenCalledOnce();
+    expect(expire).not.toHaveBeenCalled();
+    expect(report).not.toHaveBeenCalled();
+    // An authenticated answer then opens a socket bound from the start.
+    authenticate();
+    expect(created).toHaveLength(2);
+    expect(created[1]!.options.expectedIdentity?.sessionId).toBe(session.id);
+  });
+
+  it("opens nothing without the watcher, beside an existing socket, or for an authenticated account", () => {
+    openWebHubSessionBesideAccessCheck(pendingAccessCheck().promise);
+    expect(created).toHaveLength(0);
+    authenticate();
+    stop = watchWebHostedHubSession();
+    openWebHubSessionBesideAccessCheck(pendingAccessCheck().promise);
+    expect(created).toHaveLength(1);
+    expect(created[0]!.bindExpectedIdentity).not.toHaveBeenCalled();
   });
 });

@@ -140,6 +140,11 @@ const branchesStateAtom = Atom.family((key: string) => {
   );
 });
 
+/** Leading part shared by every branch and pull request key of one environment. */
+function environmentKeyPrefix(environmentId: EnvironmentId): string {
+  return `${environmentId}\u0000`;
+}
+
 interface BranchesTarget {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
@@ -166,7 +171,7 @@ const NOOP: () => void = () => undefined;
 const branchesControllers = new Map<string, BranchesController>();
 
 function branchesKey(target: { environmentId: EnvironmentId; cwd: string; query: string }): string {
-  return `${target.environmentId}\u0000${target.cwd}\u0000${target.query}`;
+  return `${environmentKeyPrefix(target.environmentId)}${target.cwd}\u0000${target.query}`;
 }
 
 export function getBranchesTargetKey(target: BranchesTarget): string | null {
@@ -232,6 +237,16 @@ function nextCursorOf(pages: ReadonlyArray<VcsListRefsResult>): number | null {
 const branchesFirstPageInFlight = new Map<string, Promise<FirstBranchesPageRead>>();
 const branchesFetchedAt = new Map<string, number>();
 let branchesFetchGeneration = 0;
+/** Bumped by a clear of one environment; the global generation covers a full clear. */
+const branchesFetchGenerationByEnvironment = new Map<EnvironmentId, number>();
+
+/**
+ * Changes whenever a clear that covers the environment happens, so a read that
+ * started before it can tell its result must not be published or vouched for.
+ */
+function branchesFetchGenerationOf(environmentId: EnvironmentId): number {
+  return branchesFetchGeneration + (branchesFetchGenerationByEnvironment.get(environmentId) ?? 0);
+}
 
 function isBranchesFetchFresh(fetchedAt: number | undefined, now: number): boolean {
   return fetchedAt !== undefined && now - fetchedAt < GIT_BRANCHES_STALE_TIME_MS;
@@ -384,7 +399,7 @@ async function refetchBranchesNow(controller: BranchesController): Promise<void>
     error: null,
   });
 
-  const generation = branchesFetchGeneration;
+  const generation = branchesFetchGenerationOf(controller.environmentId);
   try {
     const pages: VcsListRefsResult[] = [];
     let cursor = 0;
@@ -407,7 +422,7 @@ async function refetchBranchesNow(controller: BranchesController): Promise<void>
     controller.loadedPageCount = pages.length;
     controller.lastFetchedAt = Date.now();
     controller.hasLoadedOnce = true;
-    if (generation === branchesFetchGeneration) {
+    if (generation === branchesFetchGenerationOf(controller.environmentId)) {
       recordBranchesFetched(controller.key, controller.lastFetchedAt);
     }
     setBranchesState(controller.key, {
@@ -525,7 +540,7 @@ export function watchBranches(target: BranchesTarget): () => void {
     if (existing.hasLoadedOnce) {
       maybeRefetchStaleBranches(existing);
     }
-    return () => unwatchBranches(key);
+    return () => unwatchBranches(existing);
   }
 
   // A list loaded within the stale time (by a previous subscriber or a
@@ -579,12 +594,14 @@ export function watchBranches(target: BranchesTarget): () => void {
     void loadInitialBranches(controller);
   }
 
-  return () => unwatchBranches(key);
+  return () => unwatchBranches(controller);
 }
 
-function unwatchBranches(key: string): void {
-  const controller = branchesControllers.get(key);
-  if (!controller) {
+function unwatchBranches(controller: BranchesController): void {
+  const key = controller.key;
+  // A clear drops the controller; a release that outlived it must not count
+  // against a newer controller created for the same key.
+  if (branchesControllers.get(key) !== controller) {
     return;
   }
   controller.subscriberCount -= 1;
@@ -615,7 +632,7 @@ async function prefetchBranchesByKey(targetKey: string): Promise<void> {
     return;
   }
 
-  const generation = branchesFetchGeneration;
+  const generation = branchesFetchGenerationOf(target.environmentId);
   try {
     // A controller created while this is in flight joins the same request
     // and publishes its result itself.
@@ -625,7 +642,10 @@ async function prefetchBranchesByKey(targetKey: string): Promise<void> {
       target.cwd,
       target.query,
     );
-    if (generation !== branchesFetchGeneration || branchesControllers.has(targetKey)) {
+    if (
+      generation !== branchesFetchGenerationOf(target.environmentId) ||
+      branchesControllers.has(targetKey)
+    ) {
       return;
     }
     if (fetchedAt !== null) recordBranchesFetched(targetKey, fetchedAt);
@@ -718,7 +738,7 @@ function resolvePrKey(target: {
   cwd: string;
   reference: string;
 }): string {
-  return `${target.environmentId}\u0000${target.cwd}\u0000${target.reference}`;
+  return `${environmentKeyPrefix(target.environmentId)}${target.cwd}\u0000${target.reference}`;
 }
 
 export function getResolvePullRequestTargetKey(target: ResolvePullRequestTarget): string | null {
@@ -811,7 +831,7 @@ export function watchResolvePullRequest(target: ResolvePullRequestTarget): () =>
     if (Date.now() - existing.lastFetchedAt >= RESOLVE_PULL_REQUEST_STALE_TIME_MS) {
       void loadResolvePullRequest(existing);
     }
-    return () => unwatchResolvePullRequest(key);
+    return () => unwatchResolvePullRequest(existing);
   }
 
   const controller: ResolvePrController = {
@@ -826,12 +846,14 @@ export function watchResolvePullRequest(target: ResolvePullRequestTarget): () =>
   resolvePrControllers.set(key, controller);
   void loadResolvePullRequest(controller);
 
-  return () => unwatchResolvePullRequest(key);
+  return () => unwatchResolvePullRequest(controller);
 }
 
-function unwatchResolvePullRequest(key: string): void {
-  const controller = resolvePrControllers.get(key);
-  if (!controller) {
+function unwatchResolvePullRequest(controller: ResolvePrController): void {
+  const key = controller.key;
+  // A clear drops the controller; a release that outlived it must not count
+  // against a newer controller created for the same key.
+  if (resolvePrControllers.get(key) !== controller) {
     return;
   }
   controller.subscriberCount -= 1;
@@ -843,39 +865,86 @@ function unwatchResolvePullRequest(key: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Test helpers
+// Teardown and test helpers
 // ---------------------------------------------------------------------------
 
-export function clearGitAtomState(): void {
-  for (const controller of branchesControllers.values()) {
-    controller.fetchToken += 1;
-    controller.invalidationUnsub();
-    if (controller.focusListener && typeof window !== "undefined") {
-      window.removeEventListener("focus", controller.focusListener);
-    }
-    controller.poller?.stop();
+function stopBranchesController(controller: BranchesController): void {
+  controller.fetchToken += 1;
+  controller.invalidationUnsub();
+  if (controller.focusListener && typeof window !== "undefined") {
+    window.removeEventListener("focus", controller.focusListener);
   }
-  branchesControllers.clear();
-  branchesFetchGeneration += 1;
-  branchesFirstPageInFlight.clear();
-  branchesFetchedAt.clear();
-  for (const controller of resolvePrControllers.values()) {
-    controller.fetchToken += 1;
+  controller.poller?.stop();
+}
+
+/**
+ * Resets the branch and pull request state of one environment, or of every
+ * environment when `environmentId` is null. Reads still in flight are fenced so
+ * a late answer cannot repopulate what was just cleared.
+ */
+function resetGitAtomState(environmentId: EnvironmentId | null): void {
+  // An empty prefix matches every key.
+  const prefix = environmentId === null ? "" : environmentKeyPrefix(environmentId);
+
+  for (const [key, controller] of branchesControllers) {
+    if (!key.startsWith(prefix)) continue;
+    stopBranchesController(controller);
+    branchesControllers.delete(key);
   }
-  resolvePrControllers.clear();
-  invalidationListeners.clear();
+  if (environmentId === null) {
+    branchesFetchGeneration += 1;
+  } else {
+    branchesFetchGenerationByEnvironment.set(
+      environmentId,
+      (branchesFetchGenerationByEnvironment.get(environmentId) ?? 0) + 1,
+    );
+  }
+  for (const key of branchesFirstPageInFlight.keys()) {
+    if (key.startsWith(prefix)) branchesFirstPageInFlight.delete(key);
+  }
+  for (const key of branchesFetchedAt.keys()) {
+    if (key.startsWith(prefix)) branchesFetchedAt.delete(key);
+  }
+  for (const [key, controller] of resolvePrControllers) {
+    if (!key.startsWith(prefix)) continue;
+    controller.fetchToken += 1;
+    resolvePrControllers.delete(key);
+  }
 
   // Atom.family retains each atom instance. Keep the matching key indexes too,
   // so a later clear can reset a key that was reused after an earlier clear.
   for (const key of knownBranchesKeys) {
-    appAtomRegistry.set(branchesStateAtom(key), INITIAL_BRANCHES_STATE);
+    if (key.startsWith(prefix)) appAtomRegistry.set(branchesStateAtom(key), INITIAL_BRANCHES_STATE);
   }
   for (const key of knownResolvePrKeys) {
-    appAtomRegistry.set(resolvePrStateAtom(key), EMPTY_RESOLVE_PR_STATE);
+    if (key.startsWith(prefix))
+      appAtomRegistry.set(resolvePrStateAtom(key), EMPTY_RESOLVE_PR_STATE);
   }
-  for (const key of knownMutationTrackingKeys) {
-    appAtomRegistry.set(mutationRunningCountAtom(key), 0);
+
+  if (environmentId === null) {
+    invalidationListeners.clear();
+    for (const key of knownMutationTrackingKeys) {
+      appAtomRegistry.set(mutationRunningCountAtom(key), 0);
+    }
   }
+}
+
+/**
+ * Full reset of every environment's branch and pull request state, together
+ * with the invalidation listeners and mutation-running counts: tests and
+ * account teardown.
+ */
+export function clearGitAtomState(): void {
+  resetGitAtomState(null);
+}
+
+/**
+ * Resets the branch and pull request state of one environment only.
+ * Invalidation listeners and mutation-running counts hold no node content and
+ * are left alone.
+ */
+export function clearGitAtomStateForEnvironment(environmentId: EnvironmentId): void {
+  resetGitAtomState(environmentId);
 }
 
 export const resetGitAtomsForTests = clearGitAtomState;

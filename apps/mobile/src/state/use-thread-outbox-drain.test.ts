@@ -39,6 +39,14 @@ import {
   resetWsConnectionStateForTests,
 } from "@ryco/client-runtime/rpc";
 
+import type { QueueSendHooks } from "@ryco/client-runtime/state/message-queue";
+
+import {
+  drainThreadOutbox,
+  enqueueThreadOutboxMessage,
+  listThreadOutboxMessages,
+  resetThreadOutboxForTests,
+} from "./threadOutbox";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
 import {
   createOutboxLimitWake,
@@ -242,6 +250,152 @@ describe("outbox drain gate (two environments)", () => {
     connectEnvironment(ENV_B, "ws://node-b.local:13774/ws");
 
     expect(drainEnvironment(ENV_A).mutationReady).toBe(false);
+  });
+});
+
+describe("outbox drain after a cold start with cached conversation text", () => {
+  const environmentId = "env-cold-start" as EnvironmentId;
+  const threadId = "t-cold" as ThreadId;
+  const ref = { environmentId, threadId };
+  const AT = "2026-08-19T10:00:00.000Z";
+  const earlierMessage = {
+    id: "m-earlier",
+    role: "user",
+    text: "an earlier question",
+    createdAt: AT,
+    completedAt: AT,
+    turnId: null,
+    streaming: false,
+  };
+  const queuedMessage: QueuedThreadMessage = {
+    ...queuedFor(environmentId),
+    threadId,
+    messageId: "m-queued" as MessageId,
+  };
+  const wireThread = {
+    id: threadId,
+    projectId: "p1",
+    title: "Cold start",
+    modelSelection: { instanceId: "codex", model: "gpt-5" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    manualStatusBucket: null,
+    manualPosition: 0,
+    latestTurn: null,
+    createdAt: AT,
+    updatedAt: AT,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: AT,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+  };
+  const shellSnapshot = {
+    snapshotSequence: 1,
+    projects: [],
+    worktrees: [],
+    threads: [wireThread],
+    updatedAt: AT,
+  } as never;
+  const threadWindow = (messages: ReadonlyArray<Record<string, unknown>>) =>
+    ({
+      ...wireThread,
+      deletedAt: null,
+      messages: messages.map((message) => ({ ...message, updatedAt: AT })),
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    }) as never;
+
+  /**
+   * The cached shell and text hydrate first, then the live shell lands and the
+   * socket opens, but the thread's own window has not arrived. The cached text
+   * predates the queued message, so it cannot say whether it was delivered.
+   */
+  async function coldStartBeforeLiveWindow() {
+    const { useStore } = await import("./threadsRuntime");
+    const store = useStore.getState();
+    store.syncServerShellSnapshot(shellSnapshot, environmentId);
+    const live = useStore.getState().environmentStateById[environmentId]!;
+    const row = {
+      shell: live.threadShellById[threadId]!,
+      summary: live.sidebarThreadSummaryById[threadId]!,
+    };
+    store.removeEnvironmentState(environmentId);
+    store.hydrateEnvironmentStateFromCache(
+      {
+        capturedAt: 1,
+        projects: [],
+        worktrees: [],
+        threads: [{ ...row, content: { messages: [earlierMessage] } }],
+      } as never,
+      environmentId,
+    );
+    store.syncServerShellSnapshot(shellSnapshot, environmentId);
+    connectEnvironment(environmentId, "ws://node-cold.local:13775/ws");
+
+    resetThreadOutboxForTests();
+    enqueueThreadOutboxMessage(queuedMessage);
+    const sendQueuedMessage = vi.fn(
+      async (_message: QueuedThreadMessage, hooks: QueueSendHooks) => {
+        hooks.onBeforeTurnStart();
+      },
+    );
+    return {
+      store,
+      sendQueuedMessage,
+      drain: () => drainThreadOutbox({ readThreadDrainState, sendQueuedMessage }),
+      cleanup: () => {
+        resetThreadOutboxForTests();
+        store.removeEnvironmentState(environmentId);
+      },
+    };
+  }
+
+  it("sends nothing until the thread's live window arrives, then drops a message it already holds", async () => {
+    const { store, sendQueuedMessage, drain, cleanup } = await coldStartBeforeLiveWindow();
+    try {
+      const waiting = readThreadDrainState(ref);
+      expect(waiting.environment).toEqual({ shellLive: true, mutationReady: true });
+      expect(waiting.view?.detailLoaded).toBe(false);
+      expect([...(waiting.view?.projectedMessageIds ?? [])]).toEqual([]);
+      await drain();
+      expect(sendQueuedMessage).not.toHaveBeenCalled();
+      expect(listThreadOutboxMessages()).toHaveLength(1);
+
+      // The send reached the node before the app was killed: the live window
+      // shows it, so it is removed rather than sent a second time.
+      store.syncServerThreadDetail(
+        threadWindow([earlierMessage, { ...earlierMessage, id: queuedMessage.messageId }]),
+        environmentId,
+      );
+      await drain();
+      expect(sendQueuedMessage).not.toHaveBeenCalled();
+      expect(listThreadOutboxMessages()).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("sends once the live window shows the message was not delivered", async () => {
+    const { store, sendQueuedMessage, drain, cleanup } = await coldStartBeforeLiveWindow();
+    try {
+      await drain();
+      expect(sendQueuedMessage).not.toHaveBeenCalled();
+
+      store.syncServerThreadDetail(threadWindow([earlierMessage]), environmentId);
+      await drain();
+      expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+      expect(sendQueuedMessage.mock.calls[0]?.[0].messageId).toBe(queuedMessage.messageId);
+    } finally {
+      cleanup();
+    }
   });
 });
 

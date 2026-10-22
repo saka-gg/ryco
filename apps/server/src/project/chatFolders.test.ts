@@ -27,13 +27,13 @@ import {
   type ChatFoldersDependencies,
   chatFolderDate,
   chatFolderName,
-  chatFolderSuffix,
   chatProjectTitle,
   createChatFolder,
   deleteChatFolder,
   type DeleteChatFolderDependencies,
   makeChatFolders,
 } from "./chatFolders.ts";
+import { chatFolderSuffix } from "./chatFolderNames.ts";
 
 let scratch: string;
 beforeEach(async () => {

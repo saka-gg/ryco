@@ -25,6 +25,16 @@ interface ComposerPrimaryActionsProps {
   hasSendableContent: boolean;
   /** Reason the send action is held back (e.g. an attachment still uploading). */
   sendDisabledReason?: string | null | undefined;
+  /**
+   * Set while the environment's connection is being established: a send is
+   * still accepted and waits in the queue. The caption says when it goes out.
+   */
+  sendsQueueUntilReady?: string | null | undefined;
+  /**
+   * Why actions that must reach the node at once (stop, answers, plan
+   * follow-ups) are unavailable; they are never queued. `null` when they are.
+   */
+  mutationUnavailableReason?: string | null | undefined;
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
@@ -65,6 +75,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isPreparingWorktree,
   hasSendableContent,
   sendDisabledReason = null,
+  sendsQueueUntilReady = null,
+  mutationUnavailableReason = null,
   preserveComposerFocusOnPointerDown = false,
   onPreviousPendingQuestion,
   onInterrupt,
@@ -73,8 +85,11 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
+  const mutationUnavailable = mutationUnavailableReason !== null;
 
   if (pendingAction) {
+    // Moving between questions stays local; only the submit reaches the node.
+    const submitUnavailable = pendingAction.isLastQuestion && mutationUnavailable;
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
         {pendingAction.questionIndex > 0 ? (
@@ -108,9 +123,11 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={
             isEnvironmentUnavailable ||
+            submitUnavailable ||
             pendingAction.isResponding ||
             (pendingAction.isLastQuestion ? !pendingAction.isComplete : !pendingAction.canAdvance)
           }
+          title={submitUnavailable ? (mutationUnavailableReason ?? undefined) : undefined}
         >
           {formatPendingPrimaryActionLabel({
             compact,
@@ -127,9 +144,11 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     return (
       <button
         type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-lg bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
+        className="flex size-8 items-center justify-center rounded-lg bg-rose-500/90 text-white transition-all duration-150 enabled:cursor-pointer enabled:hover:bg-rose-500 enabled:hover:scale-105 disabled:opacity-50 sm:h-8 sm:w-8"
         {...pointerFocusProps}
         onClick={onInterrupt}
+        disabled={mutationUnavailable}
+        title={mutationUnavailableReason ?? undefined}
         aria-label="Stop generation"
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
@@ -140,6 +159,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   }
 
   if (showPlanFollowUpPrompt) {
+    const planActionsDisabled =
+      isSendBusy || isConnecting || isEnvironmentUnavailable || mutationUnavailable;
     if (promptHasText) {
       return (
         <Button
@@ -147,7 +168,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           size="sm"
           className={cn(compact ? "h-9 px-3 sm:h-8" : "h-9 px-4 sm:h-8")}
           {...pointerFocusProps}
-          disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
+          disabled={planActionsDisabled}
+          title={mutationUnavailableReason ?? undefined}
         >
           {isConnecting || isSendBusy ? "Sending..." : "Refine"}
         </Button>
@@ -161,7 +183,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           size="sm"
           className="h-9 rounded-l-lg rounded-r-none px-4 sm:h-8"
           {...pointerFocusProps}
-          disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
+          disabled={planActionsDisabled}
+          title={mutationUnavailableReason ?? undefined}
         >
           {isConnecting || isSendBusy ? "Sending..." : "Implement"}
         </Button>
@@ -174,7 +197,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
                 className="h-9 rounded-l-none rounded-r-lg border-l-white/12 px-2 sm:h-8"
                 aria-label="Implementation actions"
                 {...pointerFocusProps}
-                disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
+                disabled={planActionsDisabled}
               />
             }
           >
@@ -182,7 +205,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           </MenuTrigger>
           <MenuPopup align="end" side="top">
             <MenuItem
-              disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
+              disabled={planActionsDisabled}
               onClick={() => void onImplementPlanInNewThread()}
             >
               Implement in a new thread
@@ -199,7 +222,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       className="flex h-9 w-9 enabled:cursor-pointer items-center justify-center rounded-lg bg-primary/90 text-primary-foreground transition-all duration-150 hover:bg-primary hover:scale-105 disabled:pointer-events-none disabled:opacity-30 disabled:hover:scale-100 sm:h-8 sm:w-8"
       {...pointerFocusProps}
       disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || !hasSendableContent}
-      title={sendDisabledReason ?? undefined}
+      title={sendDisabledReason ?? sendsQueueUntilReady ?? undefined}
       aria-label={
         isEnvironmentUnavailable
           ? "Environment disconnected"

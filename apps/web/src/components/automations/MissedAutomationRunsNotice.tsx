@@ -82,11 +82,14 @@ type ToastId = ReturnType<typeof toastManager.add>;
 
 function MissedAutomationRunsNoticeForEnvironment({
   environmentId,
-  canDecide,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly canDecide: boolean;
 }) {
+  // A run is approved on its own device, so that device's role decides.
+  const canDecide = useHostedRpcCapability(
+    AGENT_CONTROL_WS_METHODS.acceptProposal,
+    environmentId,
+  ).allowed;
   // The notice window counts back from launch; catch-ups proposed since are always news.
   const [mountedAtMs] = useState(() => Date.now());
   // The catch-up proposals alone, so other traffic on the device's queue leaves them be.
@@ -230,22 +233,20 @@ function noticeToast(
  * (a hosted role without the automation centre, the frozen phone tier).
  */
 export function MissedAutomationRunsNotice() {
-  const capability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCentre);
+  // One switch for the notices of every device: they stay off until the selected node's role
+  // and connection allow the automation centre, whichever device a notice is about.
+  // hosted-capability: routed node
+  const capability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCentre, null);
   const phone = usePresentationTier() === "phone";
   if (!capability.allowed || phone) return null;
   return <MissedAutomationRunsNotices />;
 }
 
 function MissedAutomationRunsNotices() {
-  const decision = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.acceptProposal);
   const environmentIds = useConnectedEnvironmentIds();
   // Skip nodes whose config already says Agent Control is off.
   useAutomationProposalSync(useAgentControlSyncEnvironmentIds(environmentIds));
   return environmentIds.map((environmentId) => (
-    <MissedAutomationRunsNoticeForEnvironment
-      key={environmentId}
-      environmentId={environmentId}
-      canDecide={decision.allowed}
-    />
+    <MissedAutomationRunsNoticeForEnvironment key={environmentId} environmentId={environmentId} />
   ));
 }

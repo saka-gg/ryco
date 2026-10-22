@@ -55,6 +55,42 @@ self time per source file (see `docs/performance-testing.md`).
 patterns that keep React's 300 ms Suspense reveal throttle off navigation paths
 (route-level `lazyRouteComponent`, `preloadableLazy` loaded in `beforeLoad`).
 
+## Node-switch marks
+
+Switches between hosted nodes are always recorded too (no flag), by
+`nodeSwitchInstrumentation.ts`. Each switch gets a number `<n>` (1, 2, ...) and records
+every phase once, as a mark and as a measure from the switch's `intent` mark. Names carry
+the switch number and never an id, label or payload:
+
+- marks: `ryco:node-switch:<phase>:<n>`
+- measures: `ryco:node-switch:<phase>:<n>` (milliseconds from `ryco:node-switch:intent:<n>`)
+
+| Phase                                                               | Meaning                                                               |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `intent`                                                            | The switch started: a press on a node, or the routed node changing    |
+| `route`                                                             | The routed node was published                                         |
+| `requesting-ticket`/`connecting`/`authenticating`/`opening-channel` | The relay transport entered that status (same names as the transport) |
+| `online`                                                            | The relay transport came online                                       |
+| `shell-accepted`                                                    | The node's current shell snapshot was accepted                        |
+| `mutation-ready`                                                    | Online, session ready and browser current: mutations are allowed      |
+| `content-painted`                                                   | The switched-to view presented its content                            |
+
+A press followed by its route publication within a second counts as one switch, and a
+warm switch (a node that is already online and established) records only the phases it
+actually passes through. A phase that does not apply to a switch is simply absent. A
+switch is complete at `mutation-ready`: a later reconnect of the same node is not added to
+it, and only `content-painted` can still land after readiness. A node routed before the
+directory lists it starts its switch when the directory lists it.
+
+Because names are per switch, evicting an old switch never clears the current one's
+entries. The last 20 switches are kept in a ring buffer; when a switch leaves it, its own
+marks and measures are cleared. The external probe reads the buffer through
+`globalThis.__rycoNodeSwitchTimelines()`, which returns the recent switches oldest first
+(the last is the current one) as `{ n, phases, hubSessionVersion, warm, origin }`, with
+phase values in milliseconds since the intent. Hosted telemetry
+(`hostedHub/nodeSwitchTelemetry.ts`) fills in the route and transport phases from the
+routed node and the hosted store; it only observes and never drives the connection.
+
 ## Inspecting results in DevTools
 
 ```js

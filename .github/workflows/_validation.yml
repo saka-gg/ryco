@@ -43,23 +43,41 @@ env:
   TURBO_SCM_HEAD: HEAD
 
 # Each check runs as its own job so they execute in parallel instead of as one
-# serial chain. Jobs share the Bun/Vite+ toolchain caches via setup-ryco, and
-# each keeps its own Turbo cache slice (see `cache-scope`), so the redundant
-# install/build work is cache-cheap. The long poles (the unit tests and the
-# browser suite) are sharded across runners. The desktop build and release
-# smoke stay gated behind their inputs so callers can skip them per path (see
+# serial chain. Jobs share the Bun install cache via setup-ryco, and the jobs
+# that run cacheable Turbo tasks (Static, Build) each keep their own Turbo cache
+# slice (see `cache-scope`), so the redundant install/build work is
+# cache-cheap. The long poles (the unit tests and the browser suite) are
+# sharded across runners. The desktop pipeline and release smoke stay gated
+# behind their inputs so callers can skip them per path (see
 # pull-request-validation.yml) or event.
 #
-# Cache handling convention for every job below: `setup-ryco` restores, and the
-# job ends with an `if: always()` save. `actions/cache` normally registers its
-# own post-job save, but that post step is skipped when the job fails, exactly
-# the runs where the next attempt would benefit most from a warm cache. Failing
-# jobs get retried; making them re-download and recompute from cold each time
-# is the worst case, so saves are explicit and unconditional here.
+# Cache handling convention for the jobs below:
+# - Only Static and Build restore and save a Turbo cache. `test` is uncached and
+#   has no Turbo dependencies (turbo.json), and the browser, matrix, and smoke
+#   jobs run no Turbo task, so restoring a multi-GB blob there buys nothing.
+# - Turbo saves are explicit `!cancelled()` steps through save-turbo-cache,
+#   which first prunes the cache to the task hashes of this job's `--summarize`
+#   runs so the blob does not grow commit after commit. `actions/cache`'s own
+#   post-job save is skipped when the job fails, exactly the runs where the
+#   retry would benefit most from a warm cache; a cancelled (superseded) run,
+#   though, should free its runners for the new run instead of uploading.
+# - Each cache backend has exactly one Bun install cache writer
+#   (`bun-cache: write`). Blacksmith runners send actions/cache to Blacksmith's
+#   own backend, where Static writes; GitHub-hosted jobs use GitHub's, where the
+#   test leg test-matrix.ts marks writes. A backend lets one job reserve a key,
+#   so any other writer would compress a GB-sized cache only to have the save
+#   rejected.
+# - Callers that validate arbitrary refs cap this workflow at `cache-mode: read`,
+#   so actions/cache restores main's caches there but skips every save with a
+#   notice. GitHub's cache service also enforces the cap; Blacksmith documents
+#   no such enforcement, so on its runners the cap is only as strong as the
+#   action honoring it.
 jobs:
   static:
     name: Static
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Typecheck is CPU-bound: 4 vCPU roughly halve the job at twice the price
+    # per minute, so it reports sooner for about the same cost.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -77,26 +95,43 @@ jobs:
         with:
           cache-scope: static
           install-resource-monitor-toolchain: "false"
+          bun-cache: write
 
+      # Every check reports on its own: a format failure must not hide lint or
+      # type errors behind skipped steps.
       - name: Format
         run: bun run fmt:check
 
       - name: Lint
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bun run lint
 
-      # fmt/lint stay repo-wide (fast); only typecheck scopes to affected.
+      # fmt/lint stay repo-wide (fast); only the typechecks scope to affected.
+      # tsc-rs is an early, non-authoritative signal; the TS7 + Effect typecheck
+      # below stays the gate. tsc-rs tracks a newer TypeScript and can disagree
+      # with TS7 (docs/typescript.md), so its failures show on the step but
+      # never fail the job.
+      - name: Typecheck (tsc-rs)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        continue-on-error: true
+        run: bun run typecheck:fast --summarize ${{ inputs['affected-base'] != '' && '--affected' || '' }}
+
       - name: Typecheck
-        run: bun run typecheck ${{ inputs['affected-base'] != '' && '--affected' || '' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bun run typecheck --summarize ${{ inputs['affected-base'] != '' && '--affected' || '' }}
 
       - name: Save Turbo cache
-        if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}
-        uses: actions/cache/save@v5
+        if: ${{ !cancelled() && steps.setup.outputs['turbo-cache-key'] != '' }}
+        uses: ./.github/actions/save-turbo-cache
         with:
-          path: .turbo/cache
           key: ${{ steps.setup.outputs['turbo-cache-key'] }}
 
   # A dry plan owns affected-package selection. Each selected package can then
   # use explicit filters, and the server remains sharded in PR and full runs.
+  #
+  # Every test leg waits on this job, so it skips the project setup: Turbo's
+  # dry plan needs neither node_modules nor a Turbo cache, and test-matrix.ts
+  # fetches the lockfile's exact Turbo itself when nothing is installed.
   test-matrix:
     name: Test matrix
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -104,10 +139,10 @@ jobs:
     outputs:
       include: ${{ steps.pick.outputs.include }}
       has-tests: ${{ steps.pick.outputs.has-tests }}
-      # No `browser` output: the browser shards resolve the same scope in-job so
-      # they can start without waiting here (see `browser` below).
-      desktop: ${{ steps.pick.outputs.desktop }}
+      # No `browser` or `desktop` output: the browser shards and Build resolve
+      # the same scope in-job so they can start without waiting here.
       release: ${{ steps.pick.outputs.release }}
+      mobile: ${{ steps.pick.outputs.mobile }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -116,11 +151,10 @@ jobs:
           fetch-depth: ${{ inputs['affected-base'] == '' && 1 || 0 }}
           persist-credentials: false
 
-      - name: Setup project
-        uses: ./.github/actions/setup-ryco
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          cache-scope: test-matrix
-          install-resource-monitor-toolchain: "false"
+          bun-version-file: package.json
 
       - id: pick
         name: Resolve test and validation scope
@@ -146,42 +180,49 @@ jobs:
           fetch-depth: ${{ inputs['affected-base'] == '' && 1 || 0 }}
           persist-credentials: false
 
+      # `test` has no Turbo dependencies and is never cached (turbo.json), so
+      # these legs have no Turbo artifacts to restore or save; turn the restore
+      # back on if `test` regains a build dependency. Only ryco-cli#build
+      # compiles the resource monitor, and no test leg runs it.
       - name: Setup project
-        id: setup
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: test-${{ matrix.name }}
+          restore-turbo-cache: "false"
+          install-resource-monitor-toolchain: "false"
+          bun-cache: ${{ matrix.bunCache }}
 
       - name: Test
         run: bun run test ${{ matrix.filters }} -- ${{ matrix.shard }}
 
+      # One level per workspace glob (the root `workspaces` list): upload-artifact
+      # follows symlinks, so a `**` would walk every linked node_modules.
       - name: Upload test reports
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: unit-test-results-${{ matrix.name }}
           path: |
-            apps/**/test-results/*
-            packages/**/test-results/*
+            apps/*/test-results/*
+            apps/mobile/modules/*/test-results/*
+            packages/*/test-results/*
             scripts/test-results/*
           if-no-files-found: ignore
           retention-days: 14
 
       - name: Summarize test timings
-        if: always()
+        if: ${{ !cancelled() }}
         run: bun scripts/ci/summarize-tests.ts
 
-      - name: Save Turbo cache
-        if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}
-        uses: actions/cache/save@v5
-        with:
-          path: .turbo/cache
-          key: ${{ steps.setup.outputs['turbo-cache-key'] }}
-
+  # Also owns the desktop pipeline: its packages join the one build invocation
+  # below, so the job builds them once.
   build:
     name: Build
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
+    env:
+      # Unreferenced sourcemaps let the bundle budget check below name the
+      # modules each closure carries; they are never served.
+      RYCO_WEB_SOURCEMAP: hidden
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -196,12 +237,89 @@ jobs:
         with:
           cache-scope: build
 
-      - name: Build
+      # The same in-job scope resolution the browser shards use, so Build does
+      # not wait for the Test matrix job.
+      - id: scope
+        name: Resolve desktop validation scope
+        if: ${{ inputs['run-desktop-build'] }}
+        run: bun scripts/ci/test-matrix.ts
+
+      # The computer-use helper compiles with `cargo +1.98.1`. Install it the
+      # same way on every run: the helper's fingerprint includes the cargo
+      # environment this action exports, so skipping it would change the
+      # fingerprint and rebuild instead of reusing the restored helper.
+      - name: Install computer-use Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+
+      # The native builds keep verified, content-addressed binaries (on Linux
+      # the computer-use helper, about 3 minutes of cargo) under artifacts/ and
+      # validate every entry before reuse (native-build-cache), so any restored
+      # entry is safe: a mismatch just rebuilds. Only final binaries are cached,
+      # never the GB-sized cargo targets.
+      #
+      # Their fingerprints also cover inputs no hashFiles can see (the cargo
+      # environment, the toolchain), so the key is per run and a save happens
+      # exactly when this run published a new entry. The native-source hash in
+      # the prefix makes restores prefer the newest save for this tree.
+      - name: Compute native artifact cache key
+        id: native-key
         env:
-          # Unreferenced sourcemaps let the bundle budget check below name the
-          # modules each closure carries; they are never served.
-          RYCO_WEB_SOURCEMAP: hidden
-        run: bun run build ${{ inputs['affected-base'] != '' && '--affected' || '' }}
+          SOURCE_HASH: ${{ hashFiles('apps/desktop/native/**', 'apps/desktop/scripts/*.mjs', '!apps/desktop/scripts/*.test.mjs', 'native/**', 'scripts/build-resource-monitor.ts', 'scripts/lib/native-build-cache.*', 'packages/shared/src/cuaDriverRelease.json') }}
+        run: |
+          prefix="${RUNNER_OS}-${RUNNER_ARCH}-native-artifacts-"
+          {
+            echo "key=${prefix}${SOURCE_HASH}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "source-prefix=${prefix}${SOURCE_HASH}-"
+            echo "prefix=${prefix}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore native build artifacts
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.ryco/cache/native-builds/artifacts
+          key: ${{ steps.native-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.native-key.outputs['source-prefix'] }}
+            ${{ steps.native-key.outputs.prefix }}
+
+      # Restored files keep their original mtimes and reuse never rewrites an
+      # entry's files, so any file newer than the RUNNER_TEMP marker was
+      # published here. Reuse does touch the entry directory, so
+      # `native-cache.ts prune` drops entries older than .restore-marker.
+      - name: Mark restored native build artifacts
+        id: native-marker
+        run: |
+          mkdir -p ~/.ryco/cache/native-builds/artifacts
+          touch "$RUNNER_TEMP/native-artifacts-restored"
+          touch ~/.ryco/cache/native-builds/artifacts/.restore-marker
+
+      # Most web modules are unchanged between commits, and the React Compiler
+      # is most of the web build's CPU time. Release builds never read it.
+      - name: Restore React Compiler cache
+        id: react-compiler-cache
+        uses: ./.github/actions/restore-react-compiler-cache
+        with:
+          scope: build
+
+      # One Turbo invocation, because ryco-cli#build and @ryco/desktop#build
+      # are uncached: a separate desktop build would rerun both. Full runs
+      # build every package anyway. PRs that need the desktop pipeline pass the
+      # affected range as a filter next to build:desktop's own; Turbo unions
+      # `--filter`s but does not union `--affected` with them.
+      - name: Build
+        id: build
+        env:
+          DESKTOP: ${{ inputs['run-desktop-build'] && steps.scope.outputs.desktop == 'true' }}
+        run: |
+          if [ -z "$TURBO_SCM_BASE" ]; then
+            bun run build --summarize
+          elif [ "$DESKTOP" = "true" ]; then
+            bun run build:desktop --summarize --filter="...[${TURBO_SCM_BASE}...${TURBO_SCM_HEAD}]"
+          else
+            bun run build --summarize --affected
+          fi
 
       # Boot-chunk budget, lazy-boundary and bundled-dependency checks on the
       # built server (apps/server/src/serverBundleBoundaries.test.ts). The unit
@@ -221,18 +339,61 @@ jobs:
         shell: bash
         run: bun run perf:bundle-budget | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Save Turbo cache
-        if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}
+      # Bundle check failures do not hide this result.
+      - name: Verify preload bundle output
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs['run-desktop-build'] && steps.scope.outputs.desktop == 'true' }}
+        run: |
+          test -f apps/desktop/dist-electron/preload.cjs
+          grep -nE "desktopBridge|getLocalEnvironmentBootstrap|PICK_FOLDER_CHANNEL|wsUrl" apps/desktop/dist-electron/preload.cjs
+
+      # Published entries are complete and verified, so a later failure does
+      # not stop the save; a run that only reused entries has nothing to add.
+      # Hidden directories under a group are a killed build's temporaries.
+      - name: Check for new native build artifacts
+        id: native-new
+        if: ${{ !cancelled() && steps.native-marker.outcome == 'success' }}
+        run: |
+          artifacts=~/.ryco/cache/native-builds/artifacts
+          if [ -n "$(find "$artifacts" -mindepth 3 -type f -newer "$RUNNER_TEMP/native-artifacts-restored" ! -path "$artifacts/*/.*" -print -quit)" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Each save carries every restored entry forward, so drop the ones this
+      # run did not use (as release.yml does) before saving; otherwise the
+      # blob keeps every historical binary. Only a successful full build is
+      # known to have touched every live entry: a scoped or failed one would
+      # prune entries it never reached, so those save unpruned.
+      - name: Prune unused native build artifacts
+        if: ${{ !cancelled() && steps.native-new.outputs.published == 'true' && steps.build.outcome == 'success' && inputs['affected-base'] == '' }}
+        continue-on-error: true
+        run: node scripts/ci/native-cache.ts prune --dir ~/.ryco/cache/native-builds/artifacts
+
+      - name: Save native build artifacts
+        if: ${{ !cancelled() && steps.native-new.outputs.published == 'true' }}
         uses: actions/cache/save@v5
         with:
-          path: .turbo/cache
+          path: ~/.ryco/cache/native-builds/artifacts
+          key: ${{ steps.native-key.outputs.key }}
+
+      - name: Save React Compiler cache
+        if: ${{ !cancelled() && steps.react-compiler-cache.outcome == 'success' }}
+        uses: ./.github/actions/save-react-compiler-cache
+        with:
+          key: ${{ steps.react-compiler-cache.outputs.key }}
+
+      - name: Save Turbo cache
+        if: ${{ !cancelled() && steps.setup.outputs['turbo-cache-key'] != '' }}
+        uses: ./.github/actions/save-turbo-cache
+        with:
           key: ${{ steps.setup.outputs['turbo-cache-key'] }}
 
   # `vitest.browser.config.ts` sets `fileParallelism: false` on purpose:
   # interaction tests share one constrained Chromium and go flaky when they
   # race. That keeps a single runner at roughly 15% CPU for the whole suite, so
   # the way to spend the idle capacity is more runners, not a bigger one. Each
-  # shard stays internally serial, preserving the timing invariant.
+  # shard stays internally serial, preserving the timing invariant. The
+  # browser config's sequencer splits files by their committed CI durations
+  # (apps/web/test/browserTestDurations.json), so the shards finish together.
   #
   # These shards are the wall-clock long pole, so they do not wait for the
   # test-matrix job. Each shard resolves the same validation scope itself right
@@ -247,7 +408,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/4", "2/4", "3/4", "4/4"]
+        shard: ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -259,33 +420,53 @@ jobs:
           persist-credentials: false
 
       - name: Setup project
-        id: setup
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: browser-${{ matrix.shard }}
+          restore-turbo-cache: "false"
           install-resource-monitor-toolchain: "false"
 
       - id: scope
         name: Resolve validation scope
         run: bun scripts/ci/test-matrix.ts
 
-      # No build step and no Turbo save: browser tests run Vitest directly, which
-      # serves the app through the Vite dev server, and every `@ryco/*` workspace
-      # export web uses resolves to `src` under the ESM `import` condition. So
-      # neither the `@ryco/web` bundle nor any dependency's `dist/` is read.
+      # No build step and no Turbo cache: browser tests run Vitest directly,
+      # which serves the app through the Vite dev server, and every `@ryco/*`
+      # workspace export web uses resolves to `src` under the ESM `import`
+      # condition. So neither the `@ryco/web` bundle nor any dependency's
+      # `dist/` is read.
+      #
+      # The browser builds are pinned by the Playwright version, not by the rest
+      # of the lockfile, so key on that: unrelated dependency bumps keep the
+      # cache warm, and an exact key never carries old browser builds along.
+      - name: Resolve Playwright version
+        if: ${{ steps.scope.outputs.browser == 'true' }}
+        id: playwright
+        working-directory: apps/web
+        run: |
+          version=$(node -p 'require("playwright/package.json").version')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Restore Playwright browsers
         if: ${{ steps.scope.outputs.browser == 'true' }}
         id: playwright-cache
         uses: actions/cache/restore@v5
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-playwright-
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
 
+      # On a cold cache every shard downloads Chromium at once, and the
+      # Playwright CDN occasionally fails a request (it once served the wrong
+      # TLS certificate). Retry rather than fail the shard; a completed install
+      # makes the retry a quick no-op.
       - name: Install browser test runtime
         if: ${{ steps.scope.outputs.browser == 'true' }}
-        run: bun run --cwd apps/web test:browser:install
+        run: |
+          for attempt in 1 2 3; do
+            bun run --cwd apps/web test:browser:install && exit 0
+            echo "::warning::Browser runtime install failed (attempt ${attempt} of 3)."
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       # Saved before the suite runs, and only on a cold key. The browser
       # download is already complete here and is independent of the test
@@ -296,14 +477,31 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
+          key: ${{ steps.playwright-cache.outputs['cache-primary-key'] }}
+
+      # The dev server compiles every module a shard imports with the React
+      # Compiler on its main thread while the browser waits.
+      - name: Restore React Compiler cache
+        if: ${{ steps.scope.outputs.browser == 'true' }}
+        id: react-compiler-cache
+        uses: ./.github/actions/restore-react-compiler-cache
+        with:
+          scope: browser
 
       - name: Browser test
         if: ${{ steps.scope.outputs.browser == 'true' }}
         run: bun run --cwd apps/web test:browser --shard ${{ matrix.shard }}
 
+      # One writer: every shard would save under the same key. The shards
+      # import mostly the same modules, so the first shard's set serves all.
+      - name: Save React Compiler cache
+        if: ${{ !cancelled() && steps.react-compiler-cache.outcome == 'success' && strategy.job-index == 0 }}
+        uses: ./.github/actions/save-react-compiler-cache
+        with:
+          key: ${{ steps.react-compiler-cache.outputs.key }}
+
       - name: Upload browser test reports
-        if: ${{ always() && steps.scope.outputs.browser == 'true' }}
+        if: ${{ !cancelled() && steps.scope.outputs.browser == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: browser-test-results-${{ strategy.job-index }}
@@ -316,47 +514,8 @@ jobs:
           retention-days: 14
 
       - name: Summarize browser test timings
-        if: ${{ always() && steps.scope.outputs.browser == 'true' }}
+        if: ${{ !cancelled() && steps.scope.outputs.browser == 'true' }}
         run: bun scripts/ci/summarize-tests.ts
-
-  desktop:
-    name: Desktop build
-    needs: test-matrix
-    if: ${{ inputs['run-desktop-build'] && needs.test-matrix.outputs.desktop == 'true' }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs['checkout-ref'] != '' && inputs['checkout-ref'] || github.ref }}
-          persist-credentials: false
-
-      - name: Setup project
-        id: setup
-        uses: ./.github/actions/setup-ryco
-        with:
-          cache-scope: desktop
-
-      - name: Install computer-use Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.98.1
-
-      - name: Build desktop pipeline
-        run: bun run build:desktop
-
-      - name: Verify preload bundle output
-        run: |
-          test -f apps/desktop/dist-electron/preload.cjs
-          grep -nE "desktopBridge|getLocalEnvironmentBootstrap|PICK_FOLDER_CHANNEL|wsUrl" apps/desktop/dist-electron/preload.cjs
-
-      - name: Save Turbo cache
-        if: ${{ always() && steps.setup.outputs['turbo-cache-key'] != '' }}
-        uses: actions/cache/save@v5
-        with:
-          path: .turbo/cache
-          key: ${{ steps.setup.outputs['turbo-cache-key'] }}
 
   release-smoke:
     name: Release Smoke
@@ -371,13 +530,42 @@ jobs:
           ref: ${{ inputs['checkout-ref'] != '' && inputs['checkout-ref'] || github.ref }}
           persist-credentials: false
 
+      # No Turbo cache: this job runs no Turbo task, so it has nothing to
+      # restore or contribute.
       - name: Setup project
         uses: ./.github/actions/setup-ryco
         with:
-          cache-scope: release-smoke
+          restore-turbo-cache: "false"
           install-resource-monitor-toolchain: "false"
 
-      # No Turbo save: this job runs no Turbo task, so it has nothing to
-      # contribute to the cache.
       - name: Exercise release-only workflow steps
         run: node scripts/release-smoke.ts
+
+  # Nothing else bundles apps/mobile, and its unit tests never run Metro. A
+  # production export runs Metro resolution, Babel (React Compiler included),
+  # minification and Hermes bytecode for iOS and Android: the JS half of every
+  # EAS build, on Linux. It waits for the test matrix's scope like Release
+  # Smoke: it is off the critical path, so a skip should cost nothing.
+  mobile-bundle:
+    name: Mobile bundle
+    needs: test-matrix
+    if: ${{ needs.test-matrix.outputs.mobile == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs['checkout-ref'] != '' && inputs['checkout-ref'] || github.ref }}
+          persist-credentials: false
+
+      # No Turbo cache: Metro reads every `@ryco/*` workspace from source, so
+      # this job runs no Turbo task.
+      - name: Setup project
+        uses: ./.github/actions/setup-ryco
+        with:
+          restore-turbo-cache: "false"
+          install-resource-monitor-toolchain: "false"
+
+      - name: Export iOS and Android bundles
+        run: bun run --cwd apps/mobile bundle:check

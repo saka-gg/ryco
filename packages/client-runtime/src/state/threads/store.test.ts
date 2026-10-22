@@ -14,10 +14,13 @@ import {
   WorktreeId,
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
+  type OrchestrationStubbedShellSnapshot,
   type OrchestrationThread,
   type OrchestrationThreadShell,
+  type OrchestrationThreadWindowSnapshot,
   type ThreadLineage,
 } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { configureThreadsRuntime, getThreadsRuntimeConfiguration } from "./runtime.ts";
 
@@ -28,6 +31,7 @@ import {
   applyThreadPriorities,
   createShellEventCoalescer,
   demoteEnvironmentStateToCachedSnapshot,
+  evictThreadBodies,
   hydrateEnvironmentStateFromCache,
   selectDelegatedChildThreadsForThreadRef,
   removeEnvironmentState,
@@ -36,22 +40,30 @@ import {
   selectThreadAvailabilityByRef,
   selectThreadByRef,
   selectThreadExistsByRef,
+  setServerThreadHistoryLoadState,
   setSidebarWorktreeTitle,
   setThreadBranch,
   syncServerThreadHistoryPage,
   selectThreadsAcrossEnvironments,
   syncServerShellSnapshot,
   syncServerThreadDetail,
+  syncServerThreadWindow,
   type AppState,
   type EnvironmentState,
   useStore,
 } from "./store.ts";
+import { selectThreadDetailLoaded } from "./storeSelectors.ts";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
+import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
+import { collectedByIdsCache, threadCache } from "./threadDerivationMemo.ts";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   fullThreadEntry,
+  isArchivedThreadStub,
   type Thread,
+  type ThreadShell,
+  type ThreadShellOrStub,
 } from "./types.ts";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
@@ -708,6 +720,56 @@ describe("thread selection memoization", () => {
       twice.environmentStateById[localEnvironmentId]?.threadHistoryByThreadId?.[thread.id]?.messages
         .hasMoreBefore,
     ).toBe(true);
+  });
+
+  it("keeps the stored message slice when a history page repeats", () => {
+    const thread = makeThread({
+      messages: [
+        {
+          id: MessageId.make("message-2"),
+          role: "assistant",
+          text: "newest",
+          createdAt: "2026-02-13T00:02:00.000Z",
+          streaming: false,
+        },
+      ],
+    });
+    const page = {
+      collection: "messages" as const,
+      snapshotSequence: 2,
+      items: [
+        {
+          id: MessageId.make("message-1"),
+          role: "user" as const,
+          text: "older",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-02-13T00:01:00.000Z",
+          updatedAt: "2026-02-13T00:01:00.000Z",
+        },
+      ],
+      page: {
+        oldestCursor: OrchestrationThreadHistoryCursor.make("v1.oldest"),
+        newestCursor: OrchestrationThreadHistoryCursor.make("v1.newest"),
+        hasMoreBefore: true,
+      },
+    };
+
+    const once = syncServerThreadHistoryPage(
+      makeState(thread),
+      page,
+      thread.id,
+      localEnvironmentId,
+    );
+    const twice = syncServerThreadHistoryPage(once, page, thread.id, localEnvironmentId);
+    const before = localEnvironmentStateOf(once);
+    const after = localEnvironmentStateOf(twice);
+
+    expect(after.messageIdsByThreadId).toBe(before.messageIdsByThreadId);
+    expect(after.messageByThreadId).toBe(before.messageByThreadId);
+    expect(selectThreadByRef(twice, scopeThreadRef(localEnvironmentId, thread.id))?.messages).toBe(
+      selectThreadByRef(once, scopeThreadRef(localEnvironmentId, thread.id))?.messages,
+    );
   });
 
   it("returns stable thread references for repeated reads of the same state", () => {
@@ -2141,6 +2203,200 @@ describe("incremental orchestration updates", () => {
     });
   });
 
+  // These scenarios mirror the server projector's revert tests (same fixtures, same expected
+  // ids): the optimistic client projection of a revert must equal the server's result.
+  describe("reverting with the authoritative result", () => {
+    const t = (minute: number) => `2026-02-23T09:${String(minute).padStart(2, "0")}:00.000Z`;
+    const latestTurnAt = (turn: number, minute: number, assistantMessageId: string | null) => ({
+      turnId: TurnId.make(`turn-${turn}`),
+      state: "completed" as const,
+      requestedAt: t(minute),
+      startedAt: t(minute),
+      completedAt: t(minute),
+      assistantMessageId: assistantMessageId === null ? null : MessageId.make(assistantMessageId),
+    });
+    const turnMessage = (
+      id: string,
+      role: "user" | "assistant",
+      turnId: string | null,
+      minute: number,
+    ): Thread["messages"][number] => ({
+      id: MessageId.make(id),
+      role,
+      text: id,
+      turnId: turnId === null ? null : TurnId.make(turnId),
+      createdAt: t(minute),
+      completedAt: t(minute),
+      streaming: false,
+    });
+    const turnPlan = (
+      id: string,
+      turnId: string,
+      minute: number,
+    ): Thread["proposedPlans"][number] => ({
+      id,
+      turnId: TurnId.make(turnId),
+      planMarkdown: id,
+      implementedAt: null,
+      implementationThreadId: null,
+      createdAt: t(minute),
+      updatedAt: t(minute),
+    });
+    const turnActivity = (
+      id: string,
+      kind: string,
+      turnId: string | null,
+      minute: number,
+    ): Thread["activities"][number] => ({
+      id: EventId.make(id),
+      tone: "tool",
+      kind,
+      summary: id,
+      payload: {},
+      turnId: turnId === null ? null : TurnId.make(turnId),
+      createdAt: t(minute),
+    });
+    const checkpoint = (
+      threadRef: string,
+      count: number,
+      completedMinute: number,
+    ): Thread["turnDiffSummaries"][number] => ({
+      turnId: TurnId.make(`turn-${count}`),
+      completedAt: t(completedMinute),
+      status: "ready",
+      checkpointTurnCount: count,
+      checkpointRef: CheckpointRef.make(`refs/ryco/checkpoints/${threadRef}/turn/${count}`),
+      assistantMessageId: MessageId.make(`assistant-${count}`),
+      files: [],
+    });
+
+    const turnIds = (...turns: number[]) => turns.map((turn) => TurnId.make(`turn-${turn}`));
+
+    function revertThread(
+      thread: Thread,
+      payload: Omit<
+        Extract<OrchestrationEvent, { type: "thread.reverted" }>["payload"],
+        "threadId"
+      >,
+    ): Thread {
+      const next = applyOrchestrationEvent(
+        makeState(thread),
+        makeEvent("thread.reverted", { threadId: thread.id, ...payload }),
+        localEnvironmentId,
+      );
+      return threadsOf(next)[0]!;
+    }
+
+    // A thread rebuilt without checkpoints: turn-less prompts and items of later turns.
+    function hydratedThread(): Thread {
+      return makeThread({
+        id: ThreadId.make("thread-hydrated"),
+        latestTurn: latestTurnAt(9, 9, null),
+        messages: [
+          turnMessage("user-anchor-1", "user", null, 1),
+          turnMessage("user-anchor-9", "user", null, 9),
+        ],
+        proposedPlans: [turnPlan("plan-3", "turn-3", 3), turnPlan("plan-9", "turn-9", 9)],
+        activities: [turnActivity("activity-9", "tool.completed", "turn-9", 9)],
+      });
+    }
+
+    it("uses the authoritative latest turn and boundary on a thread without checkpoints", () => {
+      const reverted = revertThread(hydratedThread(), {
+        turnCount: 5,
+        droppedTurnIds: turnIds(6, 7, 8, 9),
+        latestTurn: latestTurnAt(5, 5, null),
+      });
+      expect(reverted.latestTurn?.turnId).toBe("turn-5");
+      expect(reverted.messages.map((entry) => entry.id)).toEqual(["user-anchor-1"]);
+      expect(reverted.proposedPlans.map((entry) => entry.id)).toEqual(["plan-3"]);
+      expect(reverted.activities).toEqual([]);
+    });
+
+    it("keeps the count-based projection for a revert without the authoritative fields", () => {
+      const reverted = revertThread(hydratedThread(), { turnCount: 5 });
+      expect(reverted.latestTurn).toBeNull();
+      expect(reverted.messages.map((entry) => entry.id)).toEqual([
+        "user-anchor-1",
+        "user-anchor-9",
+      ]);
+      expect(reverted.proposedPlans).toEqual([]);
+    });
+
+    it("projects a full thread the same with and without the authoritative fields", () => {
+      const live = makeThread({
+        id: ThreadId.make("thread-live"),
+        latestTurn: latestTurnAt(2, 5, "assistant-2"),
+        turnDiffSummaries: [checkpoint("thread-live", 1, 3), checkpoint("thread-live", 2, 5)],
+        messages: [1, 2].flatMap((count) => [
+          turnMessage(`user-${count}`, "user", `turn-${count}`, count * 2),
+          turnMessage(`assistant-${count}`, "assistant", `turn-${count}`, count * 2 + 1),
+        ]),
+      });
+      const legacy = revertThread(live, { turnCount: 1 });
+      const authoritative = revertThread(live, {
+        turnCount: 1,
+        droppedTurnIds: turnIds(2),
+        latestTurn: latestTurnAt(1, 3, "assistant-1"),
+      });
+      expect(authoritative.messages).toEqual(legacy.messages);
+      expect(authoritative.latestTurn).toEqual(legacy.latestTurn);
+      expect(authoritative.turnDiffSummaries).toEqual(legacy.turnDiffSummaries);
+      expect(legacy.messages.map((entry) => entry.id)).toEqual(["user-1", "assistant-1"]);
+    });
+
+    it("always keeps a fork's inherited history, apart from the count fallback", () => {
+      const forkId = ThreadId.make("fork-1");
+      const inherited = (id: string) => `${forkId}:inherited:${id}`;
+      const fork = makeThread({
+        id: forkId,
+        latestTurn: latestTurnAt(2, 22, "assistant-2"),
+        turnDiffSummaries: [checkpoint("fork-1", 1, 12), checkpoint("fork-1", 2, 22)],
+        // Live user prompts carry no turn id, inherited ones may not either: an inherited
+        // prompt must not take the fallback slot of the fork's own first prompt.
+        messages: [
+          turnMessage(inherited("user-0"), "user", null, 1),
+          turnMessage(inherited("assistant-0"), "assistant", "turn-source", 2),
+          turnMessage("user-1", "user", null, 10),
+          turnMessage("assistant-1", "assistant", "turn-1", 12),
+          turnMessage("user-2", "user", null, 20),
+          turnMessage("assistant-2", "assistant", "turn-2", 22),
+        ],
+        proposedPlans: [
+          turnPlan(inherited("plan-0"), "turn-source", 3),
+          turnPlan("plan-2", "turn-2", 21),
+        ],
+        activities: [
+          turnActivity(inherited("tool-0"), "tool.completed", "turn-source", 2),
+          turnActivity(`${forkId}:forked`, "thread.forked", null, 5),
+          turnActivity("tool-2", "tool.completed", "turn-2", 21),
+        ],
+      });
+      const inheritedMessageIds = [inherited("user-0"), inherited("assistant-0")];
+
+      for (const payload of [
+        { turnCount: 0 },
+        { turnCount: 0, droppedTurnIds: turnIds(1, 2), latestTurn: null },
+      ]) {
+        const toZero = revertThread(fork, payload);
+        expect(toZero.messages.map((entry) => entry.id)).toEqual(inheritedMessageIds);
+        expect(toZero.proposedPlans.map((entry) => entry.id)).toEqual([inherited("plan-0")]);
+        expect(toZero.activities.map((entry) => entry.id)).toEqual([
+          inherited("tool-0"),
+          `${forkId}:forked`,
+        ]);
+        expect(toZero.latestTurn).toBeNull();
+      }
+
+      const toOne = revertThread(fork, { turnCount: 1 });
+      expect(toOne.messages.map((entry) => entry.id)).toEqual([
+        ...inheritedMessageIds,
+        "user-1",
+        "assistant-1",
+      ]);
+    });
+  });
+
   it("clears pending source proposed plans after revert before a new session-set event", () => {
     const thread = makeThread({
       latestTurn: {
@@ -3141,5 +3397,623 @@ describe("thread lineage", () => {
         scopeThreadRef(localEnvironmentId, parentId),
       ).map((child) => child.id),
     ).toEqual([childId, laterChildId]);
+  });
+});
+
+describe("evicting thread bodies", () => {
+  const first = ThreadId.make("thread-first");
+  const second = ThreadId.make("thread-second");
+  const firstRef = scopeThreadRef(localEnvironmentId, first);
+  const secondRef = scopeThreadRef(localEnvironmentId, second);
+  const at = (minute: number) => new Date(Date.UTC(2026, 9, 1, 0, minute)).toISOString();
+
+  function shellThread(id: ThreadId, overrides: Record<string, unknown> = {}) {
+    return {
+      id,
+      projectId: ProjectId.make("project-1"),
+      title: `Thread ${id}`,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+      branch: null,
+      worktreePath: null,
+      worktreeId: null,
+      manualStatusBucket: null,
+      manualPosition: 0,
+      latestTurn: null,
+      createdAt: at(0),
+      updatedAt: at(0),
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      session: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      ...overrides,
+    };
+  }
+
+  function makeWindow(id: ThreadId): OrchestrationThreadWindowSnapshot {
+    const historyPage = { oldestCursor: null, newestCursor: null, hasMoreBefore: false };
+    const {
+      latestUserMessageAt: _latest,
+      hasPendingApprovals: _a,
+      hasPendingUserInput: _u,
+      hasActionableProposedPlan: _p,
+      ...thread
+    } = shellThread(id);
+    return {
+      snapshotSequence: 10,
+      thread: {
+        ...thread,
+        deletedAt: null,
+        messages: [1, 2].map((index) => ({
+          id: MessageId.make(`${id}-message-${index}`),
+          role: index === 1 ? "user" : "assistant",
+          text: `Message ${index}`,
+          turnId: null,
+          streaming: false,
+          createdAt: at(index),
+          updatedAt: at(index),
+        })),
+        proposedPlans: [
+          {
+            id: `${id}-plan`,
+            turnId: null,
+            planMarkdown: "# Plan",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: at(1),
+            updatedAt: at(1),
+          },
+        ],
+        activities: [
+          {
+            id: EventId.make(`${id}-activity`),
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "Tool",
+            payload: { detail: "output" },
+            turnId: null,
+            sequence: 1,
+            createdAt: at(1),
+          },
+        ],
+        checkpoints: [
+          {
+            turnId: TurnId.make(`${id}-turn`),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make(`${id}-ref`),
+            status: "ready",
+            files: [{ path: "src/a.ts", kind: "added", additions: 3, deletions: 0 }],
+            assistantMessageId: null,
+            completedAt: at(2),
+          },
+        ],
+        session: null,
+      },
+      history: {
+        messages: historyPage,
+        proposedPlans: historyPage,
+        activities: historyPage,
+        checkpoints: historyPage,
+      },
+    } as unknown as OrchestrationThreadWindowSnapshot;
+  }
+
+  function archivedStub(id: ThreadId) {
+    return {
+      id,
+      projectId: ProjectId.make("project-1"),
+      title: `Thread ${id}`,
+      branch: null,
+      worktreePath: null,
+      worktreeId: null,
+      createdAt: at(0),
+      updatedAt: at(7),
+      archivedAt: at(7),
+      latestUserMessageAt: null,
+      lineage: null,
+    };
+  }
+
+  function shellSnapshot(
+    snapshotSequence: number,
+    threads: ReadonlyArray<ReturnType<typeof shellThread>>,
+    archivedThreadStubs?: ReadonlyArray<ReturnType<typeof archivedStub>>,
+  ): OrchestrationStubbedShellSnapshot {
+    return {
+      snapshotSequence,
+      projects: [
+        {
+          id: ProjectId.make("project-1"),
+          title: "Project",
+          workspaceRoot: "/workspace/project",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      ],
+      threads,
+      ...(archivedThreadStubs === undefined ? {} : { archivedThreadStubs }),
+      updatedAt: at(0),
+    } as unknown as OrchestrationStubbedShellSnapshot;
+  }
+
+  /** Both threads listed by the shell, opened, and with a history page still loading. */
+  function loadedState(): AppState {
+    let state = syncServerShellSnapshot(
+      makeEmptyState(),
+      shellSnapshot(1, [shellThread(first), shellThread(second)]),
+      localEnvironmentId,
+    );
+    for (const id of [first, second]) {
+      state = syncServerThreadWindow(state, makeWindow(id), localEnvironmentId);
+      state = setServerThreadHistoryLoadState(state, {
+        environmentId: localEnvironmentId,
+        threadId: id,
+        collection: "messages",
+        loadState: { status: "loading", cursor: null, error: null },
+      });
+    }
+    return state;
+  }
+
+  /** Whether a composed thread is memoized under the shell. */
+  const composedUnder = (shell: ThreadShellOrStub | undefined) =>
+    shell !== undefined && threadCache.has(shell as ThreadShell);
+
+  const bodyRecords = [
+    "messageIdsByThreadId",
+    "messageByThreadId",
+    "activityIdsByThreadId",
+    "activityByThreadId",
+    "proposedPlanIdsByThreadId",
+    "proposedPlanByThreadId",
+    "turnDiffIdsByThreadId",
+    "turnDiffSummaryByThreadId",
+    "threadHistoryByThreadId",
+    "threadHistoryLoadByThreadId",
+  ] as const;
+
+  it("drops a thread's body and keeps its shell, session, turn state and summary", () => {
+    const before = localEnvironmentStateOf(loadedState());
+    for (const key of bodyRecords) expect(before[key]).toHaveProperty(first);
+
+    const after = localEnvironmentStateOf(evictThreadBodies(loadedState(), [firstRef]));
+
+    for (const key of bodyRecords) expect(after[key]).not.toHaveProperty(first);
+    expect(after.threadShellById[first]).toBeDefined();
+    expect(after.threadSessionById).toHaveProperty(first);
+    expect(after.threadTurnStateById).toHaveProperty(first);
+    expect(after.sidebarThreadSummaryById[first]?.title).toBe(`Thread ${first}`);
+    expect(after.threadIds).toEqual(before.threadIds);
+    expect(after.bootstrapComplete).toBe(true);
+  });
+
+  it("keeps the rows of every other thread by identity", () => {
+    const loaded = loadedState();
+    const before = localEnvironmentStateOf(loaded);
+    const after = localEnvironmentStateOf(evictThreadBodies(loaded, [firstRef]));
+
+    for (const key of bodyRecords) {
+      expect(after[key]![second]).toBe(before[key]![second]);
+    }
+    expect(after.threadShellById).toBe(before.threadShellById);
+    expect(after.threadSessionById).toBe(before.threadSessionById);
+    expect(after.threadTurnStateById).toBe(before.threadTurnStateById);
+    expect(after.sidebarThreadSummaryById).toBe(before.sidebarThreadSummaryById);
+    expect(after.threadIdsByProjectId).toBe(before.threadIdsByProjectId);
+    expect(after.projectById).toBe(before.projectById);
+  });
+
+  it("does not publish a new state when no listed thread holds a body", () => {
+    const loaded = loadedState();
+    const evicted = evictThreadBodies(loaded, [firstRef]);
+    expect(evictThreadBodies(evicted, [firstRef])).toBe(evicted);
+    expect(evictThreadBodies(loaded, [])).toBe(loaded);
+    expect(evictThreadBodies(loaded, [scopeThreadRef(remoteEnvironmentId, first)])).toBe(loaded);
+  });
+
+  it("drops several threads at once and the pending messages of a thread without a shell", () => {
+    const pendingId = ThreadId.make("thread-pending");
+    const pending = applyOrchestrationEvent(
+      loadedState(),
+      makeEvent("thread.message-sent", {
+        threadId: pendingId,
+        messageId: MessageId.make("pending-message"),
+        role: "assistant",
+        text: "early",
+        turnId: null,
+        streaming: true,
+        createdAt: at(3),
+        updatedAt: at(3),
+      }),
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(pending).pendingMessagesByThreadId[pendingId]).toHaveLength(1);
+
+    const after = localEnvironmentStateOf(
+      evictThreadBodies(pending, [
+        firstRef,
+        secondRef,
+        scopeThreadRef(localEnvironmentId, pendingId),
+      ]),
+    );
+
+    expect(after.messageByThreadId).toEqual({});
+    expect(after.activityByThreadId).toEqual({});
+    expect(after.pendingMessagesByThreadId).toEqual({});
+  });
+
+  it("ends a cached body's provenance with the body", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    const hydrated = hydrateEnvironmentStateFromCache(
+      { activeEnvironmentId: null, environmentStateById: {} },
+      {
+        capturedAt: 1,
+        projects: [],
+        worktrees: [],
+        threads: [
+          {
+            shell: environment.threadShellById[first]!,
+            summary: environment.sidebarThreadSummaryById[first]!,
+            content: {
+              messages: [
+                {
+                  id: MessageId.make("cached-message"),
+                  role: "user",
+                  text: "cached",
+                  createdAt: at(1),
+                  streaming: false,
+                },
+              ],
+            },
+          },
+        ],
+      },
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(hydrated).cachedMessageThreadIds).toHaveProperty(first);
+
+    const after = localEnvironmentStateOf(evictThreadBodies(hydrated, [firstRef]));
+
+    expect(after.cachedMessageThreadIds).toEqual({});
+    expect(after.messageByThreadId).toEqual({});
+    expect(after.threadShellById[first]).toBeDefined();
+  });
+
+  it("forgets the thread composed from a dropped body", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    const composed = getThreadFromEnvironmentState(environment, first);
+    const untouched = getThreadFromEnvironmentState(environment, second);
+    expect(composed?.messages).toHaveLength(2);
+    expect(getThreadFromEnvironmentState(environment, first)).toBe(composed);
+
+    const after = localEnvironmentStateOf(evictThreadBodies(loaded, [firstRef]));
+
+    // Composing from the state before the eviction builds the thread anew: the
+    // memo under its shell, and the body it held, are gone.
+    const recomposed = getThreadFromEnvironmentState(environment, first);
+    expect(recomposed).not.toBe(composed);
+    expect(recomposed).toEqual(composed);
+    expect(getThreadFromEnvironmentState(environment, second)).toBe(untouched);
+    expect(after.threadShellById[first]).toBe(environment.threadShellById[first]);
+    expect(after.threadSessionById[first]).toBe(environment.threadSessionById[first]);
+    expect(after.threadTurnStateById[first]).toBe(environment.threadTurnStateById[first]);
+    expect(after.sidebarThreadSummaryById[first]).toBe(environment.sidebarThreadSummaryById[first]);
+  });
+
+  it("forgets the rows collected from a dropped body", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    getThreadFromEnvironmentState(environment, first);
+    getThreadFromEnvironmentState(environment, second);
+    const idListsOf = (threadId: ThreadId): ReadonlyArray<readonly string[] | undefined> => [
+      environment.messageIdsByThreadId[threadId],
+      environment.activityIdsByThreadId[threadId],
+      environment.proposedPlanIdsByThreadId[threadId],
+      environment.turnDiffIdsByThreadId[threadId],
+    ];
+    for (const ids of [...idListsOf(first), ...idListsOf(second)]) {
+      expect(ids?.length).toBeGreaterThan(0);
+      expect(collectedByIdsCache.has(ids!)).toBe(true);
+    }
+
+    evictThreadBodies(loaded, [firstRef]);
+
+    // The state before the eviction still holds both keys of every dropped list.
+    for (const ids of idListsOf(first)) expect(collectedByIdsCache.has(ids!)).toBe(false);
+    for (const ids of idListsOf(second)) expect(collectedByIdsCache.has(ids!)).toBe(true);
+  });
+
+  it("forgets the thread composed under a shell an update replaced", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    const previousShell = environment.threadShellById[first];
+    expect(getThreadFromEnvironmentState(environment, first)?.messages).toHaveLength(2);
+    expect(composedUnder(previousShell)).toBe(true);
+
+    const updated = applyOrchestrationEvent(
+      loaded,
+      makeEvent(
+        "thread.meta-updated",
+        { threadId: first, title: "Renamed", updatedAt: at(5) },
+        { sequence: 11 },
+      ),
+      localEnvironmentId,
+    );
+    const nextShell = localEnvironmentStateOf(updated).threadShellById[first];
+    expect(nextShell).not.toBe(previousShell);
+    expect(nextShell?.title).toBe("Renamed");
+    expect(composedUnder(previousShell)).toBe(false);
+
+    getThreadFromEnvironmentState(localEnvironmentStateOf(updated), first);
+    expect(composedUnder(nextShell)).toBe(true);
+    evictThreadBodies(updated, [firstRef]);
+
+    // No shell of the thread the test kept reaches a composed body any more.
+    expect(composedUnder(previousShell)).toBe(false);
+    expect(composedUnder(nextShell)).toBe(false);
+  });
+
+  it("forgets the thread composed under a shell the shell stream or a snapshot replaced or dropped", () => {
+    const composeBoth = () => {
+      const loaded = loadedState();
+      const environment = localEnvironmentStateOf(loaded);
+      getThreadFromEnvironmentState(environment, first);
+      getThreadFromEnvironmentState(environment, second);
+      const firstShell = environment.threadShellById[first];
+      const secondShell = environment.threadShellById[second];
+      expect(composedUnder(firstShell)).toBe(true);
+      expect(composedUnder(secondShell)).toBe(true);
+      return { loaded, firstShell, secondShell };
+    };
+
+    const upserted = composeBoth();
+    const afterUpsert = applyShellEvent(
+      upserted.loaded,
+      {
+        kind: "thread-upserted",
+        sequence: 2,
+        thread: shellThread(first, { title: "Upserted", updatedAt: at(6) }),
+      } as never,
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(afterUpsert).threadShellById[first]?.title).toBe("Upserted");
+    expect(composedUnder(upserted.firstShell)).toBe(false);
+    expect(composedUnder(upserted.secondShell)).toBe(true);
+
+    const resynced = composeBoth();
+    const afterSnapshot = syncServerShellSnapshot(
+      resynced.loaded,
+      shellSnapshot(2, [shellThread(first, { title: "Renamed", updatedAt: at(6) })]),
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(afterSnapshot).threadIds).toEqual([first]);
+    expect(composedUnder(resynced.firstShell)).toBe(false);
+    expect(composedUnder(resynced.secondShell)).toBe(false);
+
+    const removed = composeBoth();
+    const afterRemoval = applyShellEvent(
+      removed.loaded,
+      { kind: "thread-removed", sequence: 2, threadId: first },
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(afterRemoval).threadShellById[first]).toBeUndefined();
+    expect(composedUnder(removed.firstShell)).toBe(false);
+    expect(composedUnder(removed.secondShell)).toBe(true);
+  });
+
+  it("forgets the thread composed under a shell a settlement or archive replaced", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    getThreadFromEnvironmentState(environment, first);
+    const previousShell = environment.threadShellById[first];
+    expect(composedUnder(previousShell)).toBe(true);
+
+    const settled = applyOrchestrationEvent(
+      loaded,
+      makeEvent(
+        "thread.settled",
+        { threadId: first, settledAt: at(7), updatedAt: at(7) },
+        { sequence: 11 },
+      ),
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(settled).threadShellById[first]).toMatchObject({
+      settledAt: at(7),
+    });
+    expect(composedUnder(previousShell)).toBe(false);
+
+    const reloaded = loadedState();
+    const reloadedEnvironment = localEnvironmentStateOf(reloaded);
+    getThreadFromEnvironmentState(reloadedEnvironment, first);
+    const fullShell = reloadedEnvironment.threadShellById[first];
+    expect(composedUnder(fullShell)).toBe(true);
+
+    const archived = syncServerShellSnapshot(
+      reloaded,
+      shellSnapshot(2, [shellThread(second)], [archivedStub(first)]),
+      localEnvironmentId,
+    );
+    expect(isArchivedThreadStub(localEnvironmentStateOf(archived).threadShellById[first])).toBe(
+      true,
+    );
+    expect(composedUnder(fullShell)).toBe(false);
+  });
+
+  it("keeps the composed thread of a shell that stays", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    const shell = environment.threadShellById[first];
+    const composed = getThreadFromEnvironmentState(environment, first);
+    expect(composedUnder(shell)).toBe(true);
+    const expectKept = (state: AppState) => {
+      expect(localEnvironmentStateOf(state).threadShellById[first]).toBe(shell);
+      expect(composedUnder(shell)).toBe(true);
+      expect(getThreadFromEnvironmentState(localEnvironmentStateOf(state), first)).toBe(composed);
+    };
+
+    expectKept(
+      syncServerShellSnapshot(
+        loaded,
+        shellSnapshot(2, [shellThread(first), shellThread(second)]),
+        localEnvironmentId,
+      ),
+    );
+
+    // An event that leaves the shell as it is, alone and inside a batch.
+    const unchanged = (sequence: number) =>
+      makeEvent(
+        "thread.meta-updated",
+        { threadId: first, title: `Thread ${first}`, updatedAt: at(0) },
+        { sequence },
+      );
+    expectKept(applyOrchestrationEvent(loaded, unchanged(12), localEnvironmentId));
+    expectKept(
+      applyOrchestrationEvents(loaded, [unchanged(12), unchanged(13)], localEnvironmentId),
+    );
+  });
+
+  it("loads the thread again as if it had never been opened", () => {
+    const loaded = loadedState();
+    expect(selectThreadDetailLoaded(loaded, firstRef)).toBe(true);
+
+    const evicted = evictThreadBodies(loaded, [firstRef]);
+    expect(selectThreadDetailLoaded(evicted, firstRef)).toBe(false);
+    expect(selectThreadByRef(evicted, firstRef)?.messages).toEqual([]);
+
+    const reopened = syncServerThreadWindow(evicted, makeWindow(first), localEnvironmentId);
+    expect(selectThreadDetailLoaded(reopened, firstRef)).toBe(true);
+    expect(selectThreadByRef(reopened, firstRef)?.messages.map((message) => message.text)).toEqual([
+      "Message 1",
+      "Message 2",
+    ]);
+    expect(selectThreadByRef(reopened, firstRef)?.activities).toHaveLength(1);
+  });
+
+  it("is available as a store action", () => {
+    const previous = useStore.getState();
+    try {
+      useStore.setState(loadedState());
+      useStore.getState().evictThreadBodies([firstRef]);
+
+      const environment = selectEnvironmentState(useStore.getState(), localEnvironmentId);
+      expect(environment.messageByThreadId).not.toHaveProperty(first);
+      expect(environment.messageByThreadId).toHaveProperty(second);
+    } finally {
+      useStore.setState(previous, true);
+    }
+  });
+});
+
+describe("thread errors", () => {
+  const releasedSession = {
+    threadId: ThreadId.make("thread-1"),
+    status: "error" as const,
+    providerName: "codex",
+    runtimeMode: "full-access" as const,
+    activeTurnId: null,
+    lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+    updatedAt: "2026-02-27T00:00:02.000Z",
+  };
+
+  it("shows no thread error for a session a server restart released", () => {
+    const released = applyOrchestrationEvent(
+      makeState(makeThread()),
+      makeEvent("thread.session-set", {
+        threadId: releasedSession.threadId,
+        session: releasedSession,
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(released)[0]?.session?.lastError).toBe(ORPHANED_PROVIDER_SESSION_ERROR);
+    expect(threadsOf(released)[0]?.error).toBeNull();
+
+    const failed = applyOrchestrationEvent(
+      released,
+      makeEvent(
+        "thread.session-set",
+        {
+          threadId: releasedSession.threadId,
+          session: { ...releasedSession, lastError: "Provider exited (code 1)" },
+        },
+        { sequence: 2 },
+      ),
+      localEnvironmentId,
+    );
+    expect(threadsOf(failed)[0]?.error).toBe("Provider exited (code 1)");
+  });
+
+  it("maps a released session from shell and detail snapshots without an error", () => {
+    const shell: OrchestrationThreadShell = {
+      id: releasedSession.threadId,
+      projectId: ProjectId.make("project-1"),
+      title: "Released",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      worktreeId: null,
+      manualStatusBucket: null,
+      manualPosition: 0,
+      latestTurn: null,
+      createdAt: "2026-02-27T00:00:00.000Z",
+      updatedAt: "2026-02-27T00:00:02.000Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      session: releasedSession,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const fromShell = syncServerShellSnapshot(
+      makeEmptyState(),
+      { snapshotSequence: 1, projects: [], threads: [shell], updatedAt: shell.updatedAt },
+      localEnvironmentId,
+    );
+    expect(
+      fullThreadEntry(localEnvironmentStateOf(fromShell).threadShellById[shell.id])?.error,
+    ).toBeNull();
+
+    const fromDetail = syncServerThreadDetail(
+      makeEmptyState(),
+      {
+        ...shell,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+      },
+      localEnvironmentId,
+    );
+    expect(threadsOf(fromDetail)[0]?.error).toBeNull();
+    expect(
+      threadsOf(
+        syncServerThreadDetail(
+          makeEmptyState(),
+          {
+            ...shell,
+            session: { ...releasedSession, lastError: "Provider exited (code 1)" },
+            deletedAt: null,
+            messages: [],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+          },
+          localEnvironmentId,
+        ),
+      )[0]?.error,
+    ).toBe("Provider exited (code 1)");
   });
 });

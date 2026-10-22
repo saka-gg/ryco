@@ -447,3 +447,90 @@ it("lists a parent's tasks with unsettled returns first", () =>
       expect(yield* repo.hasOutstandingDelegations(ThreadId.make("done"))).toBe(false);
     }),
   ));
+
+it("reports the earliest check among pending rows only", () =>
+  run(
+    Effect.gen(function* () {
+      const repo = yield* CompletionReturnRepository;
+      expect(yield* repo.earliestPendingCheckAt()).toBeNull();
+      const row = (childThreadId: string, status: CompletionReturnRecord["status"], at: number) =>
+        completionFixture({
+          childThreadId: ThreadId.make(childThreadId),
+          status,
+          nextCheckAt: fixtureAt(at),
+        });
+      // Settled rows keep their last check time but are no longer owed.
+      yield* repo.insert(row("delivered", "delivered", 1));
+      yield* repo.insert(row("cancelled", "cancelled", 2));
+      yield* repo.insert(row("failed", "failed", 3));
+      expect(yield* repo.earliestPendingCheckAt()).toBeNull();
+
+      yield* repo.insert(row("waiting", "waiting", 30));
+      expect(yield* repo.earliestPendingCheckAt()).toBe(fixtureAt(30));
+      yield* repo.insert(row("dispatching", "dispatching", 12));
+      yield* repo.insert(row("ready", "ready", 20));
+      expect(yield* repo.earliestPendingCheckAt()).toBe(fixtureAt(12));
+
+      // A pending row that settles stops counting.
+      const dispatching = (yield* repo.get(ThreadId.make("dispatching")))!;
+      yield* repo.save(dispatching, { ...dispatching, status: "delivered" });
+      expect(yield* repo.earliestPendingCheckAt()).toBe(fixtureAt(20));
+    }),
+  ));
+
+it("signals a change after each insert or update that wrote a row", () =>
+  run(
+    Effect.gen(function* () {
+      const repo = yield* CompletionReturnRepository;
+      let signals = 0;
+      const unsubscribe = repo.subscribeChanges(() => {
+        signals += 1;
+      });
+      const first = completionFixture();
+      const second = completionFixture({ childThreadId: ThreadId.make("sibling") });
+
+      yield* repo.insert(first);
+      expect(signals).toBe(1);
+      // A row that already exists is left alone.
+      yield* repo.insert({ ...first, detail: "Duplicate." });
+      expect(signals).toBe(1);
+
+      yield* repo.insert(second);
+      expect(signals).toBe(2);
+      expect(yield* repo.save(first, { ...first, detail: "Held." })).toBe(true);
+      expect(signals).toBe(3);
+      // A stale revision writes nothing.
+      expect(yield* repo.save(first, { ...first, detail: "Stale." })).toBe(false);
+      expect(signals).toBe(3);
+
+      const claim = (record: CompletionReturnRecord) =>
+        [record, { ...record, status: "dispatching" as const }] as const;
+      const current = (yield* repo.get(first.childThreadId))!;
+      // One stale member rolls the whole claim back.
+      expect(yield* repo.claimBatch([claim(current), claim(first)])).toBe(false);
+      expect(signals).toBe(3);
+      expect(yield* repo.claimBatch([])).toBe(true);
+      expect(signals).toBe(3);
+      expect(yield* repo.claimBatch([claim(current), claim(second)])).toBe(true);
+      expect(signals).toBe(4);
+
+      unsubscribe();
+      yield* repo.save(second, { ...second, detail: "After unsubscribe." }).pipe(Effect.ignore);
+      expect(signals).toBe(4);
+    }),
+  ));
+
+it("never fails a write because a change listener threw", () =>
+  run(
+    Effect.gen(function* () {
+      const repo = yield* CompletionReturnRepository;
+      let calls = 0;
+      repo.subscribeChanges(() => {
+        calls += 1;
+        throw new Error("listener failure");
+      });
+      yield* repo.insert(completionFixture());
+      expect(calls).toBe(1);
+      expect((yield* repo.get(ThreadId.make("child")))?.status).toBe("waiting");
+    }),
+  ));

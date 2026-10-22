@@ -45,6 +45,7 @@ const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
 const UPDATE_CHECK_CHANNEL = "desktop:update-check";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
+const UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL = "desktop:update-remote-install-response";
 const GET_APP_BRANDING_CHANNEL = "desktop:get-app-branding";
 const GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL = "desktop:get-local-environment-bootstrap";
 const GET_CLIENT_SETTINGS_CHANNEL = "desktop:get-client-settings";
@@ -289,6 +290,14 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.cancelVerification, handle),
   verifyDesktopWorkspaceApproval: (input) =>
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.verifyApproval, input),
+  publishDesktopThreadContent: (environmentId, content) =>
+    ipcRenderer.send(DESKTOP_WORKSPACE_IPC.publishThreadContent, environmentId, content),
+  getDesktopThreadContent: (environmentId) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getThreadContent, environmentId),
+  getDesktopThreadContentCacheEnabled: () =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled),
+  setDesktopThreadContentCacheEnabled: (enabled) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled, enabled),
   onDesktopWorkspaceState: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
       if (typeof state !== "object" || state === null) return;
@@ -360,6 +369,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   checkForUpdate: () => ipcRenderer.invoke(UPDATE_CHECK_CHANNEL),
   downloadUpdate: () => ipcRenderer.invoke(UPDATE_DOWNLOAD_CHANNEL),
   installUpdate: () => ipcRenderer.invoke(UPDATE_INSTALL_CHANNEL),
+  respondToRemoteInstall: (action) =>
+    ipcRenderer.invoke(UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL, action),
   onUpdateState: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
       if (typeof state !== "object" || state === null) return;

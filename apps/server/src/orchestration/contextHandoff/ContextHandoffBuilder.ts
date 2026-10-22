@@ -212,6 +212,14 @@ function asInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
 
+/**
+ * Bounds an already trimmed value. A cut can land just after whitespace; decoding the stored
+ * document trims it, so the cut value is trimmed here and stays what a later load reads back.
+ */
+function truncateTrimmed(value: string, maxChars: number): string {
+  return truncateUnicodeSafe(value, maxChars).trimEnd();
+}
+
 function boundedString(
   value: unknown,
   maxChars: number,
@@ -220,7 +228,7 @@ function boundedString(
   if (!normalized) {
     return { truncated: false };
   }
-  const bounded = truncateUnicodeSafe(normalized, maxChars);
+  const bounded = truncateTrimmed(normalized, maxChars);
   return {
     value: bounded,
     truncated: bounded.length !== normalized.length,
@@ -259,10 +267,6 @@ export function stableStringifyContextHandoff(value: unknown): string {
   return canonicalJsonText(value);
 }
 
-export function digestContextHandoffDocument(document: ContextHandoffDocument): string {
-  return sha256Hex(stableStringifyContextHandoff(document));
-}
-
 function endpointKey(endpoint: ContextHandoffEndpointSnapshot): string {
   return `${endpoint.providerInstanceId}\u0000${endpoint.modelSlug}`;
 }
@@ -274,7 +278,7 @@ function boundedEndpoint(endpoint: ContextHandoffEndpointSnapshot): ContextHando
   return {
     providerInstanceId: endpoint.providerInstanceId,
     driverKind: endpoint.driverKind,
-    modelSlug: truncateUnicodeSafe(endpoint.modelSlug, LABEL_MAX_CHARS),
+    modelSlug: truncateTrimmed(endpoint.modelSlug, LABEL_MAX_CHARS),
     ...(providerDisplayName ? { providerDisplayName } : {}),
     ...(providerAccentColor ? { providerAccentColor } : {}),
     ...(modelDisplayName ? { modelDisplayName } : {}),
@@ -360,7 +364,7 @@ function collectPriorHandoffs(
       sources: payload.sources.map(boundedEndpoint),
       target: boundedEndpoint(payload.target),
       ...(payload.status === "failed" || payload.status === "delivery-uncertain"
-        ? { error: truncateUnicodeSafe(payload.error, DETAIL_MAX_CHARS) }
+        ? { error: truncateTrimmed(payload.error, DETAIL_MAX_CHARS) }
         : {}),
     });
   }
@@ -421,7 +425,7 @@ function collectProposedPlans(
     if (plan.implementedAt !== null || !history.includes(plan)) {
       continue;
     }
-    const planMarkdown = truncateUnicodeSafe(plan.planMarkdown, PLAN_TEXT_MAX_CHARS);
+    const planMarkdown = truncateTrimmed(plan.planMarkdown, PLAN_TEXT_MAX_CHARS);
     plans.push({
       id: plan.id,
       source: "proposed-plan",
@@ -590,7 +594,7 @@ function pathFromRecord(record: Record<string, unknown>): string | undefined {
   for (const key of ["path", "filePath", "relativePath", "filename", "newPath", "oldPath"]) {
     const path = asTrimmedString(record[key]);
     if (path) {
-      return truncateUnicodeSafe(path, PATH_MAX_CHARS);
+      return truncateTrimmed(path, PATH_MAX_CHARS);
     }
   }
   return undefined;
@@ -804,8 +808,8 @@ function collectCheckpoints(
       checkpointTurnCount: checkpoint.checkpointTurnCount,
       status: checkpoint.status,
       files: checkpoint.files.map((file) => ({
-        path: truncateUnicodeSafe(file.path, PATH_MAX_CHARS),
-        kind: truncateUnicodeSafe(file.kind, LABEL_MAX_CHARS),
+        path: truncateTrimmed(file.path, PATH_MAX_CHARS),
+        kind: truncateTrimmed(file.kind, LABEL_MAX_CHARS),
         additions: file.additions,
         deletions: file.deletions,
       })),
@@ -978,6 +982,11 @@ export function countContextHandoffEntries(document: ContextHandoffDocument): nu
   );
 }
 
+/**
+ * Builds the document and its digest. The document is decoded once before it is digested, so
+ * its canonical JSON is exactly what decoding the stored copy reproduces. Throws when the
+ * thread yields a value the document schema rejects.
+ */
 export function buildContextHandoffDocument(
   input: BuildContextHandoffDocumentInput,
 ): ContextHandoffArtifact {
@@ -993,15 +1002,15 @@ export function buildContextHandoffDocument(
     ...collectProposedPlans(input.thread, history),
     ...collectRuntimePlan(activities, order),
   ].toSorted(order);
-  const document: ContextHandoffDocument = {
+  const assembled: ContextHandoffDocument = {
     version: CONTEXT_HANDOFF_CONTEXT_VERSION,
     mode: "full-context-fresh-session",
     thread: {
       id: input.thread.id,
-      title: truncateUnicodeSafe(input.thread.title, LABEL_MAX_CHARS),
-      branch: input.thread.branch ? truncateUnicodeSafe(input.thread.branch, PATH_MAX_CHARS) : null,
+      title: truncateTrimmed(input.thread.title, LABEL_MAX_CHARS),
+      branch: input.thread.branch ? truncateTrimmed(input.thread.branch, PATH_MAX_CHARS) : null,
       worktreePath: input.thread.worktreePath
-        ? truncateUnicodeSafe(input.thread.worktreePath, PATH_MAX_CHARS)
+        ? truncateTrimmed(input.thread.worktreePath, PATH_MAX_CHARS)
         : null,
     },
     provenance: {
@@ -1016,6 +1025,7 @@ export function buildContextHandoffDocument(
     subagents: collectSubagents(activities, order),
     priorHandoffs,
   };
+  const document = Schema.decodeUnknownSync(ContextHandoffDocument)(assembled);
   const canonicalJson = stableStringifyContextHandoff(document);
   return {
     document,

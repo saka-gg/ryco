@@ -1,21 +1,26 @@
 import { WS_METHODS } from "@ryco/contracts";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
   allowed: new Set<string>(),
+  readCapability: vi.fn(),
   prefetchUsageSummary: vi.fn(),
   prefetchStatistics: vi.fn(),
 }));
 
-vi.mock("~/hostedHub/capabilities", () => ({
-  readHostedRpcCapability: (method: string) => ({ allowed: mocks.allowed.has(method) }),
-}));
+vi.mock("~/hostedHub/capabilities", () => ({ readHostedRpcCapability: mocks.readCapability }));
 vi.mock("./useUsageSummary", () => ({ prefetchUsageSummary: mocks.prefetchUsageSummary }));
 vi.mock("../settings/statistics/useStatistics", () => ({
   prefetchStatistics: mocks.prefetchStatistics,
 }));
 
 import { prefetchStatisticsPage } from "./statisticsPrefetch";
+
+beforeEach(() => {
+  mocks.readCapability.mockImplementation((method: string) => ({
+    allowed: mocks.allowed.has(method),
+  }));
+});
 
 afterEach(() => {
   mocks.allowed.clear();
@@ -43,6 +48,15 @@ describe("prefetchStatisticsPage", () => {
     prefetchStatisticsPage({ view: "limits", range: "30d", environmentIds: undefined });
     expect(mocks.prefetchStatistics).not.toHaveBeenCalled();
     expect(mocks.prefetchUsageSummary).not.toHaveBeenCalled();
+  });
+
+  it("gates the requests on the routed node", () => {
+    mocks.allowed.add(WS_METHODS.serverGetUsageSummary);
+    mocks.allowed.add(WS_METHODS.serverGetStatistics);
+    prefetchStatisticsPage({ view: "usage", range: "30d", environmentIds: undefined });
+    prefetchStatisticsPage({ view: "activity", range: "30d", environmentIds: undefined });
+    expect(mocks.readCapability).toHaveBeenCalledWith(WS_METHODS.serverGetUsageSummary, null);
+    expect(mocks.readCapability).toHaveBeenCalledWith(WS_METHODS.serverGetStatistics, null);
   });
 
   it("asks nothing for a session the page would refuse", () => {

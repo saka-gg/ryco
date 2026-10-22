@@ -1,5 +1,5 @@
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import release from "../../../packages/shared/src/cuaDriverRelease.json" with { type: "json" };
@@ -9,12 +9,18 @@ import {
   usableCuaArtifact,
 } from "./cua-build-cache.mjs";
 
-import { publishNativeCacheDirectory } from "./native-build-cache.mjs";
+import {
+  desktopBuildArch,
+  markNativeCacheEntryUsed,
+  publishNativeCacheDirectory,
+} from "./native-build-cache.mjs";
 
-// Native beta is macOS-only. Other platforms keep the existing controller.
-if (process.platform === "darwin") {
+export function buildComputerBeta() {
+  // Native beta is macOS-only. Other platforms keep the existing controller.
+  if (process.platform !== "darwin") return;
   const resources = fileURLToPath(new URL("../resources/cua-driver", import.meta.url));
-  const arch = process.env.RYCO_DESKTOP_ARCH ?? process.arch;
+  // arm64 only: the Mac app is Apple Silicon only, so x64/universal requests are refused.
+  const arch = desktopBuildArch();
   const run = (script, args = []) => {
     const result = spawnSync(
       process.execPath,
@@ -36,7 +42,10 @@ if (process.platform === "darwin") {
   const key = cuaBuildCacheKey(release, process.platform, arch);
   const cache = cuaArtifactCacheDirectory(key);
   const cached = !explicitArtifact && usableCuaArtifact(cache, release, process.platform, arch);
-  if (cached) console.error(`[native] Reusing cua (${key.slice(0, 12)})`);
+  if (cached) {
+    markNativeCacheEntryUsed(cache);
+    console.error(`[native] Reusing cua (${key.slice(0, 12)})`);
+  }
   run("./provision-cua-driver.mjs", [
     "--arch",
     arch,
@@ -63,4 +72,8 @@ if (process.platform === "darwin") {
       rmSync(temporary, { recursive: true, force: true });
     }
   }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  buildComputerBeta();
 }

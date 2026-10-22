@@ -41,6 +41,7 @@ const { activateHostedNode, deactivateHostedNode, suspendHostedNode, resetRelayA
 vi.mock("./environment", () => ({ activateHostedNode, deactivateHostedNode, suspendHostedNode }));
 
 import { HostedHubApiError, STEP_UP_REQUIRED_CODE, type HostedHubApi } from "./api.ts";
+import { HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS } from "./hostedEnvironmentSessions.ts";
 import {
   configureHostedRuntime,
   type HostedNodeLifecycle,
@@ -50,6 +51,7 @@ import {
   DIRECTORY_PRESENCE_REFRESH_MS,
   HOSTED_ACCESS_CHECK_DEADLINE_MS,
   DIRECTORY_PRESENCE_WINDOW_MS,
+  DIRECTORY_REFRESH_MS,
   DIRECTORY_SUBSCRIBED_REFRESH_MS,
   HOSTED_ACCOUNT_BUSY_MESSAGE,
   HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE,
@@ -62,7 +64,9 @@ import {
   hostedHubStore,
   hostedRecoveryCodeDisplayStore,
   HOSTED_SESSION_REVALIDATION_INTERVAL_MS,
+  HOSTED_SESSION_SYNC_DEADLINE_MS,
   markHostedSessionReady,
+  retainHostedDirectoryPresenceDemand,
 } from "./state.ts";
 
 const hasHostedRelayPendingRequests = vi.fn(() => false);
@@ -807,6 +811,43 @@ describe("hosted account state", () => {
     });
   });
 
+  it("keeps an expired session's error off a session that signed in during its teardown", async () => {
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([node()]);
+    await hostedHubController.bootstrap();
+    await hostedHubController.selectNode(node().id);
+    let finishTeardown: () => void = () => undefined;
+    deactivateHostedNode.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishTeardown = resolve;
+        }),
+    );
+
+    const expiring = hostedHubController.expireSession(
+      new HostedHubApiError(
+        "session_invalid",
+        401,
+        undefined,
+        undefined,
+        undefined,
+        "token-invalidated",
+      ),
+    );
+    expect(hostedHubStore.getState().accountStatus).toBe("session-expired");
+    await hostedHubController.bootstrap();
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+
+    finishTeardown();
+    await expiring;
+
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      errorMessage: null,
+      errorReason: null,
+    });
+  });
+
   it.each([
     ["Hub rejection", new HostedHubApiError("invalid_response", 502)],
     ["network loss", new HostedHubApiError("unavailable", 0)],
@@ -1419,6 +1460,232 @@ describe("hosted registration and directory state", () => {
     expect(listNodes).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(listNodes).toHaveBeenCalledTimes(3);
+  });
+
+  describe("presence demand", () => {
+    function authenticate(): void {
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        account: sessionResponse.account,
+        session: sessionResponse.session,
+        directoryStatus: "ready",
+      });
+    }
+
+    function configureDemandDriven(overrides: Partial<HostedRuntimeConfiguration> = {}): void {
+      configureHostedRuntime(
+        { ...fakeRuntime(), demandDrivenDirectoryRefresh: true, ...overrides },
+        hostedHubApi,
+      );
+    }
+
+    it("polls at the two-minute backstop while no surface shows presence", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS - DIRECTORY_REFRESH_MS - 1);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+    });
+
+    it("polls at the normal cadence while a surface shows presence", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+      const release = retainHostedDirectoryPresenceDemand();
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS - 1);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("reads at once when demand starts after the last read went stale", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledOnce();
+
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS - 1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("moves the pending poll once per demand edge, counted from the last read", async () => {
+      vi.useFakeTimers();
+      const setTimer = vi.fn((callback: () => void, delayMs: number) =>
+        globalThis.setTimeout(callback, delayMs),
+      );
+      configureDemandDriven({ timers: { ...fakeRuntime().timers, setTimeout: setTimer } });
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+      const delays = () => setTimer.mock.calls.map(([, delayMs]) => delayMs);
+
+      await hostedHubController.refreshDirectory();
+      expect(delays()).toEqual([DIRECTORY_SUBSCRIBED_REFRESH_MS]);
+
+      // A fresh read is not repeated: the poll moves to 20s after it.
+      await vi.advanceTimersByTimeAsync(5_000);
+      const first = retainHostedDirectoryPresenceDemand();
+      const second = retainHostedDirectoryPresenceDemand();
+      expect(delays()).toEqual([DIRECTORY_SUBSCRIBED_REFRESH_MS, DIRECTORY_REFRESH_MS - 5_000]);
+
+      // Releases are per token and idempotent: one held token keeps the cadence.
+      first();
+      first();
+      expect(delays()).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS - 5_000 - 1);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      expect(delays()).toHaveLength(3);
+      expect(delays()[2]).toBe(DIRECTORY_REFRESH_MS);
+
+      // The last release moves the poll to the backstop after the last read.
+      await vi.advanceTimersByTimeAsync(4_000);
+      second();
+      second();
+      expect(delays()).toHaveLength(4);
+      expect(delays()[3]).toBe(DIRECTORY_SUBSCRIBED_REFRESH_MS - 4_000);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS - 4_000 - 1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps the presence watch cadence without demand", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      const release = hostedHubController.watchDirectoryPresence();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("keeps the live subscription backstop with demand", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven({ hasLiveHubSubscription: () => true });
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS + 10_000);
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(
+        DIRECTORY_SUBSCRIBED_REFRESH_MS - DIRECTORY_REFRESH_MS - 10_000 - 1,
+      );
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("never shortens a directory failure backoff for demand", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi
+        .spyOn(hostedHubApi, "listNodes")
+        .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+        .mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      expect(hostedHubStore.getState().directoryStatus).toBe("stale");
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      release();
+    });
+
+    it("arms no timer for demand while in the background", async () => {
+      vi.useFakeTimers();
+      const listeners = new Set<() => void>();
+      configureDemandDriven({
+        isForeground: () => false,
+        subscribeForeground: (listener) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      });
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      expect(listeners.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      const release = retainHostedDirectoryPresenceDemand();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledOnce();
+      expect(listeners.size).toBe(1);
+      release();
+    });
+
+    it("ignores demand for a client that did not opt in", async () => {
+      vi.useFakeTimers();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(4);
+    });
+
+    it("accepts demand before the runtime is configured", async () => {
+      vi.resetModules();
+      const runtime = await import("./runtime.ts");
+      const fresh = await import("./state.ts");
+      expect(() => runtime.getHostedRuntimeConfiguration()).toThrow();
+
+      let release = () => {};
+      expect(() => {
+        release = fresh.retainHostedDirectoryPresenceDemand();
+      }).not.toThrow();
+      expect(release).not.toThrow();
+    });
   });
 
   it("keeps mutations stale until browser resume revalidates access and node state", async () => {
@@ -2154,6 +2421,86 @@ describe("hosted registration and directory state", () => {
       effectiveRole: null,
       transportStatus: "terminal-failure",
       sessionStatus: "stale",
+    });
+  });
+
+  describe("retryable relay failures", () => {
+    function selectOnlineNode(): HostedHubNode {
+      const selected = node();
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        directoryStatus: "ready",
+        browserStatus: "current",
+        nodes: [selected],
+        selectedNode: selected,
+        selectionStatus: "online",
+        effectiveRole: selected.effectiveRole,
+        transportStatus: "online",
+        sessionStatus: "ready",
+        sessionEstablished: true,
+        errorMessage: null,
+        generation: 5,
+      });
+      return selected;
+    }
+
+    it("keeps a spent transfer budget quiet while the relay reconnects", () => {
+      selectOnlineNode();
+
+      hostedHubController.failure(5, {
+        kind: "budget",
+        retryable: true,
+        closeReason: "transfer_limit",
+      });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        selectionStatus: "online",
+        effectiveRole: "operator",
+        transportStatus: "reconnecting",
+        sessionStatus: "stale",
+        sessionEstablished: true,
+        errorMessage: null,
+      });
+    });
+
+    it("keeps an unconfirmed action unconfirmed through a budget rotation", () => {
+      selectOnlineNode();
+      hostedHubStore.setState({ sessionStatus: "delivery-unknown" });
+
+      hostedHubController.failure(5, { kind: "budget", retryable: true });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        transportStatus: "reconnecting",
+        sessionStatus: "delivery-unknown",
+        errorMessage: null,
+      });
+    });
+
+    it("ignores a budget failure from a stale generation", () => {
+      selectOnlineNode();
+
+      hostedHubController.failure(4, { kind: "budget", retryable: true });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        transportStatus: "online",
+        sessionStatus: "ready",
+        errorMessage: null,
+      });
+    });
+
+    it.each([
+      ["network", "The relay connection was interrupted. Ryco is reconnecting."],
+      ["slow-consumer", "The relay closed a slow connection. Ryco will reconnect."],
+      ["draining", "Hub is draining connections. Ryco will retry shortly."],
+    ] as const)("still reports a %s failure", (kind, message) => {
+      selectOnlineNode();
+
+      hostedHubController.failure(5, { kind, retryable: true });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        transportStatus: "reconnecting",
+        errorMessage: message,
+      });
     });
   });
 
@@ -3936,6 +4283,45 @@ describe("cookie-mode access checks", () => {
     });
   });
 
+  it("follows the read sent beside the restore with a push that arrives as the session validates", async () => {
+    useCookieMode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    const first = deferred<ReadonlyArray<HostedHubNode>>();
+    const signals: AbortSignal[] = [];
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockImplementation((signal) => {
+      signals.push(signal!);
+      return signals.length === 1 ? first.promise : Promise.resolve([node()]);
+    });
+    // An account socket that heard from the Hub before the access check
+    // answered hands its invalidation over right after the authenticated
+    // publish.
+    let previousStatus = hostedHubStore.getState().accountStatus;
+    const unsubscribe = hostedHubStore.subscribe(() => {
+      const status = hostedHubStore.getState().accountStatus;
+      if (status === "authenticated" && previousStatus !== "authenticated") {
+        queueMicrotask(() => hostedHubController.notifyDirectoryInvalidated());
+      }
+      previousStatus = status;
+    });
+    try {
+      const bootstrapping = hostedHubController.bootstrap();
+      await hostedHubController.bootstrapAccess();
+      await Promise.resolve();
+      // The read sent beside the restore answers for the boot; the push waits for it.
+      expect(listNodes).toHaveBeenCalledOnce();
+      expect(signals[0]!.aborted).toBe(false);
+
+      first.resolve([node()]);
+      await bootstrapping;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      expect(signals[0]!.aborted).toBe(false);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("discards the held directory when the Hub answers that the session is gone", async () => {
     useCookieMode();
     const session = deferred<HostedHubSessionResponse>();
@@ -4428,6 +4814,63 @@ describe("relay-triggered session revalidation", () => {
     expect(hostedHubStore.getState()).toMatchObject({
       accountStatus: "authenticated",
       generation: 7,
+    });
+  });
+});
+
+describe("single environment session mode", () => {
+  it("synchronizes the selected session within the environment sessions' deadline", () => {
+    expect(HOSTED_SESSION_SYNC_DEADLINE_MS).toBe(HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS);
+  });
+
+  it("fails the selected session on a terminal Hub session failure", () => {
+    const selected = node();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "synchronizing",
+      nodes: [selected],
+      selectedNode: selected,
+      selectionStatus: "online",
+      effectiveRole: selected.effectiveRole,
+      transportStatus: "connecting",
+      sessionStatus: "synchronizing",
+      generation: 5,
+    });
+
+    hostedHubController.reportHubSessionFailure({ kind: "authentication", retryable: false });
+
+    expect(hostedHubStore.getState()).toMatchObject({
+      browserStatus: "current",
+      effectiveRole: null,
+      transportStatus: "terminal-failure",
+      sessionStatus: "stale",
+      errorMessage: "The relay authentication attempt expired or was rejected.",
+    });
+  });
+
+  it("connects by selecting the node and releases by returning to the directory", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      nodes: [first, second],
+    });
+
+    expect(await hostedHubController.acquireEnvironment(first.id)).toBe("connecting");
+    expect(activateHostedNode).toHaveBeenCalledWith(first, null);
+    expect(hostedHubStore.getState().selectedNode).toBe(first);
+
+    await hostedHubController.releaseEnvironment(second.environmentId);
+    expect(deactivateHostedNode).not.toHaveBeenCalled();
+
+    await hostedHubController.releaseEnvironment(first.environmentId);
+    expect(deactivateHostedNode).toHaveBeenCalledWith(first.environmentId);
+    expect(hostedHubStore.getState()).toMatchObject({
+      selectedNode: null,
+      selectionStatus: "none",
+      sessionStatus: "closed",
     });
   });
 });

@@ -1,14 +1,9 @@
 {
   "name": "@ryco/contracts",
-  "version": "0.1.32",
+  "version": "0.1.35",
   "private": true,
-  "files": [
-    "dist"
-  ],
   "type": "module",
   "sideEffects": false,
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.mjs",
   "types": "./src/index.ts",
   "exports": {
     "./hub-session": {
@@ -50,6 +45,11 @@
       "types": "./src/nativeE2ee.ts",
       "import": "./src/nativeE2ee.ts",
       "require": "./src/nativeE2ee.ts"
+    },
+    "./node-update": {
+      "types": "./src/nodeUpdate.ts",
+      "import": "./src/nodeUpdate.ts",
+      "require": "./src/nodeUpdate.ts"
     },
     "./local-introduction": {
       "types": "./src/localIntroduction.ts",
@@ -194,13 +194,12 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts",
-      "require": "./dist/index.cjs"
+      "require": "./src/index.ts"
     }
   },
   "scripts": {
-    "dev": "tsdown src/index.ts --format esm,cjs --dts --watch --clean",
-    "build": "tsdown src/index.ts --format esm,cjs --dts --clean",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental",
+    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo",
     "test": "vp test run"
   },
   "dependencies": {
@@ -209,7 +208,6 @@
   "devDependencies": {
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
-    "tsdown": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"

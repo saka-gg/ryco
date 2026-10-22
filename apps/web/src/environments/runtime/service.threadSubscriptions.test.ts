@@ -28,6 +28,7 @@ function MockWsTransport() {
 
 vi.mock("../primary", () => ({
   getPrimaryKnownEnvironment: mockGetPrimaryKnownEnvironment,
+  writePrimaryEnvironmentDescriptor: vi.fn(),
 }));
 
 vi.mock("../remote/api", () => ({
@@ -94,6 +95,8 @@ function makeThreadShellSnapshot(params: {
   readonly hasPendingApprovals?: boolean;
   readonly hasPendingUserInput?: boolean;
   readonly hasActionableProposedPlan?: boolean;
+  /** The latest turn finished before the snapshot; a running session's turn runs. */
+  readonly latestTurnCompleted?: boolean;
 }): OrchestrationShellSnapshot {
   const projectId = ProjectId.make("project-1");
   const turnId = TurnId.make("turn-1");
@@ -125,7 +128,16 @@ function makeThreadShellSnapshot(params: {
                 completedAt: null,
                 assistantMessageId: null,
               }
-            : null,
+            : params.latestTurnCompleted
+              ? {
+                  turnId,
+                  state: "completed",
+                  requestedAt: "2026-04-13T00:00:00.000Z",
+                  startedAt: "2026-04-13T00:00:01.000Z",
+                  completedAt: "2026-04-13T00:00:02.000Z",
+                  assistantMessageId: null,
+                }
+              : null,
         createdAt: "2026-04-13T00:00:00.000Z",
         updatedAt: "2026-04-13T00:00:00.000Z",
         archivedAt: null,
@@ -435,31 +447,77 @@ describe("retainThreadDetailSubscription", () => {
     await resetEnvironmentServiceForTests();
   });
 
-  it("drops shell snapshots after browser suspension invalidates the hosted generation", async () => {
+  it("fences a retained environment connection by its record generation", async () => {
     vi.stubEnv("VITE_RYCO_CLIENT_MODE", "hosted-hub");
-    const { hostedHubController, useHostedHubStore } = await import("~/hostedHub/state");
+    vi.stubGlobal("window", {
+      location: { href: "https://hub.example.test/", origin: "https://hub.example.test" },
+    });
+    const { hostedHubApi } = await import("~/hostedHub/api");
+    const { configureWebHostedRuntime } = await import("~/hostedHub/runtime");
+    configureWebHostedRuntime(hostedHubApi, { environmentSessions: "retained" });
+    const { getHostedEnvironmentSessions, useHostedHubStore } = await import("~/hostedHub/state");
     const { useStore } = await import("~/store");
-    useHostedHubStore.setState({ accountStatus: "authenticated", generation: 7 });
-    const syncServerShellSnapshot = vi.spyOn(useStore.getState(), "syncServerShellSnapshot");
-    const { resetEnvironmentServiceForTests, startEnvironmentConnectionService } =
-      await import("./service");
-    const stop = startEnvironmentConnectionService();
-    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
     const environmentId = EnvironmentId.make("env-1");
-    const currentSnapshot = makeThreadShellSnapshot({ threadId: ThreadId.make("thread-current") });
-    const staleSnapshot = makeThreadShellSnapshot({ threadId: ThreadId.make("thread-stale") });
-    expect(connectionInput).toBeDefined();
+    const node = {
+      id: "node_aaaaaaaaaaaaaaaaaaaaaa",
+      environmentId,
+      label: "Hosted node",
+      platformOs: "linux",
+      platformArch: "x64",
+      clientVersion: "1",
+      createdAt: 1,
+      updatedAt: 1,
+      lastAuthenticatedAt: 1,
+      revokedAt: null,
+      revocationReasonCode: null,
+      grant: { id: "grant_aaaaaaaaaaaaaaaaaaaaaa", role: "operator" },
+      effectiveRole: "operator",
+      presence: { online: true, lastHeartbeatAt: 1 },
+    } as const;
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [node],
+    });
+    const syncServerShellSnapshot = vi.spyOn(useStore.getState(), "syncServerShellSnapshot");
+    const {
+      connectHostedEnvironment,
+      resetEnvironmentServiceForTests,
+      startEnvironmentConnectionService,
+    } = await import("./service");
 
-    connectionInput.syncShellSnapshot(currentSnapshot, environmentId);
+    // The generic primary path never builds a hosted connection.
+    const stop = startEnvironmentConnectionService();
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+
+    const sessions = getHostedEnvironmentSessions();
+    const generation = sessions.ensureRecord(node).generation;
+    await connectHostedEnvironment(node, generation);
+    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
+    expect(connectionInput).toMatchObject({
+      kind: "primary",
+      knownEnvironment: { environmentId, source: "hub-hosted" },
+    });
+    expect(connectionInput.lifecycleGeneration.readCurrent()).toBe(generation);
+
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId: ThreadId.make("thread-current") }),
+      environmentId,
+    );
     expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
 
-    hostedHubController.suspendBrowser("hidden");
-    expect(useHostedHubStore.getState().generation).toBe(8);
-    connectionInput.syncShellSnapshot(staleSnapshot, environmentId);
+    sessions.renew(environmentId);
+    expect(connectionInput.lifecycleGeneration.readCurrent()).not.toBe(generation);
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId: ThreadId.make("thread-stale") }),
+      environmentId,
+    );
     expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
 
     stop();
     await resetEnvironmentServiceForTests();
+    sessions.clear();
   });
 
   it("accepts a restarted node's lower shell sequence after the stream resubscribes", async () => {
@@ -547,6 +605,67 @@ describe("retainThreadDetailSubscription", () => {
 
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("idle-evicts a thread whose session stays ready after its turn completed", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const stop = startEnvironmentConnectionService();
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-completed");
+    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
+    expect(connectionInput).toBeDefined();
+
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId, sessionStatus: "ready", latestTurnCompleted: true }),
+      environmentId,
+    );
+
+    const release = retainThreadDetailSubscription(environmentId, threadId);
+    expect(mockSubscribeThread).toHaveBeenCalledTimes(1);
+
+    release();
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+    expect(mockThreadUnsubscribe).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1 * 60 * 1000);
+    expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("keeps a running thread's subscription attached however long it stays released", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const stop = startEnvironmentConnectionService();
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-running");
+    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
+    expect(connectionInput).toBeDefined();
+
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId, sessionStatus: "running" }),
+      environmentId,
+    );
+
+    const release = retainThreadDetailSubscription(environmentId, threadId);
+    expect(mockSubscribeThread).toHaveBeenCalledTimes(1);
+
+    release();
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    expect(mockThreadUnsubscribe).not.toHaveBeenCalled();
 
     stop();
     await resetEnvironmentServiceForTests();
@@ -665,15 +784,18 @@ describe("retainThreadDetailSubscription", () => {
       await import("./service");
 
     const stop = startEnvironmentConnectionService();
-    expect(mockConnectionReconnects).toHaveLength(1);
+    // Hosted mode never builds a connection on the primary path.
+    expect(mockConnectionReconnects).toHaveLength(0);
 
     visibilityState = "hidden";
     documentTarget.dispatchEvent(new Event("visibilitychange"));
     visibilityState = "visible";
     documentTarget.dispatchEvent(new Event("visibilitychange"));
     windowTarget.dispatchEvent(new Event("pageshow"));
+    documentTarget.dispatchEvent(new Event("resume"));
 
-    expect(mockConnectionReconnects[0]).not.toHaveBeenCalled();
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(mockConnectionReconnects).toHaveLength(0);
 
     stop();
     await resetEnvironmentServiceForTests();

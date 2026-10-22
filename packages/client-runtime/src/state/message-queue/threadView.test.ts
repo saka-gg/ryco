@@ -209,4 +209,47 @@ describe("readQueueThreadView", () => {
       ),
     ).toBe(true);
   });
+
+  describe("message text hydrated from a read cache", () => {
+    const withCachedMessages = (state: AppState, cached: boolean): AppState => {
+      const environment = state.environmentStateById[QUEUE_ENV]!;
+      return {
+        ...state,
+        environmentStateById: {
+          [QUEUE_ENV]: {
+            ...environment,
+            cachedMessageThreadIds: cached ? { [queueRef("t").threadId]: true } : {},
+          },
+        },
+      };
+    };
+    const fixture = {
+      id: "t",
+      messageIds: ["m-1"],
+      activities: [turnStartFailed("a-1", "m-2", "Thread already has active turn")],
+    };
+
+    it("is neither loaded detail nor a projection of the thread's messages", () => {
+      const cachedState = withCachedMessages(makeQueueAppState([fixture]), true);
+      const cached = readQueueThreadView(cachedState, queueRef("t"))!;
+      expect(cached.detailLoaded).toBe(false);
+      expect([...cached.projectedMessageIds]).toEqual([]);
+      expect(cached.turnStartFailures).toEqual([]);
+    });
+
+    it("counts again once live detail replaces it", () => {
+      const cachedState = withCachedMessages(makeQueueAppState([fixture]), true);
+      const liveState = withCachedMessages(cachedState, false);
+      const live = readQueueThreadView(liveState, queueRef("t"))!;
+      expect(live.detailLoaded).toBe(true);
+      expect([...live.projectedMessageIds]).toEqual(["m-1"]);
+      expect(live.turnStartFailures).toHaveLength(1);
+      expect(
+        queueThreadViewInputsEqual(
+          queueThreadViewInputs(cachedState, queueRef("t")),
+          queueThreadViewInputs(liveState, queueRef("t")),
+        ),
+      ).toBe(false);
+    });
+  });
 });

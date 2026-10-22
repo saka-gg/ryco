@@ -39,7 +39,36 @@ export interface HostedNodeLifecycle {
   readonly connectPrimaryEnvironment: () => void;
   readonly disconnectPrimaryEnvironment: () => Promise<void>;
   readonly setActiveEnvironmentId: (environmentId: EnvironmentId) => void;
+  // Retained environment sessions only. Each port names the session generation
+  // it acts for, and the platform ignores a call when a newer generation
+  // already owns the environment, so a late release or suspend of an old
+  // generation never tears down a newer connection.
+  /** Create the environment's connection for this generation, replacing an older one. */
+  readonly connectEnvironment?: (node: HostedHubNode, generation: number) => void;
+  /** Remove the environment's connection when its generation is at most `generation`. */
+  readonly releaseEnvironment?: (environmentId: EnvironmentId, generation: number) => Promise<void>;
+  /**
+   * Dispose the transport of the environment's connection when its generation
+   * is at most `generation`, keeping what it displays.
+   */
+  readonly suspendEnvironment?: (environmentId: EnvironmentId, generation: number) => Promise<void>;
+  /**
+   * Ask the platform to re-plan which environments are connected. In retained
+   * mode the lifecycle owner never connects on its own.
+   */
+  readonly requestEnvironmentReconcile?: (request: HostedEnvironmentReconcileRequest) => void;
 }
+
+export interface HostedEnvironmentReconcileRequest {
+  readonly reason: "resume" | "retry" | "directory";
+  readonly environmentId?: EnvironmentId;
+}
+
+/**
+ * `single`: one connection, to the selected node. `retained`: one session per
+ * environment, each with its own relay attempt binding.
+ */
+export type HostedEnvironmentSessionsMode = "single" | "retained";
 
 export interface HostedRuntimeTimers {
   readonly now: () => number;
@@ -62,12 +91,23 @@ export interface HostedRuntimeConfiguration {
   /** Preferred system-browser sign-in for bearer/native clients. */
   readonly nativeAuthorization?: NativeAuthorizationService;
   readonly nodeLifecycle: HostedNodeLifecycle;
+  /** Defaults to `single`. */
+  readonly environmentSessions?: HostedEnvironmentSessionsMode;
   readonly timers: HostedRuntimeTimers;
   readonly isForeground: () => boolean;
   readonly subscribeForeground: (listener: () => void) => () => void;
   readonly hasPendingRelayRequests: () => boolean;
   /** A live account subscription pushes directory changes independently of node channels. */
   readonly hasLiveHubSubscription?: () => boolean;
+  /**
+   * Without a live account subscription, poll the directory at the normal
+   * cadence only while a surface that shows node presence holds demand (see
+   * `retainHostedDirectoryPresenceDemand`), and at the two-minute backstop
+   * otherwise. For clients whose directory reads are costly: a device-key
+   * signature and a radio wakeup each. Omitted, the normal cadence always
+   * applies.
+   */
+  readonly demandDrivenDirectoryRefresh?: boolean;
   /**
    * Ask the account subscription to prove it is alive now (a ping with a short
    * bound) because something suggests it may not be: a relay request has gone
@@ -110,6 +150,8 @@ export interface HostedRuntimeConfiguration {
   ) => unknown;
   readonly createRelaySocket: (input: {
     readonly url: string;
+    /** The node this attempt's ticket was issued for. */
+    readonly nodeId?: string;
     readonly ticket: string;
     readonly ticketExpiresAt: number;
     readonly earlySocket?: HostedEarlyRelaySocket;
@@ -160,6 +202,12 @@ export function getHostedRuntimeConfiguration(): HostedRuntimeConfiguration {
   ensureConfigured();
   if (!configuration) throw new Error("Hosted runtime has not been configured.");
   return configuration;
+}
+
+/** The configured environment session mode; `single` while the runtime is unconfigured. */
+export function hostedEnvironmentSessionsMode(): HostedEnvironmentSessionsMode {
+  ensureConfigured();
+  return configuration?.environmentSessions ?? "single";
 }
 
 export function getHostedHubApi(): HostedHubApi {

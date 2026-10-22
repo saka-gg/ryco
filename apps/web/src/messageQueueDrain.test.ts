@@ -1,4 +1,8 @@
 import {
+  configureHostedEnvironmentSessions,
+  resetHostedEnvironmentSessionsForTests,
+} from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
+import {
   recordWsConnectionClosed,
   recordWsConnectionOpened,
   resetWsConnectionStateForTests,
@@ -99,7 +103,8 @@ vi.mock("react", async (importOriginal) => ({
 
 import { useSavedEnvironmentRuntimeStore } from "./environments/runtime";
 import { hostedWebConnectionScopes } from "./hostedHub/hostedConnectionScopes";
-import { useHostedHubStore } from "./hostedHub/state";
+import { getHostedEnvironmentSessions, useHostedHubStore } from "./hostedHub/state";
+import type { HostedHubNode } from "./hostedHub/types";
 import {
   createForegroundQueueSender,
   hasOutstandingQueuedDispatch,
@@ -226,6 +231,40 @@ function setHostedNode(environmentId: EnvironmentId | null): void {
   });
 }
 
+function hubNode(environmentId: EnvironmentId): HostedHubNode {
+  return {
+    id: `node-${environmentId}`,
+    environmentId,
+    label: "Node",
+    platformOs: "linux",
+    platformArch: "x64",
+    clientVersion: "0.9.0",
+    createdAt: 1,
+    updatedAt: 1,
+    lastAuthenticatedAt: 1,
+    revokedAt: null,
+    revocationReasonCode: null,
+    grant: { id: `grant-${environmentId}`, role: "operator" },
+    effectiveRole: "operator",
+    presence: { online: true, lastHeartbeatAt: 1 },
+  };
+}
+
+/** Opens the environment's own session record; `ready` also accepts its shell snapshot. */
+function openHostedRecord(environmentId: EnvironmentId, options: { ready: boolean }): number {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.ensureRecord(hubNode(environmentId));
+  sessions.markConnectRequested(environmentId, generation);
+  sessions.transportStatus(environmentId, generation, "online");
+  if (options.ready) sessions.markSessionReady(environmentId, generation);
+  return generation;
+}
+
+function useHostedSessions(selected: EnvironmentId | null): void {
+  harness.hosted = true;
+  setHostedNode(selected);
+}
+
 let releaseDrain: (() => void) | null = null;
 
 beforeEach(() => {
@@ -241,12 +280,18 @@ beforeEach(() => {
   useStore.getState().syncServerShellSnapshot(shellSnapshot(true), ENV);
   useMessageQueueStore.getState().reset();
   hostedWebConnectionScopes.reset();
+  configureHostedEnvironmentSessions({
+    now: () => 0,
+    setTimeout: () => null,
+    clearTimeout: () => undefined,
+  });
 });
 
 afterEach(() => {
   releaseDrain?.();
   releaseDrain = null;
   useMessageQueueStore.getState().reset();
+  resetHostedEnvironmentSessionsForTests();
 });
 
 describe("steerRejectionToast", () => {
@@ -285,14 +330,6 @@ describe("steerRejectionToast", () => {
 });
 
 describe("readWebQueueEnvironment", () => {
-  it("is never mutation-ready for a hosted node that is not the selected one", () => {
-    harness.hosted = true;
-    setHostedNode(OTHER_ENV);
-    expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: true, mutationReady: false });
-    setHostedNode(ENV);
-    expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: true, mutationReady: true });
-  });
-
   it("waits on a disconnected socket or a saved environment that is not connected", () => {
     expect(readWebQueueEnvironment(ENV).mutationReady).toBe(false);
     recordWsConnectionOpened({ environmentId: ENV });
@@ -311,6 +348,61 @@ describe("readWebQueueEnvironment", () => {
     recordWsConnectionOpened({ environmentId: ENV });
     useStore.getState().demoteEnvironmentStateToCachedSnapshot(ENV, Date.now());
     expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: false, mutationReady: false });
+  });
+});
+
+describe("readWebQueueEnvironment on hosted Web", () => {
+  it("is mutation-ready for a non-selected environment whose own record is ready", () => {
+    useHostedSessions(OTHER_ENV);
+    openHostedRecord(ENV, { ready: true });
+    expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: true, mutationReady: true });
+  });
+
+  it("is mutation-ready for the selected environment without a record of its own", () => {
+    useHostedSessions(ENV);
+    expect(getHostedEnvironmentSessions().read(ENV)).toBeUndefined();
+    expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: true, mutationReady: true });
+  });
+
+  it("waits for an environment without a record or whose record is still synchronizing", () => {
+    useHostedSessions(OTHER_ENV);
+    expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: true, mutationReady: false });
+    openHostedRecord(ENV, { ready: false });
+    expect(readWebQueueEnvironment(ENV)).toEqual({ shellLive: true, mutationReady: false });
+    // Reading readiness never opens a record or selects a node.
+    expect(getHostedEnvironmentSessions().read(OTHER_ENV)).toBeUndefined();
+    expect(useHostedHubStore.getState().selectedNode?.environmentId).toBe(OTHER_ENV);
+  });
+
+  it("waits on a record that is not ready even while another node is", () => {
+    useHostedSessions(ENV);
+    expect(readWebQueueEnvironment(ENV).mutationReady).toBe(true);
+    openHostedRecord(OTHER_ENV, { ready: false });
+    expect(readWebQueueEnvironment(OTHER_ENV).mutationReady).toBe(false);
+  });
+
+  it("holds a record in delivery-unknown until the delivery is acknowledged", () => {
+    useHostedSessions(OTHER_ENV);
+    openHostedRecord(ENV, { ready: true });
+    const sessions = getHostedEnvironmentSessions();
+    sessions.markEnvironmentDeliveryUnknown(ENV);
+    expect(readWebQueueEnvironment(ENV).mutationReady).toBe(false);
+    sessions.acknowledgeDeliveryUnknown(ENV);
+    expect(readWebQueueEnvironment(ENV).mutationReady).toBe(true);
+  });
+
+  it("is not made ready by a callback of a superseded generation", () => {
+    useHostedSessions(OTHER_ENV);
+    const staleGeneration = openHostedRecord(ENV, { ready: true });
+    const sessions = getHostedEnvironmentSessions();
+    const renewed = sessions.renew(ENV)!;
+    expect(readWebQueueEnvironment(ENV).mutationReady).toBe(false);
+    sessions.transportStatus(ENV, staleGeneration, "online");
+    sessions.markSessionReady(ENV, staleGeneration);
+    expect(readWebQueueEnvironment(ENV).mutationReady).toBe(false);
+    sessions.transportStatus(ENV, renewed.generation, "online");
+    sessions.markSessionReady(ENV, renewed.generation);
+    expect(readWebQueueEnvironment(ENV).mutationReady).toBe(true);
   });
 });
 
@@ -488,8 +580,7 @@ describe("web queue senders", () => {
   });
 
   it("never creates hosted connection demand for a queue on another node", async () => {
-    harness.hosted = true;
-    setHostedNode(OTHER_ENV);
+    useHostedSessions(OTHER_ENV);
     releaseDrain = retainMessageQueueDrain();
     useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
     await flush();
@@ -503,5 +594,72 @@ describe("web queue senders", () => {
     await flush();
     expect(harness.retainDetail).toHaveBeenCalledWith(ENV, THREAD);
     expect(hostedWebConnectionScopes.list()).toEqual([]);
+  });
+});
+
+describe("hosted queue drain", () => {
+  it("drains a non-selected environment as soon as its own record is ready", async () => {
+    useHostedSessions(OTHER_ENV);
+    openHostedRecord(ENV, { ready: true });
+    useStore.getState().syncServerThreadDetail(threadDetail() as never, ENV);
+    releaseDrain = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    await flush();
+    expect(harness.background).toHaveBeenCalledTimes(1);
+    expect(harness.background.mock.calls[0]?.[0]).toBe(KEY);
+    expect(useHostedHubStore.getState().selectedNode?.environmentId).toBe(OTHER_ENV);
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+  });
+
+  it("waits while a non-selected record synchronizes and wakes when the registry reports it ready", async () => {
+    useHostedSessions(OTHER_ENV);
+    const generation = openHostedRecord(ENV, { ready: false });
+    useStore.getState().syncServerThreadDetail(threadDetail() as never, ENV);
+    releaseDrain = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    await flush();
+    expect(inspectMessageQueueDrain(KEY).lastStep).toEqual({
+      kind: "wait",
+      reason: "environment",
+    });
+    expect(harness.background).not.toHaveBeenCalled();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    // Only the registry changes: no hosted store, thread store or timer moves.
+    getHostedEnvironmentSessions().markSessionReady(ENV, generation);
+    await flush();
+    expect(harness.background).toHaveBeenCalledTimes(1);
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+  });
+
+  it("keeps a record in delivery-unknown waiting until it is acknowledged", async () => {
+    useHostedSessions(OTHER_ENV);
+    openHostedRecord(ENV, { ready: true });
+    const sessions = getHostedEnvironmentSessions();
+    sessions.markEnvironmentDeliveryUnknown(ENV);
+    useStore.getState().syncServerThreadDetail(threadDetail() as never, ENV);
+    releaseDrain = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    await flush();
+    expect(inspectMessageQueueDrain(KEY).lastStep).toEqual({
+      kind: "wait",
+      reason: "environment",
+    });
+    expect(harness.background).not.toHaveBeenCalled();
+    sessions.acknowledgeDeliveryUnknown(ENV);
+    await flush();
+    expect(harness.background).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops listening to the registry when the drain is released", async () => {
+    useHostedSessions(OTHER_ENV);
+    const generation = openHostedRecord(ENV, { ready: false });
+    useStore.getState().syncServerThreadDetail(threadDetail() as never, ENV);
+    const release = retainMessageQueueDrain();
+    useMessageQueueStore.getState().enqueue(KEY, queued("q-1"));
+    await flush();
+    release();
+    getHostedEnvironmentSessions().markSessionReady(ENV, generation);
+    await flush();
+    expect(harness.background).not.toHaveBeenCalled();
   });
 });

@@ -97,9 +97,16 @@ Node authentication:
   protocolMinor,
   nodeId,
   nonce,
-  signature
+  signature,
+  clientVersion? // optional
 }
 ```
+
+`clientVersion` is the node's software version (non-empty, trimmed, at most 64 characters). It lets
+the Hub keep its record of the node current after the node updates. It is display metadata: it is
+not part of the signed transcript and grants nothing. A node leaves it out rather than send a value
+outside those bounds, and a relay that predates the field ignores it, like any unknown optional
+field.
 
 Client authentication:
 
@@ -293,6 +300,13 @@ The stable close-reason set is exactly:
 
 The reasons marked protocol 1.2+ are invalid on `channel.reject`, `channel.close`, or `error`
 frames declaring minor 0 or 1. Existing reasons retain their original meaning and availability.
+
+A client treats `transfer_limit` according to who ended the channel. A `channel.close` or
+`channel.reject` carrying it from the relay means the channel used up its transfer budget; the
+client reconnects under its normal backoff on a fresh channel, with a new ticket or stream, a new
+handshake, and a current snapshot, and nothing resumes the old channel. A client that itself refuses
+a message it cannot carry, such as one above the reassembly ceiling, fails the channel locally with
+the same reason and does not retry, because the same message would fail the same way.
 
 ## Deterministic validation errors
 

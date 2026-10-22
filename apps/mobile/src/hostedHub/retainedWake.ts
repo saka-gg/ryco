@@ -1,6 +1,6 @@
 import {
-  hostedAccessAwaitsRecovery,
   hostedAccountRecoversOnConnectivity,
+  hostedBrowserRevalidated,
   type HostedHubState,
 } from "@ryco/client-runtime/authorization";
 
@@ -9,7 +9,7 @@ type RetainedWakeState = Pick<HostedHubState, "accountStatus" | "browserStatus">
 export interface RetainedWakeDeps {
   readonly read: () => RetainedWakeState;
   readonly subscribe: (listener: () => void) => () => void;
-  /** The coordinator's staggered re-acquisition of retained secondary nodes. */
+  /** Ask the connection coordinator to plan the retained environments again. */
   readonly wake: () => void;
 }
 
@@ -23,17 +23,22 @@ export interface RetainedWake {
   readonly cancel: () => void;
 }
 
+/** The account is signed in and this browser lifecycle has checked its access and directory. */
+function revalidated(state: RetainedWakeState): boolean {
+  return state.accountStatus === "authenticated" && hostedBrowserRevalidated(state.browserStatus);
+}
+
 /**
- * When to wake retained secondary nodes after a foreground or online signal.
+ * When to wake retained nodes after a foreground or online signal.
  *
- * The wake used to run once, right after the recovery that signal started. A
- * recovery that could not reach the Hub leaves the browser `stale`, and the
- * controller's own access retry restores the selected node later; the wake's
- * acquisitions had been refused in the meantime and nothing re-ran them, so a
- * retained secondary node stayed disconnected until the next foreground. The
- * wake is now owed until the browser is current again. It runs no sooner than
- * before and grants nothing: every acquisition still goes through the
- * controller, which refuses a browser that is not current.
+ * The wake runs once the recovery that signal started has revalidated access:
+ * the browser is `current`, or `synchronizing` — revalidated, with only the
+ * selected node's own session still establishing. Each environment earns its
+ * readiness from its own session, so a slow or offline selected node never holds
+ * the others back. A recovery that could not reach the Hub leaves the browser
+ * `stale`, and the controller's own access retry revalidates it later, so the
+ * wake stays owed until then. It grants nothing: every acquisition still goes
+ * through the controller, which refuses a browser that is not revalidated.
  */
 export function createRetainedWake(deps: RetainedWakeDeps): RetainedWake {
   let issued = 0;
@@ -47,19 +52,21 @@ export function createRetainedWake(deps: RetainedWakeDeps): RetainedWake {
 
   const settle = () => {
     stopWaiting();
-    if (!hostedAccessAwaitsRecovery(deps.read())) {
+    const state = deps.read();
+    if (revalidated(state)) {
       deps.wake();
       return;
     }
+    // Signed out or expired: no account is left to wake nodes for.
+    if (!hostedAccountRecoversOnConnectivity(state.accountStatus)) return;
     release = deps.subscribe(() => {
-      const state = deps.read();
-      if (state.accountStatus === "authenticated" && state.browserStatus === "current") {
+      const next = deps.read();
+      if (revalidated(next)) {
         stopWaiting();
         deps.wake();
         return;
       }
-      // Signed out or expired: no account is left to wake nodes for.
-      if (!hostedAccountRecoversOnConnectivity(state.accountStatus)) stopWaiting();
+      if (!hostedAccountRecoversOnConnectivity(next.accountStatus)) stopWaiting();
     });
   };
 

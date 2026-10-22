@@ -600,11 +600,14 @@ describe("ProviderCommandReactor", () => {
         ).pipe(Layer.provide(liveProjectionSnapshotLayer))
       : liveProjectionSnapshotLayer;
     const decorateIntents = input?.decorateIntents;
+    // No real-time waits before generation or its retry.
+    const reactorOptions: ProviderCommandReactorOptions = {
+      firstTurnGenerationDelayMs: 0,
+      generationRetryDelayMs: 0,
+      ...input?.reactorOptions,
+    };
     const reactorWithIntents = decorateIntents
-      ? makeProviderCommandReactorLayer({
-          firstTurnGenerationDelayMs: 0,
-          ...input?.reactorOptions,
-        }).pipe(
+      ? makeProviderCommandReactorLayer(reactorOptions).pipe(
           Layer.provide(
             Layer.effect(
               ProviderEffectIntentRepository,
@@ -612,7 +615,7 @@ describe("ProviderCommandReactor", () => {
             ).pipe(Layer.provide(ProviderEffectIntentRepositoryLive)),
           ),
         )
-      : makeProviderCommandReactorLive({ firstTurnGenerationDelayMs: 0, ...input?.reactorOptions });
+      : makeProviderCommandReactorLive(reactorOptions);
     const decorateDispatch = input?.decorateDispatch;
     const reactorLayer = decorateDispatch
       ? reactorWithIntents.pipe(

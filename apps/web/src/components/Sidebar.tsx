@@ -1,6 +1,5 @@
 import { useAppKeybindings } from "../appKeybindings";
 import { useDeviceName } from "../deviceName";
-import { isLocalHubAlias } from "../deviceName.logic";
 import { useServerConfigSelector } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
 import React, {
@@ -12,6 +11,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -26,7 +26,6 @@ import {
   type DragEndEvent,
 } from "@dnd-kit/core";
 import {
-  type DesktopUpdateState,
   type EnvironmentId,
   ProjectId,
   type ScopedThreadRef,
@@ -40,7 +39,12 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
-import { getWsConnectionUiState } from "@ryco/client-runtime/rpc";
+import {
+  getReportedThreadCapabilitiesSnapshot,
+  getShellSettlementRulesSnapshot,
+  getWsConnectionUiState,
+  subscribeReportedThreadCapabilities,
+} from "@ryco/client-runtime/rpc";
 import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
 import {
   selectCacheHydratedEnvironmentIds,
@@ -87,16 +91,6 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
-import { stackedThreadToast, toastManager } from "./ui/toast";
-import {
-  getArm64IntelBuildWarningDescription,
-  getDesktopUpdateActionError,
-  getDesktopUpdateInstallConfirmationMessage,
-  isDesktopUpdateButtonDisabled,
-  resolveDesktopUpdateButtonAction,
-  shouldShowArm64IntelBuildWarning,
-  shouldToastDesktopUpdateActionResult,
-} from "./desktopUpdate.logic";
 import { SidebarSeparator, useSidebar } from "./ui/sidebar";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
@@ -125,9 +119,7 @@ import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
 import {
-  applyInboxServerConfig,
-  buildPrimaryInboxSidebarEnvironment,
-  buildSavedInboxSidebarEnvironment,
+  buildInboxSidebarEnvironments,
   sameInboxProviderCatalogs,
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
@@ -144,6 +136,7 @@ import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { buildSidebarProjectFolderTree } from "../sidebarProjectFolders";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
+import { useAutoSettleRuleHandOver } from "../nodeAutoSettlement";
 import { useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { useSidebarThreadPrewarm } from "./sidebar/hooks/useSidebarThreadPrewarm";
@@ -247,7 +240,6 @@ const selectSidebarProjectSortOrder = (settings: UnifiedSettings) =>
 const selectAiFocusEnabled = (settings: UnifiedSettings) => settings.aiFocusEnabled;
 const selectSidebarAutoSettleAfterDays = (settings: UnifiedSettings) =>
   settings.sidebarAutoSettleAfterDays;
-const selectServerEnvironment = (config: ServerConfig | null) => config?.environment ?? null;
 const selectServerProviders = (config: ServerConfig | null) => config?.providers ?? null;
 
 // Non-reactive store reads for event handlers and memoized shortcut contexts.
@@ -497,7 +489,6 @@ export default function Sidebar() {
   const dragInProgressRef = useRef(false);
   const suppressProjectClickAfterDragRef = useRef(false);
   const suppressProjectClickForContextMenuRef = useRef(false);
-  const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState | null>(null);
   const selectedThreadCount = useThreadSelectionStore((s) => s.selectedThreadKeys.size);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
@@ -511,6 +502,12 @@ export default function Sidebar() {
   const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
+  // The workspace republishes about every 100 ms while threads stream. The inbox
+  // reads only these parts, whose identities survive such a republish.
+  const hostedStatus = hostedWorkspace.status;
+  const hostedMachines = hostedWorkspace.machines;
+  const hostedQueuedEnvironmentIds = hostedWorkspace.demand.queuedEnvironmentIds;
+  const hostedThreads = hostedWorkspace.workspace.threads;
   const selectedHostedEnvironmentId = useHostedHubStore(
     (state) => state.selectedNode?.environmentId ?? null,
   );
@@ -528,20 +525,27 @@ export default function Sidebar() {
     },
     [clearSelection, setOpen, setSidebarMode, sidebarMode],
   );
-  // Only the parts the inbox reads: settings-only and provider-status config
-  // pushes do not rebuild the inbox environments (and with them the inbox
-  // model); the provider list only matters for its model catalogs.
-  const inboxServerEnvironment = useServerConfigSelector(selectServerEnvironment);
+  // Only the provider catalogs, for model labels: settings-only and
+  // provider-status config pushes do not rebuild the inbox environments (and
+  // with them the inbox model).
   const inboxServerProviders = useServerConfigSelector(
     selectServerProviders,
     sameInboxProviderCatalogs,
   );
   const inboxServerConfig = useMemo(
-    () =>
-      inboxServerEnvironment && inboxServerProviders
-        ? { environment: inboxServerEnvironment, providers: inboxServerProviders }
-        : null,
-    [inboxServerEnvironment, inboxServerProviders],
+    () => (inboxServerProviders ? { providers: inboxServerProviders } : null),
+    [inboxServerProviders],
+  );
+  // Changes only when a node's thread capabilities or auto-settle rule do, not on config pushes.
+  const reportedThreadCapabilities = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getReportedThreadCapabilitiesSnapshot,
+    getReportedThreadCapabilitiesSnapshot,
+  );
+  const shellSettlementRules = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getShellSettlementRulesSnapshot,
+    getShellSettlementRulesSnapshot,
   );
   const inboxEnvironments = useMemo<ReadonlyArray<InboxSidebarEnvironment>>(() => {
     const knownEnvironmentIds = new Set<EnvironmentId>();
@@ -550,140 +554,59 @@ export default function Sidebar() {
     for (const environmentId of Object.keys(savedEnvironmentRegistry) as EnvironmentId[]) {
       knownEnvironmentIds.add(environmentId);
     }
-    const byEnvironmentId = new Map<EnvironmentId, InboxSidebarEnvironment>();
-
-    if (hostedWorkspace.status !== "signed-out") {
-      for (const machine of hostedWorkspace.machines) {
-        knownEnvironmentIds.add(machine.environmentId);
-        const queued = hostedWorkspace.demand.queuedEnvironmentIds.includes(machine.environmentId);
-        const stale = !machine.presence.online || machine.cacheDisposition !== "available";
-        byEnvironmentId.set(machine.environmentId, {
-          environmentId: machine.environmentId,
-          label: machine.label,
-          connectionState: !machine.presence.online
-            ? "offline"
-            : machine.connectionState === "connected"
-              ? "connected"
-              : queued
-                ? "reconnecting"
-                : machine.connectionState === "connecting"
-                  ? "connecting"
-                  : "idle",
-          stale,
-          ...(stale ? { staleDetail: "Offline · last known" } : {}),
-          role: machine.effectiveRole,
-          trust: machine.nativeTrust,
-          deliveryUnknown: machine.deliveryUnknown,
-          threadSnoozeSupported:
-            (machine.environmentId === primaryEnvironmentId
-              ? primaryEnvironmentDescriptor?.capabilities.threadSnooze
-              : undefined) ??
-            machine.capabilities.threadSnooze ??
-            false,
-          threadSettlementSupported:
-            machine.environmentId === primaryEnvironmentId
-              ? (primaryEnvironmentDescriptor?.capabilities.threadSettlement ??
-                machine.capabilities.threadSettlement)
-              : machine.capabilities.threadSettlement,
-          mutationReady: machine.canMutate && machine.connectionState === "connected" && !stale,
-          shellCurrent: !stale,
-        });
-      }
-    } else if (desktopWorkspace.status !== "signed-out") {
-      for (const machine of desktopWorkspace.machines) {
-        if (
-          isLocalHubAlias(
-            machine.environmentId,
-            primaryEnvironmentId,
-            desktopWorkspace.localEnvironmentId,
-          )
-        )
-          continue;
-        knownEnvironmentIds.add(machine.environmentId);
-        const queued = desktopWorkspace.queuedEnvironmentIds.includes(machine.environmentId);
-        const stale = !machine.online || cacheHydratedEnvironmentIds.has(machine.environmentId);
-        byEnvironmentId.set(machine.environmentId, {
-          environmentId: machine.environmentId,
-          label: machine.label,
-          connectionState: !machine.online
-            ? "offline"
-            : machine.connectionState === "connected"
-              ? "connected"
-              : queued
-                ? "reconnecting"
-                : machine.connectionState === "connecting"
-                  ? "connecting"
-                  : "idle",
-          stale,
-          ...(stale ? { staleDetail: "Offline · last known" } : {}),
-          role: null,
-          trust: machine.nativeTrust,
-          deliveryUnknown: false,
-          threadSettlementSupported: machine.threadSettlementSupported,
-          mutationReady: machine.canMutate && machine.connectionState === "connected" && !stale,
-          shellCurrent: !stale,
-        });
-      }
-    }
-
-    for (const environmentId of knownEnvironmentIds) {
-      if (isLocalHubAlias(environmentId, primaryEnvironmentId, desktopWorkspace.localEnvironmentId))
-        continue;
-      if (byEnvironmentId.has(environmentId)) continue;
-      if (primaryEnvironmentId !== null && environmentId === primaryEnvironmentId) {
-        byEnvironmentId.set(
-          environmentId,
-          buildPrimaryInboxSidebarEnvironment({
-            label: primaryDeviceName,
-            environmentId,
-            connectionState: primaryConnectionState,
-            hydratedFromCache: cacheHydratedEnvironmentIds.has(environmentId),
-            threadSnoozeSupported: primaryEnvironmentDescriptor?.capabilities.threadSnooze ?? false,
-            threadSettlementSupported:
-              primaryEnvironmentDescriptor?.capabilities.threadSettlement ?? false,
-          }),
-        );
-        continue;
-      }
-      const runtime = savedEnvironmentRuntimeById[environmentId];
-      const saved = savedEnvironmentRegistry[environmentId];
-      byEnvironmentId.set(
-        environmentId,
-        buildSavedInboxSidebarEnvironment({
-          environmentId,
-          label: runtime?.descriptor?.label ?? saved?.label ?? environmentId,
-          runtime,
-          hydratedFromCache: cacheHydratedEnvironmentIds.has(environmentId),
-        }),
-      );
-    }
-    return [...byEnvironmentId.values()]
-      .map((environment) =>
-        applyInboxServerConfig(
-          environment,
-          environment.environmentId === primaryEnvironmentId
-            ? inboxServerConfig
-            : savedEnvironmentRuntimeById[environment.environmentId]?.serverConfig,
-        ),
-      )
-      .toSorted((left, right) => left.label.localeCompare(right.label));
+    return buildInboxSidebarEnvironments({
+      knownEnvironmentIds,
+      primary: {
+        environmentId: primaryEnvironmentId,
+        label: primaryDeviceName,
+        connectionState: primaryConnectionState,
+        descriptor: primaryEnvironmentDescriptor,
+        serverConfig: inboxServerConfig,
+      },
+      hosted:
+        hostedStatus !== "signed-out"
+          ? { machines: hostedMachines, queuedEnvironmentIds: hostedQueuedEnvironmentIds }
+          : null,
+      desktopWorkspace:
+        desktopWorkspace.status !== "signed-out"
+          ? {
+              machines: desktopWorkspace.machines,
+              queuedEnvironmentIds: desktopWorkspace.queuedEnvironmentIds,
+              localEnvironmentId: desktopWorkspace.localEnvironmentId,
+            }
+          : null,
+      savedEnvironmentRegistry,
+      savedEnvironmentRuntimeById,
+      cacheHydratedEnvironmentIds,
+      reportedThreadCapabilities,
+      shellSettlementRules,
+    });
   }, [
     inboxServerConfig,
     cacheHydratedEnvironmentIds,
     desktopWorkspace,
-    hostedWorkspace,
+    hostedMachines,
+    hostedQueuedEnvironmentIds,
+    hostedStatus,
     primaryConnectionState,
     primaryEnvironmentDescriptor,
     primaryDeviceName,
     primaryEnvironmentId,
     projects,
+    reportedThreadCapabilities,
     savedEnvironmentRegistry,
     savedEnvironmentRuntimeById,
+    shellSettlementRules,
     sidebarThreads,
   ]);
-  const deliveryUnknownThreadKeys = useMemo(() => {
+  // A node that keeps the auto-settle rule but has none yet takes this client's
+  // own once (owner only).
+  useAutoSettleRuleHandOver(inboxEnvironments, sidebarAutoSettleAfterDays);
+  // A republish rebuilds the thread lists but almost never changes which
+  // threads are unknown: the set follows its content, not the lists' identity.
+  const deliveryUnknownKeysJson = useMemo(() => {
     const keys = new Set<string>();
-    for (const thread of hostedWorkspace.workspace.threads) {
+    for (const thread of hostedThreads) {
       if (thread.deliveryUnknown) {
         keys.add(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)));
       }
@@ -696,8 +619,12 @@ export default function Sidebar() {
         }
       }
     }
-    return keys;
-  }, [desktopWorkspace.snapshots, hostedWorkspace.workspace.threads]);
+    return JSON.stringify([...keys].toSorted());
+  }, [desktopWorkspace.snapshots, hostedThreads]);
+  const deliveryUnknownThreadKeys = useMemo(
+    () => new Set<string>(JSON.parse(deliveryUnknownKeysJson) as string[]),
+    [deliveryUnknownKeysJson],
+  );
   const { orderedProjects, snapshots: sidebarProjects } = useLogicalProjectSnapshots();
 
   // Target for the sidebar-level "New thread" button: the project whose thread
@@ -1365,39 +1292,6 @@ export default function Sidebar() {
     };
   }, [clearSelection, selectedThreadCount]);
 
-  useEffect(() => {
-    if (!isElectron) return;
-    const bridge = window.desktopBridge;
-    if (
-      !bridge ||
-      typeof bridge.getUpdateState !== "function" ||
-      typeof bridge.onUpdateState !== "function"
-    ) {
-      return;
-    }
-
-    let disposed = false;
-    let receivedSubscriptionUpdate = false;
-    const unsubscribe = bridge.onUpdateState((nextState) => {
-      if (disposed) return;
-      receivedSubscriptionUpdate = true;
-      setDesktopUpdateState(nextState);
-    });
-
-    void bridge
-      .getUpdateState()
-      .then((nextState) => {
-        if (disposed || receivedSubscriptionUpdate) return;
-        setDesktopUpdateState(nextState);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      disposed = true;
-      unsubscribe();
-    };
-  }, []);
-
   // Clicking a turn-complete desktop notification focuses the window (handled in
   // the main process) and navigates to the thread whose turn finished.
   useEffect(() => {
@@ -1413,90 +1307,11 @@ export default function Sidebar() {
     });
   }, [navigateToThread]);
 
-  const desktopUpdateButtonDisabled = isDesktopUpdateButtonDisabled(desktopUpdateState);
-  const desktopUpdateButtonAction = desktopUpdateState
-    ? resolveDesktopUpdateButtonAction(desktopUpdateState)
-    : "none";
-  const showArm64IntelBuildWarning =
-    isElectron && shouldShowArm64IntelBuildWarning(desktopUpdateState);
-  const arm64IntelBuildWarningDescription =
-    desktopUpdateState && showArm64IntelBuildWarning
-      ? getArm64IntelBuildWarningDescription(desktopUpdateState)
-      : null;
   const commandPaletteShortcutLabel = shortcutLabelForCommand(
     keybindings,
     "commandPalette.toggle",
     newThreadShortcutLabelOptions,
   );
-  const handleDesktopUpdateButtonClick = useCallback(() => {
-    const bridge = window.desktopBridge;
-    if (!bridge || !desktopUpdateState) return;
-    if (desktopUpdateButtonDisabled || desktopUpdateButtonAction === "none") return;
-
-    if (desktopUpdateButtonAction === "download") {
-      void bridge
-        .downloadUpdate()
-        .then((result) => {
-          if (result.completed) {
-            toastManager.add({
-              type: "success",
-              title: "Update downloaded",
-              description: "Restart the app from the update button to install it.",
-            });
-          }
-          if (!shouldToastDesktopUpdateActionResult(result)) return;
-          const actionError = getDesktopUpdateActionError(result);
-          if (!actionError) return;
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not download update",
-              description: actionError,
-            }),
-          );
-        })
-        .catch((error) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not start update download",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
-            }),
-          );
-        });
-      return;
-    }
-
-    if (desktopUpdateButtonAction === "install") {
-      const confirmed = window.confirm(
-        getDesktopUpdateInstallConfirmationMessage(desktopUpdateState),
-      );
-      if (!confirmed) return;
-      void bridge
-        .installUpdate()
-        .then((result) => {
-          if (!shouldToastDesktopUpdateActionResult(result)) return;
-          const actionError = getDesktopUpdateActionError(result);
-          if (!actionError) return;
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: actionError,
-            }),
-          );
-        })
-        .catch((error) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
-            }),
-          );
-        });
-    }
-  }, [desktopUpdateButtonAction, desktopUpdateButtonDisabled, desktopUpdateState]);
 
   const expandThreadListForProject = useCallback((projectKey: string) => {
     setExpandedThreadListsByProject((current) => {
@@ -1597,11 +1412,6 @@ export default function Sidebar() {
             <Activity mode={projectsPaneVisible ? "visible" : "hidden"} name="sidebar-projects">
               <FrozenWhileHidden visible={projectsPaneVisible}>
                 <SidebarProjectsContent
-                  showArm64IntelBuildWarning={showArm64IntelBuildWarning}
-                  arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
-                  desktopUpdateButtonAction={desktopUpdateButtonAction}
-                  desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
-                  handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
                   projectSortOrder={sidebarProjectSortOrder}
                   threadSortOrder={sidebarThreadSortOrder}
                   projectGroupingMode={projectGroupingSettings.sidebarProjectGroupingMode}

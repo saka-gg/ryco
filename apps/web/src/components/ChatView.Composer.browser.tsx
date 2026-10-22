@@ -94,6 +94,52 @@ import {
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
 
+/**
+ * While set, every hosted capability answers as a hosted connection that is
+ * being established (a node switch); otherwise the real (standard build) one.
+ */
+const hostedEstablishing = vi.hoisted(() => {
+  let establishing = false;
+  const listeners = new Set<() => void>();
+  return {
+    read: () => establishing,
+    set: (next: boolean) => {
+      establishing = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+});
+vi.mock("../hostedHub/capabilities", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hostedHub/capabilities")>();
+  const { useSyncExternalStore } = await import("react");
+  const establishingCapability = Object.freeze({
+    hosted: true,
+    allowed: false,
+    reason: "This action is unavailable while Hub authorization or the relay is stale.",
+    kind: "establishing" as const,
+  });
+  return {
+    ...actual,
+    useHostedRpcCapability: (
+      method: string,
+      environmentId: Parameters<typeof actual.useHostedRpcCapability>[1],
+    ) => {
+      const establishing = useSyncExternalStore(
+        hostedEstablishing.subscribe,
+        hostedEstablishing.read,
+      );
+      const capability = actual.useHostedRpcCapability(method, environmentId);
+      return establishing ? establishingCapability : capability;
+    },
+  };
+});
+
 describe("ChatView Composer (full app)", () => {
   setupChatViewBrowserSuite();
 
@@ -2150,6 +2196,60 @@ describe("ChatView Composer (full app)", () => {
       );
       expect(commands.filter((command) => command.type === "thread.turn.start")).toEqual([]);
     } finally {
+      useMessageQueueStore.getState().clear(THREAD_KEY);
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+  it("queues a send while the thread's hosted connection is being established, then sends it", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-establishing-existing" as MessageId,
+      targetText: "Existing conversation",
+    });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    const commands: Array<{ readonly type: string }> = [];
+    const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+    __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+      ...api,
+      orchestration: {
+        ...api.orchestration,
+        dispatchCommand: async (command) => {
+          commands.push(command);
+          return { sequence: snapshot.snapshotSequence + 1 };
+        },
+      },
+    });
+    try {
+      await waitForComposerEditor();
+      // The rows are live; only the connection is still on its way.
+      hostedEstablishing.set(true);
+      await waitForLayout();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Sent while the node connects");
+      await waitForComposerText("Sent while the node connects");
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+
+      await vi.waitFor(
+        () => expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1),
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(commands.filter((command) => command.type === "thread.turn.start")).toEqual([]);
+
+      hostedEstablishing.set(false);
+      await vi.waitFor(
+        () => {
+          expect(commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
+            1,
+          );
+          expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? []).toEqual([]);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      hostedEstablishing.set(false);
       useMessageQueueStore.getState().clear(THREAD_KEY);
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();

@@ -6,11 +6,36 @@
       "dependsOn": ["^build", "@ryco/web#build"],
       "outputs": ["dist/**"],
       "cache": false,
+      // The resource monitor shares the desktop's native artifact cache, so it
+      // needs the same cache location and build settings (see apps/desktop/turbo.jsonc).
+      "passThroughEnv": [
+        "RYCO_NATIVE_BUILD_CACHE_DIR",
+        "CARGO_*",
+        "RUST*",
+        "CC*",
+        "CXX*",
+        "CFLAGS*",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "SDKROOT",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "DEVELOPER_DIR",
+        "TOOLCHAINS",
+      ],
     },
     "start": {
       "dependsOn": ["build"],
       "cache": false,
       "persistent": true,
+    },
+    // tsconfig.json also includes ../../scripts/lib, which lives outside this
+    // package and is not a workspace dependency, and scripts/cli.ts imports the
+    // root package.json (catalog and overrides), which no global hash covers.
+    "typecheck": {
+      "inputs": ["$TURBO_EXTENDS$", "$TURBO_ROOT$/scripts/lib/**", "$TURBO_ROOT$/package.json"],
+    },
+    "typecheck:fast": {
+      "inputs": ["$TURBO_EXTENDS$", "$TURBO_ROOT$/scripts/lib/**", "$TURBO_ROOT$/package.json"],
     },
   },
 }

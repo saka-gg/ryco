@@ -185,6 +185,64 @@ export async function refreshActiveKeyedQueriesForEnvironment(
   );
 }
 
+export interface RetainedKeyTracker {
+  /** The key gained an observer again, so it is no longer evictable. */
+  readonly retain: (compositeKey: string) => void;
+  /** The key lost its last observer: evictable, most recently released last. */
+  readonly release: (compositeKey: string) => void;
+  /** Stops tracking one environment's keys without evicting them. */
+  readonly forgetEnvironment: (environmentId: EnvironmentId) => void;
+  readonly clear: () => void;
+}
+
+export interface RetainedKeyTrackerOptions {
+  /** How many released keys stay cached before the least recently released goes. */
+  readonly limit: number;
+  /** Drops everything the cache holds for the key; called once per eviction. */
+  readonly onEvict: (compositeKey: string) => void;
+  /** Leading part shared by every composite key of the environment. */
+  readonly environmentPrefix: (environmentId: EnvironmentId) => string;
+}
+
+/**
+ * Bounds a keyed cache that has no release hook of its own. Observed keys are
+ * never evicted; once a key loses its last observer it joins the released set,
+ * and the oldest released keys are evicted while that set exceeds the limit.
+ */
+export function createRetainedKeyTracker(options: RetainedKeyTrackerOptions): RetainedKeyTracker {
+  // Insertion-ordered by release time: the first entry is the least recently
+  // released key, so eviction walks from the front.
+  const released = new Set<string>();
+
+  function evict(): void {
+    for (const compositeKey of released) {
+      if (released.size <= options.limit) return;
+      released.delete(compositeKey);
+      options.onEvict(compositeKey);
+    }
+  }
+
+  return {
+    retain: (compositeKey) => {
+      released.delete(compositeKey);
+    },
+    release: (compositeKey) => {
+      released.delete(compositeKey);
+      released.add(compositeKey);
+      evict();
+    },
+    forgetEnvironment: (environmentId) => {
+      const prefix = options.environmentPrefix(environmentId);
+      for (const compositeKey of released) {
+        if (compositeKey.startsWith(prefix)) released.delete(compositeKey);
+      }
+    },
+    clear: () => {
+      released.clear();
+    },
+  };
+}
+
 export function createKeyedQueryRegistry<TState>(
   config: KeyedQueryRegistryConfig<TState>,
 ): KeyedQueryRegistry<TState> {
@@ -199,6 +257,14 @@ export function createKeyedQueryRegistry<TState>(
   let disposed = false;
   const admissionStates = new WeakMap<KeyedQueryControllerBase, KeyedQueryAdmission>();
   const pendingAdmissionRefresh = new WeakSet<KeyedQueryControllerBase>();
+  /**
+   * Read epochs: the issue order of runs; per environment, the last run issued
+   * before its latest fence; per controller, the issue order of the run whose
+   * result it holds.
+   */
+  let readSequence = 0;
+  const readEpochs = new Map<EnvironmentId, number>();
+  const publishedReadSequences = new WeakMap<KeyedQueryControllerBase, number>();
 
   const queryStateAtom = Atom.family((compositeKey: string) => {
     knownStateKeys.add(compositeKey);
@@ -327,6 +393,8 @@ export function createKeyedQueryRegistry<TState>(
   function markLocalWrite(controller: KeyedQueryControllerBase & Record<string, unknown>): void {
     controller.localWriteEpoch = (controller.localWriteEpoch ?? 0) + 1;
     controller.lastLocalWriteAt = Date.now();
+    // The cache no longer holds what a read returned: the next refresh reads again.
+    publishedReadSequences.delete(controller);
   }
 
   async function runController(
@@ -347,6 +415,7 @@ export function createKeyedQueryRegistry<TState>(
     }
     touchController(controller);
     const token = ++controller.fetchToken;
+    const issuedReadSequence = ++readSequence;
     const isFenced = () =>
       token !== controller.fetchToken ||
       controllers.get(controller.compositeKey) !== controller ||
@@ -371,6 +440,7 @@ export function createKeyedQueryRegistry<TState>(
         if (isSupersededByLocalWrite()) return;
         controller.hasData = true;
         controller.lastFetchedAt = Date.now();
+        publishedReadSequences.set(controller, issuedReadSequence);
         setQueryState(controller.compositeKey, config.buildSuccessState(data));
         published = { data };
       } catch (error) {
@@ -524,6 +594,7 @@ export function createKeyedQueryRegistry<TState>(
       appAtomRegistry.set(queryStateAtom(compositeKey), config.initialState);
     }
     knownStateKeys.clear();
+    readEpochs.clear();
   }
 
   function synchronizeAdmission(controller: KeyedQueryControllerBase & Record<string, unknown>) {
@@ -602,7 +673,12 @@ export function createKeyedQueryRegistry<TState>(
     }
   }
 
+  /**
+   * Fences the environment's active reads in flight and starts a new read epoch
+   * for it: reads issued from now on belong to its current session.
+   */
   function fenceActiveEnvironment(environmentId: EnvironmentId): void {
+    readEpochs.set(environmentId, readSequence);
     for (const compositeKey of controllerKeys({ environmentId })) {
       const controller = controllers.get(compositeKey);
       if (!controller || controller.subscriberCount <= 0) continue;
@@ -610,19 +686,33 @@ export function createKeyedQueryRegistry<TState>(
     }
   }
 
+  /**
+   * Re-runs the environment's active reads that failed or are stale, except a
+   * read whose current data was fetched after the environment's latest fence:
+   * that read already answered from the current session.
+   */
   async function refreshActiveEnvironment(environmentId: EnvironmentId): Promise<void> {
     const runs: Array<Promise<void>> = [];
     const now = Date.now();
+    const epoch = readEpochs.get(environmentId);
     for (const compositeKey of controllerKeys({ environmentId })) {
       const controller = controllers.get(compositeKey);
       if (!controller || controller.subscriberCount <= 0) continue;
       const state = getQueryState(compositeKey);
+      const isError = config.isErrorState?.(state) === true;
       const isStale =
         !controller.hasData ||
-        config.isErrorState?.(state) === true ||
+        isError ||
         (controller.staleTime !== Infinity &&
           now - controller.lastFetchedAt >= controller.staleTime);
       if (!isStale) continue;
+      const readInCurrentEpoch =
+        epoch !== undefined &&
+        controller.hasData &&
+        controller.lastFetchedAt !== 0 &&
+        !isError &&
+        (publishedReadSequences.get(controller) ?? 0) > epoch;
+      if (readInCurrentEpoch) continue;
       runs.push(runController(controller));
     }
     await Promise.all(runs);

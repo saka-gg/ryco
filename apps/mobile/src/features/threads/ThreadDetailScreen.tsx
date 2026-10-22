@@ -61,6 +61,7 @@ import {
   defaultThreadForkBaseRef,
   deriveForkableReplyMessageIds,
   readThreadForkApi,
+  restartInterruptionNotice,
   threadForkBoundaryQuote,
   threadForkReplyExcerpt,
   type ChatMessage,
@@ -135,6 +136,7 @@ import {
   selectSidebarThreadSummaryByRef,
   selectSubscribedClaudeReviewState,
   selectThreadByRef,
+  selectThreadDetailLoaded,
   useStore,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
@@ -292,14 +294,19 @@ function TimelineRow(props: {
 /**
  * The cached / degraded strip. Sits with ErrorBanner between the context bar
  * and the timeline, and carries the context bar's `mx-4` so the three read as
- * one column. Copy and tone are decided in threadCachedViewModel.ts.
+ * one column. Copy and tone are decided in threadCachedViewModel.ts. The quiet
+ * restart interruption line uses it too.
  */
-function ThreadCachedBanner(props: { readonly text: string; readonly tone: "info" | "warning" }) {
+function ThreadCachedBanner(props: {
+  readonly text: string;
+  readonly tone: "info" | "warning";
+  readonly testID?: string;
+}) {
   const warning = props.tone === "warning";
   return (
     <View
       accessibilityRole="alert"
-      testID="thread-cached-banner"
+      testID={props.testID ?? "thread-cached-banner"}
       className={`mx-4 mb-1 rounded-2xl border px-3.5 py-3 ${
         warning ? "border-warning-border bg-warning-bg" : "border-border bg-card-translucent"
       }`}
@@ -483,6 +490,9 @@ export function ThreadDetailScreen(props: {
   const sidebarThread = useStore((state) =>
     selectSidebarThreadSummaryByRef(state, scopeThreadRef(environmentId, threadId)),
   );
+  const threadDetailLoaded = useStore((state) =>
+    selectThreadDetailLoaded(state, scopeThreadRef(environmentId, threadId)),
+  );
   const queuesByThreadKey = useMessageQueueStore((state) => state.queuesByThreadKey);
   const outboxMessages = useSyncExternalStore(
     subscribeThreadOutbox,
@@ -569,7 +579,8 @@ export function ThreadDetailScreen(props: {
           {
             environmentId,
             label: environmentRow.label,
-            threadSettlementSupported: environmentRow.threadSettlementSupported ?? false,
+            threadSettlementSupported: environmentRow.threadSettlementSupported ?? "unknown",
+            autoSettleAfterDays: environmentRow.autoSettleAfterDays,
             connected: environmentRow.connectionState === "connected",
             mutationReady: environmentRow.mutationReady ?? false,
             shellCurrent: environmentRow.shellCurrent ?? false,
@@ -1565,6 +1576,10 @@ export function ThreadDetailScreen(props: {
       />
     );
   const visibleError = sendError ?? thread?.error ?? null;
+  // A restart release is an interruption, not a thread error (`thread.error` leaves it
+  // out): a quiet line once the thread's own activities can tell whether the node
+  // already explained it.
+  const restartNotice = thread && threadDetailLoaded ? restartInterruptionNotice(thread) : null;
   const hasPrompts =
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0 ||
@@ -1601,6 +1616,9 @@ export function ThreadDetailScreen(props: {
         />
       ) : null}
       {visibleError ? <ErrorBanner message={visibleError} /> : null}
+      {restartNotice ? (
+        <ThreadCachedBanner text={restartNotice} tone="info" testID="thread-restart-banner" />
+      ) : null}
 
       {/* One full-screen view for every page in the feed: it outlives the row that opened it. */}
       <HtmlRenderFullScreenProvider>

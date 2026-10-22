@@ -1,6 +1,8 @@
 import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
+import { isRemovedChatFolder, restoreChatFolder } from "../project/chatFolderRestore.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
+import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
 import { StorageService } from "../storage/StorageService.ts";
@@ -261,6 +263,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const workspaceChangeSummary = yield* Effect.serviceOption(WorkspaceChangeSummary);
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
+    // Optional for the route-test reason above; production provides it with the runtime.
+    const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     // Optional: route tests without the orchestration runtime answer "skipped".
     const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
@@ -291,6 +295,14 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const storageAdmission = Option.map(
       yield* Effect.serviceOption(SqlClient.SqlClient),
       (sql) => (canonicalPath: string) => storagePathBlocker(sql, canonicalPath),
+    );
+    // A chat folder empty-folder cleanup removed: it lists as empty and comes back when used.
+    const removedChatFolders = Option.map(
+      yield* Effect.serviceOption(SqlClient.SqlClient),
+      (sql) => ({
+        isRemoved: (folder: string) => isRemovedChatFolder(sql, folder),
+        restore: (folder: string) => restoreChatFolder(sql, folder),
+      }),
     );
     const gitDriver = Option.getOrUndefined(yield* Effect.serviceOption(GitVcsDriver));
     const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
@@ -1396,6 +1408,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       sessionPrewarm,
       localTaskService,
       worktreeNotesService,
+      nodeUpdate,
       config,
       lifecycleEvents,
       serverSettings,
@@ -1405,6 +1418,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       chatFolders,
       projectRelocations,
       storageAdmission,
+      removedChatFolders,
       gitDriver,
       projectFaviconResolver,
       projectAvatarStore,

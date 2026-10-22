@@ -8,6 +8,7 @@ import {
   checkpointDiffCacheKey,
   checkpointDiffRetryDelay,
   checkpointDiffStateAtom,
+  clearCheckpointDiffCacheForEnvironment,
   decodeCheckpointDiffRequest,
   evictCheckpointDiffsForThread,
   executeCheckpointDiffRequest,
@@ -479,5 +480,32 @@ describe("checkpoint diff cache bounds", () => {
 
     unwatchSecond();
     expect(readState(turnInput(2)).data).toBeNull();
+  });
+
+  it("clears one environment's unwatched diffs and leaves the others cached", async () => {
+    const otherEnvironmentId = EnvironmentId.make("environment-other");
+    const { getTurnDiff } = mockDiffs((request) => `patch-${request.toTurnCount}`);
+
+    (await watchUntilResolved(turnInput(2)))();
+    const unwatchOnScreen = await watchUntilResolved(turnInput(3));
+    (await watchUntilResolved(turnInput(2, { environmentId: otherEnvironmentId })))();
+
+    clearCheckpointDiffCacheForEnvironment(environmentId);
+
+    // The released diff of the cleared environment reads as unfetched again.
+    expect(readState(turnInput(2))).toEqual({ data: null, error: null, isLoading: true });
+    // A diff still on screen survives the clear.
+    expect(readState(turnInput(3)).data?.diff).toBe("patch-3");
+    // Another environment's diff is untouched and reopens without a request.
+    const otherInput = turnInput(2, { environmentId: otherEnvironmentId });
+    expect(readState(otherInput).data?.diff).toBe("patch-2");
+    const callsBefore = getTurnDiff.mock.calls.length;
+    watchCheckpointDiff(otherInput)();
+    expect(getTurnDiff.mock.calls.length).toBe(callsBefore);
+
+    // The cleared environment's diff refetches on the next watch.
+    (await watchUntilResolved(turnInput(2)))();
+    expect(getTurnDiff.mock.calls.length).toBe(callsBefore + 1);
+    unwatchOnScreen();
   });
 });

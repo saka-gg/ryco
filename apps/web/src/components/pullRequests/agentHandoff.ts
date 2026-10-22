@@ -22,7 +22,7 @@ import { useLayoutEffect, useMemo, useRef } from "react";
 import { useComposerDraftStore, type ComposerThreadTarget } from "../../composerDraftStore";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { adoptHostedEnvironmentRoute } from "../../hostedHub/adoptHostedEnvironmentRoute";
+import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import { newDraftId, newThreadId, randomUUID } from "../../lib/utils";
 import { fetchSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
@@ -114,10 +114,6 @@ type Router = NonNullable<ReturnType<typeof useRouter>>;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function adoptHostedTarget(projectRef: ScopedProjectRef): void {
-  adoptHostedEnvironmentRoute(projectRef.environmentId);
 }
 
 /** Where the change request's head is (or will be) checked out. */
@@ -223,7 +219,6 @@ async function navigateToThread(
   projectRef: ScopedProjectRef,
   threadId: ThreadId,
 ): Promise<void> {
-  adoptHostedTarget(projectRef);
   await router.navigate({
     to: "/$environmentId/$threadId",
     params: buildThreadRouteParams(scopeThreadRef(projectRef.environmentId, threadId)),
@@ -261,7 +256,6 @@ async function openHandoffDraft(input: {
   store.applyStickyState(draftId);
   if (defaults.modelSelection) store.setModelSelection(draftId, defaults.modelSelection);
   seedComposer(draftId, { prompt: input.prompt, context: input.context });
-  adoptHostedTarget(target.projectRef);
   await router.navigate({ to: "/draft/$draftId", params: { draftId } });
 }
 
@@ -322,9 +316,17 @@ async function openOnCheckout(input: {
 export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
   const { repository, model } = usePullRequestsPage();
   const router = useRouter({ warn: false });
+  const environmentId = repository?.environmentId ?? null;
+  const environmentLabel = repository?.environmentLabel ?? null;
   // A hand-off sends nothing itself, but the composer it opens can only send with dispatch.
-  const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
-  const worktreeCapability = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject);
+  const dispatchCapability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    environmentId,
+  );
+  const worktreeCapability = useHostedRpcCapability(
+    WS_METHODS.gitCreateWorktreeForProject,
+    environmentId,
+  );
   const selection = model.selection;
   const detail = selection?.detail.data ?? null;
   const summary = selection?.summary ?? null;
@@ -344,14 +346,14 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
   }, [detail, repository, selection, summary?.headRefName, summary?.isCrossRepository]);
 
   // Callers hold on to `start` across renders; read the latest target and router.
-  const latest = useRef({ target, router, worktreeCapability });
+  const latest = useRef({ target, router, worktreeCapability, environmentLabel });
   useLayoutEffect(() => {
-    latest.current = { target, router, worktreeCapability };
+    latest.current = { target, router, worktreeCapability, environmentLabel };
   });
   const inFlightRef = useRef(false);
 
   const dispatchAllowed = dispatchCapability.allowed;
-  const dispatchReason = dispatchCapability.reason;
+  const dispatchReason = hostedCapabilityCopy(dispatchCapability, environmentLabel);
   const supported = model.capabilities.checkout;
   const hostName = model.provider?.name ?? "This host";
   return useMemo<PullRequestAgentHandoff>(() => {
@@ -414,9 +416,11 @@ export function usePullRequestAgentHandoff(): PullRequestAgentHandoff {
     };
 
     const requireWorktreeCreation = (api: EnvironmentApi) => {
-      const capability = latest.current.worktreeCapability;
+      const { worktreeCapability: capability, environmentLabel: label } = latest.current;
       if (!capability.allowed) {
-        throw new Error(capability.reason ?? "Worktree creation is unavailable here.");
+        throw new Error(
+          hostedCapabilityCopy(capability, label) ?? "Worktree creation is unavailable here.",
+        );
       }
       const createWorktree = api.git.createWorktreeForProject;
       if (!createWorktree) {
