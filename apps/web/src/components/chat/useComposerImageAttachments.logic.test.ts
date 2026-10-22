@@ -1,9 +1,16 @@
-import type { ProviderDriverKind } from "@ryco/contracts";
+import {
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  type ProviderDriverKind,
+} from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 // Imported statically (vi.mock is hoisted above it) so the module graph loads
 // while the file is collected, not inside the first test's timeout.
-import { resolveComposerAttachmentRouting } from "./useComposerImageAttachments";
+import {
+  planDirectComposerAttachments,
+  resolveComposerAttachmentRouting,
+} from "./useComposerImageAttachments";
 
 vi.mock("@ryco/shared/providerCapabilities", () => ({
   providerSupportsGeneralFileAttachments: vi.fn(
@@ -52,5 +59,80 @@ describe("resolveComposerAttachmentRouting", () => {
     });
     expect(routing.direct).toEqual([doc]);
     expect(routing.references).toEqual([]);
+  });
+});
+
+describe("planDirectComposerAttachments", () => {
+  const text = (name: string, size: number) =>
+    new File(["x".repeat(size)], name, { type: "text/plain" });
+  const summary = (plan: ReturnType<typeof planDirectComposerAttachments>) =>
+    plan.accepted.map(({ name, streamsUpload }) => ({ name, streamsUpload }));
+
+  it("streams files where the environment takes uploads, unless told to keep them inline", () => {
+    const files = [text("notes.txt", 10), makeFile("shot.png", "image/png")];
+    const streamed = planDirectComposerAttachments({
+      files,
+      existing: [],
+      fileUploadMaxBytes: 1024,
+      streamFiles: true,
+    });
+    expect(summary(streamed)).toEqual([
+      { name: "notes.txt", streamsUpload: true },
+      { name: "shot.png", streamsUpload: false },
+    ]);
+    const inline = planDirectComposerAttachments({
+      files,
+      existing: [],
+      fileUploadMaxBytes: 1024,
+      streamFiles: false,
+    });
+    expect(summary(inline)).toEqual([
+      { name: "notes.txt", streamsUpload: false },
+      { name: "shot.png", streamsUpload: false },
+    ]);
+  });
+
+  it("holds an inline file to the send limit, not the environment's upload limit", () => {
+    const large = text("pasted-text.txt", 2048);
+    expect(
+      planDirectComposerAttachments({
+        files: [large],
+        existing: [],
+        fileUploadMaxBytes: 1024,
+        streamFiles: true,
+      }).error,
+    ).toContain("1KB attachment limit");
+    expect(
+      planDirectComposerAttachments({
+        files: [large],
+        existing: [],
+        fileUploadMaxBytes: 1024,
+        streamFiles: false,
+      }).accepted,
+    ).toHaveLength(1);
+  });
+
+  it("rejects files past the message's count and total size", () => {
+    const full = Array.from({ length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS }, () => ({
+      sizeBytes: 1,
+    }));
+    const overCount = planDirectComposerAttachments({
+      files: [text("a.txt", 1)],
+      existing: full,
+      fileUploadMaxBytes: null,
+      streamFiles: false,
+    });
+    expect(overCount.accepted).toEqual([]);
+    expect(overCount.error).toBe(
+      `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
+    );
+    const overTotal = planDirectComposerAttachments({
+      files: [text("b.txt", 10)],
+      existing: [{ sizeBytes: PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES - 5 }],
+      fileUploadMaxBytes: null,
+      streamFiles: false,
+    });
+    expect(overTotal.accepted).toEqual([]);
+    expect(overTotal.error).toContain("Attachments can total at most");
   });
 });

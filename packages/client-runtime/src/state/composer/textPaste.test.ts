@@ -129,12 +129,33 @@ describe("isPasteAsTextShortcut", () => {
     expect(isPasteAsTextShortcut(key({ metaKey: true, shiftKey: true }), false)).toBe(false);
   });
 
+  it("is also Paste and Match Style (Cmd+Option+Shift+V) on macOS, read from the physical key", () => {
+    const pasteAndMatchStyle = { metaKey: true, shiftKey: true, altKey: true };
+    // Option turns the key into another character.
+    expect(
+      isPasteAsTextShortcut(key({ ...pasteAndMatchStyle, key: "◊", code: "KeyV" }), true),
+    ).toBe(true);
+    expect(isPasteAsTextShortcut(key({ ...pasteAndMatchStyle, key: "◊" }), true)).toBe(false);
+    expect(
+      isPasteAsTextShortcut(key({ ...pasteAndMatchStyle, key: "Ç", code: "KeyC" }), true),
+    ).toBe(false);
+    expect(
+      isPasteAsTextShortcut(
+        key({ ctrlKey: true, shiftKey: true, altKey: true, code: "KeyV" }),
+        false,
+      ),
+    ).toBe(false);
+  });
+
   it("is not a plain paste or another chord", () => {
     expect(isPasteAsTextShortcut(key({ metaKey: true }), true)).toBe(false);
-    expect(isPasteAsTextShortcut(key({ metaKey: true, shiftKey: true, altKey: true }), true)).toBe(
+    expect(isPasteAsTextShortcut(key({ metaKey: true, altKey: true, code: "KeyV" }), true)).toBe(
       false,
     );
     expect(isPasteAsTextShortcut(key({ key: "c", metaKey: true, shiftKey: true }), true)).toBe(
+      false,
+    );
+    expect(isPasteAsTextShortcut(key({ metaKey: true, ctrlKey: true, shiftKey: true }), true)).toBe(
       false,
     );
   });

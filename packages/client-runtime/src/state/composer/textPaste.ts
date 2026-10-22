@@ -24,20 +24,26 @@ export type PastedTextDisposition = "attachment" | "inline";
 /** The parts of a key event (DOM or native) the paste shortcut is read from. */
 export interface PasteShortcutKeyEvent {
   readonly key: string;
+  /** The physical key, where the platform reports it. */
+  readonly code?: string;
   readonly metaKey: boolean;
   readonly ctrlKey: boolean;
   readonly altKey: boolean;
   readonly shiftKey: boolean;
 }
 
-/** Cmd+Shift+V on macOS, Ctrl+Shift+V elsewhere: paste as text, never as an attachment. */
+/**
+ * Cmd+Shift+V on macOS, Ctrl+Shift+V elsewhere: paste as text, never as an attachment. macOS
+ * also has Cmd+Option+Shift+V, its Paste and Match Style; Option turns the key into another
+ * character there, so that chord is read from the physical key.
+ */
 export function isPasteAsTextShortcut(event: PasteShortcutKeyEvent, macPlatform: boolean): boolean {
-  return (
-    event.key.toLowerCase() === "v" &&
-    event.shiftKey &&
-    !event.altKey &&
-    (macPlatform ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey)
-  );
+  if (!event.shiftKey) return false;
+  if (!macPlatform) {
+    return event.key.toLowerCase() === "v" && event.ctrlKey && !event.metaKey && !event.altKey;
+  }
+  if (!event.metaKey || event.ctrlKey) return false;
+  return event.altKey ? event.code === "KeyV" : event.key.toLowerCase() === "v";
 }
 
 /**

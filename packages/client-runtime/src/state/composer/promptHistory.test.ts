@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { applyClaudePromptEffortPrefix } from "@ryco/shared/model";
@@ -67,14 +67,33 @@ describe("recallablePrompt", () => {
     expect(recallablePrompt(prompt)).toBe(prompt);
   });
 
-  it("removes the Claude effort prefix and attachment path lines", () => {
-    const sent = applyClaudePromptEffortPrefix("Look at the report", "ultrathink");
-    expect(sent.startsWith("Ultrathink:")).toBe(true);
-    const imported = appendAttachmentPathLines(sent, [
+  it("removes attachment path lines", () => {
+    const imported = appendAttachmentPathLines("Look at the report", [
       "[Attached file] report (final).pdf (application/pdf, 123456 bytes) saved at: /tmp/a/report.pdf",
       "[Attached file] diagram.png (image/png, size unknown bytes)",
     ]);
     expect(recallablePrompt(imported ?? "")).toBe("Look at the report");
+  });
+
+  it("keeps the Claude effort prefix, which selects Ultrathink again in the composer", () => {
+    const sent = applyClaudePromptEffortPrefix("Look at the report", "ultrathink");
+    expect(sent).toBe("Ultrathink:\nLook at the report");
+    expect(recallablePrompt(sent)).toBe(sent);
+    expect(recallablePrompt("ultrathink: fix the flake")).toBe("ultrathink: fix the flake");
+    // What the send added is still removed behind it.
+    const withContext = applyClaudePromptEffortPrefix(
+      appendTerminalContextsToPrompt(`Why does ${INLINE_TERMINAL_CONTEXT_PLACEHOLDER} fail?`, [
+        terminalContext("Terminal 1", 2, 3),
+      ]),
+      "ultrathink",
+    );
+    expect(recallablePrompt(withContext)).toBe("Ultrathink:\nWhy does fail?");
+    // A prefix with nothing typed after it recalls as nothing.
+    expect(
+      recallablePrompt(
+        applyClaudePromptEffortPrefix(appendSelectionQuote("", quote), "ultrathink"),
+      ),
+    ).toBe("");
   });
 
   it("keeps mentions, skills and thread mentions, which the text alone carries", () => {
@@ -97,6 +116,11 @@ describe("recallablePrompt", () => {
         applyClaudePromptEffortPrefix(`${PLAN_IMPLEMENTATION_PROMPT_PREFIX}# Plan`, "ultrathink"),
       ),
     ).toBe("");
+    expect(
+      recallablePrompt(
+        applyClaudePromptEffortPrefix(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT, "ultrathink"),
+      ),
+    ).toBe("");
   });
 });
 
@@ -117,6 +141,29 @@ describe("buildPromptHistoryEntries", () => {
       { id: "u4", prompt: "again" },
       { id: "u5", prompt: "last" },
     ]);
+  });
+
+  it("parses each message once across rebuilds, and again when its text changes", () => {
+    const messages = Array.from({ length: 50 }, (_, index) => ({
+      id: `u${index}`,
+      role: "user",
+      text: appendSelectionQuote(`prompt ${index}`, quote),
+    }));
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const first = buildPromptHistoryEntries(messages);
+      expect(first).toHaveLength(50);
+      expect(parse).toHaveBeenCalled();
+      parse.mockClear();
+      // A held ArrowUp rebuilds from a new array of mostly the same messages.
+      const changed = { ...messages[49]!, text: "edited" };
+      const second = buildPromptHistoryEntries([...messages.slice(0, 49), changed]);
+      expect(second.at(-1)).toEqual({ id: "u49", prompt: "edited" });
+      expect(second.slice(0, 49)).toEqual(first.slice(0, 49));
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
   });
 });
 

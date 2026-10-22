@@ -37,6 +37,7 @@ import { readEnvironmentApi } from "~/environmentApi";
 import { getPrimaryKnownEnvironment } from "~/environments/primary";
 import { getEnvironmentHttpBaseUrl } from "~/environments/runtime/catalog";
 import { readLocalApi } from "~/localApi";
+import { formatShortcutLabel } from "~/keybindings";
 import { randomUUID } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
 import type { ComposerPromptEditorHandle, ComposerTextPaste } from "../ComposerPromptEditor";
@@ -45,6 +46,18 @@ const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES 
 const FILE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_FILE_BYTES / (1024 * 1024))}MB`;
 const STAGED_FILE_SIZE_LIMIT_LABEL = `${Math.round(PROJECT_STAGE_FILE_MAX_BYTES / (1024 * 1024))}MB`;
 const COMPOSER_FILE_REFERENCE_SEPARATOR = " ";
+
+/** Cmd+Shift+V (as ⇧⌘V) on macOS, Ctrl+Shift+V elsewhere. */
+function pasteAsTextShortcutLabel(): string {
+  return formatShortcutLabel({
+    key: "v",
+    modKey: true,
+    shiftKey: true,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+  });
+}
 
 function formatUploadSizeLimitLabel(maxBytes: number): string {
   const streamingLimit = Math.min(maxBytes, PROVIDER_SEND_TURN_MAX_FILE_BYTES);
@@ -98,6 +111,74 @@ export function resolveComposerAttachmentRouting(input: {
     }
   }
   return { direct, references };
+}
+
+export interface PlannedComposerAttachment {
+  readonly file: File;
+  readonly name: string;
+  readonly isImage: boolean;
+  /** Non-image bytes stream to the environment under an upload token. */
+  readonly streamsUpload: boolean;
+}
+
+/**
+ * Checks files against the per-message attachment limits, after the attachments already in the
+ * composer: the files that fit, in order, and the message for the last one that did not. Nothing
+ * is added or uploaded yet.
+ */
+export function planDirectComposerAttachments(input: {
+  readonly files: readonly File[];
+  readonly existing: ReadonlyArray<{ readonly sizeBytes: number }>;
+  readonly fileUploadMaxBytes: number | null;
+  /**
+   * False keeps non-image bytes with the draft, like an image's: they persist with it and go
+   * inline with the message instead of streaming under a token that expires.
+   */
+  readonly streamFiles: boolean;
+}): { readonly accepted: PlannedComposerAttachment[]; readonly error: string | null } {
+  const { fileUploadMaxBytes } = input;
+  const accepted: PlannedComposerAttachment[] = [];
+  let nextAttachmentCount = input.existing.length;
+  let nextTotalBytes = input.existing.reduce(
+    (total, attachment) => total + attachment.sizeBytes,
+    0,
+  );
+  let error: string | null = null;
+  for (const file of input.files) {
+    const isImage = file.type.startsWith("image/");
+    const attachmentName = file.name || (isImage ? "image" : "file");
+    if (!/^[^/\\\p{Cc}]+$/u.test(attachmentName)) {
+      error = `'${attachmentName}' has an unsafe filename. Rename it without path separators or control characters.`;
+      continue;
+    }
+    const streamsUpload = !isImage && input.streamFiles && fileUploadMaxBytes !== null;
+    const fileLimit = isImage
+      ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+      : streamsUpload
+        ? Math.min(fileUploadMaxBytes, PROVIDER_SEND_TURN_MAX_FILE_BYTES)
+        : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
+    const limitLabel = isImage
+      ? IMAGE_SIZE_LIMIT_LABEL
+      : streamsUpload
+        ? formatUploadSizeLimitLabel(fileUploadMaxBytes)
+        : FILE_SIZE_LIMIT_LABEL;
+    if (file.size <= 0 || file.size > fileLimit) {
+      error = `'${attachmentName}' must be non-empty and no larger than the ${limitLabel} attachment limit.`;
+      continue;
+    }
+    if (nextAttachmentCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+      error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
+      break;
+    }
+    if (nextTotalBytes + file.size > PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES) {
+      error = `Attachments can total at most ${FILE_SIZE_LIMIT_LABEL} per message.`;
+      continue;
+    }
+    accepted.push({ file, name: attachmentName, isImage, streamsUpload });
+    nextAttachmentCount += 1;
+    nextTotalBytes += file.size;
+  }
+  return { accepted, error };
 }
 
 export interface UseComposerImageAttachmentsParams {
@@ -230,6 +311,32 @@ export function useComposerImageAttachments(
     [environmentId, fileUploadMaxBytes, resolveUploadThreadId],
   );
 
+  const addPlannedComposerAttachments = useCallback(
+    (planned: ReadonlyArray<PlannedComposerAttachment>) => {
+      const nextImages = planned.map(({ file, name, isImage, streamsUpload }) => {
+        const attachmentId = randomUUID();
+        if (streamsUpload) {
+          enqueueFileUpload(file, attachmentId);
+        }
+        return {
+          type: isImage ? "image" : "file",
+          id: attachmentId,
+          name,
+          mimeType: file.type || "application/octet-stream",
+          sizeBytes: file.size,
+          previewUrl: isImage ? URL.createObjectURL(file) : "",
+          file,
+        } satisfies ComposerImageAttachment;
+      });
+      if (nextImages.length === 1 && nextImages[0]) {
+        addComposerImage(nextImages[0]);
+      } else if (nextImages.length > 1) {
+        addComposerImagesToDraft(nextImages);
+      }
+    },
+    [addComposerImage, addComposerImagesToDraft, enqueueFileUpload],
+  );
+
   const addDirectComposerAttachments = useCallback(
     (files: File[]) => {
       if (!activeThreadId || files.length === 0) return;
@@ -240,73 +347,19 @@ export function useComposerImageAttachments(
         });
         return;
       }
-      const nextImages: ComposerImageAttachment[] = [];
-      let nextAttachmentCount = composerImagesRef.current.length;
-      let nextTotalBytes = composerImagesRef.current.reduce(
-        (total, attachment) => total + attachment.sizeBytes,
-        0,
-      );
-      let error: string | null = null;
-      for (const file of files) {
-        const isImage = file.type.startsWith("image/");
-        const attachmentName = file.name || (isImage ? "image" : "file");
-        if (!/^[^/\\\p{Cc}]+$/u.test(attachmentName)) {
-          error = `'${attachmentName}' has an unsafe filename. Rename it without path separators or control characters.`;
-          continue;
-        }
-        const streamsUpload = !isImage && fileUploadMaxBytes !== null;
-        const fileLimit = isImage
-          ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
-          : streamsUpload
-            ? Math.min(fileUploadMaxBytes, PROVIDER_SEND_TURN_MAX_FILE_BYTES)
-            : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
-        const limitLabel = isImage
-          ? IMAGE_SIZE_LIMIT_LABEL
-          : streamsUpload
-            ? formatUploadSizeLimitLabel(fileUploadMaxBytes)
-            : `${Math.round(PROVIDER_SEND_TURN_MAX_FILE_BYTES / (1024 * 1024))}MB`;
-        if (file.size <= 0 || file.size > fileLimit) {
-          error = `'${attachmentName}' must be non-empty and no larger than the ${limitLabel} attachment limit.`;
-          continue;
-        }
-        if (nextAttachmentCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-          error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
-          break;
-        }
-        if (nextTotalBytes + file.size > PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES) {
-          error = `Attachments can total at most ${FILE_SIZE_LIMIT_LABEL} per message.`;
-          continue;
-        }
-        const attachmentId = randomUUID();
-        const previewUrl = isImage ? URL.createObjectURL(file) : "";
-        nextImages.push({
-          type: isImage ? "image" : "file",
-          id: attachmentId,
-          name: attachmentName,
-          mimeType: file.type || "application/octet-stream",
-          sizeBytes: file.size,
-          previewUrl,
-          file,
-        });
-        if (streamsUpload) {
-          enqueueFileUpload(file, attachmentId);
-        }
-        nextAttachmentCount += 1;
-        nextTotalBytes += file.size;
-      }
-      if (nextImages.length === 1 && nextImages[0]) {
-        addComposerImage(nextImages[0]);
-      } else if (nextImages.length > 1) {
-        addComposerImagesToDraft(nextImages);
-      }
-      setThreadError(activeThreadId, error);
+      const plan = planDirectComposerAttachments({
+        files,
+        existing: composerImagesRef.current,
+        fileUploadMaxBytes,
+        streamFiles: true,
+      });
+      addPlannedComposerAttachments(plan.accepted);
+      setThreadError(activeThreadId, plan.error);
     },
     [
       activeThreadId,
-      addComposerImage,
-      addComposerImagesToDraft,
+      addPlannedComposerAttachments,
       composerImagesRef,
-      enqueueFileUpload,
       fileUploadMaxBytes,
       pendingUserInputCount,
       setThreadError,
@@ -476,28 +529,61 @@ export function useComposerImageAttachments(
 
   const onComposerPasteText = useCallback(
     (paste: ComposerTextPaste): boolean => {
-      const attachments = composerImagesRef.current;
+      const wouldExceedInputLimit = wouldTextPasteExceedInputLimit({
+        promptLength: paste.promptLength,
+        selectedLength: paste.selectedLength,
+        pastedLength: paste.text.length,
+      });
       const disposition = resolvePastedTextDisposition({
         text: paste.text,
-        // A plan question's answer is the editor's text, and a full composer keeps the paste
-        // visible instead of failing it.
-        canAttach:
-          activeThreadId !== null &&
-          pendingUserInputCount === 0 &&
-          attachments.length < PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+        // A plan question's answer is the editor's text.
+        canAttach: activeThreadId !== null && pendingUserInputCount === 0,
         pasteAsText: paste.pasteAsText,
-        wouldExceedInputLimit: wouldTextPasteExceedInputLimit({
-          promptLength: paste.promptLength,
-          selectedLength: paste.selectedLength,
-          pastedLength: paste.text.length,
-        }),
+        wouldExceedInputLimit,
       });
-      if (disposition === "inline") return false;
+      if (activeThreadId === null || disposition === "inline") return false;
+      const attachments = composerImagesRef.current;
       const name = nextPastedTextFileName(attachments.map((attachment) => attachment.name));
-      void addComposerAttachments([new File([paste.text], name, { type: PASTED_TEXT_MIME_TYPE })]);
+      const file = new File([paste.text], name, { type: PASTED_TEXT_MIME_TYPE });
+      if (
+        resolveComposerAttachmentRouting({ fileUploadMaxBytes, selectedProvider, files: [file] })
+          .direct.length === 0
+      ) {
+        return false;
+      }
+      const plan = planDirectComposerAttachments({
+        files: [file],
+        existing: attachments,
+        fileUploadMaxBytes,
+        // Pasted text has no file to pick again, so it never streams under an upload token
+        // that expires: its bytes stay with the draft, survive a reload and go with the message.
+        streamFiles: false,
+      });
+      if (plan.accepted.length === 0) {
+        // No room in this message: a paste the prompt can hold stays text instead.
+        if (!wouldExceedInputLimit) return false;
+        setThreadError(activeThreadId, plan.error);
+        return true;
+      }
+      addPlannedComposerAttachments(plan.accepted);
+      setThreadError(activeThreadId, null);
+      toastManager.add({
+        type: "info",
+        title: `Large paste attached as ${name}`,
+        description: `Paste with ${pasteAsTextShortcutLabel()} to keep it as text.`,
+        data: { hideCopyButton: true },
+      });
       return true;
     },
-    [activeThreadId, addComposerAttachments, composerImagesRef, pendingUserInputCount],
+    [
+      activeThreadId,
+      addPlannedComposerAttachments,
+      composerImagesRef,
+      fileUploadMaxBytes,
+      pendingUserInputCount,
+      selectedProvider,
+      setThreadError,
+    ],
   );
 
   const onComposerDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {

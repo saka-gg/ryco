@@ -461,9 +461,10 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
     image.uploadToken !== undefined &&
     image.expiresAt !== undefined &&
     isFileUploadTokenUsable(image.expiresAt, Date.now());
+  // A saved draft's file whose bytes are still loading is not missing them.
   const needsReattach =
     status === undefined
-      ? image.file === null && !hasValidUploadToken
+      ? image.file === null && !image.bytesPending && !hasValidUploadToken
       : status.kind === "needsReattach";
   const isUploading = status?.kind === "uploading" || status?.kind === "pending";
   const isUploaded = status?.kind === "uploaded";

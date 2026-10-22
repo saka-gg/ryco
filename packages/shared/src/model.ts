@@ -432,9 +432,3 @@ export function applyClaudePromptEffortPrefix(
   }
   return `Ultrathink:\n${trimmed}`;
 }
-
-/** The text before `applyClaudePromptEffortPrefix`, as the user typed it. */
-export function stripClaudePromptEffortPrefix(text: string): string {
-  const trimmed = text.trim();
-  return trimmed.startsWith("Ultrathink:") ? trimmed.slice("Ultrathink:".length).trim() : trimmed;
-}
