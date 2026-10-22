@@ -155,6 +155,8 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
     readonly environmentId: EnvironmentId;
     readonly label: string;
     readonly logicalKey: (project: Project) => string;
+    /** A destination the user already picked; it is committed once the lease arrives. */
+    readonly chosen?: HostedDraftTargetChoice;
   }) => {
     if (
       input.sourceEnvironmentId === input.environmentId ||
@@ -180,7 +182,7 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
       unsubscribeRoute: () => undefined,
       unsubscribeProjects: () => undefined,
       previewing: false,
-      chosen: null,
+      chosen: input.chosen ?? null,
     };
     publish(request);
     if (!ports.adopt(input.environmentId)) {
@@ -232,6 +234,33 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
         environmentId: input.environmentId,
         label: input.label,
         logicalKey: input.logicalKey,
+      });
+    },
+    /**
+     * Moves the draft into a project the user already picked on another device
+     * (the project selector lists every device's checkouts). Nothing is asked:
+     * the move is committed under the target's fresh lease, or the request
+     * fails and the draft stays where it was.
+     */
+    beginProject(input: {
+      readonly draftId: DraftId;
+      readonly sourceEnvironmentId: EnvironmentId;
+      readonly sourceProjectId: ProjectId;
+      readonly environmentId: EnvironmentId;
+      readonly projectId: ProjectId;
+      readonly label: string;
+      readonly logicalKey: (project: Project) => string;
+    }) {
+      start({
+        draftId: input.draftId,
+        sourceEnvironmentId: input.sourceEnvironmentId,
+        sourceProjectId: input.sourceProjectId,
+        // Never consulted: the destination is already chosen.
+        sourceLogicalKey: null,
+        environmentId: input.environmentId,
+        label: input.label,
+        logicalKey: input.logicalKey,
+        chosen: { kind: "project", projectId: input.projectId },
       });
     },
     /** Moves an unsent "No project" chat draft to a chat on another device. */

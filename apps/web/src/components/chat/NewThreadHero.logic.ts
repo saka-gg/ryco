@@ -57,17 +57,25 @@ export function resolveNewThreadHeadline(input: {
  * switching is meaningful and safe: draft threads (a server thread is already
  * bound to its project), before the thread is locked to an environment, and
  * when there is somewhere else to switch to. "No project" counts as a
- * destination wherever chats are available.
+ * destination wherever chats are available; checkouts count one each, so the
+ * same repository on two nodes is two destinations. The selector's footer
+ * ("Add project…", "Copy … to another node…") is reason enough on its own.
  */
 export function canSwitchNewThreadProject(input: {
   readonly routeKind: "draft" | "server";
   readonly envLocked: boolean;
-  /** Real projects only; chats are not projects. */
+  /** Real projects only (every checkout); chats are not projects. */
   readonly projectCount: number;
   readonly chatsAvailable?: boolean;
+  /** The selector's footer offers an action (add or copy a project). */
+  readonly footerActions?: boolean;
 }): boolean {
   const destinations = input.projectCount + (input.chatsAvailable ? 1 : 0);
-  return input.routeKind === "draft" && !input.envLocked && destinations > 1;
+  return (
+    input.routeKind === "draft" &&
+    !input.envLocked &&
+    (destinations > 1 || input.footerActions === true)
+  );
 }
 
 /**

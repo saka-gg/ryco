@@ -52,13 +52,13 @@ import { filterBrowseEntries } from "../CommandPalette.logic";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { getEnvironmentBrowsePlatform } from "./addProjectSources";
+import { HighlightedText } from "./HighlightedText";
 import {
   buildFolderCrumbs,
   buildFolderPlaces,
   describeFolderSelection,
   folderSelectionStatusKey,
   formatNodePath,
-  highlightMatch,
   nodePathLeaf,
   resolveFolderDestination,
   type FolderPickerMode,
@@ -176,24 +176,6 @@ function PickerNotice(props: {
       </span>
       {props.action}
     </div>
-  );
-}
-
-function Highlighted(props: { readonly text: string; readonly query: string }) {
-  return (
-    <>
-      {highlightMatch(props.text, props.query).map((segment, index) =>
-        segment.match ? (
-          // oxlint-disable-next-line react/no-array-index-key -- segments are positional
-          <mark key={index} className="rounded-[2px] bg-warning/38 text-inherit">
-            {segment.text}
-          </mark>
-        ) : (
-          // oxlint-disable-next-line react/no-array-index-key -- segments are positional
-          <Fragment key={index}>{segment.text}</Fragment>
-        ),
-      )}
-    </>
   );
 }
 
@@ -543,7 +525,10 @@ export function FolderPicker(props: FolderPickerProps) {
           className={cn("min-w-0 flex-1 truncate", display === "path" && "font-mono text-[11.5px]")}
         >
           {display === "path" ? (
-            <Highlighted text={formatNodePath(row.path, homeDirectory)} query={debouncedQuery} />
+            <HighlightedText
+              text={formatNodePath(row.path, homeDirectory)}
+              query={debouncedQuery}
+            />
           ) : (
             row.name
           )}

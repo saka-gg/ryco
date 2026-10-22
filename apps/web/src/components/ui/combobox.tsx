@@ -137,6 +137,7 @@ function ComboboxTrigger({ className, children, ...props }: ComboboxPrimitive.Tr
 
 function ComboboxPopup({
   className,
+  popupClassName,
   children,
   side = "bottom",
   sideOffset = 4,
@@ -150,6 +151,8 @@ function ComboboxPopup({
   alignOffset?: ComboboxPrimitive.Positioner.Props["alignOffset"];
   side?: ComboboxPrimitive.Positioner.Props["side"];
   anchor?: ComboboxPrimitive.Positioner.Props["anchor"];
+  /** Classes for the popup element inside the surface, e.g. a taller `max-h-*`. */
+  popupClassName?: string;
 }) {
   const { chipsRef } = React.useContext(ComboboxContext);
   const anchor = anchorProp ?? chipsRef;
@@ -172,7 +175,10 @@ function ComboboxPopup({
           )}
         >
           <ComboboxPrimitive.Popup
-            className="flex min-w-0 max-h-[min(var(--available-height),23rem)] flex-1 flex-col overflow-hidden text-foreground"
+            className={cn(
+              "flex min-w-0 max-h-[min(var(--available-height),23rem)] flex-1 flex-col overflow-hidden text-foreground",
+              popupClassName,
+            )}
             data-slot="combobox-popup"
             {...props}
           >

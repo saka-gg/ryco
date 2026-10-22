@@ -74,6 +74,25 @@ describe("canSwitchNewThreadProject", () => {
     }
   });
 
+  it("opens for the selector's footer actions even with a single project", () => {
+    expect(
+      canSwitchNewThreadProject({
+        routeKind: "draft",
+        envLocked: false,
+        projectCount: 1,
+        footerActions: true,
+      }),
+    ).toBe(true);
+    expect(
+      canSwitchNewThreadProject({
+        routeKind: "draft",
+        envLocked: true,
+        projectCount: 1,
+        footerActions: true,
+      }),
+    ).toBe(false);
+  });
+
   it("counts No project as a destination when chats are available", () => {
     expect(
       canSwitchNewThreadProject({
