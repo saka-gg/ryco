@@ -38,6 +38,12 @@ import {
   ensureInlineTerminalContextPlaceholders,
   normalizeTerminalContextText,
 } from "./terminalContext.ts";
+import {
+  addFileReferenceDraft,
+  type FileReferenceDraft,
+  type FileReferenceDraftAddOutcome,
+  normalizeFileReferenceDrafts,
+} from "./fileReference.ts";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { getDefaultServerModel } from "./providerModels.ts";
@@ -94,6 +100,8 @@ export interface ComposerThreadDraftState<TImage extends ComposerDraftImage = Co
   nonPersistedImageIds: string[];
   persistedAttachments: PersistedComposerImageAttachment[];
   terminalContexts: TerminalContextDraft[];
+  /** Lines of workspace files handed in from the Review and Files panels, sent as a block. */
+  fileReferences: FileReferenceDraft[];
   /** Source-control contexts (issues / change requests) attached to this draft. Not persisted. */
   sourceControlContexts: ComposerSourceControlContext[];
   /**
@@ -414,6 +422,20 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
   addTerminalContexts: (threadRef: ComposerThreadTarget, contexts: TerminalContextDraft[]) => void;
   removeTerminalContext: (threadRef: ComposerThreadTarget, contextId: string) => void;
   clearTerminalContexts: (threadRef: ComposerThreadTarget) => void;
+  /**
+   * Adds a file reference; one for lines the draft already holds replaces it in
+   * place. `unavailable` when the target has no draft key.
+   */
+  addFileReference: (
+    threadRef: ComposerThreadTarget,
+    reference: FileReferenceDraft,
+  ) => FileReferenceDraftAddOutcome | "unavailable";
+  removeFileReference: (threadRef: ComposerThreadTarget, referenceId: string) => void;
+  /** Replaces the draft's references (a restored send), de-duplicated and capped. */
+  setFileReferences: (
+    threadRef: ComposerThreadTarget,
+    references: ReadonlyArray<FileReferenceDraft>,
+  ) => void;
   addSourceControlContext: (
     threadRef: ComposerThreadTarget,
     context: ComposerSourceControlContext,
@@ -476,10 +498,12 @@ const EMPTY_IMAGES: never[] = [];
 const EMPTY_IDS: string[] = [];
 const EMPTY_PERSISTED_ATTACHMENTS: PersistedComposerImageAttachment[] = [];
 const EMPTY_TERMINAL_CONTEXTS: TerminalContextDraft[] = [];
+const EMPTY_FILE_REFERENCES: FileReferenceDraft[] = [];
 const EMPTY_SOURCE_CONTROL_CONTEXTS: ComposerSourceControlContext[] = [];
 Object.freeze(EMPTY_IMAGES);
 Object.freeze(EMPTY_IDS);
 Object.freeze(EMPTY_PERSISTED_ATTACHMENTS);
+Object.freeze(EMPTY_FILE_REFERENCES);
 Object.freeze(EMPTY_SOURCE_CONTROL_CONTEXTS);
 const EMPTY_MODEL_SELECTION_BY_PROVIDER: Partial<Record<ProviderDriverKind, ModelSelection>> =
   Object.freeze({});
@@ -494,6 +518,7 @@ export const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState<never>>
   nonPersistedImageIds: EMPTY_IDS,
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
   terminalContexts: EMPTY_TERMINAL_CONTEXTS,
+  fileReferences: EMPTY_FILE_REFERENCES,
   sourceControlContexts: EMPTY_SOURCE_CONTROL_CONTEXTS,
   modelSelectionByProvider: EMPTY_MODEL_SELECTION_BY_PROVIDER,
   activeProvider: null,
@@ -509,6 +534,7 @@ function createEmptyThreadDraft(): ComposerThreadDraftState<never> {
     nonPersistedImageIds: [],
     persistedAttachments: [],
     terminalContexts: [],
+    fileReferences: [],
     sourceControlContexts: [],
     modelSelectionByProvider: {},
     activeProvider: null,
@@ -581,6 +607,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.images.length === 0 &&
     draft.persistedAttachments.length === 0 &&
     draft.terminalContexts.length === 0 &&
+    draft.fileReferences.length === 0 &&
     draft.sourceControlContexts.length === 0 &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
@@ -2183,6 +2210,77 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               return { draftsByThreadKey: nextDraftsByThreadKey };
             });
           },
+          addFileReference: (threadRef, reference) => {
+            const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+            if (threadKey.length === 0) {
+              return "unavailable";
+            }
+            let outcome: FileReferenceDraftAddOutcome = "full";
+            set((state) => {
+              const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+              const next = addFileReferenceDraft(existing.fileReferences, reference);
+              outcome = next.outcome;
+              if (next.outcome === "full") {
+                return state;
+              }
+              return {
+                draftsByThreadKey: {
+                  ...state.draftsByThreadKey,
+                  [threadKey]: { ...existing, fileReferences: next.references },
+                },
+              };
+            });
+            return outcome;
+          },
+          removeFileReference: (threadRef, referenceId) => {
+            const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+            if (threadKey.length === 0) {
+              return;
+            }
+            set((state) => {
+              const current = state.draftsByThreadKey[threadKey];
+              if (!current?.fileReferences.some((reference) => reference.id === referenceId)) {
+                return state;
+              }
+              const nextDraft: ComposerThreadDraftState<TImage> = {
+                ...current,
+                fileReferences: current.fileReferences.filter(
+                  (reference) => reference.id !== referenceId,
+                ),
+              };
+              const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+              if (shouldRemoveDraft(nextDraft)) {
+                delete nextDraftsByThreadKey[threadKey];
+              } else {
+                nextDraftsByThreadKey[threadKey] = nextDraft;
+              }
+              return { draftsByThreadKey: nextDraftsByThreadKey };
+            });
+          },
+          setFileReferences: (threadRef, references) => {
+            const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+            if (threadKey.length === 0) {
+              return;
+            }
+            const fileReferences = normalizeFileReferenceDrafts(references);
+            set((state) => {
+              const existing = state.draftsByThreadKey[threadKey];
+              if (!existing && fileReferences.length === 0) {
+                return state;
+              }
+              const nextDraft: ComposerThreadDraftState<TImage> = {
+                ...(existing ?? createEmptyThreadDraft()),
+                fileReferences,
+              };
+              const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+              if (shouldRemoveDraft(nextDraft)) {
+                delete nextDraftsByThreadKey[threadKey];
+              } else {
+                nextDraftsByThreadKey[threadKey] = nextDraft;
+              }
+              return { draftsByThreadKey: nextDraftsByThreadKey };
+            });
+          },
           addSourceControlContext: (threadRef, context) => {
             const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
             if (threadKey.length === 0) {
@@ -2388,6 +2486,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
                 nonPersistedImageIds: [],
                 persistedAttachments: [],
                 terminalContexts: [],
+                fileReferences: [],
                 sourceControlContexts: [],
               };
               const nextDraftsByThreadKey = { ...state.draftsByThreadKey };

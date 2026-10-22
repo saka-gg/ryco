@@ -191,6 +191,7 @@ export async function sendQueuedMessageInBackground(
       removeComposerDraftImage: noop,
       addComposerDraftImages: noop,
       setComposerDraftTerminalContexts: noop,
+      setComposerDraftFileReferences: noop,
       setDraftThreadContext: noop,
       readComposerDraftContent: () => null,
     },
@@ -205,6 +206,7 @@ export async function sendQueuedMessageInBackground(
       promptRef: { current: "" },
       composerImagesRef: { current: [] },
       composerTerminalContextsRef: { current: [] },
+      composerFileReferencesRef: { current: [] },
       sendInFlightRef: { current: false },
     },
     sourceControl: {

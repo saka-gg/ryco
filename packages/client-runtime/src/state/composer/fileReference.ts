@@ -1,4 +1,4 @@
-import { normalizeWorkspaceRelativePath, workspaceFileBasename } from "../files/paths.ts";
+import { normalizeWorkspaceRelativePath, workspaceFileBasename } from "../files/relativePath.ts";
 import { formatTerminalContextRange } from "./terminalContext.ts";
 
 /**
@@ -45,18 +45,15 @@ export const FILE_REFERENCE_COMMENT_MAX_LENGTH = 2_000;
 /** How many references one prompt carries; the composer refuses more. */
 export const FILE_REFERENCE_PROMPT_MAX_COUNT = 20;
 
-const FILE_CONTEXT_OPEN_TAG = "<file_context>";
-const FILE_CONTEXT_CLOSE_TAG = "</file_context>";
-const TRUNCATION_MARKER = "… (truncated)";
+/** The tags around the block a prompt carries its references in. */
+export const FILE_CONTEXT_OPEN_TAG = "<file_context>";
+export const FILE_CONTEXT_CLOSE_TAG = "</file_context>";
+/** Ends an entry whose excerpt does not hold the whole range. */
+export const FILE_REFERENCE_TRUNCATION_MARKER = "… (truncated)";
 const SIDE_LABEL: Record<FileReferenceSide, string> = {
   old: "old version",
   new: "new version",
 };
-const ENTRY_HEADER_PATTERN =
-  /^- (.+) (?:line (\d+)|lines (\d+)-(\d+))(?: \((old|new) version\))?:$/u;
-const COMMENT_LINE_PATTERN = /^ {2}comment:(?: (.*))?$/u;
-const SNIPPET_LINE_PATTERN = /^ {2}(\d+) \|(?: (.*))?$/u;
-const OPEN_TAG_LINE_PATTERN = /(?:^|\n)<file_context>\n/gu;
 
 function splitLines(text: string): string[] {
   return text.replace(/\r\n?/gu, "\n").split("\n");
@@ -241,6 +238,78 @@ export function fileReferenceKey(reference: FileReference): string {
   ]);
 }
 
+/** A reference waiting in a composer draft, shown there as a chip until it is sent. */
+export interface FileReferenceDraft extends FileReference {
+  readonly id: string;
+  readonly createdAt: string;
+}
+
+/**
+ * A draft reference read back from storage, re-checked like a fresh one;
+ * null when it does not hold up.
+ */
+export function decodeFileReferenceDraft(value: unknown): FileReferenceDraft | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== "string" ||
+    record.id.length === 0 ||
+    typeof record.createdAt !== "string" ||
+    record.createdAt.length === 0
+  ) {
+    return null;
+  }
+  const reference = decodeFileReference(record);
+  return reference ? { ...reference, id: record.id, createdAt: record.createdAt } : null;
+}
+
+/**
+ * The references one draft keeps, in order: the first of any repeated id or
+ * range, and no more than `FILE_REFERENCE_PROMPT_MAX_COUNT`.
+ */
+export function normalizeFileReferenceDrafts(
+  references: ReadonlyArray<FileReferenceDraft>,
+): FileReferenceDraft[] {
+  const ids = new Set<string>();
+  const keys = new Set<string>();
+  const kept: FileReferenceDraft[] = [];
+  for (const reference of references) {
+    if (kept.length >= FILE_REFERENCE_PROMPT_MAX_COUNT) break;
+    const key = fileReferenceKey(reference);
+    if (ids.has(reference.id) || keys.has(key)) continue;
+    ids.add(reference.id);
+    keys.add(key);
+    kept.push(reference);
+  }
+  return kept;
+}
+
+/**
+ * How adding a reference to a draft went: `updated` when the draft already
+ * held those lines (the new excerpt and note replace the old), `full` at
+ * `FILE_REFERENCE_PROMPT_MAX_COUNT`.
+ */
+export type FileReferenceDraftAddOutcome = "added" | "updated" | "full";
+
+/** `references` with `reference` added, or the outcome that kept it out. */
+export function addFileReferenceDraft(
+  references: ReadonlyArray<FileReferenceDraft>,
+  reference: FileReferenceDraft,
+): { readonly outcome: FileReferenceDraftAddOutcome; readonly references: FileReferenceDraft[] } {
+  const key = fileReferenceKey(reference);
+  const index = references.findIndex((entry) => fileReferenceKey(entry) === key);
+  if (index >= 0) {
+    const next = [...references];
+    // The chip keeps its place and identity; what it carries is the latest pick.
+    next[index] = { ...reference, id: references[index]!.id };
+    return { outcome: "updated", references: next };
+  }
+  if (references.length >= FILE_REFERENCE_PROMPT_MAX_COUNT) {
+    return { outcome: "full", references: [...references] };
+  }
+  return { outcome: "added", references: [...references, reference] };
+}
+
 /** "line 12" / "lines 12-18", the same wording terminal contexts use. */
 export function formatFileReferenceRange(reference: {
   readonly lineStart: number;
@@ -280,7 +349,7 @@ function buildEntryLines(reference: FileReference): string[] {
       lines.push(`  ${reference.lineStart + index} | ${line}`);
     });
   }
-  if (reference.truncated) lines.push(`  ${TRUNCATION_MARKER}`);
+  if (reference.truncated) lines.push(`  ${FILE_REFERENCE_TRUNCATION_MARKER}`);
   return lines;
 }
 
@@ -298,97 +367,4 @@ export function buildFileReferenceBlock(references: ReadonlyArray<FileReference>
     lines.push(...buildEntryLines(reference));
   });
   return [FILE_CONTEXT_OPEN_TAG, ...lines, FILE_CONTEXT_CLOSE_TAG].join("\n");
-}
-
-export interface ExtractedFileReferences {
-  readonly promptText: string;
-  readonly references: ReadonlyArray<FileReference>;
-}
-
-function parseEntry(lines: ReadonlyArray<string>): FileReference | null {
-  const header = ENTRY_HEADER_PATTERN.exec(lines[0] ?? "");
-  if (!header) return null;
-  const path = header[1]!;
-  const lineStart = Number(header[2] ?? header[3]);
-  const lineEnd = Number(header[2] ?? header[4]);
-  const side = header[5] as FileReferenceSide | undefined;
-  if (lineEnd < lineStart) return null;
-  const comment: string[] = [];
-  const snippet: string[] = [];
-  let truncated = false;
-  for (const line of lines.slice(1)) {
-    if (truncated) return null;
-    const commentLine = snippet.length === 0 ? COMMENT_LINE_PATTERN.exec(line) : null;
-    if (commentLine) {
-      comment.push(commentLine[1] ?? "");
-      continue;
-    }
-    const snippetLine = SNIPPET_LINE_PATTERN.exec(line);
-    if (snippetLine) {
-      if (Number(snippetLine[1]) !== lineStart + snippet.length) return null;
-      snippet.push(snippetLine[2] ?? "");
-      continue;
-    }
-    if (line === `  ${TRUNCATION_MARKER}`) {
-      truncated = true;
-      continue;
-    }
-    return null;
-  }
-  if (snippet.length > lineEnd - lineStart + 1 || (snippet.length === 0 && !truncated)) {
-    return null;
-  }
-  const reference = createFileReference({
-    path,
-    lineStart,
-    lineEnd,
-    side,
-    lines: snippet,
-    comment: comment.length > 0 ? comment.join("\n") : undefined,
-  });
-  // Only the canonical form round-trips: anything else was not written by us.
-  if (!reference || reference.path !== path) return null;
-  return truncated && !reference.truncated ? { ...reference, truncated } : reference;
-}
-
-/**
- * Reads a trailing `<file_context>` block back into references, so a sent or
- * restored prompt can show them as chips again. All or nothing: a block that
- * does not parse exactly (typed by hand, say) stays part of the text. A whole
- * sent prompt, terminal contexts included, is read by
- * `extractTrailingPromptContexts`.
- */
-export function extractTrailingFileReferences(prompt: string): ExtractedFileReferences {
-  const none = { promptText: prompt, references: [] };
-  const text = prompt.replace(/\s+$/u, "");
-  if (!text.endsWith(`\n${FILE_CONTEXT_CLOSE_TAG}`)) return none;
-  // Entry lines are always indented, so the last opening tag at a line start
-  // is the block's own.
-  let open: { readonly index: number; readonly length: number } | null = null;
-  for (const match of text.matchAll(OPEN_TAG_LINE_PATTERN)) {
-    open = { index: match.index, length: match[0].length };
-  }
-  if (!open) return none;
-  const body = text.slice(
-    open.index + open.length,
-    text.length - FILE_CONTEXT_CLOSE_TAG.length - 1,
-  );
-  // Entries are separated by one blank line; no entry line is ever blank.
-  const entries: string[][] = [[]];
-  for (const line of body.split("\n")) {
-    const current = entries.at(-1)!;
-    if (line.length > 0) current.push(line);
-    else if (current.length > 0) entries.push([]);
-    else return none;
-  }
-  const references: FileReference[] = [];
-  for (const entry of entries) {
-    const reference = parseEntry(entry);
-    if (!reference) return none;
-    references.push(reference);
-  }
-  return {
-    promptText: text.slice(0, open.index).replace(/\n+$/u, ""),
-    references,
-  };
 }

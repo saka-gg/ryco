@@ -103,6 +103,7 @@ export interface ComposerDraftContent {
   readonly images: ReadonlyArray<unknown>;
   readonly persistedAttachments: ReadonlyArray<unknown>;
   readonly terminalContexts: ReadonlyArray<unknown>;
+  readonly fileReferences: ReadonlyArray<unknown>;
   readonly sourceControlContexts: ReadonlyArray<unknown>;
 }
 
@@ -113,6 +114,7 @@ export function hasComposerDraftContent(draft: ComposerDraftContent): boolean {
     draft.images.length > 0 ||
     draft.persistedAttachments.length > 0 ||
     draft.terminalContexts.length > 0 ||
+    draft.fileReferences.length > 0 ||
     draft.sourceControlContexts.length > 0
   );
 }

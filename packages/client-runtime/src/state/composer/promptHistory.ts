@@ -2,9 +2,9 @@ import { stripAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN } from "@ryco/shared/model";
 
 import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "./planImplementationPrompt.ts";
+import { stripSentPromptContexts } from "./promptContext.ts";
 import { stripSelectionQuotes } from "./selectionQuote.ts";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "./sendEngine.ts";
-import { stripSentTerminalContexts } from "./terminalContext.ts";
 
 // Prompt recall: ArrowUp in an empty composer brings back the prompts sent
 // earlier in the thread, newest first. The entries come from the thread's own
@@ -38,10 +38,11 @@ export interface PromptHistoryStep {
 
 /**
  * The text the user typed for a sent message, without what the send added to it: attachment
- * path lines, terminal contexts and their inline labels, and quoted assistant text. Mentions,
- * skills and thread mentions stay: the prompt text alone carries them, so the composer shows them
- * as chips again. So does a Claude `Ultrathink:` prefix: in the composer it is text the effort
- * menu writes, and it is what selects Ultrathink again. App-composed sends recall as nothing.
+ * path lines, file references, terminal contexts and their inline labels, and quoted assistant
+ * text. Mentions, skills and thread mentions stay: the prompt text alone carries them, so the
+ * composer shows them as chips again. So does a Claude `Ultrathink:` prefix: in the composer it
+ * is text the effort menu writes, and it is what selects Ultrathink again. App-composed sends
+ * recall as nothing.
  */
 export function recallablePrompt(messageText: string): string {
   const sent = stripAttachmentPathLines(messageText.trim());
@@ -49,7 +50,7 @@ export function recallablePrompt(messageText: string): string {
   const body = sent.slice(effortPrefix.length);
   if (body === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT) return "";
   if (body.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)) return "";
-  const typed = stripSelectionQuotes(stripSentTerminalContexts(body)).trim();
+  const typed = stripSelectionQuotes(stripSentPromptContexts(body)).trim();
   return typed.length > 0 ? `${effortPrefix}${typed}` : "";
 }
 

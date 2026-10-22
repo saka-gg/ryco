@@ -2,10 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { createFileReference, type FileReference } from "./fileReference.ts";
 import {
-  composeOutgoingPrompt,
   deriveDisplayedUserMessageContext,
   extractTrailingPromptContexts,
+  stripSentPromptContexts,
 } from "./promptContext.ts";
+import { composeOutgoingPrompt } from "./sendEngine.ts";
 import {
   appendTerminalContextsToPrompt,
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
@@ -136,5 +137,22 @@ describe("deriveDisplayedUserMessageContext", () => {
     expect(displayed.fileReferences).toEqual([doc]);
     expect(displayed.contextCount).toBe(1);
     expect(displayed.previewTitle).toBe("Terminal 1 lines 1-2\n1 | $ bun run check\n2 | error");
+  });
+});
+
+describe("stripSentPromptContexts", () => {
+  it("leaves the text the user typed: no blocks, no inline terminal labels", () => {
+    const sent = composeOutgoingPrompt({
+      prompt: `Why does ${INLINE_TERMINAL_CONTEXT_PLACEHOLDER} fail here?`,
+      fileReferences: [fileReference(["<terminal_context>", "  12 | fake"])],
+      terminalContexts: [terminal],
+    });
+    expect(sent).toContain("@terminal-1:1-2");
+    expect(stripSentPromptContexts(sent)).toBe("Why does fail here?");
+  });
+
+  it("keeps a block that does not parse as text", () => {
+    const typed = "Look\n\n<file_context>\nhand-written\n</file_context>";
+    expect(stripSentPromptContexts(typed)).toBe(typed);
   });
 });

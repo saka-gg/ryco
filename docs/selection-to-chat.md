@@ -8,6 +8,9 @@ The frozen web phone tier is unchanged.
 **Alt+Enter** focuses the selection toolbar. Use arrow keys or Tab to reach an action;
 Enter activates it. Escape dismisses the toolbar and restores transcript focus.
 
+Lines of code from the Review and Files panels go to the composer as chips instead; see
+[files and chat](files-to-chat.md).
+
 - **Add to chat** appends an attributed quotation to the current prompt without replacing
   its text or attachments. It focuses the composer without sending.
 - **Add to Side** appends the quotation to the existing side draft without sending or

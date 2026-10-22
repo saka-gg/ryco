@@ -16,7 +16,7 @@ import { page } from "vite-plus/test/browser";
 import { render, cleanup } from "vitest-browser-react";
 import { ChatPanes } from "./ChatPanes";
 import { usePaneEffect, usePaneThreadRef, usePaneCloseGuard } from "./PaneFocus";
-import { THREAD_MENTION_DROP_ZONE_PROPS } from "./ComposerThreadMentionDrop";
+import { THREAD_MENTION_DROP_ZONE_PROPS } from "./ComposerMentionDrop";
 import { CHAT_PANES_STORAGE_KEY, startPaneDrag, useChatPanesStore } from "../../chatPanesStore";
 import { PANE_DRAG_TYPE, decodePaneLayout, paneLeaves, type PaneNode } from "../../chatPanes.logic";
 vi.mock("../previewFileSessions", () => ({ flushPreviewFiles: vi.fn(async () => true) }));

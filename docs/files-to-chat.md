@@ -32,17 +32,39 @@ composer context intake once and refuses while it is busy, so the gutter does no
 flicker on every send). A diff range that crosses from removed into added lines
 becomes a range of the new version.
 
-Files in the Files tree can be dragged; the drag carries the workspace file
-(`application/x-ryco-workspace-file`, plus the path as plain text) for the composer
-to take as a mention of that file.
+The lines wait in the composer as chips above the prompt (`app.ts:12-18`); the
+tooltip shows the file, the note and the start of the excerpt, and **×** removes
+one. Adding the same lines again replaces the chip's excerpt and note instead of
+adding a second chip. A message carries up to 20 references; past that, and while
+the composer cannot take input (a question waits, or the connection is down), the
+note row says the chat can't take the lines and keeps the note. The chips belong
+to the draft: they survive switching threads and reloading, go out with the next
+send, and come back if that send fails. A queued message keeps them too, and
+editing it puts them back. ArrowUp recall only brings back what you typed, and it
+does not step while chips are in the composer. A send of references alone is
+fine; its title names the first file.
+
+## Dragging files into the composer
+
+Files in the Files tree can be dragged onto the composer. A drop inserts an
+`@path` mention of the file at the caret, the same mention the `@` picker
+writes: the agent reads the file on its node, so it sees all of it as it is
+when the turn runs, where an excerpt copied into the prompt would be bounded and
+could go stale (line ranges are what the gutter **+** is for). The drag carries
+the workspace file (`application/x-ryco-workspace-file`, plus the path as plain
+text for drops elsewhere); while it hovers, the composer says what a drop will do.
+A file of another machine or another workspace is refused with a short notice,
+and the editor never pastes the path as text.
 
 ## What the agent receives
 
 References travel in the ordinary prompt text, so every provider, the queue and
 send retries see the same context. They form one block after the prompt and
 before any terminal context. The client runtime writes them in one place
-(`composeOutgoingPrompt`) and reads a sent message back in one place
-(`deriveDisplayedUserMessageContext`, for display, search and copy alike):
+(`composeOutgoingPrompt`, in the send engine) and reads a sent message back in
+one place (`deriveDisplayedUserMessageContext`, for display, search and copy
+alike). The sent message shows the references as chips again, on web and in the
+mobile app; copying the message copies the text as sent, block included:
 
 ```text
 <file_context>

@@ -225,7 +225,11 @@ import {
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
-import { type TerminalContextDraft, type TerminalContextSelection } from "../lib/terminalContext";
+import {
+  type FileReferenceDraft,
+  type TerminalContextDraft,
+  type TerminalContextSelection,
+} from "../lib/terminalContext";
 import {
   applyBuildModeToSend,
   attachDevicePromptScreenshot,
@@ -656,7 +660,12 @@ const PROVIDER_SESSION_PREWARM_FOCUS_DWELL_MS = 400;
 function readComposerDraftContent(target: ScopedThreadRef | DraftId): ComposerDraftContent | null {
   const draft = useComposerDraftStore.getState().getComposerDraft(target);
   return draft
-    ? { prompt: draft.prompt, images: draft.images, terminalContexts: draft.terminalContexts }
+    ? {
+        prompt: draft.prompt,
+        images: draft.images,
+        terminalContexts: draft.terminalContexts,
+        fileReferences: draft.fileReferences,
+      }
     : null;
 }
 
@@ -778,6 +787,7 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
   );
+  const setComposerDraftFileReferences = useComposerDraftStore((store) => store.setFileReferences);
   const addComposerDraftSourceControlContext = useComposerDraftStore(
     (store) => store.addSourceControlContext,
   );
@@ -791,6 +801,7 @@ export default function ChatView(props: ChatViewProps) {
       (draft.prompt.length > 0 ||
         draft.images.length > 0 ||
         draft.terminalContexts.length > 0 ||
+        draft.fileReferences.length > 0 ||
         draft.sourceControlContexts.length > 0)
     );
   });
@@ -820,6 +831,7 @@ export default function ChatView(props: ChatViewProps) {
   const promptRef = useRef("");
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
+  const composerFileReferencesRef = useRef<FileReferenceDraft[]>([]);
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const readComposer = useCallback(() => composerRef.current, [composerRef]);
@@ -3175,7 +3187,12 @@ export default function ChatView(props: ChatViewProps) {
         (entry) => entry.id === id,
       );
       if (!message) return;
-      const refs = { promptRef, composerImagesRef, composerTerminalContextsRef };
+      const refs = {
+        promptRef,
+        composerImagesRef,
+        composerTerminalContextsRef,
+        composerFileReferencesRef,
+      };
       const unavailableReason = resolveQueuedMessageEditUnavailableReason({
         deliveryStatus: message.deliveryStatus,
         steering: queueState.steerAttemptsByThreadKey[activeThreadKey]?.[id] !== undefined,
@@ -3191,10 +3208,12 @@ export default function ChatView(props: ChatViewProps) {
           setComposerDraftPrompt,
           addComposerDraftImages,
           setComposerDraftTerminalContexts,
+          setComposerDraftFileReferences,
         },
         prompt: message.composer.promptForRestore ?? message.composer.prompt,
         images: message.composer.images,
         terminalContexts: message.composer.sendableTerminalContexts,
+        fileReferences: message.composer.fileReferences ?? [],
       });
       for (const context of message.composer.sourceControlContexts) {
         addComposerDraftSourceControlContext(composerDraftTarget, context);
@@ -3209,6 +3228,7 @@ export default function ChatView(props: ChatViewProps) {
       readComposer,
       removeMessageFromQueue,
       scheduleComposerFocus,
+      setComposerDraftFileReferences,
       setComposerDraftPrompt,
       setComposerDraftTerminalContexts,
     ],
@@ -4158,6 +4178,7 @@ export default function ChatView(props: ChatViewProps) {
           : (current?.prompt ?? "") !== (draft?.prompt ?? "")) ||
         current?.images !== draft?.images ||
         current?.terminalContexts !== draft?.terminalContexts ||
+        current?.fileReferences !== draft?.fileReferences ||
         current?.sourceControlContexts !== draft?.sourceControlContexts
       );
     };
@@ -4655,6 +4676,7 @@ export default function ChatView(props: ChatViewProps) {
           addComposerDraftImages,
           removeComposerDraftImage,
           setComposerDraftTerminalContexts,
+          setComposerDraftFileReferences,
           setDraftThreadContext,
           readComposerDraftContent,
         },
@@ -4669,6 +4691,7 @@ export default function ChatView(props: ChatViewProps) {
           promptRef,
           composerImagesRef,
           composerTerminalContextsRef,
+          composerFileReferencesRef,
           sendInFlightRef: threadSendsInFlight.ref(sendThreadKey),
         },
         sourceControl: {
@@ -4728,6 +4751,7 @@ export default function ChatView(props: ChatViewProps) {
         trimmedPrompt: `Continue pursuing this goal: ${objective}`,
         images: context.images,
         sendableTerminalContexts: sendState.sendableTerminalContexts,
+        fileReferences: context.fileReferences,
         sourceControlContexts: context.sourceControlContexts,
         selectedProvider: context.selectedProvider,
         selectedModel: context.selectedModel,
@@ -4777,13 +4801,14 @@ export default function ChatView(props: ChatViewProps) {
         sideContext &&
         (sideContext.images.length > 0 ||
           sideContext.terminalContexts.length > 0 ||
+          sideContext.fileReferences.length > 0 ||
           sideContext.sourceControlContexts.length > 0)
       ) {
         toastManager.add({
           type: "info",
           title: "Side questions accept text only",
           description:
-            "Remove attached images, terminal selections, and source-control references before using /btw.",
+            "Remove attached images, terminal selections, file references, and source-control references before using /btw.",
         });
         return;
       }
@@ -4844,6 +4869,7 @@ export default function ChatView(props: ChatViewProps) {
     const {
       images: composerImages,
       terminalContexts: composerTerminalContexts,
+      fileReferences: composerFileReferences,
       sourceControlContexts: composerSourceControlContexts,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
@@ -4861,6 +4887,7 @@ export default function ChatView(props: ChatViewProps) {
       prompt: promptForSend,
       imageCount: composerImages.length,
       terminalContexts: composerTerminalContexts,
+      fileReferences: composerFileReferences,
     });
     const goalCommand = parseThreadGoalSlashCommand(trimmed);
     if (
@@ -4949,7 +4976,9 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const standaloneSlashCommand =
-      composerImages.length === 0 && sendableComposerTerminalContexts.length === 0
+      composerImages.length === 0 &&
+      sendableComposerTerminalContexts.length === 0 &&
+      composerFileReferences.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {
@@ -4995,6 +5024,7 @@ export default function ChatView(props: ChatViewProps) {
       trimmedPrompt: trimmed,
       images: composerImages,
       sendableTerminalContexts: sendableComposerTerminalContexts,
+      fileReferences: composerFileReferences,
       sourceControlContexts: composerSourceControlContexts,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
@@ -6683,6 +6713,7 @@ export default function ChatView(props: ChatViewProps) {
                   promptRef={promptRef}
                   composerImagesRef={composerImagesRef}
                   composerTerminalContextsRef={composerTerminalContextsRef}
+                  composerFileReferencesRef={composerFileReferencesRef}
                   shouldAutoScrollRef={isAtEndRef}
                   scheduleStickToBottom={scrollToEnd}
                   followUpSurfaceAllowsSteer={presentationTier !== "phone"}
