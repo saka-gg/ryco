@@ -124,6 +124,8 @@ interface HarnessOptions {
   readonly claimGate?: Deferred.Deferred<void>;
   /** Blocks every release until opened (the transfers registry held by another claim). */
   readonly releaseGate?: Deferred.Deferred<void>;
+  /** Blocks every avatar write until opened (a large image being re-encoded). */
+  readonly avatarGate?: Deferred.Deferred<void>;
   readonly failDispatch?: ReadonlyArray<OrchestrationCommand["type"]>;
   /** The cloned repository has a `.gitmodules`, so the (failing) submodule step runs. */
   readonly withSubmodules?: boolean;
@@ -403,7 +405,11 @@ const makeHarness = (options: HarnessOptions = {}) => {
 
   const avatars = Layer.succeed(ProjectAvatarStore, {
     write: (input) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
+        if (options.avatarGate !== undefined) {
+          state.events.push("avatar-waiting");
+          yield* Deferred.await(options.avatarGate);
+        }
         state.avatarsWritten.push(`${input.projectId}:${input.contentType}`);
         return { contentHash: createHash("sha256").update(input.bytes).digest("hex") };
       }),
@@ -524,13 +530,15 @@ const openSoon = (gate: Deferred.Deferred<void>) =>
   );
 
 /**
- * A row an earlier process left `running` when it crashed: the steps before `running` are done
- * and `running` is running.
+ * A row an earlier process left when it crashed: the steps before `running` are done and
+ * `running` is running. A `running` job crashed while it ran; an `interrupted` one crashed while
+ * startup recovery replayed `running`, after its other steps were skipped.
  */
 const insertLeftoverRow = (
   input: ProjectImportStartInput,
   options: {
     readonly running: ProjectImportStepId;
+    readonly status?: "running" | "interrupted";
     readonly staging?: { readonly path: string; readonly dev: string; readonly ino: string };
     readonly child?: { readonly pid: number; readonly startedAt: string };
     readonly registered?: boolean;
@@ -539,12 +547,30 @@ const insertLeftoverRow = (
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const now = "2026-10-22T00:00:00.000Z";
+    const status = options.status ?? "running";
     let snapshot = initialProjectImportSnapshot(input, now);
+    let reached = false;
     for (const step of snapshot.steps) {
-      if (step.id === options.running) break;
-      snapshot = withImportStep(snapshot, step.id, { status: "done" }, now);
+      if (step.id === options.running) {
+        reached = true;
+        continue;
+      }
+      if (!reached || status === "interrupted") {
+        snapshot = withImportStep(snapshot, step.id, { status: reached ? "skipped" : "done" }, now);
+      }
     }
     snapshot = withImportStep(snapshot, options.running, { status: "running" }, now);
+    if (status === "interrupted") {
+      snapshot = {
+        ...snapshot,
+        status,
+        error: {
+          step: options.running,
+          code: "interrupted",
+          message: "Ryco restarted while this import was running.",
+        },
+      };
+    }
     const staging = options.staging ?? null;
     const child = options.child ?? null;
     yield* sql`INSERT INTO project_imports (import_id, project_id, destination_key,
@@ -552,7 +578,7 @@ const insertLeftoverRow = (
         snapshot_json, owned, child_pid, child_pgid, child_started_at, registered,
         created_at, updated_at)
       VALUES (${input.importId}, ${input.projectId}, ${input.destinationPath},
-        ${staging?.path ?? null}, ${staging?.dev ?? null}, ${staging?.ino ?? null}, 'running',
+        ${staging?.path ?? null}, ${staging?.dev ?? null}, ${staging?.ino ?? null}, ${status},
         ${JSON.stringify(Schema.encodeSync(ProjectImportStartInput)(input))},
         ${projectImportInputDigest(input)},
         ${JSON.stringify(Schema.encodeSync(ProjectImportSnapshot)(snapshot))},
@@ -1330,7 +1356,8 @@ describe("ProjectImportsLive", () => {
             assert.equal(stepStatus(after, "avatar"), "done");
             assert.equal((yield* rowOf(input.importId))?.registered, 1);
             yield* imports.recoverOnStartup();
-            assert.deepEqual(harness.state.released, [input.importId]);
+            // Nothing records that the files went, so recovery deletes them again: a no-op.
+            assert.deepEqual(harness.state.released, [input.importId, input.importId]);
           }),
         );
       }),
@@ -1418,6 +1445,123 @@ describe("ProjectImportsLive", () => {
             // Nothing is left to replay.
             yield* imports.recoverOnStartup();
             assert.equal(harness.state.commands.length, 3);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("a stop between a replay and its release releases the files at the next start", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const releaseGate = yield* Deferred.make<void>();
+        const harness = makeHarness({ releaseGate });
+        const input = makeInput({
+          destinationPath: path.join(tempDir("stop-before-release"), "app"),
+          avatarTransferId: randomUUID(),
+        });
+        yield* insertLeftoverRow(input, { running: "avatar", registered: true });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const recovery = yield* imports.recoverOnStartup().pipe(Effect.forkChild);
+            yield* untilEvent(harness, "release-waiting");
+            // The server stops with the avatar replayed and saved, before its files went.
+            yield* Fiber.interrupt(recovery);
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(stepStatus(after, "avatar"), "done");
+            assert.deepEqual(harness.state.released, []);
+          }),
+        );
+        yield* Deferred.succeed(releaseGate, undefined);
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const before = Option.getOrThrow(yield* imports.get(input.importId));
+            yield* imports.recoverOnStartup();
+            assert.deepEqual(harness.state.released, [input.importId]);
+            // Nothing is replayed again, and the row is not touched, so it still expires.
+            assert.lengthOf(harness.state.avatarsWritten, 1);
+            assert.deepEqual(
+              harness.state.commands.map((command) => command.commandId),
+              [projectImportCommandId(input.importId, "project-avatar")],
+            );
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(after.updatedAt, before.updatedAt);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("a crash during a replay fails the step instead of replaying it on every start", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        const input = makeInput({
+          destinationPath: path.join(tempDir("crash-in-replay"), "app"),
+          avatarTransferId: randomUUID(),
+        });
+        // Startup recovery was replaying the avatar when the node crashed, perhaps because of it.
+        yield* insertLeftoverRow(input, {
+          running: "avatar",
+          status: "interrupted",
+          registered: true,
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            yield* imports.recoverOnStartup();
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(after.status, "interrupted");
+            assert.equal(stepStatus(after, "settings"), "done");
+            assert.equal(stepStatus(after, "avatar"), "failed");
+            assert.isTrue(
+              after.warnings.some((warning) =>
+                warning.startsWith("The project's avatar was not copied: Ryco stopped"),
+              ),
+            );
+            assert.deepEqual(harness.state.avatarsWritten, []);
+            assert.deepEqual(harness.state.commands, []);
+            assert.deepEqual(harness.state.released, [input.importId]);
+
+            yield* imports.recoverOnStartup();
+            const later = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(stepStatus(later, "avatar"), "failed");
+            assert.lengthOf(later.warnings, after.warnings.length);
+            assert.deepEqual(harness.state.avatarsWritten, []);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("a stop during a replay puts the step back to pending for the next start", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const avatarGate = yield* Deferred.make<void>();
+        const harness = makeHarness({ avatarGate });
+        const input = makeInput({
+          destinationPath: path.join(tempDir("stop-in-replay"), "app"),
+          avatarTransferId: randomUUID(),
+        });
+        yield* insertLeftoverRow(input, { running: "avatar", registered: true });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            const recovery = yield* imports.recoverOnStartup().pipe(Effect.forkChild);
+            yield* untilEvent(harness, "avatar-waiting");
+            yield* Fiber.interrupt(recovery);
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(stepStatus(after, "avatar"), "pending");
+            assert.deepEqual(harness.state.released, []);
+          }),
+        );
+        yield* Deferred.succeed(avatarGate, undefined);
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            yield* imports.recoverOnStartup();
+            const after = Option.getOrThrow(yield* imports.get(input.importId));
+            assert.equal(stepStatus(after, "avatar"), "done");
+            assert.deepEqual(after.warnings, []);
+            assert.lengthOf(harness.state.avatarsWritten, 1);
+            assert.deepEqual(harness.state.released, [input.importId]);
           }),
         );
       }),

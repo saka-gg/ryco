@@ -34,10 +34,23 @@ export const PROJECT_IMPORT_STEP_IDS: ReadonlyArray<ProjectImportStepId> =
   ProjectImportStepId.literals;
 
 /** The steps after `register` that are idempotent, so startup recovery replays them. */
-export const PROJECT_IMPORT_REPLAYED_STEPS: ReadonlyArray<ProjectImportStepId> = [
+export type ProjectImportReplayedStepId = Extract<ProjectImportStepId, "settings" | "avatar">;
+
+export const PROJECT_IMPORT_REPLAYED_STEPS: ReadonlyArray<ProjectImportReplayedStepId> = [
   "settings",
   "avatar",
 ];
+
+const REPLAYED_STEP_LOSS: Record<ProjectImportReplayedStepId, string> = {
+  settings: "The project's scripts and preferred remote were not copied",
+  avatar: "The project's avatar was not copied",
+};
+
+/** The warning a replayed step leaves when it fails: what was not copied, and why. */
+export const replayedImportStepWarning = (
+  id: ProjectImportReplayedStepId,
+  reason: string,
+): string => `${REPLAYED_STEP_LOSS[id]}: ${reason}`;
 
 /** Bounds messages, details and warnings, like `ProjectCopyError.message`. */
 export const PROJECT_IMPORT_MESSAGE_MAX_CHARS = 2_000;
@@ -160,16 +173,43 @@ export const currentImportStep = (snapshot: ProjectImportSnapshot): ProjectImpor
   ).id;
 
 /**
- * The replayed steps a registered job still owes: pending, or running when a crash cut the step
- * (or its earlier replay) short. Each is idempotent by command id, so it runs again from the start.
+ * The replayed steps a registered job still owes: the pending ones. A step a crash or a stop cut
+ * short went back to pending when its job was marked interrupted (`keepPending`), and so does a
+ * replay a stop cut short. Each is idempotent by command id, so it runs again from the start.
+ * One still running in an interrupted job is not owed: see `failCutShortReplays`.
  */
 export const dueReplayedImportSteps = (
   snapshot: ProjectImportSnapshot,
-): ReadonlyArray<ProjectImportStepId> =>
-  PROJECT_IMPORT_REPLAYED_STEPS.filter((id) => {
-    const status = importStepOf(snapshot, id)?.status;
-    return status === "pending" || status === "running";
-  });
+): ReadonlyArray<ProjectImportReplayedStepId> =>
+  PROJECT_IMPORT_REPLAYED_STEPS.filter((id) => importStepOf(snapshot, id)?.status === "pending");
+
+const CUT_SHORT_REPLAY = "Ryco stopped while it retried this step after a restart.";
+
+/**
+ * Fails, with a warning, each replayed step still running in an interrupted job. Settling a job
+ * puts its running replayed steps back to pending, so such a step was cut short by a crash
+ * during its own replay. That replay may be what crashed the node (a native crash or an out of
+ * memory on the avatar's bytes, say): replaying it again could crash every later start, so a
+ * step runs at most twice, once in the job and once in a replay.
+ */
+export const failCutShortReplays = (
+  snapshot: ProjectImportSnapshot,
+  now: string,
+): ProjectImportSnapshot => {
+  if (snapshot.status !== "interrupted") return snapshot;
+  let next = snapshot;
+  for (const id of PROJECT_IMPORT_REPLAYED_STEPS) {
+    if (importStepOf(next, id)?.status !== "running") continue;
+    next = withImportStep(
+      next,
+      id,
+      { status: "failed", progressPercent: null, detail: CUT_SHORT_REPLAY },
+      now,
+    );
+    next = withImportWarning(next, replayedImportStepWarning(id, CUT_SHORT_REPLAY), now);
+  }
+  return next;
+};
 
 /**
  * Ends a job: a failure fails the step that was running, a cancel or an interruption skips it,

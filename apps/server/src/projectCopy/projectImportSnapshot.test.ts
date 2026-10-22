@@ -13,6 +13,7 @@ import {
   boundImportText,
   currentImportStep,
   dueReplayedImportSteps,
+  failCutShortReplays,
   initialProjectImportSnapshot,
   projectImportFollowUpPrompt,
   projectImportInputDigest,
@@ -129,10 +130,20 @@ describe("projectImportSnapshot", () => {
     assert.isNull(settings?.detail);
     assert.deepEqual(dueReplayedImportSteps(interrupted), ["settings", "avatar"]);
 
-    // A replay a crash cut short is owed again; a finished one is not.
+    // A replay a crash cut short is not owed again: it may be what crashed the node.
     const replaying = withImportStep(interrupted, "avatar", { status: "running" }, NOW);
     const replayed = withImportStep(replaying, "settings", { status: "done" }, NOW);
-    assert.deepEqual(dueReplayedImportSteps(replayed), ["avatar"]);
+    assert.deepEqual(dueReplayedImportSteps(replayed), []);
+    const failed = failCutShortReplays(replayed, NOW);
+    assert.equal(failed.steps.find((step) => step.id === "avatar")?.status, "failed");
+    assert.equal(failed.steps.find((step) => step.id === "settings")?.status, "done");
+    assert.deepEqual(failed.warnings, [
+      "The project's avatar was not copied: Ryco stopped while it retried this step after a restart.",
+    ]);
+    assert.strictEqual(failCutShortReplays(failed, NOW), failed);
+    // A step running in a running job is that job's own.
+    const running = withImportStep(snapshot, "avatar", { status: "running" }, NOW);
+    assert.strictEqual(failCutShortReplays(running, NOW), running);
   });
 
   it("names the staging sibling and maps it back to its destination", () => {

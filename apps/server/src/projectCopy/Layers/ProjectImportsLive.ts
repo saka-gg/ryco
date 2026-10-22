@@ -82,6 +82,7 @@ import {
   boundImportText,
   currentImportStep,
   dueReplayedImportSteps,
+  failCutShortReplays,
   importStepOf,
   initialProjectImportSnapshot,
   isTerminalImportStatus,
@@ -90,9 +91,11 @@ import {
   projectImportPublishedPath,
   projectImportStagingPath,
   renderImportOutputTail,
+  replayedImportStepWarning,
   settleImportSnapshot,
   withImportStep,
   withImportWarning,
+  type ProjectImportReplayedStepId,
   type ProjectImportSetupFailure,
   type ProjectImportStepPatch,
 } from "../projectImportSnapshot.ts";
@@ -1271,10 +1274,7 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
           return yield* setStep(record, "settings", { status: "done" });
         const message = messageOf(result.failure, "orchestration error");
         yield* setStep(record, "settings", { status: "failed", detail: message });
-        yield* warn(
-          record,
-          `The project's scripts and preferred remote were not copied: ${message}`,
-        );
+        yield* warn(record, replayedImportStepWarning("settings", message));
       });
 
     /** The avatar through the upload pipeline, then project.avatar.set; idempotent by id. */
@@ -1307,7 +1307,7 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         }).pipe(Effect.result);
         if (outcome._tag === "Success") return yield* setStep(record, "avatar", { status: "done" });
         yield* setStep(record, "avatar", { status: "failed", detail: outcome.failure });
-        yield* warn(record, `The project's avatar was not copied: ${outcome.failure}`);
+        yield* warn(record, replayedImportStepWarning("avatar", outcome.failure));
       });
 
     /** A failing setup leaves the import completed, with the step failed and a warning. */
@@ -1801,8 +1801,35 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
     });
 
     /**
+     * Runs a step of a startup replay. A stop that cuts it short saves what it got to, and puts
+     * it back to pending when it was still running: only a crash leaves a replay running, which
+     * the next start fails rather than replays (`failCutShortReplays`).
+     */
+    const replayStep = <E, R>(
+      record: JobRecord,
+      id: ProjectImportReplayedStepId,
+      step: Effect.Effect<void, E, R>,
+    ) =>
+      step.pipe(
+        Effect.onInterrupt(() =>
+          Effect.suspend(() => {
+            if (importStepOf(record.snapshot, id)?.status === "running") {
+              record.snapshot = withImportStep(
+                record.snapshot,
+                id,
+                { status: "pending", progressPercent: null, detail: null },
+                new Date().toISOString(),
+              );
+            }
+            return persist(record);
+          }),
+        ),
+      );
+
+    /**
      * Interrupted jobs: a never-registered one's directory is deleted; a registered one's due
-     * settings and avatar are replayed (idempotent by command id), then its files go.
+     * settings and avatar are replayed (idempotent by command id), then its files go. A replay a
+     * crash cut short fails with a warning instead of running a third time.
      */
     const settleInterruptedJobs = Effect.gen(function* () {
       // Only rows with something left: a folder, a child, or a registered project to finish.
@@ -1811,9 +1838,24 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
           AND (staging_path IS NOT NULL OR child_pid IS NOT NULL OR registered = 1)`;
       yield* forEachLeftover(rows, (record) =>
         Effect.gen(function* () {
+          const before = record.snapshot;
+          if (record.registered) {
+            record.snapshot = failCutShortReplays(record.snapshot, new Date().toISOString());
+          }
+          const failedReplays = record.snapshot !== before;
           const due = record.registered ? dueReplayedImportSteps(record.snapshot) : [];
-          // Nothing left; its files went when it settled.
-          if (record.staging === null && due.length === 0 && record.child === null) return;
+          if (
+            record.staging === null &&
+            record.child === null &&
+            due.length === 0 &&
+            !failedReplays
+          ) {
+            // A registered job's files usually went when it settled, but a stop or a crash between
+            // a replay saving its last step and the release below leaves them, and nothing marks
+            // that. Releasing again deletes nothing else; the row is not written, so it expires.
+            if (record.registered) yield* transfers.releaseImport(record.importId);
+            return;
+          }
           if (record.child !== null) {
             yield* processes.stopRecordedChild(record.child);
             record.child = null;
@@ -1833,12 +1875,19 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
                 : yield* transfers
                     .claimForImport({ importId: record.importId, transfers: avatarClaims })
                     .pipe(Effect.orElseSucceed((): ReadonlyArray<ClaimedProjectTransfer> => []));
-            if (due.includes("settings")) yield* settingsStep(record);
+            if (due.includes("settings")) {
+              yield* replayStep(record, "settings", settingsStep(record));
+            }
             if (due.includes("avatar")) {
-              yield* avatarStep(record, claimedPath({ claimed }, "avatar"));
+              yield* replayStep(
+                record,
+                "avatar",
+                avatarStep(record, claimedPath({ claimed }, "avatar")),
+              );
             }
           }
-          // Each replayed step saved its outcome, so nothing reads the files any more.
+          // Each replayed step saved its outcome, so nothing reads the files any more; they go
+          // before the row records a failed replay, as everywhere a job stops owing a step.
           yield* transfers.releaseImport(record.importId);
           record.snapshot = { ...record.snapshot, updatedAt: new Date().toISOString() };
           yield* persist(record);
