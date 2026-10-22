@@ -82,6 +82,22 @@ export const GUTTER_UTILITY_UNSAFE_CSS = `
 `;
 
 /**
+ * Picked and revealed lines in a neutral tint rather than pierre's
+ * modified-line blue, the same on every surface that picks lines. An
+ * editor's own text selection keeps pierre's color.
+ */
+export const NEUTRAL_LINE_SELECTION_UNSAFE_CSS = `
+pre,
+[data-diff],
+[data-file] {
+  --diffs-selection-base: color-mix(in srgb, var(--foreground) 55%, var(--background)) !important;
+}
+[data-editor-overlay] {
+  --diffs-selection-base: var(--diffs-modified-base) !important;
+}
+`;
+
+/**
  * Annotation rows (a note, a review thread) sit on the diff's own surface,
  * untinted, even under the selected lines they belong to.
  */

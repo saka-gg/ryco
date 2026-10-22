@@ -3,6 +3,7 @@ import type { DiffAnnotationSide } from "@ryco/client-runtime/state/pull-request
 import {
   DIFF_SURFACE_BASE_UNSAFE_CSS,
   GUTTER_UTILITY_UNSAFE_CSS,
+  NEUTRAL_LINE_SELECTION_UNSAFE_CSS,
   PLAIN_ANNOTATION_UNSAFE_CSS,
 } from "../../../lib/diffRendering";
 import { readMotionDurationMs } from "../../../lib/perf/motion";
@@ -15,13 +16,7 @@ import { readMotionDurationMs } from "../../../lib/perf/motion";
  * through `unsafeCSS`. The flash is an inset overlay, so a line keeps its own
  * addition/deletion tint underneath; under reduced motion it is a static ring.
  */
-export const PULL_REQUEST_DIFF_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}
-pre,
-[data-diff],
-[data-file] {
-  --diffs-selection-base: color-mix(in srgb, var(--foreground) 55%, var(--background)) !important;
-}
-${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}[data-line][data-pr-flash="flash"] {
+export const PULL_REQUEST_DIFF_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${NEUTRAL_LINE_SELECTION_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}[data-line][data-pr-flash="flash"] {
   animation: pr-line-flash 1.6s var(--app-motion-ease, ease);
 }
 [data-line][data-pr-flash="ring"] {

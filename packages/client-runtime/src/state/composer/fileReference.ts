@@ -62,6 +62,11 @@ function splitLines(text: string): string[] {
   return text.replace(/\r\n?/gu, "\n").split("\n");
 }
 
+/** C1 controls, NEL (U+0085) among them. */
+function isC1Control(code: number): boolean {
+  return code >= 0x80 && code <= 0x9f;
+}
+
 /**
  * Control characters, and the line and paragraph separators some readers
  * treat as line breaks: in a path, any of them could fake a block boundary.
@@ -69,14 +74,57 @@ function splitLines(text: string): string[] {
 function hasBreakingCharacter(path: string): boolean {
   for (let index = 0; index < path.length; index += 1) {
     const code = path.charCodeAt(index);
-    if (code < 0x20 || code === 0x7f || code === 0x2028 || code === 0x2029) return true;
+    if (code < 0x20 || code === 0x7f || isC1Control(code) || code === 0x2028 || code === 0x2029) {
+      return true;
+    }
   }
   return false;
+}
+
+/**
+ * What some readers take for a line break though this block does not: vertical
+ * tab, form feed, the information separators, C1 controls and the line and
+ * paragraph separators.
+ */
+function isReaderLineBreak(code: number): boolean {
+  return (
+    code === 0x0b ||
+    code === 0x0c ||
+    (code >= 0x1c && code <= 0x1e) ||
+    isC1Control(code) ||
+    code === 0x2028 ||
+    code === 0x2029
+  );
+}
+
+/**
+ * Excerpt and note text with every `isReaderLineBreak` character replaced by
+ * U+FFFD, so no reader sees a line of it end early (and, say, close the block).
+ */
+function neutralizeReaderLineBreaks(text: string): string {
+  let result = "";
+  let copied = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (!isReaderLineBreak(text.charCodeAt(index))) continue;
+    result += `${text.slice(copied, index)}\uFFFD`;
+    copied = index + 1;
+  }
+  return copied === 0 ? text : result + text.slice(copied);
 }
 
 function normalizeReferencePath(path: string): string | null {
   if (hasBreakingCharacter(path)) return null;
   return normalizeWorkspaceRelativePath(path.trim());
+}
+
+/**
+ * The canonical path a reference to `path` would carry, or null when no
+ * reference can name it (outside the workspace, too long, or with a
+ * character that could break the block). A surface checks it before offering
+ * to add lines of the file.
+ */
+export function normalizeFileReferencePath(path: string): string | null {
+  return normalizeReferencePath(path);
 }
 
 function normalizeLineNumber(value: number): number | null {
@@ -112,7 +160,7 @@ function boundSnippet(
 
 function normalizeComment(comment: string | undefined): string | undefined {
   if (comment === undefined) return undefined;
-  const normalized = splitLines(comment).join("\n").trim();
+  const normalized = neutralizeReaderLineBreaks(splitLines(comment).join("\n")).trim();
   if (normalized.length === 0) return undefined;
   return normalized.length > FILE_REFERENCE_COMMENT_MAX_LENGTH
     ? `${sliceCodeUnits(normalized, FILE_REFERENCE_COMMENT_MAX_LENGTH - 1)}…`
@@ -124,6 +172,7 @@ function normalizeComment(comment: string | undefined): string | undefined {
  * file or no line. The path is canonicalized, the range ordered, the snippet
  * bounded to `FILE_REFERENCE_SNIPPET_MAX_LINES` lines and
  * `FILE_REFERENCE_SNIPPET_MAX_LENGTH` characters, and the comment trimmed.
+ * Characters some readers take for a line break become U+FFFD in both.
  */
 export function createFileReference(input: FileReferenceInput): FileReference | null {
   const path = normalizeReferencePath(input.path);
@@ -133,7 +182,7 @@ export function createFileReference(input: FileReferenceInput): FileReference | 
   const lineStart = Math.min(first, last);
   const lineEnd = Math.max(first, last);
   const { snippet, truncated } = boundSnippet(
-    input.lines.length > 0 ? splitLines(input.lines.join("\n")) : [],
+    input.lines.length > 0 ? splitLines(neutralizeReaderLineBreaks(input.lines.join("\n"))) : [],
     lineEnd - lineStart + 1,
   );
   const comment = normalizeComment(input.comment);
@@ -222,12 +271,12 @@ export function formatFileReferenceLabel(
 function buildEntryLines(reference: FileReference): string[] {
   const lines = [`- ${formatFileReferenceTitle(reference)}:`];
   if (reference.comment) {
-    for (const line of splitLines(reference.comment)) {
+    for (const line of splitLines(neutralizeReaderLineBreaks(reference.comment))) {
       lines.push(line.length > 0 ? `  comment: ${line}` : "  comment:");
     }
   }
   if (reference.snippet.length > 0 || !reference.truncated) {
-    splitLines(reference.snippet).forEach((line, index) => {
+    splitLines(neutralizeReaderLineBreaks(reference.snippet)).forEach((line, index) => {
       lines.push(`  ${reference.lineStart + index} | ${line}`);
     });
   }
@@ -239,6 +288,7 @@ function buildEntryLines(reference: FileReference): string[] {
  * The `<file_context>` block a prompt carries its references in, or "" for
  * none. Every line inside it is indented and every excerpt line numbered, so
  * file contents, paths and comments cannot fake an entry or close the block.
+ * A prompt takes it through `composeOutgoingPrompt`, which places it.
  */
 export function buildFileReferenceBlock(references: ReadonlyArray<FileReference>): string {
   if (references.length === 0) return "";
@@ -248,21 +298,6 @@ export function buildFileReferenceBlock(references: ReadonlyArray<FileReference>
     lines.push(...buildEntryLines(reference));
   });
   return [FILE_CONTEXT_OPEN_TAG, ...lines, FILE_CONTEXT_CLOSE_TAG].join("\n");
-}
-
-/**
- * The prompt with its references appended as one block, in the ordinary text
- * payload, so every provider, queue and retry sees the same context. Append
- * before `appendTerminalContextsToPrompt`, whose block has to stay last.
- */
-export function appendFileReferencesToPrompt(
-  prompt: string,
-  references: ReadonlyArray<FileReference>,
-): string {
-  const text = prompt.replace(/\s+$/u, "");
-  const block = buildFileReferenceBlock(references);
-  if (block.length === 0) return text;
-  return text.length > 0 ? `${text}\n\n${block}` : block;
 }
 
 export interface ExtractedFileReferences {
@@ -319,8 +354,9 @@ function parseEntry(lines: ReadonlyArray<string>): FileReference | null {
 /**
  * Reads a trailing `<file_context>` block back into references, so a sent or
  * restored prompt can show them as chips again. All or nothing: a block that
- * does not parse exactly (typed by hand, say) stays part of the text. Read it
- * from the text `extractTrailingTerminalContexts` leaves.
+ * does not parse exactly (typed by hand, say) stays part of the text. A whole
+ * sent prompt, terminal contexts included, is read by
+ * `extractTrailingPromptContexts`.
  */
 export function extractTrailingFileReferences(prompt: string): ExtractedFileReferences {
   const none = { promptText: prompt, references: [] };

@@ -1,6 +1,8 @@
 import { normalizeWorkspaceRelativePath } from "@ryco/client-runtime/state/files";
 import { EnvironmentId } from "@ryco/contracts";
 
+import { randomUUID } from "./lib/utils";
+
 /** A workspace file dragged out of the Files panel tree; the composer takes it as a mention. */
 export const WORKSPACE_FILE_DRAG_TYPE = "application/x-ryco-workspace-file";
 
@@ -36,8 +38,14 @@ export function decodeWorkspaceFileDragPayload(value: unknown): WorkspaceFileDra
 }
 
 // Browsers hide drag data until the drop, so a drop target's preview could not
-// tell which file is coming. In-app drags record what they carry.
-let draggedWorkspaceFile: WorkspaceFileDragPayload | null = null;
+// tell which file is coming. In-app drags record what they carry, under an id
+// the drag itself also carries as a type (types stay readable mid-drag).
+let draggedWorkspaceFile: {
+  readonly payload: WorkspaceFileDragPayload;
+  readonly idType: string;
+} | null = null;
+
+const WORKSPACE_FILE_DRAG_ID_TYPE_PREFIX = "application/x-ryco-workspace-file-drag-";
 
 /**
  * Starts a file drag. Plain text carries the path too, so a drop on an
@@ -47,19 +55,28 @@ export function startWorkspaceFileDrag(
   transfer: DataTransfer,
   payload: WorkspaceFileDragPayload,
 ): void {
+  const idType = `${WORKSPACE_FILE_DRAG_ID_TYPE_PREFIX}${randomUUID()}`;
   transfer.setData(WORKSPACE_FILE_DRAG_TYPE, JSON.stringify(payload));
   transfer.setData("text/plain", payload.path);
+  transfer.setData(idType, "1");
   transfer.effectAllowed = "copy";
-  draggedWorkspaceFile = payload;
+  draggedWorkspaceFile = { payload, idType };
 }
 
 export function endWorkspaceFileDrag(): void {
   draggedWorkspaceFile = null;
 }
 
-/** The in-app file being dragged; null for drags from another window. */
-export function readWorkspaceFileDragSource(): WorkspaceFileDragPayload | null {
-  return draggedWorkspaceFile;
+/**
+ * The in-app file `transfer` is dragging; null for drags from another window.
+ * `dragend` can be lost (its row unmounted mid-drag), so the record counts
+ * only for the drag that carries its id.
+ */
+export function readWorkspaceFileDragSource(
+  transfer: Pick<DataTransfer, "types">,
+): WorkspaceFileDragPayload | null {
+  const current = draggedWorkspaceFile;
+  return current && transfer.types.includes(current.idType) ? current.payload : null;
 }
 
 export function isWorkspaceFileDrag(transfer: Pick<DataTransfer, "types">): boolean {

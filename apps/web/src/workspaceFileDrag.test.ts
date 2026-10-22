@@ -33,13 +33,29 @@ describe("workspace file drags", () => {
   it("carries the file as its own type and as plain text", () => {
     const transfer = fakeTransfer();
     startWorkspaceFileDrag(transfer as unknown as DataTransfer, payload);
-    expect(transfer.types).toEqual([WORKSPACE_FILE_DRAG_TYPE, "text/plain"]);
+    expect(transfer.types.slice(0, 2)).toEqual([WORKSPACE_FILE_DRAG_TYPE, "text/plain"]);
     expect(transfer.getData("text/plain")).toBe("src/app.ts");
     expect(transfer.effectAllowed).toBe("copy");
-    expect(readWorkspaceFileDragSource()).toEqual(payload);
+    expect(readWorkspaceFileDragSource(transfer)).toEqual(payload);
     expect(readWorkspaceFileDrop(transfer)).toEqual(payload);
     endWorkspaceFileDrag();
-    expect(readWorkspaceFileDragSource()).toBeNull();
+    expect(readWorkspaceFileDragSource(transfer)).toBeNull();
+  });
+
+  it("trusts its record only for the drag that made it, even if dragend never came", () => {
+    // The dragged row unmounted mid-drag: its dragend never reached React.
+    const lost = fakeTransfer();
+    startWorkspaceFileDrag(lost as unknown as DataTransfer, payload);
+    // A later drag from another window carries a file this window knows nothing of.
+    const foreign = fakeTransfer();
+    foreign.setData(WORKSPACE_FILE_DRAG_TYPE, JSON.stringify({ ...payload, path: "b.ts" }));
+    expect(readWorkspaceFileDragSource(foreign)).toBeNull();
+    expect(readWorkspaceFileDrop(foreign)).toEqual({ ...payload, path: "b.ts" });
+    // Each drag gets its own id.
+    const next = fakeTransfer();
+    startWorkspaceFileDrag(next as unknown as DataTransfer, { ...payload, path: "c.ts" });
+    expect(readWorkspaceFileDragSource(lost)).toBeNull();
+    expect(readWorkspaceFileDragSource(next)).toEqual({ ...payload, path: "c.ts" });
   });
 
   it("ignores other drags and malformed payloads", () => {

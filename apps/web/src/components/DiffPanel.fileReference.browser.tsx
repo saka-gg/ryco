@@ -36,18 +36,43 @@ import DiffPanel from "./DiffPanel";
 
 vi.mock("../composerDraftStore", () => import("@ryco/client-runtime/state/composer"));
 
-const diffFile = {
-  name: "src/app.ts",
-  prevName: "src/app.ts",
-  cacheKey: "src/app.ts",
-  type: "change",
-  hunks: [],
-  additionLines: ["const alpha = 1;\n", "const beta = 2;\n"],
-  deletionLines: ["const oldAlpha = 0;\n"],
+type DiffFileStub = {
+  name: string;
+  prevName: string;
+  cacheKey: string;
+  type: string;
+  hunks: never[];
+  additionLines: string[];
+  deletionLines: string[];
 };
 
+const harness = vi.hoisted(() => {
+  const diffFile = (name: string) => ({
+    name,
+    prevName: name,
+    cacheKey: name,
+    type: "change",
+    hunks: [] as never[],
+    additionLines: ["const alpha = 1;\n", "const beta = 2;\n"],
+    deletionLines: ["const oldAlpha = 0;\n"],
+  });
+  return {
+    diffFile,
+    // Files come from the patch's `diff --git` headers, one per segment. Each
+    // test reviews its own patch text, so no parse is reused across tests.
+    patch: "diff --git a/src/app.ts b/src/app.ts",
+    threadWorktreePath: "/repo" as string | null,
+    project: { cwd: "/repo" } as { cwd: string; repositoryIdentity?: { rootPath: string } },
+    reset() {
+      this.patch = "diff --git a/src/app.ts b/src/app.ts";
+      this.threadWorktreePath = "/repo";
+      this.project = { cwd: "/repo" };
+    },
+  };
+});
+
 vi.mock("@pierre/diffs", () => ({
-  parsePatchFiles: vi.fn(() => [{ files: [diffFile] }]),
+  parsePatchFiles: vi.fn(() => [{ files: [harness.diffFile("named-by-the-header")] }]),
 }));
 
 vi.mock("./DiffWorkerPoolProvider", () => ({
@@ -61,7 +86,7 @@ vi.mock("@pierre/diffs/react", () => ({
     <div className={props.className}>{props.children}</div>
   ),
   FileDiff: (props: {
-    fileDiff: typeof diffFile;
+    fileDiff: DiffFileStub;
     lineAnnotations?: ReadonlyArray<{ side: string; lineNumber: number }>;
     selectedLines?: { start: number; end: number; side?: string } | null;
     renderAnnotation?: (annotation: { side: string; lineNumber: number }) => ReactNode;
@@ -118,7 +143,7 @@ vi.mock("~/lib/gitStatusState", () => ({
 
 vi.mock("~/rpc/useProvider", () => ({
   useCheckpointDiff: () => ({
-    data: { diff: "diff --git a/src/app.ts b/src/app.ts" },
+    data: { diff: harness.patch },
     error: null,
     isLoading: false,
   }),
@@ -161,13 +186,13 @@ vi.mock("../storeSelectors", () => ({
     id: ThreadId.make("thread-1"),
     environmentId: EnvironmentId.make("environment-local"),
     projectId: ProjectId.make("project-1"),
-    worktreePath: "/repo",
+    worktreePath: harness.threadWorktreePath,
     turnDiffSummaries: [],
   }),
 }));
 
 vi.mock("../store", () => ({
-  selectProjectByRef: () => ({ cwd: "/repo" }),
+  selectProjectByRef: () => harness.project,
   useStore: (selector: (store: Record<string, never>) => unknown) => selector({}),
 }));
 
@@ -184,6 +209,7 @@ describe("DiffPanel add to chat", () => {
   const releases: Array<() => void> = [];
   afterEach(() => {
     for (const release of releases.splice(0)) release();
+    harness.reset();
     document.body.innerHTML = "";
   });
 
@@ -260,6 +286,53 @@ describe("DiffPanel add to chat", () => {
 
     await userEvent.keyboard("{Escape}");
     await expect.element(note).not.toBeInTheDocument();
+    await mounted.unmount();
+  });
+
+  it("starts a new pick with an empty note", async () => {
+    listen();
+    harness.patch = "diff --git a/src/app.ts b/src/app.ts\n# fresh note";
+    const mounted = await render(<DiffPanel mode="inline" />);
+
+    await page.getByRole("button", { name: "Mock gutter add" }).click();
+    const note = page.getByRole("textbox", { name: /Note on src\/app.ts/u });
+    await note.fill("Why does this run twice?");
+    // A second pick in the same file reuses the annotation slot.
+    await page.getByRole("button", { name: "Mock gutter add" }).click();
+    await expect.element(note).toHaveValue("");
+    await mounted.unmount();
+  });
+
+  it("names lines by the thread's folder when the project sits inside its repository", async () => {
+    const received = listen();
+    harness.threadWorktreePath = null;
+    harness.project = { cwd: "/repo/packages/app", repositoryIdentity: { rootPath: "/repo" } };
+    harness.patch = [
+      "diff --git a/packages/app/src/app.ts b/packages/app/src/app.ts",
+      "diff --git a/README.md b/README.md",
+    ].join("\n");
+    const mounted = await render(<DiffPanel mode="inline" />);
+
+    await expect.element(page.getByText("README.md", { exact: true })).toBeInTheDocument();
+    // README.md lies outside the project folder: only the app file offers the `+`.
+    expect(page.getByRole("button", { name: "Mock gutter add" }).elements()).toHaveLength(1);
+    await page.getByRole("button", { name: "Mock gutter add" }).click();
+    await page
+      .getByRole("textbox", { name: "Note on src/app.ts lines 1-2 (new version)" })
+      .fill("Here");
+    await page.getByRole("button", { name: /Add to chat/u }).click();
+    expect(received.map((item) => item.reference.path)).toEqual(["src/app.ts"]);
+    await mounted.unmount();
+  });
+
+  it("offers nothing for a file no reference can name", async () => {
+    listen();
+    // Git quotes a path with a tab in it; decoded, no reference can carry it.
+    harness.patch = 'diff --git "a/src/bad\\tname.ts" "b/src/bad\\tname.ts"';
+    const mounted = await render(<DiffPanel mode="inline" />);
+    await vi.waitFor(() => expect(document.querySelectorAll("[data-title]")).toHaveLength(1));
+    expect(document.querySelector("[data-title]")?.textContent).toBe("src/bad\tname.ts");
+    expect(page.getByRole("button", { name: "Mock gutter add" }).query()).toBeNull();
     await mounted.unmount();
   });
 

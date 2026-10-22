@@ -3,12 +3,14 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   normalizeWorkspaceRelativePath,
   relativePathToRouteSegments,
+  repositoryPathToWorkspacePath,
   resolveWorkspaceRelativePath,
   routeFilePathParam,
   routeLineParam,
   WORKSPACE_FILE_PATH_MAX_LENGTH,
   workspaceFileBasename,
   workspaceFileParentPath,
+  workspacePathWithinRepository,
 } from "./paths.ts";
 
 describe("normalizeWorkspaceRelativePath", () => {
@@ -129,5 +131,40 @@ describe("resolveWorkspaceRelativePath", () => {
       "src/a.ts",
     );
     expect(resolveWorkspaceRelativePath("D:\\repo\\project\\a.ts", "c:\\repo\\project")).toBeNull();
+  });
+  it("keeps names inside the root that only look like home or drive paths", () => {
+    // The node expands only `~` and `~/`; a `~assets` directory is a plain name.
+    expect(resolveWorkspaceRelativePath("~assets/shot.png", "/repo/project")).toBe(
+      "~assets/shot.png",
+    );
+    expect(resolveWorkspaceRelativePath("/repo/project/~cache/x.ts", "/repo/project")).toBe(
+      "~cache/x.ts",
+    );
+    expect(resolveWorkspaceRelativePath("./C:notes/a.md", "/repo/project")).toBe("C:notes/a.md");
+    // The home forms themselves stay refused.
+    expect(resolveWorkspaceRelativePath("~/secret", "/repo/project")).toBeNull();
+    expect(resolveWorkspaceRelativePath("/repo/project/~", "/repo/project")).toBeNull();
+    expect(
+      resolveWorkspaceRelativePath(`${"a/".repeat(WORKSPACE_FILE_PATH_MAX_LENGTH)}x`, "/repo"),
+    ).toBeNull();
+  });
+});
+
+describe("repository paths", () => {
+  it("finds the workspace folder inside its repository", () => {
+    expect(workspacePathWithinRepository("/repo", "/repo/")).toBe("");
+    expect(workspacePathWithinRepository("/repo/packages/app/", "/repo")).toBe("packages/app");
+    expect(workspacePathWithinRepository("C:\\Repo\\app", "c:\\repo")).toBe("app");
+    expect(workspacePathWithinRepository("/elsewhere", "/repo")).toBeNull();
+    expect(workspacePathWithinRepository("relative", "/repo")).toBeNull();
+  });
+
+  it("maps a diff path into the workspace folder, or refuses one outside it", () => {
+    expect(repositoryPathToWorkspacePath("src/a.ts", "")).toBe("src/a.ts");
+    expect(repositoryPathToWorkspacePath("packages/app/src/a.ts", "packages/app")).toBe("src/a.ts");
+    expect(repositoryPathToWorkspacePath("packages/app-two/a.ts", "packages/app")).toBeNull();
+    expect(repositoryPathToWorkspacePath("packages/app", "packages/app")).toBeNull();
+    expect(repositoryPathToWorkspacePath("README.md", "packages/app")).toBeNull();
+    expect(repositoryPathToWorkspacePath("../x.ts", "")).toBeNull();
   });
 });

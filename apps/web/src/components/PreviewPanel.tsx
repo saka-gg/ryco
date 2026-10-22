@@ -1,7 +1,10 @@
 import type { LineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { File as DiffsFile } from "@pierre/diffs/react";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { formatFileReferenceTitle } from "@ryco/client-runtime/state/composer";
+import {
+  formatFileReferenceTitle,
+  normalizeFileReferencePath,
+} from "@ryco/client-runtime/state/composer";
 import { useParams, useSearch } from "@tanstack/react-router";
 import { Schema } from "effect";
 import {
@@ -32,6 +35,7 @@ import { parsePreviewRouteSearch } from "../previewRouteSearch";
 import {
   fnv1a32,
   GUTTER_UTILITY_UNSAFE_CSS,
+  NEUTRAL_LINE_SELECTION_UNSAFE_CSS,
   PLAIN_ANNOTATION_UNSAFE_CSS,
   resolveDiffThemeName,
   SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
@@ -45,6 +49,7 @@ import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import type { TurnDiffSummary } from "../types";
+import { useEvent } from "../hooks/useEvent";
 import { endWorkspaceFileDrag, startWorkspaceFileDrag } from "../workspaceFileDrag";
 import type { WorkspaceFileReveal } from "../workspaceRouteSearch";
 import { ChangedFilesTree } from "./chat/ChangedFilesTree";
@@ -159,6 +164,13 @@ function buildPreviewFileCacheKey(filePath: string, contents: string): string {
 
 const EMPTY_TURN_DIFF_SUMMARIES: readonly TurnDiffSummary[] = [];
 const NO_FILE_ANNOTATIONS: LineAnnotation[] = [];
+
+/** The line a deep link marks in its file; `token` lets the same link reveal again. */
+interface PreviewLineReveal {
+  readonly path: string;
+  readonly line: number;
+  readonly token: number;
+}
 
 /** The scrolling element between a rendered file and the card that holds it. */
 function scrollParentWithin(element: Element, boundary: HTMLElement): HTMLElement | null {
@@ -320,17 +332,20 @@ export default function PreviewPanel({
   // "Add to chat" from the gutter; the frozen phone tier does not get it.
   const fileReferencePicker = useFileReferencePicker(isPhonePresentation ? null : activeThreadRef);
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  // The line a deep link asked for; `token` lets the same link reveal again.
-  const [lineReveal, setLineReveal] = useState<{
-    readonly path: string;
-    readonly line: number;
-    readonly token: number;
-  } | null>(null);
+  // Set only as its file opens, and replaced by every later open: a deep
+  // link marks its line while that file stays open, never on a return to it.
+  const [lineReveal, setLineReveal] = useState<PreviewLineReveal | null>(null);
   const fileCardRef = useRef<HTMLDivElement | null>(null);
   const [recoveryAction, setRecoveryAction] = useState<"reload" | "discard" | "overwrite" | null>(
     null,
   );
-  const [pendingFilePath, setPendingFilePath] = useState<string | null>(null);
+  // A file waiting on the unsaved-draft prompt, with the line a deep link
+  // asked for; cancelling drops both.
+  const [pendingNavigation, setPendingNavigation] = useState<{
+    readonly path: string;
+    readonly lineReveal: PreviewLineReveal | null;
+  } | null>(null);
+  const pendingFilePath = pendingNavigation?.path ?? null;
   const [fileFilterQuery, setFileFilterQuery] = useState("");
   const [isTreeVisible, setIsTreeVisible] = useState(true);
   // Same readability rationale as the phone diff surface: 320-430px columns
@@ -370,7 +385,8 @@ export default function PreviewPanel({
         ? retainedPreviewFilePath({ environmentId: activeThread.environmentId, cwd: activeCwd })
         : null,
     );
-    setPendingFilePath(null);
+    setLineReveal(null);
+    setPendingNavigation(null);
     setRecoveryAction(null);
     setIsTreeVisible(true);
   }, [activeCwd, activeThread?.environmentId, activeThread?.id, isPhonePresentation]);
@@ -416,12 +432,16 @@ export default function PreviewPanel({
   const isFilteringProjectFiles = fileFilterQuery.trim().length > 0;
 
   useEffect(() => {
-    if (
-      !projectFiles ||
-      !selectedFilePath ||
-      projectFiles.entries.some((file) => file.path === selectedFilePath)
-    )
+    if (!projectFiles || !selectedFilePath) return;
+    const entry = projectFiles.entries.find((file) => file.path === selectedFilePath);
+    // A deep link can name a folder: the tree shows it, a read would only fail.
+    if (entry?.kind === "directory") {
+      setSelectedFilePath(null);
+      setFileFilterQuery(selectedFilePath);
+      setIsTreeVisible(true);
       return;
+    }
+    if (entry) return;
     const retained =
       activeThread?.environmentId && activeCwd
         ? readPreviewFileSession(
@@ -557,21 +577,32 @@ export default function PreviewPanel({
     };
   }, [sessionOwner]);
 
-  const onSelectFile = useCallback(
-    async (filePath: string) => {
-      if (filePath === selectedFilePath) return;
-      const generation = ++selectionGeneration.current;
-      if (sessionOwner?.unsaved && !(await sessionOwner.flush())) {
-        if (generation === selectionGeneration.current) setPendingFilePath(filePath);
+  // Opens a file the way a tree click does: an unsaved draft asks first. A
+  // deep link's line is marked only once its file is the one open.
+  const openFile = useCallback(
+    async (filePath: string, nextLineReveal: PreviewLineReveal | null) => {
+      if (filePath === selectedFilePath) {
+        setLineReveal(nextLineReveal);
         return;
       }
-      if (generation === selectionGeneration.current) setSelectedFilePath(filePath);
+      const generation = ++selectionGeneration.current;
+      if (sessionOwner?.unsaved && !(await sessionOwner.flush())) {
+        if (generation === selectionGeneration.current) {
+          setPendingNavigation({ path: filePath, lineReveal: nextLineReveal });
+        }
+        return;
+      }
+      if (generation !== selectionGeneration.current) return;
+      setSelectedFilePath(filePath);
+      setLineReveal(nextLineReveal);
     },
     [selectedFilePath, sessionOwner],
   );
+  // Every other open drops the mark, so coming back does not replay the link.
+  const onSelectFile = useCallback((filePath: string) => openFile(filePath, null), [openFile]);
 
-  // A deep link opens its file the way a tree click does (an unsaved draft
-  // still asks first), once: the route key is cleared as soon as it is read.
+  // A deep link opens its file once: the route key is cleared as soon as it
+  // is read.
   const handledRevealRef = useRef<WorkspaceFileReveal | null>(null);
   const revealTokenRef = useRef(0);
   useEffect(() => {
@@ -581,20 +612,31 @@ export default function PreviewPanel({
     onRevealHandled?.();
     // The frozen phone tier keeps landing on the tree.
     if (isPhonePresentation) return;
+    if (
+      projectFiles?.entries.some(
+        (entry) => entry.path === reveal.path && entry.kind === "directory",
+      )
+    ) {
+      // A folder shows in the tree; the open file stays as it is.
+      setFileFilterQuery(reveal.path);
+      setIsTreeVisible(true);
+      return;
+    }
     revealTokenRef.current += 1;
-    setLineReveal(
+    void openFile(
+      reveal.path,
       reveal.line === undefined
         ? null
         : { path: reveal.path, line: reveal.line, token: revealTokenRef.current },
     );
-    void onSelectFile(reveal.path);
   }, [
     activeCwd,
     activeThread?.environmentId,
     isPhonePresentation,
     onRevealHandled,
-    onSelectFile,
+    openFile,
     previewSearch.preview,
+    projectFiles,
     reveal,
   ]);
 
@@ -669,30 +711,29 @@ export default function PreviewPanel({
     selectedFileKind,
     selectedFilePath,
   ]);
-  const openFileReferencePick = fileReferencePicker.open;
+  // Offered only for a file a reference can name.
+  const canPickLines =
+    fileReferencePicker.available &&
+    selectedFilePath !== null &&
+    normalizeFileReferencePath(selectedFilePath) !== null;
+  // Stable, so the renderer's options change only when the `+` comes or goes.
+  const onGutterPick = useEvent((range: SelectedLineRange) => {
+    if (!selectedFilePath) return;
+    // The pick's range takes over from a deep link's mark.
+    setLineReveal(null);
+    fileReferencePicker.open(selectedFilePath, fileLineSelection(selectedFilePath, range));
+  });
   const previewFileOptions = useMemo(
     () => ({
       disableFileHeader: true,
       overflow: wrapPreviewLines ? ("wrap" as const) : ("scroll" as const),
       theme: resolveDiffThemeName(resolvedTheme),
       themeType: resolvedTheme,
-      unsafeCSS: `${PREVIEW_FILE_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}`,
+      unsafeCSS: `${PREVIEW_FILE_UNSAFE_CSS}${NEUTRAL_LINE_SELECTION_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}`,
       tokenizeMaxLineLength: SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
-      ...(fileReferencePicker.available && selectedFilePath
-        ? {
-            enableGutterUtility: true,
-            onGutterUtilityClick: (range: SelectedLineRange) =>
-              openFileReferencePick(selectedFilePath, fileLineSelection(selectedFilePath, range)),
-          }
-        : {}),
+      ...(canPickLines ? { enableGutterUtility: true, onGutterUtilityClick: onGutterPick } : {}),
     }),
-    [
-      fileReferencePicker.available,
-      openFileReferencePick,
-      resolvedTheme,
-      selectedFilePath,
-      wrapPreviewLines,
-    ],
+    [canPickLines, onGutterPick, resolvedTheme, wrapPreviewLines],
   );
   const filePick =
     fileReferencePicker.pick && fileReferencePicker.pick.fileKey === selectedFilePath
@@ -716,6 +757,7 @@ export default function PreviewPanel({
   const renderPreviewAnnotation = () =>
     filePick ? (
       <FileReferenceNoteComposer
+        key={filePick.id}
         title={formatFileReferenceTitle(filePick.selection)}
         restoreComment={fileReferencePicker.restoreComment}
         onCommentChange={fileReferencePicker.rememberComment}
@@ -833,20 +875,23 @@ export default function PreviewPanel({
   }, [isTreeVisible]);
 
   const unsavedDialogOpen = pendingFilePath !== null;
-  const cancelUnsavedNavigation = useCallback(() => setPendingFilePath(null), []);
+  const cancelUnsavedNavigation = useCallback(() => setPendingNavigation(null), []);
+  const finishUnsavedNavigation = useCallback(() => {
+    setSelectedFilePath(pendingNavigation?.path ?? null);
+    setLineReveal(pendingNavigation?.lineReveal ?? null);
+    setPendingNavigation(null);
+  }, [pendingNavigation]);
   const continueUnsavedNavigation = useCallback(async () => {
     const generation = selectionGeneration.current;
     if (sessionOwner && !(await sessionOwner.discard())) return;
     if (generation !== selectionGeneration.current) return;
-    setSelectedFilePath(pendingFilePath);
-    setPendingFilePath(null);
-  }, [sessionOwner, pendingFilePath]);
+    finishUnsavedNavigation();
+  }, [finishUnsavedNavigation, sessionOwner]);
   const saveAndContinueNavigation = useCallback(async () => {
     const generation = selectionGeneration.current;
     if (!(await saveSelectedFile()) || generation !== selectionGeneration.current) return;
-    setSelectedFilePath(pendingFilePath);
-    setPendingFilePath(null);
-  }, [pendingFilePath, saveSelectedFile]);
+    finishUnsavedNavigation();
+  }, [finishUnsavedNavigation, saveSelectedFile]);
   const confirmRecovery = async () => {
     const owner = sessionOwner;
     const generation = selectionGeneration.current;

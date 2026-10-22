@@ -16,6 +16,10 @@ describe("resolveMarkdownWorkspaceImagePath", () => {
     expect(
       resolveMarkdownWorkspaceImagePath("file:///repo/project/docs/shot.webp", "/repo/project"),
     ).toBe("docs/shot.webp");
+    // A directory named like a home path is still an ordinary directory.
+    expect(resolveMarkdownWorkspaceImagePath("~assets/shot.png", "/repo/project")).toBe(
+      "~assets/shot.png",
+    );
   });
 
   it("rejects traversal, sibling-prefix, remote, and malformed sources", () => {
