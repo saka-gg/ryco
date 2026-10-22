@@ -1,5 +1,4 @@
 import { stripAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
-import { stripClaudePromptEffortPrefix } from "@ryco/shared/model";
 
 import { stripSelectionQuotes } from "./selectionQuote.ts";
 import {
@@ -38,17 +37,40 @@ export interface PromptHistoryStep {
   readonly prompt: string;
 }
 
+// Matched the way the composer's effort controls read it.
+const CLAUDE_EFFORT_PREFIX_PATTERN = /^Ultrathink:\s*/i;
+
 /**
- * The text the user typed for a sent message, without what the send added to it: the Claude
- * effort prefix, attachment path lines, terminal contexts and their inline labels, and quoted
- * assistant text. Mentions, skills and thread mentions stay: the prompt text alone carries them,
- * so the composer shows them as chips again. App-composed sends recall as nothing.
+ * The text the user typed for a sent message, without what the send added to it: attachment
+ * path lines, terminal contexts and their inline labels, and quoted assistant text. Mentions,
+ * skills and thread mentions stay: the prompt text alone carries them, so the composer shows them
+ * as chips again. So does a Claude `Ultrathink:` prefix: in the composer it is text the effort
+ * menu writes, and it is what selects Ultrathink again. App-composed sends recall as nothing.
  */
 export function recallablePrompt(messageText: string): string {
-  const typed = stripAttachmentPathLines(stripClaudePromptEffortPrefix(messageText));
-  if (typed === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT) return "";
-  if (typed.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)) return "";
-  return stripSelectionQuotes(stripSentTerminalContexts(typed)).trim();
+  const sent = stripAttachmentPathLines(messageText.trim());
+  const effortPrefix = CLAUDE_EFFORT_PREFIX_PATTERN.exec(sent)?.[0] ?? "";
+  const body = sent.slice(effortPrefix.length);
+  if (body === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT) return "";
+  if (body.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)) return "";
+  const typed = stripSelectionQuotes(stripSentTerminalContexts(body)).trim();
+  return typed.length > 0 ? `${effortPrefix}${typed}` : "";
+}
+
+// By message object: messages keep their identity across timeline updates, and a held ArrowUp
+// rebuilds the entries on every repeat, so each message is parsed once.
+const recallablePromptByMessage = new WeakMap<
+  PromptHistoryMessage,
+  { readonly text: string; readonly prompt: string }
+>();
+
+function recallablePromptOf(message: PromptHistoryMessage): string {
+  const text = message.text;
+  const cached = recallablePromptByMessage.get(message);
+  if (cached?.text === text) return cached.prompt;
+  const prompt = recallablePrompt(text);
+  recallablePromptByMessage.set(message, { text, prompt });
+  return prompt;
 }
 
 /** The thread's recallable prompts, oldest first, with repeats of the same prompt collapsed. */
@@ -58,7 +80,7 @@ export function buildPromptHistoryEntries(
   const entries: PromptHistoryEntry[] = [];
   for (const message of messages) {
     if (message.role !== "user") continue;
-    const prompt = recallablePrompt(message.text);
+    const prompt = recallablePromptOf(message);
     if (prompt.length === 0) continue;
     const previous = entries.at(-1);
     if (previous?.prompt === prompt) {

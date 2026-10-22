@@ -71,6 +71,7 @@ import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   type TerminalContextDraft,
 } from "~/lib/terminalContext";
+import { PASTE_AS_TEXT_EVENT } from "~/lib/desktopPasteAsText";
 import { cn, isMacPlatform } from "~/lib/utils";
 import { basenameOfPath, inferEntryKindFromPath } from "~/pathEntry";
 import {
@@ -1021,8 +1022,9 @@ function ComposerCommandKeyPlugin(props: {
   return null;
 }
 
-// The paste event follows its shortcut's keydown: at once in a browser, after the menu round
-// trip in Electron. A paste this long after the shortcut was not made by it.
+// The paste event follows its shortcut's keydown, or the desktop menu's announcement, at once
+// in a browser and after an IPC round trip in Electron. A paste this long after was not made by
+// either.
 const PASTE_AS_TEXT_SHORTCUT_WINDOW_MS = 1_000;
 
 function ComposerTextPastePlugin(props: { onPasteText: (paste: ComposerTextPaste) => boolean }) {
@@ -1034,6 +1036,12 @@ function ComposerTextPastePlugin(props: { onPasteText: (paste: ComposerTextPaste
 
   useEffect(() => {
     let pasteAsTextAt: number | null = null;
+    // The desktop Edit menu's Paste as Text, for the editor that has focus.
+    const onDesktopPasteAsText = () => {
+      const rootElement = editor.getRootElement();
+      if (rootElement?.contains(document.activeElement)) pasteAsTextAt = performance.now();
+    };
+    window.addEventListener(PASTE_AS_TEXT_EVENT, onDesktopPasteAsText);
     const unregisterKeyDown = editor.registerCommand(
       KEY_DOWN_COMMAND,
       (event) => {
@@ -1062,12 +1070,16 @@ function ComposerTextPastePlugin(props: { onPasteText: (paste: ComposerTextPaste
           pasteAsText:
             shortcutAt !== null && event.timeStamp - shortcutAt < PASTE_AS_TEXT_SHORTCUT_WINDOW_MS,
         });
-        if (handled) event.preventDefault();
-        return handled;
+        if (!handled) return false;
+        event.preventDefault();
+        // The paste replaces the selection as an inline one would; it only lands elsewhere.
+        if ($isRangeSelection(selection) && !selection.isCollapsed()) selection.removeText();
+        return true;
       },
       COMMAND_PRIORITY_HIGH,
     );
     return () => {
+      window.removeEventListener(PASTE_AS_TEXT_EVENT, onDesktopPasteAsText);
       unregisterKeyDown();
       unregisterPaste();
     };

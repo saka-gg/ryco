@@ -1,5 +1,6 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
+import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, PASTE_AS_TEXT_MENU_ACTION } from "./editMenu.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
 import {
@@ -2517,7 +2518,14 @@ function configureApplicationMenu(): void {
           : [{ label: `Quit ${APP_DISPLAY_NAME}`, click: () => app.quit() }]),
       ],
     },
-    { role: "editMenu" },
+    buildEditMenu({
+      mac: process.platform === "darwin",
+      // Only to the window the paste is for: unlike other menu actions, never one opened for it.
+      onPasteAsText: (window) => {
+        if (!(window instanceof BrowserWindow) || window.isDestroyed()) return;
+        window.webContents.send(MENU_ACTION_CHANNEL, PASTE_AS_TEXT_MENU_ACTION);
+      },
+    }),
     {
       label: "View",
       submenu: [
@@ -4586,6 +4594,13 @@ function registerIpcHandlers(): void {
       });
     },
   );
+
+  ipcMain.removeHandler(PASTE_AS_TEXT_CHANNEL);
+  ipcMain.handle(PASTE_AS_TEXT_CHANNEL, async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed() || event.sender.isDestroyed()) return;
+    event.sender.pasteAndMatchStyle();
+  });
 
   ipcMain.removeHandler(OPEN_EXTERNAL_CHANNEL);
   ipcMain.handle(OPEN_EXTERNAL_CHANNEL, async (event, rawUrl: unknown) => {

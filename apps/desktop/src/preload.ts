@@ -2,6 +2,7 @@ import { isQuitShortcutChord } from "./quitShortcut.ts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopBridge } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
+import { PASTE_AS_TEXT_CHANNEL } from "./editMenu.ts";
 import { DESKTOP_STARTUP_MARKS_CHANNEL, observeRendererStartupMarks } from "./startupMarks.ts";
 
 // Capture before app/terminal listeners, without suppressing Electron key releases.
@@ -355,6 +356,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(MENU_ACTION_CHANNEL, wrappedListener);
     };
   },
+  pasteAsText: () => ipcRenderer.invoke(PASTE_AS_TEXT_CHANNEL),
   onSystemResume: (listener) => {
     const wrappedListener = () => {
       listener();
