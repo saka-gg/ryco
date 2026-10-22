@@ -1,3 +1,4 @@
+import { vi } from "vite-plus/test";
 import { cdp } from "vite-plus/test/browser";
 
 // The published CDPSession type is an empty interface; the playwright
@@ -8,6 +9,25 @@ interface CdpInputSession {
 
 export function cdpSession(): CdpInputSession {
   return cdp() as unknown as CdpInputSession;
+}
+
+/**
+ * Pins whether one media query matches for code that reads it through
+ * `window.matchMedia` (such as `useMediaQuery`); every other query stays live.
+ * Pointer and hover media follow the runner's input devices (see
+ * `resetPointerEmulation`), so a test whose behavior depends on them pins
+ * them. Call the returned function to restore.
+ */
+export function pinMediaQueryMatches(query: string, matches: boolean): () => void {
+  const matchMedia = window.matchMedia.bind(window);
+  const spy = vi.spyOn(window, "matchMedia").mockImplementation((candidate: string) => {
+    const list = matchMedia(candidate);
+    if (candidate === query) {
+      Object.defineProperty(list, "matches", { value: matches });
+    }
+    return list;
+  });
+  return () => spy.mockRestore();
 }
 
 /**
