@@ -18,9 +18,14 @@ import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
 import {
   appendSelectionQuote,
   checkpointRevertUnsupportedMessage,
+  declineApprovalsForRedirect,
+  describeApprovalRedirectRefusal,
+  pendingApprovalSourceFromStore,
+  planApprovalRedirect,
   requestProviderSessionPrewarm,
   resolveProviderSessionPrewarmRequest,
   selectProviderSessionPrewarmSupported,
+  type ApprovalRedirectRefusal,
   type SubscribedClaudeReviewState,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
@@ -1087,6 +1092,7 @@ export default function ChatView(props: ChatViewProps) {
   const {
     interruptTurn,
     respondToApproval: onRespondToApproval,
+    submitApprovalDecision,
     respondToUserInput,
     revertToTurnCount,
     respondingRequestIds,
@@ -1101,6 +1107,15 @@ export default function ChatView(props: ChatViewProps) {
   const notifyMutationUnavailable = useCallback((reason: string) => {
     toastManager.add(stackedThreadToast({ type: "info", title: reason }));
   }, []);
+  /** Says why a send that redirects pending approvals sent nothing; the draft stays. */
+  const notifyApprovalRedirectRefused = useCallback(
+    (refusal: ApprovalRedirectRefusal, error?: string | null) => {
+      toastManager.add(
+        stackedThreadToast({ type: "warning", ...describeApprovalRedirectRefusal(refusal, error) }),
+      );
+    },
+    [],
+  );
   const onInterrupt = useCallback(async () => {
     if (mutationUnavailableReason !== null) {
       notifyMutationUnavailable(mutationUnavailableReason);
@@ -4706,6 +4721,8 @@ export default function ChatView(props: ChatViewProps) {
     options?: { readonly invertFollowUp?: boolean },
   ) => {
     e?.preventDefault();
+    // The approvals on screen when the user sent: a redirecting send declines only those.
+    const approvalsAtSend = pendingApprovals;
     if (
       (!dispatchCapability.allowed && !dispatchEstablishing) ||
       hostedDraftTarget.pending !== null
@@ -5043,12 +5060,69 @@ export default function ChatView(props: ChatViewProps) {
         hasOutstandingQueuedDispatch(activeThreadKey) ||
         sendWaitsForEnvironment)
     ) {
+      // Steer = enqueue, then start a steer attempt at once: every failure falls back to the
+      // queue. The phone tier is frozen and always queues; slash input never steers.
+      const invertFollowUp = options?.invertFollowUp === true;
+      const approvalRedirect = activeThreadRef
+        ? planApprovalRedirect({
+            approvals: approvalsAtSend,
+            runtimeSessionId: activeThread.session?.runtimeSessionId,
+            respondingRequestIds,
+          })
+        : ({ kind: "none" } as const);
+      const followUpAction = resolveComposerFollowUpAction({
+        turnRunning: phase === "running",
+        // While approvals wait, a send redirects the turn whatever the setting says; the
+        // alternate shortcut still queues and leaves them to be answered.
+        followUpBehavior: approvalRedirect.kind === "none" ? settings.followUpBehavior : "steer",
+        invert: invertFollowUp,
+        surfaceAllowsSteer: presentationTier !== "phone",
+        isSlashCommand: trimmed.startsWith("/"),
+      });
+      // A redirect declines only when the message can then steer; otherwise it queues as before.
+      const redirectsApprovals =
+        followUpAction === "steer" &&
+        approvalRedirect.kind !== "none" &&
+        !hasRetiredProjectMemory(composerSnapshot) &&
+        getSteerEligibility({
+          modelSelection: composerSnapshot.selectedModelSelection,
+          runtimeMode: settingsSnapshot.runtimeMode,
+          interactionMode: settingsSnapshot.interactionMode,
+          tokenMode: settingsSnapshot.tokenMode,
+        }).allowed;
       const preparing = threadSendsPreparing.ref(routeThreadKey);
       if (preparing.current) return;
+      if (redirectsApprovals && approvalRedirect.kind === "blocked") {
+        notifyApprovalRedirectRefused("blocked");
+        return;
+      }
       preparing.current = true;
       const composerChangedDuringPreparation = captureComposerContentGuard();
       try {
         if (!(await drainEditorsBeforeSend())) return;
+        if (redirectsApprovals && approvalRedirect.kind === "decline" && activeThreadRef) {
+          const outcome = await declineApprovalsForRedirect({
+            plan: approvalRedirect,
+            decline: (approval) =>
+              submitApprovalDecision(approval.requestId, "decline", approval.approvalIdentity),
+            source: pendingApprovalSourceFromStore(
+              useStore,
+              (state) => createThreadSelectorByRef(activeThreadRef)(state)?.activities,
+            ),
+          });
+          if (outcome.kind !== "declined") {
+            notifyApprovalRedirectRefused(
+              outcome.kind,
+              outcome.kind === "refused" ? outcome.error : null,
+            );
+            return;
+          }
+          // What goes out must be what the user sent; an edit made meanwhile stays a draft.
+          if (composerChangedDuringPreparation()) {
+            notifyApprovalRedirectRefused("draft-changed");
+            return;
+          }
+        }
       } finally {
         preparing.current = false;
       }
@@ -5065,20 +5139,13 @@ export default function ChatView(props: ChatViewProps) {
         settings: settingsSnapshot,
       };
       enqueueMessage(activeThreadKey, queuedEntry);
-      // Steer = enqueue, then start a steer attempt at once: every failure falls back to the
-      // queue. The phone tier is frozen and always queues; slash input never steers.
-      const invertFollowUp = options?.invertFollowUp === true;
-      const followUpAction = resolveComposerFollowUpAction({
-        turnRunning: phase === "running",
-        followUpBehavior: settings.followUpBehavior,
-        invert: invertFollowUp,
-        surfaceAllowsSteer: presentationTier !== "phone",
-        isSlashCommand: trimmed.startsWith("/"),
-      });
       if (followUpAction === "steer") {
         const eligibility = getQueuedSteerEligibility(queuedEntry);
         if (eligibility.allowed) {
-          void steerQueuedEntry(queuedEntry, { explicit: invertFollowUp, prepareEditors: false });
+          void steerQueuedEntry(queuedEntry, {
+            explicit: invertFollowUp || redirectsApprovals,
+            prepareEditors: false,
+          });
         } else if (invertFollowUp) {
           toastManager.add(
             stackedThreadToast({

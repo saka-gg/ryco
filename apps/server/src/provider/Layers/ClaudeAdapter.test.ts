@@ -5871,6 +5871,59 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("says why Claude asked and answers a refused session grant as one approval", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-approval-reason"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      const opened = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "request.opened",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.equal(typeof canUseTool, "function");
+      const permission = canUseTool!(
+        "Bash",
+        { command: "git push" },
+        {
+          signal: new AbortController().signal,
+          requestId: "permission-request-reason",
+          decisionReason: "\u001b[1mPushing needs your confirmation\u001b[22m",
+          suppressAlwaysAllowRule: true,
+          suggestions: [
+            {
+              type: "addRules",
+              rules: [{ toolName: "Bash" }],
+              behavior: "allow",
+              destination: "session",
+            },
+          ],
+          toolUseID: "tool-use-reason",
+        },
+      );
+      const request = yield* Fiber.join(opened);
+      assert.equal(request._tag, "Some");
+      if (request._tag !== "Some" || request.value.type !== "request.opened") return;
+      assert.equal(request.value.payload.reason, "Pushing needs your confirmation");
+      assert.equal(request.value.payload.acceptForSessionOffered, false);
+      yield* adapter.respondToRequest(
+        session.threadId,
+        ApprovalRequestId.make(request.value.requestId!),
+        "acceptForSession",
+      );
+      const result = yield* Effect.promise(() => permission);
+      assert.deepEqual(result, { behavior: "allow", updatedInput: { command: "git push" } });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("does not call setPermissionMode when interactionMode is absent", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

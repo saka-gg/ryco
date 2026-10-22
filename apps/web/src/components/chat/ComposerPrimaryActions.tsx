@@ -1,5 +1,5 @@
 import { memo, type PointerEventHandler } from "react";
-import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronLeftIcon, CornerDownLeftIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -23,6 +23,11 @@ interface ComposerPrimaryActionsProps {
   isEnvironmentUnavailable: boolean;
   isPreparingWorktree: boolean;
   hasSendableContent: boolean;
+  /**
+   * While the turn runs, a send declines the waiting approval and steers the message in: with
+   * something to send, the primary action is that send instead of Stop.
+   */
+  sendRedirectsApproval?: boolean;
   /** Reason the send action is held back (e.g. an attachment still uploading). */
   sendDisabledReason?: string | null | undefined;
   /**
@@ -74,6 +79,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isEnvironmentUnavailable,
   isPreparingWorktree,
   hasSendableContent,
+  sendRedirectsApproval = false,
   sendDisabledReason = null,
   sendsQueueUntilReady = null,
   mutationUnavailableReason = null,
@@ -137,6 +143,22 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           })}
         </Button>
       </div>
+    );
+  }
+
+  if (isRunning && sendRedirectsApproval && (hasSendableContent || sendDisabledReason !== null)) {
+    // The approval card's menu still offers Cancel turn while this replaces Stop.
+    return (
+      <button
+        type="submit"
+        className="flex h-9 w-9 enabled:cursor-pointer items-center justify-center rounded-lg bg-primary/90 text-primary-foreground transition-all duration-150 hover:bg-primary hover:scale-105 disabled:pointer-events-none disabled:opacity-30 disabled:hover:scale-100 sm:h-8 sm:w-8"
+        {...pointerFocusProps}
+        disabled={isConnecting || isEnvironmentUnavailable || !hasSendableContent}
+        title={sendDisabledReason ?? "Decline and redirect"}
+        aria-label="Decline and redirect"
+      >
+        <CornerDownLeftIcon className="size-3.5" aria-hidden="true" />
+      </button>
     );
   }
 

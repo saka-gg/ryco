@@ -53,6 +53,8 @@ export function ThreadComposer(props: {
   readonly sendBlock?: string | null;
   readonly fileUploadRecords?: ReadonlyMap<string, ChatFileUploadRecord>;
   readonly disabled?: boolean;
+  /** Replaces the "Message" placeholder, e.g. while a send would redirect a waiting approval. */
+  readonly placeholder?: string;
   readonly policyModel?: SessionPolicyModel | null;
   readonly policyDisabled?: boolean;
   readonly onSelectRuntimeMode: (mode: RuntimeMode) => void;
@@ -236,7 +238,7 @@ export function ThreadComposer(props: {
                 setText(nextText);
               }}
               onFocus={props.onComposerIntent}
-              placeholder="Message"
+              placeholder={props.placeholder ?? "Message"}
               multiline
               editable={!props.disabled && !sending}
               contentInsetVertical={10}

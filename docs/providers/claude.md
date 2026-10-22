@@ -245,6 +245,15 @@ finishes. Ryco shows the thread as working from the moment Claude starts that re
 reasoning and text stream like any other turn. Stop ends a background turn too. If a background turn
 starts but produces no output for two minutes, Ryco ends it.
 
+## Approvals
+
+When Claude asks before running a tool, the approval card leads with Decline and Approve once.
+Always allow this session and Cancel turn are in the card's menu. When Claude says why it asked
+(for example an ask rule or a path outside the working directories), the card shows it under
+"Why am I being asked?". When accepting for the session would allow more than this one action,
+Claude withholds that choice and Ryco leaves it out; an older client that still offers it gets a
+single approval.
+
 ## Steering A Running Turn
 
 A message you send while a Claude turn runs can steer that turn instead of waiting in the queue.
@@ -260,6 +269,11 @@ How it works:
   appears in that turn and the reply continues there, with one working state and one completion.
 - The turn waits for the steered message's reply only while Claude Code reports more queued work
   (`queued_turn_count > 0`). It never waits on a timer.
+- While Claude waits for an approval, the composer stays usable on desktop and in the app: sending
+  a message declines the approval and steers the message into the turn, whatever the setting says
+  (⌘↵ / Ctrl+Enter still queues it and leaves the approval to you). Ryco waits until Claude has
+  taken the decline before it steers; if the decline fails or its delivery is unknown, nothing is
+  sent and your draft stays.
 - A steer that cannot be applied stays in the queue and is sent as the next turn. This happens
   when the turn has already finished, while Claude waits for an approval or an answer, for slash
   commands, and on Claude Code versions without the `interrupt_receipt_v1` capability. A deferral

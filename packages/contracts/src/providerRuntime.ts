@@ -481,6 +481,17 @@ export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Why the provider asks, in its own words, when that says more than `detail`
+   * (Claude's permission decision reason). Older clients ignore it.
+   */
+  reason: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * `false` when the provider refuses a session-wide grant for this request:
+   * allowing it for the session would allow more than this one action. Older
+   * clients still offer the choice; the adapter then answers it as one approval.
+   */
+  acceptForSessionOffered: Schema.optional(Schema.Boolean),
   args: Schema.optional(Schema.Unknown),
 });
 export type RequestOpenedPayload = typeof RequestOpenedPayload.Type;

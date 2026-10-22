@@ -176,6 +176,10 @@ export interface PendingApproval {
   requestKind: "command" | "file-read" | "file-change";
   createdAt: string;
   detail?: string;
+  /** The provider's own reason for asking; read it through `pendingApprovalReason`. */
+  reason?: string;
+  /** The provider refused a session-wide grant for this request. */
+  acceptForSessionOffered?: false;
 }
 
 export interface PendingUserInput {
@@ -416,6 +420,8 @@ function updatePendingApprovalState(
         : {}),
       createdAt: activity.createdAt,
       ...(detail ? { detail } : {}),
+      ...(typeof payload?.reason === "string" ? { reason: payload.reason } : {}),
+      ...(payload?.acceptForSessionOffered === false ? { acceptForSessionOffered: false } : {}),
     });
     return;
   }

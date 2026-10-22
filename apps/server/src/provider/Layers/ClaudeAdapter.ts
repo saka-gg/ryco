@@ -1,3 +1,4 @@
+import { claudeApprovalPresentation } from "../claudeApprovalPresentation.ts";
 import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
@@ -343,6 +344,8 @@ interface PendingApproval {
   readonly requestType: CanonicalRequestType;
   readonly detail?: string;
   readonly suggestions?: ReadonlyArray<PermissionUpdate>;
+  /** The CLI refused a session-wide grant for this request. */
+  readonly acceptForSessionOffered?: false;
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
@@ -5658,12 +5661,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const requestId = ApprovalRequestId.make(callbackOptions.requestId);
       const requestType = classifyRequestType(toolName);
       const detail = summarizeToolRequest(toolName, toolInput);
+      const presentation = claudeApprovalPresentation({ detail, options: callbackOptions });
       const decisionDeferred = yield* Deferred.make<ProviderApprovalDecision>();
       const pendingApproval: PendingApproval = {
         requestType,
         detail,
         decision: decisionDeferred,
         ...(callbackOptions.suggestions ? { suggestions: callbackOptions.suggestions } : {}),
+        ...(presentation.acceptForSessionOffered === false
+          ? { acceptForSessionOffered: false }
+          : {}),
       };
 
       const requestedStamp = yield* makeEventStamp();
@@ -5678,6 +5685,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: {
           requestType,
           detail,
+          ...presentation,
           args: {
             toolName,
             input: toolInput,
@@ -5740,8 +5748,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
 
       if (decision === "accept" || decision === "acceptForSession") {
+        // A request that refused a session-wide grant (a client that predates the flag can
+        // still offer it) is answered as one approval.
+        const grantsSession =
+          decision === "acceptForSession" && pendingApproval.acceptForSessionOffered !== false;
         if (
-          decision === "acceptForSession" &&
+          grantsSession &&
           pendingApproval.suggestions?.some((suggestion) => suggestion.type === "setMode")
         ) {
           // The CLI applies the suggested mode itself; the next turn sets its own.
@@ -5750,7 +5762,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return {
           behavior: "allow",
           updatedInput: toolInput,
-          ...(decision === "acceptForSession" && pendingApproval.suggestions
+          ...(grantsSession && pendingApproval.suggestions
             ? {
                 updatedPermissions: [...pendingApproval.suggestions],
               }
