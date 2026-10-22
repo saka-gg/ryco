@@ -1,3 +1,5 @@
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -7,6 +9,33 @@ import {
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./terminalContext.ts";
 
 describe("splitPromptIntoComposerSegments", () => {
+  it("makes a quote token one chip, with no mention or skill inside it", () => {
+    const citation = createQuoteCitation({
+      source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+      messageId: MessageId.make("message"),
+      selector: {
+        exact: "Run $review on @src/a.ts now",
+        prefix: "",
+        suffix: "",
+        start: 0,
+        end: 27,
+      },
+    });
+    const token = serializeQuoteCitation(citation);
+    // Even a hand-made label with bare trigger characters stays one chip.
+    const unescaped = token.replace(/\\([@$])/g, "$1");
+
+    for (const source of [token, unescaped]) {
+      expect(splitPromptIntoComposerSegments(`Explain ${source} and @AGENTS.md please`)).toEqual([
+        { type: "text", text: "Explain " },
+        { type: "quote", citation, source },
+        { type: "text", text: " and " },
+        { type: "mention", path: "AGENTS.md" },
+        { type: "text", text: " please" },
+      ]);
+    }
+  });
+
   it("splits mention tokens followed by whitespace into mention segments", () => {
     expect(splitPromptIntoComposerSegments("Inspect @AGENTS.md please")).toEqual([
       { type: "text", text: "Inspect " },

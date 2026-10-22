@@ -1,3 +1,5 @@
+import { collectQuoteCitationTokens, type QuoteCitation } from "@ryco/shared/quoteCitations";
+
 import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   type TerminalContextDraft,
@@ -19,6 +21,12 @@ export type ComposerPromptSegment =
   | {
       type: "terminal-context";
       context: TerminalContextDraft | null;
+    }
+  | {
+      /** A quote citation's draft token; `source` is its exact text. */
+      type: "quote";
+      citation: QuoteCitation;
+      source: string;
     };
 
 const SKILL_TOKEN_REGEX = /(^|\s)\$([a-zA-Z][a-zA-Z0-9:_-]*)(?=\s)/g;
@@ -50,6 +58,13 @@ type InlineTokenMatch =
       value: string;
       start: number;
       end: number;
+    }
+  | {
+      type: "quote";
+      citation: QuoteCitation;
+      source: string;
+      start: number;
+      end: number;
     };
 
 type MentionTokenMatch = Extract<InlineTokenMatch, { type: "mention" }>;
@@ -76,7 +91,20 @@ function collectMentionTokenMatches(text: string): MentionTokenMatch[] {
 }
 
 function collectInlineTokenMatches(text: string): InlineTokenMatch[] {
-  const matches: InlineTokenMatch[] = collectMentionTokenMatches(text);
+  // A quote token is one chip: nothing inside it is a mention or a skill.
+  const quotes: InlineTokenMatch[] = collectQuoteCitationTokens(text).map((token) => ({
+    type: "quote",
+    citation: token.citation,
+    source: token.source,
+    start: token.start,
+    end: token.end,
+  }));
+  const outsideQuotes = (match: { start: number; end: number }) =>
+    !quotes.some((quote) => match.start < quote.end && match.end > quote.start);
+  const matches: InlineTokenMatch[] = [
+    ...quotes,
+    ...collectMentionTokenMatches(text).filter(outsideQuotes),
+  ];
 
   for (const match of text.matchAll(SKILL_TOKEN_REGEX)) {
     const fullMatch = match[0];
@@ -85,7 +113,7 @@ function collectInlineTokenMatches(text: string): InlineTokenMatch[] {
     const matchIndex = match.index ?? 0;
     const start = matchIndex + prefix.length;
     const end = start + fullMatch.length - prefix.length;
-    if (skillName.length > 0) {
+    if (skillName.length > 0 && outsideQuotes({ start, end })) {
       matches.push({ type: "skill", value: skillName, start, end });
     }
   }
@@ -190,8 +218,10 @@ function splitPromptTextIntoComposerSegments(text: string): ComposerPromptSegmen
 
     if (match.type === "mention") {
       segments.push({ type: "mention", path: match.value });
-    } else {
+    } else if (match.type === "skill") {
       segments.push({ type: "skill", name: match.value });
+    } else {
+      segments.push({ type: "quote", citation: match.citation, source: match.source });
     }
 
     cursor = match.end;

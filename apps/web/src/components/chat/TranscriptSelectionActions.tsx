@@ -1,23 +1,26 @@
 import { usePaneEffect, usePaneFocus, usePaneCloseGuard } from "./PaneFocus";
 import type { SelectionChatRequest } from "../../lib/selectionChat";
 import { MessageId, type ScopedThreadRef } from "@ryco/contracts";
-import {
-  MAX_SELECTION_QUOTE_LENGTH,
-  type SelectionQuote,
-} from "@ryco/client-runtime/state/composer";
+import { createQuoteCitation, type QuoteCitation } from "@ryco/shared/quoteCitations";
 import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { captureTextQuoteSelector } from "~/lib/textQuoteDom";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { Button } from "../ui/button";
 import { resolveComposerEnter } from "./composerFollowUp";
 import { useSendShortcut } from "./useSendShortcut";
 
 interface CapturedSelection {
-  quote: SelectionQuote;
+  citation: QuoteCitation;
   left: number;
   top: number;
 }
 
+/**
+ * The selection as a quote citation of its message: the text and a little
+ * context on each side, read from the same text stream the jump back reads,
+ * so the passage is found again after the message re-renders.
+ */
 export function readTranscriptSelection(
   container: HTMLElement,
   source: ScopedThreadRef,
@@ -29,14 +32,21 @@ export function readTranscriptSelection(
   const start = element(range.startContainer)?.closest<HTMLElement>("[data-selection-message-id]");
   const end = element(range.endContainer)?.closest<HTMLElement>("[data-selection-message-id]");
   if (!start || start !== end || !container.contains(start)) return null;
-  const text = selection.toString();
-  if (!text.trim() || text.length > MAX_SELECTION_QUOTE_LENGTH) return null;
+  const selector = captureTextQuoteSelector(start, range);
+  if (!selector) return null;
+  let citation: QuoteCitation;
+  try {
+    citation = createQuoteCitation({
+      source,
+      messageId: MessageId.make(start.dataset.selectionMessageId!),
+      selector,
+    });
+  } catch {
+    // Blank or past the quote limit: no actions for this selection.
+    return null;
+  }
   const bounds = range.getBoundingClientRect();
-  return {
-    quote: { source, messageId: MessageId.make(start.dataset.selectionMessageId!), text },
-    left: bounds.left,
-    top: bounds.bottom + 8,
-  };
+  return { citation, left: bounds.left, top: bounds.bottom + 8 };
 }
 
 interface Props {
@@ -45,8 +55,8 @@ interface Props {
   canUseSide: boolean;
   canCreate: boolean;
   canUseWorktree: boolean;
-  onCurrent: (quote: SelectionQuote) => void;
-  onSide: (quote: SelectionQuote) => void;
+  onCurrent: (citation: QuoteCitation) => void;
+  onSide: (citation: QuoteCitation) => void;
   onNew: (input: SelectionChatRequest) => Promise<void>;
 }
 
@@ -127,7 +137,7 @@ export function TranscriptSelectionActions(props: Props) {
         event.stopPropagation();
         focusBefore.current =
           container?.querySelector<HTMLElement>(
-            `[data-selection-message-id="${CSS.escape(selected.quote.messageId)}"]`,
+            `[data-selection-message-id="${CSS.escape(selected.citation.messageId)}"]`,
           ) ?? null;
         cancelAnimationFrame(frame);
         keyboardFocusPending.current = true;
@@ -206,7 +216,7 @@ export function TranscriptSelectionActions(props: Props) {
     setBusy(true);
     setError(null);
     try {
-      await props.onNew({ ...draft, quote: draft.selection.quote, prompt, intent });
+      await props.onNew({ ...draft, citation: draft.selection.citation, prompt, intent });
       setDraft(null);
       setExpanded(false);
       setSelection(null);
@@ -278,7 +288,7 @@ export function TranscriptSelectionActions(props: Props) {
             </Button>
           </div>
           <blockquote className="mb-3 max-h-28 overflow-y-auto whitespace-pre-wrap break-words border-l-2 pl-3 text-xs text-muted-foreground">
-            {draft.selection.quote.text}
+            {draft.selection.citation.selector.exact}
           </blockquote>
           <ComposerPromptEditor
             ref={editor}
@@ -361,7 +371,7 @@ export function TranscriptSelectionActions(props: Props) {
             size="xs"
             variant="ghost"
             onClick={() => {
-              props.onCurrent(anchor.quote);
+              props.onCurrent(anchor.citation);
               setSelection(null);
             }}
           >
@@ -372,7 +382,7 @@ export function TranscriptSelectionActions(props: Props) {
             variant="ghost"
             disabled={!props.canUseSide}
             onClick={() => {
-              props.onSide(anchor.quote);
+              props.onSide(anchor.citation);
               setSelection(null);
             }}
           >

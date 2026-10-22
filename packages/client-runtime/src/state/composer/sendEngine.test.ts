@@ -1,6 +1,7 @@
 import {
   CommandId,
   DEFAULT_MODEL,
+  EnvironmentId,
   MessageId,
   OrchestrationDispatchCommandError,
   ProjectId,
@@ -14,12 +15,15 @@ import {
   type RuntimeMode,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { describe, expect, it } from "vite-plus/test";
 
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
 import {
   buildSendTurnBootstrap,
   commitSendTurnDispatch,
+  composeOutgoingPrompt,
+  outgoingPromptOverflow,
   resolveThreadCreateModelSelection,
   retargetChatProjectBootstrap,
   type SendTurnBootstrap,
@@ -517,5 +521,26 @@ describe("send engine — retired chat project", () => {
     const plain: SendTurnBootstrap = { runSetupScript: true };
     expect(retargetChatProjectBootstrap(plain, FRESH_ID)).toBe(plain);
     expect(retargetChatProjectBootstrap(undefined, FRESH_ID)).toBeUndefined();
+  });
+});
+
+describe("send engine — input limit", () => {
+  const token = serializeQuoteCitation(
+    createQuoteCitation({
+      source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+      messageId: MessageId.make("message"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      comment: "Why?",
+    }),
+  );
+
+  it("measures the prompt as sent, quotes expanded", () => {
+    const prompt = `Explain ${token}`;
+    const sent = composeOutgoingPrompt({ prompt });
+    expect(outgoingPromptOverflow({ prompt })).toBe(0);
+    expect(outgoingPromptOverflow({ prompt }, sent.length)).toBe(0);
+    expect(outgoingPromptOverflow({ prompt }, sent.length - 7)).toBe(7);
+    // The quote block counts, not the token it replaced.
+    expect(outgoingPromptOverflow({ prompt }, prompt.length)).toBe(sent.length - prompt.length);
   });
 });

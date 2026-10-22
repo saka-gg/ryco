@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { EnvironmentId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
 import {
+  collectQuoteCitationTokens,
+  createQuoteCitation,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
+import {
+  appendQuoteCitation,
   appendSelectionQuote,
   MAX_SELECTION_QUOTE_LENGTH,
   stripSelectionQuotes,
@@ -13,6 +19,26 @@ const quote = {
   messageId: MessageId.make("message"),
   text: '  code();\n\n> nested "quote"',
 };
+
+describe("quote citations in a prompt", () => {
+  const citation = createQuoteCitation({
+    source,
+    messageId: MessageId.make("message"),
+    selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+  });
+  const token = serializeQuoteCitation(citation);
+
+  it("appends the draft token after the text, apart from it, with room to type on", () => {
+    expect(appendQuoteCitation("", citation)).toBe(`${token} `);
+    expect(appendQuoteCitation("Explain", citation)).toBe(`Explain ${token} `);
+    expect(appendQuoteCitation("Explain\n", citation)).toBe(`Explain\n${token} `);
+    const twice = appendQuoteCitation(appendQuoteCitation("Compare", citation), citation);
+    expect(collectQuoteCitationTokens(twice).map((match) => match.citation)).toStrictEqual([
+      citation,
+      citation,
+    ]);
+  });
+});
 
 describe("selection quotes", () => {
   it("preserves existing text, whitespace and quote boundaries, with scoped attribution", () => {

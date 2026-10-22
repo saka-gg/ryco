@@ -7,6 +7,7 @@ import {
   type ModelSelection,
 } from "@ryco/contracts/orchestration";
 import { ProviderInstanceId } from "@ryco/contracts/provider-instance";
+import { quoteCitationsToInlineText } from "@ryco/shared/quoteCitations";
 
 import type { ProjectEnvironment } from "../projects/projectsModel";
 
@@ -95,7 +96,8 @@ export function newTaskContextLabel(input: {
 }
 
 export function inferTaskTitle(prompt: string): string {
-  const firstLine = prompt
+  // A quote token reads as its quoted preview.
+  const firstLine = quoteCitationsToInlineText(prompt)
     .trim()
     .split(/\r?\n/u)
     .find((line) => line.trim());

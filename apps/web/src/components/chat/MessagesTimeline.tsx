@@ -125,6 +125,7 @@ import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { QuoteCitationChip } from "./QuoteCitationChip";
 import { QuoteCitationContext } from "./quoteCitationContext";
 import { useQuoteSourceHighlight } from "./useQuoteSourceHighlight";
+import { usePendingQuoteHighlight } from "./usePendingQuoteHighlight";
 import type { NumberedQuoteCitation } from "@ryco/shared/quoteCitations";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -448,6 +449,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     null,
   );
   useQuoteSourceHighlight(routeThreadKey, timelineViewportElement);
+  // The frozen phone tier gets nothing new: no marks for a draft's quotes.
+  usePendingQuoteHighlight(routeThreadKey, isPhoneTier ? null : timelineViewportElement);
   // Sized like the timeline column, which the Chat width setting widens without a viewport resize.
   const timelineColumnProbeRef = useRef<HTMLDivElement | null>(null);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);

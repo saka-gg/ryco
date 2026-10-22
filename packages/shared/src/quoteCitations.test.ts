@@ -11,10 +11,10 @@ import {
   parseQuoteCitationHref,
   QUOTE_CITATION_MAX_COMMENT_LENGTH,
   QUOTE_CITATION_MAX_TEXT_LENGTH,
-  quoteCitationExpandedLength,
-  quoteCitationInputOverflow,
   quoteCitationLabel,
+  quoteCitationsToInlineText,
   quoteCitationsToPlainText,
+  restoreQuoteCitationTokens,
   serializeQuoteCitation,
   truncateQuotePreview,
   withQuoteCitationComment,
@@ -65,6 +65,18 @@ describe("quote citation tokens", () => {
     );
     expect(collectQuoteCitationTokens(`See ${token}, please.`)).toEqual([
       { citation, source: token, start: 4, end: 4 + token.length },
+    ]);
+  });
+
+  it("escapes what would start a mention, skill or reference, and drops placeholders", () => {
+    const triggers = citationOf("Ask @src/app.ts with $review about #42 \uFFFC here");
+    const token = serializeQuoteCitation(triggers);
+
+    expect(token.startsWith("[Ask \\@src/app.ts with \\$review about \\#42 here](")).toBe(true);
+    expect(token).not.toContain("\uFFFC");
+    expect(quoteCitationLabel(triggers)).toBe("Ask @src/app.ts with $review about #42 here");
+    expect(collectQuoteCitationTokens(token).map((match) => match.citation)).toStrictEqual([
+      triggers,
     ]);
   });
 
@@ -304,12 +316,18 @@ describe("quote citation expansion", () => {
     });
   });
 
-  it("counts the expanded prompt against the provider input limit", () => {
-    const prompt = `About ${serializeQuoteCitation(first)}`;
-    expect(quoteCitationExpandedLength(prompt)).toBe(expandQuoteCitations(prompt).length);
-    expect(quoteCitationExpandedLength("  plain  ")).toBe(5);
-    expect(quoteCitationInputOverflow(prompt)).toBe(0);
-    expect(quoteCitationInputOverflow(prompt, 10)).toBe(expandQuoteCitations(prompt).length - 10);
+  it("restores the draft tokens a sent message started from", () => {
+    const draft = `Compare ${serializeQuoteCitation(first)} with ${serializeQuoteCitation(second)}, and ${serializeQuoteCitation(first)} again.`;
+    expect(restoreQuoteCitationTokens(expandQuoteCitations(draft))).toBe(draft);
+
+    // Typed marker text that names no quote stays as typed.
+    const typed = `In [Quote 2] I meant ${serializeQuoteCitation(first)}`;
+    expect(restoreQuoteCitationTokens(expandQuoteCitations(typed))).toBe(typed);
+
+    // Without a well-formed block nothing changes.
+    expect(restoreQuoteCitationTokens("See [Quote 1]")).toBe("See [Quote 1]");
+    const tampered = expandQuoteCitations(draft).replace("> passage", "passage");
+    expect(restoreQuoteCitationTokens(tampered)).toBe(tampered);
   });
 });
 
@@ -345,5 +363,12 @@ describe("quote citation display", () => {
       readable,
     );
     expect(quoteCitationsToPlainText("No quotes here.")).toBe("No quotes here.");
+  });
+
+  it("previews draft tokens inline, in quotation marks", () => {
+    expect(quoteCitationsToInlineText(`What about ${serializeQuoteCitation(commented)}?`)).toBe(
+      "What about “Quoted words.”?",
+    );
+    expect(quoteCitationsToInlineText("No quotes here.")).toBe("No quotes here.");
   });
 });

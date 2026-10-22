@@ -4,7 +4,7 @@ import {
   RuntimeSessionId,
   type EnvironmentApi,
   type EventId,
-  type MessageId,
+  MessageId,
   type OrchestrationReadModel,
   type OrchestrationThreadActivity,
   type TurnId,
@@ -14,6 +14,7 @@ import {
   composeOutgoingPrompt,
   createFileReference,
 } from "@ryco/client-runtime/state/composer";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -373,6 +374,42 @@ describe("ChatView sending while an approval waits (full app)", () => {
         },
       });
       await vi.waitFor(() => expect(draftFileReferences()).toEqual([]));
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("steers a quote chip in with the redirect, expanded once", async () => {
+    const harness = await mountThreadWaitingOnApproval({});
+    const prompt = `Use this instead ${serializeQuoteCitation(
+      createQuoteCitation({
+        source: THREAD_REF,
+        messageId: MessageId.make("msg-assistant-quoted"),
+        selector: { exact: "Cache the build.", prefix: "", suffix: "", start: 0, end: 16 },
+        comment: "Is this safe?",
+      }),
+    )}`;
+    try {
+      await waitUntilApprovalReadable();
+      await sendFromComposer(prompt);
+      // The chip stays a chip in the draft the approval holds.
+      await expect
+        .element(
+          page.getByRole("button", { name: "Show quoted text in conversation: Cache the build." }),
+        )
+        .toBeVisible();
+      await vi.waitFor(() => expect(harness.declines()).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      harness.settleApproval();
+      await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      const sent = composeOutgoingPrompt({ prompt });
+      expect(sent).toContain("<assistant_quotes>");
+      expect(harness.steers()[0]).toMatchObject({ message: { text: sent } });
     } finally {
       await harness.cleanup();
     }

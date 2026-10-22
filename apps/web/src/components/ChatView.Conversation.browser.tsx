@@ -15,6 +15,7 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
 } from "@ryco/contracts";
 import { RESTART_INTERRUPTION_NOTICE } from "@ryco/client-runtime/state/threads";
+import { collectQuoteCitationTokens } from "@ryco/shared/quoteCitations";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -113,6 +114,11 @@ function emitThreadSession(
   });
 }
 
+/** The quotes `prompt` carries as chips, by their quoted text. */
+function quotedTexts(prompt: string | undefined): string[] {
+  return collectQuoteCitationTokens(prompt ?? "").map((token) => token.citation.selector.exact);
+}
+
 function recordingDispatch(snapshot: OrchestrationReadModel) {
   const commands: Array<{ type: string; threadId?: unknown }> = [];
   const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
@@ -159,14 +165,22 @@ describe("ChatView Conversation (full app)", () => {
       await page
         .getByRole("button", { name: "Add to chat", exact: true })
         .click({ timeout: 4_000 });
+      // The quote goes in as a chip after the draft's text.
       await vi.waitFor(() =>
-        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toContain(
-          "My current draft\n\nQuoted assistant text",
-        ),
+        expect(
+          quotedTexts(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt),
+        ).toEqual(["assistant filler 21"]),
       );
-      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toContain(
-        "> assistant filler 21",
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toMatch(
+        /^My current draft \[assistant filler 21\]\(ryco-quote:v1\//,
       );
+      await expect
+        .element(
+          page.getByRole("button", {
+            name: "Show quoted text in conversation: assistant filler 21",
+          }),
+        )
+        .toBeVisible();
       await waitForLayout();
       await selectTranscriptQuote();
       await page
@@ -250,10 +264,8 @@ describe("ChatView Conversation (full app)", () => {
         expect(mounted.router.state.location.pathname).toMatch(/^\/draft\/selection-/),
       );
       const fresh = DraftId.make(mounted.router.state.location.pathname.split("/").at(-1)!);
-      expect(drafts.getComposerDraft(fresh)?.prompt).toContain(
-        "Explain the selection\n\nQuoted assistant text",
-      );
-      expect(drafts.getComposerDraft(fresh)?.prompt).toContain("> assistant filler 21");
+      expect(drafts.getComposerDraft(fresh)?.prompt).toMatch(/^Explain the selection \[/);
+      expect(quotedTexts(drafts.getComposerDraft(fresh)?.prompt)).toEqual(["assistant filler 21"]);
       expect(drafts.getComposerDraft(original)?.prompt).toBe("Keep existing project draft");
       expect(drafts.getComposerDraft(THREAD_REF)?.prompt).toBe("Keep source draft");
       expect(drafts.getDraftSessionByLogicalProjectKey(PROJECT_LOGICAL_KEY)?.draftId).toBe(
@@ -340,8 +352,8 @@ describe("ChatView Conversation (full app)", () => {
             ?.deliveryStatus,
         ).toBe("failed"),
       );
-      expect(queued[0]?.composer.prompt).toContain("Explain it\n\nQuoted assistant text");
-      expect(queued[0]?.composer.prompt).toContain("> assistant filler 21");
+      expect(queued[0]?.composer.prompt).toMatch(/^Explain it \[/);
+      expect(quotedTexts(queued[0]?.composer.prompt)).toEqual(["assistant filler 21"]);
       await waitForLayout();
       expect(attempts).toBe(1);
       await expect

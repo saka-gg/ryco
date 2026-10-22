@@ -16,6 +16,7 @@ import { usePaneEffect, usePaneFocus, usePaneFocusRef, usePaneThreadRef } from "
 import { startSelectionChat } from "../lib/selectionChat";
 import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
 import {
+  appendQuoteCitation,
   appendSelectionQuote,
   approvalRedirectTooSoon,
   checkpointRevertUnsupportedMessage,
@@ -23,6 +24,7 @@ import {
   declineApprovalsForRedirect,
   describeApprovalRedirectRefusal,
   noteApprovalRedirectEnd,
+  outgoingPromptOverflow,
   pendingApprovalSourceFromStore,
   recordApprovalSightings,
   requestProviderSessionPrewarm,
@@ -68,6 +70,7 @@ import {
   type ThreadGoalUpdate,
   THREAD_GOAL_OBJECTIVE_MAX_CHARS,
   ORCHESTRATION_WS_METHODS,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   WS_METHODS,
 } from "@ryco/contracts";
 import {
@@ -2525,8 +2528,9 @@ export default function ChatView(props: ChatViewProps) {
       buildThreadMessageSearchOccurrences({
         timelineEntries,
         query: threadMessageSearchQuery,
+        presentationTier,
       }),
-    [threadMessageSearchQuery, timelineEntries],
+    [presentationTier, threadMessageSearchQuery, timelineEntries],
   );
   useEffect(() => {
     const query = debouncedThreadMessageSearchQuery.trim();
@@ -4959,6 +4963,23 @@ export default function ChatView(props: ChatViewProps) {
       }
       return;
     }
+    // Quote chips send their quote and comment: measure what goes out, so a
+    // send the provider would refuse stays in the composer instead.
+    const overflow = outgoingPromptOverflow({
+      prompt: promptForSend,
+      fileReferences: composerFileReferences,
+      terminalContexts: sendableComposerTerminalContexts,
+    });
+    if (overflow > 0) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Message is too long",
+          description: `It is ${overflow.toLocaleString()} characters over the ${PROVIDER_SEND_TURN_MAX_INPUT_CHARS.toLocaleString()} character limit. Shorten it or remove a quote.`,
+        }),
+      );
+      return;
+    }
     if (showPlanFollowUpPrompt && activeProposedPlan && !parseComputerInvocation(promptForSend)) {
       if (reachNodeUnavailableReason !== null) {
         notifyMutationUnavailable(reachNodeUnavailableReason);
@@ -6176,10 +6197,10 @@ export default function ChatView(props: ChatViewProps) {
             !isChatContext
           }
           canUseWorktree={isGitRepo && !!activeThreadBranch}
-          onCurrent={(quote) => {
-            const nextPrompt = appendSelectionQuote(
+          onCurrent={(citation) => {
+            const nextPrompt = appendQuoteCitation(
               readComposer()?.getSendContext().prompt ?? promptRef.current,
-              quote,
+              citation,
             );
             promptRef.current = nextPrompt;
             setComposerDraftPrompt(composerDraftTarget, nextPrompt);
@@ -6190,17 +6211,20 @@ export default function ChatView(props: ChatViewProps) {
             });
             scheduleComposerFocus();
           }}
-          onSide={(quote) => {
+          onSide={(citation) => {
             if (!isServerThread || !sideChatCapability.allowed) return;
             const key = scopedThreadKey(activeThreadRef);
             const side = useSideChatStore.getState();
             side.open(key, activeThread.modelSelection);
+            // Side's question is a plain text field, which cannot show a chip:
+            // the quote goes in as quoted lines.
             side.setDraft(
               key,
-              appendSelectionQuote(
-                useSideChatStore.getState().chatsByThreadKey[key]?.draft ?? "",
-                quote,
-              ),
+              appendSelectionQuote(useSideChatStore.getState().chatsByThreadKey[key]?.draft ?? "", {
+                source: activeThreadRef,
+                messageId: citation.messageId,
+                text: citation.selector.exact,
+              }),
             );
             requestAnimationFrame(
               () =>
@@ -6210,7 +6234,7 @@ export default function ChatView(props: ChatViewProps) {
                   ?.focus(),
             );
           }}
-          onNew={async ({ quote, prompt, envMode, intent, requestKey }) => {
+          onNew={async ({ citation, prompt, envMode, intent, requestKey }) => {
             const context = readComposer()?.getSendContext();
             if (
               !context ||
@@ -6222,7 +6246,7 @@ export default function ChatView(props: ChatViewProps) {
               throw new Error("The workspace is unavailable. Your selection draft is preserved.");
             }
             await startSelectionChat({
-              quote,
+              citation,
               prompt,
               envMode,
               intent,

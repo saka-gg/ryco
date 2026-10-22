@@ -9,7 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { createFileReference } from "./fileReference.ts";
 import { composeOutgoingPrompt } from "./sendEngine.ts";
 import type { TerminalContextSelection } from "./terminalContext.ts";
-import { deriveDisplayedUserMessage, expandOutgoingQuoteCitations } from "./userMessageQuotes.ts";
+import { deriveDisplayedUserMessage } from "./userMessageQuotes.ts";
 
 const citation = createQuoteCitation({
   source: { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("thread-1") },
@@ -56,20 +56,16 @@ describe("deriveDisplayedUserMessage", () => {
   });
 });
 
-describe("expandOutgoingQuoteCitations", () => {
-  it("expands tokens ahead of context blocks already appended, once", () => {
-    const draft = composeOutgoingPrompt({
+describe("composeOutgoingPrompt", () => {
+  it("expands quote tokens once, ahead of the context blocks", () => {
+    const composed = composeOutgoingPrompt({
       prompt: `Explain ${serializeQuoteCitation(citation)} please`,
       fileReferences: [fileReference],
       terminalContexts: [terminalContext],
     });
 
-    expect(expandOutgoingQuoteCitations(draft)).toBe(sent);
-    expect(expandOutgoingQuoteCitations(sent)).toBe(sent);
-    expect(deriveDisplayedUserMessage(expandOutgoingQuoteCitations(draft)).quotes).toHaveLength(1);
-  });
-
-  it("returns text without tokens unchanged", () => {
-    expect(expandOutgoingQuoteCitations("Plain words.")).toBe("Plain words.");
+    expect(composed).toBe(sent);
+    expect(composeOutgoingPrompt({ prompt: composed })).toBe(composed);
+    expect(deriveDisplayedUserMessage(composed).quotes).toHaveLength(1);
   });
 });

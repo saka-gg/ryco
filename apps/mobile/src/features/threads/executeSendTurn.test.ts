@@ -1,4 +1,10 @@
 import type { EnvironmentApi, ModelSelection, ProjectId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, MessageId } from "@ryco/contracts/base-schemas";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("expo-crypto", () => ({ randomUUID: () => `id-${Math.random().toString(16).slice(2)}` }));
@@ -72,6 +78,27 @@ describe("executeSendTurn", () => {
       (c) => (c[0] as { type: string }).type === "thread.turn.start",
     )![0] as { threadId: ThreadId };
     expect(start.threadId).toBe(THREAD_ID);
+  });
+
+  it("sends a pasted quote token expanded, as web does", async () => {
+    const prompt = `Explain ${serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env-1"), threadId: THREAD_ID },
+        messageId: MessageId.make("assistant-1"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    )}  `;
+    const { input, dispatchCommand } = baseInput({
+      composer: { ...baseInput().input.composer, prompt },
+    });
+
+    await executeSendTurn(input);
+
+    const start = dispatchCommand.mock.calls.find(
+      (call) => (call[0] as { type: string }).type === "thread.turn.start",
+    )![0] as { message: { text: string } };
+    expect(start.message.text).toBe(expandQuoteCitations(prompt.trim()));
+    expect(start.message.text).toContain("<assistant_quotes>");
   });
 
   it("skips the title update for a non-first message", async () => {

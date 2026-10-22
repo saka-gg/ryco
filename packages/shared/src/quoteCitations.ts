@@ -20,7 +20,6 @@
  */
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
-import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@ryco/contracts/orchestration";
 
 import { truncateUnicodeSafe } from "./String.ts";
 import {
@@ -339,17 +338,26 @@ export function truncateQuotePreview(text: string, length: number): string {
   return `${truncateUnicodeSafe(text, length).trimEnd()}…`;
 }
 
+// The composer's terminal context placeholder: never part of a label.
+const OBJECT_REPLACEMENT_CHARACTER = /\uFFFC/g;
+
 /** A one-line preview of the quote, for chips and token labels. */
 export function quoteCitationLabel(citation: QuoteCitation): string {
   return truncateQuotePreview(
-    collapseTextQuoteWhitespace(citation.selector.exact).trim(),
+    collapseTextQuoteWhitespace(
+      citation.selector.exact.replace(OBJECT_REPLACEMENT_CHARACTER, " "),
+    ).trim(),
     QUOTE_CITATION_LABEL_LENGTH,
   );
 }
 
-/** Escapes what could end the label or open a code span, autolink or tag. */
+/**
+ * Escapes what could end the label or open a code span, autolink or tag, and
+ * the characters that start a composer mention, skill or reference trigger,
+ * so no part of a label reads as one.
+ */
 function escapeLabel(label: string): string {
-  return label.replace(/[\\[\]`<]/g, "\\$&");
+  return label.replace(/[\\[\]`<@$#]/g, "\\$&");
 }
 
 /** The draft token: one Markdown link, labelled with a preview of the quote. */
@@ -549,17 +557,23 @@ export function expandQuoteCitations(prompt: string): string {
   return `${text}${text ? "\n\n" : ""}${formatBlock(quotes)}`;
 }
 
-/** The length of the prompt a send dispatches, for the provider input limit. */
-export function quoteCitationExpandedLength(prompt: string): number {
-  return expandQuoteCitations(prompt).trim().length;
-}
-
-/** How far the expanded prompt runs over the provider input limit; 0 within it. */
-export function quoteCitationInputOverflow(
-  prompt: string,
-  limit: number = PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
-): number {
-  return Math.max(0, quoteCitationExpandedLength(prompt) - limit);
+/**
+ * The draft a sent message started from: its `[Quote N]` markers turned back
+ * into draft tokens and its quote block dropped, so a recalled prompt shows
+ * its quotes as chips again. The inverse of {@link expandQuoteCitations};
+ * text without a well-formed block comes back unchanged. Takes a message
+ * without its trailing context blocks.
+ */
+export function restoreQuoteCitationTokens(text: string): string {
+  const { text: body, quotes } = extractQuoteCitationBlock(text);
+  if (quotes.length === 0) return text;
+  const tokens = new Map(
+    quotes.map((quote) => [quote.number, serializeQuoteCitation(quote.citation)]),
+  );
+  return body.replace(
+    QUOTE_MARKER,
+    (marker, number: string) => tokens.get(Number(number)) ?? marker,
+  );
 }
 
 /**
@@ -591,9 +605,9 @@ export function matchQuoteCitations(
 }
 
 /**
- * Readable text for surfaces without chips (the phone app, previews): the
- * message with its `[Quote N]` markers, then each quote and comment. Takes a
- * message without its trailing terminal context, which follows the quotes.
+ * Readable text for surfaces without chips (the phone app): the message with
+ * its `[Quote N]` markers, then each quote and comment. Takes a message
+ * without its trailing context blocks, which follow the quotes.
  */
 export function quoteCitationsToPlainText(text: string): string {
   if (!mayContainQuoteCitations(text)) return text;
@@ -603,4 +617,20 @@ export function quoteCitationsToPlainText(text: string): string {
     [`[Quote ${number}]`, ...formatQuoteLines(citation)].join("\n"),
   );
   return `${body}${body ? "\n\n" : ""}${entries.join("\n\n")}`;
+}
+
+/**
+ * `text` with each draft token as its preview in quotation marks, for
+ * one-line previews and titles: `Explain “the passage…” please`.
+ */
+export function quoteCitationsToInlineText(text: string): string {
+  const tokens = collectQuoteCitationTokens(text);
+  if (tokens.length === 0) return text;
+  let inline = "";
+  let cursor = 0;
+  for (const token of tokens) {
+    inline += `${text.slice(cursor, token.start)}“${quoteCitationLabel(token.citation)}”`;
+    cursor = token.end;
+  }
+  return `${inline}${text.slice(cursor)}`;
 }

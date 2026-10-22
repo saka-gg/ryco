@@ -11,8 +11,15 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import { type EnvironmentId, type ServerProviderSkill } from "@ryco/contracts";
 import {
+  collectQuoteCitationTokens,
+  serializeQuoteCitation,
+  withQuoteCitationComment,
+  type QuoteCitation,
+} from "@ryco/shared/quoteCitations";
+import {
   $applyNodeReplacement,
   $createRangeSelection,
+  $getNodeByKey,
   $getSelection,
   $setSelection,
   $isElementNode,
@@ -35,7 +42,9 @@ import {
   KEY_BACKSPACE_COMMAND,
   $getRoot,
   HISTORY_MERGE_TAG,
+  HISTORY_PUSH_TAG,
   DecoratorNode,
+  TextNode,
   type ElementNode,
   type LexicalNode,
   type SerializedLexicalNode,
@@ -53,6 +62,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   type ClipboardEventHandler,
   type ReactElement,
   type Ref,
@@ -85,6 +95,7 @@ import {
   SKILL_CHIP_ICON_SVG,
 } from "./composerInlineChip";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
+import { QuoteCitationDraftChip } from "./chat/QuoteCitationChip";
 import { ThreadMentionChip } from "./chat/ThreadMentionChip";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import { formatProviderSkillDisplayName } from "~/providerSkillPresentation";
@@ -136,14 +147,27 @@ type SerializedComposerTerminalContextNode = Spread<
   SerializedLexicalNode
 >;
 
+type SerializedComposerQuoteCitationNode = Spread<
+  {
+    citation: QuoteCitation;
+    source: string;
+    type: "composer-quote-citation";
+    version: 1;
+  },
+  SerializedLexicalNode
+>;
+
 /** What inline chips need from their editor. */
 const ComposerTerminalContextActionsContext = createContext<{
   onRemoveTerminalContext: (contextId: string) => void;
   /** Where the prompt's thread mentions live, to name them by their titles. */
   environmentId: EnvironmentId | null;
+  /** The thread on screen: a quote chip shows its passage there without navigating. */
+  threadKey: string | null;
 }>({
   onRemoveTerminalContext: () => {},
   environmentId: null,
+  threadKey: null,
 });
 
 function ComposerMentionDecorator(props: { path: string }) {
@@ -452,16 +476,139 @@ function $createComposerTerminalContextNode(
   return $applyNodeReplacement(new ComposerTerminalContextNode(context));
 }
 
+function ComposerQuoteCitationDecorator(props: { citation: QuoteCitation; nodeKey: NodeKey }) {
+  const [editor] = useLexicalComposerContext();
+  // The chip's own controls follow the editor: a disabled prompt keeps its quotes.
+  const [editable, setEditable] = useState(() => editor.isEditable());
+  useEffect(() => editor.registerEditableListener(setEditable), [editor]);
+  const { threadKey } = useContext(ComposerTerminalContextActionsContext);
+  const focusPrompt = () => editor.getRootElement()?.focus({ preventScroll: true });
+  return (
+    <QuoteCitationDraftChip
+      citation={props.citation}
+      currentThreadKey={threadKey}
+      editable={editable}
+      onSaveComment={(comment) => {
+        // Validated before the update: a comment past the limit stays in its editor.
+        const citation = withQuoteCitationComment(props.citation, comment);
+        editor.update(
+          () => {
+            const node = $getNodeByKey(props.nodeKey);
+            if (node instanceof ComposerQuoteCitationNode) node.setCitation(citation);
+          },
+          { tag: HISTORY_PUSH_TAG },
+        );
+      }}
+      onRemove={() => {
+        editor.update(
+          () => {
+            const node = $getNodeByKey(props.nodeKey);
+            if (!(node instanceof ComposerQuoteCitationNode)) return;
+            const start = getAbsoluteOffsetForPoint(node, 0);
+            node.remove();
+            $setSelectionAtComposerOffset(start);
+          },
+          { tag: HISTORY_PUSH_TAG },
+        );
+        focusPrompt();
+      }}
+      onRestoreFocus={focusPrompt}
+    />
+  );
+}
+
+/**
+ * A quote citation: a chip whose text is exactly its draft token, so drafts,
+ * the prompt stash, copy and paste all keep the token as it is. The send
+ * expands it (`composeOutgoingPrompt`).
+ */
+class ComposerQuoteCitationNode extends DecoratorNode<ReactElement> {
+  __citation: QuoteCitation;
+  __source: string;
+
+  static override getType(): string {
+    return "composer-quote-citation";
+  }
+
+  static override clone(node: ComposerQuoteCitationNode): ComposerQuoteCitationNode {
+    return new ComposerQuoteCitationNode(node.__citation, node.__source, node.__key);
+  }
+
+  static override importJSON(
+    serializedNode: SerializedComposerQuoteCitationNode,
+  ): ComposerQuoteCitationNode {
+    return $createComposerQuoteCitationNode(
+      serializedNode.citation,
+      serializedNode.source,
+    ).updateFromJSON(serializedNode);
+  }
+
+  constructor(citation: QuoteCitation, source: string, key?: NodeKey) {
+    super(key);
+    this.__citation = citation;
+    this.__source = source;
+  }
+
+  override exportJSON(): SerializedComposerQuoteCitationNode {
+    const latest = this.getLatest();
+    return {
+      ...super.exportJSON(),
+      citation: latest.__citation,
+      source: latest.__source,
+      type: "composer-quote-citation",
+      version: 1,
+    };
+  }
+
+  override createDOM(): HTMLElement {
+    const dom = document.createElement("span");
+    dom.className = "inline-flex max-w-full align-middle leading-none";
+    return dom;
+  }
+
+  override updateDOM(): false {
+    return false;
+  }
+
+  override getTextContent(): string {
+    return this.getLatest().__source;
+  }
+
+  /** The same quote with another comment: the token is written anew. */
+  setCitation(citation: QuoteCitation): void {
+    const writable = this.getWritable();
+    writable.__citation = citation;
+    writable.__source = serializeQuoteCitation(citation);
+  }
+
+  override isInline(): true {
+    return true;
+  }
+
+  override decorate(): ReactElement {
+    return <ComposerQuoteCitationDecorator citation={this.__citation} nodeKey={this.__key} />;
+  }
+}
+
+function $createComposerQuoteCitationNode(
+  citation: QuoteCitation,
+  source: string,
+): ComposerQuoteCitationNode {
+  return $applyNodeReplacement(new ComposerQuoteCitationNode(citation, source));
+}
+
 type ComposerInlineTokenNode =
   | ComposerMentionNode
   | ComposerSkillNode
-  | ComposerTerminalContextNode;
+  | ComposerTerminalContextNode
+  | ComposerQuoteCitationNode;
 
 function isComposerInlineTokenNode(candidate: unknown): candidate is ComposerInlineTokenNode {
   return (
     candidate instanceof ComposerMentionNode ||
     candidate instanceof ComposerSkillNode ||
-    candidate instanceof ComposerTerminalContextNode
+    candidate instanceof ComposerTerminalContextNode ||
+    candidate instanceof ComposerQuoteCitationNode
   );
 }
 
@@ -878,6 +1025,10 @@ function $setComposerEditorPrompt(
       }
       continue;
     }
+    if (segment.type === "quote") {
+      paragraph.append($createComposerQuoteCitationNode(segment.citation, segment.source));
+      continue;
+    }
     $appendTextWithLineBreaks(paragraph, segment.text);
   }
 }
@@ -938,6 +1089,12 @@ interface ComposerPromptEditorProps {
   historyScope?: string;
   /** The environment of the thread the prompt is for; thread mentions resolve in it. */
   environmentId?: EnvironmentId;
+  /**
+   * The thread on screen (a scoped thread key), where a quote chip shows its
+   * passage without navigating; a quote from any other thread opens that
+   * thread first. Null or absent for a draft.
+   */
+  threadKey?: string | null;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
@@ -1299,6 +1456,30 @@ function ComposerInlineTokenBackspacePlugin() {
   return null;
 }
 
+/**
+ * Turns a quote token that arrives as text (pasted, dropped, typed) into its
+ * chip. Prompts written by the composer get their chips when they are set.
+ */
+function ComposerQuoteCitationTokenPlugin() {
+  const [editor] = useLexicalComposerContext();
+
+  useEffect(
+    () =>
+      editor.registerNodeTransform(TextNode, (textNode) => {
+        if (!textNode.isSimpleText()) return;
+        const [token] = collectQuoteCitationTokens(textNode.getTextContent());
+        if (!token) return;
+        const parts = textNode.splitText(token.start, token.end);
+        const tokenNode = token.start === 0 ? parts[0] : parts[1];
+        // The text after it is a new node, which this transform visits next.
+        tokenNode?.replace($createComposerQuoteCitationNode(token.citation, token.source));
+      }),
+    [editor],
+  );
+
+  return null;
+}
+
 function ComposerSurroundSelectionPlugin(props: {
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
   skills: ReadonlyArray<ServerProviderSkill>;
@@ -1585,6 +1766,7 @@ function ComposerPromptEditorInner({
   onPasteText,
   historyScope,
   environmentId,
+  threadKey,
   editorRef,
 }: ComposerPromptEditorInnerProps) {
   const [editor] = useLexicalComposerContext();
@@ -1604,8 +1786,12 @@ function ComposerPromptEditorInner({
   });
   const isApplyingControlledUpdateRef = useRef(false);
   const terminalContextActions = useMemo(
-    () => ({ onRemoveTerminalContext, environmentId: environmentId ?? null }),
-    [environmentId, onRemoveTerminalContext],
+    () => ({
+      onRemoveTerminalContext,
+      environmentId: environmentId ?? null,
+      threadKey: threadKey ?? null,
+    }),
+    [environmentId, onRemoveTerminalContext, threadKey],
   );
 
   useEffect(() => {
@@ -1906,6 +2092,7 @@ function ComposerPromptEditorInner({
         <ComposerInlineTokenArrowPlugin />
         <ComposerInlineTokenSelectionNormalizePlugin />
         <ComposerInlineTokenBackspacePlugin />
+        <ComposerQuoteCitationTokenPlugin />
         <HistoryPlugin />
       </div>
     </ComposerTerminalContextActionsContext.Provider>
@@ -1921,6 +2108,7 @@ export const ComposerPromptEditor = forwardRef<
     cursor,
     historyScope,
     environmentId,
+    threadKey,
     terminalContexts,
     skills,
     disabled,
@@ -1943,7 +2131,12 @@ export const ComposerPromptEditor = forwardRef<
     () => ({
       namespace: "rycotools-composer-editor",
       editable: true,
-      nodes: [ComposerMentionNode, ComposerSkillNode, ComposerTerminalContextNode],
+      nodes: [
+        ComposerMentionNode,
+        ComposerSkillNode,
+        ComposerTerminalContextNode,
+        ComposerQuoteCitationNode,
+      ],
       editorState: () => {
         $setComposerEditorPrompt(
           initialValueRef.current,
@@ -1965,6 +2158,7 @@ export const ComposerPromptEditor = forwardRef<
         cursor={cursor}
         {...(historyScope !== undefined ? { historyScope } : {})}
         {...(environmentId !== undefined ? { environmentId } : {})}
+        {...(threadKey !== undefined ? { threadKey } : {})}
         terminalContexts={terminalContexts}
         skills={skills}
         disabled={disabled}

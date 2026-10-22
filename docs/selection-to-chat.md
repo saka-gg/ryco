@@ -11,15 +11,17 @@ Enter activates it. Escape dismisses the toolbar and restores transcript focus.
 Lines of code from the Review and Files panels go to the composer as chips instead; see
 [files and chat](files-to-chat.md).
 
-- **Add to chat** appends an attributed quotation to the current prompt without replacing
-  its text or attachments. It focuses the composer without sending.
-- **Add to Side** appends the quotation to the existing side draft without sending or
-  changing its model. Side remains temporary, read-only, and subject to its existing
-  provider and connection restrictions.
+- **Add to chat** adds the quote to the current prompt as a chip, after its text and
+  attachments. It focuses the composer without sending.
+- **Add to Side** appends the quoted text to the existing side draft without sending or
+  changing its model. Side's question is a plain text field, so the quote goes in as
+  quoted lines rather than a chip. Side remains temporary, read-only, and subject to its
+  existing provider and connection restrictions.
 - **New chat** opens a mini composer with the captured quote and a choice of project
   folder or a new worktree from the source thread's branch. **Open in chat** transfers
-  the quote and prompt to a separate full draft, even with no question entered.
-  **Send** requires a question and transfers a snapshot to the existing first-turn queue.
+  the quote, as a chip after the question, to a separate full draft, even with no question
+  entered. **Send** requires a question and transfers a snapshot to the existing first-turn
+  queue.
 
 The mini composer reuses the normal prompt editor. Minimize, Escape, and outside clicks
 keep its text and location choice while the source chat remains mounted; **Resume new
@@ -35,10 +37,50 @@ silently retry or create another conversation. The existing queue is memory-only
 has the same limitations as other queued messages. Full composer drafts use normal draft
 persistence.
 
-Quotation formatting is shared, with scoped source thread/message identifiers. Quotes use
-the ordinary text payload, so all providers and existing send/queue recovery paths receive
-identical context. No new RPC, provider runtime, service-worker cache, or hosted lifecycle
-owner is introduced.
+## Quote chips
+
+A quote in the composer is a chip showing the start of the quoted text. Hover it to read
+the whole quote and its comment.
+
+- **Comment:** the pencil opens a short note for the agent about this quote (up to 4,000
+  characters). Enter saves it, Shift+Enter adds a line, and Escape leaves the comment as it
+  was. Saving an empty comment removes it. A chip with a comment shows a note icon.
+- **Remove:** the cross takes the quote out of the prompt; Backspace after the chip does
+  too.
+- **Jump back:** clicking the chip scrolls to the quoted passage and highlights it. A quote
+  from another thread opens that thread first, loading older history when needed. If the
+  passage can no longer be found, the chip turns muted and says the source is no longer
+  available.
+- **Pending quotes:** while the prompt holds a quote, the quoted passage stays lightly
+  highlighted in the answer it came from.
+
+Each quote is the selected text plus up to 32 characters on each side of it, so the
+passage is found again after the message re-renders. In the prompt it is one Markdown
+link, `[preview](ryco-quote:v1/…)`, which carries the source ids, the quote, its context
+and the comment. That text is what drafts, the prompt stash, copy and paste keep, so a
+pasted quote becomes a chip again. Queued messages, stash entries and new thread titles
+show the quote's preview in quotation marks instead.
+
+## What the agent receives
+
+Every send composes the prompt the same way on web, desktop and mobile: each quote chip
+becomes `[Quote N]` where it stood, and one `<assistant_quotes>` block after the message
+spells the quotes out once, before any file and terminal context. The block opens with a
+short note saying the quotes are reference material. Each entry has a header line, the
+quote as `>` lines and the comment indented under `Comment:`. Every quoted and comment line
+is prefixed, so quoted text cannot end the block or pose as another entry. The expanded
+prompt counts against the 120,000-character input limit; a draft that would run over it
+stays in the composer and says by how much.
+
+In the transcript, sent quotes show as chips again, and copying a message copies the text
+as sent. ArrowUp brings a sent prompt back with its quote chips. Messages sent with the
+older plain quote format keep rendering as before. The phone app shows quotes as readable
+`[Quote N]` and `>` lines with the comment below, and the frozen web phone tier shows the
+message as sent.
+
+Quotes use the ordinary text payload, so all providers and existing send/queue recovery
+paths receive identical context. No new RPC, provider runtime, service-worker cache, or
+hosted lifecycle owner is introduced.
 
 ## Side failure recovery
 
@@ -50,5 +92,5 @@ expose the same recovery actions; `/btw` preserves its originating composer whil
 is pending. This adds no native selection gesture or second state implementation.
 
 Reference behavior: [Synara PR #1130](https://github.com/Emanuele-web04/synara/pull/1130),
-merged September 11, 2026. Implemented against Ryco's shared draft and queue services;
-no upstream code copied.
+merged September 11, 2026, and T3 Code's inline citations (v0.0.39). Implemented against
+Ryco's shared draft and queue services; no upstream code copied.

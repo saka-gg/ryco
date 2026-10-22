@@ -157,7 +157,7 @@ describe("attachDevicePromptScreenshot", () => {
   });
 });
 
-describe("formatOutgoingPrompt", () => {
+describe("buildOutgoingMessageText", () => {
   const token = serializeQuoteCitation(
     createQuoteCitation({
       source: { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("thread-1") },
@@ -166,21 +166,8 @@ describe("formatOutgoingPrompt", () => {
       comment: "Why?",
     }),
   );
-  const format = (text: string) =>
-    formatOutgoingPrompt({
-      provider: ProviderDriverKind.make("codex"),
-      model: "model",
-      models: [],
-      effort: null,
-      text,
-    });
 
-  it("expands quotes on a path that passes the draft text as is (a plan follow-up)", () => {
-    const text = `Revise ${token}`;
-    expect(format(text)).toBe(expandQuoteCitations(text));
-  });
-
-  it("expands quotes ahead of the terminal context a composer send appends", () => {
+  it("expands quotes once, ahead of the terminal context the send appends", () => {
     const terminalContext = {
       terminalId: "t-1",
       terminalLabel: "Terminal 1",
@@ -203,6 +190,6 @@ describe("formatOutgoingPrompt", () => {
     expect(sent).toBe(
       appendTerminalContextsToPrompt(expandQuoteCitations(prompt), [terminalContext]),
     );
-    expect(format(sent)).toBe(sent);
+    expect(sent).not.toContain("ryco-quote:v1/env-1/thread-1/assistant-1?text=");
   });
 });

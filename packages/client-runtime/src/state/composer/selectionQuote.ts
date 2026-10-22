@@ -1,6 +1,20 @@
 import type { MessageId, ScopedThreadRef } from "@ryco/contracts";
+import { serializeQuoteCitation, type QuoteCitation } from "@ryco/shared/quoteCitations";
 
-/** A captured excerpt, not a live reference to a changing transcript or DOM range. */
+/**
+ * Adds a quote to a prompt as its draft token, after the text already there,
+ * with a space after it so typing goes on behind the chip. The send expands
+ * the token into the quote and its comment (`composeOutgoingPrompt`).
+ */
+export function appendQuoteCitation(prompt: string, citation: QuoteCitation): string {
+  const separator = prompt.length === 0 || /\s$/u.test(prompt) ? "" : " ";
+  return `${prompt}${separator}${serializeQuoteCitation(citation)} `;
+}
+
+/**
+ * A captured excerpt as plain text, for inputs that cannot show a quote chip
+ * (Side's question). Older messages carry quotes in this form too.
+ */
 export interface SelectionQuote {
   readonly source: ScopedThreadRef;
   readonly messageId: MessageId;

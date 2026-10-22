@@ -1750,6 +1750,13 @@ label:has(> select#reasoning-effort) select {
   color: inherit;
 }
 
+/* Passages the unsent prompt quotes (usePendingQuoteHighlight). Its lower
+   priority leaves the jump highlight on top where both apply. */
+::highlight(ryco-quote-pending) {
+  background-color: color-mix(in srgb, var(--primary) 16%, transparent);
+  color: inherit;
+}
+
 .chat-markdown blockquote {
   border-left: 2px solid var(--border);
   padding-left: 0.8rem;

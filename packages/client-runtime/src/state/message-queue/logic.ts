@@ -16,6 +16,8 @@ import {
   turnSteerRejectionActivityId,
   type TurnSteerRejectionActivity,
 } from "@ryco/shared/turnSteer";
+import { quoteCitationsToInlineText } from "@ryco/shared/quoteCitations";
+
 import { extractThreadReferences } from "../composer/threadMentions.ts";
 
 /**
@@ -329,7 +331,8 @@ export function getQueuedThreadKeys<Composer, Settings>(
 const QUEUED_MESSAGE_SUMMARY_MAX_CHARS = 120;
 
 export function summarizeQueuedMessage(input: QueuedMessageSummaryInput): string {
-  const text = input.trimmedPrompt.trim();
+  // A quote chip reads as its quoted preview, not as its token.
+  const text = quoteCitationsToInlineText(input.trimmedPrompt).trim();
   if (text.length > 0) {
     return text.length > QUEUED_MESSAGE_SUMMARY_MAX_CHARS
       ? `${text.slice(0, QUEUED_MESSAGE_SUMMARY_MAX_CHARS - 1)}…`

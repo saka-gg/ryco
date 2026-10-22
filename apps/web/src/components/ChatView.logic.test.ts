@@ -8,6 +8,7 @@ import {
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { type EnvironmentState, useStore } from "../store";
 import { type ChatMessage, type Thread } from "../types";
@@ -347,6 +348,23 @@ describe("buildChatSendTitleSeed", () => {
         firstTerminalContextLabel: "Terminal 1",
       }),
     ).toBe("Fix sidebar perf");
+  });
+
+  it("names a quote by its quoted preview", () => {
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    );
+    expect(
+      buildChatSendTitleSeed({
+        trimmedPrompt: `Why ${token}`,
+        firstImageName: null,
+        firstTerminalContextLabel: null,
+      }),
+    ).toBe("Why “The passage.”");
   });
 
   it("falls back to image and terminal labels", () => {

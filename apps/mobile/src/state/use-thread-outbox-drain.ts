@@ -15,6 +15,7 @@ import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   commitSendTurnDispatch,
+  composeOutgoingPrompt,
   captureReviewedSendReadiness,
 } from "@ryco/client-runtime/state/composer";
 import {
@@ -84,7 +85,8 @@ export async function sendQueuedThreadMessage(
     isServerThread: true,
     title: "",
     messageId: message.messageId,
-    outgoingMessageText: message.text.trim() || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+    outgoingMessageText:
+      composeOutgoingPrompt({ prompt: message.text }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     turnAttachments,
     modelSelection: message.modelSelection,
     hasSelectedModel: true,

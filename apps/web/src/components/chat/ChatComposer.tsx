@@ -149,7 +149,7 @@ import {
 } from "./ComposerMentionDrop";
 import { workspaceFileDropLabel } from "../../workspaceFileDrag";
 import { composerContextIntake } from "../../composerContextIntake";
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { cn, randomUUID } from "~/lib/utils";
 import { planFollowUpRefines, proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle, getProviderSupportsAskMode } from "../../providerModels";
@@ -3274,6 +3274,11 @@ export const ChatComposer = memo(
             <ComposerPromptShell
               editorRef={composerEditorRef}
               historyScope={composerTargetKey(composerDraftTarget)}
+              threadKey={
+                typeof composerDraftTarget === "string"
+                  ? null
+                  : scopedThreadKey(composerDraftTarget)
+              }
               environmentId={environmentId}
               isComposerCollapsedMobile={isComposerCollapsedMobile}
               hasComposerHeader={hasComposerHeader}

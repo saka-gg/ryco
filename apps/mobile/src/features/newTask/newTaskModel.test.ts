@@ -4,10 +4,13 @@ import type { Project, SidebarWorktreeSummary } from "@ryco/client-runtime/state
 import {
   DEFAULT_MODEL,
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 
 import {
   deriveNewTaskDefaults,
@@ -115,6 +118,14 @@ describe("New Task defaults", () => {
     ).toBe("Studio · Ryco · Mobile");
     expect(inferTaskTitle(`  ${"a".repeat(90)}\nsecond line`)).toHaveLength(70);
     expect(inferTaskTitle("")).toBe("New task");
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("ready"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    );
+    expect(inferTaskTitle(`Explain ${token}`)).toBe("Explain “The passage.”");
   });
 });
 

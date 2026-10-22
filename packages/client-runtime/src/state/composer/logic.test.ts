@@ -1,3 +1,5 @@
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -515,5 +517,31 @@ describe("parseThreadGoalSlashCommand", () => {
   it("does not capture ordinary messages", () => {
     expect(parseThreadGoalSlashCommand("Please use /goal later")).toBeNull();
     expect(parseThreadGoalSlashCommand("/goals are useful")).toBeNull();
+  });
+});
+
+describe("quote chips in cursor math", () => {
+  const token = serializeQuoteCitation(
+    createQuoteCitation({
+      source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+      messageId: MessageId.make("message"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+    }),
+  );
+  const text = `Ask ${token} why`;
+
+  it("counts a chip as one collapsed position and its whole token expanded", () => {
+    expect(expandCollapsedComposerCursor(text, 4)).toBe(4);
+    expect(expandCollapsedComposerCursor(text, 5)).toBe(4 + token.length);
+    expect(expandCollapsedComposerCursor(text, 9)).toBe(text.length);
+    expect(collapseExpandedComposerCursor(text, 4 + token.length)).toBe(5);
+    expect(collapseExpandedComposerCursor(text, 6)).toBe(5);
+    expect(clampCollapsedComposerCursor(text, Number.POSITIVE_INFINITY)).toBe(9);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, 5, "left")).toBe(true);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, 4, "right")).toBe(true);
+  });
+
+  it("opens no trigger right after a chip", () => {
+    expect(detectComposerTrigger(`Ask ${token}`, 4 + token.length)).toBeNull();
   });
 });
