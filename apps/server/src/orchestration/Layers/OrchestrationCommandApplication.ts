@@ -3,7 +3,8 @@ import {
   OrchestrationDispatchCommandError,
   type OrchestrationCommand,
 } from "@ryco/contracts";
-import { Deferred, Effect, FileSystem, Layer, Option, Path, Schema } from "effect";
+import { makeKeyedSingleFlight } from "@ryco/shared/KeyedSingleFlight";
+import { Effect, FileSystem, Layer, Option, Path, Schema } from "effect";
 
 import { ServerConfig } from "../../config.ts";
 import {
@@ -148,35 +149,12 @@ export interface OrchestrationCommandFlights {
 }
 
 export const makeOrchestrationCommandFlights = (): OrchestrationCommandFlights => {
-  const running = new Map<
+  const flights = makeKeyedSingleFlight<
     CommandId,
-    Deferred.Deferred<CommandResult, OrchestrationDispatchCommandError>
+    CommandResult,
+    OrchestrationDispatchCommandError
   >();
-  return {
-    join: (commandId, attempt) =>
-      // A flight is registered together with the attempt that completes it, or
-      // not at all: an interruption between the two would leave every later
-      // replay of the id waiting on an outcome nothing ever completes. Only the
-      // wait is interruptible; the forked attempt is interruptible on its own.
-      Effect.uninterruptibleMask((restore) =>
-        Effect.suspend(() => {
-          const existing = running.get(commandId);
-          if (existing) return restore(Deferred.await(existing));
-          const outcome = Deferred.makeUnsafe<CommandResult, OrchestrationDispatchCommandError>();
-          running.set(commandId, outcome);
-          return attempt.pipe(
-            Effect.onExit((exit) =>
-              Effect.suspend(() => {
-                if (running.get(commandId) === outcome) running.delete(commandId);
-                return Deferred.done(outcome, exit);
-              }),
-            ),
-            Effect.forkDetach,
-            Effect.andThen(restore(Deferred.await(outcome))),
-          );
-        }),
-      ),
-  };
+  return { join: flights.join };
 };
 
 /** Process-wide: a replay arrives over a different connection than its first attempt. */

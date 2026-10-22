@@ -5,6 +5,7 @@ import {
   type HostedRuntimeTimers,
 } from "../authorization/runtime.ts";
 import type { HostedHubState } from "../authorization/state.ts";
+import { hasErrorTag } from "../errors/errorTag.ts";
 import { isAwaitingAdmission, RpcRequestRefusedError } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
 import { RpcTransportDisposedError } from "../rpc/wsTransport.ts";
@@ -42,10 +43,6 @@ export function hostedDispatchLineage(
   return state.account.id;
 }
 
-function hasTag(error: unknown, tag: string): boolean {
-  return typeof error === "object" && error !== null && "_tag" in error && error._tag === tag;
-}
-
 /**
  * Effect's `Cause.squash` of a cause made only of interruptions: what a request
  * rejects with when its client is disposed or reconnected mid-request, or when
@@ -60,7 +57,7 @@ const INTERRUPTED_WITHOUT_ERROR = "All fibers interrupted without error";
  */
 function isTransportFailure(error: unknown): boolean {
   return (
-    hasTag(error, "RpcClientError") ||
+    hasErrorTag(error, "RpcClientError") ||
     error instanceof RpcTransportDisposedError ||
     (error instanceof Error && error.message === INTERRUPTED_WITHOUT_ERROR)
   );
@@ -78,7 +75,10 @@ function isTransportFailure(error: unknown): boolean {
  */
 function isDeliveryUnknown(error: unknown, lostSinceSend: boolean): boolean {
   if (error instanceof RpcRequestRefusedError) return false;
-  if (hasTag(error, "OrchestrationDispatchCommandError") || hasTag(error, "AuthRpcError")) {
+  if (
+    hasErrorTag(error, "OrchestrationDispatchCommandError") ||
+    hasErrorTag(error, "AuthRpcError")
+  ) {
     return false;
   }
   return lostSinceSend || isTransportFailure(error);
@@ -96,7 +96,7 @@ function isDeliveryUnknown(error: unknown, lostSinceSend: boolean): boolean {
  * sent, and waits for the next readiness instead.)
  */
 function isReplayAnswer(command: ClientOrchestrationCommand, error: unknown): boolean {
-  if (!hasTag(error, "OrchestrationDispatchCommandError")) return false;
+  if (!hasErrorTag(error, "OrchestrationDispatchCommandError")) return false;
   return !(command.type === "thread.turn.start" && command.bootstrap !== undefined);
 }
 

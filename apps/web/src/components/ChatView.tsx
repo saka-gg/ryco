@@ -21,14 +21,19 @@ import {
   checkpointRevertUnsupportedMessage,
   composeOutgoingPrompt,
   declineApprovalsForRedirect,
+  deriveProviderInstanceEntries,
   describeApprovalRedirectRefusal,
+  modelMultiSelectSendBlockReason,
   noteApprovalRedirectEnd,
   pendingApprovalSourceFromStore,
   recordApprovalSightings,
   requestProviderSessionPrewarm,
   resolveApprovalRedirect,
+  resolveModelMultiSelectTargets,
   resolveProviderSessionPrewarmRequest,
+  supportsMultiModelSend,
   selectProviderSessionPrewarmSupported,
+  sortProviderInstanceEntries,
   type ApprovalRedirect,
   type ApprovalRedirectedTurns,
   type ApprovalRedirectRefusal,
@@ -208,7 +213,10 @@ import {
   useEnvironmentChatsAvailable,
   useEnvironmentServerConfigSelector,
 } from "../hooks/useChatsAvailability";
-import { resolveAppModelSelectionForInstance } from "../modelSelection";
+import {
+  getAppModelOptionsForInstance,
+  resolveAppModelSelectionForInstance,
+} from "../modelSelection";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
   reconnectSavedEnvironment,
@@ -339,12 +347,27 @@ import {
   clearComposerContentRefs,
   composerRefsHaveContent,
   executeChatSendTurn,
+  inlineUploadBlockReason,
   restoreComposerContent,
   restoreUnsentComposerContent,
   type ComposerDraftContent,
   type SendTurnComposerSnapshot,
   type SendTurnSettings,
 } from "../hooks/executeChatSendTurn";
+import {
+  executeMultiModelSend,
+  isMultiModelSendBusy,
+  multiModelSendRunsSetupScript,
+  sendMultiModelTargetAsNew,
+  type MultiModelSendComposerDeps,
+} from "../hooks/executeMultiModelSend";
+import {
+  MultiModelSendConfirmDialog,
+  useMultiModelSendBannerItems,
+  type MultiModelSendCatalog,
+  type MultiModelSendConfirmation,
+} from "./chat/MultiModelSend";
+import { readMultiModelSelection, useMultiModelSends } from "./chat/multiModelSendStore";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { TIMELINE_REVEAL_SETTLE_MS, useTimelineRevealStore } from "../timelineRevealStore";
 import {
@@ -2687,6 +2710,61 @@ export default function ChatView(props: ChatViewProps) {
   // "No changes" there, since a chat records no checkpoints).
   const sourceControlCwd = isChatContext ? null : gitCwd;
   const gitStatusQuery = useGitStatus({ environmentId, cwd: sourceControlCwd });
+  // "Compare models": a new draft in a Git project, on a node that refuses a
+  // first send that requires a worktree rather than run it in the project. Not
+  // for a task's draft or one that starts from a PR or issue worktree, and not
+  // on the frozen phone tier.
+  const multiModelSendAvailable =
+    draftId !== null &&
+    isLocalDraftThread &&
+    !isPendingChat &&
+    activeProject !== undefined &&
+    !isChatContext &&
+    gitStatusQuery.data?.isRepo === true &&
+    !draftThread?.localTaskId &&
+    !draftThread?.worktreeSource &&
+    presentationTier !== "phone" &&
+    supportsMultiModelSend(serverConfig);
+  const composerProviderEntries = useMemo(
+    () => sortProviderInstanceEntries(deriveProviderInstanceEntries(composerProviderStatuses)),
+    [composerProviderStatuses],
+  );
+  const multiModelSends = useMultiModelSends(draftId);
+  const multiModelSendSending = multiModelSends.some((send) => send.sending);
+  const [multiModelSendRequest, setMultiModelSendRequest] = useState<
+    | (MultiModelSendConfirmation & {
+        /** The draft it was asked from; ChatView follows navigation to other threads. */
+        readonly draftId: DraftId;
+        readonly composer: SendTurnComposerSnapshot;
+        readonly settings: SendTurnSettings;
+        readonly fetchOrigin: boolean;
+        readonly composerChanged: () => boolean;
+      })
+    | null
+  >(null);
+  const pendingMultiModelSend =
+    multiModelSendRequest !== null && multiModelSendRequest.draftId === draftId
+      ? multiModelSendRequest
+      : null;
+  // Names the compared models as the picker does, custom ones included, and
+  // lets a confirmed send go to those. Built while anything here needs it: a
+  // confirmation or a banner outlives the draft being able to compare.
+  const multiModelSendCatalogNeeded =
+    multiModelSendAvailable || pendingMultiModelSend !== null || multiModelSends.length > 0;
+  const multiModelSendCatalog = useMemo<MultiModelSendCatalog>(
+    () => ({
+      entries: composerProviderEntries,
+      modelOptionsByInstance: new Map(
+        multiModelSendCatalogNeeded
+          ? composerProviderEntries.map((entry) => [
+              entry.instanceId,
+              getAppModelOptionsForInstance(settings, entry),
+            ])
+          : [],
+      ),
+    }),
+    [composerProviderEntries, multiModelSendCatalogNeeded, settings],
+  );
   const queryClient = useQueryClient();
   const {
     postPushWorkflowWatch,
@@ -2758,10 +2836,24 @@ export default function ChatView(props: ChatViewProps) {
     dispatchAllowed: dispatchCapability.allowed,
     snoozeEligibility: usageLimitSnoozeEligibility,
   });
+  const multiModelSendBannerItems = useMultiModelSendBannerItems({
+    // The web phone tier is frozen: no new banners there.
+    draftId: presentationTier !== "phone" ? draftId : null,
+    catalog: multiModelSendCatalog,
+    dispatchAllowed: dispatchCapability.allowed,
+    openThread: (ref) =>
+      void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(ref) }),
+    sendAsNew: (record, key) =>
+      draftId
+        ? sendMultiModelTargetAsNew({ ...multiModelSendComposerDeps(), draftId, record, key })
+        : "unavailable",
+  });
   const composerBannerStackItems = useMemo<ComposerBannerStackItem[]>(() => {
-    const baseItems = usageLimitBannerItem
-      ? [usageLimitBannerItem, ...composerBannerItems]
-      : composerBannerItems;
+    const leadingItems = [...multiModelSendBannerItems, usageLimitBannerItem].filter(
+      (item): item is ComposerBannerStackItem => item !== null,
+    );
+    const baseItems =
+      leadingItems.length > 0 ? [...leadingItems, ...composerBannerItems] : composerBannerItems;
     if (!visibleProviderStatusNotice) {
       return baseItems;
     }
@@ -2785,7 +2877,12 @@ export default function ChatView(props: ChatViewProps) {
         },
       },
     ];
-  }, [composerBannerItems, usageLimitBannerItem, visibleProviderStatusNotice]);
+  }, [
+    composerBannerItems,
+    multiModelSendBannerItems,
+    usageLimitBannerItem,
+    visibleProviderStatusNotice,
+  ]);
 
   useEffect(() => {
     if (routeKind !== "server" || !sourceControlCwd) return;
@@ -4770,6 +4867,121 @@ export default function ChatView(props: ChatViewProps) {
     );
   };
 
+  // The composer a multi-model send clears, and puts a prompt back into: taken
+  // when it acts.
+  const multiModelSendComposerDeps = (): MultiModelSendComposerDeps => ({
+    refs: {
+      promptRef,
+      composerImagesRef,
+      composerTerminalContextsRef,
+      composerFileReferencesRef,
+    },
+    composerHandle: { readComposer, showsSendThread: bindToShownThread() },
+    draft: {
+      composerDraftTarget,
+      clearComposerDraftContent,
+      setComposerDraftTokenMode,
+      setComposerDraftPrompt,
+      addComposerDraftImages,
+      setComposerDraftTerminalContexts,
+      setComposerDraftFileReferences,
+      readComposerDraftContent,
+    },
+  });
+  // A send to several models reaches the node now or not at all: it is never
+  // queued, and it asks first (how many threads and worktrees it starts).
+  const requestMultiModelSend = (request: {
+    readonly composer: SendTurnComposerSnapshot;
+    readonly settings: SendTurnSettings;
+    readonly selections: ReadonlyArray<ModelSelection>;
+    readonly computerUse: boolean;
+  }) => {
+    if (!draftId || !activeProject || isMultiModelSendBusy(draftId)) return;
+    const unavailable =
+      mutationUnavailableReason ??
+      (readEnvironmentApi(environmentId) === undefined || !activeEnvironmentShellLive
+        ? "Available once this environment is connected."
+        : null);
+    if (unavailable !== null) {
+      notifyMutationUnavailable(unavailable);
+      return;
+    }
+    const blocked = request.computerUse
+      ? "Computer Use goes to one model. Turn off Compare models to use it."
+      : (modelMultiSelectSendBlockReason(readMultiModelSelection(draftId)) ??
+        inlineUploadBlockReason(request.composer.images));
+    if (blocked !== null) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Can't send to these models",
+          description: blocked,
+        }),
+      );
+      return;
+    }
+    // Worktrees start where a new worktree of this draft would: its branch,
+    // from origin when it fetches (in a new-worktree draft), else as it is here.
+    const fetchOrigin = sendEnvMode === "worktree" ? (draftThread?.fetchOrigin ?? true) : false;
+    setMultiModelSendRequest({
+      draftId,
+      composer: request.composer,
+      settings: request.settings,
+      selections: request.selections,
+      fetchOrigin,
+      baseBranch: newWorktreeBaseBranch(
+        activeThreadBranch ?? gitStatusQuery.data?.refName ?? null,
+        fetchOrigin,
+      ),
+      runsSetupScript: multiModelSendRunsSetupScript({
+        hasSetupScript: activeProject.scripts.some((script) => script.runOnWorktreeCreate),
+        config: serverConfig,
+        environmentId,
+        projectId: activeProject.id,
+      }),
+      composerChanged: captureComposerContentGuard(),
+    });
+  };
+  const confirmMultiModelSend = async () => {
+    const request = pendingMultiModelSend;
+    setMultiModelSendRequest(null);
+    const api = readEnvironmentApi(environmentId);
+    if (!request || !draftId || !activeProject || !api) return;
+    const result = await executeMultiModelSend({
+      api,
+      environmentId,
+      draftId,
+      projectId: activeProject.id,
+      projectCwd: activeProject.cwd,
+      baseBranch: request.baseBranch,
+      fetchOrigin: request.fetchOrigin,
+      composer: request.composer,
+      selections: request.selections,
+      providerEntries: composerProviderEntries,
+      customModelSlugs: (entry) =>
+        (multiModelSendCatalog.modelOptionsByInstance.get(entry.instanceId) ?? []).map(
+          (option) => option.slug,
+        ),
+      settings: request.settings,
+      enforceBuildMode,
+      sourceControl: {
+        fetcher: createSourceControlContextFetcher({ environmentId, cwd: gitCwd, queryClient }),
+      },
+      formatOutgoingPrompt,
+      ...multiModelSendComposerDeps(),
+      composerChanged: request.composerChanged,
+    });
+    if (result.kind === "refused") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Can't send to these models",
+          description: result.message,
+        }),
+      );
+    }
+  };
+
   const runSend = async (
     e?: { preventDefault: () => void },
     options?: { readonly invertFollowUp?: boolean },
@@ -4857,7 +5069,9 @@ export default function ChatView(props: ChatViewProps) {
       (isSendBusy && !turnActive) ||
       isConnecting ||
       activeEnvironmentUnavailable ||
-      threadSendsInFlight.has(routeThreadKey)
+      threadSendsInFlight.has(routeThreadKey) ||
+      // A draft sending to several models sends nothing else until each went out.
+      (draftId !== null && isMultiModelSendBusy(draftId))
     )
       return;
     if (activePendingProgress) {
@@ -4902,6 +5116,22 @@ export default function ChatView(props: ChatViewProps) {
       reachNodeUnavailableReason !== null
     ) {
       notifyMutationUnavailable(reachNodeUnavailableReason);
+      return;
+    }
+    if (
+      goalCommand !== null &&
+      goalCommand.action !== "show" &&
+      multiModelSendAvailable &&
+      draftId &&
+      readMultiModelSelection(draftId).enabled
+    ) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: "A goal goes to one model",
+          description: "Turn off Compare models to set a goal.",
+        }),
+      );
       return;
     }
     if (goalCommand !== null) {
@@ -5077,6 +5307,23 @@ export default function ChatView(props: ChatViewProps) {
     };
     const computerInvocation = parseComputerInvocation(promptForSend);
     if (computerInvocation && !computerInvocation.prompt) return;
+    // "Compare models": one new thread and worktree per chosen model, after a confirmation.
+    const multiModelSelections =
+      multiModelSendAvailable && draftId
+        ? resolveModelMultiSelectTargets(
+            readMultiModelSelection(draftId),
+            ctxSelectedModelSelection,
+          )
+        : null;
+    if (multiModelSelections) {
+      requestMultiModelSend({
+        composer: composerSnapshot,
+        settings: settingsSnapshot,
+        selections: multiModelSelections,
+        computerUse: computerInvocation !== null,
+      });
+      return;
+    }
     const computer = window.desktopBridge?.computerBeta;
     const localComputer = computer && activeThread.environmentId === localComputerEnvironmentId;
     if (computerInvocation && !localComputer) {
@@ -6696,7 +6943,8 @@ export default function ChatView(props: ChatViewProps) {
                     // any other refusal keeps the send button busy.
                     (!dispatchCapability.allowed && !dispatchEstablishing) ||
                     workspaceExecutionTargetUnavailable ||
-                    hostedDraftTarget.pending !== null
+                    hostedDraftTarget.pending !== null ||
+                    multiModelSendSending
                   }
                   sendsQueueUntilReady={sendsQueueUntilReady}
                   mutationUnavailableReason={mutationUnavailableReason}
@@ -6735,6 +6983,7 @@ export default function ChatView(props: ChatViewProps) {
                   providerStatuses={composerProviderStatuses}
                   activeThreadModelSelection={activeThread?.modelSelection}
                   cliProxyHubsEnabled={cliProxyHubsEnabled}
+                  multiModelSendAvailable={multiModelSendAvailable}
                   activeThreadActivities={threadActivities}
                   phoneThreadDock={phoneThreadDock}
                   delegationDock={delegationDock}
@@ -6969,6 +7218,15 @@ export default function ChatView(props: ChatViewProps) {
           onRetry={hostedDraftTarget.retry}
           onSelect={hostedDraftTarget.selectProject}
           onSelectNoProject={hostedDraftTarget.selectNoProject}
+        />
+      ) : null}
+
+      {multiModelSendAvailable || pendingMultiModelSend ? (
+        <MultiModelSendConfirmDialog
+          confirmation={paneFocused ? pendingMultiModelSend : null}
+          catalog={multiModelSendCatalog}
+          onConfirm={() => void confirmMultiModelSend()}
+          onCancel={() => setMultiModelSendRequest(null)}
         />
       ) : null}
 

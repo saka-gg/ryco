@@ -25,6 +25,7 @@ import { type ContextWindowAccount, ContextWindowMeter } from "./ContextWindowMe
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { ExecutionTargetSelect } from "./ExecutionTargetSelect";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import type { ModelPickerMultiSelect } from "./modelPickerMultiSelect";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import type { ModelTuningSummary } from "./modelTuning.logic";
 import {
@@ -425,6 +426,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   hasSendableContent: boolean;
   sendRedirectsApproval?: boolean;
   sendDisabledReason?: string | null | undefined;
+  sendTargetCount?: number | null | undefined;
   sendsQueueUntilReady?: string | null | undefined;
   mutationUnavailableReason?: string | null | undefined;
   preserveComposerFocusOnPointerDown?: boolean;
@@ -455,6 +457,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         hasSendableContent={props.hasSendableContent}
         sendRedirectsApproval={props.sendRedirectsApproval ?? false}
         sendDisabledReason={props.sendDisabledReason}
+        sendTargetCount={props.sendTargetCount ?? null}
         sendsQueueUntilReady={props.sendsQueueUntilReady}
         mutationUnavailableReason={props.mutationUnavailableReason}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
@@ -507,6 +510,10 @@ export interface ComposerFooterProps {
     options?: ReadonlyArray<ProviderOptionSelection>,
     meta?: ModelPickMeta,
   ) => void;
+  /** "Compare models" for a new draft in a Git project (see `ModelPickerMultiSelect`). */
+  modelMultiSelect?: ModelPickerMultiSelect | undefined;
+  /** How many models a send goes to while comparing; null for an ordinary send. */
+  sendTargetCount?: number | null | undefined;
 
   // Mode controls
   showInteractionModeToggle: boolean;
@@ -634,6 +641,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             : {
                 tuning: props.providerModelTuning,
                 triggerTraits: props.providerModelTuningSummary,
+                multiSelect: props.modelMultiSelect,
               })}
           onOpenChange={props.onModelPickerOpenChange}
           onInstanceModelChange={props.onProviderModelSelect}
@@ -757,6 +765,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           hasSendableContent={props.hasSendableContent}
           sendRedirectsApproval={props.sendRedirectsApproval ?? false}
           sendDisabledReason={props.sendDisabledReason}
+          sendTargetCount={props.sendTargetCount ?? null}
           sendsQueueUntilReady={props.sendsQueueUntilReady}
           mutationUnavailableReason={props.mutationUnavailableReason}
           preserveComposerFocusOnPointerDown={props.isMobileViewport}

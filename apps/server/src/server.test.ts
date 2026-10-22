@@ -7660,6 +7660,184 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     );
   }
 
+  it.effect(
+    "required worktree starts sent together from one draft each get their own worktree",
+    () =>
+      Effect.gen(function* () {
+        const commands: Array<OrchestrationCommand> = [];
+        const createdAt = "2026-10-22T10:00:00.000Z";
+        const projectCwd = "/tmp/project";
+        const targets = [
+          { threadId: ThreadId.make("fixture-fanout-a"), branch: "ryco/0000000a" },
+          { threadId: ThreadId.make("fixture-fanout-b"), branch: "ryco/0000000b" },
+          // This one's checkout comes back as the project itself: it must fail
+          // on its own, never run in the shared checkout.
+          { threadId: ThreadId.make("fixture-fanout-shared"), branch: "ryco/0000000c" },
+        ];
+        // Every creation waits for all three, so the starts provably overlap.
+        const arrived = yield* Ref.make(0);
+        const allArrived = yield* Deferred.make<void>();
+        const createWorktree = vi.fn(
+          (input: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
+            Effect.gen(function* () {
+              if ((yield* Ref.updateAndGet(arrived, (count) => count + 1)) === targets.length) {
+                yield* Deferred.succeed(allArrived, undefined);
+              }
+              yield* Deferred.await(allArrived);
+              return {
+                worktree: {
+                  refName: input.newRefName!,
+                  path:
+                    input.newRefName === "ryco/0000000c"
+                      ? projectCwd
+                      : `/tmp/fixture-fanout/${input.newRefName}`,
+                },
+              };
+            }),
+        );
+        const runForThread = vi.fn(() => Effect.succeed({ status: "no-script" as const }));
+        const project = {
+          id: defaultProjectId,
+          title: "Fixture",
+          workspaceRoot: projectCwd,
+          projectMetadataDir: ".ryco",
+          repositoryIdentity: null,
+          defaultModelSelection,
+          customSystemPrompt: null,
+          customAvatarContentHash: null,
+          preferredRemoteName: null,
+          scripts: [],
+          createdAt,
+          updatedAt: createdAt,
+          deletedAt: null,
+        };
+        // Each thread as the projection would hold it after its own commands.
+        const threadShell = (threadId: ThreadId) => {
+          const created = commands.find(
+            (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+              command.type === "thread.create" && command.threadId === threadId,
+          );
+          if (!created) return Option.none();
+          const attached = commands.find(
+            (
+              command,
+            ): command is Extract<OrchestrationCommand, { type: "thread.attach-to-worktree" }> =>
+              command.type === "thread.attach-to-worktree" && command.threadId === threadId,
+          );
+          return Option.some({
+            ...makeDefaultOrchestrationReadModel().threads[0]!,
+            id: threadId,
+            projectId: created.projectId,
+            createdAt: created.createdAt,
+            worktreeId: attached?.worktreeId ?? null,
+            worktreePath: created.worktreePath,
+            latestUserMessageAt: null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+          });
+        };
+        yield* buildAppUnderTest({
+          layers: {
+            gitVcsDriver: { createWorktree },
+            projectSetupScriptRunner: { runForThread },
+            orchestrationEngine: {
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  commands.push(command);
+                  return { sequence: commands.length };
+                }),
+            },
+            projectionSnapshotQuery: {
+              getProjectShellById: () => Effect.succeed(Option.some(project)),
+              getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
+              getThreadShellById: (threadId) => Effect.sync(() => threadShell(threadId)),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const results = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.forEach(
+              targets,
+              (target) =>
+                client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                  type: "thread.turn.start",
+                  commandId: CommandId.make(`fixture-fanout-${target.threadId}`),
+                  threadId: target.threadId,
+                  message: {
+                    messageId: MessageId.make(`fixture-fanout-message-${target.threadId}`),
+                    role: "user",
+                    text: "Compare this",
+                    attachments: [],
+                  },
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  createdAt,
+                  bootstrap: {
+                    requireWorktree: true,
+                    createThread: {
+                      projectId: defaultProjectId,
+                      title: "Compare this",
+                      modelSelection: defaultModelSelection,
+                      runtimeMode: "full-access",
+                      interactionMode: "default",
+                      branch: null,
+                      worktreePath: null,
+                      createdAt,
+                    },
+                    prepareWorktree: { projectCwd, baseBranch: "main", branch: target.branch },
+                    runSetupScript: true,
+                  },
+                }).pipe(Effect.exit),
+              { concurrency: "unbounded" },
+            ),
+          ),
+        );
+
+        assert.deepStrictEqual(
+          results.map((result) => result._tag),
+          ["Success", "Success", "Failure"],
+        );
+        assert.deepStrictEqual(
+          createWorktree.mock.calls.map(([input]) => input.newRefName).toSorted(),
+          ["ryco/0000000a", "ryco/0000000b", "ryco/0000000c"],
+        );
+        assert.equal(new Set(createWorktree.mock.calls.map(([input]) => input.path)).size, 3);
+        const created = commands.filter(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+            command.type === "thread.create",
+        );
+        assert.deepStrictEqual(
+          created.map((command) => [command.threadId, command.worktreePath]).toSorted(),
+          [
+            ["fixture-fanout-a", "/tmp/fixture-fanout/ryco/0000000a"],
+            ["fixture-fanout-b", "/tmp/fixture-fanout/ryco/0000000b"],
+          ],
+        );
+        const attached = commands.filter((command) => command.type === "thread.attach-to-worktree");
+        assert.equal(
+          new Set(attached.map((command) => "worktreeId" in command && command.worktreeId)).size,
+          2,
+        );
+        assert.deepStrictEqual(
+          commands
+            .filter((command) => command.type === "thread.turn.start")
+            .map((command) => ("threadId" in command ? String(command.threadId) : ""))
+            .toSorted(),
+          ["fixture-fanout-a", "fixture-fanout-b"],
+        );
+        // Nothing ran for the failed target, its setup script included.
+        assert.isFalse(
+          commands.some(
+            (command) => "threadId" in command && command.threadId === "fixture-fanout-shared",
+          ),
+        );
+        assert.equal(runForThread.mock.calls.length, 2);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   for (const scenario of ["success", "turn-start-fails", "retired"] as const) {
     it.effect(`chat without a project first send: ${scenario}`, () =>
       Effect.gen(function* () {

@@ -54,15 +54,19 @@ import {
   composerDraftImageDedupKey,
   encodeComposerAttachmentDataUrl,
   ensureProjectProviderCommands,
+  describeModelMultiSelectTarget,
   latestClaudeCacheObservation,
   mergeProjectProviderCommands,
+  modelMultiSelectSendBlockReason,
   projectProviderCommandsKey,
   PROMPT_STASH_MAX_ENTRIES,
   buildPromptHistoryEntries,
   composerTargetKey,
   type FileReferenceDraft,
+  pruneModelMultiSelect,
   readProjectProviderCommands,
   resolveApprovalRedirect,
+  resolveModelMultiSelectTargets,
   stepPromptHistory,
   stripInlineTerminalContextPlaceholders,
   subscribeProjectProviderCommands,
@@ -128,6 +132,9 @@ import {
   getProviderModelTuningSummary,
 } from "./composerProviderState";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
+import type { ModelPickerMultiSelect } from "./modelPickerMultiSelect";
+import { setMultiModelSelection, useMultiModelSelection } from "./multiModelSendStore";
+import { inlineUploadBlockReason } from "../../hooks/executeChatSendTurn";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
 import { ComposerTaskChip } from "../tasks/ComposerTaskChip";
@@ -408,6 +415,11 @@ export interface ChatComposerProps {
   activeThreadModelSelection: ModelSelection | null | undefined;
   /** The node has an enabled CLIProxyAPI hub that Claude instances may be routed through. */
   cliProxyHubsEnabled: boolean;
+  /**
+   * The picker may choose several models for one send ("Compare models"): a
+   * new draft in a Git project, on a node that isolates each in a worktree.
+   */
+  multiModelSendAvailable?: boolean;
 
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
@@ -612,6 +624,7 @@ export const ChatComposer = memo(
       providerStatuses,
       activeThreadModelSelection,
       cliProxyHubsEnabled,
+      multiModelSendAvailable = false,
       activeThreadActivities,
       phoneThreadDock,
       delegationDock,
@@ -933,6 +946,44 @@ export const ChatComposer = memo(
       }
       return out;
     }, [providerInstanceEntries, selectedInstanceId, selectedModel, settings]);
+    // "Compare models": the draft's selection, kept beyond this mount. The
+    // frozen phone tier keeps single selection.
+    const multiModelDraftId =
+      multiModelSendAvailable && presentationTier !== "phone" ? draftId : null;
+    const multiModelSelection = useMultiModelSelection(multiModelDraftId);
+    // Models that left the catalog leave the selection (a send never moves a
+    // target). One that is only unavailable for now stays: the send refuses it
+    // by name. An empty catalog is a node still loading, not one without models.
+    useEffect(() => {
+      if (!multiModelDraftId || providerInstanceEntries.length === 0) return;
+      const pruned = pruneModelMultiSelect(
+        multiModelSelection,
+        (selection) =>
+          modelOptionsByInstance
+            .get(selection.instanceId)
+            ?.some((option) => option.slug === selection.model) === true,
+      );
+      if (pruned !== multiModelSelection) setMultiModelSelection(multiModelDraftId, pruned);
+    }, [modelOptionsByInstance, multiModelDraftId, multiModelSelection, providerInstanceEntries]);
+    const modelMultiSelect = useMemo<ModelPickerMultiSelect | undefined>(
+      () =>
+        multiModelDraftId
+          ? {
+              state: multiModelSelection,
+              labels: multiModelSelection.selections.map((selection) =>
+                describeModelMultiSelectTarget(selection, {
+                  entries: providerInstanceEntries,
+                  modelOptionsByInstance,
+                }),
+              ),
+              onChange: (next) => setMultiModelSelection(multiModelDraftId, next),
+            }
+          : undefined,
+      [modelOptionsByInstance, multiModelDraftId, multiModelSelection, providerInstanceEntries],
+    );
+    const multiModelTargets = modelMultiSelect
+      ? resolveModelMultiSelectTargets(modelMultiSelect.state, selectedModelSelection)
+      : null;
     const selectedModelForPickerWithCustomFallback = useMemo(() => {
       const currentOptions = modelOptionsByInstance.get(selectedInstanceId) ?? [];
       return currentOptions.some((option) => option.slug === selectedModelForPicker)
@@ -1149,9 +1200,16 @@ export const ChatComposer = memo(
       nowMs: Date.now(),
       records: fileUploadRecords,
     });
-    const composerSendBlockedReason = composerFileUploadSendBlock;
+    // A send to several models checks each model when it goes out; here only
+    // what the selection and the attachments allow.
+    const multiModelSendBlock =
+      modelMultiSelect && multiModelTargets
+        ? (modelMultiSelectSendBlockReason(modelMultiSelect.state) ??
+          inlineUploadBlockReason(composerImages))
+        : null;
+    const composerSendBlockedReason = composerFileUploadSendBlock ?? multiModelSendBlock;
     const composerHasSendableContent =
-      composerSendState.hasSendableContent && composerFileUploadSendBlock === null;
+      composerSendState.hasSendableContent && composerSendBlockedReason === null;
 
     // Upload completion flows back into the draft entry so dispatch, draft
     // persistence, and stash snapshots all read the token from the attachment.
@@ -3365,6 +3423,8 @@ export const ChatComposer = memo(
                   : {})}
                 onModelPickerOpenChange={setIsComposerModelPickerOpen}
                 onProviderModelSelect={onProviderModelSelect}
+                modelMultiSelect={modelMultiSelect}
+                sendTargetCount={multiModelTargets?.length ?? null}
                 showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                 askModeSupported={composerProviderControls.askModeSupported}
                 showPlanSidebarToggle={showPlanSidebarToggle}

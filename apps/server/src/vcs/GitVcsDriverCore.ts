@@ -13,7 +13,6 @@ import {
   Duration,
   Effect,
   Exit,
-  Fiber,
   FileSystem,
   Option,
   Path,
@@ -30,6 +29,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { DEFAULT_SERVER_SETTINGS, GitCommandError, type VcsRef } from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";
+import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
+import { makeKeyedSingleFlight } from "@ryco/shared/KeyedSingleFlight";
 import { withGitFilesystemGuidance } from "../git/gitFilesystemErrors.ts";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
@@ -964,6 +965,13 @@ const copyWorktreeDependencyInstallDirs = Effect.fn("copyWorktreeDependencyInsta
  * mode; a send within this window starts from that fetch.
  */
 export const WORKTREE_BASE_PREFETCH_REUSE_MS = 60_000;
+
+/** A worktree base fetch, shared by every prefetch and creation that joined it. */
+interface WorktreeBaseFetch {
+  /** A prefetch started it: a creation that joined it retries its failure. */
+  readonly prefetch: boolean;
+  readonly outcome: Exit.Exit<string, GitCommandError>;
+}
 
 export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* (options?: {
   executeOverride?: GitVcsDriver.GitVcsDriverShape["execute"];
@@ -2430,62 +2438,92 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return current;
     });
 
-  /** A base fetch started by `prefetchWorktreeBase`, keyed by repository and base. */
-  const worktreeBasePrefetches = new Map<
-    string,
-    { readonly fiber: Fiber.Fiber<string, GitCommandError>; settledAt: number | null }
-  >();
-  const worktreeBaseKey = (cwd: string, refName: string) => `${path.resolve(cwd)}\u0000${refName}`;
+  /**
+   * A worktree base by repository and the remote-tracking ref its fetch
+   * updates: `origin/main` and `main` name one ref, so they share one key.
+   */
+  const worktreeBaseKey = (cwd: string, refName: string) => {
+    const base = refName === "origin/HEAD" ? refName : refName.replace(/^origin\//, "");
+    return `${path.resolve(cwd)}\u0000${base}`;
+  };
   /** Fetches the base a worktree names and returns its branch on origin. */
   const fetchWorktreeBase = (cwd: string, refName: string) => {
     if (refName === "origin/HEAD") return fetchOriginDefaultBranch(cwd);
     const branch = refName.startsWith("origin/") ? refName.slice("origin/".length) : refName;
     return fetchOriginBranch(cwd, branch).pipe(Effect.as(branch));
   };
-  /** A prefetch of this base still running, or finished recently enough to reuse. */
-  const reusableWorktreeBasePrefetch = (key: string) => {
-    const entry = worktreeBasePrefetches.get(key);
-    if (!entry) return null;
-    if (
-      entry.settledAt !== null &&
-      Date.now() - entry.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS
-    ) {
-      worktreeBasePrefetches.delete(key);
+  /**
+   * Base fetches of one repository run one at a time: two that update one ref
+   * (`origin/HEAD` and the branch it names) race for its lock.
+   */
+  const worktreeBaseFetchLocks = yield* makeKeyedSerialExecutor<string>();
+  /**
+   * The branches this driver creates, renames and cleans up in one repository
+   * (by its common directory) change one at a time. Each change writes the
+   * shared `.git/config` (a new branch's upstream, a renamed or deleted
+   * branch's section), and a Git without `core.configLockTimeout` (Apple's
+   * among them) fails at once on a lock another holds: a rename then even
+   * stops halfway, its ref moved but its section not. A rename also picks a
+   * free name before it takes it.
+   */
+  const branchChangeLocks = yield* makeKeyedSerialExecutor<string>();
+  /** Prefetched bases, by `worktreeBaseKey`: a creation reuses one for a while. */
+  const settledWorktreeBasePrefetches = new Map<
+    string,
+    { readonly branch: string; readonly settledAt: number }
+  >();
+  const recentWorktreeBasePrefetch = (key: string): string | null => {
+    const settled = settledWorktreeBasePrefetches.get(key);
+    if (!settled) return null;
+    if (Date.now() - settled.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS) {
+      settledWorktreeBasePrefetches.delete(key);
       return null;
     }
-    return entry;
+    return settled.branch;
+  };
+  const recordWorktreeBasePrefetch = (key: string, outcome: WorktreeBaseFetch["outcome"]) => {
+    if (Exit.isSuccess(outcome)) {
+      settledWorktreeBasePrefetches.set(key, { branch: outcome.value, settledAt: Date.now() });
+    }
+  };
+  /**
+   * The base fetch running for each `worktreeBaseKey`. Prefetches and
+   * creations that start together (one prompt sent to several models, the
+   * composer prefetching meanwhile) share one: parallel fetches of one ref race
+   * for its lock, and all but one of them fail.
+   */
+  const worktreeBaseFetches = makeKeyedSingleFlight<string, WorktreeBaseFetch, never>();
+  const joinWorktreeBaseFetch = (cwd: string, refName: string, prefetch: boolean) => {
+    const key = worktreeBaseKey(cwd, refName);
+    // Built only by the caller that starts the fetch, not by every one that joins it.
+    const fetchBase = Effect.suspend(() => fetchWorktreeBase(cwd, refName));
+    return worktreeBaseFetches.join(
+      key,
+      worktreeBaseFetchLocks.withLock(path.resolve(cwd), fetchBase).pipe(
+        Effect.exit,
+        // Recorded by the run itself, so a prefetch whose client stopped
+        // waiting (it navigated away) still serves the send that follows.
+        Effect.tap((outcome) =>
+          Effect.sync(() => {
+            if (prefetch) recordWorktreeBasePrefetch(key, outcome);
+          }),
+        ),
+        Effect.map((outcome): WorktreeBaseFetch => ({ prefetch, outcome })),
+      ),
+    );
   };
   const prefetchWorktreeBase: GitVcsDriver.GitVcsDriverShape["prefetchWorktreeBase"] = (input) =>
     Effect.gen(function* () {
       const key = worktreeBaseKey(input.cwd, input.refName);
-      const existing = reusableWorktreeBasePrefetch(key);
-      if (existing) return yield* Fiber.join(existing.fiber).pipe(Effect.asVoid);
-      for (const [candidate, entry] of worktreeBasePrefetches) {
-        if (
-          entry.settledAt !== null &&
-          Date.now() - entry.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS
-        )
-          worktreeBasePrefetches.delete(candidate);
+      if (recentWorktreeBasePrefetch(key) !== null) return;
+      // Forget the stale prefetches of other bases.
+      for (const candidate of settledWorktreeBasePrefetches.keys()) {
+        recentWorktreeBasePrefetch(candidate);
       }
-      const entry: { fiber: Fiber.Fiber<string, GitCommandError>; settledAt: number | null } = {
-        fiber: undefined as unknown as Fiber.Fiber<string, GitCommandError>,
-        settledAt: null,
-      };
-      // Detached: a client that stops waiting (it navigated away) must not
-      // interrupt a fetch the first send may already be waiting on.
-      entry.fiber = yield* Effect.forkDetach(
-        fetchWorktreeBase(input.cwd, input.refName).pipe(
-          Effect.onExit((exit) =>
-            Effect.sync(() => {
-              if (Exit.isSuccess(exit)) entry.settledAt = Date.now();
-              else if (worktreeBasePrefetches.get(key) === entry)
-                worktreeBasePrefetches.delete(key);
-            }),
-          ),
-        ),
-      );
-      worktreeBasePrefetches.set(key, entry);
-      yield* Fiber.join(entry.fiber).pipe(Effect.asVoid);
+      const fetched = yield* joinWorktreeBaseFetch(input.cwd, input.refName, true);
+      // It joined a creation's fetch, which serves as well as its own would.
+      if (!fetched.prefetch) recordWorktreeBasePrefetch(key, fetched.outcome);
+      yield* Effect.asVoid(fetched.outcome);
     });
 
   const notARepositoryRefs = {
@@ -2824,19 +2862,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // base (the composer asks for one when it enters worktree mode) stands in
       // for it while running or recently finished; a failed one is retried here.
       yield* input.progress?.onFetchStarted?.() ?? Effect.void;
-      const prefetch = reusableWorktreeBasePrefetch(worktreeBaseKey(input.cwd, baseRef));
-      const prefetched = prefetch
-        ? yield* Fiber.join(prefetch.fiber).pipe(Effect.option)
-        : Option.none<string>();
-      const baseBranch = Option.isSome(prefetched)
-        ? prefetched.value
-        : yield* fetchWorktreeBase(input.cwd, baseRef);
-      yield* (
-        input.progress?.onFetchFinished?.({
-          reused: Option.isSome(prefetched),
-          branch: baseBranch,
-        }) ?? Effect.void
-      );
+      const prefetched = recentWorktreeBasePrefetch(worktreeBaseKey(input.cwd, baseRef));
+      let reused = prefetched !== null;
+      let baseBranch = prefetched;
+      if (baseBranch === null) {
+        let fetched = yield* joinWorktreeBaseFetch(input.cwd, baseRef, false);
+        // A failed prefetch is retried here; a creation's failed fetch is the
+        // answer for every creation that joined it.
+        if (fetched.prefetch && Exit.isFailure(fetched.outcome)) {
+          fetched = yield* joinWorktreeBaseFetch(input.cwd, baseRef, false);
+        }
+        reused = fetched.prefetch;
+        baseBranch = yield* fetched.outcome;
+      }
+      yield* input.progress?.onFetchFinished?.({ reused, branch: baseBranch }) ?? Effect.void;
       // Fully qualified refs prevent a same-named local branch from winning.
       baseRef = `refs/remotes/origin/${baseBranch}`;
     }
@@ -2888,9 +2927,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       yield* Effect.addFinalizer(() => release);
     }
 
-    const args = input.newRefName
-      ? ["worktree", "add", "-b", input.newRefName, worktreePath, baseRef]
-      : ["worktree", "add", worktreePath, baseRef];
+    // A new branch is created first, as `worktree add -b` does itself (tracking
+    // included), but under `branchChangeLocks`: only that short config write
+    // waits for other creations, not the checkout.
+    const newRefName = input.newRefName;
+    const args = ["worktree", "add", worktreePath, newRefName ?? baseRef];
     const onCheckoutProgress = input.progress?.onCheckoutProgress;
 
     return yield* Effect.scoped(
@@ -2925,12 +2966,40 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               }
               yield* recoverSetup(input.cwd, worktreePath);
               const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+              const createBranch = newRefName
+                ? branchChangeLocks.withLock(
+                    repositoryPath,
+                    executeGit(
+                      "GitVcsDriver.createWorktree.createBranch",
+                      input.cwd,
+                      ["branch", "--", newRefName, baseRef],
+                      { fallbackErrorMessage: "git branch failed" },
+                    ),
+                  )
+                : Effect.void;
+              // A branch created here is deleted again when its checkout fails or
+              // is cut off, so an identical retry is not refused on it. Git keeps
+              // a branch a registered checkout uses: a partial checkout keeps it.
+              const removeCreatedBranch = newRefName
+                ? branchChangeLocks
+                    .withLock(
+                      repositoryPath,
+                      executeGit(
+                        "GitVcsDriver.createWorktree.removeBranch",
+                        input.cwd,
+                        ["branch", "-D", "--", newRefName],
+                        { allowNonZeroExit: true, timeoutMs: 10_000 },
+                      ),
+                    )
+                    .pipe(Effect.ignore)
+                : Effect.void;
               yield* input.progress?.onCheckoutStarted?.() ?? Effect.void;
               // Persist journal and mutation ownership before Git can register a
               // checkout. A cancelled child leaves an uncertain guard for inspection.
               yield* Effect.uninterruptibleMask((restore) =>
                 beginWorktreeSetup(config.stateDir, worktreePath, repositoryPath).pipe(
                   Effect.andThen(mutation),
+                  Effect.andThen(restore(createBranch)),
                   Effect.andThen(
                     restore(
                       executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
@@ -2952,7 +3021,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                             }
                           : {}),
                       }),
-                    ),
+                    ).pipe(Effect.onError(() => removeCreatedBranch)),
                   ),
                 ),
               );
@@ -3236,19 +3305,25 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       if (input.oldBranch === input.newBranch) {
         return { branch: input.newBranch };
       }
-      const targetBranch = yield* resolveAvailableBranchName(input.cwd, input.newBranch);
-
-      yield* executeGit(
-        "GitVcsDriver.renameBranch",
-        input.cwd,
-        ["branch", "-m", "--", input.oldBranch, targetBranch],
-        {
-          timeoutMs: 10_000,
-          fallbackErrorMessage: "git branch rename failed",
-        },
+      // Threads started together rename their branches as each goes idle, often
+      // to the same name: the free name is picked and taken under the lock.
+      const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+      return yield* branchChangeLocks.withLock(
+        repositoryPath,
+        Effect.gen(function* () {
+          const targetBranch = yield* resolveAvailableBranchName(input.cwd, input.newBranch);
+          yield* executeGit(
+            "GitVcsDriver.renameBranch",
+            input.cwd,
+            ["branch", "-m", "--", input.oldBranch, targetBranch],
+            {
+              timeoutMs: 10_000,
+              fallbackErrorMessage: "git branch rename failed",
+            },
+          );
+          return { branch: targetBranch };
+        }),
       );
-
-      return { branch: targetBranch };
     },
   );
 
@@ -3350,14 +3425,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const deleteBranch: GitVcsDriver.GitVcsDriverShape["deleteBranch"] = Effect.fn("deleteBranch")(
     function* (input) {
-      yield* executeGit(
-        "GitVcsDriver.deleteBranch",
-        input.cwd,
-        ["branch", input.force ? "-D" : "-d", input.refName],
-        {
-          timeoutMs: 10_000,
-          fallbackErrorMessage: "git branch delete failed",
-        },
+      // Deleting a branch drops its config section: a cancelled send cleans up
+      // while other branches of the repository are being created.
+      const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+      yield* branchChangeLocks.withLock(
+        repositoryPath,
+        executeGit(
+          "GitVcsDriver.deleteBranch",
+          input.cwd,
+          ["branch", input.force ? "-D" : "-d", input.refName],
+          {
+            timeoutMs: 10_000,
+            fallbackErrorMessage: "git branch delete failed",
+          },
+        ),
       );
     },
   );

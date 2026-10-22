@@ -1,8 +1,14 @@
 import {
+  MULTI_MODEL_SEND_MAX_TARGETS,
   applyModelFavorite,
   createModelFavorite,
+  disableModelMultiSelect,
+  enableModelMultiSelect,
   modelFavoriteKey,
+  modelMultiSelectKey,
+  modelMultiSelectMinimum,
   toggleModelFavorite,
+  toggleModelMultiSelect,
   indexModelFavorites,
   resolveModelFavoriteForRow,
   getModelFavoriteEffortLabel,
@@ -15,7 +21,7 @@ import {
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { resolveSelectableModel } from "@ryco/shared/model";
+import { createModelSelection, resolveSelectableModel } from "@ryco/shared/model";
 import {
   memo,
   useMemo,
@@ -28,6 +34,8 @@ import {
 import { SearchIcon } from "lucide-react";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
+import { ModelPickerCompareBar } from "./ModelPickerCompareBar";
+import type { ModelPickerMultiSelect } from "./modelPickerMultiSelect";
 import { buildModelPickerSearchText, scoreModelPickerSearch } from "./modelPickerSearch";
 import { Combobox, ComboboxEmpty, ComboboxInput, ComboboxList } from "../ui/combobox";
 import {
@@ -113,6 +121,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
    * re-picking the active row still close.
    */
   tuning?: ReactNode;
+  /**
+   * "Compare models": with it, Shift-click (or Shift+Enter) adds a model to
+   * the selection, and while the mode is on every pick adds or removes one.
+   */
+  multiSelect?: ModelPickerMultiSelect | undefined;
   onRequestClose?: () => void;
   onInstanceModelChange: (
     instanceId: ProviderInstanceId,
@@ -446,6 +459,57 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     selectedInstanceId,
   ]);
 
+  /**
+   * The options a pick of this instance keeps when it names none: the
+   * composer's live ones for its own instance, the draft's saved ones otherwise.
+   */
+  const savedOptionsFor = useCallback(
+    (instanceId: ProviderInstanceId): ReadonlyArray<ProviderOptionSelection> =>
+      instanceId === props.activeInstanceId
+        ? (props.modelOptions ?? [])
+        : (props.savedModelOptionsByInstance?.[instanceId] ?? []),
+    [props.activeInstanceId, props.modelOptions, props.savedModelOptionsByInstance],
+  );
+
+  /** The model a row picks, with a favorite's preset applied; null when it is gone. */
+  const resolveModelPick = useCallback(
+    (
+      modelSlug: string,
+      instanceId: ProviderInstanceId,
+      favorite?: ModelFavorite,
+    ): {
+      instanceId: ProviderInstanceId;
+      model: string;
+      options?: ReadonlyArray<ProviderOptionSelection>;
+    } | null => {
+      const options = modelOptionsByInstance.get(instanceId);
+      if (!options) {
+        return null;
+      }
+      const entry = entryByInstanceId.get(instanceId);
+      if (!entry) {
+        return null;
+      }
+      // `resolveSelectableModel` uses the driver kind for normalization
+      // (slug casing etc.). Custom instances share their driver's
+      // normalization rules, so pass the driver kind here.
+      const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
+      if (!resolvedModel) {
+        return null;
+      }
+      if (favorite?.reasoningEffort === undefined) {
+        return { instanceId, model: resolvedModel };
+      }
+      const selection = applyModelFavorite(
+        favorite,
+        { instanceId, model: resolvedModel, options: savedOptionsFor(instanceId) },
+        capabilitiesByModelKey.get(providerModelKey(instanceId, resolvedModel)),
+      );
+      return { instanceId, model: resolvedModel, options: selection.options ?? [] };
+    },
+    [entryByInstanceId, modelOptionsByInstance, savedOptionsFor, capabilitiesByModelKey],
+  );
+
   const handleModelSelect = useCallback(
     (
       modelSlug: string,
@@ -453,48 +517,69 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       favorite?: ModelFavorite,
       keepOpen = false,
     ) => {
+      const pick = resolveModelPick(modelSlug, instanceId, favorite);
+      if (!pick) return;
       const meta = keepOpen ? { keepOpen: true } : undefined;
-      const options = modelOptionsByInstance.get(instanceId);
-      if (!options) {
-        return;
-      }
-      const entry = entryByInstanceId.get(instanceId);
-      if (!entry) {
-        return;
-      }
-      // `resolveSelectableModel` uses the driver kind for normalization
-      // (slug casing etc.). Custom instances share their driver's
-      // normalization rules, so pass the driver kind here.
-      const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
-      if (resolvedModel) {
-        if (favorite?.reasoningEffort !== undefined) {
-          const selection = applyModelFavorite(
-            favorite,
-            {
-              instanceId,
-              model: resolvedModel,
-              options:
-                instanceId === props.activeInstanceId
-                  ? (props.modelOptions ?? [])
-                  : (props.savedModelOptionsByInstance?.[instanceId] ?? []),
-            },
-            capabilitiesByModelKey.get(providerModelKey(instanceId, resolvedModel)),
-          );
-          onInstanceModelChange(instanceId, resolvedModel, selection.options ?? [], meta);
-        } else {
-          onInstanceModelChange(instanceId, resolvedModel, undefined, meta);
-        }
-      }
+      onInstanceModelChange(pick.instanceId, pick.model, pick.options, meta);
     },
-    [
-      entryByInstanceId,
-      modelOptionsByInstance,
-      onInstanceModelChange,
-      props.activeInstanceId,
-      props.modelOptions,
-      props.savedModelOptionsByInstance,
-      capabilitiesByModelKey,
-    ],
+    [onInstanceModelChange, resolveModelPick],
+  );
+
+  const multiSelect = props.multiSelect;
+  const multiSelectState = multiSelect?.state;
+  const compareEnabled = multiSelectState?.enabled === true;
+  const compareMax = multiSelect?.max ?? MULTI_MODEL_SEND_MAX_TARGETS;
+  // Set when the last pick was refused because the selection is full.
+  const [compareFull, setCompareFull] = useState(false);
+  const activeSelection = useMemo(
+    () => createModelSelection(props.activeInstanceId, props.model, props.modelOptions),
+    [props.activeInstanceId, props.model, props.modelOptions],
+  );
+  const compareKeys = useMemo(
+    () =>
+      new Set(
+        multiSelectState?.enabled ? multiSelectState.selections.map(modelMultiSelectKey) : [],
+      ),
+    [multiSelectState],
+  );
+  const setCompareEnabled = useCallback(
+    (enabled: boolean) => {
+      if (!multiSelect) return;
+      setCompareFull(false);
+      multiSelect.onChange(
+        enabled
+          ? enableModelMultiSelect(multiSelect.state, activeSelection)
+          : disableModelMultiSelect(),
+      );
+    },
+    [activeSelection, multiSelect],
+  );
+  /** Adds the row's model to "Compare models" or removes it; turns the mode on if needed. */
+  const handleModelToggle = useCallback(
+    (modelSlug: string, instanceId: ProviderInstanceId, favorite?: ModelFavorite) => {
+      if (!multiSelect) return;
+      const pick = resolveModelPick(modelSlug, instanceId, favorite);
+      if (!pick) return;
+      const result = toggleModelMultiSelect(multiSelect.state, {
+        active: activeSelection,
+        // Without a favorite's preset, a model keeps the options a pick of it
+        // would (the effort and the like the draft holds for its instance).
+        target: createModelSelection(
+          pick.instanceId,
+          pick.model,
+          pick.options ?? savedOptionsFor(pick.instanceId),
+        ),
+        max: compareMax,
+      });
+      setCompareFull(result.refused);
+      if (result.state !== multiSelect.state) multiSelect.onChange(result.state);
+    },
+    [activeSelection, compareMax, multiSelect, resolveModelPick, savedOptionsFor],
+  );
+  /** A pick toggles a model while the mode is on, or when Shift is held. */
+  const isComparePick = useCallback(
+    (shiftKey: boolean) => multiSelect !== undefined && (compareEnabled || shiftKey),
+    [compareEnabled, multiSelect],
   );
 
   const LockedProviderIcon =
@@ -594,7 +679,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       if (!target) return;
       event.preventDefault();
       event.stopPropagation();
-      handleModelSelect(target.slug, target.instanceId, target.favorite);
+      if (isComparePick(false)) handleModelToggle(target.slug, target.instanceId, target.favorite);
+      else handleModelSelect(target.slug, target.instanceId, target.favorite);
     };
 
     window.addEventListener("keydown", onWindowKeyDown, true);
@@ -605,6 +691,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   }, [
     filteredModelByKey,
     handleModelSelect,
+    handleModelToggle,
+    isComparePick,
     keybindings,
     modelJumpModelKeys,
     modelJumpShortcutContext,
@@ -726,7 +814,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         filter={null}
         autoHighlight
         open
-        value={selectedRow ? itemKey(selectedRow) : null}
+        // While comparing, the checks show what is chosen, not the composer's model.
+        value={!compareEnabled && selectedRow ? itemKey(selectedRow) : null}
         onItemHighlighted={(modelKey) => {
           highlightedModelKeyRef.current = typeof modelKey === "string" ? modelKey : null;
         }}
@@ -736,6 +825,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           }
           const target = filteredModelByKey.get(modelKey);
           if (!target) return;
+          const event = eventDetails.event;
+          if (isComparePick("shiftKey" in event && event.shiftKey === true)) {
+            handleModelToggle(target.slug, target.instanceId, target.favorite);
+            return;
+          }
           // With a tuning footer, a pointer pick of another row switches the
           // model in place; keyboard picks and re-picking the active row close.
           const pointerPick =
@@ -781,7 +875,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   e.preventDefault();
                   e.stopPropagation();
                   const target = filteredModelByKey.get(highlightedModelKeyRef.current);
-                  if (target) handleModelSelect(target.slug, target.instanceId, target.favorite);
+                  if (!target) return;
+                  if (isComparePick(e.shiftKey)) {
+                    handleModelToggle(target.slug, target.instanceId, target.favorite);
+                  } else {
+                    handleModelSelect(target.slug, target.instanceId, target.favorite);
+                  }
                   return;
                 }
                 e.stopPropagation();
@@ -820,6 +919,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     preferShortName={!isLocked}
                     useTriggerLabel={isLocked && !showLockedInstanceSidebar}
                     jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
+                    compareChecked={
+                      compareEnabled
+                        ? compareKeys.has(
+                            modelMultiSelectKey({
+                              instanceId: model.instanceId,
+                              model: model.slug,
+                            }),
+                          )
+                        : undefined
+                    }
                     onToggleFavorite={() =>
                       updateClientModelFavorites((current) =>
                         toggleModelFavorite(current, row.favorite),
@@ -833,6 +942,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
             No models found
           </ComboboxEmpty>
+          {multiSelect ? (
+            <ModelPickerCompareBar
+              enabled={compareEnabled}
+              count={compareEnabled ? multiSelect.state.selections.length : 0}
+              minimum={modelMultiSelectMinimum(multiSelect.state)}
+              max={compareMax}
+              full={compareFull}
+              onEnabledChange={setCompareEnabled}
+            />
+          ) : null}
         </div>
       </Combobox>
     </div>

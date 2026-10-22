@@ -13,6 +13,8 @@ export * from "./logic.ts";
 export * from "./mentionSyntax.ts";
 export * from "./modelOrdering.ts";
 export * from "./modelSelection.ts";
+export * from "./modelMultiSelect.ts";
+export * from "./multiModelSend.ts";
 export * from "./providerInstances.ts";
 export * from "./providerModels.ts";
 export * from "./providerSelectionPolicy.ts";

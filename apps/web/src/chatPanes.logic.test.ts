@@ -6,6 +6,7 @@ import {
   movePane,
   paneDropSide,
   paneGeometry,
+  paneGrid,
   paneLeaves,
   resizePane,
   resolvePaneDrop,
@@ -31,6 +32,16 @@ describe("bounded thread panes", () => {
     expect(splitPane(grid(), a, ref("e"), "top")).toEqual(grid());
     const root = pair();
     expect(splitPane(root, b, c, "right")).toBe(root);
+  });
+  it("lays up to four threads out in reading order, two on top", () => {
+    expect(paneGrid([])).toBeNull();
+    expect(paneGrid([a])).toEqual(leaf);
+    expect(paneGrid([a, b])).toEqual(pair());
+    expect(paneGrid([a, b, c, d])).toEqual(grid());
+    expect(paneGrid([a, b, c, d, ref("e")])).toEqual(grid());
+    const three = paneGrid([a, b, c])!;
+    expect(paneLeaves(three)).toEqual([a, c, b]);
+    expect(paneGeometry(three).leaves.find((pane) => pane.ref === b)?.rect.top).toBe(0);
   });
   it("rejects duplicate, missing target and cross-environment threads", () => {
     const root = pair();

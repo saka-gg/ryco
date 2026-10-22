@@ -126,7 +126,7 @@ Invalid imports are rejected without changing local preferences. The same shared
 - `composer.stash`: stash prompt text and images, or open the stash picker when the composer is empty
 - `editor.openFavorite`: open current project/worktree in the last-used editor
 - `modelPicker.toggle`: open or close the model picker
-- `modelPicker.jump.1` through `modelPicker.jump.9`: pick a visible model by position while the model picker is open
+- `modelPicker.jump.1` through `modelPicker.jump.9`: pick a visible model by position while the model picker is open; while **Compare models** is on, they add or remove that model instead. In a new thread's picker, `Shift`-click or `Shift+Enter` on a model also adds it to the comparison (see [docs/user/composer.md](docs/user/composer.md#compare-models)); these two are fixed and cannot be rebound.
 - `thread.previous` / `thread.next`: navigate between threads
 - `thread.jump.1` through `thread.jump.9`: jump to a visible thread by position
 - `projectScript.{environment}/{project}/{id}.run`: a locally assigned script shortcut. The app constructs these scoped IDs; legacy `script.{id}.run` rules are supported only through explicit import.

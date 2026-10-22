@@ -21,6 +21,7 @@ import {
   type ProviderDriverKind,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type ServerConfig,
   type ServerProvider,
   type ThreadId,
   type ThreadGoalUpdate,
@@ -482,6 +483,100 @@ export function restoreUnsentComposerContent(input: {
 
 export { buildSendTurnBootstrap } from "@ryco/client-runtime/state/composer";
 
+/** A new thread's title, from its first message: its text, else its first attachment's name. */
+export function resolveSendTurnTitle(input: {
+  readonly trimmedPrompt: string;
+  readonly images: ReadonlyArray<ComposerImageAttachment>;
+  readonly terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  readonly fileReferences: ReadonlyArray<FileReferenceDraft>;
+}): { readonly title: string; readonly titleSeedText: string } {
+  const firstTerminalContext = input.terminalContexts[0];
+  const firstFileReference = input.fileReferences[0];
+  const titleSeedText = buildChatSendTitleSeed({
+    trimmedPrompt: input.trimmedPrompt,
+    firstImageName: input.images[0]?.name ?? null,
+    firstTerminalContextLabel: firstTerminalContext
+      ? formatTerminalContextLabel(firstTerminalContext)
+      : null,
+    firstFileReferenceTitle: firstFileReference
+      ? formatFileReferenceTitle(firstFileReference)
+      : null,
+  });
+  return { title: truncate(titleSeedText), titleSeedText };
+}
+
+/**
+ * What a send that creates a worktree tells the node about it: the branch
+ * prefix (when the send does not name its branch) and whether the setup script
+ * runs. `config` is the node's config when the send creates a worktree.
+ */
+export async function resolveWorktreeSendPreferences(input: {
+  readonly api: EnvironmentApi;
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly createsWorktree: boolean;
+  readonly needsBranchPrefix: boolean;
+}): Promise<{
+  readonly config: ServerConfig | null;
+  readonly worktreeBranchPrefix: string | undefined;
+  readonly runSetupScript: boolean | undefined;
+}> {
+  const { api, environmentId, projectId, needsBranchPrefix } = input;
+  if (needsBranchPrefix && !api.server) {
+    throw new Error("Server settings are unavailable for worktree creation.");
+  }
+  // Nothing here waits on a server round trip in the common case. Support for
+  // project preferences comes from the environment's live config (hosted
+  // targets only from the connection's config for the current attempt and
+  // generation, else read fresh: a cached one may still be another node's), the
+  // branch prefix from the preferences remembered when the draft opened or
+  // worktree mode was entered (while the node's settings are unchanged), and
+  // the setup-script choice is left to the server, which resolves the same
+  // preferences while it bootstraps.
+  const readSettingsFallback = () =>
+    api.server!.getSettings().then(
+      (settings) => ({ ok: true as const, settings }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+  // Without a remembered prefix, the node-wide fallback is read alongside the
+  // config; its outcome, a failure included, only counts when the project
+  // names no prefix.
+  const settingsFallback =
+    needsBranchPrefix && api.server && !hasRememberedProjectPreferences(environmentId, projectId)
+      ? readSettingsFallback()
+      : undefined;
+  const config = input.createsWorktree
+    ? await readNodeConfig(
+        resolveNodeConfigSource(environmentId, { currentOnly: isHostedHubMode() }),
+        api,
+      )
+    : null;
+  const remembered = needsBranchPrefix
+    ? readRememberedProjectPreferences(environmentId, projectId, config)
+    : null;
+  const supportsPreferences = config?.environment.capabilities.projectPreferences === true;
+  let worktreeBranchPrefix: string | undefined;
+  if (needsBranchPrefix && api.server) {
+    const effective = supportsPreferences
+      ? (remembered ??
+        (await readAndRememberProjectPreferences({ api, environmentId, config, projectId })))
+      : null;
+    worktreeBranchPrefix = effective?.worktreeBranchPrefix.value;
+    if (worktreeBranchPrefix === undefined) {
+      const fallback = await (settingsFallback ?? readSettingsFallback());
+      if (!fallback.ok) throw fallback.error;
+      worktreeBranchPrefix = fallback.settings.worktreeBranchPrefix;
+    }
+  }
+  return {
+    config,
+    worktreeBranchPrefix,
+    // A node with project preferences resolves the project's choice itself;
+    // an older one runs the setup script as it always did.
+    runSetupScript: supportsPreferences ? undefined : true,
+  };
+}
+
 export function buildOutgoingMessageText(input: {
   readonly composer: SendTurnComposerSnapshot;
   readonly formatOutgoingPrompt: ExecuteChatSendTurnInput["formatOutgoingPrompt"];
@@ -501,16 +596,40 @@ export function buildOutgoingMessageText(input: {
   });
 }
 
+/**
+ * Why attachments cannot go inline: a streamed file whose bytes the composer no
+ * longer holds (only its upload token outlived a reload). An upload token goes
+ * with one command, so a send that goes out as several commands needs them.
+ */
+export function inlineUploadBlockReason(
+  images: ReadonlyArray<ComposerImageAttachment>,
+): string | null {
+  const unavailable = images.find(
+    (image) => image.type === "file" && image.uploadToken !== undefined && image.file === null,
+  );
+  return unavailable ? `Attach '${unavailable.name}' again to send it to several models.` : null;
+}
+
 export async function buildOutgoingTurnAttachments(
   images: readonly ComposerImageAttachment[],
-  options?: { nowMs?: number },
+  options?: {
+    nowMs?: number;
+    /**
+     * Sends streamed files inline instead of by their upload token, which one
+     * command claims: for a send that goes out as several commands.
+     */
+    inlineUploads?: boolean;
+  },
 ) {
   const nowMs = options?.nowMs ?? Date.now();
+  const inlineBlock = options?.inlineUploads ? inlineUploadBlockReason(images) : null;
+  if (inlineBlock) throw new Error(inlineBlock);
   return Promise.all(
     images.map(async (image) => {
       // Uploaded streamed files dispatch by token; images and legacy inline
       // files keep the dataUrl path.
       if (
+        !options?.inlineUploads &&
         image.type === "file" &&
         image.uploadToken !== undefined &&
         (image.expiresAt === undefined || isFileUploadTokenUsable(image.expiresAt, nowMs))
@@ -715,26 +834,12 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       draft.setComposerDraftTokenMode(draft.composerDraftTarget, settings.tokenMode);
       if (liveAtConsume) composerHandle.readComposer()?.resetCursorState();
     }
-    let firstComposerImageName: string | null = null;
-    if (imagesSnapshot.length > 0) {
-      const firstComposerImage = imagesSnapshot[0];
-      if (firstComposerImage) {
-        firstComposerImageName = firstComposerImage.name;
-      }
-    }
-    const titleSeedText = buildChatSendTitleSeed({
+    const { title, titleSeedText } = resolveSendTurnTitle({
       trimmedPrompt: composer.trimmedPrompt,
-      firstImageName: firstComposerImageName,
-      firstTerminalContextLabel:
-        terminalContextsSnapshot.length > 0
-          ? formatTerminalContextLabel(terminalContextsSnapshot[0]!)
-          : null,
-      firstFileReferenceTitle:
-        fileReferencesSnapshot.length > 0
-          ? formatFileReferenceTitle(fileReferencesSnapshot[0]!)
-          : null,
+      images: imagesSnapshot,
+      terminalContexts: terminalContextsSnapshot,
+      fileReferences: fileReferencesSnapshot,
     });
-    const title = truncate(titleSeedText);
 
     const threadCreateModelSelection = resolveThreadCreateModelSelection({
       selectedModelSelection: composer.selectedModelSelection,
@@ -747,72 +852,23 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     );
 
     // Resolve the node-owned default at creation time, including for queued drafts.
-    const needsBranchPrefix =
-      Boolean(worktree.baseBranchForWorktree) &&
-      !worktree.shouldMaterializeLegacyBranchWorktree &&
-      !worktree.worktreeBranchName;
-    if (needsBranchPrefix && !api.server) {
-      throw new Error("Server settings are unavailable for worktree creation.");
-    }
-    // Nothing here waits on a server round trip in the common case. Support for
-    // project preferences comes from the environment's live config (hosted
-    // targets only from the connection's config for the current attempt and
-    // generation, else read fresh: a cached one may still be another node's), the
-    // branch prefix from the preferences remembered when the draft opened or
-    // worktree mode was entered (while the node's settings are unchanged), and
-    // the setup-script choice is left to the server, which resolves the same
-    // preferences while it bootstraps.
-    const readSettingsFallback = () =>
-      api.server!.getSettings().then(
-        (settings) => ({ ok: true as const, settings }),
-        (error: unknown) => ({ ok: false as const, error }),
-      );
-    // Without a remembered prefix, the node-wide fallback is read alongside the
-    // config; its outcome, a failure included, only counts when the project
-    // names no prefix.
-    const settingsFallback =
-      needsBranchPrefix &&
-      api.server &&
-      !hasRememberedProjectPreferences(draft.environmentId, project.projectId)
-        ? readSettingsFallback()
-        : undefined;
-    const config = worktree.baseBranchForWorktree
-      ? await readNodeConfig(
-          resolveNodeConfigSource(draft.environmentId, { currentOnly: isHostedHubMode() }),
-          api,
-        )
-      : null;
-    const remembered = needsBranchPrefix
-      ? readRememberedProjectPreferences(draft.environmentId, project.projectId, config ?? null)
-      : null;
-    const supportsPreferences = config?.environment.capabilities.projectPreferences === true;
-    let worktreeBranchPrefix: string | undefined;
-    if (needsBranchPrefix && api.server) {
-      const effective = supportsPreferences
-        ? (remembered ??
-          (await readAndRememberProjectPreferences({
-            api,
-            environmentId: draft.environmentId,
-            config: config ?? null,
-            projectId: project.projectId,
-          })))
-        : null;
-      worktreeBranchPrefix = effective?.worktreeBranchPrefix.value;
-      if (worktreeBranchPrefix === undefined) {
-        const fallback = await (settingsFallback ?? readSettingsFallback());
-        if (!fallback.ok) throw fallback.error;
-        worktreeBranchPrefix = fallback.settings.worktreeBranchPrefix;
-      }
-    }
+    const worktreePreferences = await resolveWorktreeSendPreferences({
+      api,
+      environmentId: draft.environmentId,
+      projectId: project.projectId,
+      createsWorktree: Boolean(worktree.baseBranchForWorktree),
+      needsBranchPrefix:
+        Boolean(worktree.baseBranchForWorktree) &&
+        !worktree.shouldMaterializeLegacyBranchWorktree &&
+        !worktree.worktreeBranchName,
+    });
     const bootstrap = buildSendTurnBootstrap({
       isLocalDraftThread: thread.isLocalDraftThread,
       baseBranchForWorktree: worktree.baseBranchForWorktree,
       fetchOrigin: worktree.fetchOrigin,
       worktreeBranchName: worktree.worktreeBranchName,
-      worktreeBranchPrefix,
-      // A node with project preferences resolves the project's choice itself;
-      // an older one runs the setup script as it always did.
-      runSetupScript: supportsPreferences ? undefined : true,
+      worktreeBranchPrefix: worktreePreferences.worktreeBranchPrefix,
+      runSetupScript: worktreePreferences.runSetupScript,
       shouldMaterializeLegacyBranchWorktree: worktree.shouldMaterializeLegacyBranchWorktree,
       projectId: project.projectId,
       projectCwd: project.projectCwd,

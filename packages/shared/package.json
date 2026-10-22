@@ -202,6 +202,10 @@
       "types": "./src/KeyedSerialExecutor.ts",
       "import": "./src/KeyedSerialExecutor.ts"
     },
+    "./KeyedSingleFlight": {
+      "types": "./src/KeyedSingleFlight.ts",
+      "import": "./src/KeyedSingleFlight.ts"
+    },
     "./QueuePolicy": {
       "types": "./src/QueuePolicy.ts",
       "import": "./src/QueuePolicy.ts"
