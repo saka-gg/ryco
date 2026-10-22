@@ -147,8 +147,10 @@ import {
 } from "@ryco/shared/quoteCitations";
 import { cssHighlightRegistry } from "~/lib/cssHighlights";
 import { captureTextQuoteSelector } from "~/lib/textQuoteDom";
+import { useComposerDraftStore } from "../../composerDraftStore";
 import { useQuoteSourceJumpStore } from "../../quoteSourceJumpStore";
 import { useTimelineRevealStore } from "../../timelineRevealStore";
+import { PENDING_QUOTE_HIGHLIGHT_NAME } from "./usePendingQuoteHighlight";
 import {
   QUOTE_SOURCE_HIGHLIGHT_NAME,
   QUOTE_SOURCE_JUMP_TIMEOUT_MS,
@@ -2162,7 +2164,8 @@ describe("MessagesTimeline", () => {
       useTierOverrideStore.setState({ override: null });
       stopTier();
       useQuoteSourceJumpStore.setState({ active: null, unavailableSourceKeys: new Set() });
-      useTimelineRevealStore.setState({ requestsByThreadKey: {} });
+      useTimelineRevealStore.setState({ requestsByThreadKey: {}, settledByThreadKey: {} });
+      useComposerDraftStore.setState({ draftsByThreadKey: {} });
       cssHighlightRegistry()?.clear();
     });
 
@@ -2290,7 +2293,7 @@ describe("MessagesTimeline", () => {
         goneChip!.click();
         const request = useTimelineRevealStore.getState().requestsByThreadKey[threadKey]!;
         expect(request.messageId).toBe("assistant-removed");
-        useTimelineRevealStore.getState().settle(threadKey, request.requestId);
+        useTimelineRevealStore.getState().settle(threadKey, request.requestId, "missing");
         await vi.waitFor(
           () => {
             const chip = quoteChips()[0]!;
@@ -2460,6 +2463,102 @@ describe("MessagesTimeline", () => {
       } finally {
         await screen.unmount();
         useStore.setState({ environmentStateById: {} });
+      }
+    });
+
+    it("gives up on a reveal whose load failed without saying the source is gone", async () => {
+      const sent = expandQuoteCitations(serializeQuoteCitation(citationOf("assistant-paged-out")));
+      const screen = await render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[messageEntry("user-1", "user", sent)]}
+        />,
+      );
+      try {
+        await vi.waitFor(() => expect(quoteChips()).toHaveLength(1));
+        quoteChips()[0]!.click();
+        // The history load around the message failed (a dropped connection, say).
+        const request = useTimelineRevealStore.getState().requestsByThreadKey[threadKey]!;
+        useTimelineRevealStore.getState().settle(threadKey, request.requestId, "failed");
+        await vi.waitFor(() => expect(useQuoteSourceJumpStore.getState().active).toBeNull());
+        // Past the grace a settled reveal gets, the chip still says nothing.
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        expect(quoteChips()[0]!.dataset.sourceUnavailable).toBeUndefined();
+        expect(useQuoteSourceJumpStore.getState().unavailableSourceKeys.size).toBe(0);
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("marks the passages each timeline's draft quotes, in every timeline on screen", async () => {
+      const environmentId = EnvironmentId.make("environment-local");
+      const firstRef = { environmentId, threadId: ThreadId.make("thread-1") };
+      const secondRef = { environmentId, threadId: ThreadId.make("thread-2") };
+      const secondCitation = createQuoteCitation({
+        source: secondRef,
+        messageId: MessageId.make("assistant-2"),
+        selector: { exact: "Then more detail follows.", prefix: "", suffix: "", start: 0, end: 25 },
+      });
+      const pane = (key: string, messageId: string) => (
+        <div className="h-80">
+          <MessagesTimeline
+            {...buildProps()}
+            routeThreadKey={key}
+            timelineEntries={[messageEntry(messageId, "assistant", assistantText)]}
+          />
+        </div>
+      );
+      const highlighted = () => {
+        const highlight = cssHighlightRegistry()?.get(PENDING_QUOTE_HIGHLIGHT_NAME);
+        return highlight
+          ? [...highlight].map((range) => (range as Range).toString()).toSorted()
+          : [];
+      };
+      useComposerDraftStore
+        .getState()
+        .setPrompt(firstRef, `About ${serializeQuoteCitation(citationOf("assistant-1"))} `);
+      useComposerDraftStore
+        .getState()
+        .setPrompt(secondRef, `And ${serializeQuoteCitation(secondCitation)} `);
+      const screen = await render(
+        <>
+          {pane(threadKey, "assistant-1")}
+          {pane("environment-local:thread-2", "assistant-2")}
+        </>,
+      );
+      try {
+        await vi.waitFor(() =>
+          expect(highlighted()).toEqual([passage, "Then more detail follows."]),
+        );
+        const nextFrames = () =>
+          new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await nextFrames();
+        const [firstRange] = [
+          ...cssHighlightRegistry()!.get(PENDING_QUOTE_HIGHLIGHT_NAME)!,
+        ] as Range[];
+
+        // A change outside the quoted messages (a reply streaming in) repaints nothing.
+        const firstMessage = document.querySelector<HTMLElement>(
+          '[data-selection-message-id="assistant-1"]',
+        )!;
+        const elsewhere = document.createElement("span");
+        firstMessage.closest("[data-message-id]")!.parentElement!.append(elsewhere);
+        elsewhere.textContent = "streaming";
+        await nextFrames();
+        expect(
+          [...cssHighlightRegistry()!.get(PENDING_QUOTE_HIGHLIGHT_NAME)!].includes(firstRange!),
+        ).toBe(true);
+        elsewhere.remove();
+
+        // One timeline going leaves the other's marks in place.
+        await screen.rerender(<>{pane(threadKey, "assistant-1")}</>);
+        await vi.waitFor(() => expect(highlighted()).toEqual([passage]));
+        useComposerDraftStore.getState().setPrompt(firstRef, "About nothing");
+        await vi.waitFor(() =>
+          expect(cssHighlightRegistry()?.has(PENDING_QUOTE_HIGHLIGHT_NAME) ?? false).toBe(false),
+        );
+      } finally {
+        await screen.unmount();
       }
     });
 

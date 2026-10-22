@@ -19,9 +19,11 @@ import {
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { resolveComposerEnter } from "./composerFollowUp";
 import { QuoteCitationContext } from "./quoteCitationContext";
 import { QuoteChipIcon, QuoteCommentIcon, QuoteEditIcon } from "./quoteCitationIcons";
 import { useOpenQuoteSource } from "./useOpenQuoteSource";
+import { useSendShortcut } from "./useSendShortcut";
 
 const TOOLTIP_QUOTE_LENGTH = 280;
 
@@ -211,14 +213,16 @@ export function QuoteCitationDraftChip(props: {
 
 /**
  * The comment on one quote. It sits inside the composer's form, so it is no
- * form of its own and handles its keys itself: Enter saves, Shift+Enter adds
- * a line, Escape leaves the comment as it was. No key reaches the composer.
+ * form of its own and handles its keys itself: the Send shortcut saves, as it
+ * sends from every prompt input, Shift+Enter adds a line, and Escape leaves
+ * the comment as it was. No key reaches the composer.
  */
 function QuoteCitationCommentEditor(props: {
   readonly citation: QuoteCitation;
   readonly onSave: (comment: string) => void;
   readonly onCancel: () => void;
 }) {
+  const sendShortcut = useSendShortcut();
   const [comment, setComment] = useState(props.citation.comment ?? "");
   const [error, setError] = useState<string | null>(null);
   const save = () => {
@@ -259,7 +263,9 @@ function QuoteCitationCommentEditor(props: {
           setError(null);
         }}
         onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+          if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+          const prompt = event.currentTarget.value;
+          if (!resolveComposerEnter({ event, sendShortcut, prompt })) return;
           event.preventDefault();
           save();
         }}

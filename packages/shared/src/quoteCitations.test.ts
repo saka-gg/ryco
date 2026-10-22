@@ -2,6 +2,7 @@ import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  assertQuotableText,
   collectQuoteCitationTokens,
   createQuoteCitation,
   expandQuoteCitations,
@@ -98,7 +99,20 @@ describe("quote citation tokens", () => {
     ).toThrow(RangeError);
   });
 
+  it("reads a prompt's tokens once while it stays the same", () => {
+    const prompt = `See ${serializeQuoteCitation(citationOf("The passage."))} and this`;
+    const tokens = collectQuoteCitationTokens(prompt);
+    expect(collectQuoteCitationTokens(prompt)).toBe(tokens);
+    expect(collectQuoteCitationTokens(`${prompt}!`)).not.toBe(tokens);
+    expect(collectQuoteCitationTokens(`${prompt}!`)).toEqual(tokens);
+  });
+
   it("rejects quotes that are blank or past the limit", () => {
+    expect(() => assertQuotableText(" \n ")).toThrow("Select between 1 and 4,000 characters.");
+    expect(() => assertQuotableText("a".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH + 1))).toThrow(
+      RangeError,
+    );
+    expect(() => assertQuotableText("a".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH))).not.toThrow();
     expect(() => citationOf(" \n ")).toThrow(RangeError);
     expect(() => citationOf("a".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH + 1))).toThrow(RangeError);
     expect(citationOf("a".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH)).selector.exact).toHaveLength(

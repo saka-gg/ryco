@@ -543,4 +543,12 @@ describe("send engine — input limit", () => {
     // The quote block counts, not the token it replaced.
     expect(outgoingPromptOverflow({ prompt }, prompt.length)).toBe(sent.length - prompt.length);
   });
+
+  it("counts the provider's prefix the send adds", () => {
+    const prompt = `Explain ${token}`;
+    const sent = composeOutgoingPrompt({ prompt });
+    const format = (text: string) => `Ultrathink:\n${text}`;
+    expect(outgoingPromptOverflow({ prompt }, sent.length)).toBe(0);
+    expect(outgoingPromptOverflow({ prompt, format }, sent.length)).toBe("Ultrathink:\n".length);
+  });
 });

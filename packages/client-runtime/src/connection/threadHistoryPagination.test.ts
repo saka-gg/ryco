@@ -7,7 +7,10 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
+import {
+  createThreadHistoryPaginationController,
+  isThreadHistoryAnchorMissing,
+} from "./threadHistoryPagination.ts";
 
 const scope = {
   environmentId: EnvironmentId.make("environment-1"),
@@ -117,6 +120,21 @@ describe("thread history pagination", () => {
     ).resolves.toBeNull();
     expect(recoverStale).toHaveBeenCalledWith(scope);
     expect(setRequestState).not.toHaveBeenCalledWith(expect.objectContaining({ status: "error" }));
+  });
+
+  it("tells a missing message from a load that failed", () => {
+    const historyError = (reason: string) => ({ _tag: "OrchestrationThreadHistoryError", reason });
+    expect(isThreadHistoryAnchorMissing(historyError("stale-cursor"))).toBe(true);
+    expect(isThreadHistoryAnchorMissing(historyError("thread-not-found"))).toBe(true);
+    expect(isThreadHistoryAnchorMissing(historyError("invalid-cursor"))).toBe(false);
+    expect(isThreadHistoryAnchorMissing(new Error("socket closed"))).toBe(false);
+    expect(
+      isThreadHistoryAnchorMissing({
+        _tag: "OrchestrationGetSnapshotError",
+        reason: "stale-cursor",
+      }),
+    ).toBe(false);
+    expect(isThreadHistoryAnchorMissing(undefined)).toBe(false);
   });
 
   it("reports a message the thread no longer has instead of resnapshotting", async () => {

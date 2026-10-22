@@ -43,23 +43,26 @@ A quote in the composer is a chip showing the start of the quoted text. Hover it
 the whole quote and its comment.
 
 - **Comment:** the pencil opens a short note for the agent about this quote (up to 4,000
-  characters). Enter saves it, Shift+Enter adds a line, and Escape leaves the comment as it
-  was. Saving an empty comment removes it. A chip with a comment shows a note icon.
+  characters). The [Send shortcut](user/composer.md#send-shortcut) saves it (Enter by
+  default), Shift+Enter adds a line, and Escape leaves the comment as it was. Saving an empty
+  comment removes it. A chip with a comment shows a note icon.
 - **Remove:** the cross takes the quote out of the prompt; Backspace after the chip does
   too.
 - **Jump back:** clicking the chip scrolls to the quoted passage and highlights it. A quote
   from another thread opens that thread first, loading older history when needed. If the
   passage can no longer be found, the chip turns muted and says the source is no longer
-  available.
+  available. A history load that fails, on a dropped connection say, leaves the chip as it
+  was.
 - **Pending quotes:** while the prompt holds a quote, the quoted passage stays lightly
-  highlighted in the answer it came from.
+  highlighted in the answer it came from, in every chat pane on screen.
 
 Each quote is the selected text plus up to 32 characters on each side of it, so the
 passage is found again after the message re-renders. In the prompt it is one Markdown
 link, `[preview](ryco-quote:v1/…)`, which carries the source ids, the quote, its context
 and the comment. That text is what drafts, the prompt stash, copy and paste keep, so a
-pasted quote becomes a chip again. Queued messages, stash entries and new thread titles
-show the quote's preview in quotation marks instead.
+pasted quote becomes a chip again; a large paste never folds a chip into an attachment.
+Queued messages, stash entries and new thread titles show the quote's preview in quotation
+marks instead.
 
 ## What the agent receives
 
@@ -69,8 +72,12 @@ spells the quotes out once, before any file and terminal context. The block open
 short note saying the quotes are reference material. Each entry has a header line, the
 quote as `>` lines and the comment indented under `Comment:`. Every quoted and comment line
 is prefixed, so quoted text cannot end the block or pose as another entry. The expanded
-prompt counts against the 120,000-character input limit; a draft that would run over it
-stays in the composer and says by how much.
+prompt, with any effort prefix the model adds, counts against the 120,000-character input
+limit; a draft that would run over it stays in the composer and says by how much.
+
+A `/btw` question and a `/goal` objective are plain text, so the quotes in them become
+`[Quote N]` and `>` lines with the comment below, as on the phone app. Side reads the quote,
+and a goal's 4,000-character limit counts it in that form.
 
 In the transcript, sent quotes show as chips again, and copying a message copies the text
 as sent. ArrowUp brings a sent prompt back with its quote chips. Messages sent with the

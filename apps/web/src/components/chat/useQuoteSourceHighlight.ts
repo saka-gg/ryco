@@ -24,7 +24,8 @@ const QUOTE_SOURCE_POLL_MS = 100;
  * paints it with the CSS Custom Highlight API and scrolls it into view. Only
  * evidence makes a passage unavailable: its message rendered without it, or
  * the reveal settled without rendering the message. A reveal that is still
- * loading at the timeout, or that another one replaced, abandons the jump.
+ * loading at the timeout, that failed to load, or that another one replaced,
+ * abandons the jump.
  */
 export function useQuoteSourceHighlight(threadKey: string, root: HTMLElement | null): void {
   const jump = useQuoteSourceJumpStore((store) =>
@@ -99,8 +100,21 @@ export function useQuoteSourceHighlight(threadKey: string, root: HTMLElement | n
         finish(jump.id, range ? "shown" : "unavailable");
         return;
       }
-      const reveal = useTimelineRevealStore.getState().requestsByThreadKey[jump.threadKey];
+      const reveals = useTimelineRevealStore.getState();
+      const reveal = reveals.requestsByThreadKey[jump.threadKey];
       if (reveal === undefined || jump.revealRequestId === null) {
+        // A failed load, or a newer reveal settled in its place, proves nothing.
+        const settled = reveals.settledByThreadKey[jump.threadKey];
+        if (
+          jump.revealRequestId !== null &&
+          settled !== undefined &&
+          (settled.requestId === jump.revealRequestId
+            ? settled.settlement === "failed"
+            : settled.requestId > jump.revealRequestId)
+        ) {
+          finish(jump.id, "abandoned");
+          return;
+        }
         settledAt ??= now;
       } else if (reveal.requestId !== jump.revealRequestId) {
         finish(jump.id, "abandoned");

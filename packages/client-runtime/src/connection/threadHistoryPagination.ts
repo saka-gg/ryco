@@ -32,6 +32,25 @@ export interface ThreadHistoryPaginationController {
   }) => Promise<OrchestrationThreadHistoryPage | null>;
 }
 
+function threadHistoryErrorReason(error: unknown): unknown {
+  const record =
+    typeof error === "object" && error !== null
+      ? (error as { readonly _tag?: unknown; readonly reason?: unknown })
+      : null;
+  return record?._tag === "OrchestrationThreadHistoryError" ? record.reason : undefined;
+}
+
+/**
+ * Whether a rejected `loadAroundMessage` says the message is gone: the server
+ * answers stale-cursor for an anchor the thread no longer has, and
+ * thread-not-found for a thread it no longer has. Any other rejection (a
+ * dropped connection, a timeout) says nothing about the message.
+ */
+export function isThreadHistoryAnchorMissing(error: unknown): boolean {
+  const reason = threadHistoryErrorReason(error);
+  return reason === "stale-cursor" || reason === "thread-not-found";
+}
+
 export function createThreadHistoryPaginationController(deps: {
   readonly request: (
     environmentId: EnvironmentId,
@@ -103,12 +122,7 @@ export function createThreadHistoryPaginationController(deps: {
         return page;
       })
       .catch(async (error: unknown) => {
-        const errorRecord =
-          typeof error === "object" && error !== null
-            ? (error as { readonly _tag?: unknown; readonly reason?: unknown })
-            : null;
-        const historyErrorReason =
-          errorRecord?._tag === "OrchestrationThreadHistoryError" ? errorRecord.reason : undefined;
+        const historyErrorReason = threadHistoryErrorReason(error);
         // Around a message the thread no longer has, the server answers
         // stale-cursor though nothing loaded is stale. A resnapshot would
         // reload the window for nothing and resolve as if the load worked;

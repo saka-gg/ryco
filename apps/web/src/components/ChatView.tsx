@@ -40,6 +40,7 @@ import {
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
+import { isThreadHistoryAnchorMissing } from "@ryco/client-runtime/connection";
 import { deriveThreadBackgroundWork } from "@ryco/client-runtime/state/session";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
@@ -1241,10 +1242,15 @@ export default function ChatView(props: ChatViewProps) {
       threadId: activeThreadRef.threadId,
       messageId: linkedMessageId,
       limit: 101,
-    }).catch(() => {
-      // The thread no longer has the message: nothing to bring into view.
+    }).catch((error: unknown) => {
+      // Nothing to bring into view. Only the server's answer says the message
+      // is gone; a dropped connection says nothing about it.
       if (timelineReveal && activeThreadKey) {
-        settleTimelineReveal(activeThreadKey, timelineReveal.requestId);
+        settleTimelineReveal(
+          activeThreadKey,
+          timelineReveal.requestId,
+          isThreadHistoryAnchorMissing(error) ? "missing" : "failed",
+        );
       }
     });
   }, [
@@ -1261,7 +1267,7 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (!timelineReveal || !activeThreadKey || !linkedMessageLoaded) return;
     const timeoutId = window.setTimeout(
-      () => settleTimelineReveal(activeThreadKey, timelineReveal.requestId),
+      () => settleTimelineReveal(activeThreadKey, timelineReveal.requestId, "shown"),
       TIMELINE_REVEAL_SETTLE_MS,
     );
     return () => window.clearTimeout(timeoutId);
@@ -4963,12 +4969,21 @@ export default function ChatView(props: ChatViewProps) {
       }
       return;
     }
-    // Quote chips send their quote and comment: measure what goes out, so a
-    // send the provider would refuse stays in the composer instead.
+    // Quote chips send their quote and comment, and the effort may add a
+    // prefix: measure what goes out, so a send the provider would refuse
+    // stays in the composer instead.
     const overflow = outgoingPromptOverflow({
       prompt: promptForSend,
       fileReferences: composerFileReferences,
       terminalContexts: sendableComposerTerminalContexts,
+      format: (text) =>
+        formatOutgoingPrompt({
+          provider: ctxSelectedProvider,
+          model: ctxSelectedModel,
+          models: ctxSelectedProviderModels,
+          effort: ctxSelectedPromptEffort,
+          text,
+        }),
     });
     if (overflow > 0) {
       toastManager.add(

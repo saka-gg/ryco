@@ -16,9 +16,11 @@ import {
   PASTED_TEXT_MIME_TYPE,
   nextPastedTextFileName,
   resolvePastedTextDisposition,
+  sentPromptTextLength,
   wouldTextPasteExceedInputLimit,
 } from "@ryco/client-runtime/state/composer";
 import { providerSupportsGeneralFileAttachments } from "@ryco/shared/providerCapabilities";
+import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   formatComposerFileReference,
@@ -539,7 +541,7 @@ export function useComposerImageAttachments(
       const wouldExceedInputLimit = wouldTextPasteExceedInputLimit({
         promptLength: paste.promptLength,
         selectedLength: paste.selectedLength,
-        pastedLength: paste.text.length,
+        pastedLength: sentPromptTextLength(paste.text),
       });
       const disposition = resolvePastedTextDisposition({
         text: paste.text,
@@ -551,7 +553,10 @@ export function useComposerImageAttachments(
       if (activeThreadId === null || disposition === "inline") return "inline";
       const attachments = composerImagesRef.current;
       const name = nextPastedTextFileName(attachments.map((attachment) => attachment.name));
-      const file = new File([paste.text], name, { type: PASTED_TEXT_MIME_TYPE });
+      // A file holds no chips: quotes in it read as quoted lines, not as their tokens.
+      const file = new File([quoteCitationsToPlainText(paste.text)], name, {
+        type: PASTED_TEXT_MIME_TYPE,
+      });
       if (
         resolveComposerAttachmentRouting({ fileUploadMaxBytes, selectedProvider, files: [file] })
           .direct.length === 0

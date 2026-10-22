@@ -518,6 +518,21 @@ describe("parseThreadGoalSlashCommand", () => {
     expect(parseThreadGoalSlashCommand("Please use /goal later")).toBeNull();
     expect(parseThreadGoalSlashCommand("/goals are useful")).toBeNull();
   });
+
+  it("spells a quote chip out in the objective, which is stored and shown as text", () => {
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "引用の文", prefix: "", suffix: "", start: 0, end: 4 },
+        comment: "Keep this",
+      }),
+    );
+    expect(parseThreadGoalSlashCommand(`/goal Fix ${token} `)).toEqual({
+      action: "set",
+      objective: "Fix [Quote 1]\n\n[Quote 1]\n> 引用の文\nComment:\n  Keep this",
+    });
+  });
 });
 
 describe("quote chips in cursor math", () => {

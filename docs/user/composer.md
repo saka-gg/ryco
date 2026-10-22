@@ -11,7 +11,7 @@ on web and desktop. `Cmd` below is `Ctrl` on Windows and Linux.
 - **Always ⌘↵**: Enter always adds a new line and `Cmd+Enter` sends.
 
 `Shift+Enter` always adds a new line. The setting applies wherever you write a prompt: the chat
-composer, **Ask about this selection**, and the side chat. It belongs to this browser or app, so
+composer, **Ask about this selection**, the side chat, and the comment on a quote. It belongs to this browser or app, so
 each device keeps its own. On the phone layout of the web app with a touch screen and no mouse or
 trackpad, Enter keeps sending; a narrow desktop window keeps your choice. The Ryco iPhone app has
 no Enter-to-send, so the setting does not apply there.
@@ -42,6 +42,11 @@ The agent receives the attachment as a file it reads when it needs to, so a long
 stays out of the message itself and the transcript shows a short message. Shorter pastes stay
 inline, where the agent sees them directly. The size counts both characters and UTF-8 bytes, so
 text in scripts that take more bytes per character folds sooner.
+
+Copied quote chips paste as chips again and never fold: the size counts only the text around
+them, and the message limit counts each quote as the text it sends, not as the longer link that
+stands for it in the prompt. A folded paste that held quotes shows them as quoted lines in the
+file.
 
 The pasted text stays with your draft, like an attached image: wherever drafts are saved, it
 survives a reload or an app restart, and it goes with the message when you send it, so it never

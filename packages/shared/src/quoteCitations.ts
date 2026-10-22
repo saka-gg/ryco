@@ -165,6 +165,19 @@ function readQuoteCitation(fields: {
 }
 
 /**
+ * Throws a RangeError, worded for the user, unless `text` can be quoted: 1 to
+ * {@link QUOTE_CITATION_MAX_TEXT_LENGTH} characters, not all whitespace. Every
+ * quote of a selection, a chip or Side's quoted lines, is held to it.
+ */
+export function assertQuotableText(text: string): void {
+  if (text.trim().length === 0 || text.length > QUOTE_CITATION_MAX_TEXT_LENGTH) {
+    throw new RangeError(
+      `Select between 1 and ${QUOTE_CITATION_MAX_TEXT_LENGTH.toLocaleString("en-US")} characters.`,
+    );
+  }
+}
+
+/**
  * A citation of `selector` in `messageId`, with its comment trimmed. Throws a
  * RangeError, worded for the user, when the quote or comment is out of bounds.
  */
@@ -175,11 +188,7 @@ export function createQuoteCitation(input: {
   readonly comment?: string | undefined;
 }): QuoteCitation {
   const exact = toWellFormed(input.selector.exact);
-  if (exact.trim().length === 0 || exact.length > QUOTE_CITATION_MAX_TEXT_LENGTH) {
-    throw new RangeError(
-      `Select between 1 and ${QUOTE_CITATION_MAX_TEXT_LENGTH.toLocaleString("en-US")} characters.`,
-    );
-  }
+  assertQuotableText(exact);
   const citation = readQuoteCitation({
     environmentId: input.source.environmentId,
     threadId: input.source.threadId,
@@ -374,9 +383,18 @@ function mayContainQuoteCitations(text: string): boolean {
   return text.includes(QUOTE_CITATION_HREF_PREFIX);
 }
 
+// The composer reads one prompt's tokens several times a keystroke (its
+// segments, cursor math, trigger detection, the pending highlight), and each
+// read decodes every href: the last answer is kept.
+let lastCollected: {
+  readonly text: string;
+  readonly tokens: ReadonlyArray<QuoteCitationToken>;
+} | null = null;
+
 /** The well-formed draft tokens in `text`, in order. Malformed ones stay text. */
-export function collectQuoteCitationTokens(text: string): QuoteCitationToken[] {
+export function collectQuoteCitationTokens(text: string): ReadonlyArray<QuoteCitationToken> {
   if (!mayContainQuoteCitations(text)) return [];
+  if (lastCollected?.text === text) return lastCollected.tokens;
   const tokens: QuoteCitationToken[] = [];
   for (const match of text.matchAll(QUOTE_CITATION_TOKEN)) {
     const citation = parseQuoteCitationHref(match[2]!);
@@ -388,6 +406,7 @@ export function collectQuoteCitationTokens(text: string): QuoteCitationToken[] {
       end: match.index + match[0].length,
     });
   }
+  lastCollected = { text, tokens };
   return tokens;
 }
 

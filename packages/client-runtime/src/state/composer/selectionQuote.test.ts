@@ -3,6 +3,7 @@ import { EnvironmentId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
 import {
   collectQuoteCitationTokens,
   createQuoteCitation,
+  QUOTE_CITATION_MAX_TEXT_LENGTH,
   serializeQuoteCitation,
 } from "@ryco/shared/quoteCitations";
 import {
@@ -65,6 +66,21 @@ describe("selection quotes", () => {
     expect(() =>
       appendSelectionQuote("draft", { ...quote, text: "x".repeat(MAX_SELECTION_QUOTE_LENGTH) }),
     ).not.toThrow();
+  });
+  it("takes the same selections as a quote chip, so Add to Side never refuses one", () => {
+    expect(MAX_SELECTION_QUOTE_LENGTH).toBe(QUOTE_CITATION_MAX_TEXT_LENGTH);
+    const longest = "x".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH);
+    expect(() =>
+      createQuoteCitation({
+        source,
+        messageId: MessageId.make("message"),
+        selector: { exact: longest, prefix: "", suffix: "", start: 0, end: longest.length },
+      }),
+    ).not.toThrow();
+    expect(() => appendSelectionQuote("", { ...quote, text: longest })).not.toThrow();
+    expect(() => appendSelectionQuote("", { ...quote, text: `${longest}x` })).toThrow(
+      "Select between 1 and 4,000 characters.",
+    );
   });
   it("keeps detached drafts and the original project draft through persistence and promotion", async () => {
     const data = new Map<string, string>();

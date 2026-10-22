@@ -1,23 +1,36 @@
 import {
   MessageId,
   ORCHESTRATION_WS_METHODS,
+  OrchestrationGetSnapshotError,
+  OrchestrationThreadHistoryError,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  WS_METHODS,
   type OrchestrationReadModel,
 } from "@ryco/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { composeOutgoingPrompt } from "@ryco/client-runtime/state/composer";
 import {
+  QUOTE_CITATION_MAX_TEXT_LENGTH,
   collectQuoteCitationTokens,
   createQuoteCitation,
+  quoteCitationsToPlainText,
   serializeQuoteCitation,
   type QuoteCitation,
 } from "@ryco/shared/quoteCitations";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { pinMediaQueryMatches } from "../../test/browserPointer";
+import { WsRpcFailure } from "../../test/wsRpcHarness";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { replaceClientSettingsSnapshot } from "../hooks/clientSettingsStore";
 import { cssHighlightRegistry } from "../lib/cssHighlights";
+import { isMacPlatform } from "../lib/utils";
+import { useQuoteSourceJumpStore } from "../quoteSourceJumpStore";
+import { useSideChatStore } from "../sideChatStore";
 import {
   DEFAULT_VIEWPORT,
+  THREAD_ID,
   THREAD_KEY,
   THREAD_REF,
   createSnapshotForTargetUser,
@@ -33,6 +46,7 @@ import {
 } from "./ChatView.browser.helpers";
 import { PENDING_QUOTE_HIGHLIGHT_NAME } from "./chat/usePendingQuoteHighlight";
 import { QUOTE_SOURCE_HIGHLIGHT_NAME } from "./chat/useQuoteSourceHighlight";
+import { FINE_POINTER_MEDIA_QUERY } from "./chat/useSendShortcut";
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
@@ -128,6 +142,18 @@ async function selectQuotedPassage(): Promise<void> {
   document.dispatchEvent(new Event("selectionchange"));
   await userEvent.keyboard("{Alt>}{Enter}{/Alt}");
   await expect.element(page.getByRole("toolbar", { name: "Selection actions" })).toBeVisible();
+}
+
+const draftAttachments = () =>
+  useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.images ?? [];
+
+function pasteIntoComposer(editor: HTMLElement, text: string): void {
+  editor.focus();
+  const clipboardData = new DataTransfer();
+  clipboardData.setData("text/plain", text);
+  editor.dispatchEvent(
+    new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }),
+  );
 }
 
 async function pressEnterInComposer(): Promise<void> {
@@ -331,6 +357,181 @@ describe("ChatView quote citations", () => {
       expect(draftPrompt()).toBe(prompt);
       expect(collectQuoteCitationTokens(draftPrompt() ?? "")).toHaveLength(1);
     } finally {
+      await mounted.cleanup();
+    }
+  });
+  it("asks Side a /btw question with its quote spelled out, not as a token", async () => {
+    const commented = { ...citation, comment: "Per tenant?" };
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithAnswer(),
+      resolveRpc: (body) =>
+        body._tag === WS_METHODS.textGenerationAskSideQuestion
+          ? { requestId: (body as { requestId?: string }).requestId, answer: "It is the path." }
+          : acceptDispatch(body),
+    });
+    try {
+      await waitForComposerEditor();
+      const prompt = `/btw what does this mean? ${serializeQuoteCitation(commented)} `;
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+      await vi.waitFor(() => expect(composerChip()).not.toBeNull());
+      await pressEnterInComposer();
+
+      const question = quoteCitationsToPlainText(
+        `what does this mean? ${serializeQuoteCitation(commented)}`,
+      );
+      expect(question).toBe(
+        "what does this mean? [Quote 1]\n\n[Quote 1]\n> request path\nComment:\n  Per tenant?",
+      );
+      await vi.waitFor(() => {
+        const chat = useSideChatStore.getState().chatsByThreadKey[THREAD_KEY];
+        const asked = wsRequests.find(
+          (request) => request._tag === WS_METHODS.textGenerationAskSideQuestion,
+        ) as { readonly question?: string } | undefined;
+        expect(asked?.question ?? chat?.pending?.question ?? chat?.draft).toBe(question);
+      });
+      expect(JSON.stringify(useSideChatStore.getState().chatsByThreadKey)).not.toContain(
+        "ryco-quote:",
+      );
+      expect(turnStarts()).toHaveLength(0);
+      await vi.waitFor(() => expect(draftPrompt() ?? "").toBe(""));
+    } finally {
+      useSideChatStore.setState({ chatsByThreadKey: {} });
+      await mounted.cleanup();
+    }
+  });
+
+  it("says a quote's source is gone only when the server says so", async () => {
+    // The quoted reply is older than the loaded window, so a jump loads history around it.
+    const pagedOut = { ...citation, messageId: MessageId.make("msg-paged-out") };
+    let answer: "failure" | "missing" = "failure";
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithAnswer(),
+      configureFixture: (fixture) => {
+        fixture.threadsWithOlderMessages = new Set([THREAD_ID]);
+      },
+      resolveRpc: (body) => {
+        if (body._tag !== ORCHESTRATION_WS_METHODS.getThreadHistoryPage) return undefined;
+        return answer === "failure"
+          ? new WsRpcFailure(new OrchestrationGetSnapshotError({ message: "database is locked" }))
+          : new WsRpcFailure(
+              new OrchestrationThreadHistoryError({
+                reason: "stale-cursor",
+                threadId: THREAD_ID,
+                collection: "messages",
+              }),
+            );
+      },
+    });
+    const historyLoads = () =>
+      wsRequests.filter(
+        (request) => request._tag === ORCHESTRATION_WS_METHODS.getThreadHistoryPage,
+      );
+    const showSource = () =>
+      page.getByRole("button", { name: `Show quoted text in conversation: ${QUOTED}` }).click();
+    try {
+      await waitForComposerEditor();
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_REF, `Explain ${serializeQuoteCitation(pagedOut)} `);
+      await vi.waitFor(() => expect(composerChip()).not.toBeNull());
+
+      // A failed load says nothing about the message.
+      await showSource();
+      await vi.waitFor(() => expect(historyLoads()).toHaveLength(1), { timeout: 8_000 });
+      await vi.waitFor(() => expect(useQuoteSourceJumpStore.getState().active).toBeNull());
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      expect(composerChip()?.dataset.sourceUnavailable).toBeUndefined();
+
+      // The server's answer that it has no such message does.
+      answer = "missing";
+      await showSource();
+      await vi.waitFor(() => expect(historyLoads()).toHaveLength(2), { timeout: 8_000 });
+      await vi.waitFor(() => expect(composerChip()?.dataset.sourceUnavailable).toBe("true"), {
+        timeout: 3_000,
+      });
+    } finally {
+      useQuoteSourceJumpStore.setState({ active: null, unavailableSourceKeys: new Set() });
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps a pasted chip a chip however long its token, with room for more text", async () => {
+    const long = createQuoteCitation({
+      source: THREAD_REF,
+      messageId: ANSWER_ID,
+      selector: {
+        exact: "引".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH),
+        prefix: "",
+        suffix: "",
+        start: 0,
+        end: QUOTE_CITATION_MAX_TEXT_LENGTH,
+      },
+    });
+    const token = serializeQuoteCitation(long);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithAnswer(),
+    });
+    try {
+      const editor = await waitForComposerEditor();
+      // Past the size a paste folds into an attachment at, as its token.
+      pasteIntoComposer(editor, token);
+      await vi.waitFor(() => expect(draftPrompt()).toBe(token), { timeout: 8_000 });
+      await vi.waitFor(() => expect(composerChip()).not.toBeNull());
+      expect(draftAttachments()).toHaveLength(0);
+
+      // Three such chips measure far less than their tokens: an ordinary paste stays text.
+      const prompt = `${token} ${token} ${token} `;
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-composer-quote-chip]")).toHaveLength(3),
+      );
+      const snippet = "log line\n".repeat(1_500);
+      expect(prompt.length + snippet.length).toBeGreaterThan(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+      pasteIntoComposer(editor, snippet);
+      await vi.waitFor(() => expect(draftPrompt()).toContain("log line\nlog line"), {
+        timeout: 8_000,
+      });
+      expect(draftAttachments()).toHaveLength(0);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("adds a line to a comment with Enter under the Always ⌘↵ send shortcut", async () => {
+    // Only a fine pointer keeps the setting on the runner's viewport; device-less CI has none.
+    const restorePointer = pinMediaQueryMatches(FINE_POINTER_MEDIA_QUERY, true);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithAnswer(),
+    });
+    try {
+      replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, sendShortcut: "mod-enter" });
+      await waitForComposerEditor();
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_REF, `Explain ${serializeQuoteCitation(citation)} `);
+      await vi.waitFor(() => expect(composerChip()).not.toBeNull());
+      await page.getByRole("button", { name: `Add comment to ${QUOTED}` }).click();
+      const field = page.getByRole("textbox", { name: "Comment on quote" });
+      await expect.element(field).toHaveFocus();
+      await userEvent.keyboard("First line{Enter}Second line");
+      await expect.element(field).toHaveValue("First line\nSecond line");
+
+      const mod = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+      await userEvent.keyboard(`{${mod}>}{Enter}{/${mod}}`);
+      await expect.element(field).not.toBeInTheDocument();
+      await vi.waitFor(() =>
+        expect(draftPrompt()).toBe(
+          `Explain ${serializeQuoteCitation({ ...citation, comment: "First line\nSecond line" })} `,
+        ),
+      );
+      expect(turnStarts()).toHaveLength(0);
+    } finally {
+      replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
+      restorePointer();
       await mounted.cleanup();
     }
   });

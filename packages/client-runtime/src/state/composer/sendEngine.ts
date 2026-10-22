@@ -228,14 +228,19 @@ export function composeOutgoingPrompt(input: OutgoingPromptInput): string {
 }
 
 /**
- * How many characters the composed prompt runs over what one turn may carry;
+ * How many characters the prompt runs over what one turn may carry, as it is
+ * dispatched: composed, then formatted for the provider (an effort prefix);
  * 0 within the limit. A quote chip counts as the quote and comment it sends.
  */
 export function outgoingPromptOverflow(
-  input: OutgoingPromptInput,
+  input: OutgoingPromptInput & {
+    /** The provider's formatting of the composed text, as the send applies it. */
+    readonly format?: ((text: string) => string) | undefined;
+  },
   limit: number = PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 ): number {
-  return Math.max(0, composeOutgoingPrompt(input).length - limit);
+  const composed = composeOutgoingPrompt(input);
+  return Math.max(0, (input.format ? input.format(composed) : composed).length - limit);
 }
 
 /**

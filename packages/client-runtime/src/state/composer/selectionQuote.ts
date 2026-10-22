@@ -1,5 +1,10 @@
 import type { MessageId, ScopedThreadRef } from "@ryco/contracts";
-import { serializeQuoteCitation, type QuoteCitation } from "@ryco/shared/quoteCitations";
+import {
+  assertQuotableText,
+  QUOTE_CITATION_MAX_TEXT_LENGTH,
+  serializeQuoteCitation,
+  type QuoteCitation,
+} from "@ryco/shared/quoteCitations";
 
 /**
  * Adds a quote to a prompt as its draft token, after the text already there,
@@ -21,14 +26,12 @@ export interface SelectionQuote {
   readonly text: string;
 }
 
-export const MAX_SELECTION_QUOTE_LENGTH = 4_000;
+/** The one selection limit: a chip and Side's quoted lines take the same selections. */
+export const MAX_SELECTION_QUOTE_LENGTH = QUOTE_CITATION_MAX_TEXT_LENGTH;
 
+/** Throws a RangeError, worded for the user, when the quote is out of bounds. */
 export function validateSelectionQuote(quote: SelectionQuote): void {
-  if (!quote.text.trim() || quote.text.length > MAX_SELECTION_QUOTE_LENGTH) {
-    throw new Error(
-      `Select between 1 and ${MAX_SELECTION_QUOTE_LENGTH.toLocaleString("en-US")} characters.`,
-    );
-  }
+  assertQuotableText(quote.text);
 }
 
 const QUOTE_HEADER_PREFIX = "Quoted assistant text (";

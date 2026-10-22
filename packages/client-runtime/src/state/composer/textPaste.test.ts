@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@ryco/contracts/orchestration";
+import {
+  QUOTE_CITATION_MAX_TEXT_LENGTH,
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
 
 import {
   PASTED_TEXT_ATTACHMENT_THRESHOLD,
@@ -7,9 +14,25 @@ import {
   isPastedTextAttachment,
   nextPastedTextFileName,
   resolvePastedTextDisposition,
+  sentPromptTextLength,
   wouldTextPasteExceedInputLimit,
   type PasteShortcutKeyEvent,
 } from "./textPaste.ts";
+
+/** A copied chip of a long quote in a script that percent-encodes to nine characters a unit. */
+const largeQuoteToken = serializeQuoteCitation(
+  createQuoteCitation({
+    source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+    messageId: MessageId.make("message"),
+    selector: {
+      exact: "引".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH),
+      prefix: "",
+      suffix: "",
+      start: 0,
+      end: QUOTE_CITATION_MAX_TEXT_LENGTH,
+    },
+  }),
+);
 
 const fold = (
   text: string,
@@ -47,6 +70,40 @@ describe("resolvePastedTextDisposition", () => {
     expect(fold(large, { pasteAsText: true })).toBe("inline");
     expect(fold(large, { canAttach: false, wouldExceedInputLimit: true })).toBe("inline");
     expect(fold("", { wouldExceedInputLimit: true })).toBe("inline");
+  });
+});
+
+describe("quote chips in a paste", () => {
+  it("keeps a pasted chip a chip, however long its token", () => {
+    expect(largeQuoteToken.length).toBeGreaterThan(PASTED_TEXT_ATTACHMENT_THRESHOLD);
+    expect(fold(largeQuoteToken)).toBe("inline");
+    expect(fold(` ${largeQuoteToken}\n${largeQuoteToken} `)).toBe("inline");
+    // Chips alone never fold, not even into a prompt with no room.
+    expect(fold(largeQuoteToken, { wouldExceedInputLimit: true })).toBe("inline");
+  });
+
+  it("measures the text around chips against the threshold", () => {
+    expect(fold(`Notes: ${largeQuoteToken} done`)).toBe("inline");
+    const document = "a".repeat(PASTED_TEXT_ATTACHMENT_THRESHOLD);
+    expect(fold(`${document} ${largeQuoteToken}`)).toBe("attachment");
+    expect(fold(`Notes ${largeQuoteToken}`, { wouldExceedInputLimit: true })).toBe("attachment");
+  });
+
+  it("counts a chip as the quote it sends, not as its token", () => {
+    const sent = expandQuoteCitations(largeQuoteToken).length;
+    expect(sentPromptTextLength(largeQuoteToken)).toBe(sent);
+    expect(sent).toBeLessThan(largeQuoteToken.length / 4);
+    expect(sentPromptTextLength("plain text")).toBe("plain text".length);
+    // Three such chips leave room for an ordinary paste.
+    const prompt = `${largeQuoteToken} ${largeQuoteToken} ${largeQuoteToken}`;
+    expect(prompt.length + 15_000).toBeGreaterThan(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(
+      wouldTextPasteExceedInputLimit({
+        promptLength: sentPromptTextLength(prompt),
+        selectedLength: 0,
+        pastedLength: 15_000,
+      }),
+    ).toBe(false);
   });
 });
 

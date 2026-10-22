@@ -5,10 +5,16 @@ import type {
   SideQuestionResult,
   ThreadId,
 } from "@ryco/contracts";
+import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 
+/**
+ * The question a `/btw` prompt asks, or null when it is not one. Side's
+ * question is plain text, which cannot show a chip: quote chips become
+ * `[Quote N]` and quoted lines, so Side reads the quote and its comment.
+ */
 export function parseSideQuestionCommand(text: string): string | null {
   const match = /^\/btw(?:\s+([\s\S]*))?$/i.exec(text.trim());
-  return match ? (match[1] ?? "").trim() : null;
+  return match ? quoteCitationsToPlainText((match[1] ?? "").trim()) : null;
 }
 
 export interface SideChatApi {

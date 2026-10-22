@@ -8,6 +8,7 @@ import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
 import {
   isPasteAsTextShortcut,
   PASTE_AS_TEXT_SHORTCUT_WINDOW_MS,
+  sentPromptTextLength,
 } from "@ryco/client-runtime/state/composer";
 import { type EnvironmentId, type ServerProviderSkill } from "@ryco/contracts";
 import {
@@ -1065,7 +1066,7 @@ export interface ComposerPromptEditorHandle {
 /** A text paste, before the editor inserts it. */
 export interface ComposerTextPaste {
   readonly text: string;
-  /** The prompt's text length, and how much of it the paste replaces. */
+  /** The prompt's length and how much of it the paste replaces, as sent (`sentPromptTextLength`). */
   readonly promptLength: number;
   readonly selectedLength: number;
   /** Pasted with the paste-as-text shortcut (Cmd/Ctrl+Shift+V). */
@@ -1228,8 +1229,10 @@ function ComposerTextPastePlugin(props: {
         const selection = $getSelection();
         const result = onPasteTextRef.current({
           text,
-          promptLength: $getRoot().getTextContent().length,
-          selectedLength: $isRangeSelection(selection) ? selection.getTextContent().length : 0,
+          promptLength: sentPromptTextLength($getRoot().getTextContent()),
+          selectedLength: $isRangeSelection(selection)
+            ? sentPromptTextLength(selection.getTextContent())
+            : 0,
           pasteAsText:
             shortcutAt !== null && event.timeStamp - shortcutAt < PASTE_AS_TEXT_SHORTCUT_WINDOW_MS,
         });
