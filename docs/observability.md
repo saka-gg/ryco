@@ -546,6 +546,22 @@ OTLP export:
 
 If the OTLP URLs are unset, local tracing still works and metrics stay in-process only.
 
+Product analytics (off by default):
+
+Ryco ships no analytics key and sends no product analytics. The server keeps an inherited PostHog
+sender (`apps/server/src/telemetry`) that does nothing unless both of these are set:
+
+- `RYCO_TELEMETRY_ENABLED=true`
+- `RYCO_POSTHOG_KEY`: the PostHog project key to send to (`RYCO_POSTHOG_HOST` defaults to
+  `https://us.i.posthog.com`)
+
+When both are set, the server sends `server.boot.heartbeat` and `provider.*` session and turn
+events. They are identified by a hash of a random install id (`<state dir>/anonymous-id`) and the
+project key, never by provider accounts. Until then the server writes no install id and makes no
+analytics requests. If a telemetry variable cannot be parsed (for example
+`RYCO_TELEMETRY_ENABLED=sometimes`, or a non-numeric `RYCO_TELEMETRY_FLUSH_BATCH_SIZE`), the server
+logs a warning and telemetry stays off.
+
 ### What Is Instrumented Today
 
 Current high-value span and metric boundaries include:

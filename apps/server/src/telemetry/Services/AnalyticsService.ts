@@ -1,8 +1,8 @@
 /**
  * AnalyticsService - Anonymous telemetry capture contract.
  *
- * Provides a best-effort event API for runtime telemetry and a strict
- * `captureImmediate` method for call sites that need explicit error handling.
+ * Provides a best-effort event API for runtime telemetry. Telemetry is opt-in:
+ * unless it is configured, the service is {@link AnalyticsService.disabled}.
  *
  * @module AnalyticsService
  */
@@ -10,7 +10,13 @@ import { Effect, Layer, Context } from "effect";
 
 export interface AnalyticsServiceShape {
   /**
-   * Capture an event immediately; returns typed failure when capture fails.
+   * Whether recorded events are delivered anywhere. Callers skip work that
+   * only feeds analytics when this is false.
+   */
+  readonly enabled: boolean;
+
+  /**
+   * Record an event for delivery; best effort, never fails.
    */
   readonly record: (
     event: string,
@@ -23,11 +29,16 @@ export interface AnalyticsServiceShape {
   readonly flush: Effect.Effect<void, never>;
 }
 
+const disabledAnalyticsService: AnalyticsServiceShape = {
+  enabled: false,
+  record: () => Effect.void,
+  flush: Effect.void,
+};
+
 export class AnalyticsService extends Context.Service<AnalyticsService, AnalyticsServiceShape>()(
   "ryco/telemetry/Services/AnalyticsService",
 ) {
-  static readonly layerTest = Layer.succeed(AnalyticsService, {
-    record: () => Effect.void,
-    flush: Effect.void,
-  });
+  /** Delivers nothing: the service when telemetry is not configured, and in tests. */
+  static readonly disabled = disabledAnalyticsService;
+  static readonly layerTest = Layer.succeed(AnalyticsService, disabledAnalyticsService);
 }

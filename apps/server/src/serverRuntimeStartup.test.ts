@@ -104,6 +104,7 @@ import { ProviderService, type ProviderServiceShape } from "./provider/Services/
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import {
   launchStartupHeartbeat,
+  recordStartupHeartbeat,
   makeCommandGate,
   makeServerRuntimeStartup,
   reconcileOrphanedProviderSessions,
@@ -1009,12 +1010,30 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
           searchThreadMessages: () => Effect.succeed([]),
         }),
         Effect.provideService(AnalyticsService, {
+          enabled: true,
           record: () => Effect.void,
           flush: Effect.void,
         }),
       );
     }),
   ),
+);
+
+it.effect("recordStartupHeartbeat skips the count query when telemetry is off", () =>
+  Effect.gen(function* () {
+    let countsQueried = false;
+    yield* recordStartupHeartbeat.pipe(
+      Effect.provideService(ProjectionSnapshotQuery, {
+        getCounts: () =>
+          Effect.sync(() => {
+            countsQueried = true;
+            return { projectCount: 0, threadCount: 0 };
+          }),
+      } as unknown as ProjectionSnapshotQuery["Service"]),
+      Effect.provideService(AnalyticsService, AnalyticsService.disabled),
+    );
+    assert.equal(countsQueried, false);
+  }),
 );
 
 it.effect("resolveWelcomeBase derives cwd and project name from server config", () =>
@@ -1317,9 +1336,7 @@ const startupShellStubs = (input: {
       listSessions: input.listSessions ?? (() => Effect.succeed([])),
       stopSessionBinding: () => Effect.succeed("not-found" as const),
     } as unknown as ProviderServiceShape),
-    Layer.succeed(AnalyticsService, {
-      record: () => Effect.void,
-    } as unknown as AnalyticsService["Service"]),
+    Layer.succeed(AnalyticsService, AnalyticsService.disabled),
     Layer.succeed(ServerAuth, {
       issueStartupPairingUrl: (baseUrl: string) => Effect.succeed(baseUrl),
     } as unknown as ServerAuth["Service"]),
