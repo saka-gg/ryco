@@ -40,8 +40,7 @@ import {
   SavedEnvironmentConnectionCancelledError,
   SavedEnvironmentCredentialError,
   savedEnvironmentRequiresAuthState,
-  shouldRepairDesktopSshAsOwner,
-  type DesktopSshOwnerRepairOutcome,
+  createDesktopSshOwnerRepairTracker,
   withSavedEnvironmentTimeout,
 } from "@ryco/client-runtime/connection";
 export {
@@ -569,31 +568,31 @@ interface IssuedDesktopSshBearer {
 }
 
 /**
- * What the last owner pairing of each Desktop SSH environment found since the
- * app started; see {@link shouldRepairDesktopSshAsOwner}. A remote CLI that
- * cannot mint owner credentials is asked again once the node reports another
- * Ryco version, a failed attempt after its retry delay.
+ * The owner re-pair state of each Desktop SSH environment since the app
+ * started; see `shouldRepairDesktopSshAsOwner`. A remote CLI that cannot
+ * mint owner credentials is asked again once the node reports another Ryco
+ * version; a failed attempt then too, or once its retry delay has passed,
+ * which re-pairs a connected node in place.
  */
-const desktopSshOwnerRepairOutcomes = new Map<EnvironmentId, DesktopSshOwnerRepairOutcome>();
-/** Environments with an owner re-pair running; a second one never starts alongside. */
-const desktopSshOwnerRepairsRunning = new Set<EnvironmentId>();
-
-function shouldRepairDesktopSshEnvironmentAsOwner(
-  environmentId: EnvironmentId,
-  input: {
-    readonly sessionRole: AuthSessionRole | null | undefined;
-    readonly bearerIssuedThisConnect: boolean;
-    readonly serverVersion: string | null;
+const desktopSshOwnerRepairs = createDesktopSshOwnerRepairTracker({
+  onRetryDue: (environmentId) => {
+    const connection = getEnvironmentSupervisor().read(environmentId);
+    // Without a connection, the environment's next connect asks again.
+    if (connection) {
+      repairConnectedDesktopSshAsOwner(
+        environmentId,
+        connection,
+        reportedDesktopSshServerVersion(environmentId),
+      );
+    }
   },
-): boolean {
+});
+
+/** The Ryco version the environment's node last reported, or null. */
+function reportedDesktopSshServerVersion(environmentId: EnvironmentId): string | null {
   return (
-    !desktopSshOwnerRepairsRunning.has(environmentId) &&
-    shouldRepairDesktopSshAsOwner({
-      desktopSsh: true,
-      ...input,
-      lastOutcome: desktopSshOwnerRepairOutcomes.get(environmentId),
-      now: Date.now(),
-    })
+    useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.descriptor?.serverVersion ??
+    null
   );
 }
 
@@ -608,18 +607,39 @@ async function recordDesktopSshPairedRole(
   /** The node's version, when already in hand; otherwise it is read over the tunnel. */
   knownServerVersion?: string,
 ): Promise<void> {
-  if (role === "owner") {
-    desktopSshOwnerRepairOutcomes.delete(record.environmentId);
+  if (role !== "client") {
+    desktopSshOwnerRepairs.record(record.environmentId, undefined);
     return;
   }
-  if (role !== "client") return;
   const serverVersion =
     knownServerVersion ??
     (await fetchDesktopSshEnvironmentDescriptor(record.httpBaseUrl).then(
       (descriptor) => descriptor.serverVersion ?? null,
       () => null,
     ));
-  desktopSshOwnerRepairOutcomes.set(record.environmentId, { kind: "unsupported", serverVersion });
+  desktopSshOwnerRepairs.record(record.environmentId, { kind: "unsupported", serverVersion });
+}
+
+/**
+ * Runs one owner re-pair of a Desktop SSH environment; see
+ * `DesktopSshOwnerRepairTracker.run`. Resolves null, and changes no
+ * credential, when it fails: an SSH hiccup, a busy node or a refused redeem
+ * says nothing about the remote CLI, so the client bearer stays and the retry
+ * asks again. A cancelled one rethrows its
+ * {@link SavedEnvironmentConnectionCancelledError}.
+ */
+async function runDesktopSshOwnerRepair(
+  environmentId: EnvironmentId,
+  /** The version the node reported when the re-pair was decided. */
+  serverVersion: string | null,
+  repair: () => Promise<IssuedDesktopSshBearer | null>,
+): Promise<IssuedDesktopSshBearer | null> {
+  return await desktopSshOwnerRepairs
+    .run(environmentId, serverVersion, repair)
+    .catch((error: unknown) => {
+      if (isSavedEnvironmentConnectionCancelledError(error)) throw error;
+      return null;
+    });
 }
 
 /** Redeems a pairing token minted through the tunnel and persists the bearer. */
@@ -697,71 +717,61 @@ async function issueDesktopSshBearerSession(
  * the tunnel it already has, and records what came of it. The owner bearer is
  * persisted before the client session it replaces is revoked. Returns null,
  * and changes no credential, when the remote CLI cannot mint owner credentials
- * yet or the attempt fails; once `isCancelled`, it stops before its next side
- * effect and throws {@link SavedEnvironmentConnectionCancelledError}.
+ * yet; once `isCancelled`, it stops before its next side effect and throws
+ * {@link SavedEnvironmentConnectionCancelledError}. Run it through
+ * {@link runDesktopSshOwnerRepair}.
  */
 async function repairDesktopSshBearerAsOwner(
   record: SavedEnvironmentRecord,
   replacedSession: AuthSessionState,
   isCancelled: () => boolean,
 ): Promise<IssuedDesktopSshBearer | null> {
-  const environmentId = record.environmentId;
-  if (desktopSshOwnerRepairsRunning.has(environmentId)) return null;
-  desktopSshOwnerRepairsRunning.add(environmentId);
-  try {
-    const prepared = await prepareSavedEnvironmentRecordForConnection(
-      record,
-      { issuePairingToken: true, requireOwnerPairing: true },
-      isCancelled,
-    );
-    const pairingToken = prepared.pairingToken;
-    if (!pairingToken || prepared.pairingRole !== "owner") {
-      await recordDesktopSshPairedRole(prepared.record, "client");
-      return null;
-    }
-
-    const issued = await redeemDesktopSshPairingToken({ ...prepared, pairingToken }, isCancelled);
-    await recordDesktopSshPairedRole(issued.record, issued.role);
-    const revoke = window.desktopBridge?.revokeSshClientSession;
-    if (
-      issued.role === "owner" &&
-      replacedSession.sessionId !== undefined &&
-      revoke &&
-      !isCancelled()
-    ) {
-      // Best effort: a client session left behind only lingers until it expires.
-      await revoke(issued.record.httpBaseUrl, issued.bearerToken, replacedSession.sessionId).catch(
-        NOOP,
-      );
-    }
-    return issued;
-  } catch (error) {
-    if (isSavedEnvironmentConnectionCancelledError(error)) throw error;
-    // An SSH hiccup, a busy node or a refused redeem says nothing about the
-    // remote CLI: the client bearer stays, and a later connect tries again.
-    desktopSshOwnerRepairOutcomes.set(environmentId, { kind: "failed", at: Date.now() });
+  const prepared = await prepareSavedEnvironmentRecordForConnection(
+    record,
+    { issuePairingToken: true, requireOwnerPairing: true },
+    isCancelled,
+  );
+  const pairingToken = prepared.pairingToken;
+  if (!pairingToken || prepared.pairingRole !== "owner") {
+    await recordDesktopSshPairedRole(prepared.record, "client");
     return null;
-  } finally {
-    desktopSshOwnerRepairsRunning.delete(environmentId);
   }
+
+  const issued = await redeemDesktopSshPairingToken({ ...prepared, pairingToken }, isCancelled);
+  await recordDesktopSshPairedRole(issued.record, issued.role);
+  const revoke = window.desktopBridge?.revokeSshClientSession;
+  if (
+    issued.role === "owner" &&
+    replacedSession.sessionId !== undefined &&
+    revoke &&
+    !isCancelled()
+  ) {
+    // Best effort: a client session left behind only lingers until it expires.
+    await revoke(issued.record.httpBaseUrl, issued.bearerToken, replacedSession.sessionId).catch(
+      NOOP,
+    );
+  }
+  return issued;
 }
 
 /**
  * A connected Desktop SSH node still on a client session re-pairs as owner in
- * place when its socket (re)connects to a node that may now mint owner
- * credentials (see {@link shouldRepairDesktopSshAsOwner}): updating Ryco there
- * restarts its server, and the socket reconnects on its own, on the bearer it
- * has. The connection then reconnects on the owner bearer.
+ * place when it may now mint owner credentials (see
+ * `shouldRepairDesktopSshAsOwner`): when its socket (re)connects, since
+ * updating Ryco there restarts its server and the socket reconnects on its
+ * own, on the bearer it has, and when a failed re-pair's retry is due, since a
+ * healthy socket never reconnects. The connection then reconnects on the owner
+ * bearer.
  */
 function repairConnectedDesktopSshAsOwner(
   environmentId: EnvironmentId,
   connection: EnvironmentConnection,
-  serverVersion: string,
+  serverVersion: string | null,
 ): void {
   const isCurrent = () => getEnvironmentSupervisor().read(environmentId) === connection;
   if (
     !isCurrent() ||
-    !shouldRepairDesktopSshEnvironmentAsOwner(environmentId, {
+    !desktopSshOwnerRepairs.shouldRepair(environmentId, {
       sessionRole: useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.role,
       bearerIssuedThisConnect: false,
       serverVersion,
@@ -771,12 +781,21 @@ function repairConnectedDesktopSshAsOwner(
   }
   const isCancelled = () => !isCurrent();
   void (async () => {
-    const record = getSavedEnvironmentRecord(environmentId);
-    const bearerToken = await readSavedEnvironmentBearerToken(environmentId);
-    if (!record?.desktopSsh || !bearerToken || isCancelled()) return;
-    const session = await readSavedEnvironmentSession(record, bearerToken);
-    if (session?.role !== "client" || isCancelled()) return;
-    const repaired = await repairDesktopSshBearerAsOwner(record, session, isCancelled);
+    const repaired = await runDesktopSshOwnerRepair(environmentId, serverVersion, async () => {
+      const record = getSavedEnvironmentRecord(environmentId);
+      const bearerToken = await readSavedEnvironmentBearerToken(environmentId);
+      throwIfConnectionCancelled(environmentId, isCancelled);
+      if (!record?.desktopSsh || !bearerToken) return null;
+      const session = await readSavedEnvironmentSession(record, bearerToken);
+      throwIfConnectionCancelled(environmentId, isCancelled);
+      // A rejected bearer is the socket's to report.
+      if (session === null) return null;
+      if (session.role !== "client") {
+        await recordDesktopSshPairedRole(record, session.role ?? null);
+        return null;
+      }
+      return await repairDesktopSshBearerAsOwner(record, session, isCancelled);
+    });
     if (repaired && !isCancelled()) await connection.reconnect();
   })().catch((error: unknown) => {
     if (isSavedEnvironmentConnectionCancelledError(error)) return;
@@ -1703,17 +1722,22 @@ async function connectSavedEnvironment(
     }
     // A Desktop SSH node still on a client bearer re-pairs as owner. A failed
     // or unsupported re-pair keeps the client bearer it has.
+    const serverVersion = reportedDesktopSshServerVersion(activeRecord.environmentId);
     if (
       activeRecord.desktopSsh &&
-      shouldRepairDesktopSshEnvironmentAsOwner(activeRecord.environmentId, {
+      desktopSshOwnerRepairs.shouldRepair(activeRecord.environmentId, {
         sessionRole: session.role,
         bearerIssuedThisConnect,
-        serverVersion:
-          useSavedEnvironmentRuntimeStore.getState().byId[activeRecord.environmentId]?.descriptor
-            ?.serverVersion ?? null,
+        serverVersion,
       })
     ) {
-      const repaired = await repairDesktopSshBearerAsOwner(activeRecord, session, isCancelled);
+      const repairRecord = activeRecord;
+      const replacedSession = session;
+      const repaired = await runDesktopSshOwnerRepair(
+        repairRecord.environmentId,
+        serverVersion,
+        () => repairDesktopSshBearerAsOwner(repairRecord, replacedSession, isCancelled),
+      );
       throwIfConnectionCancelled(activeRecord.environmentId, isCancelled);
       if (repaired) {
         activeRecord = repaired.record;
@@ -1836,7 +1860,7 @@ async function connectSavedEnvironment(
           repairConnectedDesktopSshAsOwner(
             activeRecord.environmentId,
             connection,
-            config.environment.serverVersion,
+            config.environment.serverVersion ?? null,
           );
         }
       },
@@ -2035,7 +2059,7 @@ export async function disconnectSavedEnvironment(environmentId: EnvironmentId): 
     await window.desktopBridge?.disconnectSshEnvironment(record.desktopSsh);
     await removeSavedEnvironmentBearerToken(environmentId);
     // The next connect pairs afresh, owner first, and records what it gets.
-    desktopSshOwnerRepairOutcomes.delete(environmentId);
+    desktopSshOwnerRepairs.record(environmentId, undefined);
   }
 }
 
@@ -2226,8 +2250,7 @@ export function startEnvironmentConnectionService(): () => void {
 export async function resetEnvironmentServiceForTests(): Promise<void> {
   await getEnvironmentSupervisor().resetForTests();
   environmentSupervisor = null;
-  desktopSshOwnerRepairOutcomes.clear();
-  desktopSshOwnerRepairsRunning.clear();
+  desktopSshOwnerRepairs.reset();
   clearEnvironmentServerConfigs();
   lastBrowserHiddenAt = null;
   primaryShellSnapshotApplied = false;

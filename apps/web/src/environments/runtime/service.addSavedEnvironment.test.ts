@@ -1743,7 +1743,7 @@ describe("addSavedEnvironment", () => {
       await resetEnvironmentServiceForTests();
     });
 
-    it("retries a re-pair that failed once its retry delay has passed", async () => {
+    it("retries a failed re-pair on the next connect once its retry delay has passed", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date("2026-10-22T10:00:00.000Z"));
       mockEnsureSshEnvironment.mockImplementation(async (_target, options) => {
@@ -1793,6 +1793,154 @@ describe("addSavedEnvironment", () => {
         environmentId,
         expect.objectContaining({ role: "owner" }),
       );
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    /**
+     * A node whose first `failures` owner re-pairs hit an SSH hiccup, then
+     * mint owner credentials. Returns the stored bearer, the connection's
+     * reconnect and a socket snapshot.
+     */
+    const failFirstOwnerPairings = (failures = 1) => {
+      const state = { storedBearer: "client-bearer" };
+      mockReadSavedEnvironmentBearerToken.mockImplementation(async () => state.storedBearer);
+      mockWriteSavedEnvironmentBearerToken.mockImplementation(async (_id, token: string) => {
+        state.storedBearer = token;
+        return true;
+      });
+      mockEnsureSshEnvironment.mockImplementation(async (_target, options) => {
+        if (options?.requireOwnerPairing && pairingCalls().length <= failures) {
+          throw new Error("ssh: Connection reset by peer");
+        }
+        return {
+          ...tunnelBootstrap,
+          ...(options?.issuePairingToken
+            ? { pairingToken: "owner-pairing-code", pairingRole: "owner" }
+            : {}),
+        };
+      });
+      mockBootstrapSshBearerSession.mockResolvedValue({
+        sessionToken: "owner-bearer",
+        role: "owner",
+      });
+      const reconnect = vi.fn(async () => undefined);
+      let onConfigUpdated!: (config: unknown, type: "snapshot" | "settingsUpdated") => void;
+      mockCreateEnvironmentConnection.mockImplementation(
+        (input: {
+          knownEnvironment: { environmentId: EnvironmentId };
+          client: unknown;
+          onConfigUpdated: typeof onConfigUpdated;
+        }) => {
+          onConfigUpdated = input.onConfigUpdated;
+          return {
+            kind: "saved",
+            environmentId: input.knownEnvironment.environmentId,
+            knownEnvironment: input.knownEnvironment,
+            client: input.client,
+            ensureBootstrapped: async () => undefined,
+            reconnect,
+            dispose: async () => undefined,
+          };
+        },
+      );
+      return {
+        state,
+        reconnect,
+        snapshot: (serverVersion: string) =>
+          onConfigUpdated(configForVersion(serverVersion), "snapshot"),
+      };
+    };
+
+    it("re-pairs a connected node in place once a failed re-pair's retry delay has passed", async () => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      vi.setSystemTime(new Date("2026-10-22T10:00:00.000Z"));
+      mockClientGetConfig.mockImplementation(async () => configForVersion("0.1.36") as never);
+      const node = failFirstOwnerPairings();
+
+      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } = await import("@ryco/client-runtime/connection");
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      // At app start the re-pair hits an SSH hiccup: the node connects on its
+      // client bearer, and its socket then stays healthy.
+      await reconnectSavedEnvironment(environmentId);
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+      expect(mockRuntimeById[environmentId]?.role).toBe("client");
+
+      await vi.advanceTimersByTimeAsync(DESKTOP_SSH_OWNER_REPAIR_RETRY_MS - 1);
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+
+      // No connect and no socket snapshot: the retry itself asks again.
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => {
+        expect(node.reconnect).toHaveBeenCalledOnce();
+      });
+      expect(pairingCalls()).toEqual([ownerPairingCall, ownerPairingCall]);
+      expect(node.state.storedBearer).toBe("owner-bearer");
+      expect(mockRevokeSshClientSession).toHaveBeenCalledWith(
+        "http://127.0.0.1:3774/",
+        "owner-bearer",
+        "client-session",
+      );
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("keeps retrying a connected node whose re-pair keeps failing", async () => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      vi.setSystemTime(new Date("2026-10-22T10:00:00.000Z"));
+      mockClientGetConfig.mockImplementation(async () => configForVersion("0.1.36") as never);
+      const node = failFirstOwnerPairings(2);
+
+      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } = await import("@ryco/client-runtime/connection");
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      await reconnectSavedEnvironment(environmentId);
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+
+      await vi.advanceTimersByTimeAsync(DESKTOP_SSH_OWNER_REPAIR_RETRY_MS);
+      await vi.waitFor(() => {
+        expect(pairingCalls()).toEqual([ownerPairingCall, ownerPairingCall]);
+      });
+      expect(node.reconnect).not.toHaveBeenCalled();
+      expect(node.state.storedBearer).toBe("client-bearer");
+
+      await vi.advanceTimersByTimeAsync(DESKTOP_SSH_OWNER_REPAIR_RETRY_MS);
+      await vi.waitFor(() => {
+        expect(node.reconnect).toHaveBeenCalledOnce();
+      });
+      expect(pairingCalls()).toEqual([ownerPairingCall, ownerPairingCall, ownerPairingCall]);
+      expect(node.state.storedBearer).toBe("owner-bearer");
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("retries a failed re-pair at once when the connected node reports another Ryco version", async () => {
+      // The node was connected before, on Ryco 0.1.30.
+      mockRuntimeById = {
+        [environmentId]: { descriptor: { environmentId, serverVersion: "0.1.30" } },
+      };
+      mockClientGetConfig.mockImplementation(async () => configForVersion("0.1.30") as never);
+      const node = failFirstOwnerPairings();
+
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      await reconnectSavedEnvironment(environmentId);
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+      expect(mockRuntimeById[environmentId]?.role).toBe("client");
+
+      // The socket reconnects to the same Ryco within the retry delay: nothing is asked.
+      node.snapshot("0.1.30");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+
+      // Ryco is updated on the node, as the copy dialog asks, and its server restarts.
+      node.snapshot("0.1.36");
+      await vi.waitFor(() => {
+        expect(node.reconnect).toHaveBeenCalledOnce();
+      });
+      expect(pairingCalls()).toEqual([ownerPairingCall, ownerPairingCall]);
+      expect(node.state.storedBearer).toBe("owner-bearer");
 
       await resetEnvironmentServiceForTests();
     });
