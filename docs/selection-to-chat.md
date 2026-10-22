@@ -60,8 +60,9 @@ Each quote is the selected text plus up to 32 characters on each side of it, so 
 passage is found again after the message re-renders. In the prompt it is one Markdown
 link, `[preview](ryco-quote:v1/…)`, which carries the source ids, the quote, its context
 and the comment. That text is what drafts, the prompt stash, copy and paste keep, so a
-pasted quote becomes a chip again; a large paste never folds a chip into an attachment.
-Queued messages, stash entries and new thread titles show the quote's preview in quotation
+pasted quote becomes a chip again. A paste of chips alone never folds into an attachment,
+however long their tokens; a paste whose other text is large enough to fold takes its
+quotes into the file as quoted lines. Queued messages, stash entries and new thread titles show the quote's preview in quotation
 marks instead.
 
 ## What the agent receives

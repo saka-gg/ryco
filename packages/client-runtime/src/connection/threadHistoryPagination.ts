@@ -122,12 +122,12 @@ export function createThreadHistoryPaginationController(deps: {
         return page;
       })
       .catch(async (error: unknown) => {
-        const historyErrorReason = threadHistoryErrorReason(error);
-        // Around a message the thread no longer has, the server answers
-        // stale-cursor though nothing loaded is stale. A resnapshot would
-        // reload the window for nothing and resolve as if the load worked;
-        // the caller needs the answer (a reveal settles on it).
-        if (input.request.mode.kind === "around" && historyErrorReason === "stale-cursor") {
+        // Around a message (or thread) that is gone, the server answers
+        // stale-cursor (or thread-not-found) though nothing loaded is stale or
+        // failed. A resnapshot would reload the window for nothing and resolve
+        // as if the load worked, and an error would show on the older-messages
+        // loader; the caller needs the answer (a reveal settles on it).
+        if (input.request.mode.kind === "around" && isThreadHistoryAnchorMissing(error)) {
           if (currentGeneration(input.scope) === generation) {
             deps.setRequestState({
               ...input.scope,
@@ -139,6 +139,7 @@ export function createThreadHistoryPaginationController(deps: {
           }
           throw error;
         }
+        const historyErrorReason = threadHistoryErrorReason(error);
         const shouldRecover =
           historyErrorReason === "stale-cursor" ||
           historyErrorReason === "invalid-cursor" ||

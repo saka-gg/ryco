@@ -43,10 +43,10 @@ stays out of the message itself and the transcript shows a short message. Shorte
 inline, where the agent sees them directly. The size counts both characters and UTF-8 bytes, so
 text in scripts that take more bytes per character folds sooner.
 
-Copied quote chips paste as chips again and never fold: the size counts only the text around
-them, and the message limit counts each quote as the text it sends, not as the longer link that
-stands for it in the prompt. A folded paste that held quotes shows them as quoted lines in the
-file.
+Copied quote chips paste as chips again, and a paste of chips alone never folds: the size counts
+only the text around them, and the message limit counts each quote as the text it sends, not as
+the longer link that stands for it in the prompt. When the text around them is large enough to
+fold, the quotes go into the file with it, as quoted lines.
 
 The pasted text stays with your draft, like an attached image: wherever drafts are saved, it
 survives a reload or an app restart, and it goes with the message when you send it, so it never

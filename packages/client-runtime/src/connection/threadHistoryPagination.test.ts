@@ -137,33 +137,38 @@ describe("thread history pagination", () => {
     expect(isThreadHistoryAnchorMissing(undefined)).toBe(false);
   });
 
-  it("reports a message the thread no longer has instead of resnapshotting", async () => {
-    const recoverStale = vi.fn(async () => undefined);
-    const setRequestState = vi.fn();
-    const missingAnchor = { _tag: "OrchestrationThreadHistoryError", reason: "stale-cursor" };
-    const controller = createThreadHistoryPaginationController({
-      request: vi.fn(async () => {
-        throw missingAnchor;
-      }),
-      apply: vi.fn(),
-      setRequestState,
-      recoverStale,
-    });
-    controller.beginSnapshot(scope);
+  it.each(["stale-cursor", "thread-not-found"])(
+    "reports a message that is gone (%s) instead of resnapshotting or failing the loader",
+    async (reason) => {
+      const recoverStale = vi.fn(async () => undefined);
+      const setRequestState = vi.fn();
+      const missingAnchor = { _tag: "OrchestrationThreadHistoryError", reason };
+      const controller = createThreadHistoryPaginationController({
+        request: vi.fn(async () => {
+          throw missingAnchor;
+        }),
+        apply: vi.fn(),
+        setRequestState,
+        recoverStale,
+      });
+      controller.beginSnapshot(scope);
 
-    // A reveal or quote jump settles on this rejection; a resnapshot resolved null instead.
-    await expect(
-      controller.loadAroundMessage({
-        scope,
-        anchorId: MessageId.make("message-deleted"),
-        limit: 101,
-      }),
-    ).rejects.toBe(missingAnchor);
-    expect(recoverStale).not.toHaveBeenCalled();
-    // Loading older messages did not fail, so the timeline shows no error.
-    expect(setRequestState).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: "idle", cursor: null, error: null }),
-    );
-    expect(setRequestState).not.toHaveBeenCalledWith(expect.objectContaining({ status: "error" }));
-  });
+      // A reveal or quote jump settles on this rejection; a resnapshot resolved null instead.
+      await expect(
+        controller.loadAroundMessage({
+          scope,
+          anchorId: MessageId.make("message-deleted"),
+          limit: 101,
+        }),
+      ).rejects.toBe(missingAnchor);
+      expect(recoverStale).not.toHaveBeenCalled();
+      // Loading older messages did not fail, so the timeline shows no error.
+      expect(setRequestState).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: "idle", cursor: null, error: null }),
+      );
+      expect(setRequestState).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: "error" }),
+      );
+    },
+  );
 });
