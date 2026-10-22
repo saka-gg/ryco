@@ -76,12 +76,31 @@ export function buildPlanImplementationPrompt(planMarkdown: string): string {
   return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
 }
 
+/**
+ * A plan follow-up refines the plan when the composer holds typed text or
+ * file references (lines picked while reading the plan are feedback on it),
+ * and implements it otherwise. The composer's primary action reads this, so
+ * its label says what the send does; the send composes the references into
+ * `draftText` (`composeOutgoingPrompt`), which then is never empty.
+ */
+export function planFollowUpRefines(input: {
+  readonly draftText: string;
+  readonly fileReferenceCount: number;
+}): boolean {
+  return input.draftText.trim().length > 0 || input.fileReferenceCount > 0;
+}
+
+/**
+ * `draftText` is the whole refinement as sent, context blocks included. The
+ * send engine is not imported here: these helpers also load lazily, and
+ * sharing the engine with them would split it out of the shell's chunks.
+ */
 export function resolvePlanFollowUpSubmission(input: { draftText: string; planMarkdown: string }): {
   text: string;
   interactionMode: "default" | "plan";
 } {
   const trimmedDraftText = input.draftText.trim();
-  if (trimmedDraftText.length > 0) {
+  if (planFollowUpRefines({ draftText: trimmedDraftText, fileReferenceCount: 0 })) {
     return {
       text: trimmedDraftText,
       interactionMode: "plan",

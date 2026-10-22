@@ -68,9 +68,12 @@ const previewHarness = vi.hoisted(() => {
     writeFailure: null as { readonly reason: string; readonly message: string } | null,
     savedVersion: 0,
     serverThreadEnabled: true,
+    /** Server threads' worktrees by thread id; a thread without one works in the project. */
+    worktreePaths: {} as Record<string, string>,
     draftThread: null as DraftThreadStub | null,
     routeParams: { environmentId: "environment-local", threadId: "thread-1" } as Params,
     reset() {
+      this.worktreePaths = {};
       this.entries = [];
       this.readFiles = new Map();
       this.binaryFiles = new Map();
@@ -236,13 +239,13 @@ vi.mock("../hooks/useSettings", () => ({
 }));
 
 vi.mock("../storeSelectors", () => ({
-  createThreadSelectorByRef: () => () =>
+  createThreadSelectorByRef: (ref: { threadId: string } | null) => () =>
     previewHarness.serverThreadEnabled
       ? {
-          id: ThreadId.make("thread-1"),
+          id: ThreadId.make(ref?.threadId ?? "thread-1"),
           environmentId: EnvironmentId.make("environment-local"),
           projectId: ProjectId.make("project-1"),
-          worktreePath: null,
+          worktreePath: previewHarness.worktreePaths[ref?.threadId ?? "thread-1"] ?? null,
           turnDiffSummaries: [],
         }
       : undefined,
@@ -297,6 +300,12 @@ function renderPreviewPanel(props: Partial<ComponentProps<typeof PreviewPanel>> 
       <PreviewPanel mode="sheet" {...props} />
     </AppAtomRegistryProvider>,
   );
+}
+
+async function waitForLayout(): Promise<void> {
+  for (let frame = 0; frame < 3; frame++) {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  }
 }
 
 const PREVIEW_THREAD = {
@@ -441,13 +450,84 @@ describe("PreviewPanel", () => {
     await expect.element(page.getByText("Open file")).toBeInTheDocument();
   });
 
+  it("opens a linked file the listing leaves out, and lets the read decide it is gone", async () => {
+    // The listing skips ignored folders, gitignored files and entries past its cap.
+    previewHarness.entries = [{ path: "README.md", kind: "file" }];
+    previewHarness.readFiles.set("node_modules/effect/Effect.js", {
+      relativePath: "node_modules/effect/Effect.js",
+      contents: "one\ntwo\nthree",
+    });
+    const panel = (reveal: ComponentProps<typeof PreviewPanel>["reveal"]) => (
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>
+    );
+
+    mounted = await renderPreviewPanel({
+      reveal: { path: "node_modules/effect/Effect.js", line: 2 },
+    });
+    await expect.element(page.getByRole("button", { name: "README.md" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit node_modules/effect/Effect.js" }))
+      .toHaveValue("one\ntwo\nthree");
+    await waitForLayout();
+    // Still open once the listing that lacks it has loaded, with its line marked.
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit node_modules/effect/Effect.js" }))
+      .toBeInTheDocument();
+    expect(
+      document
+        .querySelector("[data-test-selected-lines]")
+        ?.getAttribute("data-test-selected-lines"),
+    ).toBe("2-2");
+
+    // A link to a file that does not exist ends on the tree once the read says so.
+    await mounted.rerender(panel({ path: "src/gone.ts", line: 1 }));
+    await vi.waitFor(() => expect(previewHarness.readAttempts).toContain("src/gone.ts"));
+    await expect.element(page.getByText("Open file")).toBeInTheDocument();
+  });
+
+  it("opens a link in the thread it switched to, even at the path the last thread had open", async () => {
+    previewHarness.entries = [{ path: "src/a.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/a.ts", { relativePath: "src/a.ts", contents: "one\ntwo" });
+    previewHarness.worktreePaths = { "thread-2": "/worktrees/thread-2" };
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/a.ts" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+
+    // A link in another split pane routes that pane's thread and opens the file in one go.
+    previewHarness.routeParams = { environmentId: "environment-local", threadId: "thread-2" };
+    await mounted.rerender(
+      <AppAtomRegistryProvider>
+        <PreviewPanel
+          mode="sheet"
+          reveal={{ path: "src/a.ts", line: 2 }}
+          onRevealHandled={() => undefined}
+        />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-2"),
+    );
+  });
+
   it("starts a new pick with an empty note", async () => {
     previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
     previewHarness.readFiles.set("src/app.ts", {
       relativePath: "src/app.ts",
       contents: "one\ntwo\nthree",
     });
-    const release = composerContextIntake.register(PREVIEW_THREAD, () => true);
+    const release = composerContextIntake.register(PREVIEW_THREAD, () => "added");
     try {
       mounted = await renderPreviewPanel();
       await page.getByRole("button", { name: "src/app.ts" }).click();
@@ -477,7 +557,7 @@ describe("PreviewPanel", () => {
     const received: ComposerContextItem[] = [];
     const release = composerContextIntake.register(PREVIEW_THREAD, (item) => {
       received.push(item);
-      return true;
+      return "added";
     });
     try {
       await editor.fill("one\nTWO\nTHREE");

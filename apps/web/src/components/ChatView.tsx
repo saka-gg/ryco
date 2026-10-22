@@ -19,6 +19,7 @@ import {
   appendSelectionQuote,
   approvalRedirectTooSoon,
   checkpointRevertUnsupportedMessage,
+  composeOutgoingPrompt,
   declineApprovalsForRedirect,
   describeApprovalRedirectRefusal,
   noteApprovalRedirectEnd,
@@ -4961,8 +4962,12 @@ export default function ChatView(props: ChatViewProps) {
         notifyMutationUnavailable(reachNodeUnavailableReason);
         return;
       }
+      // File references are feedback on the plan: they refine it, and go with the text.
       const followUp = resolvePlanFollowUpSubmission({
-        draftText: trimmed,
+        draftText: composeOutgoingPrompt({
+          prompt: trimmed,
+          fileReferences: composerFileReferences,
+        }),
         planMarkdown: activeProposedPlan.planMarkdown,
       });
       promptRef.current = "";

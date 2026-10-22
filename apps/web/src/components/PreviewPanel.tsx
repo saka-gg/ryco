@@ -332,6 +332,19 @@ export default function PreviewPanel({
   // "Add to chat" from the gutter; the frozen phone tier does not get it.
   const fileReferencePicker = useFileReferencePicker(isPhonePresentation ? null : activeThreadRef);
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  // The thread and folder the selection below was last reset for. A deep
+  // link waits until the reset for its own thread has applied: the panel is
+  // not keyed per thread, and opening against the previous thread's
+  // selection would find its file "already open" and never open it.
+  const selectionScopeKey =
+    activeEnvironmentId && activeThreadId && activeCwd
+      ? `${isPhonePresentation ? "phone" : "wide"}\u0000${activeEnvironmentId}\u0000${activeThreadId}\u0000${activeCwd}`
+      : null;
+  const [selectionScope, setSelectionScope] = useState<string | null>(null);
+  // The file a deep link opened. The listing leaves files out (ignored and
+  // gitignored folders, past its entry cap, untracked files while it is still
+  // the quick build), so for this file the read decides whether it exists.
+  const linkedFilePathRef = useRef<string | null>(null);
   // Set only as its file opens, and replaced by every later open: a deep
   // link marks its line while that file stays open, never on a return to it.
   const [lineReveal, setLineReveal] = useState<PreviewLineReveal | null>(null);
@@ -389,7 +402,15 @@ export default function PreviewPanel({
     setPendingNavigation(null);
     setRecoveryAction(null);
     setIsTreeVisible(true);
-  }, [activeCwd, activeThread?.environmentId, activeThread?.id, isPhonePresentation]);
+    linkedFilePathRef.current = null;
+    setSelectionScope(selectionScopeKey);
+  }, [
+    activeCwd,
+    activeThread?.environmentId,
+    activeThread?.id,
+    isPhonePresentation,
+    selectionScopeKey,
+  ]);
 
   const latestProjectFilesRefreshKey = useMemo(() => {
     const latestChangedSummary = (activeThread?.turnDiffSummaries ?? [])
@@ -441,7 +462,7 @@ export default function PreviewPanel({
       setIsTreeVisible(true);
       return;
     }
-    if (entry) return;
+    if (entry || selectedFilePath === linkedFilePathRef.current) return;
     const retained =
       activeThread?.environmentId && activeCwd
         ? readPreviewFileSession(
@@ -608,6 +629,9 @@ export default function PreviewPanel({
   useEffect(() => {
     if (!reveal || handledRevealRef.current === reveal) return;
     if (previewSearch.preview !== "1" || !activeThread?.environmentId || !activeCwd) return;
+    // Wait for the selection of the thread the link opened, so `openFile`
+    // compares against that thread's open file.
+    if (selectionScopeKey === null || selectionScope !== selectionScopeKey) return;
     handledRevealRef.current = reveal;
     onRevealHandled?.();
     // The frozen phone tier keeps landing on the tree.
@@ -623,6 +647,7 @@ export default function PreviewPanel({
       return;
     }
     revealTokenRef.current += 1;
+    linkedFilePathRef.current = reveal.path;
     void openFile(
       reveal.path,
       reveal.line === undefined
@@ -638,6 +663,8 @@ export default function PreviewPanel({
     previewSearch.preview,
     projectFiles,
     reveal,
+    selectionScope,
+    selectionScopeKey,
   ]);
 
   const onEditContentsChange = useCallback(

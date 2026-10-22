@@ -14,32 +14,35 @@ describe("createComposerContextIntake", () => {
   it("delivers to the thread's registered composer only", () => {
     const intake = createComposerContextIntake();
     expect(intake.canDeliver(thread)).toBe(false);
-    expect(intake.deliver(thread, item)).toBe(false);
+    expect(intake.deliver(thread, item)).toBe("unavailable");
 
-    const receiver = vi.fn(() => true);
+    const receiver = vi.fn(() => "added" as const);
     const release = intake.register(thread, receiver);
     expect(intake.canDeliver(thread)).toBe(true);
     expect(intake.canDeliver(otherThread)).toBe(false);
-    expect(intake.deliver(thread, item)).toBe(true);
+    expect(intake.deliver(thread, item)).toBe("added");
     expect(receiver).toHaveBeenCalledWith(item);
-    expect(intake.deliver(otherThread, item)).toBe(false);
+    expect(intake.deliver(otherThread, item)).toBe("unavailable");
 
     release();
     expect(intake.canDeliver(thread)).toBe(false);
-    expect(intake.deliver(thread, item)).toBe(false);
+    expect(intake.deliver(thread, item)).toBe("unavailable");
     expect(receiver).toHaveBeenCalledTimes(1);
   });
 
-  it("passes on a receiver's refusal", () => {
+  it("passes on a receiver's refusal and its reason", () => {
     const intake = createComposerContextIntake();
-    intake.register(thread, () => false);
-    expect(intake.deliver(thread, item)).toBe(false);
+    const release = intake.register(thread, () => "unavailable");
+    expect(intake.deliver(thread, item)).toBe("unavailable");
+    release();
+    intake.register(thread, () => "full");
+    expect(intake.deliver(thread, item)).toBe("full");
   });
 
   it("lets the latest registration take over and hands back on release", () => {
     const intake = createComposerContextIntake();
-    const first = vi.fn(() => true);
-    const second = vi.fn(() => true);
+    const first = vi.fn(() => "added" as const);
+    const second = vi.fn(() => "added" as const);
     const releaseFirst = intake.register(thread, first);
     const releaseSecond = intake.register(thread, second);
     intake.deliver(thread, item);
@@ -58,11 +61,11 @@ describe("createComposerContextIntake", () => {
     const intake = createComposerContextIntake();
     const listener = vi.fn();
     const unsubscribe = intake.subscribe(listener);
-    const release = intake.register(thread, () => true);
+    const release = intake.register(thread, () => "added");
     release();
     expect(listener).toHaveBeenCalledTimes(2);
     unsubscribe();
-    intake.register(thread, () => true);
+    intake.register(thread, () => "added");
     expect(listener).toHaveBeenCalledTimes(2);
   });
 });

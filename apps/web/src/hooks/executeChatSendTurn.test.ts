@@ -727,6 +727,58 @@ describe("executeChatSendTurn", () => {
     expect(input.refs.composerFileReferencesRef.current).toEqual([reference]);
   });
 
+  it("restores an attachment and a file reference when the send fails before the composer re-renders", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.claudeCacheReview = null;
+    const attachment = {
+      id: "sent-upload",
+      type: "file" as const,
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 4,
+      file: null,
+      previewUrl: "",
+      uploadToken: "upload-1",
+      expiresAt: "2099-01-01T00:00:00Z",
+    };
+    const reference = {
+      id: "reference-1",
+      createdAt: "2026-10-22T00:00:00.000Z",
+      path: "src/app.ts",
+      lineStart: 4,
+      lineEnd: 4,
+      snippet: "run(item);",
+      truncated: false,
+    };
+    input.composer.images = [attachment];
+    input.composer.fileReferences = [reference];
+    // The live refs still hold what was sent: nothing re-rendered the composer in between.
+    input.refs.promptRef.current = input.composer.prompt;
+    input.refs.composerImagesRef.current = [attachment];
+    input.refs.composerFileReferencesRef.current = [reference];
+    dispatchCommand.mockImplementation(async (command) => {
+      if ((command as { type: string }).type === "thread.turn.start") {
+        throw new Error("The node went away.");
+      }
+      return { sequence: 1 };
+    });
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+
+    expect(input.draft.clearComposerDraftContent).toHaveBeenCalled();
+    expect(input.draft.addComposerDraftImages).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      [attachment],
+    );
+    expect(input.draft.setComposerDraftFileReferences).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      [reference],
+    );
+    expect(input.refs.composerImagesRef.current).toEqual([attachment]);
+    expect(input.refs.composerFileReferencesRef.current).toEqual([reference]);
+    expect(input.refs.promptRef.current).toBe(input.composer.prompt);
+  });
+
   it("keeps the draft when a file reference was added while the send prepared", async () => {
     const { input } = makeSendInput();
     input.claudeCacheReview = null;
