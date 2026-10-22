@@ -5,6 +5,10 @@ import { withInspectionTools } from "../Mcp/inspectionTools.ts";
 import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
+import { withProjectCopyTools } from "../Mcp/projectCopyTools.ts";
+import { AgentControlNodeDirectory } from "../Services/AgentControlNodeDirectory.ts";
+import { GitNetwork } from "../../projectCopy/Services/GitNetwork.ts";
+import { NodePaths } from "../../projectCopy/Services/NodePaths.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
@@ -85,6 +89,9 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const proposalRepository = yield* Effect.serviceOption(AgentControlProposalRepository);
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
+  const nodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
+  const nodePaths = yield* Effect.serviceOption(NodePaths);
+  const gitNetwork = yield* Effect.serviceOption(GitNetwork);
   const toolDeps = {
     policy,
     proposals,
@@ -186,7 +193,17 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         ...(Option.isSome(config) ? { taskFilesDir: config.value.taskFilesDir } : {}),
       })
     : computerTools;
-  const tools = withCompleteAgentControlCatalog(taskTools);
+  const projectCopyTools = withProjectCopyTools(taskTools, {
+    policy,
+    registry,
+    proposals,
+    ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+    projections,
+    ...(Option.isSome(nodeDirectory) ? { nodeDirectory: nodeDirectory.value } : {}),
+    ...(Option.isSome(nodePaths) ? { nodePaths: nodePaths.value } : {}),
+    ...(Option.isSome(gitNetwork) ? { gitNetwork: gitNetwork.value } : {}),
+  });
+  const tools = withCompleteAgentControlCatalog(projectCopyTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

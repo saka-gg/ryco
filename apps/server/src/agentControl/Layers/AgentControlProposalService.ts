@@ -7,6 +7,8 @@ import {
 } from "@ryco/contracts";
 import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
 
+import { AgentControlClientExecutionError } from "../Errors.ts";
+import { isAgentControlClientExecutedKind } from "../projectCopyControl.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import {
@@ -113,7 +115,41 @@ const makeAgentControlProposalService = (options?: AgentControlProposalServiceLi
         ),
       );
 
-    const accept: AgentControlProposalServiceShape["accept"] = (input) => decide("approved", input);
+    /**
+     * A client-executed kind runs only in the client that accepts it, so the accept must name
+     * that client's executor. An already approved or executing proposal answers with its
+     * receipt here: the executor binding that follows refuses a different executor, and re-runs
+     * the begin step a crash left undone.
+     */
+    const accept: AgentControlProposalServiceShape["accept"] = (input) =>
+      Effect.gen(function* () {
+        yield* policy.requireEnabled("AgentControlProposalService.accept");
+        const current = yield* store.getById(input.proposalId);
+        if (Option.isNone(current) || !isAgentControlClientExecutedKind(current.value.plan.kind)) {
+          return yield* decide("approved", input);
+        }
+        if (input.executeOnClient === undefined) {
+          return yield* new AgentControlClientExecutionError({
+            reason: "executor-required",
+            detail:
+              "This request runs in the app that approves it. Approve it in Ryco on a computer connected to the target node.",
+          });
+        }
+        return yield* decide("approved", input).pipe(
+          Effect.catchTag("AgentControlInvalidTransitionError", (error) =>
+            store
+              .getById(input.proposalId)
+              .pipe(
+                Effect.flatMap((latest) =>
+                  Option.isSome(latest) &&
+                  (latest.value.status === "approved" || latest.value.status === "executing")
+                    ? Effect.succeed(toAgentControlProposalReceipt(latest.value))
+                    : Effect.fail(error),
+                ),
+              ),
+          ),
+        );
+      });
 
     const reject: AgentControlProposalServiceShape["reject"] = (input) => decide("rejected", input);
 

@@ -73,11 +73,19 @@ export interface DecideAgentControlProposalInput {
   readonly decidedAt: IsoDateTime;
 }
 
-export interface BeginAgentControlExecutionInput {
+export interface BeginAgentControlExecutionInput<E = never> {
   readonly proposalId: AgentControlProposalId;
   /** Must be `executor`; every other actor is rejected. */
   readonly actor: AgentControlTransitionActor;
   readonly now: IsoDateTime;
+  /**
+   * Runs in the transaction that moves the proposal into `executing`, after its audit row; a
+   * failure rolls the transition back. A client-executed proposal inserts its operation (with
+   * the executor binding) here, so it is never `executing` without one.
+   */
+  readonly withinTransaction?:
+    | ((executing: AgentControlProposal) => Effect.Effect<void, E>)
+    | undefined;
 }
 
 export interface SettleAgentControlExecutionInput {
@@ -158,9 +166,9 @@ export interface AgentControlProposalStoreShape {
    * only permitted caller (`actor: "executor"`); an approved proposal whose
    * expiry has passed is expired instead and refuses execution.
    */
-  readonly beginExecution: (
-    input: BeginAgentControlExecutionInput,
-  ) => Effect.Effect<AgentControlProposal, AgentControlProposalStoreError>;
+  readonly beginExecution: <E = never>(
+    input: BeginAgentControlExecutionInput<E>,
+  ) => Effect.Effect<AgentControlProposal, AgentControlProposalStoreError | E>;
 
   /** Settle an executing proposal with its terminal receipt. */
   readonly settleExecution: (

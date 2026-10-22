@@ -46,7 +46,7 @@ const makeAgentControlOperationStore = Effect.gen(function* () {
         actionKind: input.proposal.plan.kind,
         status: "pending",
         attempt: 0,
-        state: {
+        state: input.state ?? {
           completedSteps: [],
           resources: {
             projectIds: [],

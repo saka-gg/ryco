@@ -13,6 +13,7 @@ import { SessionImport } from "../imports/SessionImport.ts";
 import { ThreadFork } from "../threadFork/Services/ThreadFork.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
 import { AgentControlNodeDirectory } from "../agentControl/Services/AgentControlNodeDirectory.ts";
+import { AgentControlExecution } from "../agentControl/Services/AgentControlExecution.ts";
 import { GitNetwork } from "../projectCopy/Services/GitNetwork.ts";
 import { NodePaths } from "../projectCopy/Services/NodePaths.ts";
 import { ProjectExport } from "../projectCopy/Services/ProjectExport.ts";
@@ -247,6 +248,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectImports: yield* Effect.serviceOption(ProjectImports),
     };
     const agentControlNodeDirectory = yield* Effect.serviceOption(AgentControlNodeDirectory);
+    // Binds and settles client-executed proposals (`copyProjectToNode`) for the approving client.
+    const agentControlExecution = yield* Effect.serviceOption(AgentControlExecution);
     const checkpointDiffQuery = yield* CheckpointDiffQuery;
     const keybindings = yield* Keybindings;
     const open = yield* Open;
@@ -1408,6 +1411,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       agentControlExternalIntegrations,
       agentControlExternalInstallations,
       agentControlNodeDirectory,
+      agentControlExecution,
       projectCopy,
       checkpointDiffQuery,
       keybindings,

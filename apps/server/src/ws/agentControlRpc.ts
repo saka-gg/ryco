@@ -12,7 +12,12 @@ import {
 import { Effect, Option, Schema, Stream } from "effect";
 
 import type { AgentControlNodeDirectoryError } from "../agentControl/Errors.ts";
-import type { AgentControlProposalDecisionError } from "../agentControl/Services/AgentControlProposalService.ts";
+import { isAgentControlClientExecutedKind } from "../agentControl/projectCopyControl.ts";
+import type { AgentControlClientExecutionFailure } from "../agentControl/Services/AgentControlExecution.ts";
+import {
+  toAgentControlProposalReceipt,
+  type AgentControlProposalDecisionError,
+} from "../agentControl/Services/AgentControlProposalService.ts";
 import type { AgentControlExternalIntegrationServiceError } from "../agentControl/Services/AgentControlExternalIntegration.ts";
 import type { AgentControlExternalInstallationServiceError } from "../agentControl/Services/AgentControlExternalInstallation.ts";
 import { observeRpcEffect, observeRpcStreamEffect } from "../observability/RpcInstrumentation.ts";
@@ -64,9 +69,20 @@ export const proposalStreamEventInPlanView = (
  * prompts, storage details — crosses this boundary.
  */
 export const toAgentControlRpcError = (
-  error: AgentControlProposalDecisionError,
+  error: AgentControlProposalDecisionError | AgentControlClientExecutionFailure,
 ): AgentControlRpcError => {
   switch (error._tag) {
+    case "AgentControlClientExecutionError":
+      return new AgentControlRpcError({
+        code:
+          error.reason === "executor-required" || error.reason === "not-client-executed"
+            ? "unsupported"
+            : "conflict",
+        message: error.detail,
+        ...(error.status !== undefined && isProposalStatus(error.status)
+          ? { status: error.status }
+          : {}),
+      });
     case "AgentControlDisabledError":
       return new AgentControlRpcError({
         code: "disabled",
@@ -87,7 +103,9 @@ export const toAgentControlRpcError = (
       return new AgentControlRpcError({
         code: "conflict",
         message: "Decision no longer applies to the proposal's current state.",
-        ...(isProposalStatus(error.from) ? { status: error.from } : {}),
+        ...(error.entity === "proposal" && isProposalStatus(error.from)
+          ? { status: error.from }
+          : {}),
       });
     case "AgentControlDuplicateRequestError":
       return new AgentControlRpcError({
@@ -200,10 +218,27 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
     agentControlExternalIntegrations,
     agentControlExternalInstallations,
     agentControlNodeDirectory,
+    agentControlExecution,
     currentSessionId,
     ownerEffect,
     ownerStreamEffect,
   } = ctx;
+
+  const withExecution = <A, E>(
+    use: (
+      execution: Option.Option.Value<typeof agentControlExecution>,
+    ) => Effect.Effect<A, E | AgentControlRpcError>,
+  ) =>
+    Option.match(agentControlExecution, {
+      onNone: () =>
+        Effect.fail(
+          new AgentControlRpcError({
+            code: "unsupported",
+            message: "This server does not run client-executed requests.",
+          }),
+        ),
+      onSome: use,
+    });
 
   const withService = <A, E>(
     use: (
@@ -304,7 +339,28 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
                 decidedAt: new Date().toISOString(),
                 executeOnClient: input.executeOnClient,
               })
-              .pipe(Effect.mapError(toAgentControlRpcError)),
+              .pipe(
+                Effect.mapError(toAgentControlRpcError),
+                // A client-executed kind is bound to this client's executor in the same request
+                // (A1): approved, then executing with the binding, or the current state again.
+                Effect.flatMap((receipt) => {
+                  const executeOnClient = input.executeOnClient;
+                  return executeOnClient === undefined ||
+                    !isAgentControlClientExecutedKind(receipt.actionKind)
+                    ? Effect.succeed(receipt)
+                    : withExecution((execution) =>
+                        execution
+                          .beginClientExecution({
+                            proposalId: input.proposalId,
+                            executorId: executeOnClient.executorId,
+                          })
+                          .pipe(
+                            Effect.map(toAgentControlProposalReceipt),
+                            Effect.mapError(toAgentControlRpcError),
+                          ),
+                      );
+                }),
+              ),
           ),
         ),
         { "rpc.aggregate": "agent-control", "rpc.operation": "accept" },
@@ -363,17 +419,22 @@ export const makeAgentControlHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "agent-control", "rpc.operation": "publish-node-directory" },
       ),
-    // Refused until client-executed proposals are implemented; the node does not advertise
-    // `projectCopy` yet, so no client accepts one.
-    [AGENT_CONTROL_WS_METHODS.reportClientExecution]: () =>
-      ownerEffect(
+    // The approving client's outcome; only the executor the proposal was accepted with counts.
+    [AGENT_CONTROL_WS_METHODS.reportClientExecution]: (input) =>
+      observeRpcEffect(
         AGENT_CONTROL_WS_METHODS.reportClientExecution,
-        Effect.fail(
-          new AgentControlRpcError({
-            code: "unsupported",
-            message: "This server does not run client-executed requests yet.",
-          }),
+        ownerEffect(
+          AGENT_CONTROL_WS_METHODS.reportClientExecution,
+          withExecution((execution) =>
+            execution
+              .reportClientExecution(input)
+              .pipe(
+                Effect.map(toAgentControlProposalReceipt),
+                Effect.mapError(toAgentControlRpcError),
+              ),
+          ),
         ),
+        { "rpc.aggregate": "agent-control", "rpc.operation": "report-client-execution" },
       ),
     [AGENT_CONTROL_WS_METHODS.listIntegrations]: () =>
       ownerEffect(

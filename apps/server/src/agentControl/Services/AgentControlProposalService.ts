@@ -43,11 +43,15 @@ import type {
   SubmitAgentControlProposalInput,
   SubmitAgentControlProposalResult,
 } from "./AgentControlProposalStore.ts";
-import type { AgentControlSettingsChangeUnsupportedError } from "../Errors.ts";
+import type {
+  AgentControlClientExecutionError,
+  AgentControlSettingsChangeUnsupportedError,
+} from "../Errors.ts";
 
 export type AgentControlProposalDecisionError =
   | AgentControlProposalStoreError
-  | AgentControlSettingsChangeUnsupportedError;
+  | AgentControlSettingsChangeUnsupportedError
+  | AgentControlClientExecutionError;
 
 export interface AgentControlQueueLimitsInput {
   /** Capped at `AGENT_CONTROL_QUEUE_ACTIVE_LIMIT_MAX`. */
@@ -113,7 +117,12 @@ export interface AgentControlProposalServiceShape {
     proposalId: AgentControlProposalId,
   ) => Effect.Effect<Option.Option<AgentControlProposal>, AgentControlProposalStoreError>;
 
-  /** Accept a pending proposal (idempotent when it is already approved). */
+  /**
+   * Accept a pending proposal (idempotent when it is already approved). A client-executed kind
+   * requires `executeOnClient` and also answers an `approved` or `executing` proposal with its
+   * receipt: binding the executor is the next step (`AgentControlExecution.beginClientExecution`),
+   * which refuses a different executor.
+   */
   readonly accept: (
     input: AcceptAgentControlProposalRequest,
   ) => Effect.Effect<AgentControlProposalReceipt, AgentControlProposalDecisionError>;

@@ -168,6 +168,10 @@ const grantedCapabilities = [
   AGENT_CONTROL_CAPABILITIES.controlBrowser,
   AGENT_CONTROL_CAPABILITIES.readLocalTasks,
   AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+  // Cross-node projects: proposals the user approves, and the node directory they target.
+  AGENT_CONTROL_CAPABILITIES.importProject,
+  AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
+  AGENT_CONTROL_CAPABILITIES.readNodes,
 ] as const;
 
 const lifecycle = (input: {
