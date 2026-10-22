@@ -38,6 +38,7 @@ import {
   Effect,
   Fiber,
   Layer,
+  Logger,
   Option,
   Queue,
   Random,
@@ -2954,9 +2955,22 @@ describe("ClaudeAdapterLive", () => {
 
     it.effect("keeps benign and unknown subtypes out of the conversation", () => {
       const harness = makeHarness();
+      const logLines: Array<{ level: string; message: ReadonlyArray<unknown> }> = [];
+      const logs = Logger.layer([
+        Logger.make((options) => {
+          logLines.push({
+            level: options.logLevel,
+            message: Array.isArray(options.message) ? options.message : [options.message],
+          });
+        }),
+      ]);
       return Effect.gen(function* () {
         const adapter = yield* startSideChannelSession("test-claudeadapter-side-channel-quiet");
         const events = yield* emitSystemFrames(harness, adapter, [
+          // Frames that lack the field a notice reads emit nothing instead of failing the stream.
+          { subtype: "informational", level: "warning" },
+          { subtype: "model_refusal_no_fallback", original_model: "claude-opus", request_id: null },
+          { subtype: "notification", key: "empty", text: "   ", priority: "high" },
           { subtype: "session_state_changed", state: "idle" },
           { subtype: "session_state_changed", state: "requires_action" },
           { subtype: "commands_changed", commands: [] },
@@ -2975,14 +2989,39 @@ describe("ClaudeAdapterLive", () => {
           { subtype: "worker_shutting_down", reason: "host_exit" },
           { subtype: "control_request_progress", request_id: "req-1", status: "started" },
           { subtype: "a_subtype_from_a_newer_cli", payload: { anything: true } },
+          { subtype: "a_subtype_from_a_newer_cli", payload: { again: true } },
         ]);
         assert.deepEqual(
           events.map((event) => event.type),
           [],
         );
+        // An unknown subtype stays diagnosable at the server's default log level, once a window.
+        const unhandled = logLines.filter(
+          (line) => line.message[0] === "claude.system-message.unhandled",
+        );
+        assert.deepEqual(
+          unhandled.map((line) => ({
+            level: line.level,
+            subtype: (line.message[1] as { subtype?: unknown } | undefined)?.subtype,
+            preview: (line.message[1] as { preview?: unknown } | undefined)?.preview,
+          })),
+          [
+            {
+              level: "Info",
+              subtype: "a_subtype_from_a_newer_cli",
+              preview: JSON.stringify({
+                type: "system",
+                session_id: "sdk-session-side-channel",
+                uuid: "side-channel-15",
+                subtype: "a_subtype_from_a_newer_cli",
+                payload: { anything: true },
+              }),
+            },
+          ],
+        );
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
-        Effect.provide(harness.layer),
+        Effect.provide(Layer.merge(harness.layer, logs)),
       );
     });
 
@@ -3044,6 +3083,13 @@ describe("ClaudeAdapterLive", () => {
 
     it.effect("surfaces banners, command output and refusals as notices", () => {
       const harness = makeHarness();
+      // A hook's reason can run to several lines: the row's label stays short and the reason
+      // travels whole as the body, which the row's panel shows in full.
+      const longHookReason = [
+        "Stop hook feedback:",
+        `- ${"The test suite must pass before the turn can end. ".repeat(5).trim()}`,
+        "- Run `bun run test` and fix the failures.",
+      ].join("\n");
       return Effect.gen(function* () {
         const adapter = yield* startSideChannelSession("test-claudeadapter-side-channel-notices");
         const events = yield* emitSystemFrames(harness, adapter, [
@@ -3053,13 +3099,23 @@ describe("ClaudeAdapterLive", () => {
             level: "warning",
             prevent_continuation: true,
           },
+          { subtype: "informational", content: `${longHookReason}\n`, level: "warning" },
+          {
+            subtype: "informational",
+            content: "Try /compact to free context.",
+            level: "suggestion",
+          },
+          { subtype: "informational", content: "Hooks reloaded.", level: "notice" },
           {
             subtype: "notification",
             key: "fallback",
             text: "Opus limit reached, now using Sonnet",
             priority: "high",
           },
-          { subtype: "local_command_output", content: "Usage: 42% of the weekly limit\n" },
+          {
+            subtype: "local_command_output",
+            content: "Usage: 42% of the weekly limit\n  Resets Monday 09:00\n",
+          },
           {
             subtype: "memory_recall",
             mode: "select",
@@ -3090,12 +3146,24 @@ describe("ClaudeAdapterLive", () => {
             event.type === "runtime.notice" ? event.payload : { unexpected: event.type },
           ),
           [
-            { message: "UserPromptSubmit hook blocked this prompt." },
-            { message: "Opus limit reached, now using Sonnet" },
-            { message: "Command output", detail: "Usage: 42% of the weekly limit" },
+            { message: "Claude stopped", detail: "UserPromptSubmit hook blocked this prompt." },
+            { message: "Claude warning", detail: longHookReason },
+            { message: "Claude suggestion", detail: "Try /compact to free context." },
+            { message: "Claude notice", detail: "Hooks reloaded." },
+            { message: "Claude notification", detail: "Opus limit reached, now using Sonnet" },
+            {
+              message: "Command output",
+              detail: "Usage: 42% of the weekly limit\n  Resets Monday 09:00",
+            },
             { message: "Recalled 2 memories" },
-            { message: "Retried with claude-sonnet after a refusal." },
-            { message: "Claude declined to answer this request." },
+            {
+              message: "Model switched after a refusal",
+              detail: "Retried with claude-sonnet after a refusal.",
+            },
+            {
+              message: "Claude declined the request",
+              detail: "Claude declined to answer this request.",
+            },
             { message: "Claude plugin install failed: market", detail: "Clone failed" },
           ],
         );

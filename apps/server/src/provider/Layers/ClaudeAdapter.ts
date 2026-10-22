@@ -48,6 +48,7 @@ import {
   type PermissionResult,
   type PermissionUpdate,
   type SDKAPIRetryMessage,
+  type SDKInformationalMessage,
   type SDKMessage,
   type SDKResultMessage,
   type SettingSource,
@@ -132,6 +133,7 @@ import {
 
 import { isPersistableChatAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { logOnceEvery } from "../../logOnceEvery.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import {
   disableContextCompaction,
@@ -1637,9 +1639,24 @@ function claudeApiRetryNotice(message: SDKAPIRetryMessage): {
   };
 }
 
+/** The row label of an `informational` banner; the CLI's own text is the row's body. */
+function claudeInformationalLabel(message: SDKInformationalMessage): string {
+  if (message.prevent_continuation === true) {
+    return "Claude stopped";
+  }
+  switch (message.level) {
+    case "warning":
+      return "Claude warning";
+    case "suggestion":
+      return "Claude suggestion";
+    default:
+      return "Claude notice";
+  }
+}
+
 const DEBUG_PREVIEW_MAX_CHARS = 400;
 
-/** A frame for a debug log line: JSON, cut to a few hundred characters. */
+/** A frame for a log line: JSON, cut to a few hundred characters. */
 function boundedJsonPreview(value: unknown): string {
   let json: string;
   try {
@@ -4047,18 +4064,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: message,
       },
     };
-    /** A low-key status line (a retry, a banner): never a "Runtime warning" row. */
-    const emitNotice = (text: string, detail?: string) => {
-      const notice = text.trim();
-      const body = detail?.trim();
+    /**
+     * A low-key status line (a retry, a banner): never a "Runtime warning" row. `text` is the
+     * row's label, so it must stay short; anything longer belongs in `detail`, the row's body.
+     * Both read SDK fields, so a frame missing one emits nothing rather than failing the stream.
+     */
+    const emitNotice = (text: unknown, detail?: unknown) => {
+      const notice = typeof text === "string" ? text.trim() : "";
+      const body = typeof detail === "string" ? detail.trim() : "";
       return notice.length === 0
         ? Effect.void
         : offerRuntimeEventForContext(context, {
             ...base,
             type: "runtime.notice",
-            payload: { message: notice, ...(body ? { detail: body } : {}) },
+            payload: { message: notice, ...(body.length > 0 ? { detail: body } : {}) },
           });
     };
+    /** Provider prose of any length (a hook's reason, a refusal): a fixed label, the text as body. */
+    const emitBanner = (label: string, content: unknown) =>
+      typeof content === "string" && content.trim().length > 0
+        ? emitNotice(label, content)
+        : Effect.void;
 
     // Background-set reconciliation (CC ≥ 2.1.203; the pinned SDK typings
     // don't carry the subtype yet, hence the runtime check before the typed
@@ -4705,22 +4731,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         };
         return;
       case "informational":
-        // `info` lines show only in Claude Code's transcript mode, and a tool-scoped line is
-        // that tool's progress (the tool row carries it). The rest are banners: hook feedback,
-        // a block reason, command output.
+        // `info` lines show only in Claude Code's transcript mode. A tool-scoped line is that
+        // tool's live progress, which the CLI dedupes per tool use; the tool's own row already
+        // tracks it, so it is dropped. The rest are banners: hook feedback, a block reason.
         if (message.level !== "info" && message.tool_use_id === undefined) {
-          yield* emitNotice(message.content);
+          yield* emitBanner(claudeInformationalLabel(message), message.content);
         }
         return;
       case "notification":
         // The REPL's transient toast queue; only what it would interrupt for earns a row.
         if (message.priority === "high" || message.priority === "immediate") {
-          yield* emitNotice(message.text);
+          yield* emitBanner("Claude notification", message.text);
         }
         return;
       case "local_command_output":
         // A slash command's own output (/usage, /context): the answer the user asked for.
-        yield* emitNotice("Command output", message.content);
+        yield* emitBanner("Command output", message.content);
         return;
       case "memory_recall": {
         const count = Array.isArray(message.memories) ? message.memories.length : 0;
@@ -4730,8 +4756,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
       case "model_refusal_fallback":
+        yield* emitBanner("Model switched after a refusal", message.content);
+        return;
       case "model_refusal_no_fallback":
-        yield* emitNotice(message.content);
+        yield* emitBanner("Claude declined the request", message.content);
         return;
       case "plugin_install":
         // Headless install progress; only a failure is actionable.
@@ -4758,13 +4786,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Remote Control bridge teardown; a local CLI's exit ends the stream itself.
         return;
       default: {
-        // A subtype newer than the pinned SDK. The native event log keeps the whole frame;
-        // the conversation gets nothing it cannot explain.
-        const subtype = (message as { readonly subtype?: unknown }).subtype;
-        yield* Effect.logDebug("claude.system-message.unhandled", {
-          threadId: context.session.threadId,
-          subtype: typeof subtype === "string" ? subtype : String(subtype),
-          preview: boundedJsonPreview(secretRedactor.payload(message)),
+        // A subtype newer than the pinned SDK: the conversation gets nothing it cannot explain,
+        // and the server log (kept at its default level, unlike the provider event log's
+        // lifecycle mode) gets the subtype with a redacted preview, once per subtype a window.
+        const rawSubtype = (message as { readonly subtype?: unknown }).subtype;
+        const subtype = typeof rawSubtype === "string" ? rawSubtype : String(rawSubtype);
+        yield* logOnceEvery({
+          key: `claude.system-message.unhandled:${subtype}`,
+          message: "claude.system-message.unhandled",
+          level: "Info",
+          fields: {
+            threadId: context.session.threadId,
+            subtype,
+            preview: boundedJsonPreview(secretRedactor.payload(message)),
+          },
         });
         return;
       }
