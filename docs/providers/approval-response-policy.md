@@ -58,11 +58,12 @@ follow-up setting and the approvals stay.
 Responses and steers run on separate reactor lanes and adapters refuse a steer while an
 approval waits, so the client steers only after every decline left the pending list.
 Approvals the redirected turn opens meanwhile (the next tool of the same batch) are
-declined too. The draft stays, and nothing is sent, when an approval to decline appeared
-less than 750 ms before the send, when the node refuses a decline, when one ends
-`retryable` or `uncertain` or is still in flight after 15 seconds, when an approval of
-another turn arrives, or when the draft changed meanwhile. If declines went through
-before that, the next send on the same turn steers whatever the setting says.
+declined too, for up to 15 seconds. The draft stays, and nothing is sent, when an approval
+to decline appeared less than 750 ms before the send, when the node refuses a decline,
+when one ends `retryable` or `uncertain` or is still in flight after 15 seconds, when an
+approval of another turn arrives or the redirected turn asks again after those 15
+seconds, or when the draft changed meanwhile. If declines went through before that, the
+next send on the same turn steers whatever the setting says.
 
 ## Lifecycle integration boundary
 
