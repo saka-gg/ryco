@@ -303,6 +303,29 @@ describe("multi-model send — targets", () => {
       }),
     ).toEqual({ ok: false, reason: "gone is unavailable." });
   });
+
+  it("sends to a custom model the composer offers for the instance", () => {
+    const custom = createModelSelection(claude, "claude-via-proxy");
+    expect(
+      resolveMultiModelSendTarget({
+        selection: custom,
+        entries,
+        prompt: "",
+        customModelSlugs: (entry) => (entry.instanceId === claude ? ["claude-via-proxy"] : []),
+      }),
+    ).toMatchObject({
+      ok: true,
+      modelSelection: { instanceId: claude, model: "claude-via-proxy" },
+    });
+    expect(
+      resolveMultiModelSendTarget({
+        selection: custom,
+        entries,
+        prompt: "",
+        customModelSlugs: () => [],
+      }),
+    ).toEqual({ ok: false, reason: "claude-via-proxy is not available on Claude." });
+  });
 });
 
 describe("multi-model send — outcomes", () => {

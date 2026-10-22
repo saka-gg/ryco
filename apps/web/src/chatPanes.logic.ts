@@ -51,6 +51,25 @@ export function splitPane(
   };
   return visit(root, new Set());
 }
+/**
+ * A layout of up to four threads of one environment, in reading order: side by
+ * side, and with three or four a second row (the first two stay on top).
+ */
+export function paneGrid(refs: ReadonlyArray<ScopedThreadRef>): PaneNode | null {
+  const [first, ...rest] = refs;
+  if (!first) return null;
+  let root: PaneNode = { kind: "thread", ref: first };
+  const placements: ReadonlyArray<readonly [number, PaneSide]> = [
+    [0, "right"],
+    [0, "bottom"],
+    [1, "bottom"],
+  ];
+  rest.slice(0, placements.length).forEach((ref, index) => {
+    const [anchorIndex, side] = placements[index]!;
+    root = splitPane(root, refs[anchorIndex]!, ref, side);
+  });
+  return root;
+}
 export function closePane(root: PaneNode, ref: ScopedThreadRef): PaneNode | null {
   if (root.kind === "thread") return paneKey(root.ref) === paneKey(ref) ? null : root;
   const first = closePane(root.first, ref),

@@ -121,19 +121,26 @@ export function resolveMultiModelSendTarget(input: {
   readonly selection: ModelSelection;
   readonly entries: ReadonlyArray<ProviderInstanceEntry>;
   readonly prompt: string;
+  /**
+   * The custom models the composer offers for an instance beyond the
+   * provider's own list (the user's settings); a send may go to those too.
+   */
+  readonly customModelSlugs?: ((entry: ProviderInstanceEntry) => ReadonlyArray<string>) | undefined;
 }): MultiModelSendTargetResolution {
   const { selection } = input;
   const entry = input.entries.find((candidate) => candidate.instanceId === selection.instanceId);
   if (!entry || !isSetupProviderInstance(entry)) {
     return { ok: false, reason: `${entry?.displayName ?? selection.instanceId} is unavailable.` };
   }
-  const model = entry.models.find((candidate) => candidate.slug === selection.model);
-  if (!model) {
+  const offered =
+    entry.models.some((candidate) => candidate.slug === selection.model) ||
+    (input.customModelSlugs?.(entry).includes(selection.model) ?? false);
+  if (!offered) {
     return { ok: false, reason: `${selection.model} is not available on ${entry.displayName}.` };
   }
   const state = getComposerProviderState({
     provider: entry.driverKind,
-    model: model.slug,
+    model: selection.model,
     models: entry.models,
     prompt: input.prompt,
     modelOptions: selection.options,
@@ -142,7 +149,7 @@ export function resolveMultiModelSendTarget(input: {
     ok: true,
     modelSelection: createModelSelection(
       entry.instanceId,
-      model.slug,
+      selection.model,
       state.modelOptionsForDispatch,
     ),
     promptEffort: state.promptEffort,

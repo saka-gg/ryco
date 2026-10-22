@@ -2,8 +2,11 @@
 
 Desktop and web can keep one layout of up to four thread views. Open a thread's
 sidebar menu and choose **Open in split view**, or drag its row to an edge of the
-chat. Drag a pane's numbered title to rearrange it. Each branch can split once
-horizontally and once vertically, so layouts never exceed two rows or columns.
+chat. After a **Compare models** send, **Open side by side** lays out its started
+threads the same way, replacing the current layout (see
+[Compare models](user/composer.md#compare-models)). Drag a pane's numbered title
+to rearrange it. Each branch can split once horizontally and once vertically, so
+layouts never exceed two rows or columns.
 All threads in a layout belong to the same environment. Existing connection,
 subscription and mutation-readiness policies remain authoritative.
 

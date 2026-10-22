@@ -30,6 +30,8 @@ interface ComposerPrimaryActionsProps {
   sendRedirectsApproval?: boolean;
   /** Reason the send action is held back (e.g. an attachment still uploading). */
   sendDisabledReason?: string | null | undefined;
+  /** How many models a send goes to ("Compare models"); null for an ordinary send. */
+  sendTargetCount?: number | null | undefined;
   /**
    * Set while the environment's connection is being established: a send is
    * still accepted and waits in the queue. The caption says when it goes out.
@@ -81,6 +83,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   hasSendableContent,
   sendRedirectsApproval = false,
   sendDisabledReason = null,
+  sendTargetCount = null,
   sendsQueueUntilReady = null,
   mutationUnavailableReason = null,
   preserveComposerFocusOnPointerDown = false,
@@ -238,13 +241,24 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
+  const sendLabel =
+    sendTargetCount !== null
+      ? `Send to ${sendTargetCount} ${sendTargetCount === 1 ? "model" : "models"}`
+      : "Send message";
   return (
     <button
       type="submit"
-      className="flex h-9 w-9 enabled:cursor-pointer items-center justify-center rounded-lg bg-primary/90 text-primary-foreground transition-all duration-150 hover:bg-primary hover:scale-105 disabled:pointer-events-none disabled:opacity-30 disabled:hover:scale-100 sm:h-8 sm:w-8"
+      className={cn(
+        "flex h-9 enabled:cursor-pointer items-center justify-center gap-1 rounded-lg bg-primary/90 text-primary-foreground transition-all duration-150 hover:bg-primary hover:scale-105 disabled:pointer-events-none disabled:opacity-30 disabled:hover:scale-100 sm:h-8",
+        sendTargetCount !== null ? "px-2.5" : "w-9 sm:w-8",
+      )}
       {...pointerFocusProps}
       disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || !hasSendableContent}
-      title={sendDisabledReason ?? sendsQueueUntilReady ?? undefined}
+      title={
+        sendDisabledReason ??
+        sendsQueueUntilReady ??
+        (sendTargetCount !== null ? sendLabel : undefined)
+      }
       aria-label={
         isEnvironmentUnavailable
           ? "Environment disconnected"
@@ -254,8 +268,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
               ? "Preparing worktree"
               : isSendBusy
                 ? "Sending"
-                : "Send message"
+                : sendLabel
       }
+      data-send-target-count={sendTargetCount ?? undefined}
     >
       {isConnecting || isSendBusy ? (
         <svg
@@ -287,6 +302,11 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           />
         </svg>
       )}
+      {sendTargetCount !== null ? (
+        <span className="text-xs font-semibold tabular-nums" aria-hidden="true">
+          {sendTargetCount}
+        </span>
+      ) : null}
     </button>
   );
 });

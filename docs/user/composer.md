@@ -73,3 +73,38 @@ the composer shows an unedited recalled prompt, with the caret on the first visu
 prompt turns it into a normal draft. A composer that holds an attachment or context chip does not
 count as empty, and while an approval or a question waits, the arrows stay with it. Nothing is
 stored for recall: it reads the thread's own messages.
+
+## Compare models
+
+A new thread in a Git project can send one prompt to several models at once. Each model gets its
+own new thread in its own new worktree, so their changes never touch each other or your checkout.
+
+In the model picker, `Shift`-click a second model, or press `Shift+Enter` on a highlighted model, to
+start comparing; the **Compare models** switch under the list does the same. While it is on, every
+pick adds or removes a model (up to four), and so do `Cmd+1` through `Cmd+9`.
+The picker button then reads **N models** and the send button shows the count. Turn the switch off
+to go back to one model.
+
+When you send, Ryco asks first: it names the models and the branch every worktree starts from,
+and says whether the project's setup script runs in each. Every model works on the prompt
+separately, so usage adds up. The worktrees start from the draft's branch: from `origin` when the
+draft is set to a new worktree that fetches first, otherwise from the branch's last commit in
+your checkout. Uncommitted changes are not carried over.
+
+Every model receives the same message: your text, file references, terminal context and
+attachments, the way a normal send composes them. You stay in the composer, which is cleared for
+the next prompt, and a notice above it shows each model's outcome:
+
+- **Started**: open its thread from the notice, or choose **Open side by side** to show the
+  started threads in a split layout (up to four; it replaces the current layout).
+- **Didn't start**: nothing was created for that model. Your prompt comes back and only those
+  models stay selected, so the next send retries just them.
+- **Not confirmed**: the connection dropped before the node answered, so the model may have
+  started. Open its thread to check, then **Retry**. A retry sends the same request again and can
+  never create a second thread for that model.
+
+Comparing needs an environment whose Ryco refuses to start a model outside its own worktree;
+older environments keep one model per send. It is not offered for a task's thread, for a thread
+that starts from a pull request or issue, for chats without a project, or on the phone layout of
+the web app. Goals and Computer Use go to one model, so turn comparing off for them. The notice
+lives in memory: after a reload it is gone, but the threads are in the sidebar.
