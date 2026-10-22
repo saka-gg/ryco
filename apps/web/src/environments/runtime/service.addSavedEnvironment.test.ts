@@ -27,7 +27,13 @@ const mockGetSavedEnvironmentRecord = vi.fn((environmentId: EnvironmentId) => {
 });
 const mockReadSavedEnvironmentBearerToken = vi.fn();
 const mockRemoveSavedEnvironmentBearerToken = vi.fn();
-const mockPatchRuntime = vi.fn();
+let mockRuntimeById: Record<string, Record<string, unknown>> = {};
+const mockPatchRuntime = vi.fn((environmentId: EnvironmentId, patch: Record<string, unknown>) => {
+  mockRuntimeById = {
+    ...mockRuntimeById,
+    [environmentId]: { ...mockRuntimeById[environmentId], ...patch },
+  };
+});
 const mockClearRuntime = vi.fn();
 const mockRegistrySetState = vi.fn((next: { byId: Record<string, Record<string, unknown>> }) => {
   mockSavedRecords = Object.values(next.byId);
@@ -108,7 +114,7 @@ vi.mock("./catalog", () => ({
   },
   useSavedEnvironmentRuntimeStore: {
     getState: () => ({
-      byId: {},
+      byId: mockRuntimeById,
       ensure: vi.fn(),
       patch: mockPatchRuntime,
       clear: mockClearRuntime,
@@ -172,6 +178,7 @@ describe("addSavedEnvironment", () => {
     vi.resetModules();
     vi.clearAllMocks();
     mockSavedRecords = [];
+    mockRuntimeById = {};
     vi.stubGlobal("window", {
       desktopBridge: {
         ensureSshEnvironment: mockEnsureSshEnvironment,
@@ -1643,6 +1650,259 @@ describe("addSavedEnvironment", () => {
 
       expect(pairingCalls()).toEqual([[sshTarget, { issuePairingToken: true }]]);
       expect(mockRevokeSshClientSession).not.toHaveBeenCalled();
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    const ownerPairingCall = [sshTarget, { issuePairingToken: true, requireOwnerPairing: true }];
+    const configForVersion = (serverVersion: string) => ({
+      environment: { environmentId, label: "Remote environment", serverVersion },
+    });
+
+    it("asks again once the connected node reports another Ryco version, and reconnects as owner", async () => {
+      // The remote CLI predates owner pairing until Ryco is updated there.
+      let remoteVersion = "0.1.30";
+      let remoteMintsOwner = false;
+      let storedBearer = "client-bearer";
+      mockReadSavedEnvironmentBearerToken.mockImplementation(async () => storedBearer);
+      mockWriteSavedEnvironmentBearerToken.mockImplementation(async (_id, token: string) => {
+        storedBearer = token;
+        return true;
+      });
+      mockFetchSshEnvironmentDescriptor.mockImplementation(async () => ({
+        environmentId,
+        label: "Remote environment",
+        serverVersion: remoteVersion,
+      }));
+      mockClientGetConfig.mockImplementation(async () => configForVersion(remoteVersion) as never);
+      mockEnsureSshEnvironment.mockImplementation(async (_target, options) => ({
+        ...tunnelBootstrap,
+        ...(options?.issuePairingToken && remoteMintsOwner
+          ? { pairingToken: "owner-pairing-code", pairingRole: "owner" }
+          : {}),
+      }));
+      mockBootstrapSshBearerSession.mockResolvedValue({
+        sessionToken: "owner-bearer",
+        role: "owner",
+      });
+      const reconnect = vi.fn(async () => undefined);
+      let onConfigUpdated!: (config: unknown, type: "snapshot" | "settingsUpdated") => void;
+      mockCreateEnvironmentConnection.mockImplementation(
+        (input: {
+          knownEnvironment: { environmentId: EnvironmentId };
+          client: unknown;
+          onConfigUpdated: typeof onConfigUpdated;
+        }) => {
+          onConfigUpdated = input.onConfigUpdated;
+          return {
+            kind: "saved",
+            environmentId: input.knownEnvironment.environmentId,
+            knownEnvironment: input.knownEnvironment,
+            client: input.client,
+            ensureBootstrapped: async () => undefined,
+            reconnect,
+            dispose: async () => undefined,
+          };
+        },
+      );
+
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      await reconnectSavedEnvironment(environmentId);
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+      expect(mockRuntimeById[environmentId]?.role).toBe("client");
+
+      // The socket reconnects to the same Ryco: nothing is asked.
+      onConfigUpdated(configForVersion("0.1.30"), "snapshot");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+
+      // Ryco is updated on the node and its server restarts; the socket
+      // reconnects on its own, still on the client bearer.
+      remoteVersion = "0.1.36";
+      remoteMintsOwner = true;
+      onConfigUpdated(configForVersion("0.1.36"), "snapshot");
+
+      await vi.waitFor(() => {
+        expect(reconnect).toHaveBeenCalledOnce();
+      });
+      expect(pairingCalls()).toEqual([ownerPairingCall, ownerPairingCall]);
+      expect(mockWriteSavedEnvironmentBearerToken).toHaveBeenCalledWith(
+        environmentId,
+        "owner-bearer",
+      );
+      expect(mockRevokeSshClientSession).toHaveBeenCalledWith(
+        "http://127.0.0.1:3774/",
+        "owner-bearer",
+        "client-session",
+      );
+      expect(mockWriteSavedEnvironmentBearerToken.mock.invocationCallOrder[0]).toBeLessThan(
+        reconnect.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY,
+      );
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("retries a re-pair that failed once its retry delay has passed", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-22T10:00:00.000Z"));
+      mockEnsureSshEnvironment.mockImplementation(async (_target, options) => {
+        if (options?.requireOwnerPairing && pairingCalls().length === 1) {
+          throw new Error("ssh: Connection reset by peer");
+        }
+        return {
+          ...tunnelBootstrap,
+          ...(options?.issuePairingToken
+            ? { pairingToken: "owner-pairing-code", pairingRole: "owner" }
+            : {}),
+        };
+      });
+      mockBootstrapSshBearerSession.mockResolvedValue({
+        sessionToken: "owner-bearer",
+        role: "owner",
+      });
+      mockCreateEnvironmentConnection
+        .mockImplementationOnce(() => {
+          throw new Error("socket setup failed");
+        })
+        .mockImplementationOnce(() => {
+          throw new Error("socket setup failed");
+        });
+
+      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } = await import("@ryco/client-runtime/connection");
+      const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      // An SSH hiccup fails the re-pair: the client bearer stays.
+      await expect(reconnectSavedEnvironment(environmentId)).rejects.toThrow("socket setup failed");
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+      expect(mockWriteSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+
+      // A connect right after does not ask again.
+      await expect(reconnectSavedEnvironment(environmentId)).rejects.toThrow("socket setup failed");
+      expect(pairingCalls()).toEqual([ownerPairingCall]);
+
+      vi.setSystemTime(Date.now() + DESKTOP_SSH_OWNER_REPAIR_RETRY_MS);
+      await reconnectSavedEnvironment(environmentId);
+
+      expect(pairingCalls()).toEqual([ownerPairingCall, ownerPairingCall]);
+      expect(mockWriteSavedEnvironmentBearerToken).toHaveBeenCalledWith(
+        environmentId,
+        "owner-bearer",
+      );
+      expect(mockPatchRuntime).toHaveBeenCalledWith(
+        environmentId,
+        expect.objectContaining({ role: "owner" }),
+      );
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("stops a re-pair a disconnect cancelled before it stores the bearer or reopens the tunnel", async () => {
+      mockEnsureSshEnvironment.mockImplementation(async (_target, options) => ({
+        ...tunnelBootstrap,
+        ...(options?.issuePairingToken
+          ? { pairingToken: "owner-pairing-code", pairingRole: "owner" }
+          : {}),
+      }));
+      let resolveRedeem!: (value: { sessionToken: string; role: "owner" }) => void;
+      mockBootstrapSshBearerSession.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRedeem = resolve;
+        }),
+      );
+
+      const {
+        disconnectSavedEnvironment,
+        reconnectSavedEnvironment,
+        resetEnvironmentServiceForTests,
+      } = await import("./service");
+      const connecting = reconnectSavedEnvironment(environmentId);
+      await vi.waitFor(() => {
+        expect(mockBootstrapSshBearerSession).toHaveBeenCalledOnce();
+      });
+      const tunnelEnsures = mockEnsureSshEnvironment.mock.calls.length;
+
+      await disconnectSavedEnvironment(environmentId);
+      resolveRedeem({ sessionToken: "owner-bearer", role: "owner" });
+      await expect(connecting).resolves.toBeUndefined();
+
+      expect(mockWriteSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+      expect(mockRevokeSshClientSession).not.toHaveBeenCalled();
+      // The tunnel the disconnect closed stays closed.
+      expect(mockEnsureSshEnvironment).toHaveBeenCalledTimes(tunnelEnsures);
+      expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("never brings back an environment removed while its re-pair opened a new tunnel", async () => {
+      let resolveOwnerPairing!: (value: Record<string, unknown>) => void;
+      mockEnsureSshEnvironment.mockImplementation((_target, options) =>
+        options?.requireOwnerPairing
+          ? new Promise((resolve) => {
+              resolveOwnerPairing = resolve;
+            })
+          : Promise.resolve(tunnelBootstrap),
+      );
+
+      const { reconnectSavedEnvironment, removeSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      const connecting = reconnectSavedEnvironment(environmentId);
+      await vi.waitFor(() => {
+        expect(pairingCalls()).toEqual([ownerPairingCall]);
+      });
+
+      await removeSavedEnvironment(environmentId);
+      expect(mockSavedRecords).toEqual([]);
+      // The tunnel came back on another local port.
+      resolveOwnerPairing({
+        ...tunnelBootstrap,
+        httpBaseUrl: "http://127.0.0.1:3775/",
+        wsBaseUrl: "ws://127.0.0.1:3775/",
+        pairingToken: "owner-pairing-code",
+        pairingRole: "owner",
+      });
+      await expect(connecting).resolves.toBeUndefined();
+
+      expect(mockPersistSavedEnvironmentRecord).not.toHaveBeenCalled();
+      expect(mockUpsert).not.toHaveBeenCalled();
+      expect(mockBootstrapSshBearerSession).not.toHaveBeenCalled();
+      expect(mockSavedRecords).toEqual([]);
+
+      await resetEnvironmentServiceForTests();
+    });
+
+    it("never stores a bearer, nor rolls the registry back, for a pairing a removal cancelled", async () => {
+      mockReadSavedEnvironmentBearerToken.mockResolvedValue(null);
+      mockEnsureSshEnvironment.mockImplementation(async (_target, options) => ({
+        ...tunnelBootstrap,
+        ...(options?.issuePairingToken
+          ? { pairingToken: "owner-pairing-code", pairingRole: "owner" }
+          : {}),
+      }));
+      let resolveRedeem!: (value: { sessionToken: string; role: "owner" }) => void;
+      mockBootstrapSshBearerSession.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRedeem = resolve;
+        }),
+      );
+
+      const { reconnectSavedEnvironment, removeSavedEnvironment, resetEnvironmentServiceForTests } =
+        await import("./service");
+      const connecting = reconnectSavedEnvironment(environmentId);
+      await vi.waitFor(() => {
+        expect(mockBootstrapSshBearerSession).toHaveBeenCalledOnce();
+      });
+      const tunnelEnsures = mockEnsureSshEnvironment.mock.calls.length;
+
+      await removeSavedEnvironment(environmentId);
+      resolveRedeem({ sessionToken: "owner-bearer", role: "owner" });
+      await expect(connecting).resolves.toBeUndefined();
+
+      expect(mockWriteSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+      expect(mockSetSavedEnvironmentRegistry).not.toHaveBeenCalled();
+      expect(mockEnsureSshEnvironment).toHaveBeenCalledTimes(tunnelEnsures);
+      expect(mockSavedRecords).toEqual([]);
 
       await resetEnvironmentServiceForTests();
     });
