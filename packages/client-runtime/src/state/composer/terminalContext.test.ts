@@ -11,6 +11,7 @@ import {
   extractTrailingTerminalContexts,
   filterTerminalContextsWithText,
   formatInlineTerminalContextLabel,
+  formatInlineTerminalContextLabelFromHeader,
   formatTerminalContextLabel,
   hasTerminalContextText,
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
@@ -19,6 +20,7 @@ import {
   materializeInlineTerminalContextPrompt,
   removeInlineTerminalContextPlaceholder,
   stripInlineTerminalContextPlaceholders,
+  stripSentTerminalContexts,
   type TerminalContextDraft,
 } from "./terminalContext.ts";
 
@@ -206,5 +208,27 @@ describe("terminalContext", () => {
         [makeContext()],
       ),
     ).toBe("Investigate @terminal-1:12-13 carefully");
+  });
+
+  it("maps a sent block header back to its inline label", () => {
+    expect(formatInlineTerminalContextLabelFromHeader("Terminal 1 lines 12-13")).toBe(
+      "@terminal-1:12-13",
+    );
+    expect(formatInlineTerminalContextLabelFromHeader("Terminal 2 line 4")).toBe("@terminal-2:4");
+    expect(formatInlineTerminalContextLabelFromHeader("Build output")).toBe("@build-output");
+  });
+
+  it("strips the sent block and the labels it backs, leaving the typed text", () => {
+    const placeholder = INLINE_TERMINAL_CONTEXT_PLACEHOLDER;
+    const sent = appendTerminalContextsToPrompt(`Investigate ${placeholder} carefully`, [
+      makeContext(),
+    ]);
+    expect(stripSentTerminalContexts(sent)).toBe("Investigate carefully");
+    expect(
+      stripSentTerminalContexts(appendTerminalContextsToPrompt(placeholder, [makeContext()])),
+    ).toBe("");
+    expect(stripSentTerminalContexts("No contexts @terminal-1:12-13")).toBe(
+      "No contexts @terminal-1:12-13",
+    );
   });
 });

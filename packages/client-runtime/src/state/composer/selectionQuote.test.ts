@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { EnvironmentId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
-import { appendSelectionQuote, MAX_SELECTION_QUOTE_LENGTH } from "./selectionQuote.ts";
+import {
+  appendSelectionQuote,
+  MAX_SELECTION_QUOTE_LENGTH,
+  stripSelectionQuotes,
+} from "./selectionQuote.ts";
 import { createComposerDraftStore, DraftId } from "./draftStore.ts";
 
 const source = { environmentId: EnvironmentId.make("remote"), threadId: ThreadId.make("thread") };
@@ -14,6 +18,17 @@ describe("selection quotes", () => {
   it("preserves existing text, whitespace and quote boundaries, with scoped attribution", () => {
     expect(appendSelectionQuote("My unsent draft", quote)).toBe(
       'My unsent draft\n\nQuoted assistant text ({"environmentId":"remote","threadId":"thread","messageId":"message"}):\n>   code();\n> \n> > nested "quote"\n\n',
+    );
+  });
+  it("strips the quotes it appended and keeps the text around them", () => {
+    const draft = appendSelectionQuote("My unsent draft", quote);
+    expect(stripSelectionQuotes(draft)).toBe("My unsent draft");
+    expect(stripSelectionQuotes(`${appendSelectionQuote(draft, quote)}Why?`)).toBe(
+      "My unsent draft\n\nWhy?",
+    );
+    expect(stripSelectionQuotes(appendSelectionQuote("", quote))).toBe("");
+    expect(stripSelectionQuotes("> my own\n\nQuoted assistant text (note):\n> x")).toBe(
+      "> my own\n\nQuoted assistant text (note):\n> x",
     );
   });
   it("rejects blank or oversized excerpts without truncating them", () => {

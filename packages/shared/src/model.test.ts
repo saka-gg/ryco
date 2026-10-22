@@ -8,6 +8,7 @@ import {
 
 import {
   applyClaudePromptEffortPrefix,
+  stripClaudePromptEffortPrefix,
   buildProviderOptionSelectionsFromDescriptors,
   createModelCapabilities,
   createModelSelection,
@@ -250,6 +251,14 @@ describe("misc helpers", () => {
     );
     expect(applyClaudePromptEffortPrefix("Ultrathink:\nInvestigate", "ultrathink")).toBe(
       "Ultrathink:\nInvestigate",
+    );
+  });
+
+  it("strips the ultrathink prefix the send added", () => {
+    expect(stripClaudePromptEffortPrefix("Ultrathink:\nInvestigate")).toBe("Investigate");
+    expect(stripClaudePromptEffortPrefix(" Investigate ")).toBe("Investigate");
+    expect(stripClaudePromptEffortPrefix("Please ultrathink about this")).toBe(
+      "Please ultrathink about this",
     );
   });
 

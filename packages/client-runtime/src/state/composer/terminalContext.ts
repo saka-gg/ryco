@@ -121,6 +121,24 @@ export function formatInlineTerminalContextLabel(selection: {
   return `@${terminalLabel}:${range}`;
 }
 
+const TERMINAL_CONTEXT_HEADER_PATTERN = /^(.*?)\s+line(?:s)?\s+(\d+)(?:-(\d+))?$/i;
+
+/** The inline label a sent context's block header (`Terminal 1 lines 12-13`) stands for. */
+export function formatInlineTerminalContextLabelFromHeader(header: string): string {
+  const trimmedHeader = header.trim();
+  const match = TERMINAL_CONTEXT_HEADER_PATTERN.exec(trimmedHeader);
+  const lineStart = Number.parseInt(match?.[2] ?? "", 10);
+  const lineEnd = Number.parseInt(match?.[3] ?? match?.[2] ?? "", 10);
+  if (!match || !Number.isFinite(lineStart) || !Number.isFinite(lineEnd)) {
+    return `@${trimmedHeader.toLowerCase().replace(/\s+/g, "-")}`;
+  }
+  return formatInlineTerminalContextLabel({
+    terminalLabel: match[1]?.trim() || "terminal",
+    lineStart,
+    lineEnd,
+  });
+}
+
 export function buildTerminalContextPreviewTitle(
   contexts: ReadonlyArray<TerminalContextSelection>,
 ): string | null {
@@ -232,6 +250,42 @@ export function extractTrailingTerminalContexts(prompt: string): ExtractedTermin
         : null,
     contexts: parsedContexts,
   };
+}
+
+/** Removes `label` where it stands as a whole token, with one space beside it. */
+function removeInlineLabel(text: string, label: string): string {
+  let from = 0;
+  while (from <= text.length) {
+    const index = text.indexOf(label, from);
+    if (index < 0) return text;
+    const end = index + label.length;
+    const before = text[index - 1];
+    const after = text[end];
+    // `@terminal-1:1` must not match inside `@terminal-1:12` or `@terminal-1:1-4`.
+    const boundedBefore = before === undefined || !/[\w@.-]/.test(before);
+    const boundedAfter = after === undefined || !/[\d-]/.test(after);
+    if (boundedBefore && boundedAfter) {
+      if (after === " ") return text.slice(0, index) + text.slice(end + 1);
+      if (before === " ") return text.slice(0, index - 1) + text.slice(end);
+      return text.slice(0, index) + text.slice(end);
+    }
+    from = index + 1;
+  }
+  return text;
+}
+
+/**
+ * The prompt a send started from, without its terminal contexts: the trailing
+ * `<terminal_context>` block and the inline labels that stood for its entries.
+ */
+export function stripSentTerminalContexts(prompt: string): string {
+  const extracted = extractTrailingTerminalContexts(prompt);
+  if (extracted.contexts.length === 0) return extracted.promptText;
+  let text = extracted.promptText;
+  for (const context of extracted.contexts) {
+    text = removeInlineLabel(text, formatInlineTerminalContextLabelFromHeader(context.header));
+  }
+  return text;
 }
 
 export function deriveDisplayedUserMessageState(prompt: string): DisplayedUserMessageState {
