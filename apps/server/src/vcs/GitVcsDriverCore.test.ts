@@ -1250,6 +1250,67 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.lengthOf(fetchArgs, 2);
       }).pipe(Effect.provide(ServerConfigLayer)),
     );
+    it.effect("creates the branches of worktrees created together one at a time", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", remote, "."]);
+        // Git as it was before it retried a held config lock (Apple's still is):
+        // two branches created at once fail on `.git/config.lock`.
+        yield* git(cwd, ["config", "core.configLockTimeout", "0"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        // Commands that write a new branch's upstream to the shared config.
+        const writesBranchConfig = (args: ReadonlyArray<string>) =>
+          (args[0] === "branch" && !args.includes("-m")) ||
+          (args[0] === "worktree" && args[1] === "add" && args.includes("-b"));
+        let running = 0;
+        let mostAtOnce = 0;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            !writesBranchConfig(input.args)
+              ? base.execute(input)
+              : Effect.suspend(() => {
+                  running += 1;
+                  mostAtOnce = Math.max(mostAtOnce, running);
+                  // Long enough for every creation to reach its own branch write.
+                  return Effect.promise(
+                    () => new Promise((resolve) => setTimeout(resolve, 50)),
+                  ).pipe(
+                    Effect.andThen(base.execute(input)),
+                    Effect.ensuring(Effect.sync(() => (running -= 1))),
+                  );
+                }),
+        });
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+
+        const created = yield* Effect.forEach(
+          [1, 2, 3, 4],
+          (index) =>
+            driver.createWorktree({
+              cwd,
+              path: pathService.join(root, `model-${index}`),
+              refName: `origin/${initialBranch}`,
+              newRefName: `compare/model-${index}`,
+              fetchOrigin: true,
+            }),
+          { concurrency: "unbounded" },
+        );
+
+        assert.equal(mostAtOnce, 1);
+        assert.lengthOf(created, 4);
+        for (const [index, result] of created.entries()) {
+          const branch = `compare/model-${index + 1}`;
+          assert.equal(yield* git(result.worktree.path, ["branch", "--show-current"]), branch);
+          // The upstream Git sets for a branch cut from origin's is kept.
+          assert.equal(
+            yield* git(cwd, ["config", "--get", `branch.${branch}.merge`]),
+            `refs/heads/${initialBranch}`,
+          );
+        }
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
     it.effect("lets a prefetch join the base fetch of worktrees being created", () =>
       Effect.gen(function* () {
         const remote = yield* makeTmpDir();
@@ -2003,7 +2064,11 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
         assert.deepStrictEqual(
           calls.map((call) => call.operation),
-          ["GitVcsDriver.resolveGitCommonDir", "GitVcsDriver.createWorktree"],
+          [
+            "GitVcsDriver.resolveGitCommonDir",
+            "GitVcsDriver.createWorktree.createBranch",
+            "GitVcsDriver.createWorktree",
+          ],
         );
       }).pipe(Effect.provide(OverrideTestLayer)),
     );

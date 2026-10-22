@@ -2457,6 +2457,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
    * (`origin/HEAD` and the branch it names) race for its lock.
    */
   const worktreeBaseFetchLocks = yield* makeKeyedSerialExecutor<string>();
+  /**
+   * New worktree branches of one repository (by its common directory) are
+   * created one at a time. Creating one writes its upstream to the shared
+   * `.git/config`, and a Git without `core.configLockTimeout` (Apple's among
+   * them) fails at once on a lock another creation holds.
+   */
+  const worktreeBranchCreationLocks = yield* makeKeyedSerialExecutor<string>();
   /** Prefetched bases, by `worktreeBaseKey`: a creation reuses one for a while. */
   const settledWorktreeBasePrefetches = new Map<
     string,
@@ -2917,9 +2924,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       yield* Effect.addFinalizer(() => release);
     }
 
-    const args = input.newRefName
-      ? ["worktree", "add", "-b", input.newRefName, worktreePath, baseRef]
-      : ["worktree", "add", worktreePath, baseRef];
+    // A new branch is created first, as `worktree add -b` does itself (tracking
+    // included), but under `worktreeBranchCreationLocks`: only that short config
+    // write waits for other creations, not the checkout.
+    const branchArgs = input.newRefName ? ["branch", "--", input.newRefName, baseRef] : null;
+    const args = ["worktree", "add", worktreePath, input.newRefName ?? baseRef];
     const onCheckoutProgress = input.progress?.onCheckoutProgress;
 
     return yield* Effect.scoped(
@@ -2954,12 +2963,27 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               }
               yield* recoverSetup(input.cwd, worktreePath);
               const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+              const createBranch =
+                branchArgs === null
+                  ? Effect.void
+                  : worktreeBranchCreationLocks.withLock(
+                      repositoryPath,
+                      executeGit(
+                        "GitVcsDriver.createWorktree.createBranch",
+                        input.cwd,
+                        branchArgs,
+                        {
+                          fallbackErrorMessage: "git branch failed",
+                        },
+                      ),
+                    );
               yield* input.progress?.onCheckoutStarted?.() ?? Effect.void;
               // Persist journal and mutation ownership before Git can register a
               // checkout. A cancelled child leaves an uncertain guard for inspection.
               yield* Effect.uninterruptibleMask((restore) =>
                 beginWorktreeSetup(config.stateDir, worktreePath, repositoryPath).pipe(
                   Effect.andThen(mutation),
+                  Effect.andThen(restore(createBranch)),
                   Effect.andThen(
                     restore(
                       executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
