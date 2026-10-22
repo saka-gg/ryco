@@ -145,7 +145,7 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
-  it("carries the provider's reason and a refused session grant", () => {
+  it("carries the asking turn, the provider's reason and a refused session grant", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
         id: "approval-open-reason",
@@ -153,6 +153,7 @@ describe("derivePendingApprovals", () => {
         kind: "approval.requested",
         summary: "Command approval requested",
         tone: "approval",
+        turnId: "turn-asking",
         payload: {
           requestId: "req-reason",
           requestKind: "command",
@@ -168,6 +169,7 @@ describe("derivePendingApprovals", () => {
         requestId: "req-reason",
         requestKind: "command",
         createdAt: "2026-02-23T00:00:01.000Z",
+        turnId: "turn-asking",
         detail: "Bash: git push",
         reason: "Pushing needs your confirmation",
         acceptForSessionOffered: false,

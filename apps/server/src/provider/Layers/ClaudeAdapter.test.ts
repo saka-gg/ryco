@@ -5871,7 +5871,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("says why Claude asked and answers a refused session grant as one approval", () => {
+  it.effect("says why Claude asked and treats a refused session grant as one approval", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -5911,6 +5911,10 @@ describe("ClaudeAdapterLive", () => {
       if (request._tag !== "Some" || request.value.type !== "request.opened") return;
       assert.equal(request.value.payload.reason, "Pushing needs your confirmation");
       assert.equal(request.value.payload.acceptForSessionOffered, false);
+      const resolvedEvent = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "request.resolved",
+      ).pipe(Stream.runHead, Effect.forkChild);
       yield* adapter.respondToRequest(
         session.threadId,
         ApprovalRequestId.make(request.value.requestId!),
@@ -5918,6 +5922,11 @@ describe("ClaudeAdapterLive", () => {
       );
       const result = yield* Effect.promise(() => permission);
       assert.deepEqual(result, { behavior: "allow", updatedInput: { command: "git push" } });
+      // The timeline and the projection record what was granted, not what the client asked.
+      const resolved = yield* Fiber.join(resolvedEvent);
+      assert.equal(resolved._tag, "Some");
+      if (resolved._tag !== "Some" || resolved.value.type !== "request.resolved") return;
+      assert.equal(resolved.value.payload.decision, "accept");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
