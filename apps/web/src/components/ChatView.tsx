@@ -2729,22 +2729,8 @@ export default function ChatView(props: ChatViewProps) {
     () => sortProviderInstanceEntries(deriveProviderInstanceEntries(composerProviderStatuses)),
     [composerProviderStatuses],
   );
-  // Names the compared models as the picker does, custom ones included.
-  const multiModelSendCatalog = useMemo<MultiModelSendCatalog>(
-    () => ({
-      entries: composerProviderEntries,
-      modelOptionsByInstance: new Map(
-        multiModelSendAvailable
-          ? composerProviderEntries.map((entry) => [
-              entry.instanceId,
-              getAppModelOptionsForInstance(settings, entry),
-            ])
-          : [],
-      ),
-    }),
-    [composerProviderEntries, multiModelSendAvailable, settings],
-  );
-  const multiModelSendSending = useMultiModelSends(draftId).some((send) => send.sending);
+  const multiModelSends = useMultiModelSends(draftId);
+  const multiModelSendSending = multiModelSends.some((send) => send.sending);
   const [multiModelSendRequest, setMultiModelSendRequest] = useState<
     | (MultiModelSendConfirmation & {
         /** The draft it was asked from; ChatView follows navigation to other threads. */
@@ -2760,6 +2746,25 @@ export default function ChatView(props: ChatViewProps) {
     multiModelSendRequest !== null && multiModelSendRequest.draftId === draftId
       ? multiModelSendRequest
       : null;
+  // Names the compared models as the picker does, custom ones included, and
+  // lets a confirmed send go to those. Built while anything here needs it: a
+  // confirmation or a banner outlives the draft being able to compare.
+  const multiModelSendCatalogNeeded =
+    multiModelSendAvailable || pendingMultiModelSend !== null || multiModelSends.length > 0;
+  const multiModelSendCatalog = useMemo<MultiModelSendCatalog>(
+    () => ({
+      entries: composerProviderEntries,
+      modelOptionsByInstance: new Map(
+        multiModelSendCatalogNeeded
+          ? composerProviderEntries.map((entry) => [
+              entry.instanceId,
+              getAppModelOptionsForInstance(settings, entry),
+            ])
+          : [],
+      ),
+    }),
+    [composerProviderEntries, multiModelSendCatalogNeeded, settings],
+  );
   const queryClient = useQueryClient();
   const {
     postPushWorkflowWatch,

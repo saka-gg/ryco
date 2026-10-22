@@ -199,6 +199,7 @@ function StatusIcon({ status }: { readonly status: MultiModelSendTargetStatus })
 }
 
 const NO_SNAPSHOTS: ReadonlyArray<MultiModelSendSnapshot> = [];
+const NO_BANNER_ITEMS: ReadonlyArray<ComposerBannerStackItem> = [];
 
 /** Each send's live snapshot, in order; the same array while none of them changed. */
 function useMultiModelSendSnapshots(
@@ -276,13 +277,17 @@ export function useMultiModelSendBannerItems(
   }, [records, uncertainVisible]);
 
   const { draftId } = input;
-  if (!draftId) return [];
-  return records.flatMap((record, index) => {
+  // The same empty list on every render: the composer's banner stack is memoized on it.
+  if (!draftId || records.length === 0) return NO_BANNER_ITEMS;
+  // The draft sends one thing at a time, Send as new included.
+  const draftSending = records.some((record) => record.sending);
+  const items = records.flatMap((record, index) => {
     const snapshot = snapshots[index];
     return snapshot && snapshot.targets.length > 0
-      ? [multiModelSendBannerItem({ ...input, draftId, record, snapshot })]
+      ? [multiModelSendBannerItem({ ...input, draftId, record, snapshot, draftSending })]
       : [];
   });
+  return items.length > 0 ? items : NO_BANNER_ITEMS;
 }
 
 function multiModelSendBannerItem(
@@ -290,6 +295,8 @@ function multiModelSendBannerItem(
     readonly draftId: DraftId;
     readonly record: MultiModelSendRecord;
     readonly snapshot: MultiModelSendSnapshot;
+    /** A send of the draft is still going out. */
+    readonly draftSending: boolean;
   },
 ): ComposerBannerStackItem {
   const { draftId, record, snapshot, catalog, dispatchAllowed, openThread } = input;
@@ -338,13 +345,22 @@ function multiModelSendBannerItem(
     }
   };
   const sendAsNew = (target: MultiModelSendTargetState) => {
-    if (input.sendAsNew(record, target.plan.key) !== "composer-not-empty") return;
+    const result = input.sendAsNew(record, target.plan.key);
+    if (result === "restored") return;
     toastManager.add(
-      stackedThreadToast({
-        type: "info",
-        title: "The composer isn't empty",
-        description: "Send or clear what's in it first, then choose Send as new again.",
-      }),
+      stackedThreadToast(
+        result === "composer-not-empty"
+          ? {
+              type: "info",
+              title: "The composer isn't empty",
+              description: "Send or clear what's in it first, then choose Send as new again.",
+            }
+          : {
+              type: "info",
+              title: "A send is still going out",
+              description: "Choose Send as new again once it has.",
+            },
+      ),
     );
   };
   const openSideBySide = () => {
@@ -444,7 +460,7 @@ function multiModelSendBannerItem(
                 <Button
                   size="xs"
                   variant="outline"
-                  disabled={record.sending}
+                  disabled={input.draftSending}
                   aria-label={`Send ${label.name} as new`}
                   onClick={() => sendAsNew(target)}
                 >

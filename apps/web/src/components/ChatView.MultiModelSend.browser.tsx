@@ -2,6 +2,7 @@ import { createMultiModelSendTracker } from "@ryco/client-runtime/state/composer
 import {
   ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
+  ProviderDriverKind,
   ProviderInstanceId,
   type EnvironmentApi,
 } from "@ryco/contracts";
@@ -16,6 +17,7 @@ import { useChatPanesStore } from "../chatPanesStore";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import {
   addMultiModelSend,
+  finishMultiModelSend,
   readMultiModelSelection,
   readMultiModelSends,
   setMultiModelSelection,
@@ -93,6 +95,8 @@ function seedWorktreeDraft(): void {
 
 async function mountCompareDraft(options: {
   readonly requiredWorktreeBootstrap?: boolean;
+  /** Custom models the user added to the Codex instance. */
+  readonly codexCustomModels?: ReadonlyArray<string>;
   readonly answer?: (request: TurnStartRequest) => unknown;
 }) {
   setGitStatusForTests(REPO_STATUS);
@@ -114,6 +118,18 @@ async function mountCompareDraft(options: {
             requiredWorktreeBootstrap: options.requiredWorktreeBootstrap ?? true,
           },
         },
+        settings: options.codexCustomModels
+          ? {
+              ...nextFixture.serverConfig.settings,
+              providerInstances: {
+                ...nextFixture.serverConfig.settings.providerInstances,
+                [ProviderInstanceId.make("codex")]: {
+                  driver: ProviderDriverKind.make("codex"),
+                  config: { customModels: [...options.codexCustomModels] },
+                },
+              },
+            }
+          : nextFixture.serverConfig.settings,
       };
     },
     resolveRpc: (body) => {
@@ -448,6 +464,94 @@ describe("ChatView compare models (full app)", () => {
       expect(sends[1]!.tracker).toBe(earlier);
       expect(document.body.textContent).toContain("Started 2 threads");
       expect(document.body.textContent).toContain("1 of 2 started");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("offers Send as new only once no send of the draft is going out", async () => {
+    const mounted = await mountCompareDraft({});
+    try {
+      const earlier = await seedSendWithUnconfirmedSonnet();
+      const refusingApi = {
+        orchestration: {
+          dispatchCommand: async () => {
+            throw new OrchestrationDispatchCommandError({
+              message: "fatal: a branch named 'ryco/1a2b3c4d' already exists",
+            });
+          },
+        },
+      } as unknown as EnvironmentApi;
+      await earlier.retryUncertain(earlier.read().targets[1]!.plan.key, {
+        api: refusingApi,
+        turnVisible: () => false,
+      });
+      // A newer send of the draft is still going out.
+      const newer = createMultiModelSendTracker({
+        draftId: DRAFT_ID,
+        submissionId: "submission-2",
+        projectId: PROJECT_ID,
+        projectCwd: "/repo/project",
+        baseBranch: "origin/main",
+        title: "Compare that",
+        runtimeMode: "full-access",
+        tokenMode: "balanced",
+        turnAttachments: [],
+        sourceControlContexts: [],
+        createdAt: NOW_ISO,
+        targets: [GPT].map((modelSelection) => ({
+          modelSelection,
+          outgoingMessageText: "Compare that",
+          interactionMode: "default" as const,
+        })),
+      });
+      addMultiModelSend(DRAFT_ID, {
+        tracker: newer,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        sending: true,
+        content: { prompt: "Compare that", images: [], terminalContexts: [], fileReferences: [] },
+      });
+
+      const sendAsNew = () =>
+        document.querySelector<HTMLButtonElement>('[aria-label="Send Sonnet 4.6 as new"]');
+      await vi.waitFor(() => expect(sendAsNew()?.disabled).toBe(true));
+      finishMultiModelSend(DRAFT_ID, newer);
+      await vi.waitFor(() => expect(sendAsNew()?.disabled).toBe(false));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("sends a confirmed custom model after the draft stopped offering Compare", async () => {
+    const custom = createModelSelection(ProviderInstanceId.make("codex"), "gpt-custom");
+    const mounted = await mountCompareDraft({ codexCustomModels: ["gpt-custom"] });
+    try {
+      setMultiModelSelection(DRAFT_ID, { enabled: true, selections: [custom, SONNET] });
+      useComposerDraftStore.getState().setPrompt(DRAFT_ID, "Compare this");
+      const button = await sendButton();
+      await vi.waitFor(() => expect(button.disabled).toBe(false));
+      button.click();
+      await waitForElement(confirmDialog, "The compare confirmation did not open.");
+
+      // While the confirmation is open, the folder stops reading as a Git
+      // repository (a status refresh), so the draft no longer offers Compare.
+      setGitStatusForTests({ ...REPO_STATUS, isRepo: false });
+      // The view renders again with it (the mocked status does not notify).
+      useComposerDraftStore.setState((state) => ({
+        draftThreadsByThreadKey: {
+          ...state.draftThreadsByThreadKey,
+          [DRAFT_ID]: { ...state.draftThreadsByThreadKey[DRAFT_ID]! },
+        },
+      }));
+      await vi.waitFor(() =>
+        expect(document.querySelector('button[type="submit"][data-send-target-count]')).toBeNull(),
+      );
+      await page.getByRole("button", { name: "Send to 2 models", exact: true }).last().click();
+
+      await vi.waitFor(() => expect(turnStarts()).toHaveLength(2), { timeout: 8_000 });
+      expect(turnStarts().map((request) => request.modelSelection?.model)).toEqual(
+        expect.arrayContaining(["gpt-custom", "claude-sonnet-4-6"]),
+      );
     } finally {
       await mounted.cleanup();
     }
