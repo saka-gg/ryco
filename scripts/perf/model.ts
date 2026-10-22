@@ -365,8 +365,13 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       // automatic chunking splits their shared chunk in two. With all of the
       // feature's lazy surfaces the shell's lucide icons drifted into a seventh
       // chunk (117); `ICON_MERGE_THRESHOLD_BYTES` folds them back (116 / 417.1 KiB).
+      // 117 / 417.2 KiB once the page's own role on the primary became one store
+      // (`environments/primarySessionRole`, ~0.3 KiB gzip) that node
+      // auto-settlement in the shell and the lazy node catalog share, so it is
+      // a chunk of its own. Folding an icon chunk instead (a 15 KiB threshold)
+      // moves ~3.5 KiB gzip each into the pull request and settings routes.
       maxGzipBytes: 420 * KIB,
-      maxFiles: 116,
+      maxFiles: 117,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,
