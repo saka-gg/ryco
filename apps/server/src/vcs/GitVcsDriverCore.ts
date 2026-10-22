@@ -2458,12 +2458,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
    */
   const worktreeBaseFetchLocks = yield* makeKeyedSerialExecutor<string>();
   /**
-   * New worktree branches of one repository (by its common directory) are
-   * created one at a time. Creating one writes its upstream to the shared
-   * `.git/config`, and a Git without `core.configLockTimeout` (Apple's among
-   * them) fails at once on a lock another creation holds.
+   * The branches this driver creates, renames and cleans up in one repository
+   * (by its common directory) change one at a time. Each change writes the
+   * shared `.git/config` (a new branch's upstream, a renamed or deleted
+   * branch's section), and a Git without `core.configLockTimeout` (Apple's
+   * among them) fails at once on a lock another holds: a rename then even
+   * stops halfway, its ref moved but its section not. A rename also picks a
+   * free name before it takes it.
    */
-  const worktreeBranchCreationLocks = yield* makeKeyedSerialExecutor<string>();
+  const branchChangeLocks = yield* makeKeyedSerialExecutor<string>();
   /** Prefetched bases, by `worktreeBaseKey`: a creation reuses one for a while. */
   const settledWorktreeBasePrefetches = new Map<
     string,
@@ -2925,10 +2928,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     }
 
     // A new branch is created first, as `worktree add -b` does itself (tracking
-    // included), but under `worktreeBranchCreationLocks`: only that short config
-    // write waits for other creations, not the checkout.
-    const branchArgs = input.newRefName ? ["branch", "--", input.newRefName, baseRef] : null;
-    const args = ["worktree", "add", worktreePath, input.newRefName ?? baseRef];
+    // included), but under `branchChangeLocks`: only that short config write
+    // waits for other creations, not the checkout.
+    const newRefName = input.newRefName;
+    const args = ["worktree", "add", worktreePath, newRefName ?? baseRef];
     const onCheckoutProgress = input.progress?.onCheckoutProgress;
 
     return yield* Effect.scoped(
@@ -2963,20 +2966,33 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               }
               yield* recoverSetup(input.cwd, worktreePath);
               const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
-              const createBranch =
-                branchArgs === null
-                  ? Effect.void
-                  : worktreeBranchCreationLocks.withLock(
+              const createBranch = newRefName
+                ? branchChangeLocks.withLock(
+                    repositoryPath,
+                    executeGit(
+                      "GitVcsDriver.createWorktree.createBranch",
+                      input.cwd,
+                      ["branch", "--", newRefName, baseRef],
+                      { fallbackErrorMessage: "git branch failed" },
+                    ),
+                  )
+                : Effect.void;
+              // A branch created here is deleted again when its checkout fails or
+              // is cut off, so an identical retry is not refused on it. Git keeps
+              // a branch a registered checkout uses: a partial checkout keeps it.
+              const removeCreatedBranch = newRefName
+                ? branchChangeLocks
+                    .withLock(
                       repositoryPath,
                       executeGit(
-                        "GitVcsDriver.createWorktree.createBranch",
+                        "GitVcsDriver.createWorktree.removeBranch",
                         input.cwd,
-                        branchArgs,
-                        {
-                          fallbackErrorMessage: "git branch failed",
-                        },
+                        ["branch", "-D", "--", newRefName],
+                        { allowNonZeroExit: true, timeoutMs: 10_000 },
                       ),
-                    );
+                    )
+                    .pipe(Effect.ignore)
+                : Effect.void;
               yield* input.progress?.onCheckoutStarted?.() ?? Effect.void;
               // Persist journal and mutation ownership before Git can register a
               // checkout. A cancelled child leaves an uncertain guard for inspection.
@@ -3005,7 +3021,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                             }
                           : {}),
                       }),
-                    ),
+                    ).pipe(Effect.onError(() => removeCreatedBranch)),
                   ),
                 ),
               );
@@ -3289,19 +3305,25 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       if (input.oldBranch === input.newBranch) {
         return { branch: input.newBranch };
       }
-      const targetBranch = yield* resolveAvailableBranchName(input.cwd, input.newBranch);
-
-      yield* executeGit(
-        "GitVcsDriver.renameBranch",
-        input.cwd,
-        ["branch", "-m", "--", input.oldBranch, targetBranch],
-        {
-          timeoutMs: 10_000,
-          fallbackErrorMessage: "git branch rename failed",
-        },
+      // Threads started together rename their branches as each goes idle, often
+      // to the same name: the free name is picked and taken under the lock.
+      const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+      return yield* branchChangeLocks.withLock(
+        repositoryPath,
+        Effect.gen(function* () {
+          const targetBranch = yield* resolveAvailableBranchName(input.cwd, input.newBranch);
+          yield* executeGit(
+            "GitVcsDriver.renameBranch",
+            input.cwd,
+            ["branch", "-m", "--", input.oldBranch, targetBranch],
+            {
+              timeoutMs: 10_000,
+              fallbackErrorMessage: "git branch rename failed",
+            },
+          );
+          return { branch: targetBranch };
+        }),
       );
-
-      return { branch: targetBranch };
     },
   );
 
@@ -3403,14 +3425,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const deleteBranch: GitVcsDriver.GitVcsDriverShape["deleteBranch"] = Effect.fn("deleteBranch")(
     function* (input) {
-      yield* executeGit(
-        "GitVcsDriver.deleteBranch",
-        input.cwd,
-        ["branch", input.force ? "-D" : "-d", input.refName],
-        {
-          timeoutMs: 10_000,
-          fallbackErrorMessage: "git branch delete failed",
-        },
+      // Deleting a branch drops its config section: a cancelled send cleans up
+      // while other branches of the repository are being created.
+      const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+      yield* branchChangeLocks.withLock(
+        repositoryPath,
+        executeGit(
+          "GitVcsDriver.deleteBranch",
+          input.cwd,
+          ["branch", input.force ? "-D" : "-d", input.refName],
+          {
+            timeoutMs: 10_000,
+            fallbackErrorMessage: "git branch delete failed",
+          },
+        ),
       );
     },
   );

@@ -887,6 +887,11 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           assert.equal(attempts, 1);
           assert.equal(yield* fs.readFileString(`${checkout}/retain.txt`), "partial checkout data");
           assert.include(yield* base.listWorktreePaths(cwd), yield* fs.realPath(checkout));
+          // The registered checkout keeps the branch it uses.
+          assert.equal(
+            yield* git(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads/feature"]),
+            "feature/mmap",
+          );
           const incomplete = yield* driver.assertWorktreeSetupComplete(checkout).pipe(Effect.flip);
           assert.include(incomplete.detail, "incomplete setup");
         }).pipe(Effect.provide(OverrideTestLayer)),
@@ -1309,6 +1314,158 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
             `refs/heads/${initialBranch}`,
           );
         }
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+    it.effect("gives branches renamed together distinct free names, one at a time", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        // Without a config lock retry, two renames at once also fail on `.git/config.lock`.
+        yield* git(cwd, ["config", "core.configLockTimeout", "0"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        let running = 0;
+        let mostAtOnce = 0;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            input.args[0] !== "branch"
+              ? base.execute(input)
+              : Effect.suspend(() => {
+                  running += 1;
+                  mostAtOnce = Math.max(mostAtOnce, running);
+                  // Long enough for every rename to have picked its name.
+                  return Effect.promise(
+                    () => new Promise((resolve) => setTimeout(resolve, 50)),
+                  ).pipe(
+                    Effect.andThen(base.execute(input)),
+                    Effect.ensuring(Effect.sync(() => (running -= 1))),
+                  );
+                }),
+        });
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+        const created = yield* Effect.forEach(
+          [1, 2, 3],
+          (index) =>
+            driver.createWorktree({
+              cwd,
+              path: pathService.join(root, `model-${index}`),
+              refName: initialBranch,
+              newRefName: `ryco/model-${index}`,
+            }),
+          { concurrency: "unbounded" },
+        );
+
+        // Threads sent the same prompt go idle together and get the same name.
+        const renamed = yield* Effect.forEach(
+          created,
+          (result, index) =>
+            driver.renameBranch({
+              cwd: result.worktree.path,
+              oldBranch: `ryco/model-${index + 1}`,
+              newBranch: "feature/same-title",
+            }),
+          { concurrency: "unbounded" },
+        );
+
+        assert.equal(mostAtOnce, 1);
+        assert.sameMembers(
+          renamed.map((result) => result.branch),
+          ["feature/same-title", "feature/same-title-1", "feature/same-title-2"],
+        );
+        for (const [index, result] of created.entries()) {
+          assert.equal(
+            yield* git(result.worktree.path, ["branch", "--show-current"]),
+            renamed[index]!.branch,
+          );
+        }
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+    it.effect("removes the branch it created when the checkout fails", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const fs = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        let occupy = true;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            input.operation === "GitVcsDriver.createWorktree" && occupy
+              ? // Something takes the destination after the driver checked it.
+                fs
+                  .makeDirectory(input.args.at(-2)!, { recursive: true })
+                  .pipe(
+                    Effect.andThen(
+                      fs.writeFileString(pathService.join(input.args.at(-2)!, "taken.txt"), "x"),
+                    ),
+                    Effect.orDie,
+                    Effect.andThen(base.execute(input)),
+                  )
+              : base.execute(input),
+        });
+        const root = yield* makeTmpDir();
+
+        const error = yield* driver
+          .createWorktree({
+            cwd,
+            path: pathService.join(root, "taken"),
+            refName: initialBranch,
+            newRefName: "feature/retried",
+          })
+          .pipe(Effect.flip);
+
+        assert.include(error.detail, "already exists");
+        assert.equal(
+          yield* git(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads/feature"]),
+          "",
+        );
+        // The same creation, retried, is not refused on a branch the first one left.
+        occupy = false;
+        const retried = yield* driver.createWorktree({
+          cwd,
+          path: pathService.join(root, "retried"),
+          refName: initialBranch,
+          newRefName: "feature/retried",
+        });
+        assert.equal(
+          yield* git(retried.worktree.path, ["branch", "--show-current"]),
+          "feature/retried",
+        );
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+    it.effect("removes the branch it created when the checkout is cut off", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        const checkoutStarted = yield* Deferred.make<void>();
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            input.operation === "GitVcsDriver.createWorktree"
+              ? Deferred.succeed(checkoutStarted, undefined).pipe(Effect.andThen(Effect.never))
+              : base.execute(input),
+        });
+        const fiber = yield* driver
+          .createWorktree({
+            cwd,
+            path: (yield* Path.Path).join(yield* makeTmpDir(), "cut-off"),
+            refName: initialBranch,
+            newRefName: "feature/cut-off",
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(checkoutStarted);
+        assert.equal(
+          yield* git(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads/feature"]),
+          "feature/cut-off",
+        );
+
+        yield* Fiber.interrupt(fiber);
+
+        assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(fiber)));
+        assert.equal(
+          yield* git(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads/feature"]),
+          "",
+        );
       }).pipe(Effect.provide(ServerConfigLayer)),
     );
     it.effect("lets a prefetch join the base fetch of worktrees being created", () =>
