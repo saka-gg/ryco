@@ -27,6 +27,28 @@ const io = <A>(cwd: string, action: () => Promise<A>) =>
       ),
   });
 
+/**
+ * `git diff` arguments for a patch `git apply` takes back whatever the user's git config says:
+ * binary hunks with full object ids, no colour, external diff or textconv, no rename pairs, and
+ * explicit `a/` `b/` prefixes from the repository root (`diff.noprefix`, `diff.mnemonicPrefix`
+ * and `diff.relative` would otherwise change the paths).
+ */
+export const PORTABLE_PATCH_DIFF_ARGS: ReadonlyArray<string> = Object.freeze([
+  "diff",
+  "--patch",
+  "--binary",
+  "--full-index",
+  "--no-color",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--no-renames",
+  "--src-prefix=a/",
+  "--dst-prefix=b/",
+  "--no-relative",
+  "--unified=3",
+  "--submodule=short",
+]);
+
 function describePatch(patch: string): GitLocalChangesResult["staged"] {
   return {
     patch,
@@ -150,21 +172,7 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
       const bytes = yield* readIndex();
       return { ...head, indexIdentity: bytes === null ? "missing" : hash(bytes) };
     });
-  const diffArgs = [
-    "diff",
-    "--patch",
-    "--binary",
-    "--full-index",
-    "--no-color",
-    "--no-ext-diff",
-    "--no-textconv",
-    "--no-renames",
-    "--src-prefix=a/",
-    "--dst-prefix=b/",
-    "--no-relative",
-    "--unified=3",
-    "--submodule=short",
-  ];
+  const diffArgs = PORTABLE_PATCH_DIFF_ARGS;
   const read = () =>
     Effect.scoped(
       Effect.gen(function* () {

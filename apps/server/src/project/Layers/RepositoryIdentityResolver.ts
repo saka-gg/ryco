@@ -14,7 +14,8 @@ import {
   type RepositoryIdentityResolverShape,
 } from "../Services/RepositoryIdentityResolver.ts";
 
-function parseRemoteFetchUrls(stdout: string): Map<string, string> {
+/** The fetch URL of every remote in `git remote -v` output, by remote name in listing order. */
+export function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   const remotes = new Map<string, string>();
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -30,7 +31,11 @@ function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   return remotes;
 }
 
-function pickPrimaryRemote(
+/**
+ * The remote a repository's identity (and a cross-node copy's clone) comes from: `upstream`, then
+ * `origin`, then the first by name.
+ */
+export function pickPrimaryRemote(
   remotes: ReadonlyMap<string, string>,
 ): { readonly remoteName: string; readonly remoteUrl: string } | null {
   for (const preferredRemoteName of ["upstream", "origin"] as const) {

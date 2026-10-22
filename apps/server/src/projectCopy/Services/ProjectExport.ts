@@ -51,9 +51,14 @@ export interface ProjectExportShape {
   readonly start: (
     request: ProjectExportStartRequest,
   ) => Effect.Effect<ProjectExportResult, ProjectCopyError>;
-  /** One chunk of an artifact; slides the export's TTL (30 min from the last read). */
+  /**
+   * One chunk of an artifact; slides the export's TTL (30 min from the last read). With the
+   * caller's `channel`, an artifact that carries opted-in ignored files is refused on
+   * `relay-plaintext` (`access-denied`), like `start` leaves them out there.
+   */
   readonly readChunk: (
     input: ProjectExportReadChunkInput,
+    channel?: ProjectCopyCallerChannel,
   ) => Effect.Effect<ProjectExportReadChunkResult, ProjectCopyError>;
   /** Deletes the export's artifacts; idempotent, and an unknown id is already gone. */
   readonly dispose: (input: ProjectExportDisposeInput) => Effect.Effect<void, ProjectCopyError>;
