@@ -154,7 +154,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (!hasActiveThread || !activeProject) return null;
 
   return (
-    <div className="mx-auto flex w-full max-w-208 items-center gap-1 px-2.5 pb-3 pt-1 sm:px-3">
+    <div className="mx-auto flex w-full max-w-(--chat-composer-max-width) items-center gap-1 px-2.5 pb-3 pt-1 sm:px-3">
       {contextControlsHoisted ? null : (
         <div className="flex min-w-0 shrink items-center gap-0.5">
           {/* A started thread already names its project in the header breadcrumb;

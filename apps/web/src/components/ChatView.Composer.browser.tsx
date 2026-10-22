@@ -10,7 +10,7 @@ import {
   type TurnId,
   WS_METHODS,
 } from "@ryco/contracts";
-import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
+import { DEFAULT_CLIENT_SETTINGS, type SendShortcut } from "@ryco/contracts/settings";
 import {
   PROMPT_STASH_STORAGE_KEY,
   stripInlineTerminalContextPlaceholders,
@@ -33,6 +33,11 @@ import {
 import { useMessageQueueStore } from "../messageQueueStore";
 import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
+import { useTierOverrideStore } from "../tierOverrideStore";
+import {
+  getClientSettingsSnapshot,
+  replaceClientSettingsSnapshot,
+} from "../hooks/clientSettingsStore";
 import {
   setupChatViewBrowserSuite,
   addThreadToSnapshot,
@@ -139,6 +144,24 @@ vi.mock("../hostedHub/capabilities", async (importOriginal) => {
     },
   };
 });
+
+/** Enter on the composer, holding the platform's mod key (Cmd / Ctrl) and Shift as asked. */
+function pressComposerEnter(
+  editor: HTMLElement,
+  keys: { readonly mod: boolean; readonly shift?: boolean },
+): void {
+  const mac = isMacPlatform(navigator.platform);
+  editor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      metaKey: keys.mod && mac,
+      ctrlKey: keys.mod && !mac,
+      shiftKey: keys.shift === true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
 
 describe("ChatView Composer (full app)", () => {
   setupChatViewBrowserSuite();
@@ -761,6 +784,122 @@ describe("ChatView Composer (full app)", () => {
       );
     } finally {
       await newThreadMounted.cleanup();
+    }
+  });
+
+  it("widens the timeline and composer columns with the Chat width setting", async () => {
+    const mounted = await mountChatView({
+      viewport: WIDE_FOOTER_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-chat-width" as MessageId,
+        targetText: "chat width",
+      }),
+    });
+    const setChatWidth = (chatWidth: "comfortable" | "wide" | "full") =>
+      replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), chatWidth });
+
+    try {
+      const composerForm = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-chat-composer-form="true"]'),
+        "Unable to find the composer form.",
+      );
+      const timelineRoot = await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-timeline-root="true"]'),
+        "Unable to find a timeline row.",
+      );
+      const contentWidth = (element: HTMLElement) => {
+        const style = getComputedStyle(element);
+        return (
+          element.clientWidth -
+          Number.parseFloat(style.paddingLeft) -
+          Number.parseFloat(style.paddingRight)
+        );
+      };
+      const widths = () => ({
+        composer: composerForm.getBoundingClientRect().width,
+        timeline: timelineRoot.getBoundingClientRect().width,
+      });
+
+      await vi.waitFor(() =>
+        expect(document.documentElement.dataset.chatWidth).toBe("comfortable"),
+      );
+      await waitForLayout();
+      expect(widths().composer).toBeCloseTo(52 * 16, 1);
+      expect(widths().timeline).toBeCloseTo(48 * 16, 1);
+
+      setChatWidth("wide");
+      await vi.waitFor(() => {
+        expect(document.documentElement.dataset.chatWidth).toBe("wide");
+        expect(widths().composer).toBeCloseTo(76 * 16, 1);
+        expect(widths().timeline).toBeCloseTo(72 * 16, 1);
+      });
+
+      setChatWidth("full");
+      await vi.waitFor(() => {
+        expect(widths().composer).toBeCloseTo(contentWidth(composerForm.parentElement!), 1);
+        expect(widths().timeline).toBeCloseTo(contentWidth(timelineRoot.parentElement!), 1);
+      });
+      expect(widths().timeline).toBeGreaterThan(72 * 16);
+
+      // The frozen phone tier keeps the comfortable widths.
+      useTierOverrideStore.setState({ override: "phone" });
+      await vi.waitFor(() => {
+        expect(document.documentElement.getAttribute("data-tier")).toBe("phone");
+        const root = getComputedStyle(document.documentElement);
+        expect(root.getPropertyValue("--chat-timeline-max-width").trim()).toBe("48rem");
+      });
+    } finally {
+      useTierOverrideStore.setState({ override: null });
+      delete document.documentElement.dataset.chatWidth;
+      await mounted.cleanup();
+    }
+  });
+
+  it("adds a line with Enter in a multiline prompt and sends it with Mod+Enter", async () => {
+    localStorage.setItem(
+      "ryco:client-settings:v1",
+      JSON.stringify({ ...DEFAULT_CLIENT_SETTINGS, sendShortcut: "mod-enter-multiline" }),
+    );
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-send-shortcut" as MessageId,
+        targetText: "send shortcut",
+      }),
+      resolveRpc: (body) =>
+        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+          ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+          : undefined,
+    });
+    const turnStarts = () =>
+      wsRequests.filter(
+        (request) =>
+          request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          request.type === "thread.turn.start",
+      );
+
+    try {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "First line\nSecond line");
+      await waitForComposerText("First line\nSecond line");
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      pressComposerEnter(editor, { mod: false });
+      await vi.waitFor(() =>
+        expect(
+          useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt.split("\n"),
+        ).toHaveLength(3),
+      );
+      await waitForLayout();
+      expect(turnStarts()).toEqual([]);
+
+      pressComposerEnter(editor, { mod: true });
+      await vi.waitFor(() => expect(turnStarts()).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+    } finally {
+      localStorage.removeItem("ryco:client-settings:v1");
+      await mounted.cleanup();
     }
   });
 
@@ -2262,10 +2401,13 @@ describe("ChatView Composer (full app)", () => {
       unknown
     >;
 
-    async function mountSteerableRunningThread(followUpBehavior: "queue" | "steer") {
+    async function mountSteerableRunningThread(
+      followUpBehavior: "queue" | "steer",
+      sendShortcut: SendShortcut = "enter",
+    ) {
       localStorage.setItem(
         "ryco:client-settings:v1",
-        JSON.stringify({ ...DEFAULT_CLIENT_SETTINGS, followUpBehavior }),
+        JSON.stringify({ ...DEFAULT_CLIENT_SETTINGS, followUpBehavior, sendShortcut }),
       );
       const base = createSnapshotForTargetUser({
         targetMessageId: "msg-follow-up-existing" as MessageId,
@@ -2322,21 +2464,16 @@ describe("ChatView Composer (full app)", () => {
       };
     }
 
-    async function submitFollowUp(text: string, options: { readonly invert: boolean }) {
+    /** Sends `text` with Enter, holding the platform's mod key (Cmd / Ctrl) and Shift as asked. */
+    async function submitFollowUp(
+      text: string,
+      keys: { readonly mod: boolean; readonly shift?: boolean },
+    ) {
       useComposerDraftStore.getState().setPrompt(THREAD_REF, text);
       await waitForComposerText(text);
       const editor = await waitForComposerEditor();
       editor.focus();
-      const mac = isMacPlatform(navigator.platform);
-      editor.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Enter",
-          metaKey: options.invert && mac,
-          ctrlKey: options.invert && !mac,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
+      pressComposerEnter(editor, keys);
       await vi.waitFor(
         () => expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1),
         { timeout: 8_000, interval: 16 },
@@ -2351,7 +2488,7 @@ describe("ChatView Composer (full app)", () => {
     it("edits a queued message back into the composer and takes it out of the queue", async () => {
       const harness = await mountSteerableRunningThread("queue");
       try {
-        await submitFollowUp("Fix the failing tests", { invert: false });
+        await submitFollowUp("Fix the failing tests", { mod: false });
         await waitForComposerText("");
         const edit = page.getByRole("button", { name: /^Edit queued message/ });
         await expect.element(edit).toBeEnabled();
@@ -2371,7 +2508,7 @@ describe("ChatView Composer (full app)", () => {
     it("keeps Edit unavailable while the composer already holds a draft", async () => {
       const harness = await mountSteerableRunningThread("queue");
       try {
-        await submitFollowUp("Queued first", { invert: false });
+        await submitFollowUp("Queued first", { mod: false });
         await waitForComposerText("");
         await expect
           .element(page.getByRole("button", { name: /^Edit queued message/ }))
@@ -2396,7 +2533,7 @@ describe("ChatView Composer (full app)", () => {
             "Steer this turn",
           ),
         );
-        await submitFollowUp("Steer right now", { invert: false });
+        await submitFollowUp("Steer right now", { mod: false });
         await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
           timeout: 8_000,
           interval: 16,
@@ -2420,7 +2557,7 @@ describe("ChatView Composer (full app)", () => {
     it("queues with Mod+Enter in steer mode", async () => {
       const harness = await mountSteerableRunningThread("steer");
       try {
-        await submitFollowUp("Wait for the turn", { invert: true });
+        await submitFollowUp("Wait for the turn", { mod: true });
         await waitForLayout();
         expect(harness.steers()).toEqual([]);
         expect(steerAttempt()).toBeUndefined();
@@ -2432,12 +2569,53 @@ describe("ChatView Composer (full app)", () => {
     it("queues with Enter and steers explicitly with Mod+Enter in queue mode", async () => {
       const harness = await mountSteerableRunningThread("queue");
       try {
-        await submitFollowUp("Queue this one", { invert: false });
+        await submitFollowUp("Queue this one", { mod: false });
         await waitForLayout();
         expect(harness.steers()).toEqual([]);
         useMessageQueueStore.getState().clear(THREAD_KEY);
 
-        await submitFollowUp("Steer this one", { invert: true });
+        await submitFollowUp("Steer this one", { mod: true });
+        await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+          timeout: 8_000,
+          interval: 16,
+        });
+        expect(steerAttempt()).toMatchObject({ explicit: true });
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
+    it("moves the opposite action to Mod+Shift+Enter when sending needs Mod+Enter", async () => {
+      const harness = await mountSteerableRunningThread("queue", "mod-enter");
+      try {
+        const editor = await waitForComposerEditor();
+        const inversion = isMacPlatform(navigator.platform) ? "⇧⌘↵" : "Ctrl+Shift+Enter";
+        await vi.waitFor(() =>
+          expect(editor.getAttribute("aria-placeholder") ?? editor.textContent).toContain(
+            `Queue a follow-up · ${inversion} to steer`,
+          ),
+        );
+
+        // Enter adds a line instead of sending.
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Not yet");
+        await waitForComposerText("Not yet");
+        editor.focus();
+        pressComposerEnter(editor, { mod: false });
+        await vi.waitFor(() =>
+          expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt).toContain(
+            "\n",
+          ),
+        );
+        await waitForLayout();
+        expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? []).toEqual([]);
+
+        // Mod+Enter sends as the setting says; Mod+Shift+Enter does the opposite.
+        await submitFollowUp("Queue with the send shortcut", { mod: true });
+        await waitForLayout();
+        expect(harness.steers()).toEqual([]);
+        useMessageQueueStore.getState().clear(THREAD_KEY);
+
+        await submitFollowUp("Steer with the shortcut and Shift", { mod: true, shift: true });
         await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
           timeout: 8_000,
           interval: 16,
@@ -2451,7 +2629,7 @@ describe("ChatView Composer (full app)", () => {
     it("steers a queued message whose send failed from its row", async () => {
       const harness = await mountSteerableRunningThread("queue");
       try {
-        await submitFollowUp("Retry by steering", { invert: false });
+        await submitFollowUp("Retry by steering", { mod: false });
         const messageId = queuedEntry().id;
         const queue = useMessageQueueStore.getState();
         expect(queue.beginSend(THREAD_KEY, messageId)).toBe(true);
@@ -2480,7 +2658,7 @@ describe("ChatView Composer (full app)", () => {
     it("does not end a re-steer on a stale deferred rejection of an earlier attempt", async () => {
       const harness = await mountSteerableRunningThread("steer");
       try {
-        await submitFollowUp("Steer twice", { invert: false });
+        await submitFollowUp("Steer twice", { mod: false });
         await vi.waitFor(() => expect(harness.steers()).toHaveLength(1));
         const first = harness.steers()[0]!;
         const messageId = queuedEntry().id;

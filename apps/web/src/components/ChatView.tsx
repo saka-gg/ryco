@@ -6520,7 +6520,7 @@ export default function ChatView(props: ChatViewProps) {
                 backgroundWork.tasks.length > 0 ||
                 backgroundWork.detailsOmitted) &&
               presentationTier !== "phone" ? (
-                <div className="mx-auto mb-2 flex w-full min-w-0 max-w-208 items-center px-4">
+                <div className="mx-auto mb-2 flex w-full min-w-0 max-w-(--chat-composer-max-width) items-center px-4">
                   <BackgroundLivenessChip
                     key={activeThreadKey}
                     work={backgroundWork}

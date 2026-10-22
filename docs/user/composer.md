@@ -1,5 +1,29 @@
 # Composer
 
+## Send shortcut
+
+In **Settings > General > Send shortcut**, choose when Enter sends a message on web and desktop.
+`Cmd` below is `Ctrl` on Windows and Linux.
+
+- **Enter**: Enter sends. This is the default.
+- **⌘↵ for multiline prompts**: Enter sends a one-line prompt. Once the prompt has more than one
+  line, Enter adds a new line and `Cmd+Enter` sends.
+- **Always ⌘↵**: Enter always adds a new line and `Cmd+Enter` sends.
+
+`Shift+Enter` always adds a new line. The setting belongs to this browser or app, so each device
+keeps its own. It does not apply to the phone layout of the web app or to the Ryco iPhone app.
+
+While the agent works, **Messages sent while a turn runs** chooses whether a message waits in the
+queue or steers the running turn. `Cmd+Enter` does the opposite for one message. Where sending
+needs `Cmd+Enter` (always, or for a multiline prompt), use `Cmd+Shift+Enter` for the opposite
+instead. While a turn runs, the empty composer's hint names the shortcut for a one-line prompt.
+
+## Chat width
+
+In **Settings > Appearance > Chat width**, choose how wide messages and the composer grow on large
+screens: **Comfortable** (the default), **Wide**, or **Full**, which fills the chat pane. The
+setting belongs to this browser or app. Phone layouts keep the comfortable width.
+
 ## Large pastes
 
 On web and desktop, a text paste of 32 KiB or more becomes an attachment instead of prompt text.

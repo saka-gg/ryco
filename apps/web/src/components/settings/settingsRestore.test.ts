@@ -44,6 +44,19 @@ describe("settings reset ownership", () => {
       ).patch,
     ).toEqual({});
   });
+  it("restores the send shortcut and chat width as local preferences", () => {
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      sendShortcut: "mod-enter" as const,
+      chatWidth: "wide" as const,
+    };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Send shortcut", "Chat width"],
+      resetTheme: false,
+      patch: { sendShortcut: "enter", chatWidth: "comfortable" },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
+  });
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
   });

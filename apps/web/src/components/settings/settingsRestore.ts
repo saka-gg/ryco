@@ -7,6 +7,8 @@ const RESTORABLE_SETTINGS = {
   diffWordWrap: "Diff line wrapping",
   diffIgnoreWhitespace: "Diff whitespace changes",
   followUpBehavior: "Follow-up while working",
+  sendShortcut: "Send shortcut",
+  chatWidth: "Chat width",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",
   enableLegacyTokenStreaming: "Stream token by token",
