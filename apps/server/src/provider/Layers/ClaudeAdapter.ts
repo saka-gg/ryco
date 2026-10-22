@@ -47,6 +47,7 @@ import {
   type PermissionMode,
   type PermissionResult,
   type PermissionUpdate,
+  type SDKAPIRetryMessage,
   type SDKMessage,
   type SDKResultMessage,
   type SettingSource,
@@ -78,6 +79,7 @@ import {
   type ProviderSendTurnInput,
   type ProviderSession,
   type ProviderSessionStartInput,
+  type ServerProviderSlashCommand,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
@@ -157,6 +159,7 @@ import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
   normalizeClaudeCliEffort,
+  parseClaudeSlashCommands,
   probeClaudeCapabilities,
   resolveClaudeApiModelId,
   resolveClaudeEffort,
@@ -518,6 +521,13 @@ interface ClaudeSessionContext {
   requestingStatusObserved: boolean;
   /** Protocol capabilities from the latest `system/init`; undefined before the first one. */
   cliCapabilities: ReadonlySet<string> | undefined;
+  /**
+   * The full slash-command list the CLI last pushed (`commands_changed`), with the adapter-wide
+   * order of that push; undefined before the first one.
+   */
+  slashCommands:
+    | { readonly commands: ReadonlyArray<ServerProviderSlashCommand>; readonly order: number }
+    | undefined;
   /**
    * Steer uuids that must never reply (Stop, or a failed segment) but that the CLI may still
    * run; their CLI turn is dropped. A uuid leaves the set once a CLI turn consumed it.
@@ -1593,6 +1603,55 @@ function claudeTurnCloseErrorMessage(
   }
 }
 
+const CLAUDE_API_RETRY_ERROR_LABELS: Partial<Record<SDKAPIRetryMessage["error"], string>> = {
+  overloaded: "API overloaded",
+  rate_limit: "Rate limited",
+  server_error: "API server error",
+};
+
+/** `api_retry` as a notice: "Retrying request (2/10) in 4s", detailed by why the attempt failed. */
+function claudeApiRetryNotice(message: SDKAPIRetryMessage): {
+  readonly message: string;
+  readonly detail: string;
+} {
+  const attempt = Math.trunc(message.attempt);
+  const maxRetries = Math.trunc(message.max_retries);
+  const delaySeconds = Math.ceil(message.retry_delay_ms / 1000);
+  const waitedSeconds = Math.round((message.no_response?.waited_ms ?? Number.NaN) / 1000);
+  const label = CLAUDE_API_RETRY_ERROR_LABELS[message.error];
+  const status =
+    typeof message.error_status === "number" ? `HTTP ${message.error_status}` : undefined;
+  return {
+    message: [
+      "Retrying request",
+      ...(attempt > 0 && maxRetries > 0 ? [`(${attempt}/${maxRetries})`] : []),
+      ...(delaySeconds > 0 ? [`in ${delaySeconds}s`] : []),
+    ].join(" "),
+    detail: Number.isFinite(waitedSeconds)
+      ? `No response after ${waitedSeconds}s`
+      : status === undefined
+        ? "Connection error"
+        : label === undefined
+          ? status
+          : `${label} (${status})`,
+  };
+}
+
+const DEBUG_PREVIEW_MAX_CHARS = 400;
+
+/** A frame for a debug log line: JSON, cut to a few hundred characters. */
+function boundedJsonPreview(value: unknown): string {
+  let json: string;
+  try {
+    json = JSON.stringify(value) ?? String(value);
+  } catch {
+    json = String(value);
+  }
+  return json.length > DEBUG_PREVIEW_MAX_CHARS
+    ? `${json.slice(0, DEBUG_PREVIEW_MAX_CHARS)}…`
+    : json;
+}
+
 function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
   return deltaType.includes("thinking") ? "reasoning_text" : "assistant_text";
 }
@@ -1982,6 +2041,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   let nextSessionGeneration = 0;
+  /** Orders `commands_changed` pushes across sessions, so the newest list of a directory wins. */
+  let nextSlashCommandsOrder = 0;
   // One SDK message fans out into several runtime events that all carry it as
   // `raw.payload` (and is logged natively first): redact it once, share it.
   const secretRedactor = makeSharedPayloadSecretRedactor();
@@ -3986,6 +4047,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: message,
       },
     };
+    /** A low-key status line (a retry, a banner): never a "Runtime warning" row. */
+    const emitNotice = (text: string, detail?: string) => {
+      const notice = text.trim();
+      const body = detail?.trim();
+      return notice.length === 0
+        ? Effect.void
+        : offerRuntimeEventForContext(context, {
+            ...base,
+            type: "runtime.notice",
+            payload: { message: notice, ...(body ? { detail: body } : {}) },
+          });
+    };
 
     // Background-set reconciliation (CC ≥ 2.1.203; the pinned SDK typings
     // don't carry the subtype yet, hence the runtime check before the typed
@@ -4617,13 +4690,84 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           message,
         );
         return;
-      default:
-        yield* emitRuntimeWarning(
-          context,
-          `Unhandled Claude system message subtype '${message.subtype}'.`,
-          message,
-        );
+      case "api_retry": {
+        const retry = claudeApiRetryNotice(message);
+        yield* emitNotice(retry.message, retry.detail);
         return;
+      }
+      case "commands_changed":
+        // The full list after a change (skills found as the agent works, MCP prompts): it
+        // replaces what the session reported before and is served for its directory while it
+        // runs (`readLiveProjectCommands`). Menu bookkeeping, not transcript content.
+        context.slashCommands = {
+          commands: parseClaudeSlashCommands(message.commands),
+          order: ++nextSlashCommandsOrder,
+        };
+        return;
+      case "informational":
+        // `info` lines show only in Claude Code's transcript mode, and a tool-scoped line is
+        // that tool's progress (the tool row carries it). The rest are banners: hook feedback,
+        // a block reason, command output.
+        if (message.level !== "info" && message.tool_use_id === undefined) {
+          yield* emitNotice(message.content);
+        }
+        return;
+      case "notification":
+        // The REPL's transient toast queue; only what it would interrupt for earns a row.
+        if (message.priority === "high" || message.priority === "immediate") {
+          yield* emitNotice(message.text);
+        }
+        return;
+      case "local_command_output":
+        // A slash command's own output (/usage, /context): the answer the user asked for.
+        yield* emitNotice("Command output", message.content);
+        return;
+      case "memory_recall": {
+        const count = Array.isArray(message.memories) ? message.memories.length : 0;
+        if (count > 0) {
+          yield* emitNotice(`Recalled ${count} ${count === 1 ? "memory" : "memories"}`);
+        }
+        return;
+      }
+      case "model_refusal_fallback":
+      case "model_refusal_no_fallback":
+        yield* emitNotice(message.content);
+        return;
+      case "plugin_install":
+        // Headless install progress; only a failure is actionable.
+        if (message.status === "failed") {
+          yield* emitNotice(
+            message.name
+              ? `Claude plugin install failed: ${message.name}`
+              : "Claude plugin install failed",
+            message.error,
+          );
+        }
+        return;
+      case "session_state_changed":
+        // Turn boundaries come from results and wake signals; a second idle/running source
+        // would race them over the session's status.
+        return;
+      case "control_request_progress":
+        // Progress of a control request this adapter already bounds with its own deadline.
+        return;
+      case "elicitation_complete":
+        // Confirms a URL-mode MCP elicitation, which this adapter never opens.
+        return;
+      case "worker_shutting_down":
+        // Remote Control bridge teardown; a local CLI's exit ends the stream itself.
+        return;
+      default: {
+        // A subtype newer than the pinned SDK. The native event log keeps the whole frame;
+        // the conversation gets nothing it cannot explain.
+        const subtype = (message as { readonly subtype?: unknown }).subtype;
+        yield* Effect.logDebug("claude.system-message.unhandled", {
+          threadId: context.session.threadId,
+          subtype: typeof subtype === "string" ? subtype : String(subtype),
+          preview: boundedJsonPreview(secretRedactor.payload(message)),
+        });
+        return;
+      }
     }
   });
 
@@ -5867,6 +6011,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnInstallsInFlight: 0,
       requestingStatusObserved: false,
       cliCapabilities: undefined,
+      slashCommands: undefined,
       discardedSteerPromptUuids: new Set(),
       discardingCliTurn: undefined,
       wakeSignalDeferred: false,
@@ -6760,6 +6905,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ),
         Effect.provideService(Path.Path, path),
       ),
+    // The newest `commands_changed` list of a running session in the directory.
+    readLiveProjectCommands: (cwd) =>
+      Effect.sync(() => {
+        let latest: ClaudeSessionContext["slashCommands"];
+        for (const context of sessions.values()) {
+          const pushed = context.slashCommands;
+          if (
+            pushed !== undefined &&
+            !context.stopped &&
+            context.session.cwd === cwd &&
+            (latest === undefined || pushed.order > latest.order)
+          ) {
+            latest = pushed;
+          }
+        }
+        return latest === undefined ? undefined : { skills: [], slashCommands: latest.commands };
+      }),
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue).pipe(
         Stream.tap(() => runtimeEventQueueMetrics.recordDequeued()),

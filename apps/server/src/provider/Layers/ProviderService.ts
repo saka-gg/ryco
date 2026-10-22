@@ -1359,7 +1359,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // list with an empty one.
   const projectCommands = makeStaleWhileRevalidateCache<
     ProviderProjectCommands,
-    ProviderAdapterError | ProviderUnsupportedError | Cause.TimeoutError
+    ProviderAdapterError | Cause.TimeoutError
   >({
     freshMs: PROJECT_COMMANDS_FRESH_MS,
     capacity: 128,
@@ -1369,28 +1369,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     instanceId,
     cwd,
   ) =>
-    projectCommands
-      .get(
-        `${instanceId}\u0000${cwd}`,
-        registry.getByInstance(instanceId).pipe(
-          Effect.flatMap((adapter) =>
-            adapter.readProjectCommands
-              ? adapter.readProjectCommands(cwd)
-              : Effect.succeed(EMPTY_PROJECT_COMMANDS),
-          ),
-          Effect.timeout(Duration.millis(PROJECT_COMMANDS_TIMEOUT_MS)),
-          Effect.tapCause((cause) =>
-            Effect.logDebug("provider.project-commands.read-failed", {
-              instanceId,
-              cause: Cause.pretty(cause),
-            }),
+    registry.getByInstance(instanceId).pipe(
+      Effect.flatMap((adapter) =>
+        (adapter.readLiveProjectCommands?.(cwd) ?? Effect.succeed(undefined)).pipe(
+          Effect.flatMap((live) =>
+            // A running session's own push is the freshest list: never cached, never re-read.
+            live !== undefined
+              ? Effect.succeed(live)
+              : projectCommands.get(
+                  `${instanceId}\u0000${cwd}`,
+                  (adapter.readProjectCommands
+                    ? adapter.readProjectCommands(cwd)
+                    : Effect.succeed(EMPTY_PROJECT_COMMANDS)
+                  ).pipe(
+                    Effect.timeout(Duration.millis(PROJECT_COMMANDS_TIMEOUT_MS)),
+                    Effect.tapCause((cause) =>
+                      Effect.logDebug("provider.project-commands.read-failed", {
+                        instanceId,
+                        cause: Cause.pretty(cause),
+                      }),
+                    ),
+                  ),
+                ),
           ),
         ),
-      )
-      .pipe(
-        // Only a first read can fail here (a stale entry keeps its value): nothing to show yet.
-        Effect.catchCause(() => Effect.succeed(EMPTY_PROJECT_COMMANDS)),
-      );
+      ),
+      // Only a first read can fail here (a stale entry keeps its value): nothing to show yet.
+      Effect.catchCause(() => Effect.succeed(EMPTY_PROJECT_COMMANDS)),
+    );
 
   const startSession: ProviderServiceShape["startSession"] = Effect.fn("startSession")(
     function* (threadId, rawInput, options) {

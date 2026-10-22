@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type {
   ProviderApprovalDecision,
+  ProviderProjectCommands,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
@@ -2638,6 +2639,45 @@ it.live("ProviderServiceLive reads and keeps an instance's project commands per 
         "/repo-a",
       );
       assert.deepEqual(unknown, { skills: [], slashCommands: [] });
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("ProviderServiceLive serves a running session's pushed commands over the cache", () =>
+  Effect.gen(function* () {
+    const fake = makeFakeCodexAdapter();
+    let reads = 0;
+    const readProjectCommands = () =>
+      Effect.sync(() => {
+        reads += 1;
+        return { skills: [], slashCommands: [{ name: "probed" }] };
+      });
+    let live: ProviderProjectCommands | undefined;
+    const readLiveProjectCommands = (cwd: string) =>
+      Effect.sync(() => (cwd === "/repo-a" ? live : undefined));
+    const providerLayer = makeStandaloneProviderServiceLayer([
+      {
+        ...fake,
+        adapter: { ...fake.adapter, readProjectCommands, readLiveProjectCommands },
+      },
+    ]);
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const read = (cwd: string) => provider.readProjectCommands!(codexInstanceId, cwd);
+      const names = (commands: ProviderProjectCommands) =>
+        commands.slashCommands.map((command) => command.name);
+      assert.deepEqual(names(yield* read("/repo-a")), ["probed"]);
+
+      // A push lands at once, although the probed list is still fresh.
+      live = { skills: [], slashCommands: [{ name: "pushed" }] };
+      assert.deepEqual(names(yield* read("/repo-a")), ["pushed"]);
+      assert.deepEqual(names(yield* read("/repo-b")), ["probed"]);
+      assert.equal(reads, 2);
+
+      // Once the session is gone, the cached probe answers again without a new read.
+      live = undefined;
+      assert.deepEqual(names(yield* read("/repo-a")), ["probed"]);
+      assert.equal(reads, 2);
     }).pipe(Effect.provide(providerLayer));
   }).pipe(Effect.provide(NodeServices.layer)),
 );

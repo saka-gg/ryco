@@ -2901,6 +2901,257 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  describe("Claude side-channel system messages", () => {
+    const SIDE_CHANNEL_CWD = "/tmp/claude-side-channel-project";
+
+    const startSideChannelSession = (runtimeSessionId: string) =>
+      Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make(runtimeSessionId),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          cwd: SIDE_CHANNEL_CWD,
+        });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        return adapter;
+      });
+
+    /** Emits `frames`, then a sentinel, and returns every runtime event up to the sentinel's. */
+    const emitSystemFrames = (
+      harness: ReturnType<typeof makeHarness>,
+      adapter: ClaudeAdapterShape,
+      frames: ReadonlyArray<Record<string, unknown>>,
+    ) =>
+      Effect.gen(function* () {
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "tool.denied"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const [index, frame] of frames.entries()) {
+          harness.query.emit({
+            type: "system",
+            session_id: "sdk-session-side-channel",
+            uuid: `side-channel-${index}`,
+            ...frame,
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "system",
+          subtype: "permission_denied",
+          tool_name: "Bash",
+          session_id: "sdk-session-side-channel",
+          uuid: "side-channel-sentinel",
+        } as unknown as SDKMessage);
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        // The first frame with a session id also announces the provider thread.
+        return events.filter(
+          (event) => event.type !== "tool.denied" && event.type !== "thread.started",
+        );
+      });
+
+    it.effect("keeps benign and unknown subtypes out of the conversation", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* startSideChannelSession("test-claudeadapter-side-channel-quiet");
+        const events = yield* emitSystemFrames(harness, adapter, [
+          { subtype: "session_state_changed", state: "idle" },
+          { subtype: "session_state_changed", state: "requires_action" },
+          { subtype: "commands_changed", commands: [] },
+          { subtype: "informational", content: "Transcript-only line", level: "info" },
+          {
+            subtype: "informational",
+            content: "Hook still running",
+            level: "notice",
+            tool_use_id: "tool-1",
+          },
+          { subtype: "notification", key: "update", text: "Update ready", priority: "low" },
+          { subtype: "plugin_install", status: "started" },
+          { subtype: "plugin_install", status: "installed", name: "market" },
+          { subtype: "memory_recall", mode: "select", memories: [] },
+          { subtype: "elicitation_complete", mcp_server_name: "docs", elicitation_id: "e-1" },
+          { subtype: "worker_shutting_down", reason: "host_exit" },
+          { subtype: "control_request_progress", request_id: "req-1", status: "started" },
+          { subtype: "a_subtype_from_a_newer_cli", payload: { anything: true } },
+        ]);
+        assert.deepEqual(
+          events.map((event) => event.type),
+          [],
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("reports api_retry as a readable retry notice, not a warning", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* startSideChannelSession("test-claudeadapter-side-channel-retry");
+        const events = yield* emitSystemFrames(harness, adapter, [
+          {
+            subtype: "api_retry",
+            attempt: 2,
+            max_retries: 10,
+            retry_delay_ms: 3_500,
+            error_status: 529,
+            error: "overloaded",
+          },
+          {
+            subtype: "api_retry",
+            attempt: 3,
+            max_retries: 10,
+            retry_delay_ms: 8_000,
+            error_status: null,
+            error: "unknown",
+          },
+          {
+            subtype: "api_retry",
+            attempt: 1,
+            max_retries: 1,
+            retry_delay_ms: 0,
+            error_status: null,
+            error: "unknown",
+            no_response: { waited_ms: 30_000, retry_wait_ms: 60_000 },
+          },
+          {
+            subtype: "api_retry",
+            attempt: 4,
+            max_retries: 10,
+            retry_delay_ms: 1_200,
+            error_status: 500,
+            error: "unknown",
+          },
+        ]);
+        assert.deepEqual(
+          events.map((event) =>
+            event.type === "runtime.notice" ? event.payload : { unexpected: event.type },
+          ),
+          [
+            { message: "Retrying request (2/10) in 4s", detail: "API overloaded (HTTP 529)" },
+            { message: "Retrying request (3/10) in 8s", detail: "Connection error" },
+            { message: "Retrying request (1/1)", detail: "No response after 30s" },
+            { message: "Retrying request (4/10) in 2s", detail: "HTTP 500" },
+          ],
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("surfaces banners, command output and refusals as notices", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* startSideChannelSession("test-claudeadapter-side-channel-notices");
+        const events = yield* emitSystemFrames(harness, adapter, [
+          {
+            subtype: "informational",
+            content: "UserPromptSubmit hook blocked this prompt.",
+            level: "warning",
+            prevent_continuation: true,
+          },
+          {
+            subtype: "notification",
+            key: "fallback",
+            text: "Opus limit reached, now using Sonnet",
+            priority: "high",
+          },
+          { subtype: "local_command_output", content: "Usage: 42% of the weekly limit\n" },
+          {
+            subtype: "memory_recall",
+            mode: "select",
+            memories: [
+              { path: "/home/u/.claude/memory/a.md", scope: "personal" },
+              { path: "/home/u/.claude/memory/b.md", scope: "team" },
+            ],
+          },
+          {
+            subtype: "model_refusal_fallback",
+            trigger: "refusal",
+            direction: "retry",
+            original_model: "claude-opus",
+            fallback_model: "claude-sonnet",
+            request_id: null,
+            content: "Retried with claude-sonnet after a refusal.",
+          },
+          {
+            subtype: "model_refusal_no_fallback",
+            original_model: "claude-opus",
+            request_id: null,
+            content: "Claude declined to answer this request.",
+          },
+          { subtype: "plugin_install", status: "failed", name: "market", error: "Clone failed" },
+        ]);
+        assert.deepEqual(
+          events.map((event) =>
+            event.type === "runtime.notice" ? event.payload : { unexpected: event.type },
+          ),
+          [
+            { message: "UserPromptSubmit hook blocked this prompt." },
+            { message: "Opus limit reached, now using Sonnet" },
+            { message: "Command output", detail: "Usage: 42% of the weekly limit" },
+            { message: "Recalled 2 memories" },
+            { message: "Retried with claude-sonnet after a refusal." },
+            { message: "Claude declined to answer this request." },
+            { message: "Claude plugin install failed: market", detail: "Clone failed" },
+          ],
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("serves a running session's commands_changed list for its directory", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* startSideChannelSession("test-claudeadapter-side-channel-commands");
+        assert.isUndefined(yield* adapter.readLiveProjectCommands!(SIDE_CHANNEL_CWD));
+
+        yield* emitSystemFrames(harness, adapter, [
+          {
+            subtype: "commands_changed",
+            commands: [
+              { name: "review", description: "Review a pull request", argumentHint: "<pr>" },
+              { name: "  ", description: "nameless", argumentHint: "" },
+              { name: "Review", description: "", argumentHint: "" },
+              { name: "frontend-skill", description: "", argumentHint: "" },
+            ],
+          },
+        ]);
+        assert.deepEqual(yield* adapter.readLiveProjectCommands!(SIDE_CHANNEL_CWD), {
+          skills: [],
+          slashCommands: [
+            { name: "review", description: "Review a pull request", input: { hint: "<pr>" } },
+            { name: "frontend-skill" },
+          ],
+        });
+        assert.isUndefined(yield* adapter.readLiveProjectCommands!("/tmp/another-project"));
+
+        // Each push replaces the whole list.
+        yield* emitSystemFrames(harness, adapter, [
+          {
+            subtype: "commands_changed",
+            commands: [{ name: "deploy", description: "Ship it", argumentHint: "" }],
+          },
+        ]);
+        assert.deepEqual(yield* adapter.readLiveProjectCommands!(SIDE_CHANNEL_CWD), {
+          skills: [],
+          slashCommands: [{ name: "deploy", description: "Ship it" }],
+        });
+
+        yield* adapter.stopSession(THREAD_ID);
+        assert.isUndefined(yield* adapter.readLiveProjectCommands!(SIDE_CHANNEL_CWD));
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  });
+
   it.effect("emits Claude context window on result completion usage snapshots", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

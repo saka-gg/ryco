@@ -208,6 +208,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "deprecation.notice",
   "files.persisted",
   "tool.denied",
+  "runtime.notice",
   "runtime.warning",
   "runtime.error",
 ]);
@@ -266,6 +267,7 @@ const ConfigWarningType = Schema.Literal("config.warning");
 const DeprecationNoticeType = Schema.Literal("deprecation.notice");
 const FilesPersistedType = Schema.Literal("files.persisted");
 const ToolDeniedType = Schema.Literal("tool.denied");
+const RuntimeNoticeType = Schema.Literal("runtime.notice");
 const RuntimeWarningType = Schema.Literal("runtime.warning");
 const RuntimeErrorType = Schema.Literal("runtime.error");
 
@@ -870,6 +872,16 @@ const ToolDeniedPayload = Schema.Struct({
 });
 export type ToolDeniedPayload = typeof ToolDeniedPayload.Type;
 
+/**
+ * A low-key provider status line that is neither a warning nor an error (a request retry, a
+ * provider banner): an info row labelled with `message`, with `detail` as its plain-text body.
+ */
+const RuntimeNoticePayload = Schema.Struct({
+  message: TrimmedNonEmptyStringSchema,
+  detail: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type RuntimeNoticePayload = typeof RuntimeNoticePayload.Type;
+
 const RuntimeWarningPayload = Schema.Struct({
   message: TrimmedNonEmptyStringSchema,
   detail: Schema.optional(Schema.Unknown),
@@ -1280,6 +1292,13 @@ const ProviderRuntimeToolDeniedEvent = Schema.Struct({
 });
 export type ProviderRuntimeToolDeniedEvent = typeof ProviderRuntimeToolDeniedEvent.Type;
 
+const ProviderRuntimeNoticeEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: RuntimeNoticeType,
+  payload: RuntimeNoticePayload,
+});
+export type ProviderRuntimeNoticeEvent = typeof ProviderRuntimeNoticeEvent.Type;
+
 const ProviderRuntimeWarningEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: RuntimeWarningType,
@@ -1348,6 +1367,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeDeprecationNoticeEvent,
   ProviderRuntimeFilesPersistedEvent,
   ProviderRuntimeToolDeniedEvent,
+  ProviderRuntimeNoticeEvent,
   ProviderRuntimeWarningEvent,
   ProviderRuntimeErrorEvent,
 ]);

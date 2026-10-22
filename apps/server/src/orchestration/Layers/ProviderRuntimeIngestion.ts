@@ -347,6 +347,9 @@ function truncateUsageLimitMessage(value: string): string {
   return value.length > 1_000 ? `${value.slice(0, 997)}...` : value;
 }
 
+/** A notice's body (for example a local command's output) is display text, not a log. */
+const RUNTIME_NOTICE_DETAIL_LIMIT = 4_000;
+
 function truncateActivityText(value: string, limit = 24_000): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
@@ -735,6 +738,25 @@ export function runtimeEventToActivities(
             ...(event.payload.reason ? { detail: truncateDetail(event.payload.reason) } : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
           },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "runtime.notice": {
+      // Labelled by its own message, so a retry or a provider banner never reads as a warning.
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "runtime.notice",
+          summary: truncateDetail(event.payload.message),
+          payload:
+            event.payload.detail !== undefined
+              ? { detail: truncateActivityText(event.payload.detail, RUNTIME_NOTICE_DETAIL_LIMIT) }
+              : {},
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
         },
