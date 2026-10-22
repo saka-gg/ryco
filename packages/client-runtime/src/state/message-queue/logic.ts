@@ -313,6 +313,7 @@ export interface QueuedMessageSummaryInput {
   readonly trimmedPrompt: string;
   readonly imageCount: number;
   readonly terminalContextCount: number;
+  readonly fileReferenceCount?: number;
 }
 
 export function getQueuedThreadKeys<Composer, Settings>(
@@ -340,6 +341,10 @@ export function summarizeQueuedMessage(input: QueuedMessageSummaryInput): string
     return input.terminalContextCount === 1
       ? "1 terminal context"
       : `${input.terminalContextCount} terminal contexts`;
+  }
+  const fileReferenceCount = input.fileReferenceCount ?? 0;
+  if (fileReferenceCount > 0) {
+    return fileReferenceCount === 1 ? "1 file reference" : `${fileReferenceCount} file references`;
   }
   return "Queued message";
 }

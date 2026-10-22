@@ -32,6 +32,12 @@ import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { createModelSelection } from "@ryco/shared/model";
 import type { ComposerAttachment } from "../../platform/index.ts";
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
+import { buildFileReferenceBlock, type FileReference } from "./fileReference.ts";
+import {
+  buildTerminalContextBlock,
+  materializeInlineTerminalContextPrompt,
+  type TerminalContextSelection,
+} from "./terminalContext.ts";
 import { extractThreadReferences } from "./threadMentions.ts";
 
 export interface SendTurnBootstrapInput {
@@ -189,6 +195,31 @@ export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
 
 /** @deprecated Use `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT`. */
 export const IMAGE_ONLY_BOOTSTRAP_PROMPT = ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
+
+export interface OutgoingPromptInput {
+  readonly prompt: string;
+  readonly fileReferences?: ReadonlyArray<FileReference> | undefined;
+  readonly terminalContexts?: ReadonlyArray<TerminalContextSelection> | undefined;
+}
+
+/**
+ * The text a prompt is sent as: the user's text, then the `<file_context>`
+ * block, then the `<terminal_context>` block, which stays last. It travels in
+ * the ordinary text payload so every provider, the queue and send retries see
+ * the same context; `extractTrailingPromptContexts` reads it back. Inline
+ * terminal placeholders are resolved in the user's own text only: a file
+ * excerpt keeps a U+FFFC it contains.
+ */
+export function composeOutgoingPrompt(input: OutgoingPromptInput): string {
+  const terminalContexts = input.terminalContexts ?? [];
+  return [
+    materializeInlineTerminalContextPrompt(input.prompt, terminalContexts).trim(),
+    buildFileReferenceBlock(input.fileReferences ?? []),
+    buildTerminalContextBlock(terminalContexts),
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n\n");
+}
 
 /**
  * Resolves the model selection recorded on a freshly created thread's

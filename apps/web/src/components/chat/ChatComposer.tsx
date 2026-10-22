@@ -60,6 +60,7 @@ import {
   PROMPT_STASH_MAX_ENTRIES,
   buildPromptHistoryEntries,
   composerTargetKey,
+  type FileReferenceDraft,
   readProjectProviderCommands,
   resolveApprovalRedirect,
   stepPromptHistory,
@@ -140,10 +141,15 @@ import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { LazyDelegationDock } from "./chatViewLazySurfaces";
 import { useComposerImageAttachments } from "./useComposerImageAttachments";
 import {
+  ComposerMentionDropHint,
   THREAD_MENTION_DROP_ZONE_PROPS,
-  ThreadMentionDropHint,
+  threadMentionDropLabel,
   useComposerThreadMentionDrop,
-} from "./ComposerThreadMentionDrop";
+  useComposerWorkspaceFileDrop,
+} from "./ComposerMentionDrop";
+import { workspaceFileDropLabel } from "../../workspaceFileDrag";
+import { composerContextIntake } from "../../composerContextIntake";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { cn, randomUUID } from "~/lib/utils";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle, getProviderSupportsAskMode } from "../../providerModels";
@@ -290,6 +296,7 @@ export interface ChatComposerHandle {
     prompt: string;
     images: ComposerImageAttachment[];
     terminalContexts: TerminalContextDraft[];
+    fileReferences: FileReferenceDraft[];
     sourceControlContexts: ComposerSourceControlContext[];
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
@@ -443,6 +450,7 @@ export interface ChatComposerProps {
   promptRef: React.MutableRefObject<string>;
   composerImagesRef: React.MutableRefObject<ComposerImageAttachment[]>;
   composerTerminalContextsRef: React.MutableRefObject<TerminalContextDraft[]>;
+  composerFileReferencesRef: React.MutableRefObject<FileReferenceDraft[]>;
 
   // Scroll
   shouldAutoScrollRef: React.MutableRefObject<boolean>;
@@ -616,6 +624,7 @@ export const ChatComposer = memo(
       promptRef,
       composerImagesRef,
       composerTerminalContextsRef,
+      composerFileReferencesRef,
       shouldAutoScrollRef,
       scheduleStickToBottom,
       followUpSurfaceAllowsSteer,
@@ -653,6 +662,7 @@ export const ChatComposer = memo(
     const prompt = composerDraft.prompt;
     const composerImages = composerDraft.images;
     const composerTerminalContexts = composerDraft.terminalContexts;
+    const composerFileReferences = composerDraft.fileReferences;
     const composerSourceControlContexts = composerDraft.sourceControlContexts;
     const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
     // The task an unsent task draft starts a chat for.
@@ -699,6 +709,9 @@ export const ChatComposer = memo(
     );
     const removeSourceControlContextFromDraft = useComposerDraftStore(
       (store) => store.removeSourceControlContext,
+    );
+    const removeFileReferenceFromDraft = useComposerDraftStore(
+      (store) => store.removeFileReference,
     );
     const stashEntries = usePromptStashStore((store) => store.entries);
     const stashEntry = usePromptStashStore((store) => store.stashEntry);
@@ -1111,9 +1124,16 @@ export const ChatComposer = memo(
           prompt,
           imageCount: composerImages.length,
           terminalContexts: composerTerminalContexts,
+          fileReferences: composerFileReferences,
           sourceControlContexts: composerSourceControlContexts,
         }),
-      [composerImages.length, composerSourceControlContexts, composerTerminalContexts, prompt],
+      [
+        composerFileReferences,
+        composerImages.length,
+        composerSourceControlContexts,
+        composerTerminalContexts,
+        prompt,
+      ],
     );
 
     // ------------------------------------------------------------------
@@ -1394,6 +1414,10 @@ export const ChatComposer = memo(
     useEffect(() => {
       composerTerminalContextsRef.current = composerTerminalContexts;
     }, [composerTerminalContexts, composerTerminalContextsRef]);
+
+    useEffect(() => {
+      composerFileReferencesRef.current = composerFileReferences;
+    }, [composerFileReferences, composerFileReferencesRef]);
 
     // ------------------------------------------------------------------
     // Composer menu highlight sync
@@ -2044,6 +2068,7 @@ export const ChatComposer = memo(
       if (
         composerImagesRef.current.length > 0 ||
         composerTerminalContextsRef.current.length > 0 ||
+        composerFileReferencesRef.current.length > 0 ||
         composerSourceControlContexts.length > 0
       ) {
         return false;
@@ -2199,6 +2224,24 @@ export const ChatComposer = memo(
       focusComposer,
     });
 
+    // A mention dropped on the composer goes in at the caret, with a space on
+    // each side where the text has none.
+    const insertMentionAtCaret = useCallback(
+      (token: string) => {
+        const text = promptRef.current;
+        const snapshot = composerEditorRef.current?.readSnapshot();
+        const at = Math.min(snapshot?.expandedCursor ?? text.length, text.length);
+        const before = text[at - 1];
+        const after = text[at];
+        applyPromptReplacement(
+          at,
+          at,
+          `${before && !/\s/.test(before) ? " " : ""}${token}${after && /\s/.test(after) ? "" : " "}`,
+        );
+      },
+      [applyPromptReplacement, promptRef],
+    );
+
     // A thread dropped on the composer becomes an `@thread:` mention at the
     // caret; the server hands the agent an excerpt of it with the message.
     const insertThreadMention = useCallback(
@@ -2216,18 +2259,9 @@ export const ChatComposer = memo(
           });
           return;
         }
-        const snapshot = composerEditorRef.current?.readSnapshot();
-        const at = Math.min(snapshot?.expandedCursor ?? text.length, text.length);
-        const before = text[at - 1];
-        const after = text[at];
-        const token = `@${formatThreadMentionPath(threadId)}`;
-        applyPromptReplacement(
-          at,
-          at,
-          `${before && !/\s/.test(before) ? " " : ""}${token}${after && /\s/.test(after) ? "" : " "}`,
-        );
+        insertMentionAtCaret(`@${formatThreadMentionPath(threadId)}`);
       },
-      [applyPromptReplacement, promptRef],
+      [insertMentionAtCaret, promptRef],
     );
     const threadMentionDrop = useComposerThreadMentionDrop({
       environmentId,
@@ -2235,7 +2269,22 @@ export const ChatComposer = memo(
       disabled: isComposerEditorDisabled,
       onMention: insertThreadMention,
     });
-    const isThreadMentionDragOver = threadMentionDrop.verdict?.kind === "mention";
+    // A file dragged from the Files tree becomes an `@path` mention at the
+    // caret: the agent reads the whole file on its node, where an excerpt
+    // copied into the prompt would be bounded and could go stale.
+    const insertWorkspaceFileMention = useCallback(
+      (path: string) => insertMentionAtCaret(`@${serializeComposerMentionPath(path)}`),
+      [insertMentionAtCaret],
+    );
+    const workspaceFileDrop = useComposerWorkspaceFileDrop({
+      environmentId,
+      workspaceRoot: gitCwd,
+      disabled: isComposerEditorDisabled || pendingUserInputs.length > 0,
+      onMention: insertWorkspaceFileMention,
+    });
+    const isMentionDragOver =
+      threadMentionDrop.verdict?.kind === "mention" ||
+      workspaceFileDrop.verdict?.kind === "mention";
 
     const handleRemoveSourceControlContext = useCallback(
       (id: string) => {
@@ -2243,6 +2292,54 @@ export const ChatComposer = memo(
       },
       [composerDraftTarget, removeSourceControlContextFromDraft],
     );
+
+    const handleRemoveFileReference = useCallback(
+      (id: string) => {
+        removeFileReferenceFromDraft(composerDraftTarget, id);
+      },
+      [composerDraftTarget, removeFileReferenceFromDraft],
+    );
+
+    // Lines from the Review and Files panels arrive through the composer
+    // context intake. The composer registers once per thread it shows and
+    // refuses while it cannot take them, so the panels' gutter `+` does not
+    // flicker around every send; what it may take is read when one arrives.
+    const fileReferenceIntakeRef = useRef({
+      target: composerDraftTarget,
+      accepts: false,
+      focus: scheduleComposerFocus,
+    });
+    useLayoutEffect(() => {
+      fileReferenceIntakeRef.current = {
+        target: composerDraftTarget,
+        // A waiting question owns the composer, and its chips row is hidden.
+        accepts: !isComposerEditorDisabled && pendingUserInputs.length === 0,
+        focus: scheduleComposerFocus,
+      };
+    }, [
+      composerDraftTarget,
+      isComposerEditorDisabled,
+      pendingUserInputs.length,
+      scheduleComposerFocus,
+    ]);
+    useEffect(() => {
+      if (activeThreadId === null) return;
+      return composerContextIntake.register(
+        scopeThreadRef(environmentId, activeThreadId),
+        (item) => {
+          const intake = fileReferenceIntakeRef.current;
+          if (item.kind !== "file-reference" || !intake.accepts) return false;
+          const outcome = useComposerDraftStore.getState().addFileReference(intake.target, {
+            ...item.reference,
+            id: randomUUID(),
+            createdAt: new Date().toISOString(),
+          });
+          if (outcome !== "added" && outcome !== "updated") return false;
+          intake.focus();
+          return true;
+        },
+      );
+    }, [activeThreadId, environmentId]);
 
     // ------------------------------------------------------------------
     // Re-attach flow for interrupted streamed uploads
@@ -2835,6 +2932,7 @@ export const ChatComposer = memo(
           prompt: promptRef.current,
           images: composerImagesRef.current,
           terminalContexts: composerTerminalContextsRef.current,
+          fileReferences: composerFileReferencesRef.current,
           sourceControlContexts: composerSourceControlContexts,
           selectedPromptEffort,
           selectedModelOptionsForDispatch,
@@ -2855,6 +2953,7 @@ export const ChatComposer = memo(
         promptRef,
         composerImagesRef,
         composerTerminalContextsRef,
+        composerFileReferencesRef,
         isComposerModelPickerOpen,
         readComposerSnapshot,
         selectedModel,
@@ -2874,7 +2973,8 @@ export const ChatComposer = memo(
       !isComposerModelPickerOpen &&
       !composerMenuOpen &&
       !isDragOverComposer &&
-      threadMentionDrop.verdict === null;
+      threadMentionDrop.verdict === null &&
+      workspaceFileDrop.verdict === null;
 
     // Render
     // ------------------------------------------------------------------
@@ -2935,17 +3035,30 @@ export const ChatComposer = memo(
           )}
           onDragEnter={onComposerDragEnter}
           onDragOver={(event) => {
-            if (!threadMentionDrop.onDragOver(event)) onComposerDragOver(event);
+            if (threadMentionDrop.onDragOver(event) || workspaceFileDrop.onDragOver(event)) return;
+            onComposerDragOver(event);
           }}
           onDragLeave={(event) => {
-            if (!threadMentionDrop.onDragLeave(event)) onComposerDragLeave(event);
+            if (threadMentionDrop.onDragLeave(event) || workspaceFileDrop.onDragLeave(event)) {
+              return;
+            }
+            onComposerDragLeave(event);
           }}
           onDrop={(event) => {
-            if (!threadMentionDrop.onDrop(event)) onComposerDrop(event);
+            if (threadMentionDrop.onDrop(event) || workspaceFileDrop.onDrop(event)) return;
+            onComposerDrop(event);
           }}
         >
           {threadMentionDrop.verdict ? (
-            <ThreadMentionDropHint verdict={threadMentionDrop.verdict} />
+            <ComposerMentionDropHint
+              refused={threadMentionDrop.verdict.kind === "refused"}
+              label={threadMentionDropLabel(threadMentionDrop.verdict)}
+            />
+          ) : workspaceFileDrop.verdict ? (
+            <ComposerMentionDropHint
+              refused={workspaceFileDrop.verdict.kind === "refused"}
+              label={workspaceFileDropLabel(workspaceFileDrop.verdict)}
+            />
           ) : null}
           <div
             ref={composerSurfaceRef}
@@ -2961,7 +3074,7 @@ export const ChatComposer = memo(
               // read as flicker — nor on focus; only a drag-over tints it,
               // because that one has to read as a drop target.
               "app-composer-surface rounded-[max(0px,calc(var(--radius-3xl)-2px))] border-0 outline-none transition-[background-color,box-shadow] duration-(--app-motion-duration-pop) ease-(--app-motion-ease)",
-              isDragOverComposer || isThreadMentionDragOver
+              isDragOverComposer || isMentionDragOver
                 ? "bg-[color-mix(in_srgb,var(--accent)_38%,var(--app-composer-surface))] ring-1 ring-inset ring-primary/45"
                 : null,
               environmentUnavailable ? "opacity-75" : null,
@@ -3169,6 +3282,8 @@ export const ChatComposer = memo(
               composerSourceControlContexts={composerSourceControlContexts}
               onRemoveSourceControlContext={handleRemoveSourceControlContext}
               leadingContextChips={taskChip}
+              composerFileReferences={composerFileReferences}
+              onRemoveFileReference={handleRemoveFileReference}
               composerImages={composerImages}
               nonPersistedComposerImageIdSet={nonPersistedComposerImageIdSet}
               fileUploadRecords={fileUploadRecords}

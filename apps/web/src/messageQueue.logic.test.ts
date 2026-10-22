@@ -97,6 +97,16 @@ describe("summarizeQueuedMessage", () => {
     ).toBe("1 terminal context");
   });
 
+  it("falls back to file reference count", () => {
+    expect(
+      summarizeQueuedMessage(
+        makeMessage("a", {
+          fileReferences: [{}, {}] as NonNullable<QueuedMessage["composer"]["fileReferences"]>,
+        }),
+      ),
+    ).toBe("2 file references");
+  });
+
   it("falls back to a generic label", () => {
     expect(summarizeQueuedMessage(makeMessage("a"))).toBe("Queued message");
   });

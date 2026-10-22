@@ -274,18 +274,25 @@ function removeInlineLabel(text: string, label: string): string {
   return text;
 }
 
+/** `text` without the inline labels that stood for `contexts` when it was sent. */
+export function removeInlineTerminalContextLabels(
+  text: string,
+  contexts: ReadonlyArray<ParsedTerminalContextEntry>,
+): string {
+  let result = text;
+  for (const context of contexts) {
+    result = removeInlineLabel(result, formatInlineTerminalContextLabelFromHeader(context.header));
+  }
+  return result;
+}
+
 /**
  * The prompt a send started from, without its terminal contexts: the trailing
  * `<terminal_context>` block and the inline labels that stood for its entries.
  */
 export function stripSentTerminalContexts(prompt: string): string {
   const extracted = extractTrailingTerminalContexts(prompt);
-  if (extracted.contexts.length === 0) return extracted.promptText;
-  let text = extracted.promptText;
-  for (const context of extracted.contexts) {
-    text = removeInlineLabel(text, formatInlineTerminalContextLabelFromHeader(context.header));
-  }
-  return text;
+  return removeInlineTerminalContextLabels(extracted.promptText, extracted.contexts);
 }
 
 export function deriveDisplayedUserMessageState(prompt: string): DisplayedUserMessageState {

@@ -6,7 +6,10 @@ import type {
 import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { formatAttachmentBytes } from "./attachmentPreview";
 import { memo } from "react";
-import { isPastedTextAttachment } from "@ryco/client-runtime/state/composer";
+import {
+  type FileReferenceDraft,
+  isPastedTextAttachment,
+} from "@ryco/client-runtime/state/composer";
 import {
   CircleAlertIcon,
   ClipboardPasteIcon,
@@ -32,6 +35,7 @@ import type { ComposerMenuEmptyState } from "./composerPathMenu";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
+import { FileReferenceChip } from "./FileReferenceChip";
 import { SourceControlContextChip } from "./SourceControlContextChip";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -82,6 +86,10 @@ export interface ComposerPromptShellProps {
   onRemoveSourceControlContext: (id: string) => void;
   /** Chips shown before the source-control contexts (a task draft's task). */
   leadingContextChips?: React.ReactNode;
+
+  // File reference chips (lines from the Review and Files panels)
+  composerFileReferences: ReadonlyArray<FileReferenceDraft>;
+  onRemoveFileReference: (id: string) => void;
 
   // Image attachments
   composerImages: ComposerImageAttachment[];
@@ -174,6 +182,8 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     composerSourceControlContexts,
     onRemoveSourceControlContext,
     leadingContextChips,
+    composerFileReferences,
+    onRemoveFileReference,
     composerImages,
     nonPersistedComposerImageIdSet,
     fileUploadRecords,
@@ -236,7 +246,9 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
       {!isComposerCollapsedMobile &&
         !isApprovalLocked &&
         pendingUserInputCount === 0 &&
-        (leadingContextChips || composerSourceControlContexts.length > 0) && (
+        (leadingContextChips ||
+          composerSourceControlContexts.length > 0 ||
+          composerFileReferences.length > 0) && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {leadingContextChips}
             {composerSourceControlContexts.map((ctx) => (
@@ -244,6 +256,14 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
                 key={ctx.id}
                 context={ctx}
                 onRemove={onRemoveSourceControlContext}
+              />
+            ))}
+            {composerFileReferences.map((reference) => (
+              <FileReferenceChip
+                key={reference.id}
+                reference={reference}
+                theme={resolvedTheme}
+                onRemove={() => onRemoveFileReference(reference.id)}
               />
             ))}
           </div>

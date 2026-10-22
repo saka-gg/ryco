@@ -1,21 +1,21 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  buildFileReferenceBlock,
   createFileReference,
   decodeFileReference,
-  extractTrailingFileReferences,
   FILE_REFERENCE_COMMENT_MAX_LENGTH,
   FILE_REFERENCE_SNIPPET_MAX_LENGTH,
   FILE_REFERENCE_SNIPPET_MAX_LINES,
   fileReferenceKey,
+  normalizeFileReferencePath,
+  buildFileReferenceBlock,
   formatFileReferenceLabel,
   formatFileReferenceTitle,
-  normalizeFileReferencePath,
   type FileReference,
   type FileReferenceInput,
 } from "./fileReference.ts";
-import { composeOutgoingPrompt } from "./promptContext.ts";
+import { extractTrailingFileReferences } from "./promptContext.ts";
+import { composeOutgoingPrompt } from "./sendEngine.ts";
 
 function appendFileReferencesToPrompt(prompt: string, fileReferences: FileReference[]): string {
   return composeOutgoingPrompt({ prompt, fileReferences });

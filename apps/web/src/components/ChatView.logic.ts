@@ -234,6 +234,7 @@ export function buildChatSendTitleSeed(input: {
   trimmedPrompt: string;
   firstImageName: string | null;
   firstTerminalContextLabel: string | null;
+  firstFileReferenceTitle?: string | null;
 }): string {
   const normalizedPrompt = input.trimmedPrompt.trim();
   if (normalizedPrompt.length > 0) {
@@ -244,6 +245,9 @@ export function buildChatSendTitleSeed(input: {
   }
   if (input.firstTerminalContextLabel) {
     return input.firstTerminalContextLabel;
+  }
+  if (input.firstFileReferenceTitle) {
+    return input.firstFileReferenceTitle;
   }
   return "New thread";
 }
@@ -268,6 +272,7 @@ export function deriveComposerSendState(options: {
   prompt: string;
   imageCount: number;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  fileReferences?: ReadonlyArray<unknown>;
   sourceControlContexts?: ReadonlyArray<unknown>;
 }): {
   trimmedPrompt: string;
@@ -280,6 +285,7 @@ export function deriveComposerSendState(options: {
   const expiredTerminalContextCount =
     options.terminalContexts.length - sendableTerminalContexts.length;
   const sourceControlContextCount = options.sourceControlContexts?.length ?? 0;
+  const fileReferenceCount = options.fileReferences?.length ?? 0;
   return {
     trimmedPrompt,
     sendableTerminalContexts,
@@ -288,6 +294,7 @@ export function deriveComposerSendState(options: {
       trimmedPrompt.length > 0 ||
       options.imageCount > 0 ||
       sendableTerminalContexts.length > 0 ||
+      fileReferenceCount > 0 ||
       sourceControlContextCount > 0,
   };
 }

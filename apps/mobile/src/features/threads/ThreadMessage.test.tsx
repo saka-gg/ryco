@@ -110,6 +110,11 @@ function isElement(value: unknown): value is ReactElement {
 const MAX_WALK_DEPTH = 24;
 
 function walkTree(node: unknown, visit: (element: ReactElement) => void, depth = 0): void {
+  // A mapped list is an array among the children.
+  if (Array.isArray(node)) {
+    for (const child of node) walkTree(child, visit, depth + 1);
+    return;
+  }
   if (!isElement(node) || depth > MAX_WALK_DEPTH) return;
   visit(node);
   if (typeof node.type === "function") {
@@ -431,6 +436,62 @@ describe("ThreadMessage attachment rows", () => {
     ]);
     expect(collectElements(tree, (element) => element.type === "VideoView")).toHaveLength(0);
     expect(findPressables(tree).find((p) => pressableLabel(p) === "Open report.pdf")).toBeDefined();
+  });
+});
+
+describe("ThreadMessage sent contexts", () => {
+  function textOf(tree: ReactElement): string[] {
+    return collectElements(tree, (element) => element.type === "AppText").flatMap((element) => {
+      const children = (element.props as { children?: unknown }).children;
+      return typeof children === "string" ? [children] : [];
+    });
+  }
+
+  const sent = [
+    "Why does this run twice?",
+    "",
+    "<file_context>",
+    "- src/app.ts lines 12-13 (new version):",
+    "  comment: Looks wrong",
+    "  12 | for (const item of items) {",
+    "  13 |   run(item);",
+    "</file_context>",
+    "",
+    "<terminal_context>",
+    "- Terminal 1 line 4:",
+    "  4 | error: boom",
+    "</terminal_context>",
+  ].join("\n");
+
+  it("shows the typed text, with the file references and terminal output as chips", () => {
+    const tree = renderMessage([], { text: sent });
+    const texts = textOf(tree);
+    expect(texts).toContain("Why does this run twice?");
+    expect(texts).toContain("app.ts:12-13");
+    expect(texts).toContain("Looks wrong");
+    expect(texts).toContain("Terminal 1 line 4");
+    expect(texts.some((text) => text.includes("<file_context>"))).toBe(false);
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          (element.props as { accessibilityLabel?: string }).accessibilityLabel ===
+          "src/app.ts lines 12-13 (new version): Looks wrong",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("still copies the message exactly as sent", () => {
+    const tree = renderMessage([], { text: sent });
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy[0]?.props).toMatchObject({ text: sent });
+  });
+
+  it("leaves a block that does not parse as text, and an assistant's reply untouched", () => {
+    const typed = "See\n\n<file_context>\nnot a reference\n</file_context>";
+    expect(textOf(renderMessage([], { text: typed }))).toContain(typed);
+    const reply = renderMessage([], { role: "assistant", text: sent });
+    expect(textOf(reply)).not.toContain("app.ts:12-13");
   });
 });
 

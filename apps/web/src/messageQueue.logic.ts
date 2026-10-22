@@ -38,5 +38,6 @@ export function summarizeQueuedMessage(message: QueuedMessage): string {
     trimmedPrompt: message.composer.trimmedPrompt,
     imageCount: message.composer.images.length,
     terminalContextCount: message.composer.sendableTerminalContexts.length,
+    fileReferenceCount: message.composer.fileReferences?.length ?? 0,
   });
 }
