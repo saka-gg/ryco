@@ -11,13 +11,23 @@ import {
   OrchestrationThreadWindowStreamItem,
 } from "./orchestration.ts";
 import {
+  WsAgentControlSubscribeProposalsRpc,
+  WsGitRunStackedActionRpc,
+  WsHostedRpcGroup,
   WsOrchestrationReplayEventsPageRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
   WsOrchestrationSubscribeThreadWindowRpc,
+  WsServerSubscribeLocalTaskChangesRpc,
+  WsServerSubscribeNodeUpdateRpc,
+  WsSubscribeAuthAccessRpc,
+  WsSubscribeDeviceEventsRpc,
   WsSubscribeServerConfigRpc,
+  WsSubscribeServerLifecycleRpc,
   WsSubscribeTerminalEventsRpc,
+  WsSubscribeVcsStatusRpc,
+  WsSubscribeWorktreeSetupRpc,
 } from "./rpc.ts";
 import { ServerConfigStreamEvent, ServerConfigStreamWireEvent } from "./server.ts";
 import { TerminalEvent, TerminalWireEvent } from "./terminal.ts";
@@ -73,7 +83,7 @@ interface WireUnionCase {
   /** The strict union the server (or its event store) builds, and a member it must reject. */
   readonly strict: { readonly schema: Schema.Top; readonly rejects: unknown };
   /** The RPC that carries it: clients must decode with the wire schema. */
-  readonly rpc: { readonly successSchema: Schema.Constraint };
+  readonly rpc: { readonly _tag: string; readonly successSchema: Schema.Constraint };
   readonly known: readonly [unknown, ...ReadonlyArray<unknown>];
   readonly broken: ReadonlyArray<unknown>;
   readonly unknown: ReadonlyArray<{ readonly wire: unknown; readonly decoded: unknown }>;
@@ -227,5 +237,33 @@ describe("forward-compatible orchestration event replays", () => {
 
   it("still fails a known event whose payload is broken", () => {
     expect(() => decodeReplay([{ ...knownEvent, payload: { threadId: "thread-1" } }])).toThrow();
+  });
+});
+
+/**
+ * Streams whose chunks a client still decodes strictly: a member or value a
+ * newer node adds there fails the decode and ends that subscription on an
+ * older client. Moving one to a forward-compatible union moves it to `cases`.
+ */
+const strictStreams = [
+  WsAgentControlSubscribeProposalsRpc,
+  WsGitRunStackedActionRpc,
+  WsServerSubscribeLocalTaskChangesRpc,
+  WsServerSubscribeNodeUpdateRpc,
+  WsSubscribeAuthAccessRpc,
+  WsSubscribeDeviceEventsRpc,
+  WsSubscribeServerLifecycleRpc,
+  WsSubscribeVcsStatusRpc,
+  WsSubscribeWorktreeSetupRpc,
+];
+
+describe("streams a node sends a client", () => {
+  it("are each forward-compatible or strict on purpose", () => {
+    const streams = [...WsHostedRpcGroup.requests.values()]
+      .filter((rpc) => RpcSchema.isStreamSchema(rpc.successSchema))
+      .map((rpc) => rpc._tag);
+    const decided = [...cases.map(({ rpc }) => rpc), ...strictStreams].map((rpc) => rpc._tag);
+    // A new stream must join `cases` (forward-compatible) or `strictStreams`.
+    expect(streams.toSorted()).toEqual(decided.toSorted());
   });
 });

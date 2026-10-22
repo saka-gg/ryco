@@ -13,9 +13,8 @@ import type {
   ScopedThreadRef,
   ThreadId,
 } from "@ryco/contracts";
-import { isUnknownUnionMember, type UnknownUnionMember } from "@ryco/contracts/base-schemas";
 
-import { recordNewerNodeContent } from "../rpc/newerNodeState.ts";
+import { skipNewerNodeContent } from "../rpc/newerNodeState.ts";
 import {
   isResponseTooLargeError,
   isUnsupportedRpcError,
@@ -659,16 +658,10 @@ export function createEnvironmentConnectionSupervisor<
       ...(resumable ? { resumeFromSequence: () => appliedSequence } : {}),
       historyRecovery: () => historyRecoveryMode(entry),
     };
-    /** An item kind a newer node added: nothing to apply. */
-    const skipUnknownItem = (item: object): item is UnknownUnionMember => {
-      if (!isUnknownUnionMember(item)) return false;
-      recordNewerNodeContent(entry.environmentId, item);
-      return true;
-    };
     const applyEvent = (event: OrchestrationWireEvent) => {
       appliedSequence = Math.max(appliedSequence ?? 0, event.sequence);
       // An event type a newer node added: skipped, but a resume starts after it.
-      if (skipUnknownItem(event)) return;
+      if (skipNewerNodeContent(entry.environmentId, event)) return;
       recordRetainedEvent(entry, event);
       scheduleEvictToCapacity();
       input.applyThreadDetailEvent(entry.environmentId, event);
@@ -681,7 +674,7 @@ export function createEnvironmentConnectionSupervisor<
       unsubscribeCurrent = connection.client.orchestration.subscribeThread(
         { threadId: entry.threadId },
         (item) => {
-          if (skipUnknownItem(item) || item.kind === "resumed") return;
+          if (skipNewerNodeContent(entry.environmentId, item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
             appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
@@ -760,7 +753,7 @@ export function createEnvironmentConnectionSupervisor<
         (item) => {
           // Any item, a resume included, means the server served this window.
           failedWindowAttempts = 0;
-          if (skipUnknownItem(item) || item.kind === "resumed") return;
+          if (skipNewerNodeContent(entry.environmentId, item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
             appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);

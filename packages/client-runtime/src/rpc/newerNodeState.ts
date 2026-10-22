@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import type { UnknownUnionMember } from "@ryco/contracts/base-schemas";
+import { isUnknownUnionMember, type UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import * as Atom from "effect/reactivity/Atom";
 
 import { appAtomRegistry } from "./atomRegistry.ts";
@@ -9,9 +9,11 @@ const knownEnvironmentIds = new Set<EnvironmentId>();
 /**
  * Whether an environment's node has sent something this build cannot read: an
  * event, stream item or update kind added after this app was built. The
- * streams skip it and keep going; this flag is how the app learns it is
- * missing something and can suggest updating. It stays set for the app's
- * life: a node does not get older, and updating the app reloads it.
+ * streams skip it and keep going. It stays set for the app's life: a node does
+ * not get older, and updating the app reloads it.
+ *
+ * No UI reads it yet: today it only limits the warning to one per environment.
+ * It is the state an "update this app to see everything" hint will read.
  */
 export const environmentNodeNewerAtom = Atom.family((environmentId: EnvironmentId) => {
   knownEnvironmentIds.add(environmentId);
@@ -22,10 +24,7 @@ export const environmentNodeNewerAtom = Atom.family((environmentId: EnvironmentI
 });
 
 /** A stream skipped what a node sent because this build does not know it. */
-export function recordNewerNodeContent(
-  environmentId: EnvironmentId,
-  unknown: UnknownUnionMember,
-): void {
+function recordNewerNodeContent(environmentId: EnvironmentId, unknown: UnknownUnionMember): void {
   const atom = environmentNodeNewerAtom(environmentId);
   if (appAtomRegistry.get(atom)) return;
   appAtomRegistry.set(atom, true);
@@ -33,6 +32,20 @@ export function recordNewerNodeContent(
     environmentId,
     [unknown.tag]: unknown.value,
   });
+}
+
+/**
+ * Whether the caller must skip `value` because it is a member a newer node
+ * added that this build does not know. When it is, sets the environment's
+ * `environmentNodeNewerAtom` and warns once per environment.
+ */
+export function skipNewerNodeContent<A>(
+  environmentId: EnvironmentId,
+  value: A,
+): value is Extract<A, UnknownUnionMember> {
+  if (!isUnknownUnionMember(value)) return false;
+  recordNewerNodeContent(environmentId, value);
+  return true;
 }
 
 export function isEnvironmentNodeNewer(environmentId: EnvironmentId): boolean {

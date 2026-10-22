@@ -10,11 +10,10 @@ import type {
   ServerLifecycleWelcomePayload,
   TerminalEvent,
 } from "@ryco/contracts";
-import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 import type { KnownEnvironment } from "../knownEnvironment.ts";
 import type { WsRpcClient } from "../rpc/index.ts";
-import { recordNewerNodeContent } from "../rpc/newerNodeState.ts";
+import { skipNewerNodeContent } from "../rpc/newerNodeState.ts";
 import { projectServerConfigEvent } from "../rpc/serverConfigProjection.ts";
 import {
   getWsConnectionStatusForEnvironment,
@@ -293,10 +292,7 @@ export function createEnvironmentConnection(
   const observeConfigEvent = (event: ServerConfigStreamWireEvent) => {
     // A stale hosted generation never publishes config, not even a snapshot.
     if (disposed || !isCurrentGeneration()) return;
-    if (isUnknownUnionMember(event)) {
-      recordNewerNodeContent(environmentId, event);
-      return;
-    }
+    if (skipNewerNodeContent(environmentId, event)) return;
     const attempt = currentAttempt();
     // Incremental events apply only on top of this attempt's own snapshot.
     const base =
@@ -361,10 +357,9 @@ export function createEnvironmentConnection(
   const unsubShell = input.client.orchestration.subscribeShell(
     (item) => {
       if (disposed) return;
-      if (isUnknownUnionMember(item)) {
+      if (skipNewerNodeContent(environmentId, item)) {
         // A kind a newer node added: skipped, but a shell event's sequence
         // still counts.
-        recordNewerNodeContent(environmentId, item);
         if (item.sequence === undefined) return;
         input.pushSequenceMonitor.recordEvent(environmentId, item.sequence);
         input.skipShellEvent?.(item.sequence, environmentId);
@@ -432,10 +427,7 @@ export function createEnvironmentConnection(
     },
   );
   const unsubTerminalEvent = input.client.terminal.onEvent((event) => {
-    if (isUnknownUnionMember(event)) {
-      recordNewerNodeContent(environmentId, event);
-      return;
-    }
+    if (skipNewerNodeContent(environmentId, event)) return;
     input.applyTerminalEvent(event, environmentId);
   });
   // The device event stream starts only while a device surface retains it.

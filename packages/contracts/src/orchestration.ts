@@ -1427,7 +1427,9 @@ export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.T
  * this build does not know (a new shell event, sent to every client); it
  * decodes to an `UnknownOrchestrationShellStreamItem` the client skips. A
  * shell event's `sequence` is kept, so the client's shell cursor still passes
- * it.
+ * it. So `sequence` on a shell item always means a shell event sequence: a new
+ * non-event kind must name its own sequence field differently (as `snapshot*`
+ * and `resumed` do), or older clients would move their cursor to it.
  */
 export const OrchestrationShellStreamWireItem = ForwardCompatibleUnion(
   OrchestrationShellStreamItemMembers,
