@@ -177,13 +177,17 @@ export type ApprovalRedirectOutcome =
   | { readonly kind: "undelivered"; readonly declined: number }
   /** A decline was still in flight at the deadline. */
   | { readonly kind: "timed-out"; readonly declined: number }
-  /** An approval of another turn arrived while the declines settled; it would block the steer. */
+  /**
+   * An approval the redirect does not decline arrived while the declines settled (another
+   * turn's, or the redirected turn's after the deadline); it would block the steer.
+   */
   | { readonly kind: "approval-arrived"; readonly declined: number };
 
 /**
  * Declines the redirect's approvals in order and resolves once the provider took them all.
  * Approvals the redirected turn opens meanwhile (the next tool of the same batch) are part of the
- * plan the message replaces, so they are declined too, until the deadline.
+ * plan the message replaces, so they are declined too, until the deadline: a turn that keeps
+ * asking cannot hold the send, or decline approvals the user never saw, past it.
  */
 export async function declineApprovalsForRedirect(input: {
   readonly redirect: Extract<ApprovalRedirect, { kind: "decline" }>;
@@ -283,8 +287,11 @@ function waitForDeclinesToSettle(input: {
           arrived = true;
         }
       }
-      if (arrived) finish({ kind: "approval-arrived" });
-      else if (followOns.length > 0) finish({ kind: "follow-on", approvals: followOns });
+      // The deadline timer cannot fire between a decline's ack and this synchronous check, so
+      // the check itself stops follow-ons once the deadline has passed.
+      if (arrived || (followOns.length > 0 && Date.now() >= input.deadline)) {
+        finish({ kind: "approval-arrived" });
+      } else if (followOns.length > 0) finish({ kind: "follow-on", approvals: followOns });
       else if (!open) finish({ kind: "declined" });
     };
     const timer = setTimeout(
@@ -309,6 +316,41 @@ export type ApprovalRedirectRefusal =
 /** Whether a refused redirect still declined approvals; the next send on that turn steers. */
 export function approvalRedirectRefusalDeclined(refusal: ApprovalRedirectRefusal): boolean {
   return refusal.kind !== "just-arrived" && refusal.declined > 0;
+}
+
+/**
+ * Per thread key, the turn on which a redirect declined approvals but sent nothing: the next send
+ * on that turn steers (`resolveApprovalRedirect`'s `redirectedTurnId`). Keyed by thread, so a view
+ * that switches threads keeps each thread's own.
+ */
+export type ApprovalRedirectedTurns = ReadonlyMap<string, string>;
+
+/**
+ * Notes how a send on `threadKey` ended under `redirect`: a refusal (`refusal`) after declines
+ * went through marks the redirected turn, a send that went out (`null`) carried the redirect and
+ * clears it. Other threads keep theirs. Returns `turns` itself when nothing changed.
+ */
+export function noteApprovalRedirectEnd(
+  turns: ApprovalRedirectedTurns,
+  threadKey: string,
+  redirect: ApprovalRedirect,
+  refusal: ApprovalRedirectRefusal | null,
+): ApprovalRedirectedTurns {
+  if (refusal === null) {
+    if (redirect.kind === "none" || !turns.has(threadKey)) return turns;
+    const next = new Map(turns);
+    next.delete(threadKey);
+    return next;
+  }
+  if (
+    redirect.kind !== "decline" ||
+    redirect.turnId === null ||
+    !approvalRedirectRefusalDeclined(refusal) ||
+    turns.get(threadKey) === redirect.turnId
+  ) {
+    return turns;
+  }
+  return new Map(turns).set(threadKey, redirect.turnId);
 }
 
 export function describeApprovalRedirectRefusal(refusal: ApprovalRedirectRefusal): {

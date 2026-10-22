@@ -17,11 +17,11 @@ import { startSelectionChat } from "../lib/selectionChat";
 import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
 import {
   appendSelectionQuote,
-  approvalRedirectRefusalDeclined,
   approvalRedirectTooSoon,
   checkpointRevertUnsupportedMessage,
   declineApprovalsForRedirect,
   describeApprovalRedirectRefusal,
+  noteApprovalRedirectEnd,
   pendingApprovalSourceFromStore,
   recordApprovalSightings,
   requestProviderSessionPrewarm,
@@ -29,6 +29,7 @@ import {
   resolveProviderSessionPrewarmRequest,
   selectProviderSessionPrewarmSupported,
   type ApprovalRedirect,
+  type ApprovalRedirectedTurns,
   type ApprovalRedirectRefusal,
   type ApprovalSightings,
   type SubscribedClaudeReviewState,
@@ -1118,11 +1119,10 @@ export default function ChatView(props: ChatViewProps) {
       stackedThreadToast({ type: "warning", ...describeApprovalRedirectRefusal(refusal) }),
     );
   }, []);
-  // A redirect that declined approvals but sent nothing: the next send on that turn steers.
-  const [approvalRedirectedTurn, setApprovalRedirectedTurn] = useState<{
-    readonly threadKey: string;
-    readonly turnId: string;
-  } | null>(null);
+  // Redirects that declined approvals but sent nothing: the next send on that turn steers.
+  const [approvalRedirectedTurns, setApprovalRedirectedTurns] = useState<ApprovalRedirectedTurns>(
+    () => new Map(),
+  );
   const onInterrupt = useCallback(async () => {
     if (mutationUnavailableReason !== null) {
       notifyMutationUnavailable(mutationUnavailableReason);
@@ -5097,10 +5097,7 @@ export default function ChatView(props: ChatViewProps) {
             tokenMode: settingsSnapshot.tokenMode,
           }).allowed,
         questionPending: pendingUserInputs.length > 0,
-        redirectedTurnId:
-          approvalRedirectedTurn?.threadKey === activeThreadKey
-            ? approvalRedirectedTurn.turnId
-            : null,
+        redirectedTurnId: approvalRedirectedTurns.get(activeThreadKey) ?? null,
       });
       const followUpAction = resolveComposerFollowUpAction({
         turnRunning: phase === "running",
@@ -5115,13 +5112,9 @@ export default function ChatView(props: ChatViewProps) {
         followUpAction === "steer" ? approvalRedirect : { kind: "none" };
       const refuseRedirect = (refusal: ApprovalRedirectRefusal) => {
         notifyApprovalRedirectRefused(refusal);
-        if (
-          redirect.kind === "decline" &&
-          redirect.turnId !== null &&
-          approvalRedirectRefusalDeclined(refusal)
-        ) {
-          setApprovalRedirectedTurn({ threadKey: activeThreadKey, turnId: redirect.turnId });
-        }
+        setApprovalRedirectedTurns((turns) =>
+          noteApprovalRedirectEnd(turns, activeThreadKey, redirect, refusal),
+        );
       };
       const preparing = threadSendsPreparing.ref(routeThreadKey);
       if (preparing.current) return;
@@ -5160,7 +5153,9 @@ export default function ChatView(props: ChatViewProps) {
         preparing.current = false;
       }
       // This send carries the redirect; later ones on the turn follow the setting again.
-      if (redirect.kind !== "none") setApprovalRedirectedTurn(null);
+      setApprovalRedirectedTurns((turns) =>
+        noteApprovalRedirectEnd(turns, activeThreadKey, redirect, null),
+      );
       const queuedMessageId = newMessageId();
       const queuedEntry: QueuedMessage = {
         id: queuedMessageId,
@@ -6648,9 +6643,7 @@ export default function ChatView(props: ChatViewProps) {
                   activeRuntimeSessionId={activeThread?.session?.runtimeSessionId ?? null}
                   activeTurnId={activeThread?.session?.activeTurnId ?? null}
                   approvalRedirectedTurnId={
-                    approvalRedirectedTurn?.threadKey === activeThreadKey
-                      ? approvalRedirectedTurn.turnId
-                      : null
+                    activeThreadKey ? (approvalRedirectedTurns.get(activeThreadKey) ?? null) : null
                   }
                   showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                   activeProposedPlan={activeProposedPlan}

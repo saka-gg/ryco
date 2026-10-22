@@ -8,9 +8,11 @@ import {
   approvalRedirectTooSoon,
   declineApprovalsForRedirect,
   describeApprovalRedirectRefusal,
+  noteApprovalRedirectEnd,
   recordApprovalSightings,
   resolveApprovalRedirect,
   type ApprovalRedirect,
+  type ApprovalRedirectedTurns,
   type PendingApprovalSource,
 } from "./approvalRedirect.ts";
 
@@ -293,6 +295,33 @@ describe("declineApprovalsForRedirect", () => {
     }
   });
 
+  it("declines no follow-on once the deadline has passed", async () => {
+    vi.useFakeTimers();
+    try {
+      let asked = 0;
+      const first = approval("ask-0");
+      const projection = fakeSource([first]);
+      // A turn that asks again as soon as each decline lands, before any timer can run.
+      const decline = vi.fn(async () => {
+        asked += 1;
+        vi.setSystemTime(Date.now() + 400);
+        projection.set(asked < 10 ? [approval(`ask-${asked}`)] : []);
+      });
+      await expect(
+        declineApprovalsForRedirect({
+          redirect: redirectOf([first]),
+          decline,
+          source: projection.source,
+          timeoutMs: 1_000,
+        }),
+      ).resolves.toEqual({ kind: "approval-arrived", declined: 3 });
+      expect(decline).toHaveBeenCalledTimes(3);
+      expect(projection.listeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stops when an approval of another turn arrives while the declines settle", async () => {
     const seen = approval("seen");
     const projection = fakeSource([seen]);
@@ -324,6 +353,63 @@ describe("declineApprovalsForRedirect", () => {
         source: projection.source,
       }),
     ).resolves.toEqual({ kind: "declined", declined: 1 });
+  });
+});
+
+describe("noteApprovalRedirectEnd", () => {
+  const declineRedirect = redirectOf([approval("a")]);
+
+  it("marks the turn of a refused redirect that declined, per thread", () => {
+    const none: ApprovalRedirectedTurns = new Map();
+    const marked = noteApprovalRedirectEnd(none, "thread-a", declineRedirect, {
+      kind: "draft-changed",
+      declined: 1,
+    });
+    expect([...marked]).toEqual([["thread-a", TURN]]);
+    // Nothing declined, or nothing to steer on: nothing to remember.
+    expect(
+      noteApprovalRedirectEnd(none, "thread-a", declineRedirect, { kind: "just-arrived" }),
+    ).toBe(none);
+    expect(
+      noteApprovalRedirectEnd(none, "thread-a", declineRedirect, {
+        kind: "refused",
+        declined: 0,
+        error: null,
+      }),
+    ).toBe(none);
+    expect(
+      noteApprovalRedirectEnd(
+        none,
+        "thread-a",
+        { ...declineRedirect, turnId: null },
+        { kind: "timed-out", declined: 1 },
+      ),
+    ).toBe(none);
+  });
+
+  it("clears only the thread whose send carried the redirect", () => {
+    const turns: ApprovalRedirectedTurns = new Map([
+      ["thread-a", "turn-a"],
+      ["thread-b", "turn-b"],
+    ]);
+    // A send on thread B that went out leaves thread A's redirected turn alone.
+    expect([...noteApprovalRedirectEnd(turns, "thread-b", declineRedirect, null)]).toEqual([
+      ["thread-a", "turn-a"],
+    ]);
+    expect([...noteApprovalRedirectEnd(turns, "thread-b", { kind: "steer" }, null)]).toEqual([
+      ["thread-a", "turn-a"],
+    ]);
+    // A plain send carried no redirect, and a partial refusal on B keeps A's.
+    expect(noteApprovalRedirectEnd(turns, "thread-b", { kind: "none" }, null)).toBe(turns);
+    expect([
+      ...noteApprovalRedirectEnd(turns, "thread-b", declineRedirect, {
+        kind: "approval-arrived",
+        declined: 1,
+      }),
+    ]).toEqual([
+      ["thread-a", "turn-a"],
+      ["thread-b", TURN],
+    ]);
   });
 });
 

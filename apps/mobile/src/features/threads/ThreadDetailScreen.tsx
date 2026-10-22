@@ -38,7 +38,6 @@ import {
 } from "@ryco/client-runtime/state/side-chat";
 import {
   APPROVAL_REDIRECT_PLACEHOLDER,
-  approvalRedirectRefusalDeclined,
   approvalRedirectTooSoon,
   declineApprovalsForRedirect,
   deriveProviderSelectionPolicy,
@@ -46,10 +45,12 @@ import {
   getProviderInteractionModeToggle,
   getProviderSupportsAskMode,
   normalizeInteractionModeForProviderTarget,
+  noteApprovalRedirectEnd,
   pendingApprovalSourceFromStore,
   recordApprovalSightings,
   resolveApprovalRedirect,
   selectionAllowedAtSendBoundary,
+  type ApprovalRedirectedTurns,
   type ApprovalRedirectRefusal,
   type ApprovalSightings,
 } from "@ryco/client-runtime/state/composer";
@@ -574,13 +575,11 @@ export function ThreadDetailScreen(props: {
       Date.now(),
     );
   }, [pendingApprovals]);
-  // A redirect that declined approvals but sent nothing: the next send on that turn steers.
-  const [approvalRedirectedTurn, setApprovalRedirectedTurn] = useState<{
-    readonly threadId: string;
-    readonly turnId: string;
-  } | null>(null);
-  const approvalRedirectedTurnId =
-    approvalRedirectedTurn?.threadId === threadId ? approvalRedirectedTurn.turnId : null;
+  // Redirects that declined approvals but sent nothing: the next send on that turn steers.
+  const [approvalRedirectedTurns, setApprovalRedirectedTurns] = useState<ApprovalRedirectedTurns>(
+    () => new Map(),
+  );
+  const approvalRedirectedTurnId = approvalRedirectedTurns.get(threadId) ?? null;
   // Agent Control proposals share the web runtime state; mobile only syncs
   // while the server-side setting is enabled and renders the same queue.
   const agentControlEnabled = serverConfig?.settings.agentControl.enabled ?? false;
@@ -1411,13 +1410,9 @@ export function ThreadDetailScreen(props: {
       const refuse = (refusal: ApprovalRedirectRefusal) => {
         const copy = describeApprovalRedirectRefusal(refusal);
         setSendError(`${copy.title}. ${copy.description}`);
-        if (
-          redirect.kind === "decline" &&
-          redirect.turnId !== null &&
-          approvalRedirectRefusalDeclined(refusal)
-        ) {
-          setApprovalRedirectedTurn({ threadId, turnId: redirect.turnId });
-        }
+        setApprovalRedirectedTurns((turns) =>
+          noteApprovalRedirectEnd(turns, threadId, redirect, refusal),
+        );
         return "refuse" as const;
       };
       if (redirect.kind === "none") return "queue" as const;
@@ -1452,7 +1447,9 @@ export function ThreadDetailScreen(props: {
         }
       }
       // This send carries the redirect; later ones on the turn queue again.
-      setApprovalRedirectedTurn(null);
+      setApprovalRedirectedTurns((turns) =>
+        noteApprovalRedirectEnd(turns, threadId, redirect, null),
+      );
       return "steer" as const;
     };
 
