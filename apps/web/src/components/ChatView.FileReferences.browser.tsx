@@ -34,7 +34,9 @@ import {
   THREAD_REF,
   createSnapshotForTargetUser,
   createSnapshotWithPlanFollowUpPrompt,
+  createTerminalContext,
   createUserMessage,
+  findButtonByText,
   fixture,
   mountChatView,
   setupChatViewBrowserSuite,
@@ -415,6 +417,81 @@ describe("ChatView file references", () => {
       }
     },
   );
+
+  it("puts a plan refinement that did not go out back into the composer, chips included", async () => {
+    useUiStateStore.getState().setAlwaysUseBuildMode(false);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithPlanFollowUpPrompt(),
+    });
+    try {
+      await waitForButtonByText("Implement");
+      await vi.waitFor(() => expect(composerContextIntake.canDeliver(THREAD_REF)).toBe(true));
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      let attempts = 0;
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+        ...api,
+        orchestration: {
+          ...api.orchestration,
+          dispatchCommand: async () => {
+            attempts += 1;
+            throw new Error("The node went away.");
+          },
+        },
+      });
+      const reference = lines("src/app.ts", 12, "This step misses the retry");
+      expect(deliver(reference)).toBe("added");
+      await waitForChipLabels(["app.ts:12-13"]);
+
+      await sendWithEnter("Refine with this");
+      await vi.waitFor(() => expect(attempts).toBeGreaterThan(0), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      await waitForComposerText("Refine with this");
+      await waitForChipLabels(["app.ts:12-13"]);
+      expect(draftReferences()[0]?.comment).toBe("This step misses the retry");
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("labels a plan follow-up of only a terminal context Implement, as it sends", async () => {
+    useUiStateStore.getState().setAlwaysUseBuildMode(false);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithPlanFollowUpPrompt(),
+    });
+    try {
+      await waitForButtonByText("Implement");
+      // The context sits inline in the prompt as a placeholder, which the send strips.
+      useComposerDraftStore.getState().addTerminalContext(
+        THREAD_REF,
+        createTerminalContext({
+          id: "ctx-plan",
+          terminalLabel: "Terminal 1",
+          lineStart: 1,
+          lineEnd: 2,
+          text: "bun i\nno changes",
+        }),
+      );
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Terminal 1 lines 1-2"), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      await waitForLayout();
+      expect(findButtonByText("Implement")).not.toBeNull();
+      expect(findButtonByText("Refine")).toBeNull();
+
+      // A file reference is feedback on the plan: now it refines.
+      await vi.waitFor(() => expect(composerContextIntake.canDeliver(THREAD_REF)).toBe(true));
+      expect(deliver(lines("src/app.ts", 12))).toBe("added");
+      await waitForButtonByText("Refine");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
 
   it("queues the references with a follow-up and puts them back when it is edited", async () => {
     const harness = await mountRunningThread("queue");

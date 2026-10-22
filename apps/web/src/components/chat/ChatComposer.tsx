@@ -1264,8 +1264,9 @@ export const ChatComposer = memo(
 
     const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
     // Refine or Implement: file references refine the plan as typed text does.
+    // The send reads the same prompt, inline terminal placeholders stripped.
     const planFollowUpHasRefinement = planFollowUpRefines({
-      draftText: prompt,
+      draftText: composerSendState.trimmedPrompt,
       fileReferenceCount: composerFileReferences.length,
     });
     const showPlanSidebarToggle = false;

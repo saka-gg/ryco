@@ -416,42 +416,64 @@ export function rollbackSendTurn(input: {
   terminalContextsSnapshot: TerminalContextDraft[];
   fileReferencesSnapshot: FileReferenceDraft[];
 }): void {
-  const {
-    refs,
+  const { composerHandle, dispatch, messageId } = input;
+  const live = composerHandle.showsSendThread?.() ?? true;
+  const restored = restoreUnsentComposerContent({
+    refs: input.refs,
     composerHandle,
-    dispatch,
-    draft,
-    messageId,
-    promptSnapshot,
-    imagesSnapshot,
-    terminalContextsSnapshot,
-    fileReferencesSnapshot,
-  } = input;
+    draft: input.draft,
+    prompt: input.promptSnapshot,
+    images: input.imagesSnapshot,
+    terminalContexts: input.terminalContextsSnapshot,
+    fileReferences: input.fileReferencesSnapshot,
+  });
+  if (restored && live) removeOptimisticUserMessage(dispatch.setOptimisticUserMessages, messageId);
+}
+
+/**
+ * Puts what a send took from the composer back once the send did not go out,
+ * unless the composer holds new content by then. False when it left it alone.
+ */
+export function restoreUnsentComposerContent(input: {
+  refs: ComposerContentRefs;
+  composerHandle: SendTurnReadComposer;
+  draft: Pick<
+    SendTurnComposerDraftDeps,
+    | "composerDraftTarget"
+    | "setComposerDraftPrompt"
+    | "addComposerDraftImages"
+    | "setComposerDraftTerminalContexts"
+    | "setComposerDraftFileReferences"
+    | "readComposerDraftContent"
+  >;
+  prompt: string;
+  images: ComposerImageAttachment[];
+  terminalContexts: TerminalContextDraft[];
+  fileReferences: FileReferenceDraft[];
+}): boolean {
+  const { refs, composerHandle, draft } = input;
   // The live refs belong to whichever thread the view shows: once that is
   // another one, this thread's draft is what decides, in the store.
   const live = composerHandle.showsSendThread?.() ?? true;
-
   if (
     live
       ? composerRefsHaveContent(refs)
       : composerDraftContentHasContent(draft.readComposerDraftContent(draft.composerDraftTarget))
   ) {
-    return;
+    return false;
   }
-
-  if (live) removeOptimisticUserMessage(dispatch.setOptimisticUserMessages, messageId);
-
   restoreComposerContent({
     refs,
     composerHandle,
     draft,
     live,
-    prompt: promptSnapshot,
-    // The send revoked the live previews; give the retry its own blob URLs.
-    images: imagesSnapshot.map(cloneComposerImageForRetry),
-    terminalContexts: terminalContextsSnapshot,
-    fileReferences: fileReferencesSnapshot,
+    prompt: input.prompt,
+    // The send may have revoked the live previews; give the retry its own blob URLs.
+    images: input.images.map(cloneComposerImageForRetry),
+    terminalContexts: input.terminalContexts,
+    fileReferences: input.fileReferences,
   });
+  return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -72,8 +72,11 @@ const previewHarness = vi.hoisted(() => {
     worktreePaths: {} as Record<string, string>,
     draftThread: null as DraftThreadStub | null,
     routeParams: { environmentId: "environment-local", threadId: "thread-1" } as Params,
+    /** The route search; `preview: "1"` is the Files panel open. */
+    search: { preview: "1" } as Record<string, string>,
     reset() {
       this.worktreePaths = {};
+      this.search = { preview: "1" };
       this.entries = [];
       this.readFiles = new Map();
       this.binaryFiles = new Map();
@@ -155,7 +158,7 @@ vi.mock("@tanstack/react-router", () => ({
     return options?.select ? options.select(params) : params;
   }),
   useSearch: vi.fn((options?: { select?: (search: Record<string, string>) => unknown }) => {
-    const search = { preview: "1" };
+    const search = previewHarness.search;
     return options?.select ? options.select(search) : search;
   }),
   useBlocker: vi.fn(() => ({
@@ -519,6 +522,46 @@ describe("PreviewPanel", () => {
           ?.getAttribute("data-test-selected-lines"),
       ).toBe("2-2"),
     );
+  });
+
+  it("opens a link that reopens the panel at the file it had open when it closed", async () => {
+    previewHarness.entries = [{ path: "src/a.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/a.ts", { relativePath: "src/a.ts", contents: "one\ntwo" });
+    const panel = (reveal: ComponentProps<typeof PreviewPanel>["reveal"]) => (
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>
+    );
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/a.ts" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+
+    // The sheet keeps the panel mounted while it is closed.
+    previewHarness.search = {};
+    await mounted.rerender(panel(null));
+    // A link opens it again and asks for the same file in one go.
+    previewHarness.search = { preview: "1" };
+    await mounted.rerender(panel({ path: "src/a.ts", line: 2 }));
+
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-2"),
+    );
+
+    // Reopened without a link, the panel starts at the tree.
+    previewHarness.search = {};
+    await mounted.rerender(panel(null));
+    previewHarness.search = { preview: "1" };
+    await mounted.rerender(panel(null));
+    await expect.element(page.getByText("Open file")).toBeInTheDocument();
   });
 
   it("starts a new pick with an empty note", async () => {

@@ -336,9 +336,11 @@ import { useChatSessionActions } from "../hooks/useChatSessionActions";
 import {
   buildOutgoingMessageText,
   buildOutgoingTurnAttachments,
+  clearComposerContentRefs,
   composerRefsHaveContent,
   executeChatSendTurn,
   restoreComposerContent,
+  restoreUnsentComposerContent,
   type ComposerDraftContent,
   type SendTurnComposerSnapshot,
   type SendTurnSettings,
@@ -4970,14 +4972,41 @@ export default function ChatView(props: ChatViewProps) {
         }),
         planMarkdown: activeProposedPlan.planMarkdown,
       });
-      promptRef.current = "";
+      const refs = {
+        promptRef,
+        composerImagesRef,
+        composerTerminalContextsRef,
+        composerFileReferencesRef,
+      };
+      // Bound before the send: the restore below belongs to the thread shown now.
+      const showsSendThread = bindToShownThread();
+      clearComposerContentRefs(refs);
       clearComposerDraftContent(composerDraftTarget);
       setComposerDraftTokenMode(composerDraftTarget, tokenMode);
       readComposer()?.resetCursorState();
-      await onSubmitPlanFollowUp({
+      const sent = await onSubmitPlanFollowUp({
         text: followUp.text,
         interactionMode: followUp.interactionMode,
       });
+      // A refinement that did not go out comes back, chips included, as a failed send does.
+      if (!sent) {
+        restoreUnsentComposerContent({
+          refs,
+          composerHandle: { readComposer, showsSendThread },
+          draft: {
+            composerDraftTarget,
+            setComposerDraftPrompt,
+            addComposerDraftImages,
+            setComposerDraftTerminalContexts,
+            setComposerDraftFileReferences,
+            readComposerDraftContent,
+          },
+          prompt: promptForSend,
+          images: composerImages,
+          terminalContexts: composerTerminalContexts,
+          fileReferences: composerFileReferences,
+        });
+      }
       return;
     }
     const standaloneSlashCommand =
@@ -5292,13 +5321,14 @@ export default function ChatView(props: ChatViewProps) {
   useForegroundQueueSender(activeThreadKey, foregroundQueueSender);
 
   const onSubmitPlanFollowUp = useCallback(
+    // True once the turn is dispatched; the caller puts its draft back otherwise.
     async ({
       text,
       interactionMode: nextInteractionMode,
     }: {
       text: string;
       interactionMode: ProviderInteractionMode;
-    }) => {
+    }): Promise<boolean> => {
       const api = readEnvironmentApi(environmentId);
       if (
         !api ||
@@ -5308,7 +5338,7 @@ export default function ChatView(props: ChatViewProps) {
         isConnecting ||
         threadSendsInFlight.has(routeThreadKey)
       ) {
-        return;
+        return false;
       }
       const sendInFlight = threadSendsInFlight.ref(routeThreadKey);
       const sendLocalDispatch = bindLocalDispatch();
@@ -5316,13 +5346,13 @@ export default function ChatView(props: ChatViewProps) {
 
       const trimmed = text.trim();
       if (!trimmed) {
-        return;
+        return false;
       }
 
-      if (!(await prepareEditorSend())) return;
+      if (!(await prepareEditorSend())) return false;
       const sendCtx = readComposer()?.getSendContext();
       if (!sendCtx) {
-        return;
+        return false;
       }
       const {
         selectedProvider: ctxSelectedProvider,
@@ -5333,7 +5363,7 @@ export default function ChatView(props: ChatViewProps) {
       } = sendCtx;
       if (!canSendModelSelection(ctxSelectedModelSelection)) {
         notifySelectionBecameIneligible();
-        return;
+        return false;
       }
 
       const threadIdForSend = activeThread.id;
@@ -5423,6 +5453,7 @@ export default function ChatView(props: ChatViewProps) {
           setPlanSidebarOpen(true);
         }
         sendInFlight.current = false;
+        return true;
       } catch (err) {
         if (showsSendThread()) {
           setOptimisticUserMessages((existing) =>
@@ -5435,6 +5466,7 @@ export default function ChatView(props: ChatViewProps) {
         );
         sendInFlight.current = false;
         sendLocalDispatch.resetLocalDispatch();
+        return false;
       }
     },
     [

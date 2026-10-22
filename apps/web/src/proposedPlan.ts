@@ -79,9 +79,10 @@ export function buildPlanImplementationPrompt(planMarkdown: string): string {
 /**
  * A plan follow-up refines the plan when the composer holds typed text or
  * file references (lines picked while reading the plan are feedback on it),
- * and implements it otherwise. The composer's primary action reads this, so
- * its label says what the send does; the send composes the references into
- * `draftText` (`composeOutgoingPrompt`), which then is never empty.
+ * and implements it otherwise. The composer's primary action reads this with
+ * the prompt the send reads, so its label says what the send does; the send
+ * composes the references into `draftText` (`composeOutgoingPrompt`), which
+ * then is never empty.
  */
 export function planFollowUpRefines(input: {
   readonly draftText: string;
@@ -100,7 +101,7 @@ export function resolvePlanFollowUpSubmission(input: { draftText: string; planMa
   interactionMode: "default" | "plan";
 } {
   const trimmedDraftText = input.draftText.trim();
-  if (planFollowUpRefines({ draftText: trimmedDraftText, fileReferenceCount: 0 })) {
+  if (trimmedDraftText.length > 0) {
     return {
       text: trimmedDraftText,
       interactionMode: "plan",

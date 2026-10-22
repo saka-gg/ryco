@@ -384,6 +384,9 @@ export default function PreviewPanel({
     startX: number;
   } | null>(null);
   const previousPreviewOpenRef = useRef(previewSearch.preview === "1");
+  // A deep link opens its file once: the route key is cleared as soon as it
+  // is read.
+  const handledRevealRef = useRef<WorkspaceFileReveal | null>(null);
   const previousProjectFilesRefreshKeyRef = useRef<string | null>(null);
   const previousSelectedFileRefreshKeyRef = useRef<string | null>(null);
   const missingFileRefreshKeyRef = useRef<string | null>(null);
@@ -491,11 +494,16 @@ export default function PreviewPanel({
 
   useEffect(() => {
     const previewOpen = previewSearch.preview === "1";
-    if (previewOpen && !previousPreviewOpenRef.current) {
+    // Reopening starts at the tree, unless a link opened the panel: the link
+    // picks the file, and it would find the file left open before the panel
+    // closed "already open" against this reset and land on the tree.
+    const linkPending =
+      !isPhonePresentation && reveal !== null && handledRevealRef.current !== reveal;
+    if (previewOpen && !previousPreviewOpenRef.current && !linkPending) {
       setSelectedFilePath(null);
     }
     previousPreviewOpenRef.current = previewOpen;
-  }, [previewSearch.preview]);
+  }, [isPhonePresentation, previewSearch.preview, reveal]);
 
   // Raster images read through the binary API; the text read would always be
   // rejected for them. Oversized files are refused by the server with a
@@ -622,9 +630,6 @@ export default function PreviewPanel({
   // Every other open drops the mark, so coming back does not replay the link.
   const onSelectFile = useCallback((filePath: string) => openFile(filePath, null), [openFile]);
 
-  // A deep link opens its file once: the route key is cleared as soon as it
-  // is read.
-  const handledRevealRef = useRef<WorkspaceFileReveal | null>(null);
   const revealTokenRef = useRef(0);
   useEffect(() => {
     if (!reveal || handledRevealRef.current === reveal) return;
