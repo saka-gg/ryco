@@ -65,6 +65,7 @@ import {
   parseWorkspaceRenderKey,
   stripWorkspaceRevealSearch,
   workspaceAgentKeyForRuntimeAgent,
+  type WorkspaceFileReveal,
 } from "../workspaceRouteSearch";
 import { buildOpenRightPanelTabSearch, isRightPanelTabMode } from "../rightPanelTabs.logic";
 import {
@@ -1064,6 +1065,13 @@ export default function ThreadWorkspacePanel(props: {
   );
   const agentsFocusWorkflowId =
     search.workspaceTab === "agents" ? (search.workspaceAgentsWorkflow ?? null) : null;
+  const fileReveal = useMemo<WorkspaceFileReveal | null>(
+    () =>
+      search.workspaceTab === "files" && search.workspaceFile
+        ? { path: search.workspaceFile, line: search.workspaceFileLine }
+        : null,
+    [search.workspaceFile, search.workspaceFileLine, search.workspaceTab],
+  );
   // One page tab: the render the route shows, else the one it showed last.
   const renderKey =
     search.workspaceTab === "render" && search.workspaceRender
@@ -1568,7 +1576,7 @@ export default function ThreadWorkspacePanel(props: {
             </WorkspaceSurfaceGate>
           ) : activeMode === "files" ? (
             <WorkspaceSurfaceGate key="files" chunk={PreviewPanel} mode="files">
-              <PreviewPanel mode={props.mode} />
+              <PreviewPanel mode={props.mode} reveal={fileReveal} onRevealHandled={clearReveal} />
             </WorkspaceSurfaceGate>
           ) : activeMode === "terminal" ? (
             <WorkspaceTerminalPanel />

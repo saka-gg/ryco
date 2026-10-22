@@ -6,10 +6,13 @@ import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import type { ComposerContextItem } from "@ryco/client-runtime/state/composer";
 
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";
 import { resetProjectPreviewAtomsForTests } from "../rpc/projectPreviewAtoms";
+import { composerContextIntake } from "../composerContextIntake";
+import { WORKSPACE_FILE_DRAG_TYPE } from "../workspaceFileDrag";
 import PreviewPanel from "./PreviewPanel";
 
 type PreviewWriteFileInput = {
@@ -87,26 +90,55 @@ const previewHarness = vi.hoisted(() => {
 vi.mock("@pierre/diffs/react", () => ({
   EditProvider: (props: { children: ReactNode }) => props.children,
   Virtualizer: (props: { children: ReactNode }) => <div>{props.children}</div>,
+  // Stands in for the renderer: the gutter `+` callback, line annotations and
+  // the highlighted lines are exposed so the panel's wiring can be driven.
   File: (props: {
     edit?: boolean;
     file: { contents: string; name: string };
     onEditChange?: (event: { file: { contents: string; name: string } }) => void;
-  }) =>
-    props.edit ? (
-      <textarea
-        aria-label={`Edit ${props.file.name}`}
-        value={props.file.contents}
-        onChange={(event) =>
-          props.onEditChange?.({
-            file: { ...props.file, contents: event.currentTarget.value },
-          })
-        }
-      />
-    ) : (
-      <pre>
-        <code>{props.file.contents}</code>
-      </pre>
-    ),
+    options?: {
+      enableGutterUtility?: boolean;
+      onGutterUtilityClick?: (range: { start: number; end: number }) => void;
+    };
+    lineAnnotations?: ReadonlyArray<{ lineNumber: number }>;
+    renderAnnotation?: (annotation: { lineNumber: number }) => ReactNode;
+    selectedLines?: { start: number; end: number } | null;
+  }) => (
+    <div
+      data-test-selected-lines={
+        props.selectedLines ? `${props.selectedLines.start}-${props.selectedLines.end}` : ""
+      }
+    >
+      {props.edit ? (
+        <textarea
+          aria-label={`Edit ${props.file.name}`}
+          value={props.file.contents}
+          onChange={(event) =>
+            props.onEditChange?.({
+              file: { ...props.file, contents: event.currentTarget.value },
+            })
+          }
+        />
+      ) : (
+        <pre>
+          <code>{props.file.contents}</code>
+        </pre>
+      )}
+      {props.options?.enableGutterUtility ? (
+        <button
+          type="button"
+          onClick={() => props.options?.onGutterUtilityClick?.({ start: 3, end: 2 })}
+        >
+          Mock gutter add
+        </button>
+      ) : null}
+      {(props.lineAnnotations ?? []).map((annotation) => (
+        <div key={annotation.lineNumber} data-test-annotation-line={annotation.lineNumber}>
+          {props.renderAnnotation?.(annotation)}
+        </div>
+      ))}
+    </div>
+  ),
 }));
 
 // The shared highlight pool spawns real workers; these tests render plain output.
@@ -241,10 +273,17 @@ vi.mock("./chat/ChangedFilesTree", () => ({
   ChangedFilesTree: (props: {
     files: readonly { readonly path: string }[];
     onSelectFile: (path: string) => void;
+    onFileDragStart?: (path: string, transfer: DataTransfer) => void;
   }) => (
     <div>
       {props.files.map((file) => (
-        <button key={file.path} type="button" onClick={() => props.onSelectFile(file.path)}>
+        <button
+          key={file.path}
+          type="button"
+          draggable={props.onFileDragStart ? true : undefined}
+          onDragStart={(event) => props.onFileDragStart?.(file.path, event.dataTransfer)}
+          onClick={() => props.onSelectFile(file.path)}
+        >
           {file.path}
         </button>
       ))}
@@ -252,13 +291,18 @@ vi.mock("./chat/ChangedFilesTree", () => ({
   ),
 }));
 
-function renderPreviewPanel() {
+function renderPreviewPanel(props: Partial<ComponentProps<typeof PreviewPanel>> = {}) {
   return render(
     <AppAtomRegistryProvider>
-      <PreviewPanel mode="sheet" />
+      <PreviewPanel mode="sheet" {...props} />
     </AppAtomRegistryProvider>,
   );
 }
+
+const PREVIEW_THREAD = {
+  environmentId: EnvironmentId.make("environment-local"),
+  threadId: ThreadId.make("thread-1"),
+};
 
 describe("PreviewPanel", () => {
   let mounted:
@@ -288,6 +332,108 @@ describe("PreviewPanel", () => {
     resetAppAtomRegistryForTests();
     resetProjectPreviewAtomsForTests();
     recordWsConnectionOpened({ environmentId: EnvironmentId.make("environment-local") });
+  });
+
+  it("opens a deep-linked file once and marks its line", async () => {
+    previewHarness.entries = [
+      { path: "src/app.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    const onRevealHandled = vi.fn();
+    const reveal = { path: "src/app.ts", line: 2 };
+
+    mounted = await renderPreviewPanel({ reveal, onRevealHandled });
+
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+      .toHaveValue("one\ntwo\nthree");
+    expect(onRevealHandled).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-2"),
+    );
+
+    await mounted.rerender(
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={onRevealHandled} />
+      </AppAtomRegistryProvider>,
+    );
+    expect(onRevealHandled).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds picked lines, unsaved edits included, to the thread's composer", async () => {
+    previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    const editor = page.getByRole("textbox", { name: "Edit src/app.ts" });
+    await expect.element(editor).toHaveValue("one\ntwo\nthree");
+    // No composer takes context yet: nothing is offered.
+    expect(page.getByRole("button", { name: "Mock gutter add" }).query()).toBeNull();
+
+    const received: ComposerContextItem[] = [];
+    const release = composerContextIntake.register(PREVIEW_THREAD, (item) => {
+      received.push(item);
+      return true;
+    });
+    try {
+      await editor.fill("one\nTWO\nTHREE");
+      await page.getByRole("button", { name: "Mock gutter add" }).click();
+      const note = page.getByRole("textbox", { name: "Note on src/app.ts lines 2-3" });
+      await expect.element(note).toBeInTheDocument();
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-3");
+      await note.fill("Uppercase?");
+      await page.getByRole("button", { name: /Add to chat/u }).click();
+
+      expect(received).toEqual([
+        {
+          kind: "file-reference",
+          reference: {
+            path: "src/app.ts",
+            lineStart: 2,
+            lineEnd: 3,
+            snippet: "TWO\nTHREE",
+            truncated: false,
+            comment: "Uppercase?",
+          },
+        },
+      ]);
+      await expect.element(note).not.toBeInTheDocument();
+    } finally {
+      release();
+    }
+  });
+
+  it("drags tree files as workspace files of the thread's workspace", async () => {
+    previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
+    mounted = await renderPreviewPanel();
+    const row = page.getByRole("button", { name: "src/app.ts" });
+    await expect.element(row).toHaveAttribute("draggable", "true");
+
+    const transfer = new DataTransfer();
+    row
+      .element()
+      .dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: transfer }));
+    expect(JSON.parse(transfer.getData(WORKSPACE_FILE_DRAG_TYPE))).toEqual({
+      environmentId: "environment-local",
+      workspaceRoot: "/repo",
+      path: "src/app.ts",
+    });
+    expect(transfer.getData("text/plain")).toBe("src/app.ts");
   });
 
   it("places the workspace tree on the right and filters visible files", async () => {

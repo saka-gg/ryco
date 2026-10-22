@@ -1,4 +1,7 @@
+import type { LineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { File as DiffsFile } from "@pierre/diffs/react";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { formatFileReferenceTitle } from "@ryco/client-runtime/state/composer";
 import { useParams, useSearch } from "@tanstack/react-router";
 import { Schema } from "effect";
 import {
@@ -28,6 +31,8 @@ import {
 import { parsePreviewRouteSearch } from "../previewRouteSearch";
 import {
   fnv1a32,
+  GUTTER_UTILITY_UNSAFE_CSS,
+  PLAIN_ANNOTATION_UNSAFE_CSS,
   resolveDiffThemeName,
   SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
 } from "../lib/diffRendering";
@@ -40,9 +45,19 @@ import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import type { TurnDiffSummary } from "../types";
+import { endWorkspaceFileDrag, startWorkspaceFileDrag } from "../workspaceFileDrag";
+import type { WorkspaceFileReveal } from "../workspaceRouteSearch";
 import { ChangedFilesTree } from "./chat/ChangedFilesTree";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+import {
+  fileContentsReference,
+  fileLineSelection,
+  fileLineSelectionRange,
+} from "./fileReferences/fileReferenceSelection";
+import { FileReferenceNoteComposer } from "./fileReferences/FileReferenceNoteComposer";
+import { useFileReferencePicker } from "./fileReferences/useFileReferencePicker";
+import { revealFileLine, waitForDiffLayout } from "./pullRequests/files/diffReveal";
 import { PreviewFileEditor } from "./PreviewFileEditor";
 import { PREVIEW_FILE_UNSAFE_CSS } from "./PreviewFileStyles";
 import { createPreviewFileDocument, isPreviewFileSessionDirty } from "./PreviewFileEditSession";
@@ -143,6 +158,16 @@ function buildPreviewFileCacheKey(filePath: string, contents: string): string {
 }
 
 const EMPTY_TURN_DIFF_SUMMARIES: readonly TurnDiffSummary[] = [];
+const NO_FILE_ANNOTATIONS: LineAnnotation[] = [];
+
+/** The scrolling element between a rendered file and the card that holds it. */
+function scrollParentWithin(element: Element, boundary: HTMLElement): HTMLElement | null {
+  for (let node = element.parentElement; node && node !== boundary; node = node.parentElement) {
+    const { overflowY } = getComputedStyle(node);
+    if (overflowY === "auto" || overflowY === "scroll") return node;
+  }
+  return null;
+}
 
 function PreviewTreeMotionFrame(props: {
   children: ReactNode;
@@ -213,9 +238,17 @@ function PreviewOpenFileEmptyState() {
 
 interface PreviewPanelProps {
   mode?: DiffPanelMode;
+  /** A one-shot deep link (an agent's file link): open this file, at a line when it names one. */
+  reveal?: WorkspaceFileReveal | null | undefined;
+  /** The reveal was acted on; the caller clears it so a repeat link fires again. */
+  onRevealHandled?: (() => void) | undefined;
 }
 
-export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
+export default function PreviewPanel({
+  mode = "inline",
+  reveal = null,
+  onRevealHandled,
+}: PreviewPanelProps) {
   const { resolvedTheme } = useTheme();
   const settings = useSettings();
   // Phone work surface: the two-pane tree+preview split becomes a single-pane
@@ -275,7 +308,25 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
       : undefined,
   );
   const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const activeEnvironmentId = activeThread?.environmentId ?? null;
+  const activeThreadId = activeThread?.id ?? null;
+  const activeThreadRef = useMemo(
+    () =>
+      activeEnvironmentId && activeThreadId
+        ? scopeThreadRef(activeEnvironmentId, activeThreadId)
+        : null,
+    [activeEnvironmentId, activeThreadId],
+  );
+  // "Add to chat" from the gutter; the frozen phone tier does not get it.
+  const fileReferencePicker = useFileReferencePicker(isPhonePresentation ? null : activeThreadRef);
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  // The line a deep link asked for; `token` lets the same link reveal again.
+  const [lineReveal, setLineReveal] = useState<{
+    readonly path: string;
+    readonly line: number;
+    readonly token: number;
+  } | null>(null);
+  const fileCardRef = useRef<HTMLDivElement | null>(null);
   const [recoveryAction, setRecoveryAction] = useState<"reload" | "discard" | "overwrite" | null>(
     null,
   );
@@ -519,6 +570,34 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     [selectedFilePath, sessionOwner],
   );
 
+  // A deep link opens its file the way a tree click does (an unsaved draft
+  // still asks first), once: the route key is cleared as soon as it is read.
+  const handledRevealRef = useRef<WorkspaceFileReveal | null>(null);
+  const revealTokenRef = useRef(0);
+  useEffect(() => {
+    if (!reveal || handledRevealRef.current === reveal) return;
+    if (previewSearch.preview !== "1" || !activeThread?.environmentId || !activeCwd) return;
+    handledRevealRef.current = reveal;
+    onRevealHandled?.();
+    // The frozen phone tier keeps landing on the tree.
+    if (isPhonePresentation) return;
+    revealTokenRef.current += 1;
+    setLineReveal(
+      reveal.line === undefined
+        ? null
+        : { path: reveal.path, line: reveal.line, token: revealTokenRef.current },
+    );
+    void onSelectFile(reveal.path);
+  }, [
+    activeCwd,
+    activeThread?.environmentId,
+    isPhonePresentation,
+    onRevealHandled,
+    onSelectFile,
+    previewSearch.preview,
+    reveal,
+  ]);
+
   const onEditContentsChange = useCallback(
     (contents: string) => sessionOwner?.change(contents),
     [sessionOwner],
@@ -590,17 +669,93 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     selectedFileKind,
     selectedFilePath,
   ]);
+  const openFileReferencePick = fileReferencePicker.open;
   const previewFileOptions = useMemo(
     () => ({
       disableFileHeader: true,
       overflow: wrapPreviewLines ? ("wrap" as const) : ("scroll" as const),
       theme: resolveDiffThemeName(resolvedTheme),
       themeType: resolvedTheme,
-      unsafeCSS: PREVIEW_FILE_UNSAFE_CSS,
+      unsafeCSS: `${PREVIEW_FILE_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}`,
       tokenizeMaxLineLength: SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
+      ...(fileReferencePicker.available && selectedFilePath
+        ? {
+            enableGutterUtility: true,
+            onGutterUtilityClick: (range: SelectedLineRange) =>
+              openFileReferencePick(selectedFilePath, fileLineSelection(selectedFilePath, range)),
+          }
+        : {}),
     }),
-    [resolvedTheme, wrapPreviewLines],
+    [
+      fileReferencePicker.available,
+      openFileReferencePick,
+      resolvedTheme,
+      selectedFilePath,
+      wrapPreviewLines,
+    ],
   );
+  const filePick =
+    fileReferencePicker.pick && fileReferencePicker.pick.fileKey === selectedFilePath
+      ? fileReferencePicker.pick
+      : null;
+  const revealedLine = lineReveal && lineReveal.path === selectedFilePath ? lineReveal : null;
+  // An open pick shows its range; otherwise a deep link's line stays marked.
+  const previewSelectedLines = useMemo<SelectedLineRange | null>(
+    () =>
+      filePick
+        ? fileLineSelectionRange(filePick.selection)
+        : revealedLine
+          ? { start: revealedLine.line, end: revealedLine.line }
+          : null,
+    [filePick, revealedLine],
+  );
+  const previewLineAnnotations = useMemo(
+    () => (filePick ? [{ lineNumber: filePick.selection.lineEnd }] : NO_FILE_ANNOTATIONS),
+    [filePick],
+  );
+  const renderPreviewAnnotation = () =>
+    filePick ? (
+      <FileReferenceNoteComposer
+        title={formatFileReferenceTitle(filePick.selection)}
+        restoreComment={fileReferencePicker.restoreComment}
+        onCommentChange={fileReferencePicker.rememberComment}
+        onCancel={fileReferencePicker.cancel}
+        onAdd={(comment) =>
+          fileReferencePicker.add(
+            fileContentsReference({
+              // What the view shows, unsaved edits included.
+              contents: currentEditSession?.contents ?? selectedFileData?.contents ?? "",
+              selection: filePick.selection,
+              comment,
+            }),
+          )
+        }
+      />
+    ) : null;
+
+  // Scroll a deep link's line into view once its file has rendered.
+  const fileViewReady = previewTextFile !== null || isSelectedFileEditable;
+  const revealedTokenRef = useRef<number | null>(null);
+  useEffect(() => {
+    const card = fileCardRef.current;
+    if (!revealedLine || !fileViewReady || !card) return;
+    if (revealedTokenRef.current === revealedLine.token) return;
+    const controller = new AbortController();
+    void (async () => {
+      if (!(await waitForDiffLayout(card, controller.signal))) return;
+      const container = card.querySelector("diffs-container");
+      const scroller = container ? scrollParentWithin(container, card) : null;
+      if (!scroller || controller.signal.aborted) return;
+      const element = await revealFileLine({
+        scroller,
+        fileElement: card,
+        line: revealedLine.line,
+        signal: controller.signal,
+      });
+      if (element) revealedTokenRef.current = revealedLine.token;
+    })();
+    return () => controller.abort();
+  }, [fileViewReady, revealedLine]);
 
   const onResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -707,6 +862,17 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     }
   };
 
+  // Tree rows drag out as workspace files; the composer takes them as mentions.
+  const onTreeFileDragStart = useMemo(() => {
+    if (isPhonePresentation || !activeEnvironmentId || !activeCwd) return undefined;
+    return (path: string, transfer: DataTransfer) =>
+      startWorkspaceFileDrag(transfer, {
+        environmentId: activeEnvironmentId,
+        workspaceRoot: activeCwd,
+        path,
+      });
+  }, [activeCwd, activeEnvironmentId, isPhonePresentation]);
+
   const headerRow = (
     <>
       <div className="min-w-0 flex-1 px-1 [-webkit-app-region:no-drag]">
@@ -778,7 +944,10 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
     ) : (
       <div className="min-h-0 flex-1 p-2">
         <style>{PREVIEW_CODE_CSS}</style>
-        <div className="preview-panel-file-card flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-border/70 bg-[color:color-mix(in_srgb,var(--card)_90%,var(--background))]">
+        <div
+          ref={fileCardRef}
+          className="preview-panel-file-card flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-border/70 bg-[color:color-mix(in_srgb,var(--card)_90%,var(--background))]"
+        >
           <div className="preview-panel-file-toolbar flex min-h-10 shrink-0 items-center gap-3 border-b border-border/70 bg-[color:color-mix(in_srgb,var(--card)_94%,var(--foreground))] px-3 py-1.5 text-foreground">
             <div className="preview-panel-file-identity flex min-w-0 flex-1 items-center gap-2">
               <div className="truncate font-mono text-[12px] font-medium">{selectedFilePath}</div>
@@ -914,6 +1083,9 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
               language={inferPreviewLanguage(currentEditSession.relativePath)}
               onChange={onEditContentsChange}
               options={previewFileOptions}
+              lineAnnotations={previewLineAnnotations}
+              renderAnnotation={renderPreviewAnnotation}
+              selectedLines={previewSelectedLines}
             />
           ) : currentEditSession?.diskState === "unknown" ? null : previewTextFile ? (
             <div className="min-h-0 flex-1 overflow-auto">
@@ -924,6 +1096,9 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
                   file={previewTextFile}
                   className="preview-panel-diffs-file"
                   options={previewFileOptions}
+                  lineAnnotations={previewLineAnnotations}
+                  renderAnnotation={renderPreviewAnnotation}
+                  selectedLines={previewSelectedLines}
                 />
               </DiffWorkerPoolProvider>
             </div>
@@ -1002,6 +1177,8 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
             onSelectFile={onSelectFile}
             selectedFilePath={selectedFilePath}
             showStats={false}
+            onFileDragStart={onTreeFileDragStart}
+            onFileDragEnd={endWorkspaceFileDrag}
           />
         )}
       </div>

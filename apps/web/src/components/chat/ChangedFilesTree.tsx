@@ -18,6 +18,9 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
   onSelectFile: (filePath: string) => void;
   selectedFilePath?: string | null;
   showStats?: boolean;
+  /** Makes file rows draggable: the caller writes what the drag carries. */
+  onFileDragStart?: ((filePath: string, transfer: DataTransfer) => void) | undefined;
+  onFileDragEnd?: (() => void) | undefined;
 }) {
   const {
     files,
@@ -26,6 +29,8 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
     resolvedTheme,
     selectedFilePath = null,
     showStats = true,
+    onFileDragStart,
+    onFileDragEnd,
   } = props;
   const treeNodes = useMemo(() => buildTurnDiffTree(files), [files]);
   const directoryPathsKey = useMemo(
@@ -117,6 +122,11 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
         )}
         style={{ paddingLeft: `${leftPadding}px` }}
         onClick={() => onSelectFile(node.path)}
+        draggable={onFileDragStart ? true : undefined}
+        onDragStart={
+          onFileDragStart ? (event) => onFileDragStart(node.path, event.dataTransfer) : undefined
+        }
+        onDragEnd={onFileDragEnd}
       >
         <span aria-hidden="true" className="size-3.5 shrink-0" />
         <VscodeEntryIcon

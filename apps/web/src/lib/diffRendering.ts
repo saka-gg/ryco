@@ -70,6 +70,32 @@ export const DIFF_SURFACE_BASE_UNSAFE_CSS = `
 }
 `;
 
+/**
+ * The gutter `+` that picks lines (drag for a range) in the app's primary
+ * color rather than pierre's own blue.
+ */
+export const GUTTER_UTILITY_UNSAFE_CSS = `
+[data-utility-button] {
+  background-color: var(--primary) !important;
+  color: var(--primary-foreground) !important;
+}
+`;
+
+/**
+ * Annotation rows (a note, a review thread) sit on the diff's own surface,
+ * untinted, even under the selected lines they belong to.
+ */
+export const PLAIN_ANNOTATION_UNSAFE_CSS = `
+[data-line-annotation],
+[data-gutter-buffer="annotation"] {
+  --diffs-annotation-bg: var(--diffs-bg) !important;
+}
+[data-line-annotation][data-selected-line],
+[data-gutter-buffer="annotation"][data-selected-line] {
+  --diffs-computed-selected-line-bg: var(--diffs-computed-diff-line-bg) !important;
+}
+`;
+
 const FNV_OFFSET_BASIS_32 = 0x811c9dc5;
 const FNV_PRIME_32 = 0x01000193;
 const SECONDARY_HASH_SEED = 0x9e3779b9;

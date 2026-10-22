@@ -1,9 +1,12 @@
+import type { LineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { Editor, type EditorFactory } from "@pierre/diffs/edit";
 import { EditProvider, File, type FileOptions, Virtualizer } from "@pierre/diffs/react";
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 
 const createEditor: EditorFactory<undefined, undefined> = (type, options, editStateKey) =>
   new Editor(type, options, editStateKey);
+
+const NO_ANNOTATIONS: LineAnnotation[] = [];
 
 interface PreviewFileEditorProps {
   readonly cacheKey: string;
@@ -13,6 +16,11 @@ interface PreviewFileEditorProps {
   readonly language: string;
   readonly onChange: (contents: string) => void;
   readonly options: FileOptions<undefined, undefined>;
+  /** Rows rendered under lines (the "Add to chat" note). */
+  readonly lineAnnotations?: LineAnnotation[] | undefined;
+  readonly renderAnnotation?: ((annotation: LineAnnotation) => ReactNode) | undefined;
+  /** Highlighted lines (a revealed line, a picked range). */
+  readonly selectedLines?: SelectedLineRange | null | undefined;
 }
 
 export function PreviewFileEditor(props: PreviewFileEditorProps) {
@@ -40,6 +48,9 @@ export function PreviewFileEditor(props: PreviewFileEditorProps) {
           className={className}
           onEditChange={({ file }) => onChange(file.contents)}
           options={options}
+          lineAnnotations={props.lineAnnotations ?? NO_ANNOTATIONS}
+          {...(props.renderAnnotation ? { renderAnnotation: props.renderAnnotation } : {})}
+          selectedLines={props.selectedLines ?? null}
         />
       </Virtualizer>
     </EditProvider>

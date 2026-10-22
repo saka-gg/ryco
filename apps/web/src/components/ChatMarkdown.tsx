@@ -1,4 +1,5 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
+import { resolveWorkspaceRelativePath } from "@ryco/client-runtime/state/files";
 import {
   isTerminalSnippetLanguage,
   terminalSnippetError,
@@ -55,6 +56,7 @@ import {
   rewriteMarkdownFileUriHref,
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
+import { useWorkspaceFileOpener } from "../workspaceFileNavigation";
 import { cn } from "../lib/utils";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { readEnvironmentApi } from "../environmentApi";
@@ -346,10 +348,15 @@ interface MarkdownFileLinkProps {
   targetPath: string;
   displayPath: string;
   filePath: string;
+  /** The file inside the thread's workspace, when it is there; null otherwise. */
+  workspacePath: string | null;
+  line: number | undefined;
   label: string;
   theme: "light" | "dark";
   className?: string | undefined;
 }
+
+type MarkdownFileLinkAction = "open-ryco" | "open" | "copy-relative" | "copy-full";
 
 const MARKDOWN_LINK_HREF_PATTERN = /\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
 // Plain inline flow — sizing and color live in the stylesheet so the chip sits
@@ -437,10 +444,31 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   targetPath,
   displayPath,
   filePath,
+  workspacePath,
+  line,
   label,
   theme,
   className,
 }: MarkdownFileLinkProps) {
+  // Phone tier: long-press mirrors right-click, presenting the same file
+  // actions through the shared bottom action sheet. Its file actions stay
+  // as they were (the web phone tier is frozen).
+  const isPhoneTier = usePresentationTier() === "phone";
+  const workspaceFileOpener = useWorkspaceFileOpener();
+  // Ryco's own Files panel reads through the thread's node, so a file inside
+  // the workspace opens there on hosted web and remote nodes alike.
+  const canOpenInRyco = useCallback(
+    () => !isPhoneTier && workspacePath !== null && workspaceFileOpener.canOpen(),
+    [isPhoneTier, workspaceFileOpener, workspacePath],
+  );
+  const handleOpenInRyco = useCallback(
+    () =>
+      canOpenInRyco() &&
+      workspacePath !== null &&
+      workspaceFileOpener.open({ path: workspacePath, line }),
+    [canOpenInRyco, line, workspaceFileOpener, workspacePath],
+  );
+
   const handleOpen = useCallback(() => {
     const api = readLocalApi();
     if (!api) {
@@ -499,15 +527,20 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       const api = readLocalApi();
       if (!api) return;
 
-      const clicked = await api.contextMenu.show(
+      const clicked = await api.contextMenu.show<MarkdownFileLinkAction>(
         [
+          ...(canOpenInRyco() ? [{ id: "open-ryco" as const, label: "Open in Ryco" }] : []),
           { id: "open", label: "Open in editor" },
           { id: "copy-relative", label: "Copy relative path" },
           { id: "copy-full", label: "Copy full path" },
-        ] as const,
+        ],
         position,
       );
 
+      if (clicked === "open-ryco") {
+        if (!handleOpenInRyco()) handleOpen();
+        return;
+      }
       if (clicked === "open") {
         handleOpen();
         return;
@@ -520,7 +553,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         handleCopy(targetPath, "Full path");
       }
     },
-    [displayPath, handleCopy, handleOpen, targetPath],
+    [canOpenInRyco, displayPath, handleCopy, handleOpen, handleOpenInRyco, targetPath],
   );
 
   const handleContextMenu = useCallback(
@@ -532,9 +565,6 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     [openFileLinkMenu],
   );
 
-  // Phone tier: long-press mirrors right-click, presenting the same file
-  // actions through the shared bottom action sheet.
-  const isPhoneTier = usePresentationTier() === "phone";
   const longPress = useLongPress(
     (point) => {
       void openFileLinkMenu(point);
@@ -558,7 +588,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              handleOpen();
+              // Cmd/Ctrl-click asks for the editor; a plain click opens the
+              // file in Ryco when it can.
+              if (event.metaKey || event.ctrlKey || !handleOpenInRyco()) handleOpen();
             }}
             onContextMenu={(event) => {
               // A fired long-press already presented the menu; swallow the
@@ -599,6 +631,8 @@ function areMarkdownFileLinkPropsEqual(
     previous.targetPath === next.targetPath &&
     previous.displayPath === next.displayPath &&
     previous.filePath === next.filePath &&
+    previous.workspacePath === next.workspacePath &&
+    previous.line === next.line &&
     previous.label === next.label &&
     previous.theme === next.theme &&
     previous.className === next.className
@@ -789,6 +823,8 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
             targetPath={fileLinkMeta.targetPath}
             displayPath={fileLinkMeta.displayPath}
             filePath={fileLinkMeta.filePath}
+            workspacePath={cwd ? resolveWorkspaceRelativePath(fileLinkMeta.filePath, cwd) : null}
+            line={fileLinkMeta.line}
             label={labelParts.join(" · ")}
             theme={resolvedTheme}
             className={props.className}

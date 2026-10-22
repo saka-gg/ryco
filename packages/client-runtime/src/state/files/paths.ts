@@ -44,6 +44,48 @@ export function normalizeWorkspaceRelativePath(value: string): string | null {
   return joined.length > WORKSPACE_FILE_PATH_MAX_LENGTH ? null : joined;
 }
 
+const WINDOWS_DRIVE_ROOT_PATTERN = /^([A-Za-z]:)\//;
+
+/** `/a/b/../c` → `/a/c`; null for relative, UNC or root-escaping paths. */
+function normalizeAbsolutePath(value: string): string | null {
+  const slashPath = value.replaceAll("\\", "/");
+  const drive = WINDOWS_DRIVE_ROOT_PATTERN.exec(slashPath)?.[1];
+  if ((!slashPath.startsWith("/") && drive === undefined) || slashPath.startsWith("//")) {
+    return null;
+  }
+  const segments: string[] = [];
+  for (const segment of slashPath.slice(drive ? drive.length + 1 : 1).split("/")) {
+    if (segment.length === 0 || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length === 0) return null;
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return `${drive ? `${drive}/` : "/"}${segments.join("/")}`;
+}
+
+/**
+ * A path (an agent's file link, a markdown image) as a path inside
+ * `workspaceRoot`, or null when it addresses anything outside it. Absolute
+ * paths must sit under the root (case-insensitively on a Windows drive);
+ * relative ones resolve against it and may not walk out of it.
+ */
+export function resolveWorkspaceRelativePath(path: string, workspaceRoot: string): string | null {
+  if (path.length === 0 || path.includes("\0")) return null;
+  const root = normalizeAbsolutePath(workspaceRoot);
+  if (!root) return null;
+  const isAbsolute = path.startsWith("/") || path.startsWith("\\") || isWindowsAbsolutePath(path);
+  const candidate = normalizeAbsolutePath(isAbsolute ? path : `${root}/${path}`);
+  if (!candidate) return null;
+  const caseInsensitive = WINDOWS_DRIVE_ROOT_PATTERN.test(root);
+  const prefix = root.endsWith("/") ? root : `${root}/`;
+  const comparable = (value: string) => (caseInsensitive ? value.toLowerCase() : value);
+  if (!comparable(candidate).startsWith(comparable(prefix))) return null;
+  return normalizeWorkspaceRelativePath(candidate.slice(prefix.length));
+}
+
 export function workspaceFileBasename(path: string): string {
   const segments = path.split("/").filter((segment) => segment.length > 0);
   return segments.at(-1) ?? path;
