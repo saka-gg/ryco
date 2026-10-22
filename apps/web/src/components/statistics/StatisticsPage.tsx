@@ -77,7 +77,9 @@ export function StatisticsPage({
             {search.view === "limits" ? (
               <>
                 <p className="text-xs font-medium">Live subscription quota</p>
-                <p className="text-[11px] text-muted-foreground">From CLIProxyAPI hubs</p>
+                <p className="text-[11px] text-muted-foreground">
+                  From providers and CLIProxyAPI hubs
+                </p>
               </>
             ) : (
               <>
