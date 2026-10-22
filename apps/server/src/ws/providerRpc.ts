@@ -1,11 +1,17 @@
 import { ProjectId, ServerSettingsError, KeybindingsConfigError } from "@ryco/contracts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
 import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
-import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import {
+  codexProcessEnvironment,
+  resolveCodexHomeLayout,
+} from "../provider/Drivers/CodexHomeLayout.ts";
 import * as NodePath from "node:path";
 import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
 import { makeAcpRegistryCatalog } from "../provider/acp/AcpRegistryCatalog.ts";
-import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
+import {
+  mergeProviderInstanceEnvironment,
+  normalizeProviderHomeEnvironment,
+} from "../provider/ProviderInstanceEnvironment.ts";
 import {
   readResourceTelemetryHistory,
   retryResourceTelemetry,
@@ -118,12 +124,16 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
           new CodexResetCreditError({ message: "Select an enabled Codex provider." }),
         );
       const codex = yield* Schema.decodeUnknownEffect(CodexSettings)(instance.config ?? {});
-      const layout = yield* resolveCodexHomeLayout(codex);
+      // The home layout and environment the instance's driver starts Codex with.
+      const environment = normalizeProviderHomeEnvironment(
+        mergeProviderInstanceEnvironment(instance.environment),
+      );
+      const layout = yield* resolveCodexHomeLayout(codex, environment);
       return {
         instanceId,
         binaryPath: codex.binaryPath,
         homePath: layout.effectiveHomePath ?? "",
-        environment: mergeProviderInstanceEnvironment(instance.environment),
+        environment: codexProcessEnvironment(layout, environment),
       };
     }).pipe(
       Effect.mapError(

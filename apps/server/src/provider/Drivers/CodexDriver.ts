@@ -52,6 +52,7 @@ import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   codexContinuationIdentity,
+  codexProcessEnvironment,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
@@ -177,6 +178,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         enabled,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
+      // Sessions, history reads, probes and text generation all start Codex with this.
+      const codexEnvironment = codexProcessEnvironment(homeLayout, processEnv);
       const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(
         makeCodexMaintenanceResolver(
           homeLayout.effectiveHomePath === undefined ? undefined : homeLayout.sharedHomePath,
@@ -216,7 +219,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: effectiveConfig.binaryPath,
         cwd: process.cwd(),
         ...(effectiveConfig.homePath ? { homePath: effectiveConfig.homePath } : {}),
-        environment: processEnv,
+        environment: codexEnvironment,
         binaryIdentity: probeFingerprint,
       });
 
@@ -228,12 +231,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // below.
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
-        environment: processEnv,
+        environment: codexEnvironment,
         storedThreadReader,
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, codexEnvironment);
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place
@@ -242,7 +245,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const checkProvider = checkCodexProviderStatus(
         effectiveConfig,
         undefined,
-        processEnv,
+        codexEnvironment,
         storedThreadReader,
       ).pipe(
         Effect.map(stampIdentity),

@@ -36,6 +36,7 @@ import { ServerConfig } from "../config.ts";
 import { runProcess } from "../processRunner.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
+  codexProcessEnvironment,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
   type CodexHomeLayout,
@@ -502,12 +503,7 @@ function buildServers(input: {
 }
 
 function runtimeEnvFor(workspace: WorkspaceRuntime): Record<string, string> {
-  return asSpawnEnv({
-    ...workspace.processEnv,
-    ...(workspace.layout.effectiveHomePath
-      ? { CODEX_HOME: workspace.layout.effectiveHomePath }
-      : {}),
-  });
+  return asSpawnEnv(codexProcessEnvironment(workspace.layout, workspace.processEnv));
 }
 
 function chooseWorkspaceRuntime(
