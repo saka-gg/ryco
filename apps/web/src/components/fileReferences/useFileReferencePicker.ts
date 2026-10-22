@@ -19,9 +19,11 @@ export interface FileReferencePick {
 
 /**
  * How "Add to chat" went: `invalid` when no reference could be made of the
- * lines (retrying cannot help), `refused` when the composer did not take it.
+ * lines and `full` when the message holds as many references as it carries
+ * (retrying cannot help either), `refused` when the composer cannot take it
+ * now.
  */
-export type FileReferenceAddResult = "added" | "refused" | "invalid";
+export type FileReferenceAddResult = "added" | "refused" | "full" | "invalid";
 
 export interface FileReferencePicker {
   /** A composer takes context for this thread: offer the gutter `+`. */
@@ -73,11 +75,12 @@ export function useFileReferencePicker(thread: ScopedThreadRef | null): FileRefe
     (reference: FileReference | null): FileReferenceAddResult => {
       if (!reference) return "invalid";
       if (environmentId === null || threadId === null) return "refused";
-      const delivered = composerContextIntake.deliver(
+      const delivery = composerContextIntake.deliver(
         { environmentId, threadId },
         { kind: "file-reference", reference },
       );
-      if (!delivered) return "refused";
+      if (delivery === "full") return "full";
+      if (delivery !== "added") return "refused";
       setState(null);
       return "added";
     },

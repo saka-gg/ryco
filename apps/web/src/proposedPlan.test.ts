@@ -1,3 +1,4 @@
+import { composeOutgoingPrompt, createFileReference } from "@ryco/client-runtime/state/composer";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -5,6 +6,7 @@ import {
   buildPlanImplementationThreadTitle,
   buildPlanImplementationPrompt,
   buildProposedPlanMarkdownFilename,
+  planFollowUpRefines,
   proposedPlanTitle,
   resolvePlanFollowUpSubmission,
   stripDisplayedPlanMarkdown,
@@ -86,6 +88,24 @@ describe("resolvePlanFollowUpSubmission", () => {
       text: "Refine step 2 first",
       interactionMode: "plan",
     });
+  });
+
+  it("refines with file references alone, sent as their block", () => {
+    const reference = createFileReference({
+      path: "src/app.ts",
+      lineStart: 12,
+      lineEnd: 12,
+      lines: ["retry();"],
+      comment: "This step misses the retry",
+    });
+    if (!reference) throw new Error("Expected a file reference.");
+    // The composer's label and the send agree: a chip alone refines.
+    expect(planFollowUpRefines({ draftText: " ", fileReferenceCount: 1 })).toBe(true);
+    expect(planFollowUpRefines({ draftText: " ", fileReferenceCount: 0 })).toBe(false);
+    const draftText = composeOutgoingPrompt({ prompt: "", fileReferences: [reference] });
+    expect(
+      resolvePlanFollowUpSubmission({ draftText, planMarkdown: "## Ship it\n\n- step 1\n" }),
+    ).toEqual({ text: draftText, interactionMode: "plan" });
   });
 });
 

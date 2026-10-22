@@ -24,7 +24,10 @@ vi.mock("../rpc/useComparison", () => ({
 }));
 import "../index.css";
 
-import type { ComposerContextItem } from "@ryco/client-runtime/state/composer";
+import type {
+  ComposerContextDelivery,
+  ComposerContextItem,
+} from "@ryco/client-runtime/state/composer";
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -213,7 +216,7 @@ describe("DiffPanel add to chat", () => {
     document.body.innerHTML = "";
   });
 
-  function listen(result = true) {
+  function listen(result: ComposerContextDelivery = "added") {
     const received: ComposerContextItem[] = [];
     releases.push(
       composerContextIntake.register(THREAD, (item) => {
@@ -271,7 +274,7 @@ describe("DiffPanel add to chat", () => {
   });
 
   it("keeps the pick open when the composer refuses, and Escape drops it", async () => {
-    const received = listen(false);
+    const received = listen("unavailable");
     const mounted = await render(<DiffPanel mode="inline" />);
 
     await page.getByRole("button", { name: "Mock gutter add" }).click();
@@ -286,6 +289,24 @@ describe("DiffPanel add to chat", () => {
 
     await userEvent.keyboard("{Escape}");
     await expect.element(note).not.toBeInTheDocument();
+    await mounted.unmount();
+  });
+
+  it("says when the message already holds as many references as it carries", async () => {
+    listen("full");
+    const mounted = await render(<DiffPanel mode="inline" />);
+
+    await page.getByRole("button", { name: "Mock gutter add" }).click();
+    const note = page.getByRole("textbox", { name: /Note on src\/app.ts/u });
+    await note.fill("One more");
+    await page.getByRole("button", { name: /Add to chat/u }).click();
+    await expect
+      .element(
+        page.getByText("This message already has 20 file references. Remove one to add more."),
+      )
+      .toBeInTheDocument();
+    // The note is kept for when a chip has been removed.
+    await expect.element(note).toHaveValue("One more");
     await mounted.unmount();
   });
 

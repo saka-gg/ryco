@@ -347,6 +347,18 @@ export function composerRefsHaveContent(refs: ComposerContentRefs): boolean {
 }
 
 /**
+ * Empties the live content refs as a send takes the draft. The composer
+ * mirrors them from the store only when it re-renders, and a failure before
+ * that must find them empty, or the rollback would leave the sent content out.
+ */
+export function clearComposerContentRefs(refs: ComposerContentRefs): void {
+  refs.promptRef.current = "";
+  refs.composerImagesRef.current = [];
+  refs.composerTerminalContextsRef.current = [];
+  refs.composerFileReferencesRef.current = [];
+}
+
+/**
  * Puts a prompt, its attachments, terminal contexts and file references back
  * into the composer and parks the cursor at the end. Shared by the send rollback and by editing a
  * queued message. Callers check `composerRefsHaveContent` first: this replaces
@@ -676,11 +688,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     // Queued snapshots and edits made during preparation belong to the next draft.
     if (consumeDraft) {
       composerCleared = true;
-      if (liveAtConsume) {
-        refs.promptRef.current = "";
-        // A failure before the composer re-renders must still find it empty and restore.
-        refs.composerFileReferencesRef.current = [];
-      }
+      if (liveAtConsume) clearComposerContentRefs(refs);
       draft.clearComposerDraftContent(draft.composerDraftTarget);
       draft.setComposerDraftTokenMode(draft.composerDraftTarget, settings.tokenMode);
       if (liveAtConsume) composerHandle.readComposer()?.resetCursorState();

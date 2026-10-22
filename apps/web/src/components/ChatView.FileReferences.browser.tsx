@@ -2,17 +2,30 @@ import {
   EnvironmentId,
   MessageId,
   ORCHESTRATION_WS_METHODS,
+  ProviderInstanceId,
+  type EnvironmentApi,
   type OrchestrationReadModel,
+  type TurnId,
 } from "@ryco/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import {
+  type ComposerContextDelivery,
   composeOutgoingPrompt,
   createFileReference,
   type FileReference,
 } from "@ryco/client-runtime/state/composer";
+import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { composerContextIntake } from "../composerContextIntake";
 import { useComposerDraftStore } from "../composerDraftStore";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+  readEnvironmentApi,
+} from "../environmentApi";
+import { useMessageQueueStore } from "../messageQueueStore";
+import { useUiStateStore } from "../uiStateStore";
 import { endWorkspaceFileDrag, startWorkspaceFileDrag } from "../workspaceFileDrag";
 import {
   DEFAULT_VIEWPORT,
@@ -20,10 +33,12 @@ import {
   THREAD_KEY,
   THREAD_REF,
   createSnapshotForTargetUser,
+  createSnapshotWithPlanFollowUpPrompt,
   createUserMessage,
   fixture,
   mountChatView,
   setupChatViewBrowserSuite,
+  waitForButtonByText,
   waitForComposerEditor,
   waitForComposerText,
   waitForLayout,
@@ -46,7 +61,7 @@ function lines(path: string, lineStart: number, comment?: string): FileReference
   return reference;
 }
 
-function deliver(reference: FileReference): boolean {
+function deliver(reference: FileReference): ComposerContextDelivery {
   return composerContextIntake.deliver(THREAD_REF, { kind: "file-reference", reference });
 }
 
@@ -98,6 +113,94 @@ function snapshotWithUserText(text: string): OrchestrationReadModel {
   };
 }
 
+type RecordedCommand = { readonly type: string } & Record<string, unknown>;
+
+const turnStarts = () =>
+  wsRequests.filter(
+    (request) =>
+      request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+      request.type === "thread.turn.start",
+  ) as unknown as ReadonlyArray<{
+    readonly interactionMode: string;
+    readonly message: { readonly text: string };
+  }>;
+
+const queued = () => useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? [];
+
+/** Types `text` next to the chips and presses Enter, the send shortcut. */
+async function sendWithEnter(text: string): Promise<void> {
+  useComposerDraftStore.getState().setPrompt(THREAD_REF, text);
+  await waitForComposerText(text);
+  const editor = await waitForComposerEditor();
+  editor.focus();
+  editor.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+  );
+}
+
+/** A thread whose turn runs, on a provider that takes steering, with commands recorded. */
+async function mountRunningThread(followUpBehavior: "queue" | "steer") {
+  localStorage.setItem(
+    "ryco:client-settings:v1",
+    JSON.stringify({ ...DEFAULT_CLIENT_SETTINGS, followUpBehavior }),
+  );
+  const base = createSnapshotForTargetUser({
+    targetMessageId: MessageId.make("msg-file-reference-running"),
+    targetText: "Existing turn",
+    sessionStatus: "running",
+  });
+  const snapshot: OrchestrationReadModel = {
+    ...base,
+    threads: base.threads.map((thread) => ({
+      ...thread,
+      session: {
+        ...thread.session!,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        activeTurnId: "file-reference-turn" as TurnId,
+      },
+    })),
+  };
+  const mounted = await mountChatView({
+    viewport: DEFAULT_VIEWPORT,
+    snapshot,
+    configureFixture: (value) => {
+      value.serverConfig = {
+        ...value.serverConfig,
+        providers: value.serverConfig.providers.map((provider) => ({
+          ...provider,
+          supportsTurnSteering: true,
+        })),
+      };
+    },
+  });
+  await waitForComposerEditor();
+  const commands: RecordedCommand[] = [];
+  const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+  const dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"] = async (command) => {
+    commands.push(command as unknown as RecordedCommand);
+    return { sequence: snapshot.snapshotSequence + 1 };
+  };
+  __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+    ...api,
+    orchestration: { ...api.orchestration, dispatchCommand },
+  });
+  await vi.waitFor(() => expect(composerContextIntake.canDeliver(THREAD_REF)).toBe(true));
+  return {
+    steers: () =>
+      commands.filter(
+        (command) => command.type === "thread.turn.steer",
+      ) as unknown as ReadonlyArray<{
+        readonly message: { readonly text: string };
+      }>,
+    cleanup: async () => {
+      useMessageQueueStore.getState().clear(THREAD_KEY);
+      __resetEnvironmentApiOverridesForTests();
+      localStorage.removeItem("ryco:client-settings:v1");
+      await mounted.cleanup();
+    },
+  };
+}
+
 function dragFileOnto(
   target: Element,
   type: "dragover" | "drop",
@@ -126,12 +229,12 @@ describe("ChatView file references", () => {
       // The mounted composer is what makes the panels offer "Add to chat".
       await vi.waitFor(() => expect(composerContextIntake.canDeliver(THREAD_REF)).toBe(true));
 
-      expect(deliver(lines("src/app.ts", 12, "Why twice?"))).toBe(true);
-      expect(deliver(lines("src/other.ts", 3))).toBe(true);
+      expect(deliver(lines("src/app.ts", 12, "Why twice?"))).toBe("added");
+      expect(deliver(lines("src/other.ts", 3))).toBe("added");
       await waitForChipLabels(["app.ts:12-13", "other.ts:3-4"]);
 
       // The same lines again replace the chip's note instead of adding a second chip.
-      expect(deliver(lines("src/app.ts", 12, "Still twice?"))).toBe(true);
+      expect(deliver(lines("src/app.ts", 12, "Still twice?"))).toBe("added");
       await waitForChipLabels(["app.ts:12-13", "other.ts:3-4"]);
       expect(draftReferences()[0]?.comment).toBe("Still twice?");
 
@@ -141,6 +244,16 @@ describe("ChatView file references", () => {
       expect(remove).not.toBeNull();
       remove!.click();
       await waitForChipLabels(["app.ts:12-13"]);
+
+      // A message carries 20 references; the 21st is refused as full, not as busy.
+      for (let index = 2; index <= 20; index++) {
+        expect(deliver(lines(`src/file-${index}.ts`, 1))).toBe("added");
+      }
+      expect(draftReferences()).toHaveLength(20);
+      expect(deliver(lines("src/one-more.ts", 1))).toBe("full");
+      // A repeat of lines already there still replaces its chip.
+      expect(deliver(lines("src/app.ts", 12, "Third look"))).toBe("added");
+      expect(draftReferences()).toHaveLength(20);
     } finally {
       await mounted.cleanup();
     }
@@ -160,17 +273,11 @@ describe("ChatView file references", () => {
           ? { sequence: fixture.snapshot.snapshotSequence + 1 }
           : undefined,
     });
-    const turnStarts = () =>
-      wsRequests.filter(
-        (request) =>
-          request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-          request.type === "thread.turn.start",
-      ) as unknown as ReadonlyArray<{ readonly message: { readonly text: string } }>;
     try {
       await waitForComposerEditor();
       await vi.waitFor(() => expect(composerContextIntake.canDeliver(THREAD_REF)).toBe(true));
       const reference = lines("src/app.ts", 12, "Why twice?");
-      expect(deliver(reference)).toBe(true);
+      expect(deliver(reference)).toBe("added");
       useComposerDraftStore.getState().setPrompt(THREAD_REF, "Explain this loop");
       await waitForComposerText("Explain this loop");
 
@@ -252,7 +359,7 @@ describe("ChatView file references", () => {
     try {
       await waitForComposerEditor();
       await vi.waitFor(() => expect(composerContextIntake.canDeliver(THREAD_REF)).toBe(true));
-      expect(deliver(lines("src/app.ts", 1))).toBe(true);
+      expect(deliver(lines("src/app.ts", 1))).toBe("added");
       await waitForChipLabels(["app.ts:1-2"]);
       const editor = await waitForComposerEditor();
       editor.focus();
@@ -267,6 +374,94 @@ describe("ChatView file references", () => {
       await waitForComposerText("");
     } finally {
       await mounted.cleanup();
+    }
+  });
+
+  it.each(["", "Refine with this"])(
+    "refines a proposed plan with the references (typed text: %j)",
+    async (typed) => {
+      useUiStateStore.getState().setAlwaysUseBuildMode(false);
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithPlanFollowUpPrompt(),
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      try {
+        await waitForButtonByText("Implement");
+        await vi.waitFor(() => expect(composerContextIntake.canDeliver(THREAD_REF)).toBe(true));
+        const reference = lines("src/app.ts", 12, "This step misses the retry");
+        expect(deliver(reference)).toBe("added");
+        await waitForChipLabels(["app.ts:12-13"]);
+        // Lines picked while reading the plan are feedback on it: a chip alone refines too.
+        await waitForButtonByText("Refine");
+
+        await sendWithEnter(typed);
+        await vi.waitFor(() => expect(turnStarts()).toHaveLength(1), {
+          timeout: 8_000,
+          interval: 16,
+        });
+        expect(turnStarts()[0]).toMatchObject({
+          interactionMode: "plan",
+          message: {
+            text: composeOutgoingPrompt({ prompt: typed, fileReferences: [reference] }),
+          },
+        });
+        await waitForChipLabels([]);
+      } finally {
+        await mounted.cleanup();
+      }
+    },
+  );
+
+  it("queues the references with a follow-up and puts them back when it is edited", async () => {
+    const harness = await mountRunningThread("queue");
+    try {
+      const reference = lines("src/app.ts", 12, "Why twice?");
+      expect(deliver(reference)).toBe("added");
+      await waitForChipLabels(["app.ts:12-13"]);
+
+      await sendWithEnter("After this turn");
+      await vi.waitFor(() => expect(queued()).toHaveLength(1), { timeout: 8_000, interval: 16 });
+      expect(queued()[0]!.composer.fileReferences).toEqual([
+        expect.objectContaining({ path: "src/app.ts", lineStart: 12, comment: "Why twice?" }),
+      ]);
+      await waitForChipLabels([]);
+      expect(draftReferences()).toEqual([]);
+
+      const edit = page.getByRole("button", { name: /^Edit queued message/ });
+      await expect.element(edit).toBeEnabled();
+      await edit.click();
+      await vi.waitFor(() => expect(queued()).toHaveLength(0));
+      await waitForComposerText("After this turn");
+      await waitForChipLabels(["app.ts:12-13"]);
+      expect(draftReferences()[0]?.comment).toBe("Why twice?");
+      expect(harness.steers()).toEqual([]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("steers the references into the running turn with the message", async () => {
+    const harness = await mountRunningThread("steer");
+    try {
+      const reference = lines("src/app.ts", 12, "Use this instead");
+      expect(deliver(reference)).toBe("added");
+      await waitForChipLabels(["app.ts:12-13"]);
+
+      await sendWithEnter("Steer to this");
+      await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      expect(harness.steers()[0]?.message.text).toBe(
+        composeOutgoingPrompt({ prompt: "Steer to this", fileReferences: [reference] }),
+      );
+      await waitForChipLabels([]);
+    } finally {
+      await harness.cleanup();
     }
   });
 

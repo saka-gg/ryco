@@ -9,10 +9,15 @@ import {
   type OrchestrationThreadActivity,
   type TurnId,
 } from "@ryco/contracts";
-import { APPROVAL_REDIRECT_MIN_VISIBLE_MS } from "@ryco/client-runtime/state/composer";
+import {
+  APPROVAL_REDIRECT_MIN_VISIBLE_MS,
+  composeOutgoingPrompt,
+  createFileReference,
+} from "@ryco/client-runtime/state/composer";
 import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { composerContextIntake } from "../composerContextIntake";
 import { useComposerDraftStore } from "../composerDraftStore";
 import {
   __resetEnvironmentApiOverridesForTests,
@@ -186,6 +191,20 @@ async function sendFromComposer(text: string, options: { readonly invert?: boole
 
 const queued = () => useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? [];
 const draftPrompt = () => useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt;
+const draftFileReferences = () =>
+  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.fileReferences ?? [];
+
+const reference = createFileReference({
+  path: "src/build.ts",
+  lineStart: 3,
+  lineEnd: 3,
+  lines: ["rmSync(out);"],
+  comment: "Keep the cache",
+});
+if (!reference) throw new Error("Expected a file reference.");
+/** Lines a Review or Files panel hands to the thread's composer. */
+const addFileReference = () =>
+  composerContextIntake.deliver(THREAD_REF, { kind: "file-reference", reference });
 
 describe("ChatView sending while an approval waits (full app)", () => {
   setupChatViewBrowserSuite();
@@ -325,6 +344,58 @@ describe("ChatView sending while an approval waits (full app)", () => {
       });
       expect(harness.steers()[0]).toMatchObject({ message: { text: "Second thought" } });
       expect(harness.declines()).toHaveLength(1);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("steers the file references in with the redirect", async () => {
+    const harness = await mountThreadWaitingOnApproval({});
+    try {
+      await vi.waitFor(() => expect(addFileReference()).toBe("added"));
+      await waitUntilApprovalReadable();
+      await sendFromComposer("Use the cache instead");
+      await vi.waitFor(() => expect(harness.declines()).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      harness.settleApproval();
+      await vi.waitFor(() => expect(harness.steers()).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      expect(harness.steers()[0]).toMatchObject({
+        message: {
+          text: composeOutgoingPrompt({
+            prompt: "Use the cache instead",
+            fileReferences: [reference],
+          }),
+        },
+      });
+      await vi.waitFor(() => expect(draftFileReferences()).toEqual([]));
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("does not send a draft that took a file reference while the decline settled", async () => {
+    const harness = await mountThreadWaitingOnApproval({});
+    try {
+      await waitUntilApprovalReadable();
+      await sendFromComposer("First thought");
+      await vi.waitFor(() => expect(harness.declines()).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      expect(addFileReference()).toBe("added");
+      harness.settleApproval();
+      await expect.element(page.getByText("Approval declined, message not sent")).toBeVisible();
+      expect(harness.steers()).toEqual([]);
+      expect(queued()).toEqual([]);
+      expect(draftPrompt()).toBe("First thought");
+      expect(draftFileReferences()).toEqual([
+        expect.objectContaining({ path: "src/build.ts", comment: "Keep the cache" }),
+      ]);
     } finally {
       await harness.cleanup();
     }

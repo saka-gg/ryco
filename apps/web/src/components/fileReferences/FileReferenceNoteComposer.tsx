@@ -1,4 +1,7 @@
-import { FILE_REFERENCE_COMMENT_MAX_LENGTH } from "@ryco/client-runtime/state/composer";
+import {
+  FILE_REFERENCE_COMMENT_MAX_LENGTH,
+  FILE_REFERENCE_PROMPT_MAX_COUNT,
+} from "@ryco/client-runtime/state/composer";
 import { useEffect, useRef, useState } from "react";
 
 import { KeyHint } from "../pullRequests/primitives";
@@ -8,6 +11,7 @@ import type { FileReferenceAddResult } from "./useFileReferencePicker";
 
 const ADD_ERRORS: Record<Exclude<FileReferenceAddResult, "added">, string> = {
   refused: "The chat can’t take these lines right now.",
+  full: `This message already has ${FILE_REFERENCE_PROMPT_MAX_COUNT} file references. Remove one to add more.`,
   invalid: "These lines can’t be sent to the chat.",
 };
 

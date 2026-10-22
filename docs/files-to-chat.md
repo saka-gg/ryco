@@ -8,8 +8,11 @@ nodes: the panel reads the file through the thread's own node, so no local
 editor is involved. An unsaved edit in the panel still asks before another file
 opens; cancelling stays on the current file and drops the link. The mark stays
 while the file is open and is gone once you open another one. A link to a folder
-shows that folder in the Files tree. In split panes a link opens in the Files
-panel of its own pane's thread.
+shows that folder in the Files tree. A linked file opens even when the tree does
+not list it (inside `node_modules` or another ignored folder, gitignored, or past
+the listing's cap in a large repository); only a read that finds no such file
+takes the panel back to the tree. In split panes a link opens in the Files panel of its own
+pane's thread.
 
 **Cmd/Ctrl-click** opens the file in your editor instead. The link's context menu
 (right-click) offers **Open in Ryco**, **Open in editor**, **Copy relative path**
@@ -35,14 +38,18 @@ becomes a range of the new version.
 The lines wait in the composer as chips above the prompt (`app.ts:12-18`); the
 tooltip shows the file, the note and the start of the excerpt, and **×** removes
 one. Adding the same lines again replaces the chip's excerpt and note instead of
-adding a second chip. A message carries up to 20 references; past that, and while
-the composer cannot take input (a question waits, or the connection is down), the
-note row says the chat can't take the lines and keeps the note. The chips belong
+adding a second chip. A message carries up to 20 references: past that, the note
+row says the message is full and asks you to remove one first. While the composer
+cannot take input (a question waits, or the connection is down), it says the chat
+can't take the lines right now. Either way the note is kept. The chips belong
 to the draft: they survive switching threads and reloading, go out with the next
 send, and come back if that send fails. A queued message keeps them too, and
-editing it puts them back. ArrowUp recall only brings back what you typed, and it
+editing it puts them back; a steered message and a redirect past a waiting
+approval carry them as well. ArrowUp recall only brings back what you typed, and it
 does not step while chips are in the composer. A send of references alone is
-fine; its title names the first file.
+fine; its title names the first file. On a proposed plan, chips are feedback on
+it: with or without typed text the send refines the plan (the button reads
+**Refine**) rather than implementing it.
 
 ## Dragging files into the composer
 

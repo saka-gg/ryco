@@ -151,7 +151,7 @@ import { workspaceFileDropLabel } from "../../workspaceFileDrag";
 import { composerContextIntake } from "../../composerContextIntake";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { cn, randomUUID } from "~/lib/utils";
-import { proposedPlanTitle } from "../../proposedPlan";
+import { planFollowUpRefines, proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle, getProviderSupportsAskMode } from "../../providerModels";
 import {
   deriveProviderInstanceEntries,
@@ -1263,6 +1263,11 @@ export const ChatComposer = memo(
         (isConnecting || (environmentUnavailable !== null && activePendingProgress === null)));
 
     const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
+    // Refine or Implement: file references refine the plan as typed text does.
+    const planFollowUpHasRefinement = planFollowUpRefines({
+      draftText: prompt,
+      fileReferenceCount: composerFileReferences.length,
+    });
     const showPlanSidebarToggle = false;
     const composerFooterActionLayoutKey = useMemo(
       () =>
@@ -1271,7 +1276,7 @@ export const ChatComposer = memo(
           pendingIsResponding: activePendingIsResponding,
           phase,
           showPlanFollowUpPrompt,
-          promptHasText: prompt.trim().length > 0,
+          promptHasText: planFollowUpHasRefinement,
           hasSendableContent: composerHasSendableContent,
           isSendBusy,
           isConnecting,
@@ -1285,7 +1290,7 @@ export const ChatComposer = memo(
         isPreparingWorktree,
         isSendBusy,
         phase,
-        prompt,
+        planFollowUpHasRefinement,
         showPlanFollowUpPrompt,
       ],
     );
@@ -2328,15 +2333,16 @@ export const ChatComposer = memo(
         scopeThreadRef(environmentId, activeThreadId),
         (item) => {
           const intake = fileReferenceIntakeRef.current;
-          if (item.kind !== "file-reference" || !intake.accepts) return false;
+          if (item.kind !== "file-reference" || !intake.accepts) return "unavailable";
           const outcome = useComposerDraftStore.getState().addFileReference(intake.target, {
             ...item.reference,
             id: randomUUID(),
             createdAt: new Date().toISOString(),
           });
-          if (outcome !== "added" && outcome !== "updated") return false;
+          if (outcome === "full") return "full";
+          if (outcome !== "added" && outcome !== "updated") return "unavailable";
           intake.focus();
-          return true;
+          return "added";
         },
       );
     }, [activeThreadId, environmentId]);
@@ -3390,7 +3396,7 @@ export const ChatComposer = memo(
                 pendingAction={pendingPrimaryAction}
                 isRunning={phase === "running" || isWorktreeSetupRunning}
                 showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
-                promptHasText={prompt.trim().length > 0}
+                promptHasText={planFollowUpHasRefinement}
                 isSendBusy={isSendBusy}
                 isConnecting={isConnecting}
                 isEnvironmentUnavailable={environmentUnavailable !== null}

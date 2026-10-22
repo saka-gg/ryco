@@ -10,10 +10,16 @@ export type ComposerContextItem = {
 };
 
 /**
- * A mounted composer taking an item. Returns false when it cannot take it now
- * (read-only, full, mid-send); the caller then tells the user.
+ * What became of an item handed to a composer: `added` (a repeat that
+ * replaced an earlier one included), `full` when the draft holds as many as a
+ * message carries (retrying cannot help until one is removed), or
+ * `unavailable` when no composer could take it now (none listens, read-only,
+ * a question waits). The caller tells the user which.
  */
-export type ComposerContextReceiver = (item: ComposerContextItem) => boolean;
+export type ComposerContextDelivery = "added" | "full" | "unavailable";
+
+/** A mounted composer taking an item. */
+export type ComposerContextReceiver = (item: ComposerContextItem) => ComposerContextDelivery;
 
 export interface ComposerContextIntake {
   /**
@@ -30,8 +36,8 @@ export interface ComposerContextIntake {
   register(thread: ScopedThreadRef, receiver: ComposerContextReceiver): () => void;
   /** Whether a composer is listening for `thread`, so offering "Add to chat" can work. */
   canDeliver(thread: ScopedThreadRef): boolean;
-  /** Hands `item` to `thread`'s composer; false when none took it. */
-  deliver(thread: ScopedThreadRef, item: ComposerContextItem): boolean;
+  /** Hands `item` to `thread`'s composer; `unavailable` when none listens. */
+  deliver(thread: ScopedThreadRef, item: ComposerContextItem): ComposerContextDelivery;
   /** Runs `listener` whenever a composer registers or releases. */
   subscribe(listener: () => void): () => void;
 }
@@ -70,7 +76,7 @@ export function createComposerContextIntake(): ComposerContextIntake {
     canDeliver: (thread) => current(thread) !== undefined,
     deliver(thread, item) {
       const receiver = current(thread);
-      return receiver ? receiver(item) : false;
+      return receiver ? receiver(item) : "unavailable";
     },
     subscribe(listener) {
       listeners.add(listener);
