@@ -183,7 +183,7 @@ describe("useCrownAlerts", () => {
     expect(hook.result.current.pings.checks.n).toBe(2);
   });
 
-  it("pings branch and ship for branch events", async () => {
+  it("pings Ship for branch events", async () => {
     const { hook, update } = await setup();
     await update({
       snapshot: makeSnapshot({
@@ -191,7 +191,6 @@ describe("useCrownAlerts", () => {
         branch: { refName: "feature/crown", ahead: 2, behind: 0 },
       }),
     });
-    expect(hook.result.current.pings.branch.n).toBe(1);
     expect(hook.result.current.pings.ship.n).toBe(1);
     expect(hook.result.current.current?.title).toBe("2 new commits");
   });

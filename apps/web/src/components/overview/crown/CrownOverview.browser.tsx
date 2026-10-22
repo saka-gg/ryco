@@ -286,15 +286,7 @@ describe("CrownOverview", () => {
 
   it("renders the rail icons in order and hides the git group outside a repository", async () => {
     const crown = await mountCrown();
-    expect(railKeys(crown.rail())).toEqual([
-      "branch",
-      "changes",
-      "checks",
-      "plan",
-      "agents",
-      "pr",
-      "ship",
-    ]);
+    expect(railKeys(crown.rail())).toEqual(["changes", "checks", "plan", "agents", "pr", "ship"]);
     expect(crown.rail().querySelectorAll(".crown-rail-sep")).toHaveLength(1);
     await expect
       .element(page.getByRole("navigation", { name: "Overview", exact: true }))
@@ -308,7 +300,7 @@ describe("CrownOverview", () => {
   it("hides Plan until the thread has one and keeps Pull request without one", async () => {
     const crown = await mountCrown();
     await crown.update({ activePlan: null, activeProposedPlan: null, pullRequest: null });
-    expect(railKeys(crown.rail())).toEqual(["branch", "changes", "checks", "agents", "pr", "ship"]);
+    expect(railKeys(crown.rail())).toEqual(["changes", "checks", "agents", "pr", "ship"]);
 
     // Outside a repository the plan-less fallback headline opens the first shown section.
     await crown.update({ isGitRepo: false });
@@ -343,9 +335,9 @@ describe("CrownOverview", () => {
     expect(performance.now() - leftAt).toBeGreaterThanOrEqual(CROWN_FLYOUT_CLOSE_DELAY_MS - 40);
   });
 
-  it("labels the flyout as a preview and shows the branch read-only", async () => {
+  it("labels the flyout as a preview and shows the branch read-only without a Ship binding", async () => {
     const crown = await mountCrown();
-    await page.getByRole("button", { name: "Branch", exact: true }).hover();
+    await page.getByRole("button", { name: "Ship", exact: true }).hover();
     await expect.poll(() => crown.flyout().dataset.open).toBe("true");
 
     expect(crown.flyout().hasAttribute("aria-hidden")).toBe(false);
@@ -353,7 +345,7 @@ describe("CrownOverview", () => {
     await expect.element(page.getByRole("group", { name: "Branch preview" })).toBeVisible();
     // The stateful picker (here the portal probe) only mounts in the card.
     expect(document.querySelector('[data-testid="portal-probe"]')).toBeNull();
-    expect(crown.flyout().textContent).toContain("Click to commit or push");
+    expect(crown.flyout().textContent).toContain("Click to open the branch");
 
     await page.getByRole("button", { name: "Outside" }).hover();
     await expect.poll(() => crown.flyout().dataset.open).toBeUndefined();
@@ -370,7 +362,7 @@ describe("CrownOverview", () => {
       crownProps({ changes: { ...crownLayoutFixture().changes!, files } }),
       { headerClearancePx: 52 },
     );
-    await page.getByRole("button", { name: "Push", exact: true }).hover();
+    await page.getByRole("button", { name: "Ship", exact: true }).hover();
     await page.getByRole("button", { name: "Changes", exact: true }).hover();
     await expect.poll(() => crown.flyout().dataset.open).toBe("true");
     await expect
@@ -407,7 +399,8 @@ describe("CrownOverview", () => {
       "Running, 1 of 3 passed",
     );
     expect(crown.railButton("changes").getAttribute("aria-description")).toBe("4 files changed");
-    expect(crown.railButton("ship").getAttribute("aria-description")).toBe("2 commits to push");
+    // Without a Ship binding the button only opens the branch card.
+    expect(crown.railButton("ship").getAttribute("aria-description")).toBe("Nothing to ship");
     // Four workflow members and two direct agents; the coordinator is not one of them.
     expect(crown.railButton("agents").getAttribute("aria-description")).toBe(
       "6 subagents, 2 active",
@@ -494,7 +487,7 @@ describe("CrownOverview", () => {
     await expect.poll(() => crown.island().dataset.mode).toBe("dot");
 
     // A press inside a popup portaled out of the card still counts as inside.
-    await openOn("Branch");
+    await openOn("Ship");
     await page.getByTestId("portal-probe").click();
     expect(crown.island().dataset.mode).toBe("card");
 

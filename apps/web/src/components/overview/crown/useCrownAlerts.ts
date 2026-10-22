@@ -177,10 +177,7 @@ export function useCrownAlerts(input: {
     setPings((current) => {
       const bumped = { ...current };
       for (const event of events) {
-        // Branch events also light the Push icon, as in the prototype's syncRailIcons.
-        const keys: CrownRailKey[] =
-          event.kind === "branch" ? [event.railKey, "ship"] : [event.railKey];
-        for (const key of keys) bumped[key] = { n: bumped[key].n + 1, tone: event.tone };
+        bumped[event.railKey] = { n: bumped[event.railKey].n + 1, tone: event.tone };
       }
       return bumped;
     });

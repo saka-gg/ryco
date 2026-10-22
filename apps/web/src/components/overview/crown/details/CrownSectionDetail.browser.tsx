@@ -3,24 +3,14 @@ import "../../../../index.css";
 import "../../overview.css";
 
 import { EnvironmentId, WorktreeId } from "@ryco/contracts";
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import { Button } from "~/components/ui/button";
-import {
-  Dialog,
-  DialogFooter,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "~/components/ui/dialog";
-import { Input } from "~/components/ui/input";
 import { PaneFocusContext } from "../../../chat/PaneFocus";
 import { CROWN_FLYOUT_CLOSE_DELAY_MS, CROWN_FLYOUT_WIDTH_PX } from "../crownLayout";
-import type { CrownOverviewProps, CrownSectionDetailProps } from "../crownTypes";
+import type { CrownOverviewProps, CrownSectionDetailProps, CrownShipBinding } from "../crownTypes";
 import { CrownOverview } from "../CrownOverview";
 import { CrownSectionDetail } from "./CrownSectionDetail";
 import {
@@ -458,37 +448,36 @@ describe("CrownSectionDetail interactions", () => {
   });
 });
 
-/**
- * Stands in for the Branch preview's git action buttons: a button opening a
- * portaled modal dialog with a text field, like the commit dialog.
- */
-function QuickActionsDialogProbe() {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button type="button" onClick={() => setOpen(true)}>
-        Commit 3 files
-      </button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogPopup>
-          <DialogHeader>
-            <DialogTitle>Commit changes</DialogTitle>
-          </DialogHeader>
-          <DialogPanel>
-            <Input aria-label="Commit message" />
-          </DialogPanel>
-          <DialogFooter>
-            <Button size="sm" onClick={() => setOpen(false)}>
-              Commit
-            </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
-    </>
-  );
+/** A Ship binding whose calls the tests can read, with plan and run state to set. */
+function makeShip(overrides: Partial<CrownShipBinding> = {}): CrownShipBinding & {
+  readonly calls: { ship: number; messages: string[] };
+} {
+  const calls = { ship: 0, messages: [] as string[] };
+  return {
+    steps: ["commit", "push", "pr"],
+    label: "Commit, push & create PR",
+    disabledReason: null,
+    changeRequestLabel: "PR",
+    phase: "idle",
+    runSteps: [],
+    activeStep: null,
+    stepDetails: { pull: "2 incoming", commit: "3 files", push: "to origin", pr: "for review" },
+    ship: () => {
+      calls.ship += 1;
+    },
+    commitMessage: "",
+    setCommitMessage: (message) => {
+      calls.messages.push(message);
+    },
+    commitOnly: null,
+    pull: null,
+    openPullRequest: null,
+    ...overrides,
+    calls,
+  };
 }
 
-describe("Crown branch preview actions", () => {
+describe("Crown Ship button", () => {
   const mounts: Array<{ unmount: () => Promise<void> | void; host: HTMLElement }> = [];
 
   afterEach(async () => {
@@ -498,7 +487,7 @@ describe("Crown branch preview actions", () => {
     }
   });
 
-  async function mountCrown() {
+  async function mountCrown(ship: CrownShipBinding) {
     await page.viewport(1200, 800);
     const host = document.createElement("div");
     host.style.position = "relative";
@@ -512,7 +501,7 @@ describe("Crown branch preview actions", () => {
     outside.style.top = "400px";
     document.body.append(host, outside);
     const props: CrownOverviewProps = {
-      ...crownLayoutFixture({ sourceControlQuickActions: <QuickActionsDialogProbe /> }),
+      ...crownLayoutFixture(),
       threadTitle: "Overview rail",
       readiness: { remoteStatus: true, pullRequestLookup: true },
       isGitRepo: true,
@@ -521,6 +510,7 @@ describe("Crown branch preview actions", () => {
       agentRunning: false,
       scopeKey: "thread-1|/repo",
       userGitActionActive: false,
+      ship,
     };
     const screen = await render(
       <PaneFocusContext value={true}>
@@ -529,53 +519,106 @@ describe("Crown branch preview actions", () => {
       { container: host },
     );
     mounts.push({ unmount: () => screen.unmount(), host }, { unmount: () => {}, host: outside });
-    return { flyout: () => host.querySelector<HTMLElement>('[data-slot="crown-flyout"]')! };
+    return {
+      root: () => host.querySelector<HTMLElement>('[data-slot="crown-overview"]')!,
+      flyout: () => host.querySelector<HTMLElement>('[data-slot="crown-flyout"]')!,
+      rerender: (next: CrownShipBinding) =>
+        screen.rerender(
+          <PaneFocusContext value={true}>
+            <CrownOverview {...props} ship={next} />
+          </PaneFocusContext>,
+        ),
+    };
   }
 
   const pastCloseDelay = () =>
     new Promise((resolve) => setTimeout(resolve, CROWN_FLYOUT_CLOSE_DELAY_MS + 120));
 
-  it("shows the buttons in the Branch preview and holds it open while their dialog is up", async () => {
-    const crown = await mountCrown();
-    await page.getByRole("button", { name: "Branch", exact: true }).hover();
-    await expect.poll(() => crown.flyout().dataset.open).toBe("true");
-    expect(crown.flyout().textContent).not.toContain("Click to commit or push");
+  it("replaces the Branch and Push icons with one Ship button", async () => {
+    await mountCrown(makeShip());
+    await expect.element(page.getByRole("button", { name: "Ship", exact: true })).toBeVisible();
+    expect(document.querySelector('[data-slot="crown-rail"] [data-nav-key="branch"]')).toBeNull();
+    const ship = document.querySelector<HTMLElement>(
+      '[data-slot="crown-rail"] [data-nav-key="ship"]',
+    )!;
+    expect(ship.getAttribute("aria-description")).toBe("Commit, push & create PR");
+    expect(ship.dataset.ready).toBe("true");
+    expect(ship.textContent).toContain("3");
+  });
 
-    await page.getByRole("button", { name: "Commit 3 files" }).click();
-    const dialog = page.getByRole("dialog", { name: "Commit changes" });
-    await expect.element(dialog).toBeVisible();
-    // Portaled out of the crown, yet the flyout (and the control owning the dialog) stays.
-    expect(crown.flyout().contains(dialog.element())).toBe(false);
-    await page.getByRole("textbox", { name: "Commit message" }).click();
-    await userEvent.keyboard("wip");
-    await page.getByRole("heading", { name: "Commit changes" }).hover();
+  it("previews what one click runs, and ships on click without opening the card", async () => {
+    const binding = makeShip();
+    const crown = await mountCrown(binding);
+    await page.getByRole("button", { name: "Ship", exact: true }).hover();
+    await expect.poll(() => crown.flyout().dataset.open).toBe("true");
+    const preview = crown.flyout();
+    expect(preview.getAttribute("aria-label")).toBe("Ship preview");
+    expect(
+      [...preview.querySelectorAll('[data-slot="crown-ship-step"]')].map((row) => row.textContent),
+    ).toEqual(["Commit3 files", "Pushto origin", "Create PRfor review"]);
+    expect(preview.textContent).toContain("Commit message is written for you");
+    expect(preview.textContent).toContain("Click the rocket to ship");
+
+    await page.getByRole("button", { name: "Ship", exact: true }).click();
+    expect(binding.calls.ship).toBe(1);
+    expect(crown.root().dataset.mode).not.toBe("card");
+  });
+
+  it("opens the branch card when there is nothing to ship", async () => {
+    const binding = makeShip({ steps: [], label: "Nothing to ship", disabledReason: "Up to date" });
+    const crown = await mountCrown(binding);
+    const ship = document.querySelector<HTMLElement>(
+      '[data-slot="crown-rail"] [data-nav-key="ship"]',
+    )!;
+    expect(ship.dataset.ready).toBeUndefined();
+    await page.getByRole("button", { name: "Ship", exact: true }).click();
+    expect(binding.calls.ship).toBe(0);
+    await expect.poll(() => crown.root().dataset.mode).toBe("card");
+    expect(crown.root().querySelector(".crown-card-title")?.textContent).toBe("Branch");
+  });
+
+  it("shows the run's progress in the preview and on the icon", async () => {
+    const crown = await mountCrown(makeShip());
+    await page.getByRole("button", { name: "Ship", exact: true }).hover();
+    await expect.poll(() => crown.flyout().dataset.open).toBe("true");
+    await crown.rerender(
+      makeShip({ phase: "running", runSteps: ["commit", "push", "pr"], activeStep: "push" }),
+    );
+    await expect
+      .poll(() =>
+        [...crown.flyout().querySelectorAll<HTMLElement>('[data-slot="crown-ship-step"]')].map(
+          (row) => row.dataset.state,
+        ),
+      )
+      .toEqual(["done", "now", "todo"]);
+    expect(crown.flyout().querySelector('[data-slot="crown-ship-hint"]')).toBeNull();
+    const icon = document.querySelector<HTMLElement>(
+      '[data-slot="crown-rail"] [data-nav-key="ship"]',
+    )!;
+    expect(icon.dataset.phase).toBe("running");
+    expect(
+      [...icon.querySelectorAll(".crown-ring-seg")].map((segment) =>
+        segment.getAttribute("data-s"),
+      ),
+    ).toEqual(["pass", "current", "queued"]);
+  });
+
+  it("holds the preview open while the commit message is edited", async () => {
+    const binding = makeShip();
+    const crown = await mountCrown(binding);
+    await page.getByRole("button", { name: "Ship", exact: true }).hover();
+    await expect.poll(() => crown.flyout().dataset.open).toBe("true");
+    await page.getByRole("button", { name: "Edit" }).click();
+    const field = page.getByRole("textbox", { name: "Commit message" });
+    await expect.element(field).toHaveFocus();
+    await userEvent.keyboard("w");
+    expect(binding.calls.messages).toEqual(["w"]);
+    await page.getByRole("button", { name: "Outside" }).hover();
     await pastCloseDelay();
     expect(crown.flyout().dataset.open).toBe("true");
 
-    // Escape closes only the dialog.
-    await userEvent.keyboard("{Escape}");
-    await expect.element(dialog).not.toBeInTheDocument();
-    expect(crown.flyout().dataset.open).toBe("true");
-
-    // Reopen, close from a button, then leave: the preview closes as usual.
-    await page.getByRole("button", { name: "Commit 3 files" }).click();
-    await expect.element(dialog).toBeVisible();
-    await page.getByRole("button", { name: "Commit", exact: true }).click();
-    await expect.element(dialog).not.toBeInTheDocument();
-    expect(crown.flyout().dataset.open).toBe("true");
-    await page.getByRole("button", { name: "Outside" }).hover();
-    await expect.poll(() => crown.flyout().dataset.open).toBeUndefined();
-  });
-
-  it("closes the preview when the pointer rests outside after a dialog closes", async () => {
-    const crown = await mountCrown();
-    await page.getByRole("button", { name: "Branch", exact: true }).hover();
-    await expect.poll(() => crown.flyout().dataset.open).toBe("true");
-    await page.getByRole("button", { name: "Commit 3 files" }).click();
-    // Close from a button far from the flyout, so the pointer ends up outside it.
-    await page.getByRole("button", { name: "Commit", exact: true }).click();
-    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-    await page.getByRole("button", { name: "Outside" }).hover();
-    await expect.poll(() => crown.flyout().dataset.open).toBeUndefined();
+    // Enter in the field ships, like the rail button.
+    await userEvent.keyboard("{Enter}");
+    expect(binding.calls.ship).toBe(1);
   });
 });

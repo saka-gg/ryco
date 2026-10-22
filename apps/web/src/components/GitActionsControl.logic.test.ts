@@ -11,7 +11,7 @@ import {
   resolveLiveThreadBranchUpdate,
   resolvePullAvailability,
   resolveQuickAction,
-  resolveRecommendedGitActionTile,
+  resolveShipPlan,
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
 
@@ -1264,43 +1264,6 @@ describe("resolveAutoFeatureBranchName", () => {
   });
 });
 
-describe("resolveRecommendedGitActionTile", () => {
-  const resolve = (overrides: Partial<VcsStatusResult>, isDefaultRef = false, hasRemote = true) => {
-    const gitStatus = status(overrides);
-    return resolveRecommendedGitActionTile(
-      resolveQuickAction(gitStatus, false, isDefaultRef, hasRemote),
-      gitStatus.hasWorkingTreeChanges,
-    );
-  };
-
-  it("points a commit-including quick action at Commit while there are changes", () => {
-    assert.equal(resolve({ hasWorkingTreeChanges: true }), "commit");
-    assert.equal(resolve({ hasWorkingTreeChanges: true }, true), "commit");
-    assert.equal(
-      resolve({ hasWorkingTreeChanges: true, hasUpstream: false }, false, false),
-      "commit",
-    );
-  });
-
-  it("points pushes at Push, including a clean default ref's commit_push", () => {
-    assert.equal(resolve({ aheadCount: 2 }, true), "push");
-    assert.equal(resolve({ aheadCount: 2, pr: { ...openPrStatus(), state: "open" } }), "push");
-  });
-
-  it("points create, view, pull and publish at their buttons", () => {
-    assert.equal(resolve({ aheadCount: 2 }), "pr");
-    assert.equal(resolve({ pr: openPrStatus() }), "pr");
-    assert.equal(resolve({ behindCount: 1 }), "pull");
-    assert.equal(resolve({ hasUpstream: false }, false, false), "push");
-  });
-
-  it("recommends nothing for a hint", () => {
-    assert.equal(resolve({}), null);
-    assert.equal(resolve({ aheadCount: 1, behindCount: 1 }), null);
-    assert.equal(resolveRecommendedGitActionTile(resolveQuickAction(status(), true), false), null);
-  });
-});
-
 describe("resolvePullAvailability", () => {
   it("blocks Pull while busy or before status loads", () => {
     assert.deepStrictEqual(resolvePullAvailability(status({ behindCount: 1 }), true), {
@@ -1346,3 +1309,76 @@ function openPrStatus(): NonNullable<VcsStatusResult["pr"]> {
     state: "open",
   };
 }
+
+describe("resolveShipPlan", () => {
+  it("commits, pushes and opens a PR for local changes on a feature branch", () => {
+    const plan = resolveShipPlan(status({ hasWorkingTreeChanges: true }), false);
+    assert.deepEqual(plan.steps, ["commit", "push", "pr"]);
+    assert.equal(plan.action, "commit_push_pr");
+    assert.equal(plan.label, "Commit, push & create PR");
+    assert.isNull(plan.disabledReason);
+  });
+
+  it("pulls first when the branch is behind, then runs the rest", () => {
+    const plan = resolveShipPlan(status({ hasWorkingTreeChanges: true, behindCount: 2 }), false);
+    assert.deepEqual(plan.steps, ["pull", "commit", "push", "pr"]);
+    assert.equal(plan.action, "commit_push_pr");
+    assert.equal(plan.label, "Pull, commit, push & create PR");
+  });
+
+  it("only pulls when a clean branch is behind", () => {
+    const plan = resolveShipPlan(status({ behindCount: 3 }), false);
+    assert.deepEqual(plan.steps, ["pull"]);
+    assert.isNull(plan.action);
+    assert.equal(plan.label, "Pull");
+  });
+
+  it("commits and pushes when a PR is already open", () => {
+    const plan = resolveShipPlan(
+      status({ hasWorkingTreeChanges: true, pr: openPrStatus() }),
+      false,
+    );
+    assert.deepEqual(plan.steps, ["commit", "push"]);
+    assert.equal(plan.action, "commit_push");
+  });
+
+  it("pushes and opens a PR for a branch that was never pushed", () => {
+    const plan = resolveShipPlan(status({ hasUpstream: false, aheadCount: 2 }), false);
+    assert.deepEqual(plan.steps, ["push", "pr"]);
+    assert.equal(plan.action, "create_pr");
+    assert.equal(plan.label, "Push & create PR");
+  });
+
+  it("opens the PR when everything is already shipped", () => {
+    const plan = resolveShipPlan(status({ pr: openPrStatus() }), false);
+    assert.deepEqual(plan.steps, []);
+    assert.isTrue(plan.opensPullRequest);
+    assert.isNull(plan.disabledReason);
+  });
+
+  it("cannot ship a diverged branch", () => {
+    const plan = resolveShipPlan(status({ aheadCount: 1, behindCount: 2 }), false);
+    assert.deepEqual(plan.steps, []);
+    assert.include(plan.disabledReason ?? "", "diverged");
+  });
+
+  it("is blocked while another git action runs and when the branch is up to date", () => {
+    assert.equal(resolveShipPlan(status({ hasWorkingTreeChanges: true }), true).steps.length, 0);
+    assert.isString(resolveShipPlan(status({ hasWorkingTreeChanges: true }), true).disabledReason);
+    const idle = resolveShipPlan(status(), false);
+    assert.deepEqual(idle.steps, []);
+    assert.isFalse(idle.opensPullRequest);
+    assert.isString(idle.disabledReason);
+  });
+
+  it("only commits when there is no remote to push to", () => {
+    const plan = resolveShipPlan(
+      status({ hasWorkingTreeChanges: true, hasUpstream: false, hasPrimaryRemote: false }),
+      false,
+      false,
+      false,
+    );
+    assert.deepEqual(plan.steps, ["commit"]);
+    assert.equal(plan.action, "commit");
+  });
+});

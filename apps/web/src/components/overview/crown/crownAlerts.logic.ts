@@ -354,7 +354,7 @@ const GIT_NOTICE_PLACEMENT: Record<
   GitActionNotice["kind"],
   Pick<CrownEvent, "section" | "railKey" | "icon">
 > = {
-  pull: { section: "branch", railKey: "branch", icon: "pull" },
+  pull: { section: "branch", railKey: "ship", icon: "pull" },
   commit: { section: "branch", railKey: "ship", icon: "commit" },
   push: { section: "branch", railKey: "ship", icon: "upload" },
   pr: { section: "pr", railKey: "pr", icon: "pr" },
@@ -370,7 +370,14 @@ export function gitNoticeEvent(notice: GitActionNotice): CrownEvent {
     id: key,
     ...GIT_NOTICE_PLACEMENT[notice.kind],
     kind: "git",
-    tone: notice.status === "error" ? "danger" : notice.status === "success" ? "success" : "info",
+    tone:
+      notice.status === "error"
+        ? "danger"
+        : notice.status === "success"
+          ? "success"
+          : notice.status === "cancelled"
+            ? "neutral"
+            : "info",
     title: notice.title,
     ...(notice.description ? { sub: notice.description } : {}),
     loud: true,
@@ -550,7 +557,7 @@ function diffBranch(prev: CrownSnapshot, next: CrownSnapshot): EventDraft[] {
   if (!after.refName || before.refName !== after.refName) return [];
   if (before.ahead === null || before.behind === null) return [];
   if (after.ahead === null || after.behind === null) return [];
-  const base = { section: "branch", railKey: "branch", kind: "branch" } as const;
+  const base = { section: "branch", railKey: "ship", kind: "branch" } as const;
   // Ahead counts repeat (commit 1, push, commit 1 again); the turn tells repeats apart.
   const scope = `branch:${after.refName}:${next.turn?.turnId ?? ""}`;
   if (after.ahead > before.ahead) {

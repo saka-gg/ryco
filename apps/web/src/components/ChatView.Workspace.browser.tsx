@@ -68,14 +68,23 @@ async function openCrownBranchSection(): Promise<HTMLElement> {
     "Unable to find the overview toggle.",
   );
   overviewToggle.click();
-  const branchIcon = await waitForElement(
+  // The rail's Ship icon ships in one click; the branch card opens from the spine.
+  const changesIcon = await waitForElement(
     () =>
       document.querySelector<HTMLElement>(
-        '[data-slot="crown-overview"][data-state="open"] [data-slot="crown-rail"] [data-nav-key="branch"]',
+        '[data-slot="crown-overview"][data-state="open"] [data-slot="crown-rail"] [data-nav-key="changes"]',
       ),
-    "Unable to find the Crown rail's Branch icon.",
+    "Unable to find the Crown rail's Changes icon.",
   );
-  branchIcon.click();
+  changesIcon.click();
+  const shipSpineIcon = await waitForElement(
+    () =>
+      document.querySelector<HTMLElement>(
+        '[data-slot="crown-overview"] [data-slot="crown-spine"] [data-nav-key="ship"]',
+      ),
+    "Unable to find the card spine's Ship icon.",
+  );
+  shipSpineIcon.click();
   return waitForElement(
     () =>
       document.querySelector<HTMLElement>(

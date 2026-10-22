@@ -2,6 +2,7 @@ import type { OrchestrationLatestTurnState } from "@ryco/contracts";
 import type { ReactNode } from "react";
 
 import type { GitActionNotice } from "../../../gitActionNotices";
+import type { GitShipStep } from "../../GitActionsControl.logic";
 import type { Project } from "../../../types";
 import type { WorktreeNotes } from "../notes/useWorktreeNotes";
 import type { OverviewDataReadiness, OverviewLayoutProps } from "../overviewTypes";
@@ -19,6 +20,44 @@ export interface CrownChatBinding {
   readonly turnIntoProject: (origin: HTMLElement) => void;
   /** Starts loading the dialog ahead of a likely open. */
   readonly preload: () => void;
+}
+
+/** Where the Ship button is: waiting out its grace period, or running its steps. */
+export type CrownShipPhase = "idle" | "arming" | "running";
+
+/**
+ * The rail's one-click Ship button, bound to the thread's checkout
+ * (`useCrownShipBinding`): commit, push, pull request and a pull in front when
+ * behind, as one chain. Clicking arms it; the chain starts after a short grace
+ * that a second click or Escape cancels.
+ */
+export interface CrownShipBinding {
+  /** What a click runs now; empty when nothing can ship. */
+  readonly steps: ReadonlyArray<GitShipStep>;
+  /** The steps as one phrase ("Commit, push & create PR"). */
+  readonly label: string;
+  /** Why nothing can ship (up to date, diverged, another action running). */
+  readonly disabledReason: string | null;
+  /** The provider's short name for a pull request ("PR", "MR"). */
+  readonly changeRequestLabel: string;
+  readonly phase: CrownShipPhase;
+  /** The steps of the run in progress, frozen at the click. */
+  readonly runSteps: ReadonlyArray<GitShipStep>;
+  /** The step running now; null while arming. */
+  readonly activeStep: GitShipStep | null;
+  /** A short note per step ("3 files", "2 incoming"), frozen while a run is in flight. */
+  readonly stepDetails: Readonly<Record<GitShipStep, string>>;
+  /** Arms the chain; called again during the grace, it cancels instead. */
+  readonly ship: () => void;
+  /** The next run's commit message; empty lets the server write one. */
+  readonly commitMessage: string;
+  readonly setCommitMessage: (message: string) => void;
+  /** Commits on its own, while there is something to commit. */
+  readonly commitOnly: (() => void) | null;
+  /** Pulls on its own, while the branch is behind. */
+  readonly pull: (() => void) | null;
+  /** Opens the branch's open pull request. */
+  readonly openPullRequest: (() => void) | null;
 }
 
 /**
@@ -62,6 +101,8 @@ export interface CrownOverviewProps extends OverviewLayoutProps {
   readonly notes?: CrownNotesBinding | undefined;
   /** Set for a chat this client can promote: the rail shows "Turn into project". */
   readonly chat?: CrownChatBinding | undefined;
+  /** The checkout's one-click Ship button; without it the rail's Ship icon opens the branch card. */
+  readonly ship?: CrownShipBinding | undefined;
   /** The thread's project; the face shows its logo (a folder without one). */
   readonly project?: CrownProject | null | undefined;
   /**

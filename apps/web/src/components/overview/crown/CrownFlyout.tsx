@@ -15,7 +15,8 @@ import {
   type CrownRailKey,
   type CrownSection,
 } from "./crownSections";
-import type { CrownChatBinding, CrownNotesBinding } from "./crownTypes";
+import type { CrownChatBinding, CrownNotesBinding, CrownShipBinding } from "./crownTypes";
+import { ShipDetail } from "./details/ShipDetail";
 
 type FlyoutSection = CrownSection;
 
@@ -70,15 +71,10 @@ function holdsFlyout(element: Element | null): boolean {
  * flyout variant, and the card hosts the stateful pickers and menus (a
  * combobox or menu would close under the pointer here). Two previews act:
  * the Notes composer, as in the prototype, which holds the flyout open while
- * it has focus; and the Branch preview's git action buttons. Their dialogs
- * (commit, default-branch confirm, publish) portal to the body but stay
- * React children of this panel, so its pointer handlers treat them as
- * inside and the flyout (and the control owning the dialog) stays mounted
- * until the dialog closes and the pointer leaves. Escape in a dialog only
- * closes the dialog. A push or pull still running when the pointer leaves
- * keeps going after the flyout closes and unmounts its control, and its toast
- * keeps updating: a push's elapsed-time ticker belongs to the action, not the
- * control.
+ * it has focus; and the Ship preview, whose commit message field holds it the
+ * same way and whose single-action buttons run through the Ship binding. The
+ * binding (and its default-branch dialog) lives with the crown, not this
+ * panel, so a run keeps going and reporting after the flyout closes.
  *
  * It is a labelled non-modal group, inert while closed and in its leaving
  * layer, so hidden content is never focusable. Keyboard users get the same
@@ -96,12 +92,14 @@ export function CrownFlyout(props: {
   readonly reducedMotion: boolean;
   readonly notes?: CrownNotesBinding | undefined;
   readonly chat?: CrownChatBinding | undefined;
+  /** The Ship button the branch section previews; without it the plain branch summary shows. */
+  readonly ship?: CrownShipBinding | undefined;
   readonly onPointerEnter: () => void;
   readonly onPointerLeave: () => void;
   /** Focus inside started or stopped holding the preview (the Notes composer, keyboard focus). */
   readonly onEditingChange?: (editing: boolean) => void;
 }) {
-  const { anchorEl, rootRef, railRef, reducedMotion, notes, chat, onEditingChange } = props;
+  const { anchorEl, rootRef, railRef, reducedMotion, notes, chat, ship, onEditingChange } = props;
   const onPointerLeave = useEvent(props.onPointerLeave);
   const section = flyoutSection(props.openKey, {
     notes: notes !== undefined,
@@ -271,7 +269,11 @@ export function CrownFlyout(props: {
     <div
       ref={flyRef}
       role="group"
-      aria-label={current ? `${CROWN_SECTION_LABEL[current.section]} preview` : undefined}
+      aria-label={
+        current
+          ? `${current.section === "branch" && ship ? "Ship" : CROWN_SECTION_LABEL[current.section]} preview`
+          : undefined
+      }
       className="crown-flyout crown-mat"
       data-slot="crown-flyout"
       data-section={current?.section}
@@ -313,6 +315,15 @@ export function CrownFlyout(props: {
             chat ? (
               <CrownChatDetail chat={chat} variant="flyout" />
             ) : null
+          ) : entry.section === "branch" && ship ? (
+            <div
+              className="min-w-0 text-[12px] leading-[1.45]"
+              data-slot="crown-section-detail"
+              data-section="ship"
+              data-variant="flyout"
+            >
+              <ShipDetail ship={ship} layout={props.layout} />
+            </div>
           ) : (
             <CrownSectionDetail
               section={entry.section}

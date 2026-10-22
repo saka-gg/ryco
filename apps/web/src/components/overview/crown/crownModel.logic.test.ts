@@ -4,6 +4,7 @@ import { assert, describe, it } from "vite-plus/test";
 import {
   buildCheckRingSegments,
   buildCrownRailSummary,
+  buildShipRingSegments,
   countCrownChecks,
   crownRailItemDescription,
   resolveCrownFaceLogo,
@@ -163,7 +164,6 @@ describe("buildCrownRailSummary", () => {
       }),
       { isGitRepo: true, notesFilled: true },
     );
-    assert.equal(summary.branch.badge, "↑3");
     assert.equal(summary.changes.count, 2);
     assert.equal(summary.checks.ci, "running");
     assert.equal(summary.checks.passed, 1);
@@ -179,16 +179,18 @@ describe("buildCrownRailSummary", () => {
     assert.deepEqual(summary.agents, { count: 2, live: 1 });
     assert.deepEqual(summary.pr, { state: "draft", conflict: true });
     assert.deepEqual(summary.notes, { filled: true });
-    assert.deepEqual(summary.ship, { count: 3, ready: true });
+    assert.equal(summary.ship.count, 3);
+    // Without a Ship binding nothing can ship from the rail.
+    assert.equal(summary.ship.ready, false);
   });
 
   it("reports an empty thread", () => {
     const summary = buildCrownRailSummary(makeLayout(), GIT);
-    assert.equal(summary.branch.badge, "");
     assert.equal(summary.checks.ci, "none");
     assert.deepEqual(summary.plan, { pct: 0, done: 0, total: 0, active: false, stepLabel: null });
     assert.equal(summary.pr.state, null);
-    assert.deepEqual(summary.ship, { count: 0, ready: false });
+    assert.equal(summary.ship.count, 0);
+    assert.equal(summary.ship.steps, 0);
   });
 
   it("ships a never-pushed branch's commits ahead of the default branch", () => {
@@ -196,12 +198,48 @@ describe("buildCrownRailSummary", () => {
       makeLayout({ changes: makeChanges({ hasUpstream: false, aheadOfDefaultCount: 4 }) }),
       GIT,
     );
-    assert.deepEqual(neverPushed.ship, { count: 4, ready: true });
+    assert.equal(neverPushed.ship.count, 4);
     const tracked = buildCrownRailSummary(
       makeLayout({ changes: makeChanges({ hasUpstream: true, aheadOfDefaultCount: 4 }) }),
       GIT,
     );
-    assert.deepEqual(tracked.ship, { count: 0, ready: false });
+    assert.equal(tracked.ship.count, 0);
+  });
+
+  it("reads the Ship button's plan and run from its binding", () => {
+    const ship = {
+      steps: ["commit", "push", "pr"] as const,
+      label: "Commit, push & create PR",
+      disabledReason: null,
+      phase: "idle" as const,
+      runSteps: [] as const,
+      activeStep: null,
+    };
+    const idle = buildCrownRailSummary(makeLayout(), { ...GIT, ship });
+    assert.deepInclude(idle.ship, { steps: 3, ready: true, phase: "idle", activeIndex: -1 });
+    const running = buildCrownRailSummary(makeLayout(), {
+      ...GIT,
+      ship: { ...ship, phase: "running", runSteps: ship.steps, activeStep: "push" },
+    });
+    assert.deepInclude(running.ship, { ready: false, runSteps: 3, activeIndex: 1 });
+    // Outside a git repository the binding is ignored.
+    const noGit = buildCrownRailSummary(makeLayout(), { isGitRepo: false, ship });
+    assert.equal(noGit.ship.steps, 0);
+  });
+
+  it("draws the Ship ring with done, current and queued steps", () => {
+    const segments = buildShipRingSegments(3, 1, 9);
+    assert.deepEqual(
+      segments.map((segment) => segment.state),
+      ["pass", "current", "queued"],
+    );
+    assert.closeTo(segments[0]!.len, 100 / 3 - 9, 0.001);
+    assert.closeTo(segments[1]!.offset, -(100 / 3 + 4.5), 0.001);
+    assert.deepEqual(buildShipRingSegments(0, -1), []);
+    assert.deepEqual(
+      buildShipRingSegments(2, -1).map((segment) => segment.state),
+      ["queued", "queued"],
+    );
   });
 
   it("maps pull request states", () => {
@@ -293,7 +331,6 @@ describe("crownRailItemDescription", () => {
       { isGitRepo: true, notesFilled: true },
     );
     assert.deepEqual(describeAll(summary), {
-      branch: "3 commits ahead",
       changes: "1 file changed",
       checks: "2 checks failing",
       plan: "1 of 2 steps done",
@@ -301,7 +338,7 @@ describe("crownRailItemDescription", () => {
       pr: "open, has conflicts",
       notes: "Has notes",
       project: null,
-      ship: "3 commits to push",
+      ship: "Nothing to ship",
     });
   });
 
@@ -322,7 +359,6 @@ describe("crownRailItemDescription", () => {
 
   it("describes an empty thread and running checks", () => {
     assert.deepEqual(describeAll(buildCrownRailSummary(makeLayout(), GIT)), {
-      branch: null,
       changes: "No changes",
       checks: "No checks",
       plan: "No plan",
@@ -330,7 +366,7 @@ describe("crownRailItemDescription", () => {
       pr: "No pull request",
       notes: null,
       project: null,
-      ship: "Nothing to push",
+      ship: "Nothing to ship",
     });
     const running = buildCrownRailSummary(
       makeLayout({
@@ -342,6 +378,27 @@ describe("crownRailItemDescription", () => {
     );
     const checks = CROWN_RAIL_ITEMS.find((item) => item.key === "checks")!;
     assert.equal(crownRailItemDescription(checks, running), "Running, 1 of 2 passed");
+  });
+
+  it("describes what a Ship click would do, and its run", () => {
+    const shipItem = CROWN_RAIL_ITEMS.find((item) => item.key === "ship")!;
+    const describeShip = (ship: Parameters<typeof buildCrownRailSummary>[1]["ship"]) =>
+      crownRailItemDescription(shipItem, buildCrownRailSummary(makeLayout(), { ...GIT, ship }));
+    const base = {
+      steps: ["push", "pr"] as const,
+      label: "Push & create PR",
+      disabledReason: null,
+      phase: "idle" as const,
+      runSteps: [] as const,
+      activeStep: null,
+    };
+    assert.equal(describeShip(base), "Push & create PR");
+    assert.equal(describeShip({ ...base, phase: "arming" }), "Starting, click again to cancel");
+    assert.equal(describeShip({ ...base, phase: "running" }), "Shipping");
+    assert.equal(
+      describeShip({ ...base, steps: [], disabledReason: "Branch has diverged" }),
+      "Branch has diverged",
+    );
   });
 });
 
@@ -463,7 +520,6 @@ describe("visibleCrownRailItems", () => {
 
   it("shows Notes only while the node's notes are available", () => {
     assert.deepEqual(keys({ isGitRepo: true, notesAvailable: true, ...withContent }), [
-      "branch",
       "changes",
       "checks",
       "plan",
@@ -482,7 +538,6 @@ describe("visibleCrownRailItems", () => {
 
   it("hides Plan until the thread has a plan", () => {
     assert.deepEqual(keys({ isGitRepo: true, notesAvailable: false }), [
-      "branch",
       "changes",
       "checks",
       "agents",
