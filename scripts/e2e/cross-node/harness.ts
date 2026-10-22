@@ -44,6 +44,17 @@ export const CONTAINER_LABEL = "ryco.e2e=cross-node";
 export const CONTAINER_HOSTNAME = "linux-box";
 /** A well-known code root baked into the image (node.Dockerfile). */
 export const CONTAINER_CODE_DIRECTORY = "/root/code";
+/** Node B's base dir. */
+const CONTAINER_BASE_DIR = "/data/ryco";
+/** Node B's state dir: its database, logs and project-copy scratch folders. */
+export const CONTAINER_STATE_DIR = `${CONTAINER_BASE_DIR}/userdata`;
+/**
+ * A remote host only node A reaches: node B's fake ssh fails it the way ssh fails
+ * for a name it cannot resolve (`FAKE_SSH_UNREACHABLE_HOSTS`, see fake-ssh).
+ */
+export const LAN_ONLY_HOST = "a-lan.invalid";
+/** On node B, a `git clone` from this host hangs until it is killed (see fake-ssh). */
+export const STALLING_HOST = "stall.test";
 
 const NODE_BOOT_TIMEOUT_MS = 180_000;
 const NODE_STOP_GRACE_MS = 10_000;
@@ -178,6 +189,18 @@ export interface ContainerNode {
   /** `docker exec <name> <args…>`. */
   readonly exec: (args: ReadonlyArray<string>) => Promise<CommandResult>;
   readonly logs: () => Promise<string>;
+  /**
+   * Copies the node's log directory (server.trace.ndjson and friends) to `hostDirectory`, with
+   * the container's output as `container.log` beside them.
+   */
+  readonly copyLogs: (hostDirectory: string) => Promise<void>;
+  /**
+   * Kills the server process alone (SIGKILL), as a crash does: the children it spawned (git,
+   * setup) keep running. The container's supervisor starts the server again a second later.
+   */
+  readonly crashServer: () => Promise<void>;
+  /** Resolves once the server serves again (after `crashServer`). */
+  readonly waitUntilServing: () => Promise<void>;
   readonly stop: () => Promise<void>;
 }
 
@@ -207,9 +230,16 @@ const containerExitReason = async (name: string): Promise<string | null> => {
   return `container ${name} is not running.\n${tail(logs)}`;
 };
 
+/** How node B's server shows up in `ps` (and `pkill -f`); its supervisor's line does not start so. */
+const CONTAINER_SERVER_PROCESS = "^node /app/apps/server/src/bin.ts serve";
+
 /**
  * Start node B: listening on the same port inside the container and on the
  * host's loopback, with `sharedDirectory` bind-mounted at its own path.
+ *
+ * The server runs under a shell loop that starts it again whenever it exits,
+ * and the loop under `--init`, which reaps the orphans a crash leaves. So a
+ * test can crash the server alone and watch the next one recover.
  */
 export const startContainerNode = async (input: {
   readonly image: string;
@@ -231,29 +261,34 @@ export const startContainerNode = async (input: {
     `127.0.0.1:${port}:${port}`,
     "--volume",
     `${input.sharedDirectory}:${input.sharedDirectory}`,
+    "--env",
+    `FAKE_SSH_UNREACHABLE_HOSTS=${LAN_ONLY_HOST}`,
+    "--init",
     input.image,
-    "node",
-    "/app/apps/server/src/bin.ts",
-    "serve",
-    "--host",
-    "0.0.0.0",
-    "--port",
-    String(port),
-    "--base-dir",
-    "/data/ryco",
-    "--no-browser",
+    "sh",
+    "-c",
+    [
+      "while :; do",
+      `node /app/apps/server/src/bin.ts serve --host 0.0.0.0 --port ${port} --base-dir ${CONTAINER_BASE_DIR} --no-browser;`,
+      'echo "[harness] node B exited ($?); starting it again" >&2;',
+      "sleep 1;",
+      "done",
+    ].join(" "),
   ]);
   const stop = async () => {
     await runCommand("docker", ["rm", "--force", "--volumes", name]).catch(() => undefined);
   };
-  try {
-    const exited = () => containerExitReason(name);
+  const exited = () => containerExitReason(name);
+  const waitUntilServing = async () => {
     await waitFor({
       what: `node B (${name}) to serve on ${httpBaseUrl}`,
       timeoutMs: NODE_BOOT_TIMEOUT_MS,
       probe: () => environmentDescriptorReady(httpBaseUrl),
       exited,
     });
+  };
+  try {
+    await waitUntilServing();
     const token = await waitFor({
       what: `node B (${name}) to print its owner token`,
       timeoutMs: 30_000,
@@ -268,6 +303,29 @@ export const startContainerNode = async (input: {
       pairingUrl: buildDirectPairingUrl(httpBaseUrl, token),
       exec: (args) => runCommand("docker", ["exec", name, ...args]),
       logs: () => containerLogs(name),
+      copyLogs: async (hostDirectory) => {
+        await runCommand("docker", ["cp", `${name}:${CONTAINER_STATE_DIR}/logs`, hostDirectory]);
+        await writeFile(path.join(hostDirectory, "container.log"), await containerLogs(name));
+      },
+      crashServer: async () => {
+        const exec = (args: ReadonlyArray<string>) => runCommand("docker", ["exec", name, ...args]);
+        const pid = (
+          await exec(["pgrep", "--full", "--oldest", CONTAINER_SERVER_PROCESS])
+        ).stdout.trim();
+        await exec(["kill", "-KILL", pid]);
+        // Gone before it returns, so a following waitUntilServing sees the next server.
+        await waitFor({
+          what: `node B's server (pid ${pid}) to exit`,
+          timeoutMs: 10_000,
+          probe: () =>
+            exec(["kill", "-0", pid]).then(
+              () => null,
+              () => true as const,
+            ),
+          exited,
+        });
+      },
+      waitUntilServing,
       stop,
     };
   } catch (error) {
@@ -479,6 +537,62 @@ export const makeSharedDirectory = async (prefix: string): Promise<string> =>
   // realpath: on macOS /tmp is a symlink to /private/tmp, which the container cannot follow.
   mkdtemp(path.join(await realpath("/tmp"), prefix));
 
+/** git on this machine for fixture repositories, through the fake ssh; trimmed stdout. */
+const fixtureGit = async (cwd: string, ...args: ReadonlyArray<string>) =>
+  (await runCommand("git", args, { cwd, env: isolatedEnv(fakeSshEnv()) })).stdout.trim();
+
+/** Local config every fixture repository gets: no signing, a committer identity. */
+const configureFixtureRepository = async (repository: string, options = { identity: true }) => {
+  // The machine's global config may sign through an agent that is not there.
+  await fixtureGit(repository, "config", "commit.gpgsign", "false");
+  await fixtureGit(repository, "config", "tag.gpgsign", "false");
+  if (!options.identity) return;
+  await fixtureGit(repository, "config", "user.name", "Cross Node E2E");
+  await fixtureGit(repository, "config", "user.email", "cross-node-e2e@example.test");
+};
+
+/** Writes a file below `root` (creating its folders) and describes it. */
+const writeFixtureFile = async (
+  root: string,
+  relativePath: string,
+  content: Uint8Array | string,
+): Promise<FixtureFile> => {
+  const absolute = path.join(root, relativePath);
+  await mkdir(path.dirname(absolute), { recursive: true });
+  await writeFile(absolute, content);
+  return fixtureFile(relativePath, content);
+};
+
+/** `project.create`, then `project.meta.update` with the scripts and prompt, over node A's RPC. */
+export const registerProjectOnA = async (input: {
+  readonly nodeA: CliRemoteRpcClient;
+  readonly projectId: ProjectId;
+  readonly title: string;
+  readonly workspaceRoot: string;
+  readonly scripts: ReadonlyArray<ProjectScript>;
+  readonly customSystemPrompt: string | null;
+}) => {
+  await Effect.runPromise(
+    input.nodeA[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+      type: "project.create",
+      commandId: CommandId.make(`e2e:${randomUUID()}`),
+      projectId: input.projectId,
+      title: input.title,
+      workspaceRoot: input.workspaceRoot,
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  await Effect.runPromise(
+    input.nodeA[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+      type: "project.meta.update",
+      commandId: CommandId.make(`e2e:${randomUUID()}`),
+      projectId: input.projectId,
+      scripts: [...input.scripts],
+      customSystemPrompt: input.customSystemPrompt,
+    }),
+  );
+};
+
 /**
  * Build the source repository under `root` and register it on node A over RPC:
  * a bare origin with `main` pushed, the workspace on an unpushed feature
@@ -489,15 +603,7 @@ export const buildFixture = async (input: {
   readonly root: string;
   readonly nodeA: CliRemoteRpcClient;
 }): Promise<CrossNodeFixture> => {
-  const env = isolatedEnv(fakeSshEnv());
-  const git = async (cwd: string, ...args: ReadonlyArray<string>) =>
-    (await runCommand("git", args, { cwd, env })).stdout.trim();
-  // The machine's global config may sign through an agent that is not there.
-  const disableSigning = async (repository: string) => {
-    await git(repository, "config", "commit.gpgsign", "false");
-    await git(repository, "config", "tag.gpgsign", "false");
-  };
-
+  const git = fixtureGit;
   const mainBranch = "main";
   const featureBranch = "feature/cross-node";
   const originPath = path.join(input.root, "origin.git");
@@ -505,19 +611,13 @@ export const buildFixture = async (input: {
   const workspace = path.join(input.root, "workspace");
   for (const bare of [originPath, upstreamPath]) {
     await git(input.root, "init", "--quiet", "--bare", `--initial-branch=${mainBranch}`, bare);
-    await disableSigning(bare);
+    await configureFixtureRepository(bare, { identity: false });
   }
   await git(input.root, "init", "--quiet", `--initial-branch=${mainBranch}`, workspace);
-  await disableSigning(workspace);
-  await git(workspace, "config", "user.name", "Cross Node E2E");
-  await git(workspace, "config", "user.email", "cross-node-e2e@example.test");
+  await configureFixtureRepository(workspace);
 
-  const write = async (relativePath: string, content: Uint8Array | string) => {
-    const absolute = path.join(workspace, relativePath);
-    await mkdir(path.dirname(absolute), { recursive: true });
-    await writeFile(absolute, content);
-    return fixtureFile(relativePath, content);
-  };
+  const write = (relativePath: string, content: Uint8Array | string) =>
+    writeFixtureFile(workspace, relativePath, content);
   await write("README.md", "# Cross-node fixture\n\nCopied between two Ryco nodes.\n");
   await write(".gitignore", ".env\nnode_modules/\n");
   await write("src/app.txt", "base\n");
@@ -559,26 +659,14 @@ export const buildFixture = async (input: {
     { id: "test", name: "Test", command: "echo test", icon: "test", runOnWorktreeCreate: false },
   ];
   const customSystemPrompt = "Cross-node E2E: keep answers short.";
-  const createdAt = new Date().toISOString();
-  await Effect.runPromise(
-    input.nodeA[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-      type: "project.create",
-      commandId: CommandId.make(`e2e:${randomUUID()}`),
-      projectId,
-      title,
-      workspaceRoot: workspace,
-      createdAt,
-    }),
-  );
-  await Effect.runPromise(
-    input.nodeA[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-      type: "project.meta.update",
-      commandId: CommandId.make(`e2e:${randomUUID()}`),
-      projectId,
-      scripts,
-      customSystemPrompt,
-    }),
-  );
+  await registerProjectOnA({
+    nodeA: input.nodeA,
+    projectId,
+    title,
+    workspaceRoot: workspace,
+    scripts,
+    customSystemPrompt,
+  });
 
   return {
     root: input.root,
@@ -601,11 +689,90 @@ export const buildFixture = async (input: {
   };
 };
 
+export interface LanOnlyFixture {
+  /** Node A's checkout. */
+  readonly workspace: string;
+  /** `git@a-lan.invalid:<originPath>`: node A reaches it, node B cannot resolve the host. */
+  readonly originUrl: string;
+  readonly branch: string;
+  /** HEAD on node A, one commit on top of the origin's `main`. */
+  readonly headOid: string;
+  readonly mainOid: string;
+  readonly projectId: ProjectId;
+  readonly title: string;
+  readonly trackedEdit: FixtureFile;
+  readonly untrackedFile: FixtureFile;
+}
+
+/**
+ * A second project on node A whose only remote is the fixture's origin under a
+ * host node B cannot resolve (`LAN_ONLY_HOST`), as for a server on node A's
+ * home network: an unpushed branch, a tracked edit and an untracked file.
+ */
+export const buildLanOnlyFixture = async (input: {
+  readonly fixture: CrossNodeFixture;
+  readonly nodeA: CliRemoteRpcClient;
+}): Promise<LanOnlyFixture> => {
+  const git = fixtureGit;
+  const { fixture } = input;
+  const workspace = path.join(fixture.root, `lan-workspace-${randomUUID().slice(0, 8)}`);
+  const originUrl = `git@${LAN_ONLY_HOST}:${fixture.originPath}`;
+  await git(
+    fixture.root,
+    "clone",
+    "--quiet",
+    "--branch",
+    fixture.mainBranch,
+    "--",
+    originUrl,
+    workspace,
+  );
+  await configureFixtureRepository(workspace);
+  const mainOid = await git(workspace, "rev-parse", "HEAD");
+  const branch = "feature/lan-only";
+  await git(workspace, "switch", "--quiet", "--create", branch);
+  await writeFixtureFile(workspace, "src/lan.txt", "made where only node A can push\n");
+  await git(workspace, "add", "--all");
+  await git(workspace, "commit", "--quiet", "--message", "Work on the LAN-only remote");
+  const headOid = await git(workspace, "rev-parse", "HEAD");
+  const trackedEdit = await writeFixtureFile(workspace, "src/app.txt", "base\nedited on node A\n");
+  const untrackedFile = await writeFixtureFile(workspace, "notes/todo.txt", "send the files\n");
+
+  const projectId = ProjectId.make(`e2e-lan-${randomUUID()}`);
+  const title = "LAN-only fixture";
+  await registerProjectOnA({
+    nodeA: input.nodeA,
+    projectId,
+    title,
+    workspaceRoot: workspace,
+    scripts: [],
+    customSystemPrompt: null,
+  });
+  return {
+    workspace,
+    originUrl,
+    branch,
+    headOid,
+    mainOid,
+    projectId,
+    title,
+    trackedEdit,
+    untrackedFile,
+  };
+};
+
 // ── The whole harness ─────────────────────────────────────────────────
 
 export interface CrossNodeHarness {
   readonly nodeA: SourceNode & PairedNode;
-  readonly nodeB: ContainerNode & PairedNode;
+  readonly nodeB: ContainerNode &
+    PairedNode & {
+      /**
+       * Opens a new RPC client with the same pairing once the server serves again (after
+       * `crashServer`); `client` is that one from then on.
+       */
+      readonly reconnect: () => Promise<void>;
+    };
   readonly fixture: CrossNodeFixture;
   /** Stops both nodes and removes the temporary directories (unless kept). */
   readonly teardown: () => Promise<void>;
@@ -654,7 +821,16 @@ export const startCrossNodeHarness = async (
 
     log("starting node B");
     const containerNode = await startContainerNode({ image, sharedDirectory: root });
-    cleanups.push(containerNode.stop);
+    cleanups.push(async () => {
+      if (options.keepFiles) {
+        const logsDirectory = path.join(root, "node-b-logs");
+        await containerNode
+          .copyLogs(logsDirectory)
+          .then(() => log(`kept node B's logs in ${logsDirectory}`))
+          .catch((error: unknown) => log(`node B's logs could not be copied: ${String(error)}`));
+      }
+      await containerNode.stop();
+    });
     log(`starting node A (base dir ${nodeABaseDir})`);
     const sourceNode = await startSourceNode({
       baseDir: nodeABaseDir,
@@ -677,12 +853,21 @@ export const startCrossNodeHarness = async (
     });
     log("building fixture");
     const fixture = await buildFixture({ root, nodeA: pairedA.client });
-    return {
-      nodeA: { ...sourceNode, ...pairedA },
-      nodeB: { ...containerNode, ...pairedB },
-      fixture,
-      teardown,
+    let clientB = pairedB.client;
+    const nodeB: CrossNodeHarness["nodeB"] = {
+      ...containerNode,
+      remote: pairedB.remote,
+      get client() {
+        return clientB;
+      },
+      reconnect: async () => {
+        await containerNode.waitUntilServing();
+        clientB = await Effect.runPromise(
+          connectCliRemote(pairedB.remote).pipe(Scope.provide(scope)),
+        );
+      },
     };
+    return { nodeA: { ...sourceNode, ...pairedA }, nodeB, fixture, teardown };
   } catch (error) {
     await teardown();
     throw error;
