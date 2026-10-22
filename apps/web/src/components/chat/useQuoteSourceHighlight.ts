@@ -9,8 +9,11 @@ import { useTimelineRevealStore } from "../../timelineRevealStore";
 export const QUOTE_SOURCE_HIGHLIGHT_NAME = "ryco-quote-source";
 /** How long the passage stays painted. */
 export const QUOTE_SOURCE_HIGHLIGHT_MS = 2_400;
-/** A jump that has not found its message by then gives up. */
-const QUOTE_SOURCE_JUMP_TIMEOUT_MS = 10_000;
+/**
+ * A jump whose reveal is still loading by then gives up, without saying the
+ * source is gone: a slow connection proves nothing.
+ */
+export const QUOTE_SOURCE_JUMP_TIMEOUT_MS = 30_000;
 /** After the reveal settles (shown or failed), how long the message may take to render. */
 const QUOTE_SOURCE_SETTLED_GRACE_MS = 600;
 const QUOTE_SOURCE_POLL_MS = 100;
@@ -18,9 +21,10 @@ const QUOTE_SOURCE_POLL_MS = 100;
 /**
  * Finishes this thread's quote jumps: once the timeline reveal has rendered
  * the quoted message, re-anchors the passage with its text-quote selector,
- * paints it with the CSS Custom Highlight API and scrolls it into view. A
- * message that never renders, or no longer contains the passage, finishes the
- * jump as unavailable.
+ * paints it with the CSS Custom Highlight API and scrolls it into view. Only
+ * evidence makes a passage unavailable: its message rendered without it, or
+ * the reveal settled without rendering the message. A reveal that is still
+ * loading at the timeout, or that another one replaced, abandons the jump.
  */
 export function useQuoteSourceHighlight(threadKey: string, root: HTMLElement | null): void {
   const jump = useQuoteSourceJumpStore((store) =>
@@ -95,16 +99,20 @@ export function useQuoteSourceHighlight(threadKey: string, root: HTMLElement | n
         finish(jump.id, range ? "shown" : "unavailable");
         return;
       }
-      const revealPending =
-        jump.revealRequestId !== null &&
-        useTimelineRevealStore.getState().requestsByThreadKey[jump.threadKey]?.requestId ===
-          jump.revealRequestId;
-      if (!revealPending) settledAt ??= now;
-      if (
-        now - jump.startedAt >= QUOTE_SOURCE_JUMP_TIMEOUT_MS ||
-        (settledAt !== null && now - settledAt >= QUOTE_SOURCE_SETTLED_GRACE_MS)
-      ) {
-        finish(jump.id, "unavailable");
+      const reveal = useTimelineRevealStore.getState().requestsByThreadKey[jump.threadKey];
+      if (reveal === undefined || jump.revealRequestId === null) {
+        settledAt ??= now;
+      } else if (reveal.requestId !== jump.revealRequestId) {
+        finish(jump.id, "abandoned");
+        return;
+      }
+      if (settledAt !== null) {
+        if (now - settledAt >= QUOTE_SOURCE_SETTLED_GRACE_MS) {
+          finish(jump.id, "unavailable");
+          return;
+        }
+      } else if (now - jump.startedAt >= QUOTE_SOURCE_JUMP_TIMEOUT_MS) {
+        finish(jump.id, "abandoned");
         return;
       }
       pollId = window.setTimeout(attempt, QUOTE_SOURCE_POLL_MS);

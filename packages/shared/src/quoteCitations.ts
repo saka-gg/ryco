@@ -22,6 +22,7 @@ import type { ScopedThreadRef } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@ryco/contracts/orchestration";
 
+import { truncateUnicodeSafe } from "./String.ts";
 import {
   collapseTextQuoteWhitespace,
   TEXT_QUOTE_CONTEXT_LENGTH,
@@ -32,7 +33,8 @@ import {
 export const QUOTE_CITATION_MAX_TEXT_LENGTH = 4_000;
 export const QUOTE_CITATION_MAX_COMMENT_LENGTH = 4_000;
 const QUOTE_CITATION_MAX_ID_LENGTH = 512;
-const QUOTE_CITATION_MAX_QUOTES = 999;
+/** `[Quote N]` markers take up to three digits. */
+const QUOTE_CITATION_MAX_NUMBER = 999;
 const QUOTE_CITATION_LABEL_LENGTH = 60;
 
 export const QUOTE_CITATION_HREF_PREFIX = "ryco-quote:v1/";
@@ -331,17 +333,15 @@ export function isQuoteCitationHref(href: string | undefined): href is string {
 // The draft token
 // ---------------------------------------------------------------------------
 
-function truncatePreview(text: string, length: number): string {
+/** `text`, or its first `length` units and an ellipsis, never splitting a character. */
+export function truncateQuotePreview(text: string, length: number): string {
   if (text.length <= length) return text;
-  let cut = length;
-  const code = text.charCodeAt(cut - 1);
-  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
-  return `${text.slice(0, cut).trimEnd()}…`;
+  return `${truncateUnicodeSafe(text, length).trimEnd()}…`;
 }
 
 /** A one-line preview of the quote, for chips and token labels. */
 export function quoteCitationLabel(citation: QuoteCitation): string {
-  return truncatePreview(
+  return truncateQuotePreview(
     collapseTextQuoteWhitespace(citation.selector.exact).trim(),
     QUOTE_CITATION_LABEL_LENGTH,
   );
@@ -391,8 +391,9 @@ function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
 
-function formatEntry({ number, citation }: NumberedQuoteCitation): string {
-  const lines = [`[Quote ${number}] ${formatHref(citation, false)}`];
+/** A quote as `>` lines, then its comment indented under a `Comment:` line. */
+function formatQuoteLines(citation: QuoteCitation): string[] {
+  const lines: string[] = [];
   for (const line of normalizeLineEndings(citation.selector.exact).split("\n")) {
     lines.push(line.length > 0 ? `> ${line}` : ">");
   }
@@ -402,7 +403,13 @@ function formatEntry({ number, citation }: NumberedQuoteCitation): string {
       lines.push(line.length > 0 ? `${COMMENT_INDENT}${line}` : "");
     }
   }
-  return lines.join("\n");
+  return lines;
+}
+
+function formatEntry({ number, citation }: NumberedQuoteCitation): string {
+  return [`[Quote ${number}] ${formatHref(citation, false)}`, ...formatQuoteLines(citation)].join(
+    "\n",
+  );
 }
 
 function formatBlock(quotes: ReadonlyArray<NumberedQuoteCitation>): string {
@@ -429,8 +436,9 @@ function parseBlockBody(body: string): NumberedQuoteCitation[] | null {
   while (index < lines.length) {
     const header = ENTRY_HEADER.exec(lines[index]!);
     if (header === null) return null;
+    // Numbers only rise; they may skip ones the message's own text used.
     const number = Number(header[1]);
-    if (number !== quotes.length + 1) return null;
+    if (number <= (quotes.at(-1)?.number ?? 0)) return null;
     index += 1;
 
     const quoted: string[] = [];
@@ -500,7 +508,9 @@ export function extractQuoteCitationBlock(text: string): {
  * The prompt a provider receives: each draft token becomes `[Quote N]` and
  * the quotes are spelled out once, in a trailing block. Repeated tokens share
  * a number; text already expanded is returned unchanged, and tokens added to
- * it extend its block. Call before appending terminal context.
+ * it extend its block. New quotes number above any `[Quote N]` the text
+ * already has, so typed or pasted marker text never names one of them. Call
+ * before appending terminal context.
  */
 export function expandQuoteCitations(prompt: string): string {
   if (!mayContainQuoteCitations(prompt)) return prompt;
@@ -514,20 +524,27 @@ export function expandQuoteCitations(prompt: string): string {
   const numberByKey = new Map<string, number>();
   for (const quote of quotes)
     numberByKey.set(formatQuoteCitationHref(quote.citation), quote.number);
+  let lastNumber = quotes.at(-1)?.number ?? 0;
+  for (const marker of body.matchAll(QUOTE_MARKER)) {
+    lastNumber = Math.max(lastNumber, Number(marker[1]));
+  }
   let text = "";
   let cursor = 0;
   for (const token of tokens) {
     const key = formatQuoteCitationHref(token.citation);
     let number = numberByKey.get(key);
     if (number === undefined) {
-      if (quotes.length >= QUOTE_CITATION_MAX_QUOTES) continue;
-      number = quotes.length + 1;
+      if (lastNumber >= QUOTE_CITATION_MAX_NUMBER) continue;
+      lastNumber += 1;
+      number = lastNumber;
       numberByKey.set(key, number);
       quotes.push({ number, citation: token.citation });
     }
     text += `${body.slice(cursor, token.start)}[Quote ${number}]`;
     cursor = token.end;
   }
+  // Every number taken: the tokens stay as they are.
+  if (quotes.length === 0) return prompt;
   text = `${text}${body.slice(cursor)}`.trimEnd();
   return `${text}${text ? "\n\n" : ""}${formatBlock(quotes)}`;
 }
@@ -575,19 +592,15 @@ export function matchQuoteCitations(
 
 /**
  * Readable text for surfaces without chips (the phone app, previews): the
- * message with its `[Quote N]` markers, then each quote and comment.
+ * message with its `[Quote N]` markers, then each quote and comment. Takes a
+ * message without its trailing terminal context, which follows the quotes.
  */
 export function quoteCitationsToPlainText(text: string): string {
   if (!mayContainQuoteCitations(text)) return text;
   const { text: body, quotes } = extractQuoteCitationBlock(expandQuoteCitations(text));
   if (quotes.length === 0) return text;
-  const entries = quotes.map(({ number, citation }) => {
-    const lines = [`[Quote ${number}]`];
-    for (const line of normalizeLineEndings(citation.selector.exact).split("\n")) {
-      lines.push(line.length > 0 ? `> ${line}` : ">");
-    }
-    if (citation.comment !== undefined) lines.push(`Comment: ${citation.comment}`);
-    return lines.join("\n");
-  });
+  const entries = quotes.map(({ number, citation }) =>
+    [`[Quote ${number}]`, ...formatQuoteLines(citation)].join("\n"),
+  );
   return `${body}${body ? "\n\n" : ""}${entries.join("\n\n")}`;
 }

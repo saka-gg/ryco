@@ -16,6 +16,7 @@ import {
   use,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -132,7 +133,7 @@ import {
   type ParsedTerminalContextEntry,
 } from "~/lib/terminalContext";
 import { FileReferenceChip } from "./FileReferenceChip";
-import { deriveDisplayedUserMessage } from "~/lib/userMessageDisplay";
+import { deriveDisplayedUserMessageForTier } from "~/lib/userMessageDisplay";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ryco/contracts/settings";
@@ -438,7 +439,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
-  const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
+  const minimapItems = useMemo(
+    () => deriveTimelineMinimapItems(rows, isPhoneTier ? "phone" : "desktop"),
+    [isPhoneTier, rows],
+  );
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -1399,10 +1403,10 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         row.message.role === "user" &&
         (() => {
           const userImages = row.message.attachments ?? [];
-          // The frozen phone tier gets nothing new: quotes stay the text as sent.
-          const displayedUserMessage = isPhoneTier
-            ? { ...deriveDisplayedUserMessageContext(row.message.text), quotes: [] }
-            : deriveDisplayedUserMessage(row.message.text);
+          const displayedUserMessage = deriveDisplayedUserMessageForTier(
+            row.message.text,
+            isPhoneTier ? "phone" : "desktop",
+          );
           const terminalContexts = displayedUserMessage.contexts;
           const fileReferences = displayedUserMessage.fileReferences;
           const hasUserMessageBody =
@@ -1450,18 +1454,19 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                             }
                       }
                     >
-                      <UnplacedQuoteCitations
+                      <UserMessageQuotes
                         text={displayedUserMessage.visibleText}
                         quotes={displayedUserMessage.quotes}
-                      />
-                      <UserMessageBody
-                        cwd={ctx.markdownCwd}
-                        environmentId={ctx.activeThreadEnvironmentId}
-                        text={displayedUserMessage.visibleText}
-                        terminalContexts={terminalContexts}
-                        skills={ctx.skills}
-                        searchHighlight={messageSearchHighlight}
-                      />
+                      >
+                        <UserMessageBody
+                          cwd={ctx.markdownCwd}
+                          environmentId={ctx.activeThreadEnvironmentId}
+                          text={displayedUserMessage.visibleText}
+                          terminalContexts={terminalContexts}
+                          skills={ctx.skills}
+                          searchHighlight={messageSearchHighlight}
+                        />
+                      </UserMessageQuotes>
                     </QuoteCitationContext>
                   )}
                 </div>
@@ -2476,19 +2481,60 @@ const UserMessageTerminalContextInlineLabel = memo(
   },
 );
 
-/** Quotes whose `[Quote N]` marker is missing from the text lead the message instead. */
-function UnplacedQuoteCitations(props: {
+type UserMessageQuotesProps = {
   text: string;
   quotes: ReadonlyArray<NumberedQuoteCitation>;
-}) {
-  const unplaced = props.quotes.filter((quote) => !props.text.includes(`[Quote ${quote.number}]`));
-  if (unplaced.length === 0) return null;
+  children: ReactNode;
+};
+
+function UserMessageQuotes(props: UserMessageQuotesProps) {
+  return props.quotes.length === 0 ? props.children : <UserMessageWithQuotes {...props} />;
+}
+
+function sameNumbers(left: ReadonlyArray<number>, right: ReadonlyArray<number>): boolean {
+  return left.length === right.length && left.every((number, index) => number === right[index]);
+}
+
+/**
+ * Each quote whose `[Quote N]` marker did not render as a chip (missing from
+ * the text, or read as Markdown syntax such as a link) leads the message
+ * instead, so no quote goes unseen.
+ */
+function UserMessageWithQuotes(props: UserMessageQuotesProps) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // A first guess from the text; the chips that rendered settle it before paint.
+  const [unplacedNumbers, setUnplacedNumbers] = useState<ReadonlyArray<number>>(() =>
+    props.quotes
+      .filter((quote) => !props.text.includes(`[Quote ${quote.number}]`))
+      .map((quote) => quote.number),
+  );
+  // The quotes are derived from the message text, so they change with it.
+  const { quotes } = props;
+  useLayoutEffect(() => {
+    const placed = new Set<string>();
+    for (const chip of bodyRef.current?.querySelectorAll<HTMLElement>("[data-quote-number]") ??
+      []) {
+      if (chip.dataset.quoteNumber) placed.add(chip.dataset.quoteNumber);
+    }
+    const next = quotes
+      .map((quote) => quote.number)
+      .filter((number) => !placed.has(String(number)));
+    setUnplacedNumbers((previous) => (sameNumbers(previous, next) ? previous : next));
+  }, [quotes]);
+  const unplaced = props.quotes.filter((quote) => unplacedNumbers.includes(quote.number));
   return (
-    <div className="mb-1 flex flex-wrap gap-1">
-      {unplaced.map((quote) => (
-        <QuoteCitationChip key={quote.number} citation={quote.citation} />
-      ))}
-    </div>
+    <>
+      {unplaced.length > 0 ? (
+        <div className="mb-1 flex flex-wrap gap-1">
+          {unplaced.map((quote) => (
+            <QuoteCitationChip key={quote.number} citation={quote.citation} />
+          ))}
+        </div>
+      ) : null}
+      <div ref={bodyRef} className="contents">
+        {props.children}
+      </div>
+    </>
   );
 }
 

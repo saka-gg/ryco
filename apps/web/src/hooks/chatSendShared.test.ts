@@ -1,19 +1,32 @@
 import {
+  EnvironmentId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type EnvironmentApi,
 } from "@ryco/contracts";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { appendTerminalContextsToPrompt } from "../lib/terminalContext";
 import { useUiStateStore } from "../uiStateStore";
 import {
   applyBuildModeToSend,
   attachDevicePromptScreenshot,
+  formatOutgoingPrompt,
   persistThreadSettingsForNextTurn,
   resolveEnforceBuildMode,
 } from "./chatSendShared";
-import type { SendTurnComposerSnapshot, SendTurnSettings } from "./executeChatSendTurn";
+import {
+  buildOutgoingMessageText,
+  type SendTurnComposerSnapshot,
+  type SendTurnSettings,
+} from "./executeChatSendTurn";
 
 function composer(provider: string, overrides: Partial<SendTurnComposerSnapshot> = {}) {
   return {
@@ -141,5 +154,55 @@ describe("attachDevicePromptScreenshot", () => {
         composer: composer("codex", { prompt, trimmedPrompt: prompt }),
       }),
     ).resolves.toBeDefined();
+  });
+});
+
+describe("formatOutgoingPrompt", () => {
+  const token = serializeQuoteCitation(
+    createQuoteCitation({
+      source: { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("thread-1") },
+      messageId: MessageId.make("assistant-1"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      comment: "Why?",
+    }),
+  );
+  const format = (text: string) =>
+    formatOutgoingPrompt({
+      provider: ProviderDriverKind.make("codex"),
+      model: "model",
+      models: [],
+      effort: null,
+      text,
+    });
+
+  it("expands quotes on a path that passes the draft text as is (a plan follow-up)", () => {
+    const text = `Revise ${token}`;
+    expect(format(text)).toBe(expandQuoteCitations(text));
+  });
+
+  it("expands quotes ahead of the terminal context a composer send appends", () => {
+    const terminalContext = {
+      terminalId: "t-1",
+      terminalLabel: "Terminal 1",
+      lineStart: 1,
+      lineEnd: 1,
+      text: "ok",
+    };
+    const prompt = `Explain ${token}`;
+    const sent = buildOutgoingMessageText({
+      composer: composer("codex", {
+        prompt,
+        trimmedPrompt: prompt,
+        sendableTerminalContexts: [
+          { ...terminalContext, id: "c-1", threadId: ThreadId.make("t"), createdAt: "" },
+        ],
+      }),
+      formatOutgoingPrompt,
+    });
+
+    expect(sent).toBe(
+      appendTerminalContextsToPrompt(expandQuoteCitations(prompt), [terminalContext]),
+    );
+    expect(format(sent)).toBe(sent);
   });
 });

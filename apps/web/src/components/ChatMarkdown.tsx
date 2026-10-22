@@ -714,11 +714,12 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [markdownFileLinkMetaByHref]);
-  // Quote links render as chips, and only inside a sent user message.
+  // Quote links render as chips, and only inside a sent user message. One
+  // that does not parse is an unsafe link like any other.
   const rendersQuoteCitations = use(QuoteCitationContext) !== null;
   const markdownUrlTransform = useCallback(
     (href: string) => {
-      if (rendersQuoteCitations && isQuoteCitationHref(href)) return href;
+      if (rendersQuoteCitations && parseQuoteCitationHref(href) !== null) return href;
       return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
     },
     [rendersQuoteCitations],

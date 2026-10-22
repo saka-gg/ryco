@@ -10,6 +10,7 @@ import {
   type ServerProvider,
   type ThreadId,
 } from "@ryco/contracts";
+import { expandOutgoingQuoteCitations } from "@ryco/client-runtime/state/composer";
 import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@ryco/shared/model";
 import { DateTime } from "effect";
 
@@ -41,6 +42,11 @@ import type {
 // send no matter which of them dispatches it.
 // ---------------------------------------------------------------------------
 
+/**
+ * The text a send dispatches, on every send path (composer, queue, plan
+ * follow-up): quote tokens expanded ahead of any terminal context, then the
+ * provider's effort prefix.
+ */
 export function formatOutgoingPrompt(params: {
   provider: ProviderDriverKind;
   model: string | null;
@@ -50,7 +56,7 @@ export function formatOutgoingPrompt(params: {
 }): string {
   const caps = getProviderModelCapabilities(params.models, params.model, params.provider);
   const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
-  return applyClaudePromptEffortPrefix(params.text, promptEffort);
+  return applyClaudePromptEffortPrefix(expandOutgoingQuoteCitations(params.text), promptEffort);
 }
 
 type PersistThreadSettingsInput = Parameters<

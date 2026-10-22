@@ -1,9 +1,10 @@
-import type { MessageId } from "@ryco/contracts";
+import type { MessageId, ScopedThreadRef } from "@ryco/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { quoteCitationSourceKey, type QuoteCitation } from "@ryco/shared/quoteCitations";
 import type { TextQuoteSelector } from "@ryco/shared/textQuoteSelector";
 import { create } from "zustand";
 
+import { selectThreadAvailabilityByRef, useStore } from "./store";
 import { useTimelineRevealStore } from "./timelineRevealStore";
 
 /**
@@ -30,11 +31,8 @@ interface QuoteSourceJumpStore {
   readonly active: QuoteSourceJump | null;
   /** Quotes whose passage could not be found, by source key; their chips say so. */
   readonly unavailableSourceKeys: ReadonlySet<string>;
-  readonly jump: (citation: QuoteCitation) => QuoteSourceJump;
   /** Ends the jump, unless a newer one replaced it. */
   readonly finish: (id: number, outcome: QuoteSourceJumpOutcome) => void;
-  /** Records a passage as unavailable without jumping (its thread is gone). */
-  readonly markUnavailable: (citation: QuoteCitation) => void;
 }
 
 let nextJumpId = 0;
@@ -50,23 +48,6 @@ function withSourceKey(keys: ReadonlySet<string>, key: string, unavailable: bool
 export const useQuoteSourceJumpStore = create<QuoteSourceJumpStore>((set, get) => ({
   active: null,
   unavailableSourceKeys: new Set(),
-  jump: (citation) => {
-    const threadKey = scopedThreadKey(scopeThreadRef(citation.environmentId, citation.threadId));
-    useTimelineRevealStore.getState().reveal(threadKey, citation.messageId);
-    nextJumpId += 1;
-    const jump: QuoteSourceJump = {
-      id: nextJumpId,
-      threadKey,
-      messageId: citation.messageId,
-      selector: citation.selector,
-      sourceKey: quoteCitationSourceKey(citation),
-      revealRequestId:
-        useTimelineRevealStore.getState().requestsByThreadKey[threadKey]?.requestId ?? null,
-      startedAt: Date.now(),
-    };
-    set({ active: jump });
-    return jump;
-  },
   finish: (id, outcome) => {
     const active = get().active;
     if (active?.id !== id) return;
@@ -78,12 +59,51 @@ export const useQuoteSourceJumpStore = create<QuoteSourceJumpStore>((set, get) =
           : withSourceKey(state.unavailableSourceKeys, active.sourceKey, outcome === "unavailable"),
     }));
   },
-  markUnavailable: (citation) =>
-    set((state) => ({
-      unavailableSourceKeys: withSourceKey(
-        state.unavailableSourceKeys,
-        quoteCitationSourceKey(citation),
-        true,
-      ),
-    })),
 }));
+
+/** Where a quote chip sits, and how it opens another thread. */
+export interface QuoteSourceTarget {
+  /** The thread on screen; a quote from another thread opens its own first. */
+  readonly currentThreadKey: string | null;
+  /** Opens another thread, or null where none can be opened from here. */
+  readonly openThread: ((thread: ScopedThreadRef) => void) | null;
+}
+
+/**
+ * Brings a quote's passage into view, in the thread on screen or in its own
+ * thread after opening it. A source thread that is gone, or that cannot be
+ * opened from here, marks the passage unavailable instead. Every quote chip
+ * opens its source through this.
+ */
+export function openQuoteSource(citation: QuoteCitation, target: QuoteSourceTarget): void {
+  const threadRef = scopeThreadRef(citation.environmentId, citation.threadId);
+  const threadKey = scopedThreadKey(threadRef);
+  const sourceKey = quoteCitationSourceKey(citation);
+  if (threadKey !== target.currentThreadKey) {
+    if (
+      target.openThread === null ||
+      selectThreadAvailabilityByRef(useStore.getState(), threadRef) === "missing"
+    ) {
+      useQuoteSourceJumpStore.setState((state) => ({
+        unavailableSourceKeys: withSourceKey(state.unavailableSourceKeys, sourceKey, true),
+      }));
+      return;
+    }
+    target.openThread(threadRef);
+  }
+  const reveals = useTimelineRevealStore.getState();
+  reveals.reveal(threadKey, citation.messageId);
+  nextJumpId += 1;
+  useQuoteSourceJumpStore.setState({
+    active: {
+      id: nextJumpId,
+      threadKey,
+      messageId: citation.messageId,
+      selector: citation.selector,
+      sourceKey,
+      revealRequestId:
+        useTimelineRevealStore.getState().requestsByThreadKey[threadKey]?.requestId ?? null,
+      startedAt: Date.now(),
+    },
+  });
+}

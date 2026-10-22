@@ -7,7 +7,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import { appendTerminalContextsToPrompt } from "./terminalContext";
-import { deriveDisplayedUserMessage } from "./userMessageDisplay";
+import { deriveDisplayedUserMessageForTier } from "./userMessageDisplay";
 
 const citation = createQuoteCitation({
   source: { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("thread-1") },
@@ -15,23 +15,14 @@ const citation = createQuoteCitation({
   selector: { exact: "Quoted words.", prefix: "", suffix: "", start: 0, end: 13 },
   comment: "Why?",
 });
+const quoted = expandQuoteCitations(`Explain ${serializeQuoteCitation(citation)} please`);
+const sent = appendTerminalContextsToPrompt(quoted, [
+  { terminalId: "t-1", terminalLabel: "Terminal 1", lineStart: 3, lineEnd: 4, text: "ls\nok" },
+]);
 
-describe("deriveDisplayedUserMessage", () => {
-  it("shows the prompt without its quote and terminal blocks, and copies it as sent", () => {
-    // The send order: quotes expand first, terminal context is appended after.
-    const sent = appendTerminalContextsToPrompt(
-      expandQuoteCitations(`Explain ${serializeQuoteCitation(citation)} please`),
-      [
-        {
-          terminalId: "t-1",
-          terminalLabel: "Terminal 1",
-          lineStart: 3,
-          lineEnd: 4,
-          text: "ls\nok",
-        },
-      ],
-    );
-    const displayed = deriveDisplayedUserMessage(sent);
+describe("deriveDisplayedUserMessageForTier", () => {
+  it("shows quotes as chips on the desktop tier", () => {
+    const displayed = deriveDisplayedUserMessageForTier(sent, "desktop");
 
     expect(displayed.visibleText).toBe("Explain [Quote 1] please");
     expect(displayed.quotes).toStrictEqual([{ number: 1, citation }]);
@@ -39,9 +30,11 @@ describe("deriveDisplayedUserMessage", () => {
     expect(displayed.copyText).toBe(sent);
   });
 
-  it("leaves a message without quotes as before", () => {
-    const displayed = deriveDisplayedUserMessage("Just a question.");
-    expect(displayed.visibleText).toBe("Just a question.");
+  it("leaves the frozen phone tier's quotes as sent", () => {
+    const displayed = deriveDisplayedUserMessageForTier(sent, "phone");
+
+    expect(displayed.visibleText).toBe(quoted);
     expect(displayed.quotes).toEqual([]);
+    expect(displayed.contexts).toHaveLength(1);
   });
 });

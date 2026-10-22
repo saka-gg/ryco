@@ -1,22 +1,21 @@
-import { extractQuoteCitationBlock, type NumberedQuoteCitation } from "@ryco/shared/quoteCitations";
-
 import {
+  deriveDisplayedUserMessage,
   deriveDisplayedUserMessageContext,
-  type DisplayedUserMessageContext,
-} from "./terminalContext";
+  type DisplayedUserMessage,
+} from "@ryco/client-runtime/state/composer";
 
-export interface DisplayedUserMessage extends DisplayedUserMessageContext {
-  /** The quotes of the message's trailing quote block; its markers show them as chips. */
-  readonly quotes: ReadonlyArray<NumberedQuoteCitation>;
-}
+import type { PresentationTier } from "./presentationTier";
 
 /**
- * What a sent user message shows: its text without the trailing context and
- * quote blocks, which render as chips instead. Copying keeps the
+ * What a sent user message shows on `tier`, for its bubble, search and the
+ * minimap alike. The frozen phone tier gets nothing new: its quotes stay the
  * text as sent.
  */
-export function deriveDisplayedUserMessage(text: string): DisplayedUserMessage {
-  const state = deriveDisplayedUserMessageContext(text);
-  const quoted = extractQuoteCitationBlock(state.visibleText);
-  return { ...state, visibleText: quoted.text, quotes: quoted.quotes };
+export function deriveDisplayedUserMessageForTier(
+  text: string,
+  tier: PresentationTier,
+): DisplayedUserMessage {
+  return tier === "phone"
+    ? { ...deriveDisplayedUserMessageContext(text), quotes: [] }
+    : deriveDisplayedUserMessage(text);
 }

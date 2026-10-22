@@ -64,6 +64,7 @@ type InlineChipMatch =
       readonly start: number;
       readonly end: number;
       readonly citation: QuoteCitation;
+      readonly number: number | null;
     };
 
 /**
@@ -90,7 +91,7 @@ function collectInlineChipMatches(
   }
   if (quoteCitations) {
     for (const quote of matchQuoteCitations(text, quoteCitations.quotes)) {
-      matches.push({ kind: "quote", start: quote.start, end: quote.end, citation: quote.citation });
+      matches.push({ kind: "quote", ...quote });
     }
   }
   return matches.toSorted((left, right) => left.start - right.start);
@@ -131,7 +132,11 @@ export function SkillInlineText(props: {
           rawText={props.text.slice(match.start, match.end)}
         />
       ) : match.kind === "quote" ? (
-        <QuoteCitationChip key={`${match.start}:quote`} citation={match.citation} />
+        <QuoteCitationChip
+          key={`${match.start}:quote`}
+          citation={match.citation}
+          number={match.number}
+        />
       ) : (
         <ThreadMentionChip
           key={`${match.start}:${match.threadId}`}

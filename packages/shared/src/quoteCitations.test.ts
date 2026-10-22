@@ -16,6 +16,7 @@ import {
   quoteCitationLabel,
   quoteCitationsToPlainText,
   serializeQuoteCitation,
+  truncateQuotePreview,
   withQuoteCitationComment,
   type QuoteCitation,
 } from "./quoteCitations.ts";
@@ -70,6 +71,8 @@ describe("quote citation tokens", () => {
   it("truncates long previews without splitting an astral character", () => {
     const long = citationOf(`${"a".repeat(59)}🚀 and more text after the cut`);
     expect(quoteCitationLabel(long)).toBe(`${"a".repeat(59)}…`);
+    expect(truncateQuotePreview(`ab🚀`, 3)).toBe("ab…");
+    expect(truncateQuotePreview(`ab🚀`, 4)).toBe("ab🚀");
   });
 
   it("removes a cleared comment and rejects one past the limit", () => {
@@ -242,8 +245,8 @@ describe("quote citation expansion", () => {
   it.each([
     ["a missing quote line", (block: string) => block.replace("> The first passage.\n", "")],
     [
-      "an out-of-order number",
-      (block: string) => block.replace("[Quote 2] ryco", "[Quote 3] ryco"),
+      "a number that does not rise",
+      (block: string) => block.replace("[Quote 2] ryco", "[Quote 1] ryco"),
     ],
     ["an unprefixed line", (block: string) => block.replace("> passage", "passage")],
     ["a tampered href", (block: string) => block.replace("start=11&end=26", "start=11&end=26&x=1")],
@@ -255,6 +258,40 @@ describe("quote citation expansion", () => {
     );
     const tampered = tamper(expanded);
     expect(extractQuoteCitationBlock(tampered)).toEqual({ text: tampered, quotes: [] });
+  });
+
+  it("numbers new quotes above marker text the prompt already has", () => {
+    const expanded = expandQuoteCitations(
+      `In [Quote 2] I meant ${serializeQuoteCitation(first)} and ${serializeQuoteCitation(second)}`,
+    );
+    const { text, quotes } = extractQuoteCitationBlock(expanded);
+
+    expect(text).toBe("In [Quote 2] I meant [Quote 3] and [Quote 4]");
+    expect(quotes).toStrictEqual([
+      { number: 3, citation: first },
+      { number: 4, citation: second },
+    ]);
+    // The typed marker names no quote, so it stays text.
+    expect(matchQuoteCitations(text, quotes).map((match) => match.number)).toEqual([3, 4]);
+    expect(expandQuoteCitations(expanded)).toBe(expanded);
+
+    // No number left: the token stays a token, and no empty block is added.
+    const full = `[Quote 999] and ${serializeQuoteCitation(first)}`;
+    expect(expandQuoteCitations(full)).toBe(full);
+  });
+
+  it("keeps a pasted message's block and markers apart from new quotes", () => {
+    const pasted = expandQuoteCitations(`See ${serializeQuoteCitation(first)}`);
+    const expanded = expandQuoteCitations(
+      `${pasted}\n\nAnd also ${serializeQuoteCitation(second)}`,
+    );
+    const { text, quotes } = extractQuoteCitationBlock(expanded);
+
+    expect(text.startsWith(`${pasted}\n\nAnd also [Quote 2]`)).toBe(true);
+    expect(quotes).toStrictEqual([{ number: 2, citation: second }]);
+    expect(matchQuoteCitations(text, quotes)).toEqual([
+      { start: text.length - "[Quote 2]".length, end: text.length, citation: second, number: 2 },
+    ]);
   });
 
   it("uses the last block when the prompt itself mentions the tag", () => {
@@ -298,7 +335,9 @@ describe("quote citation display", () => {
       "",
       "[Quote 1]",
       "> Quoted words.",
-      "Comment: My note\nsecond line",
+      "Comment:",
+      "  My note",
+      "  second line",
     ].join("\n");
 
     expect(quoteCitationsToPlainText(expanded)).toBe(readable);

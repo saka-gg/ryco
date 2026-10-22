@@ -6,7 +6,8 @@ import {
   type WorkLogEntry,
 } from "../../session-logic";
 import type { AgentPanelModel } from "../../threadWorkspaceViewModel";
-import { deriveDisplayedUserMessage } from "../../lib/userMessageDisplay";
+import type { PresentationTier } from "../../lib/presentationTier";
+import { deriveDisplayedUserMessageForTier } from "../../lib/userMessageDisplay";
 import {
   isChatFileAttachment,
   isChatImageAttachment,
@@ -529,6 +530,7 @@ export function chapterStepsExpansionKey(chapterId: string): string {
 
 export function deriveTimelineMinimapItems(
   rows: ReadonlyArray<MessagesTimelineRow>,
+  presentationTier: PresentationTier = "desktop",
 ): TimelineMinimapItem[] {
   const items: TimelineMinimapItem[] = [];
 
@@ -542,7 +544,7 @@ export function deriveTimelineMinimapItems(
       id: row.id,
       rowIndex: index,
       userText: compactTimelineMinimapPreview(
-        deriveDisplayedUserMessage(row.message.text).visibleText,
+        deriveDisplayedUserMessageForTier(row.message.text, presentationTier).visibleText,
       ),
       assistantText: compactTimelineMinimapPreview(
         resolveFinalAssistantTextForTimelineTurn(rows, index),
