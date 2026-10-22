@@ -5,7 +5,10 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
-import { isPasteAsTextShortcut } from "@ryco/client-runtime/state/composer";
+import {
+  isPasteAsTextShortcut,
+  PASTE_AS_TEXT_SHORTCUT_WINDOW_MS,
+} from "@ryco/client-runtime/state/composer";
 import { type EnvironmentId, type ServerProviderSkill } from "@ryco/contracts";
 import {
   $applyNodeReplacement,
@@ -918,6 +921,12 @@ export interface ComposerTextPaste {
   readonly pasteAsText: boolean;
 }
 
+/**
+ * What became of a text paste: left to the editor to insert, attached in place of the
+ * selection, or refused with nothing inserted and the selection kept.
+ */
+export type ComposerTextPasteResult = "inline" | "attached" | "refused";
+
 interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
@@ -956,10 +965,10 @@ interface ComposerPromptEditorProps {
   ) => boolean;
   onPaste: ClipboardEventHandler<HTMLElement>;
   /**
-   * Offered every text paste first (file pastes go to `onPaste`). True means it took the
-   * paste, as an attachment, and the editor inserts nothing.
+   * Offered every text paste first (file pastes go to `onPaste`). Unless it leaves the paste
+   * inline, the editor inserts nothing.
    */
-  onPasteText?: (paste: ComposerTextPaste) => boolean;
+  onPasteText?: (paste: ComposerTextPaste) => ComposerTextPasteResult;
 }
 
 interface ComposerPromptEditorInnerProps extends ComposerPromptEditorProps {
@@ -1022,12 +1031,9 @@ function ComposerCommandKeyPlugin(props: {
   return null;
 }
 
-// The paste event follows its shortcut's keydown, or the desktop menu's announcement, at once
-// in a browser and after an IPC round trip in Electron. A paste this long after was not made by
-// either.
-const PASTE_AS_TEXT_SHORTCUT_WINDOW_MS = 1_000;
-
-function ComposerTextPastePlugin(props: { onPasteText: (paste: ComposerTextPaste) => boolean }) {
+function ComposerTextPastePlugin(props: {
+  onPasteText: (paste: ComposerTextPaste) => ComposerTextPasteResult;
+}) {
   const [editor] = useLexicalComposerContext();
   const onPasteTextRef = useRef(props.onPasteText);
   useLayoutEffect(() => {
@@ -1063,17 +1069,20 @@ function ComposerTextPastePlugin(props: { onPasteText: (paste: ComposerTextPaste
         const text = event.clipboardData.getData("text/plain");
         if (text.length === 0) return false;
         const selection = $getSelection();
-        const handled = onPasteTextRef.current({
+        const result = onPasteTextRef.current({
           text,
           promptLength: $getRoot().getTextContent().length,
           selectedLength: $isRangeSelection(selection) ? selection.getTextContent().length : 0,
           pasteAsText:
             shortcutAt !== null && event.timeStamp - shortcutAt < PASTE_AS_TEXT_SHORTCUT_WINDOW_MS,
         });
-        if (!handled) return false;
+        if (result === "inline") return false;
         event.preventDefault();
-        // The paste replaces the selection as an inline one would; it only lands elsewhere.
-        if ($isRangeSelection(selection) && !selection.isCollapsed()) selection.removeText();
+        // An attached paste replaces the selection as an inline one would; it only lands
+        // elsewhere. A refused one leaves the prompt as it was.
+        if (result === "attached" && $isRangeSelection(selection) && !selection.isCollapsed()) {
+          selection.removeText();
+        }
         return true;
       },
       COMMAND_PRIORITY_HIGH,

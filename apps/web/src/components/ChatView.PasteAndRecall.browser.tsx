@@ -522,15 +522,18 @@ describe("ChatView large pastes", () => {
       pasteIntoComposer(editor, LARGE_PASTE);
       await waitForPromptToHold(LARGE_PASTE);
 
-      // Past the input limit it cannot stay text either: it is refused, and says why.
-      useComposerDraftStore.getState().setPrompt(THREAD_REF, "");
-      await waitForComposerText("");
-      editor.focus();
+      // Past the input limit it cannot stay text either: it is refused, and says why. The text
+      // it was pasted over stays, since nothing took its place.
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "keep this draft");
+      await waitForComposerText("keep this draft");
+      await selectAllComposerContent();
       pasteIntoComposer(editor, "a".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1));
       await waitForTranscriptText(
         `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
       );
-      await waitForComposerText("");
+      await waitForLayout();
+      await waitForComposerText("keep this draft");
+      await waitForPromptToHold("keep this draft");
       expect(draftAttachments()).toHaveLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
     } finally {
       await mounted.cleanup();

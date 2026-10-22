@@ -24,6 +24,7 @@ import type { SessionPhase, Thread } from "../../types";
 import {
   type ComposerPromptEditorHandle,
   type ComposerTextPaste,
+  type ComposerTextPasteResult,
   ComposerPromptEditor,
 } from "../ComposerPromptEditor";
 import { ComposerCommandMenuOverlay } from "./ComposerAttachmentMenus";
@@ -111,7 +112,7 @@ export interface ComposerPromptShellProps {
     event: KeyboardEvent,
   ) => boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLElement>) => void;
-  onComposerPasteText: (paste: ComposerTextPaste) => boolean;
+  onComposerPasteText: (paste: ComposerTextPaste) => ComposerTextPasteResult;
 
   // Placeholder / disabled state
   activePendingProgress: ComposerPromptShellPendingProgress | null;

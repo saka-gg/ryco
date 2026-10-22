@@ -1,3 +1,4 @@
+import { DESKTOP_PASTE_AS_TEXT_MENU_ACTION } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { installDesktopPasteAsText, PASTE_AS_TEXT_EVENT } from "./desktopPasteAsText";
@@ -58,7 +59,7 @@ describe("installDesktopPasteAsText", () => {
     const desktop = harness();
     desktop.menu("open-settings");
     expect(desktop.pasteAsText).not.toHaveBeenCalled();
-    desktop.menu("paste-as-text");
+    desktop.menu(DESKTOP_PASTE_AS_TEXT_MENU_ACTION);
     expect(desktop.announced).toHaveBeenCalledTimes(1);
     expect(desktop.pasteAsText).toHaveBeenCalledTimes(1);
     expect(desktop.announced.mock.invocationCallOrder[0]).toBeLessThan(
@@ -70,7 +71,7 @@ describe("installDesktopPasteAsText", () => {
     const desktop = harness();
     desktop.chord();
     desktop.paste();
-    desktop.menu("paste-as-text");
+    desktop.menu(DESKTOP_PASTE_AS_TEXT_MENU_ACTION);
     expect(desktop.pasteAsText).not.toHaveBeenCalled();
     expect(desktop.announced).not.toHaveBeenCalled();
   });
@@ -78,13 +79,13 @@ describe("installDesktopPasteAsText", () => {
   it("pastes for a shortcut that did not paste by itself, or one pressed long before", () => {
     const desktop = harness();
     desktop.chord();
-    desktop.menu("paste-as-text");
+    desktop.menu(DESKTOP_PASTE_AS_TEXT_MENU_ACTION);
     expect(desktop.pasteAsText).toHaveBeenCalledTimes(1);
 
     desktop.chord();
     desktop.paste();
     desktop.advance(5_000);
-    desktop.menu("paste-as-text");
+    desktop.menu(DESKTOP_PASTE_AS_TEXT_MENU_ACTION);
     expect(desktop.pasteAsText).toHaveBeenCalledTimes(2);
   });
 

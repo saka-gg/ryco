@@ -1,7 +1,7 @@
 import type { BaseWindow, MenuItem, MenuItemConstructorOptions } from "electron";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { buildEditMenu } from "./editMenu.ts";
+import { buildEditMenu, resolvePasteAsTextTarget } from "./editMenu.ts";
 
 function items(mac: boolean, onPasteAsText = vi.fn()) {
   const submenu = buildEditMenu({ mac, onPasteAsText }).submenu;
@@ -37,15 +37,48 @@ describe("buildEditMenu", () => {
     expect(items(true).some((item) => item.label === "Speech")).toBe(true);
   });
 
-  it("hands every Paste as Text click, by mouse or chord, to the window it was made in", () => {
+  it("hands every Paste as Text click, by mouse or chord, on with how it was made", () => {
     const onPasteAsText = vi.fn();
     const window = { id: 1 } as unknown as BaseWindow;
-    for (const item of items(true, onPasteAsText).filter(
+    const [shown, alias] = items(true, onPasteAsText).filter(
       (entry) => entry.label === "Paste as Text",
-    )) {
-      item.click?.({} as MenuItem, window, {} as ClickEvent);
+    );
+    shown?.click?.({} as MenuItem, window, {} as ClickEvent);
+    alias?.click?.({} as MenuItem, window, { triggeredByAccelerator: true } as ClickEvent);
+    expect(onPasteAsText.mock.calls).toEqual([
+      [{ triggeredByAccelerator: false }],
+      [{ triggeredByAccelerator: true }],
+    ]);
+  });
+});
+
+describe("resolvePasteAsTextTarget", () => {
+  it("tells the app's page, by mouse or chord, so its composer keeps the paste as text", () => {
+    for (const mac of [true, false]) {
+      for (const triggeredByAccelerator of [true, false]) {
+        expect(resolvePasteAsTextTarget({ focused: "app", triggeredByAccelerator, mac })).toBe(
+          "app",
+        );
+      }
     }
-    expect(onPasteAsText).toHaveBeenCalledTimes(2);
-    expect(onPasteAsText).toHaveBeenNthCalledWith(1, window);
+  });
+
+  it("pastes into another focused page, such as the browser panel's, not into the app", () => {
+    expect(
+      resolvePasteAsTextTarget({ focused: "page", triggeredByAccelerator: false, mac: false }),
+    ).toBe("page");
+    expect(
+      resolvePasteAsTextTarget({ focused: "page", triggeredByAccelerator: true, mac: true }),
+    ).toBe("page");
+    // Off macOS Chromium pastes as text for the chord in a page itself.
+    expect(
+      resolvePasteAsTextTarget({ focused: "page", triggeredByAccelerator: true, mac: false }),
+    ).toBeNull();
+  });
+
+  it("does nothing without a focused page", () => {
+    expect(
+      resolvePasteAsTextTarget({ focused: null, triggeredByAccelerator: false, mac: true }),
+    ).toBeNull();
   });
 });
