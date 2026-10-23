@@ -32,6 +32,7 @@ import {
   Notification,
   protocol,
   safeStorage,
+  screen,
   session,
   shell,
   webContents,
@@ -174,6 +175,14 @@ import {
 } from "./clientPersistence.ts";
 import { isBackendReadinessAborted, waitForHttpReady } from "./backendReadiness.ts";
 import { createBackendRestartBackoff } from "./backendRestartBackoff.ts";
+import { sanitizeLogValue } from "./logValue.ts";
+import {
+  createDesktopWindowStateStore,
+  DESKTOP_WINDOW_MIN_SIZE,
+  DESKTOP_WINDOW_STATE_FILE_NAME,
+  type DesktopWindowBounds,
+  isWindowPositionUnreported,
+} from "./windowState.ts";
 import { showDesktopConfirmDialog } from "./confirmDialog.ts";
 import {
   resolveDesktopCoreAdvertisedEndpoints,
@@ -322,6 +331,7 @@ const BACKEND_BASE_DIR = DESKTOP_PATHS.backendBaseDir;
 const STATE_DIR = DESKTOP_PATHS.stateDir;
 const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
+const DESKTOP_WINDOW_STATE_PATH = Path.join(STATE_DIR, DESKTOP_WINDOW_STATE_FILE_NAME);
 const SAVED_ENVIRONMENT_REGISTRY_PATH = Path.join(STATE_DIR, "saved-environments.json");
 const SHELL_ENVIRONMENT_CACHE_PATH = DESKTOP_PATHS.shellEnvironmentCachePath;
 const DESKTOP_WORKSPACE_CLIENT_DIR = Path.join(STATE_DIR, "desktop-workspace-client");
@@ -553,6 +563,18 @@ let backendEverReady = false;
 const appShellUsableContents = new WeakSet<Electron.WebContents>();
 // The app's own pages (one per `createWindow`), which load the preload and answer menu actions.
 const appWindowContents = new WeakSet<Electron.WebContents>();
+// Reopens the window where it was (bounds and maximized state).
+const desktopWindowState = createDesktopWindowStateStore({
+  filePath: DESKTOP_WINDOW_STATE_PATH,
+  log: logDesktopEvent,
+  now: () => performance.now(),
+  positionReported: !isWindowPositionUnreported({
+    platform: process.platform,
+    sessionType: readEnv("XDG_SESSION_TYPE"),
+    waylandDisplay: readEnv("WAYLAND_DISPLAY"),
+    ozonePlatform: app.commandLine.getSwitchValue("ozone-platform"),
+  }),
+});
 // The backend child each window's app document was requested from, and when.
 // A load requested when the backend bound its port is not repeated at its
 // readiness (unless it failed or the backend took too long; see
@@ -621,10 +643,6 @@ function logTimestamp(): string {
 
 function logScope(scope: string): string {
   return `${scope} run=${APP_RUN_ID}`;
-}
-
-function sanitizeLogValue(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
 }
 
 function readPersistedBackendObservabilitySettings(): {
@@ -1552,6 +1570,8 @@ function relaunchDesktopApp(reason: string): void {
   if (desktopRelaunchRequested) return;
   desktopRelaunchRequested = true;
   setImmediate(() => {
+    // app.exit() below emits no window events, so nothing else saves the window.
+    desktopWindowState.flushAll();
     isQuitting = true;
     clearUpdatePollTimer();
     cancelBackendReadinessWait();
@@ -1581,6 +1601,12 @@ function relaunchDesktopApp(reason: string): void {
 function writeDesktopLogHeader(message: string): void {
   if (!desktopLogSink) return;
   void desktopLogSink.write(`[${logTimestamp()}] [${logScope("desktop")}] ${message}\n`);
+}
+
+/** A desktop event line: the desktop log when packaged, the terminal otherwise. */
+function logDesktopEvent(line: string): void {
+  if (desktopLogSink) writeDesktopLogHeader(line);
+  else console.warn(`[desktop] ${line}`);
 }
 
 /**
@@ -2673,6 +2699,8 @@ function revealWindow(window: BrowserWindow): void {
 
   if (!window.isVisible()) {
     markDesktopStartupPhase("desktop.window.first-reveal");
+    // Maximizing right before the first show keeps it to one visible transition.
+    desktopWindowState.beforeFirstShow(window);
     window.show();
   }
 
@@ -4828,13 +4856,32 @@ function loadDesktopBootPage(window: BrowserWindow): void {
   }
 }
 
+/** Display work areas, primary first (empty when Electron cannot tell). */
+function readDisplayWorkAreas(): DesktopWindowBounds[] {
+  try {
+    const primary = screen.getPrimaryDisplay();
+    return [
+      primary.workArea,
+      ...screen
+        .getAllDisplays()
+        .filter((display) => display.id !== primary.id)
+        .map((display) => display.workArea),
+    ];
+  } catch (error) {
+    logDesktopEvent(
+      `window state displays unavailable message=${sanitizeLogValue(formatErrorMessage(error))}`,
+    );
+    return [];
+  }
+}
+
 function createWindow(): BrowserWindow {
   markDesktopStartupPhase("desktop.window.create");
+  const restoredWindowState = desktopWindowState.restore(readDisplayWorkAreas());
   const window = new BrowserWindow({
-    width: 1100,
-    height: 780,
-    minWidth: 840,
-    minHeight: 620,
+    ...restoredWindowState.bounds,
+    minWidth: DESKTOP_WINDOW_MIN_SIZE.width,
+    minHeight: DESKTOP_WINDOW_MIN_SIZE.height,
     show: false,
     autoHideMenuBar: true,
     backgroundColor: getInitialWindowBackgroundColor(),
@@ -4853,6 +4900,7 @@ function createWindow(): BrowserWindow {
     },
   });
   appWindowContents.add(window.webContents);
+  desktopWindowState.track(window, restoredWindowState);
 
   const quitGuard = createQuitShortcutGuard({
     mode: () => desktopSettings.quitShortcutMode,
