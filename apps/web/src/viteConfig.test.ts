@@ -1,12 +1,10 @@
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  createWebViteConfig,
-  REACT_COMPILER_EXCLUDE,
-  REACT_COMPILER_INCLUDE,
-  shouldEnableHostedPwaBuild,
-} from "../vite.config";
+import { createWebViteConfig, shouldEnableHostedPwaBuild } from "../vite.config";
 import { resolveWebModulePreloadDependencies } from "./viteBuild/modulePreload";
+import { REACT_COMPILER_EXCLUDE, REACT_COMPILER_INCLUDE } from "./viteBuild/reactCompilerScope";
 
 type ViteConfigWithOptimizeDeps = {
   readonly optimizeDeps?: {
@@ -38,12 +36,69 @@ type ViteConfigWithOptimizeDeps = {
   };
 };
 
-function collectPluginNames(value: unknown): ReadonlyArray<string> {
-  if (Array.isArray(value)) return value.flatMap(collectPluginNames);
+type NamedPlugin = { readonly name: string; readonly [key: string]: unknown };
+
+function collectPlugins(value: unknown): ReadonlyArray<NamedPlugin> {
+  if (Array.isArray(value)) return value.flatMap(collectPlugins);
   if (value && typeof value === "object" && "name" in value && typeof value.name === "string") {
-    return [value.name];
+    return [value as NamedPlugin];
   }
   return [];
+}
+
+function collectPluginNames(value: unknown): ReadonlyArray<string> {
+  return collectPlugins(value).map((plugin) => plugin.name);
+}
+
+type IdFilter = RegExp | ReadonlyArray<RegExp>;
+
+/** plugin-react's `vite:react-compiler` transform hook, as far as these tests use it. */
+interface ReactCompilerTransformHook {
+  readonly filter: { readonly id: { readonly include: IdFilter; readonly exclude: IdFilter } };
+  readonly handler: (
+    this: unknown,
+    code: string,
+    id: string,
+  ) => Promise<{ readonly code: string } | undefined>;
+}
+
+function reactCompilerTransform(): ReactCompilerTransformHook {
+  const plugin = collectPlugins(createWebViteConfig().plugins).find(
+    ({ name }) => name === "vite:react-compiler",
+  );
+  if (!plugin) throw new Error("vite:react-compiler is not configured");
+  return plugin.transform as ReactCompilerTransformHook;
+}
+
+function matchesIdFilter(filter: IdFilter, id: string): boolean {
+  return (Array.isArray(filter) ? filter : [filter]).some((pattern) => pattern.test(id));
+}
+
+/**
+ * Runs the configured compiler transform on a fixture the way a production
+ * client build does. The fixtures live in `test/`, outside the compiler's
+ * scope, so each is compiled as if it sat in `src/` (the module id names a
+ * directory that does not exist; the transform only reads the code).
+ */
+async function compileForClientBuild(fixture: string): Promise<string> {
+  const code = await readFile(
+    new URL(`../test/fixtures/reactCompiler/${fixture}`, import.meta.url),
+    "utf8",
+  );
+  const id = fileURLToPath(new URL(`./reactCompilerFixtures/${fixture}`, import.meta.url));
+  const transform = reactCompilerTransform();
+  // Calling the handler directly skips the hook filter, so check it here.
+  expect(matchesIdFilter(transform.filter.id.include, id), id).toBe(true);
+  expect(matchesIdFilter(transform.filter.id.exclude, id), id).toBe(false);
+  const context = {
+    environment: { config: { consumer: "client", command: "build", build: { sourcemap: false } } },
+    error(error: unknown): never {
+      throw error instanceof Error ? error : new Error(String(error));
+    },
+    warn() {},
+  };
+  const result = await transform.handler.call(context, code, id);
+  return result?.code ?? "";
 }
 
 describe("web Vite config", () => {
@@ -81,6 +136,40 @@ describe("web Vite config", () => {
     expect(excluded("/repo/apps/web/src/workers/example.worker.ts")).toBe(true);
     expect(excluded("/repo/apps/web/src/components/ChatView.logic.ts")).toBe(true);
     expect(excluded("/repo/apps/web/src/components/ChatView.tsx")).toBe(false);
+  });
+
+  it("compiles web React source with the Oxc React Compiler", () => {
+    const names = collectPluginNames(createWebViteConfig().plugins);
+
+    expect(names).toContain("vite:react-compiler");
+    expect(names).not.toContain("ryco:react-compiler");
+  });
+
+  it("applies the compiler filters to the compiler transform", () => {
+    const { filter } = reactCompilerTransform();
+    const compiles = (id: string) =>
+      matchesIdFilter(filter.id.include, id) && !matchesIdFilter(filter.id.exclude, id);
+
+    expect(compiles("/repo/apps/web/src/components/ChatView.tsx")).toBe(true);
+    expect(compiles("/repo/apps/web/src/components/ChatView.tsx?v=1")).toBe(true);
+    expect(compiles("/repo/apps/web/src/components/ChatView.logic.ts")).toBe(false);
+    expect(compiles("/repo/packages/client-runtime/src/state/store.ts")).toBe(false);
+  });
+
+  it("memoizes components and hooks in TSX and TS modules and honors opt-outs", async () => {
+    const counterList = await compileForClientBuild("CounterList.tsx");
+    expect(counterList).toContain("react/compiler-runtime");
+    expect(counterList).not.toContain("interface CounterListProps");
+
+    const sortedEntries = await compileForClientBuild("useSortedEntries.ts");
+    expect(sortedEntries).toContain("react/compiler-runtime");
+    expect(sortedEntries).not.toContain("ReadonlyArray<T>");
+
+    const labeledInput = await compileForClientBuild("LabeledInput.tsx");
+    expect(labeledInput).toContain("react/compiler-runtime");
+    expect(labeledInput).toContain("function OptedOut");
+    const optedOut = labeledInput.slice(labeledInput.indexOf("function OptedOut"));
+    expect(optedOut.slice(0, optedOut.indexOf("\n}"))).not.toMatch(/_c\d*\(/);
   });
 
   it("enables PWA artifacts only for production hosted builds", () => {

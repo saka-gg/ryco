@@ -99,6 +99,12 @@ export function AppearanceSettingsPanel({
    */
   readonly surface?: "node" | "hub";
 } = {}) {
+  // Uncompiled on purpose: this panel reads theme and appearance state from
+  // module storage during render (`getAllThemes()`,
+  // `hasAppearancePreferenceOverride()`). Compiled, those reads are cached on
+  // inputs that never change, and the interface font reset button never
+  // appears. Babel's React Compiler never compiled it either.
+  "use no memo";
   const isHub = surface === "hub";
   // The frozen phone tier keeps the comfortable chat width, so it does not offer the setting.
   const isPhoneTier = usePresentationTier() === "phone";

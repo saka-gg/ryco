@@ -132,15 +132,15 @@ compiles only when its fingerprint changes. It saves them only when a run
 publishes a new entry, because the fingerprint includes the cargo environment,
 which no cache key can hash.
 
-Build and the browser shards also keep the web app's React Compiler transform
-cache (`apps/web/node_modules/.cache/ryco-react-compiler`, see
-`apps/web/src/viteBuild/reactCompilerCache.ts`). Each entry is keyed by the
-module and its path, `NODE_ENV`, the installed Babel and compiler packages, the
-full Babel option set and the plugin sources, so a hit is byte-identical to
-compiling. The restore and save actions keep only the entries a job used and
-save only when it compiled something new; among the browser shards only the
-first saves. Release builds and Vercel set `RYCO_REACT_COMPILER_CACHE=off` and
-compile every module.
+The web build compiles React with the Oxc React Compiler and keeps no
+transform cache. Build and the browser shards still run the
+`restore-react-compiler-cache` and `save-react-compiler-cache` steps, which
+restore nothing and save nothing now
+(`apps/web/node_modules/.cache/ryco-react-compiler` stays empty). Release
+builds and Vercel still set the unused `RYCO_REACT_COMPILER_CACHE=off`, and
+`turbo.json` and `apps/web/turbo.jsonc` still list it and
+`RYCO_REACT_COMPILER_CACHE_DIR`. A follow-up removes the steps, the actions
+and these variables once main's workflow no longer references the actions.
 
 Blacksmith runners send `actions/cache` to Blacksmith's own cache backend, not
 GitHub's, so each backend gets one Bun install cache writer: Static on

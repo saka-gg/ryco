@@ -70,6 +70,10 @@ export function WorkspaceReview(props: {
   /** Inline under a workspace (indented to its title) or flush in a dialog. */
   readonly layout?: "inline" | "dialog";
 }) {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const { environmentId, worktreeId, action, onClose, onReopen } = props;
   const label = WORKSPACE_LIFECYCLE_ACTION_LABELS[action];
   const [deleteConversations, setDeleteConversations] = useState(false);

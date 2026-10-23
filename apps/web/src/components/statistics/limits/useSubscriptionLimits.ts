@@ -59,6 +59,10 @@ export interface UseSubscriptionLimitsResult {
 export function useSubscriptionLimits(input: {
   readonly environmentIds?: readonly string[] | undefined;
 }): UseSubscriptionLimitsResult {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const queryClient = useQueryClient();
   const connections = useConnectedEnvironments();
   const selected = useMemo(
