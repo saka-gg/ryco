@@ -71,7 +71,6 @@ import {
 } from "./ClaudeAdapter.ts";
 import type { AgentControlProviderBridge } from "../../agentControl/ProviderInjection.ts";
 import { makeAgentProcessPriority } from "../agentProcessPriority.ts";
-import { isMissingConversationError } from "../resumeFailure.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
