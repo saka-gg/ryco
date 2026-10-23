@@ -1,6 +1,6 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
-import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
+import { REGULAR_FILE_READ_FLAGS } from "./regularFile.ts";
 
 export interface ComputerAuditFileTail {
   readonly contents: Buffer;
@@ -23,10 +23,7 @@ export async function readComputerAuditFileTail(
     // identity so a link cannot substitute an arbitrary file there.
     const entry = await lstat(path);
     if (!entry.isFile()) throw new Error("Could not read Computer activity history.");
-    file = await open(
-      path,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
-    );
+    file = await open(path, REGULAR_FILE_READ_FLAGS);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error("Could not read Computer activity history.");
