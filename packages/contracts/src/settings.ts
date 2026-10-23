@@ -188,11 +188,17 @@ export const ClientSettingsSchema = Schema.Struct({
   sourceControlRefreshMode: SourceControlRefreshMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SOURCE_CONTROL_REFRESH_MODE)),
   ),
-  // Desktop-only: post a native notification when an agent turn completes while
-  // the Ryco window is unfocused. No-op in the browser (no desktop bridge).
+  // The "Notifications" half of the thread alert mode: a system notification on
+  // desktop or in the browser when a thread on any connected machine finishes,
+  // fails or needs you while Ryco is in the background. The name predates that
+  // scope and stays for storage stability; older builds read the same switch.
   notifyOnTurnCompleteWhenUnfocused: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
+  // The "Sound" half of the thread alert mode.
+  threadNotificationSound: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // In-app "Open thread" toasts for other threads while Ryco is in front.
+  threadNotificationToasts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -991,5 +997,8 @@ export const ClientSettingsPatch = Schema.Struct({
   preferredEditor: Schema.optionalKey(Schema.NullOr(EditorId)),
   gitStatusPollIntervalMs: Schema.optionalKey(GitStatusPollIntervalMs),
   sourceControlRefreshMode: Schema.optionalKey(SourceControlRefreshMode),
+  notifyOnTurnCompleteWhenUnfocused: Schema.optionalKey(Schema.Boolean),
+  threadNotificationSound: Schema.optionalKey(Schema.Boolean),
+  threadNotificationToasts: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

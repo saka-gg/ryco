@@ -118,6 +118,7 @@ export const CLIENT_RUNTIME_PURE_TEST_FILES = [
   "src/state/settings/externalIntegrations.test.ts",
   "src/state/settings/mcpInstallations.test.ts",
   "src/state/settings/projectPreferences.test.ts",
+  "src/state/settings/threadNotificationPreferences.test.ts",
   "src/state/settings/tokenLifetime.test.ts",
   "src/state/side-chat/index.test.ts",
   "src/state/singleFlightReader.test.ts",

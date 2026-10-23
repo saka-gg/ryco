@@ -720,6 +720,8 @@ describe("wsApi", () => {
       gitStatusPollIntervalMs: 0 as const,
       sourceControlRefreshMode: "automatic" as const,
       notifyOnTurnCompleteWhenUnfocused: true,
+      threadNotificationSound: false,
+      threadNotificationToasts: true,
     };
     const getClientSettings = vi.fn().mockResolvedValue({
       ...clientSettings,
@@ -792,6 +794,8 @@ describe("wsApi", () => {
       gitStatusPollIntervalMs: 0 as const,
       sourceControlRefreshMode: "automatic" as const,
       notifyOnTurnCompleteWhenUnfocused: true,
+      threadNotificationSound: false,
+      threadNotificationToasts: true,
     };
 
     await api.persistence.setClientSettings(clientSettings);

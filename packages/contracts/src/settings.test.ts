@@ -193,6 +193,40 @@ describe("ClientSettings.chatWidth", () => {
   });
 });
 
+describe("ClientSettings thread alerts", () => {
+  it("turns on notifications and toasts, but not sound, for settings saved before them", () => {
+    for (const settings of [decodeClientSettings({}), DEFAULT_CLIENT_SETTINGS]) {
+      expect(settings.notifyOnTurnCompleteWhenUnfocused).toBe(true);
+      expect(settings.threadNotificationSound).toBe(false);
+      expect(settings.threadNotificationToasts).toBe(true);
+    }
+  });
+
+  it("keeps a switched-off desktop notification switch off", () => {
+    expect(decodeClientSettings({ notifyOnTurnCompleteWhenUnfocused: false })).toMatchObject({
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: false,
+      threadNotificationToasts: true,
+    });
+  });
+
+  it("patches each switch independently", () => {
+    expect(
+      decodeClientSettingsPatch({
+        notifyOnTurnCompleteWhenUnfocused: false,
+        threadNotificationSound: true,
+        threadNotificationToasts: false,
+      }),
+    ).toEqual({
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
+    });
+    expect(decodeClientSettingsPatch({})).toEqual({});
+    expect(() => decodeClientSettingsPatch({ threadNotificationSound: "on" })).toThrow();
+  });
+});
+
 describe("ServerSettings.responseStreamingMode", () => {
   it("defaults to paragraph streaming and ignores the retired keys", () => {
     expect(DEFAULT_SERVER_SETTINGS.responseStreamingMode).toBe("paragraph");
