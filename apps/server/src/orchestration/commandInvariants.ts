@@ -14,7 +14,11 @@ import { ContextHandoffActivityPayload } from "@ryco/contracts";
 import { FORKED_THREAD_RELATIONSHIP } from "@ryco/shared/threadFork";
 import { Effect, Option, Schema } from "effect";
 
-import { OrchestrationCommandInvariantError } from "./Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationModelSwitchBlockedError,
+} from "./Errors.ts";
+import { modelSelectionChangeRestartsSession } from "../provider/sessionModelRestart.ts";
 import { findThreadInArray } from "./threadIndex.ts";
 
 function invariantError(commandType: string, detail: string): OrchestrationCommandInvariantError {
@@ -168,6 +172,55 @@ export function requireThreadIdleForContextHandoff(input: {
     );
   }
   return Effect.void;
+}
+
+/**
+ * Refuses a turn start that would replace the thread's live provider runtime while that runtime
+ * still runs native background work (subagents, background shells, watch loops): replacing the
+ * runtime ends every task with it. Two turn starts replace it: a context handoff the decider
+ * planned (another provider instance), and a model or option change that restarts the session
+ * on the same instance (`modelSelectionChangeRestartsSession`, compared with the selection the
+ * last accepted turn committed, as the provider reactor compares with the one it last applied).
+ * The decider cannot check this: background liveness is in-memory runtime state
+ * (`ThreadBackgroundLiveness`), not part of the read model, so the engine applies this to the
+ * events the decider planned. Only tasks the current runtime reported count. Only a turn start
+ * marked `keepBackgroundWork` is refused: a client that predates the refusal could not handle
+ * it (an older mobile outbox drops a refused message), so its turn starts switch as before. A
+ * turn start with `stopBackgroundWork` (the user chose to end the tasks) or a thread without a
+ * live runtime passes.
+ */
+export function requireNoBackgroundWorkForModelSwitch(input: {
+  readonly command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
+  readonly events: ReadonlyArray<{ readonly type: string }>;
+  readonly thread: OrchestrationThread | undefined;
+  readonly liveTaskIds: (
+    threadId: ThreadId,
+    runtimeSessionId: string | null,
+  ) => ReadonlyArray<string>;
+}): Effect.Effect<void, OrchestrationModelSwitchBlockedError> {
+  const { command, thread } = input;
+  const session = thread?.session;
+  if (
+    command.keepBackgroundWork !== true ||
+    command.stopBackgroundWork === true ||
+    !thread ||
+    !session ||
+    session.status === "stopped"
+  ) {
+    return Effect.void;
+  }
+  const replacesRuntime =
+    input.events.some((event) => event.type === "thread.context-handoff-requested") ||
+    modelSelectionChangeRestartsSession({
+      driver: session.providerName,
+      previous: thread.modelSelection,
+      requested: command.modelSelection,
+    });
+  if (!replacesRuntime) return Effect.void;
+  const taskIds = input.liveTaskIds(thread.id, session.runtimeSessionId ?? null);
+  return taskIds.length === 0
+    ? Effect.void
+    : Effect.fail(new OrchestrationModelSwitchBlockedError({ threadId: thread.id, taskIds }));
 }
 
 export function findThreadById(

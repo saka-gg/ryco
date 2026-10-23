@@ -59,6 +59,12 @@ export class ThreadBackgroundLivenessService extends Context.Service<
       readonly agentId?: string | undefined;
       readonly attempt?: number | undefined;
       readonly parentAgentId?: string | undefined;
+      /**
+       * The runtime that reported the transition (null for a runtime without an id). A report
+       * from another runtime than the thread's earlier reports means that runtime was replaced:
+       * its work died with it, so the thread's earlier liveness is dropped first.
+       */
+      readonly runtimeSessionId?: string | null | undefined;
     }) => void;
 
     /** Session death orphans all of a thread's background work. */
@@ -68,6 +74,16 @@ export class ThreadBackgroundLivenessService extends Context.Service<
      * Any live agent, background shell, or monitor task keeps the thread working.
      */
     readonly getThreadBackgroundLiveness: (threadId: string) => ThreadBackgroundLiveness;
+
+    /**
+     * The task ids that keep the thread working; empty exactly when its liveness is null. Given
+     * a runtime, only that runtime's tasks: tasks a replaced runtime reported are dead, even
+     * though its late terminal events are dropped as stale and never clear them.
+     */
+    readonly listLiveTaskIds: (
+      threadId: string,
+      runtimeSessionId?: string | null,
+    ) => ReadonlyArray<string>;
 
     /** Threads with at least one live agent or watch loop (graceful-shutdown hints). */
     readonly listLiveThreadIds: () => ReadonlyArray<string>;
@@ -86,6 +102,14 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
   // Session-scoped history prevents delayed starts/status patches from reviving
   // completed tasks and retains classification on sparse updates.
   const history = new Map<string, Map<string, TaskLivenessHistory>>();
+  // The runtime whose reports the thread's state and history hold (see `recordTaskLiveness`).
+  const runtimeByThreadId = new Map<string, string | null>();
+
+  const clearThread = (threadId: string) => {
+    stateByThreadId.delete(threadId);
+    history.delete(threadId);
+    runtimeByThreadId.delete(threadId);
+  };
 
   const stateFor = (threadId: string): ThreadLivenessState => {
     const existing = stateByThreadId.get(threadId);
@@ -115,6 +139,15 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
 
   return {
     recordTaskLiveness: (input) => {
+      if (input.runtimeSessionId !== undefined) {
+        if (
+          runtimeByThreadId.has(input.threadId) &&
+          runtimeByThreadId.get(input.threadId) !== input.runtimeSessionId
+        ) {
+          clearThread(input.threadId);
+        }
+        runtimeByThreadId.set(input.threadId, input.runtimeSessionId);
+      }
       const tasks = history.get(input.threadId) ?? new Map<string, TaskLivenessHistory>();
       const previous = tasks.get(input.taskId);
       if (
@@ -200,13 +233,23 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       bucket.add(input.taskId);
     },
 
-    clearThreadLiveness: (threadId) => {
-      stateByThreadId.delete(threadId);
-      history.delete(threadId);
-    },
+    clearThreadLiveness: clearThread,
 
     // `drop` prunes empty threads, so every key has live work.
     listLiveThreadIds: () => [...stateByThreadId.keys()],
+
+    listLiveTaskIds: (threadId, runtimeSessionId) => {
+      const state = stateByThreadId.get(threadId);
+      if (!state) return [];
+      if (
+        runtimeSessionId !== undefined &&
+        runtimeByThreadId.has(threadId) &&
+        runtimeByThreadId.get(threadId) !== runtimeSessionId
+      ) {
+        return [];
+      }
+      return [...state.agents, ...state.monitors];
+    },
 
     getThreadBackgroundLiveness: (threadId) => {
       const state = stateByThreadId.get(threadId);

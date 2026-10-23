@@ -53,6 +53,49 @@ describe("ThreadBackgroundLiveness", () => {
     expect(liveness.listLiveThreadIds()).toEqual(["t-monitor"]);
   });
 
+  it("lists the live tasks of a thread, agents and watch loops alike", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const record = (taskId: string, taskType: string, kind: "started" | "completed") =>
+      liveness.recordTaskLiveness({ threadId: "t", taskId, taskType, status: undefined, kind });
+    record("agent", "subagent", "started");
+    record("watch", "monitor", "started");
+    record("shell", "local_bash", "started");
+    record("shell", "local_bash", "completed");
+    expect(liveness.listLiveTaskIds("t").toSorted()).toEqual(["agent", "watch"]);
+    expect(liveness.listLiveTaskIds("other")).toEqual([]);
+    liveness.clearThreadLiveness("t");
+    expect(liveness.listLiveTaskIds("t")).toEqual([]);
+  });
+
+  it("scopes a thread's live tasks to the runtime that reported them", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const start = (taskId: string, runtimeSessionId: string | null) =>
+      liveness.recordTaskLiveness({
+        threadId: "t",
+        taskId,
+        taskType: "local_agent",
+        status: "running",
+        kind: "started",
+        runtimeSessionId,
+      });
+    start("old-agent", "runtime-a");
+    expect(liveness.listLiveTaskIds("t", "runtime-a")).toEqual(["old-agent"]);
+    // The thread runs another runtime now: the old one's tasks died with it.
+    expect(liveness.listLiveTaskIds("t", "runtime-b")).toEqual([]);
+    expect(liveness.listLiveTaskIds("t", null)).toEqual([]);
+    expect(liveness.listLiveTaskIds("t")).toEqual(["old-agent"]);
+
+    // The replacement's first report drops what the replaced runtime left behind.
+    start("new-agent", "runtime-b");
+    expect(liveness.listLiveTaskIds("t")).toEqual(["new-agent"]);
+    expect(liveness.listLiveTaskIds("t", "runtime-b")).toEqual(["new-agent"]);
+
+    liveness.clearThreadLiveness("t");
+    start("fresh", null);
+    expect(liveness.listLiveTaskIds("t", null)).toEqual(["fresh"]);
+    expect(liveness.listLiveTaskIds("t", "runtime-b")).toEqual([]);
+  });
+
   it("keeps working until both agents and background tasks finish", () => {
     const liveness = ThreadBackgroundLiveness.make();
     const threadId = "t-live-1";

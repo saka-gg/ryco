@@ -161,6 +161,7 @@ export async function sendQueuedMessageInBackground(
     messageId: MessageId.make(entry.id),
     preserveComposerDraft: true,
     claudeCacheReview: null,
+    confirmStopBackgroundWork: null,
     suppressToasts: true,
     onBeforeTurnStart: hooks.onBeforeTurnStart,
     onSendError: (error) => {

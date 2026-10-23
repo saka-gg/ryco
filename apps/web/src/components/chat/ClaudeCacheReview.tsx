@@ -1,4 +1,3 @@
-import { createRoot } from "react-dom/client";
 import type { ClaudeCacheObservation } from "@ryco/contracts";
 import type {
   ClaudeCacheReviewPresentation,
@@ -6,6 +5,7 @@ import type {
 } from "@ryco/client-runtime/state/composer";
 import { Dialog, DialogPopup, DialogTitle, DialogDescription } from "../ui/dialog";
 import { Button } from "../ui/button";
+import { mountDialog } from "./mountDialog";
 
 export function ClaudeCacheEvidence({ observation }: { observation: ClaudeCacheObservation }) {
   return (
@@ -40,23 +40,6 @@ export function ClaudeCacheEvidence({ observation }: { observation: ClaudeCacheO
       </p>
     </div>
   );
-}
-
-function mountDialog(render: (close: () => void) => React.ReactNode) {
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    queueMicrotask(() => {
-      root.unmount();
-      container.remove();
-    });
-  };
-  root.render(render(close));
-  return close;
 }
 
 export const claudeCacheReviewPresentation: ClaudeCacheReviewPresentation = {

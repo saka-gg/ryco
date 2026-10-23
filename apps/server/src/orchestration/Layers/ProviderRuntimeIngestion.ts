@@ -3660,7 +3660,9 @@ const make = Effect.gen(function* () {
         thread.id,
       );
       // Sidebar background liveness: fed from the same lifecycle stream,
-      // read by the shell query at mapping time (no persistence).
+      // read by the shell query at mapping time (no persistence). Tagged with
+      // the reporting runtime, which the stale-event check above proved is the
+      // thread's current one.
       switch (event.type) {
         case "task.started":
         case "task.progress":
@@ -3682,6 +3684,7 @@ const make = Effect.gen(function* () {
             agentId: payload.agentId,
             attempt: payload.attempt,
             parentAgentId: payload.parentAgentId,
+            runtimeSessionId: event.runtimeSessionId ?? null,
             kind:
               event.type === "task.started"
                 ? "started"
@@ -3704,6 +3707,7 @@ const make = Effect.gen(function* () {
               taskId: `subagent:${subagent.subagentId}`,
               taskType: "subagent",
               status: "status" in event.payload ? event.payload.status : undefined,
+              runtimeSessionId: event.runtimeSessionId ?? null,
               kind:
                 event.type === "subagent.started"
                   ? "started"

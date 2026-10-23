@@ -2075,6 +2075,23 @@ export const ThreadReferences = Schema.Array(ThreadId).check(
 );
 export type ThreadReferences = typeof ThreadReferences.Type;
 
+/**
+ * Asks the node to refuse this `thread.turn.start` with `modelSwitchBlockedByBackgroundWork`,
+ * recording nothing, when its model switch would end native background tasks the thread's
+ * provider runtime still runs. Senders that handle that refusal set it on every turn start. A
+ * turn start without it switches as it always did and ends the tasks: clients that predate the
+ * refusal cannot handle it (an older mobile outbox would drop the refused message), so the node
+ * refuses only those that ask. A turn start that switches nothing ignores it.
+ */
+const KeepBackgroundWork = Schema.optional(Schema.Literal(true));
+
+/**
+ * Set instead of `keepBackgroundWork` on a `thread.turn.start` sent again after the node refused
+ * its model switch and the user chose to stop those tasks: the switch then proceeds, and
+ * replacing the provider runtime ends whatever still runs. It wins over `keepBackgroundWork`.
+ */
+const StopBackgroundWork = Schema.optional(Schema.Literal(true));
+
 export const ThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   restartContinuationGuard: Schema.optional(RestartContinuationGuard),
@@ -2104,6 +2121,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
   threadReferences: Schema.optional(ThreadReferences),
+  keepBackgroundWork: KeepBackgroundWork,
+  stopBackgroundWork: StopBackgroundWork,
   createdAt: IsoDateTime,
 });
 /** A turn start as dispatched: its attachments are already stored. */
@@ -2135,6 +2154,8 @@ export const ClientThreadTurnStartCommand = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
   threadReferences: Schema.optional(ThreadReferences),
+  keepBackgroundWork: KeepBackgroundWork,
+  stopBackgroundWork: StopBackgroundWork,
   createdAt: IsoDateTime,
 });
 
@@ -3960,12 +3981,34 @@ export const OrchestrationDispatchCommandErrorReason = Schema.Literals(["chat-pr
 export type OrchestrationDispatchCommandErrorReason =
   typeof OrchestrationDispatchCommandErrorReason.Type;
 
+/**
+ * A model switch the node refused because the thread's current provider runtime still runs
+ * native background tasks (subagents, background shells, watch loops) that the switch would
+ * end: a context handoff to another provider instance, or a model or option change that
+ * restarts the session. Only a turn start marked `keepBackgroundWork` is refused. Nothing was
+ * recorded for the command: the same `thread.turn.start`, with the same command id, can be sent
+ * again once the tasks finish, or with `stopBackgroundWork` once the user chose to stop them.
+ */
+export const ModelSwitchBlockedByBackgroundWork = Schema.Struct({
+  /**
+   * The live tasks as the node tracks them: provider task ids, or `subagent:<id>` for
+   * subagents without one. Informational; the switch itself ends them.
+   */
+  taskIds: Schema.Array(TrimmedNonEmptyString),
+});
+export type ModelSwitchBlockedByBackgroundWork = typeof ModelSwitchBlockedByBackgroundWork.Type;
+
 export class OrchestrationDispatchCommandError extends Schema.TaggedError<OrchestrationDispatchCommandError>()(
   "OrchestrationDispatchCommandError",
   {
     message: TrimmedNonEmptyString,
     /** Additive: older clients ignore it and show `message`. */
     reason: Schema.optionalKey(OrchestrationDispatchCommandErrorReason),
+    /**
+     * Additive, like `reason`, but its own key: clients decode `reason` as a closed set, so a
+     * new reason value would make every older client fail to decode the whole error.
+     */
+    modelSwitchBlockedByBackgroundWork: Schema.optionalKey(ModelSwitchBlockedByBackgroundWork),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}

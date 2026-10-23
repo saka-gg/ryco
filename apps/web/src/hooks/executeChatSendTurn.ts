@@ -7,6 +7,7 @@ import {
 } from "./newDraftDefaults";
 import { readNodeConfig, resolveNodeConfigSource } from "./nodeConfigSource";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
+import { confirmStopBackgroundWorkDialog } from "../components/chat/StopBackgroundWorkDialog";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
@@ -243,6 +244,11 @@ export interface ExecuteChatSendTurnInput {
   preserveComposerDraft?: boolean;
   /** undefined = the dialog presentation (default); null = never review interactively. */
   claudeCacheReview?: ClaudeCacheReviewPresentation | null;
+  /**
+   * The "Stop tasks and switch" choice when background tasks hold back a model
+   * switch: undefined = the dialog (default); null = never ask (the refusal fails the send).
+   */
+  confirmStopBackgroundWork?: CommitSendTurnDispatchInput["confirmStopBackgroundWork"] | null;
   /** The live subscribed thread for the Claude resume review (see the send engine). */
   readSubscribedClaudeReviewState?: CommitSendTurnDispatchInput["readSubscribedClaudeReviewState"];
   /** Background sends never toast. */
@@ -864,8 +870,13 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       input.claudeCacheReview === undefined
         ? claudeCacheReviewPresentation
         : (input.claudeCacheReview ?? undefined);
+    const confirmStopBackgroundWork =
+      input.confirmStopBackgroundWork === undefined
+        ? confirmStopBackgroundWorkDialog
+        : (input.confirmStopBackgroundWork ?? undefined);
     await commitSendTurnDispatch({
       ...(claudeCacheReview ? { claudeCacheReview } : {}),
+      ...(confirmStopBackgroundWork ? { confirmStopBackgroundWork } : {}),
       // A prepared thread is new: there is no subscribed state of it to review from.
       ...(input.readSubscribedClaudeReviewState && !prepared
         ? { readSubscribedClaudeReviewState: input.readSubscribedClaudeReviewState }

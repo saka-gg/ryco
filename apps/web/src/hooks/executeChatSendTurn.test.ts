@@ -20,6 +20,7 @@ import {
   resetNewDraftDefaultsCacheForTests,
 } from "./newDraftDefaults";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
+import { confirmStopBackgroundWorkDialog } from "../components/chat/StopBackgroundWorkDialog";
 import { toastManager } from "../components/ui/toast";
 import type { ChatMessage } from "../types";
 import {
@@ -1179,6 +1180,83 @@ describe("chat first send with a retired project id", () => {
     expect(await executeChatSendTurn(input)).toBe(false);
     expect(renewChatProjectId).not.toHaveBeenCalled();
     expect(turnStarts()).toHaveLength(1);
+  });
+});
+
+describe("a model switch held back by background tasks", () => {
+  const blocked = () =>
+    new OrchestrationDispatchCommandError({
+      message: "This thread still has background tasks running.",
+      modelSwitchBlockedByBackgroundWork: { taskIds: ["task-agent"] },
+    });
+
+  function makeBlockedSendInput(stop: boolean) {
+    const sent = makeSendInput();
+    const stopBackgroundTask = vi.fn(async (_input: unknown) => ({}));
+    const confirmStopBackgroundWork = vi.fn(async () => stop);
+    sent.input.claudeCacheReview = null;
+    sent.input.confirmStopBackgroundWork = confirmStopBackgroundWork;
+    sent.input.dispatch.api = {
+      orchestration: { dispatchCommand: sent.dispatchCommand, stopBackgroundTask },
+    } as never;
+    sent.dispatchCommand.mockRejectedValueOnce(blocked());
+    const turnStarts = () =>
+      sent.dispatchCommand.mock.calls
+        .map(([command]) => command as { type: string; [key: string]: unknown })
+        .filter((command) => command.type === "thread.turn.start");
+    return { ...sent, stopBackgroundTask, confirmStopBackgroundWork, turnStarts };
+  }
+
+  it("asks with the dialog by default and never for a background send", async () => {
+    const calls = () => commitSendTurnDispatchSpy.current!.mock.calls;
+    const { input } = makeSendInput();
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(calls().at(-1)?.[0].confirmStopBackgroundWork).toBe(confirmStopBackgroundWorkDialog);
+
+    const background = makeSendInput();
+    background.input.confirmStopBackgroundWork = null;
+    expect(await executeChatSendTurn(background.input)).toBe(true);
+    expect(calls().at(-1)?.[0]).not.toHaveProperty("confirmStopBackgroundWork");
+  });
+
+  it("stops and sends nothing more when the choice outlived the send's connection", async () => {
+    // No connection stands in here, so the send's readiness capture fails after the choice.
+    const { input, stopBackgroundTask, turnStarts } = makeBlockedSendInput(true);
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(stopBackgroundTask).not.toHaveBeenCalled();
+    expect(turnStarts()).toHaveLength(1);
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(
+      input.thread.threadId,
+      expect.stringContaining("Nothing was stopped or sent"),
+    );
+  });
+
+  it("keeps the message and the staged target on cancel", async () => {
+    const { input, dispatchCommand, stopBackgroundTask, turnStarts } = makeBlockedSendInput(false);
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(stopBackgroundTask).not.toHaveBeenCalled();
+    expect(turnStarts()).toHaveLength(1);
+    // The composed text returns to the draft, and the send never wrote the target
+    // anywhere but the refused turn start, so the composer still stages it.
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+    expect(
+      dispatchCommand.mock.calls.filter(
+        ([command]) => (command as { type: string }).type !== "thread.turn.start",
+      ),
+    ).toEqual([]);
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(
+      input.thread.threadId,
+      expect.stringContaining("Your message and the selected model are kept"),
+    );
   });
 });
 

@@ -24,6 +24,12 @@ import type { DraftComposerAttachment } from "../lib/composerFiles";
 const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 
 export interface QueuedThreadMessage {
+  /**
+   * The send stopped at a choice the user did not confirm (the Claude resume review, or
+   * stopping background tasks to switch the model) and nothing was recorded. The message no
+   * longer drains: it waits for an explicit retry, which asks again. The key predates the
+   * second use and stays as persisted.
+   */
   readonly resumeReviewError?: string;
   /**
    * A steer of this message was cut off after the provider may have received it. The message
