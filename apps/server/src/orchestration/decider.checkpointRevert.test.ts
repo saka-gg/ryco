@@ -79,9 +79,15 @@ function makeReadModel(thread: OrchestrationThread): OrchestrationReadModel {
   return { snapshotSequence: 1, projects: [], threads: [thread], updatedAt: now };
 }
 
-function revertCommand(overrides: { commandId?: string; createdAt?: string } = {}) {
+function revertCommand(
+  overrides: {
+    commandId?: string;
+    createdAt?: string;
+    type?: "thread.checkpoint.revert" | "thread.conversation.revert";
+  } = {},
+) {
   return {
-    type: "thread.checkpoint.revert",
+    type: overrides.type ?? "thread.checkpoint.revert",
     commandId: CommandId.make(overrides.commandId ?? "cmd-revert"),
     threadId,
     turnCount: 1,
@@ -270,6 +276,42 @@ describe("checkpoint revert admission", () => {
     });
     expect(activityEvent.payload.activity.payload).not.toHaveProperty("fromTurnCount");
     expect(events.every((event) => event.commandId === "cmd-revert")).toBe(true);
+  });
+
+  it("journals a conversation-only revert as keeping the files", async () => {
+    const exit = await decide(revertCommand({ type: "thread.conversation.revert" }), makeThread());
+    expect(Exit.isSuccess(exit)).toBe(true);
+    if (!Exit.isSuccess(exit)) return;
+    const events = Array.isArray(exit.value) ? exit.value : [exit.value];
+    const [activityEvent, requestEvent] = events;
+    if (activityEvent?.type !== "thread.activity-appended") throw new Error("expected activity");
+    if (requestEvent?.type !== "thread.checkpoint-revert-requested") {
+      throw new Error("expected revert request");
+    }
+    expect(activityEvent.payload.activity.payload).toMatchObject({
+      status: "requested",
+      restoreFiles: false,
+    });
+    expect(requestEvent.payload).toMatchObject({ turnCount: 1, restoreFiles: false });
+
+    // A file-restoring revert says nothing, so older readers see the old shape.
+    const restoring = await decide(revertCommand(), makeThread());
+    if (!Exit.isSuccess(restoring)) throw new Error("expected success");
+    const restoringEvents = Array.isArray(restoring.value) ? restoring.value : [restoring.value];
+    for (const event of restoringEvents) {
+      expect(JSON.stringify(event.payload)).not.toContain("restoreFiles");
+    }
+  });
+
+  it("admits a conversation-only revert by the same rules", async () => {
+    const thread = makeThread({
+      latestTurn: { ...makeThread().latestTurn!, state: "running", completedAt: null },
+    });
+    await expectRejected(
+      revertCommand({ type: "thread.conversation.revert" }),
+      thread,
+      "This thread is still working",
+    );
   });
 
   it("stamps the pending revert with server time, not the client's clock", async () => {

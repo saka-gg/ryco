@@ -4989,7 +4989,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
 
   const getLatestCheckpointRevert: NonNullable<
     ProjectionSnapshotQueryShape["getLatestCheckpointRevert"]
-  > = (threadId) =>
+  > = (threadId, options) =>
     listThreadCheckpointRevertActivityRows({ threadId }).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
@@ -4998,7 +4998,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         ),
       ),
       // Ordered by the same rule as every other journal reader.
-      Effect.map((rows) => latestCheckpointRevert(rows.map(mapActivityRow))),
+      Effect.map((rows) => latestCheckpointRevert(rows.map(mapActivityRow), options)),
     );
 
   const getThreadProposedPlanById: NonNullable<

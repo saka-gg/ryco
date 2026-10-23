@@ -21,6 +21,7 @@ export * from "./planImplementationPrompt.ts";
 export * from "./promptContext.ts";
 export * from "./promptStash.ts";
 export * from "./sendEngine.ts";
+export * from "./sentMessageDraft.ts";
 export * from "./terminalContext.ts";
 export * from "./userMessageQuotes.ts";
 export * from "./threadMentions.ts";

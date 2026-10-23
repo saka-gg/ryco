@@ -120,6 +120,7 @@ import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { ForkOriginMarkerRow } from "./ForkOriginMarkerRow";
 import { UserInputExchangeRow } from "./UserInputExchangeRow";
 import { THREAD_FORK_COPY } from "@ryco/client-runtime/state/threads";
+import { EDIT_FROM_HERE_COPY } from "@ryco/client-runtime/state/session";
 import { useLongPress } from "~/hooks/useLongPress";
 import { usePresentationTier } from "~/hooks/usePresentationTier";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
@@ -1517,7 +1518,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                         className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
                         disabled={ctx.isRevertingCheckpoint || ctx.isWorking}
                         onClick={() => ctx.onRevertUserMessage(row.message.id)}
-                        title="Revert to this message"
+                        title={EDIT_FROM_HERE_COPY.action}
+                        aria-label={EDIT_FROM_HERE_COPY.action}
                       >
                         <Undo2Icon className="size-3" />
                       </Button>

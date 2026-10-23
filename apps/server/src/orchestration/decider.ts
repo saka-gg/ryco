@@ -2204,7 +2204,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       ];
     }
 
-    case "thread.checkpoint.revert": {
+    case "thread.checkpoint.revert":
+    case "thread.conversation.revert": {
       const thread = yield* requireThread({
         readModel,
         command,
@@ -2216,6 +2217,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         nowMs: Date.now(),
       });
+      // Journaled from the first phase on, so recovery keeps the files too.
+      const keepFiles = command.type === "thread.conversation.revert";
       const eventBase = () =>
         withEventBase({
           aggregateKind: "thread",
@@ -2233,6 +2236,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               revertRequestId: command.commandId,
               turnCount: command.turnCount,
               status: "requested",
+              ...(keepFiles ? { restoreFiles: false } : {}),
               // Server time, like every later phase: the journal orders reverts by
               // createdAt, so it must not mix the client's clock with the server's.
               createdAt: nowIso(),
@@ -2245,6 +2249,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           payload: {
             threadId: command.threadId,
             turnCount: command.turnCount,
+            ...(keepFiles ? { restoreFiles: false } : {}),
             createdAt: command.createdAt,
           },
         },

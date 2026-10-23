@@ -104,6 +104,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       nodeSelfUpdate: true,
       terminalWriteRequireIdle: true,
       threadFork: true,
+      conversationRevert: true,
       providerSessionPrewarm: true,
       providerProjectCommands: true,
       projectSearchEmptyQuery: true,

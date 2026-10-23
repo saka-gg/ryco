@@ -819,7 +819,7 @@ describe("MessagesTimeline", () => {
         'button[aria-label="Copy message"]',
       );
       const revertButton = document.querySelector<HTMLButtonElement>(
-        'button[title="Revert to this message"]',
+        'button[title="Edit from here"]',
       );
 
       for (const button of [copyButton, revertButton]) {

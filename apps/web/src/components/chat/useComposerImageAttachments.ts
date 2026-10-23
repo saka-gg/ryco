@@ -33,6 +33,7 @@ import {
 } from "../../composerDraftStore";
 import {
   composerFileUploadEngine,
+  enqueueComposerFileUpload,
   useEnvironmentFileUploadCapability,
 } from "../../composerFileUpload";
 import { readEnvironmentApi } from "~/environmentApi";
@@ -80,6 +81,24 @@ async function readFileAsBase64(file: File): Promise<string> {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(binary);
+}
+
+/**
+ * A composer entry for a file the user attached: a fresh id, and a blob
+ * preview for images. Non-image files stream through the upload queue
+ * (`enqueueComposerFileUpload`) where the machine supports it.
+ */
+export function composerAttachmentFromFile(file: File, name: string): ComposerImageAttachment {
+  const isImage = file.type.startsWith("image/");
+  return {
+    type: isImage ? "image" : "file",
+    id: randomUUID(),
+    name,
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    previewUrl: isImage ? URL.createObjectURL(file) : "",
+    file,
+  };
 }
 
 export interface ComposerAttachmentRouting {
@@ -307,35 +326,19 @@ export function useComposerImageAttachments(
       if (!threadId) {
         return;
       }
-      composerFileUploadEngine.enqueue({
-        attachmentId,
-        threadId,
-        environmentId,
-        name: file.name || "file",
-        mimeType: file.type || "application/octet-stream",
-        sizeBytes: file.size,
-        readBytes: async () => new Uint8Array(await file.arrayBuffer()),
-      });
+      enqueueComposerFileUpload({ attachmentId, threadId, environmentId, file });
     },
     [environmentId, fileUploadMaxBytes, resolveUploadThreadId],
   );
 
   const addPlannedComposerAttachments = useCallback(
     (planned: ReadonlyArray<PlannedComposerAttachment>) => {
-      const nextImages = planned.map(({ file, name, isImage, streamsUpload }) => {
-        const attachmentId = randomUUID();
+      const nextImages = planned.map(({ file, name, streamsUpload }) => {
+        const attachment = composerAttachmentFromFile(file, name);
         if (streamsUpload) {
-          enqueueFileUpload(file, attachmentId);
+          enqueueFileUpload(file, attachment.id);
         }
-        return {
-          type: isImage ? "image" : "file",
-          id: attachmentId,
-          name,
-          mimeType: file.type || "application/octet-stream",
-          sizeBytes: file.size,
-          previewUrl: isImage ? URL.createObjectURL(file) : "",
-          file,
-        } satisfies ComposerImageAttachment;
+        return attachment;
       });
       if (nextImages.length === 1 && nextImages[0]) {
         addComposerImage(nextImages[0]);

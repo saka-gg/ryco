@@ -31,7 +31,7 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { TEST_GIT_COMMIT_IDENTITY_CONFIG } from "../../vcs/testing/GitTestRepo.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
-import { CheckpointReactorLive } from "./CheckpointReactor.ts";
+import { CheckpointReactorLive, keptFilesDetail } from "./CheckpointReactor.ts";
 import { LocalDiagnosticsMetricsLive } from "../../observability/Services/LocalDiagnosticsMetrics.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -248,16 +248,21 @@ type RevertActivityPayload = {
   readonly status: string;
   readonly reason?: string;
   readonly detail?: string;
+  readonly restoreFiles?: boolean;
 };
 
 /** Every recorded phase of one checkpoint revert, in event order. */
-async function revertStatuses(engine: OrchestrationEngineShape, commandId: string) {
+async function revertPhases(engine: OrchestrationEngineShape, commandId: string) {
   return (await readAllEvents(engine)).flatMap((event) =>
     event.type === "thread.activity-appended" &&
     event.payload.activity.id === `checkpoint-revert:${commandId}`
-      ? [(event.payload.activity.payload as RevertActivityPayload).status]
+      ? [event.payload.activity.payload as RevertActivityPayload]
       : [],
   );
+}
+
+async function revertStatuses(engine: OrchestrationEngineShape, commandId: string) {
+  return (await revertPhases(engine, commandId)).map((phase) => phase.status);
 }
 
 async function waitForRevertStatus(
@@ -1568,7 +1573,12 @@ describe("CheckpointReactor", () => {
 
   async function seedCheckpoints(
     harness: Awaited<ReturnType<typeof createHarness>>,
-    input: { readonly completedAt?: ReadonlyArray<string>; readonly sessionStatus?: "ready" } = {},
+    input: {
+      readonly completedAt?: ReadonlyArray<string>;
+      readonly sessionStatus?: "ready";
+      /** Paths each turn changed, by checkpoint turn count. */
+      readonly changedPaths?: Readonly<Partial<Record<1 | 2, ReadonlyArray<string>>>>;
+    } = {},
   ) {
     const createdAt = new Date().toISOString();
     if (input.sessionStatus) {
@@ -1600,7 +1610,12 @@ describe("CheckpointReactor", () => {
           completedAt: input.completedAt?.[count - 1] ?? createdAt,
           checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), count),
           status: "ready",
-          files: [],
+          files: (input.changedPaths?.[count as 1 | 2] ?? []).map((filePath) => ({
+            path: filePath,
+            kind: "modified",
+            additions: 1,
+            deletions: 0,
+          })),
           checkpointTurnCount: count,
           createdAt,
         }),
@@ -1681,10 +1696,11 @@ describe("CheckpointReactor", () => {
     commandId: string,
     turnCount: number,
     threadId: ThreadId = ThreadId.make("thread-1"),
+    type: "thread.checkpoint.revert" | "thread.conversation.revert" = "thread.checkpoint.revert",
   ) {
     await Effect.runPromise(
       harness.engine.dispatch({
-        type: "thread.checkpoint.revert",
+        type,
         commandId: CommandId.make(commandId),
         threadId,
         turnCount,
@@ -1971,6 +1987,105 @@ describe("CheckpointReactor", () => {
     expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
   });
 
+  describe("conversation-only revert", () => {
+    const requestConversationRevert = (
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      commandId: string,
+      turnCount: number,
+    ) => requestRevert(harness, commandId, turnCount, undefined, "thread.conversation.revert");
+
+    it("rewinds the agent and the history but keeps the files", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+
+      await requestConversationRevert(harness, "cmd-keep-files", 1);
+      const activity = await waitForRevertStatus(harness.engine, "cmd-keep-files", "completed");
+
+      expect(harness.provider.rollbackConversation).toHaveBeenCalledWith({
+        threadId: ThreadId.make("thread-1"),
+        numTurns: 1,
+        targetTurnId: asTurnId("turn-1"),
+        droppedTurnIds: [asTurnId("turn-2")],
+        cwd: harness.cwd,
+      });
+      expect(readme(harness.cwd)).toBe("v3\n");
+      // The dropped turn's checkpoint is stale either way.
+      expect(gitRefExists(harness.cwd, ref(2))).toBe(false);
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.checkpoints.length === 1,
+      );
+      expect(thread.latestTurn?.turnId).toBe("turn-1");
+      // Every phase carries the choice, so a restart never restores the files.
+      const phases = await revertPhases(harness.engine, "cmd-keep-files");
+      expect(phases.map((phase) => phase.status)).toEqual([
+        "requested",
+        "rolling-back",
+        "restoring-files",
+        "completed",
+      ]);
+      expect(phases.every((phase) => phase.restoreFiles === false)).toBe(true);
+      expect(activity.reason).toBeUndefined();
+      expect(activity.detail).toBeUndefined();
+    });
+
+    it("names the files that keep the removed turns' changes", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, {
+        sessionStatus: "ready",
+        changedPaths: { 1: ["src/first.ts"], 2: ["README.md", "src/app.ts"] },
+      });
+
+      await requestConversationRevert(harness, "cmd-keep-files-named", 1);
+      const activity = await waitForRevertStatus(
+        harness.engine,
+        "cmd-keep-files-named",
+        "completed",
+      );
+
+      expect(activity.detail).toBe("The removed turns' changes stay in README.md and src/app.ts.");
+    });
+
+    it("keeps the files in a checkout another thread is working in", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      await createNeighbour(harness, { worktreePath: null, running: true });
+
+      await requestConversationRevert(harness, "cmd-keep-files-shared", 1);
+      await waitForRevertStatus(harness.engine, "cmd-keep-files-shared", "completed");
+
+      expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+      expect(readme(harness.cwd)).toBe("v3\n");
+    });
+
+    it("changes nothing when the provider cannot forget turns", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      harness.provider.rollbackConversation.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderOperationUnsupportedError({
+            provider: "cursor",
+            operation: "rollbackConversation",
+            detail: "Cursor can't remove turns from its conversation.",
+          }),
+        ),
+      );
+
+      await requestConversationRevert(harness, "cmd-keep-files-unsupported", 1);
+      const activity = await waitForRevertStatus(
+        harness.engine,
+        "cmd-keep-files-unsupported",
+        "failed",
+      );
+
+      expect(activity.reason).toBe("provider-unsupported");
+      expect(activity.restoreFiles).toBe(false);
+      expect(await hasReverted(harness.engine)).toBe(false);
+      expect(readme(harness.cwd)).toBe("v3\n");
+      expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
+    });
+  });
+
   it("refuses a revert while another thread is working in the same checkout", async () => {
     const harness = await createHarness();
     await seedCheckpoints(harness, { sessionStatus: "ready" });
@@ -2020,6 +2135,94 @@ describe("CheckpointReactor", () => {
     await waitForRevertStatus(harness.engine, "cmd-revert-shared-older", "completed");
 
     expect(readme(harness.cwd)).toBe("v2\n");
+  });
+
+  /** This thread, and a neighbour that rewound its conversation but kept its changes. */
+  async function seedNeighbourThatKeptChanges() {
+    const base = Date.now() - 60_000;
+    const iso = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+    const harness = await createHarness();
+    await seedCheckpoints(harness, {
+      sessionStatus: "ready",
+      completedAt: [iso(10_000), iso(20_000)],
+    });
+    const neighbour = await createNeighbour(harness, { worktreePath: null });
+    // The neighbour's second turn changed the checkout after this thread's checkpoint 1.
+    for (const [count, offsetMs] of [
+      [1, 0],
+      [2, 15_000],
+    ] as const) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`cmd-thread-2-diff-${count}`),
+          threadId: neighbour,
+          turnId: asTurnId(`turn-neighbour-${count}`),
+          completedAt: iso(offsetMs),
+          checkpointRef: checkpointRefForThreadTurn(neighbour, count),
+          status: "ready",
+          files: [{ path: "README.md", kind: "modified", additions: 1, deletions: 0 }],
+          checkpointTurnCount: count,
+          createdAt: iso(offsetMs),
+        }),
+      );
+    }
+    // It forgets that turn but keeps its changes, which moves its recency back before them.
+    await requestRevert(
+      harness,
+      "cmd-neighbour-keep-files",
+      1,
+      neighbour,
+      "thread.conversation.revert",
+    );
+    await waitForRevertStatus(harness.engine, "cmd-neighbour-keep-files", "completed");
+    return { harness, neighbour };
+  }
+
+  it("still counts the changes a neighbour kept when it rewound its conversation", async () => {
+    const { harness } = await seedNeighbourThatKeptChanges();
+
+    await requestRevert(harness, "cmd-revert-after-kept", 1);
+    const activity = await waitForRevertStatus(harness.engine, "cmd-revert-after-kept", "failed");
+
+    expect(activity.reason).toBe("shared-checkout");
+    expect(activity.detail).toContain('"Neighbour" changed this checkout after checkpoint 1');
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+    expect(readme(harness.cwd)).toBe("v3\n");
+  });
+
+  it("still counts a neighbour's kept changes after its next revert failed", async () => {
+    const { harness, neighbour } = await seedNeighbourThatKeptChanges();
+    // The neighbour's next revert changes nothing, and must not hide the kept changes.
+    harness.provider.rollbackConversation.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: "codex",
+          method: "thread/rollback",
+          detail: "boom",
+        }),
+      ),
+    );
+    await requestRevert(
+      harness,
+      "cmd-neighbour-refused",
+      0,
+      neighbour,
+      "thread.conversation.revert",
+    );
+    const refused = await waitForRevertStatus(harness.engine, "cmd-neighbour-refused", "failed");
+    expect(refused.reason).toBe("provider-failed");
+
+    await requestRevert(harness, "cmd-revert-after-refused", 1);
+    const activity = await waitForRevertStatus(
+      harness.engine,
+      "cmd-revert-after-refused",
+      "failed",
+    );
+
+    expect(activity.reason).toBe("shared-checkout");
+    expect(activity.detail).toContain('"Neighbour" changed this checkout after checkpoint 1');
+    expect(readme(harness.cwd)).toBe("v3\n");
   });
 
   it("proceeds while a neighbour works in a nested worktree", async () => {
@@ -2478,6 +2681,7 @@ describe("CheckpointReactor", () => {
         readonly status: "requested" | "rolling-back" | "restoring-files";
         readonly cwd?: string;
         readonly createdAt?: string;
+        readonly restoreFiles?: false;
       },
     ) {
       const createdAt = input.createdAt ?? new Date().toISOString();
@@ -2492,6 +2696,7 @@ describe("CheckpointReactor", () => {
             fromTurnCount: 2,
             status: input.status,
             cwd: input.cwd,
+            restoreFiles: input.restoreFiles,
             createdAt,
           }),
           createdAt,
@@ -2715,6 +2920,56 @@ describe("CheckpointReactor", () => {
       expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
     });
 
+    it("finishes a conversation-only revert without restoring files", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      await seedRevertActivity(harness, {
+        revertRequestId: "cmd-recover-keep-files",
+        status: "restoring-files",
+        cwd: harness.cwd,
+        restoreFiles: false,
+      });
+
+      await Effect.runPromise(harness.reactor.recover());
+      const activity = await waitForRevertStatus(
+        harness.engine,
+        "cmd-recover-keep-files",
+        "completed",
+      );
+
+      expect(activity.restoreFiles).toBe(false);
+      expect(await hasReverted(harness.engine)).toBe(true);
+      expect(readme(harness.cwd)).toBe("v3\n");
+      expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    });
+
+    it("completes a conversation-only revert whose final status was lost", async () => {
+      const harness = await createHarness();
+      await seedCheckpoints(harness, { sessionStatus: "ready" });
+      await seedRevertActivity(harness, {
+        revertRequestId: "cmd-recover-keep-files-projected",
+        status: "restoring-files",
+        cwd: harness.cwd,
+        restoreFiles: false,
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.revert.complete",
+          commandId: CommandId.make("cmd-recover-keep-files-projected-complete"),
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 1,
+          droppedTurnIds: [asTurnId("turn-2")],
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
+      await Effect.runPromise(harness.reactor.recover());
+      await waitForRevertStatus(harness.engine, "cmd-recover-keep-files-projected", "completed");
+
+      expect(await revertedEventCount(harness.engine)).toBe(1);
+      expect(readme(harness.cwd)).toBe("v3\n");
+    });
+
     it("terminalizes reverts that stopped before or during the provider rollback", async () => {
       const harness = await createHarness();
       await seedCheckpoints(harness, { sessionStatus: "ready" });
@@ -2745,5 +3000,33 @@ describe("CheckpointReactor", () => {
       expect(readme(harness.cwd)).toBe("v3\n");
       expect(await hasReverted(harness.engine)).toBe(false);
     });
+  });
+});
+
+describe("keptFilesDetail", () => {
+  const checkpoint = (...paths: ReadonlyArray<string>) => ({
+    files: paths.map((filePath) => ({
+      path: filePath,
+      kind: "modified",
+      additions: 1,
+      deletions: 0,
+    })),
+  });
+
+  it("names each kept file once, and at most three", () => {
+    expect(keptFilesDetail([])).toBeUndefined();
+    expect(keptFilesDetail([checkpoint()])).toBeUndefined();
+    expect(keptFilesDetail([checkpoint("a.ts"), checkpoint("a.ts")])).toBe(
+      "The removed turns' changes stay in a.ts.",
+    );
+    expect(keptFilesDetail([checkpoint("a.ts", "b.ts", "c.ts")])).toBe(
+      "The removed turns' changes stay in a.ts, b.ts and c.ts.",
+    );
+    expect(keptFilesDetail([checkpoint("a.ts", "b.ts"), checkpoint("c.ts", "d.ts")])).toBe(
+      "The removed turns' changes stay in a.ts, b.ts, c.ts and 1 more file.",
+    );
+    expect(keptFilesDetail([checkpoint("a.ts", "b.ts", "c.ts", "d.ts", "e.ts")])).toBe(
+      "The removed turns' changes stay in a.ts, b.ts, c.ts and 2 more files.",
+    );
   });
 });

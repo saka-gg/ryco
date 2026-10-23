@@ -1,3 +1,11 @@
+import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
+import {
+  revertCheckpointGuardFailureMessage,
+  readCheckpointRevertPhase,
+  runCheckpointRevert,
+  subscribeCheckpointReverts,
+  type CheckpointRevertMode,
+} from "@ryco/client-runtime/state/session";
 import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import type { EnvironmentId } from "@ryco/contracts";
 import {
@@ -5,36 +13,37 @@ import {
   type ProviderApprovalDecision,
   type ThreadId,
 } from "@ryco/contracts";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 
+import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { readEnvironmentApi } from "../environmentApi";
-import { readLocalApi } from "../localApi";
+import { newCommandId } from "../lib/utils";
 import { holdMessageQueueForInterrupt } from "../messageQueueDrain";
+import { selectThreadByRef, useStore } from "../store";
 import {
   interruptThreadTurn,
   respondToThreadApproval,
   respondToThreadUserInput,
-  revertThreadCheckpointWithGuards,
-  type RevertThreadCheckpointGuardFailure,
 } from "./chatSessionActions";
 
 export type SetThreadError = (targetThreadId: ThreadId | null, error: string | null) => void;
 
-export function revertCheckpointGuardFailureMessage(
-  failure: RevertThreadCheckpointGuardFailure,
-): string | null {
-  switch (failure.type) {
-    case "missing-api":
-    case "missing-thread":
-    case "user-cancelled":
-      return null;
-    case "environment-unavailable":
-      return `Reconnect ${failure.label} before reverting checkpoints.`;
-    case "turn-in-progress":
-      return "Interrupt the current turn before reverting checkpoints.";
-    case "provider-unsupported":
-      return failure.message;
-  }
+export interface RevertToTurnCountInput<TPrepared> {
+  readonly thread: { readonly id: ThreadId } | null;
+  readonly turnCount: number;
+  readonly environmentUnavailable: boolean;
+  readonly environmentUnavailableLabel: string | null;
+  readonly turnInProgress: boolean;
+  readonly providerRefusal: string | null;
+  /** Asks the user how to revert; null cancels. */
+  readonly choose: () => Promise<CheckpointRevertMode | null>;
+  /** Runs after the choice, before the revert is sent; a throw reverts nothing. */
+  readonly prepare?: ((mode: CheckpointRevertMode) => Promise<TPrepared>) | undefined;
+  /**
+   * Runs with what `prepare` returned once the node rewound the thread, or
+   * when Ryco could not confirm it either way (the node may have deleted it).
+   */
+  readonly onReverted?: ((prepared: TPrepared) => void) | undefined;
 }
 
 export function useChatSessionActions(input: {
@@ -47,11 +56,17 @@ export function useChatSessionActions(input: {
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
     ApprovalRequestId[]
   >([]);
-  const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
-
-  useEffect(() => {
-    setIsRevertingCheckpoint(false);
-  }, [activeThreadId]);
+  // Per thread, so it survives switching threads and is not ended by another thread's revert.
+  const activeThreadKey = activeThreadId
+    ? scopedThreadKey(scopeThreadRef(environmentId, activeThreadId))
+    : null;
+  const readActiveRevertPhase = () => readCheckpointRevertPhase(activeThreadKey);
+  const isRevertingCheckpoint =
+    useSyncExternalStore(
+      subscribeCheckpointReverts,
+      readActiveRevertPhase,
+      readActiveRevertPhase,
+    ) === "reverting";
 
   const interruptTurn = useCallback(async () => {
     const api = readEnvironmentApi(environmentId);
@@ -158,58 +173,59 @@ export function useChatSessionActions(input: {
   );
 
   const revertToTurnCount = useCallback(
-    async (input: {
-      thread: { id: ThreadId } | null;
-      turnCount: number;
-      environmentUnavailable: boolean;
-      environmentUnavailableLabel: string | null;
-      turnInProgress: boolean;
-      providerRefusal: string | null;
-    }) => {
+    async <TPrepared = undefined>(input: RevertToTurnCountInput<TPrepared>) => {
       const api = readEnvironmentApi(environmentId);
-      const localApi = readLocalApi();
-      if (isRevertingCheckpoint) {
-        return;
-      }
-
-      setIsRevertingCheckpoint(true);
-      if (input.thread) {
-        setThreadError(input.thread.id, null);
-      }
-      try {
-        const result = await revertThreadCheckpointWithGuards({
-          api: api ?? null,
-          localApi: localApi ?? null,
-          thread: input.thread,
-          turnCount: input.turnCount,
-          environmentUnavailable: input.environmentUnavailable,
-          environmentUnavailableLabel: input.environmentUnavailableLabel,
-          turnInProgress: input.turnInProgress,
-          providerRefusal: input.providerRefusal,
-          confirmMessage: [
-            `Revert this thread to checkpoint ${input.turnCount}?`,
-            "The agent forgets the newer turns, and the files in this checkout go back to how they were at that checkpoint. Changes made since then, including your own edits, are discarded.",
-            "This action cannot be undone.",
-          ].join("\n"),
-        });
-        if (!result.ok) {
+      const threadId = input.thread?.id ?? null;
+      const threadRef = threadId ? scopeThreadRef(environmentId, threadId) : null;
+      const result = await runCheckpointRevert<TPrepared>({
+        environmentId,
+        dispatchCommand: api ? (command) => api.orchestration.dispatchCommand(command) : null,
+        threadId,
+        turnCount: input.turnCount,
+        environmentUnavailable: input.environmentUnavailable,
+        environmentUnavailableLabel: input.environmentUnavailableLabel,
+        turnInProgress: input.turnInProgress,
+        providerRefusal: input.providerRefusal,
+        choose: async () => {
+          const mode = await input.choose();
+          if (mode !== null) setThreadError(threadId, null);
+          return mode;
+        },
+        prepare: input.prepare,
+        newCommandId,
+        readThread: () =>
+          threadRef ? selectThreadByRef(useStore.getState(), threadRef) : undefined,
+        subscribe: (listener) => useStore.subscribe(listener),
+      });
+      switch (result.kind) {
+        case "refused": {
           const message = revertCheckpointGuardFailureMessage(result.reason);
-          if (message && input.thread) {
-            setThreadError(input.thread.id, message);
+          if (message) setThreadError(threadId, message);
+          return;
+        }
+        case "not-reverted":
+          setThreadError(threadId, result.error);
+          return;
+        case "reverted":
+          input.onReverted?.(result.prepared);
+          // The revert's own row stays out of the timeline, so its note shows here.
+          if (result.notice) {
+            toastManager.add(
+              stackedThreadToast({
+                type: result.notice.tone,
+                title: result.notice.title,
+                description: result.notice.detail,
+              }),
+            );
           }
-        }
-      } catch (err: unknown) {
-        if (input.thread) {
-          setThreadError(
-            input.thread.id,
-            err instanceof Error ? err.message : "Failed to revert thread state.",
-          );
-        }
-      } finally {
-        setIsRevertingCheckpoint(false);
+          return;
+        case "unconfirmed":
+          input.onReverted?.(result.prepared);
+          setThreadError(threadId, result.error);
+          return;
       }
     },
-    [environmentId, isRevertingCheckpoint, setThreadError],
+    [environmentId, setThreadError],
   );
 
   return {

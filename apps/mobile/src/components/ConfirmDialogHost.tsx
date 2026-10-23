@@ -13,6 +13,12 @@ export type ConfirmDialogRequest = {
   readonly destructive?: boolean;
   readonly onConfirm: () => void;
   readonly onCancel?: () => void;
+  /** A second way to go ahead, shown between cancel and confirm. */
+  readonly alternative?: {
+    readonly text: string;
+    readonly destructive?: boolean;
+    readonly onPress: () => void;
+  };
 };
 
 let presentRequest: ((request: ConfirmDialogRequest) => void) | null = null;
@@ -31,6 +37,17 @@ export function showConfirmDialog(request: ConfirmDialogRequest): void {
         style: "cancel",
         ...(request.onCancel ? { onPress: request.onCancel } : {}),
       },
+      ...(request.alternative
+        ? [
+            {
+              text: request.alternative.text,
+              style: request.alternative.destructive
+                ? ("destructive" as const)
+                : ("default" as const),
+              onPress: request.alternative.onPress,
+            },
+          ]
+        : []),
       {
         text: request.confirmText,
         style: request.destructive ? "destructive" : "default",
@@ -69,6 +86,11 @@ export function ConfirmDialogHost() {
     setRequest(null);
   }, [request]);
 
+  const handleAlternative = useCallback(() => {
+    request?.alternative?.onPress();
+    setRequest(null);
+  }, [request]);
+
   return (
     <Modal
       visible={request !== null}
@@ -87,7 +109,7 @@ export function ConfirmDialogHost() {
                 {request.message}
               </AppText>
             )}
-            <View className="mt-5 flex-row justify-end gap-1">
+            <View className="mt-5 flex-row flex-wrap justify-end gap-1">
               <View className="overflow-hidden rounded-full">
                 <Pressable
                   accessibilityRole="button"
@@ -100,6 +122,25 @@ export function ConfirmDialogHost() {
                   </AppText>
                 </Pressable>
               </View>
+              {request.alternative === undefined ? null : (
+                <View className="overflow-hidden rounded-full">
+                  <Pressable
+                    accessibilityRole="button"
+                    className="min-h-10 items-center justify-center px-4"
+                    android_ripple={{ color: pressedOverlay }}
+                    onPress={handleAlternative}
+                  >
+                    <AppText
+                      className={cn(
+                        "text-base font-ryco-medium",
+                        request.alternative.destructive && "text-danger-foreground",
+                      )}
+                    >
+                      {request.alternative.text}
+                    </AppText>
+                  </Pressable>
+                </View>
+              )}
               <View className="overflow-hidden rounded-full">
                 <Pressable
                   accessibilityRole="button"

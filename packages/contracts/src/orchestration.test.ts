@@ -2109,3 +2109,59 @@ it("accepts shell subscribe input with and without paged delivery", () => {
   });
   assert.throws(() => decodeSubscribeShellInput({ snapshotDelivery: "streamed" }));
 });
+
+it.effect("decodes a conversation-only revert as a command of its own", () =>
+  Effect.gen(function* () {
+    const command = {
+      commandId: "revert-command",
+      threadId: "revert-thread",
+      turnCount: 1,
+      createdAt: "2026-10-22T00:00:00.000Z",
+    };
+    const conversation = yield* decodeClientOrchestrationCommand({
+      ...command,
+      type: "thread.conversation.revert",
+    });
+    assert.strictEqual(conversation.type, "thread.conversation.revert");
+    // A file restore never carries a keep-files flag an older server would drop.
+    const restore = yield* decodeClientOrchestrationCommand({
+      ...command,
+      type: "thread.checkpoint.revert",
+      restoreFiles: false,
+    });
+    assert.strictEqual(restore.type, "thread.checkpoint.revert");
+    assert.isFalse("restoreFiles" in restore);
+
+    const requested = (payload: Record<string, unknown>) =>
+      decodeOrchestrationEvent({
+        sequence: 1,
+        eventId: "revert-event",
+        aggregateKind: "thread",
+        aggregateId: "revert-thread",
+        type: "thread.checkpoint-revert-requested",
+        occurredAt: "2026-10-22T00:00:00.000Z",
+        commandId: "revert-command",
+        causationEventId: null,
+        correlationId: "revert-command",
+        metadata: {},
+        payload: {
+          threadId: "revert-thread",
+          turnCount: 1,
+          createdAt: "2026-10-22T00:00:00.000Z",
+          ...payload,
+        },
+      });
+    const legacy = yield* requested({});
+    const keepFiles = yield* requested({ restoreFiles: false });
+    assert.strictEqual(
+      legacy.type === "thread.checkpoint-revert-requested" ? legacy.payload.restoreFiles : null,
+      undefined,
+    );
+    assert.strictEqual(
+      keepFiles.type === "thread.checkpoint-revert-requested"
+        ? keepFiles.payload.restoreFiles
+        : null,
+      false,
+    );
+  }),
+);

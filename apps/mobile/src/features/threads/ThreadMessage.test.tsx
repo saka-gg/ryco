@@ -85,6 +85,7 @@ vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
 
 import { ThreadMessage } from "./ThreadMessage";
+import { EDIT_FROM_HERE_COPY } from "@ryco/client-runtime/state/session";
 import {
   THREAD_FORK_COPY,
   type ChatAttachment,
@@ -780,5 +781,45 @@ describe("ThreadMessage fork affordance", () => {
     });
     expect(forkButtons(tree)).toHaveLength(0);
     expect(collectElements(tree, (element) => element.type === "CopyTextButton")).toHaveLength(1);
+  });
+});
+
+describe("ThreadMessage Edit from here", () => {
+  const sent = {
+    id: "m-1",
+    role: "user",
+    text: "Split the parser",
+    streaming: false,
+    createdAt: "2026-10-22T10:00:00.000Z",
+  } as unknown as ChatMessage;
+
+  function editButtons(tree: ReactElement): ReactElement[] {
+    return findPressables(tree).filter(
+      (pressable) => pressableLabel(pressable) === EDIT_FROM_HERE_COPY.action,
+    );
+  }
+
+  it("shows the button under a sent message the screen marked editable", () => {
+    const onEditFromHere = vi.fn();
+    const buttons = editButtons(
+      ThreadMessage({ environmentId, threadId, message: sent, onEditFromHere }),
+    );
+    expect(buttons).toHaveLength(1);
+    (buttons[0]!.props as { onPress: () => void }).onPress();
+    expect(onEditFromHere).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows nothing otherwise, and never under a reply", () => {
+    expect(editButtons(ThreadMessage({ environmentId, threadId, message: sent }))).toHaveLength(0);
+    expect(
+      editButtons(
+        ThreadMessage({
+          environmentId,
+          threadId,
+          message: { ...sent, role: "assistant" } as ChatMessage,
+          onEditFromHere: vi.fn(),
+        }),
+      ),
+    ).toHaveLength(0);
   });
 });

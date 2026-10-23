@@ -8,7 +8,6 @@ import {
   renameThread,
   respondToThreadApproval,
   respondToThreadUserInput,
-  revertThreadCheckpointWithGuards,
   setThreadArchived,
   setThreadSettled,
 } from "./sessionActions";
@@ -103,80 +102,5 @@ describe("sessionActions", () => {
     };
     expect(command.type).toBe("thread.user-input.respond");
     expect(command.answers).toEqual({ q1: "yes" });
-  });
-
-  it("guards checkpoint revert: cancels when confirm is declined, dispatches when confirmed", async () => {
-    const { api, dispatchCommand } = fakeApi();
-    const base = {
-      api,
-      thread: { id: THREAD_ID },
-      turnCount: 3,
-      environmentUnavailable: false,
-      environmentUnavailableLabel: null,
-      turnInProgress: false,
-      providerRefusal: null,
-      confirmMessage: "Revert?",
-    };
-
-    const cancelled = await revertThreadCheckpointWithGuards({
-      ...base,
-      confirm: async () => false,
-    });
-    expect(cancelled).toEqual({ ok: false, reason: { type: "user-cancelled" } });
-    expect(dispatchCommand).not.toHaveBeenCalled();
-
-    const confirmed = await revertThreadCheckpointWithGuards({
-      ...base,
-      confirm: async () => true,
-    });
-    expect(confirmed).toEqual({ ok: true });
-    const command = dispatchCommand.mock.calls[0]![0] as unknown as {
-      type: string;
-      turnCount: number;
-    };
-    expect(command.type).toBe("thread.checkpoint.revert");
-    expect(command.turnCount).toBe(3);
-  });
-
-  it("blocks revert while a turn is in progress", async () => {
-    const { api, dispatchCommand } = fakeApi();
-    const result = await revertThreadCheckpointWithGuards({
-      api,
-      thread: { id: THREAD_ID },
-      turnCount: 3,
-      environmentUnavailable: false,
-      environmentUnavailableLabel: null,
-      turnInProgress: true,
-      providerRefusal: null,
-      confirmMessage: "Revert?",
-      confirm: async () => true,
-    });
-    expect(result).toEqual({ ok: false, reason: { type: "turn-in-progress" } });
-    expect(dispatchCommand).not.toHaveBeenCalled();
-  });
-
-  it("refuses providers that cannot forget turns before asking for confirmation", async () => {
-    const { api, dispatchCommand } = fakeApi();
-    const confirm = vi.fn(async () => true);
-    const result = await revertThreadCheckpointWithGuards({
-      api,
-      thread: { id: THREAD_ID },
-      turnCount: 3,
-      environmentUnavailable: false,
-      environmentUnavailableLabel: null,
-      turnInProgress: false,
-      providerRefusal: "Cursor can't remove turns from its conversation.",
-      confirmMessage: "Revert?",
-      confirm,
-    });
-    expect(result).toEqual({
-      ok: false,
-      reason: {
-        type: "provider-unsupported",
-        message: "Cursor can't remove turns from its conversation.",
-      },
-    });
-    expect(confirm).not.toHaveBeenCalled();
-    expect(dispatchCommand).not.toHaveBeenCalled();
   });
 });

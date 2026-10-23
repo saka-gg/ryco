@@ -362,40 +362,56 @@ export function clearComposerContentRefs(refs: ComposerContentRefs): void {
  * Puts a prompt, its attachments, terminal contexts and file references back
  * into the composer and parks the cursor at the end. Shared by the send rollback and by editing a
  * queued message. Callers check `composerRefsHaveContent` first: this replaces
- * the composer's content, so it must only run into an empty composer.
+ * the composer's content, so it must only run into an empty composer. With
+ * `append`, the composer keeps its attachments and terminal contexts and gains
+ * `images`; `prompt` is then the whole new prompt, composed from its own
+ * ("Edit from here" returns a sent message below an unsent draft).
  */
-export function restoreComposerContent(input: {
-  refs: ComposerContentRefs;
-  composerHandle: SendTurnReadComposer;
-  draft: Pick<
-    SendTurnComposerDraftDeps,
-    | "composerDraftTarget"
-    | "setComposerDraftPrompt"
-    | "addComposerDraftImages"
-    | "setComposerDraftTerminalContexts"
-    | "setComposerDraftFileReferences"
-  >;
-  prompt: string;
-  images: ComposerImageAttachment[];
-  terminalContexts: TerminalContextDraft[];
-  fileReferences: FileReferenceDraft[];
-  /** False once the view shows another thread: only the draft store is written. */
-  live?: boolean;
-}): void {
-  const { refs, composerHandle, draft, prompt, images, terminalContexts, fileReferences } = input;
+export function restoreComposerContent(
+  input: {
+    refs: ComposerContentRefs;
+    composerHandle: SendTurnReadComposer;
+    draft: Pick<
+      SendTurnComposerDraftDeps,
+      | "composerDraftTarget"
+      | "setComposerDraftPrompt"
+      | "addComposerDraftImages"
+      | "setComposerDraftTerminalContexts"
+      | "setComposerDraftFileReferences"
+    >;
+    prompt: string;
+    images: ComposerImageAttachment[];
+    /** False once the view shows another thread: only the draft store is written. */
+    live?: boolean;
+  } & (
+    | {
+        append?: false;
+        terminalContexts: TerminalContextDraft[];
+        fileReferences: FileReferenceDraft[];
+      }
+    | { append: true; terminalContexts?: never; fileReferences?: never }
+  ),
+): void {
+  const { refs, composerHandle, draft, prompt, images } = input;
   const live = input.live ?? true;
 
   if (live) {
     refs.promptRef.current = prompt;
-    refs.composerImagesRef.current = images;
-    refs.composerTerminalContextsRef.current = terminalContexts;
-    refs.composerFileReferencesRef.current = fileReferences;
+    refs.composerImagesRef.current = input.append
+      ? [...refs.composerImagesRef.current, ...images]
+      : images;
+    if (!input.append) {
+      refs.composerTerminalContextsRef.current = input.terminalContexts;
+      refs.composerFileReferencesRef.current = input.fileReferences;
+    }
   }
 
   draft.setComposerDraftPrompt(draft.composerDraftTarget, prompt);
   draft.addComposerDraftImages(draft.composerDraftTarget, images);
-  draft.setComposerDraftTerminalContexts(draft.composerDraftTarget, terminalContexts);
-  draft.setComposerDraftFileReferences(draft.composerDraftTarget, fileReferences);
+  if (!input.append) {
+    draft.setComposerDraftTerminalContexts(draft.composerDraftTarget, input.terminalContexts);
+    draft.setComposerDraftFileReferences(draft.composerDraftTarget, input.fileReferences);
+  }
 
   if (!live) return;
   composerHandle.readComposer()?.resetCursorState({

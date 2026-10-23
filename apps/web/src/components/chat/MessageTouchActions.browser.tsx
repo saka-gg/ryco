@@ -251,9 +251,9 @@ describe("message touch actions", () => {
     // Revert round-trip through the existing revert handler.
     await dispatchLongPress(userBubble());
     await vi.waitFor(() => {
-      expect(sheetRow("Revert to this message")).not.toBeNull();
+      expect(sheetRow("Edit from here")).not.toBeNull();
     });
-    sheetRow("Revert to this message")!.click();
+    sheetRow("Edit from here")!.click();
     await vi.waitFor(() => {
       expect(props.onRevertUserMessage).toHaveBeenCalledWith(USER_MESSAGE_ID);
     });

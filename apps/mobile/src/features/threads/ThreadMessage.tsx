@@ -7,6 +7,7 @@ import {
   type ParsedTerminalContextEntry,
 } from "@ryco/client-runtime/state/composer";
 import {
+  EDIT_FROM_HERE_COPY,
   readHtmlRenderAttachment,
   type HtmlRenderAttachment,
 } from "@ryco/client-runtime/state/session";
@@ -251,6 +252,8 @@ export function ThreadMessage(props: {
    * which would fight the reply's text selection.
    */
   readonly onForkFromHere?: (() => void) | undefined;
+  /** Present only on a sent message the thread can be rewound to before, right now. */
+  readonly onEditFromHere?: (() => void) | undefined;
 }) {
   const isUser = props.message.role === "user";
   const sentAt = isUser ? Date.parse(props.message.createdAt) : Number.NaN;
@@ -480,6 +483,22 @@ export function ThreadMessage(props: {
               iconSize={12}
               buttonSize={28}
             />
+          ) : null}
+          {props.onEditFromHere ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={EDIT_FROM_HERE_COPY.action}
+              hitSlop={8}
+              onPress={props.onEditFromHere}
+              className="h-7 w-7 items-center justify-center rounded-full active:bg-subtle"
+            >
+              <SymbolView
+                name="arrow.uturn.backward"
+                size={12}
+                tintColor={metadataColor}
+                type="monochrome"
+              />
+            </Pressable>
           ) : null}
         </View>
       ) : props.message.role === "assistant" && props.onForkFromHere ? (

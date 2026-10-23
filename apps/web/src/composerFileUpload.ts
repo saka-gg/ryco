@@ -1,4 +1,4 @@
-import { ORCHESTRATION_WS_METHODS, type EnvironmentId } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS, type EnvironmentId, type ThreadId } from "@ryco/contracts";
 import {
   createChatFileUploadEngine,
   watchDirectChatFileUploadReadiness,
@@ -89,6 +89,25 @@ export const composerFileUploadEngine = createChatFileUploadEngine(webChatFileUp
 });
 
 if (import.meta.hot) import.meta.hot.dispose(() => composerFileUploadEngine.releaseAll());
+
+/** Streams one attached file through the upload queue; its bytes stay in memory only. */
+export function enqueueComposerFileUpload(input: {
+  attachmentId: string;
+  threadId: ThreadId;
+  environmentId: EnvironmentId;
+  file: File;
+}): void {
+  const { file } = input;
+  composerFileUploadEngine.enqueue({
+    attachmentId: input.attachmentId,
+    threadId: input.threadId,
+    environmentId: input.environmentId,
+    name: file.name || "file",
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    readBytes: async () => new Uint8Array(await file.arrayBuffer()),
+  });
+}
 
 /** Release only uploads previously owned by this composer, preserving other drafts. */
 export function releaseUnusedComposerFileUploads(

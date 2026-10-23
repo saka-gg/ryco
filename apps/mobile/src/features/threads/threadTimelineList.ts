@@ -15,12 +15,16 @@ import type { ThreadTimelineRow } from "./threadActivityFold";
 export type ThreadListRow = ThreadTimelineRow & {
   /** The reply offers "Fork from here". */
   readonly forkable?: true;
+  /** The sent message offers "Edit from here". */
+  readonly editable?: true;
   /** The message a link opened this thread at, highlighted briefly. */
   readonly highlighted?: true;
 };
 
 export interface ThreadListRowFlags {
   readonly forkableMessageIds: ReadonlySet<MessageId>;
+  /** Sent messages the thread can be rewound to before right now. */
+  readonly editableMessageIds?: ReadonlySet<MessageId> | undefined;
   readonly highlightedMessageId: MessageId | null;
 }
 
@@ -60,12 +64,15 @@ export function createThreadListRowAnnotator(): (
     rows.map((row): ThreadListRow => {
       const forkMessageId = forkMessageIdOfRow(row);
       const forkable = forkMessageId !== null && flags.forkableMessageIds.has(forkMessageId);
+      const messageId = messageIdOfRow(row);
+      const editable = messageId !== null && flags.editableMessageIds?.has(messageId) === true;
       const highlighted = timelineRowShowsMessage(messagesOfRow(row), flags.highlightedMessageId);
-      if (!forkable && !highlighted) return row;
+      if (!forkable && !editable && !highlighted) return row;
       const kept = annotated.get(row);
       if (
         kept &&
         (kept.forkable === true) === forkable &&
+        (kept.editable === true) === editable &&
         (kept.highlighted === true) === highlighted
       ) {
         return kept;
@@ -73,6 +80,7 @@ export function createThreadListRowAnnotator(): (
       const next: ThreadListRow = {
         ...row,
         ...(forkable ? { forkable: true as const } : {}),
+        ...(editable ? { editable: true as const } : {}),
         ...(highlighted ? { highlighted: true as const } : {}),
       };
       annotated.set(row, next);

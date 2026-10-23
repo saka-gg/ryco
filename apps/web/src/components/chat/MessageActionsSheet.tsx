@@ -1,3 +1,4 @@
+import { EDIT_FROM_HERE_COPY } from "@ryco/client-runtime/state/session";
 import { CopyIcon, Undo2Icon } from "lucide-react";
 
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -20,8 +21,8 @@ export interface MessageActionsSheetTarget {
 /**
  * Phone bottom-sheet for message actions opened by long-pressing a message.
  * Mirrors the hover-revealed desktop row exactly: copy (user), copy response
- * (assistant), and revert-to-checkpoint (user, when a checkpoint exists) —
- * all dispatched through the same handlers the desktop buttons use.
+ * (assistant), and Edit from here (user, when a checkpoint exists) — all
+ * dispatched through the same handlers the desktop buttons use.
  */
 export function MessageActionsSheet({
   target,
@@ -71,7 +72,7 @@ export function MessageActionsSheet({
           ) : null}
           {target?.role === "user" && target.canRevert ? (
             <MobileListRow
-              label="Revert to this message"
+              label={EDIT_FROM_HERE_COPY.action}
               icon={<Undo2Icon aria-hidden className="size-4 shrink-0" />}
               disabled={revertDisabled}
               disabledReason="Reverting is unavailable while the session is busy."

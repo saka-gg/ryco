@@ -203,6 +203,24 @@ export function isAwaitingAdmission(error: unknown): error is RpcRequestRefusedE
   return error instanceof RpcRequestRefusedError && error.admission !== "forbidden";
 }
 
+function hasErrorTag(error: unknown, tag: string): boolean {
+  return typeof error === "object" && error !== null && "_tag" in error && error._tag === tag;
+}
+
+/**
+ * Whether an `orchestration.dispatchCommand` failure is a definite answer: this
+ * client refused the command before sending it, or the node answered with its
+ * typed command or auth error. Either way the outcome is known; callers decide
+ * how to treat every other failure, which may have reached the node.
+ */
+export function isDefiniteDispatchFailure(error: unknown): boolean {
+  return (
+    error instanceof RpcRequestRefusedError ||
+    hasErrorTag(error, "OrchestrationDispatchCommandError") ||
+    hasErrorTag(error, "AuthRpcError")
+  );
+}
+
 function resolveWsRpcSocketUrl(rawUrl: string, preservePath = false): string {
   const resolved = new URL(rawUrl);
   if (resolved.protocol !== "ws:" && resolved.protocol !== "wss:") {
