@@ -162,6 +162,7 @@ function AgentStopControl({
   const disabled = pending || unavailableReason !== null;
   const accessibleName = `${pending ? "Stopping" : "Stop"} ${label}`;
   if (variant === "labeled") {
+    // Overhangs its line, so a header keeps its height as Stop comes and goes.
     return (
       <button
         type="button"
@@ -169,7 +170,7 @@ function AgentStopControl({
         disabled={disabled}
         aria-label={accessibleName}
         title={unavailableReason ?? undefined}
-        className="shrink-0 rounded px-2 py-1 text-xs hover:bg-muted disabled:cursor-default disabled:text-muted-foreground/50"
+        className="-my-1 shrink-0 rounded px-2 py-1 text-xs hover:bg-muted disabled:cursor-default disabled:text-muted-foreground/50"
       >
         {pending ? "Stopping…" : "Stop"}
       </button>
