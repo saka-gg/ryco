@@ -26,8 +26,10 @@ import type {
   SessionEvent,
 } from "@github/copilot-sdk";
 import { RuntimeConnection } from "@github/copilot-sdk";
+import { Effect } from "effect";
 
 import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import type { DeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import type {
   ProviderThreadSnapshot,
@@ -112,6 +114,8 @@ export interface CopilotAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly agentControl?: AgentControlProviderBridge;
+  /** Lowers each session's Copilot CLI; undefined spawns it unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 /**
@@ -143,6 +147,49 @@ export async function makeCopilotClientOptions(
     logLevel: "error",
   };
 }
+
+/**
+ * Runs the Copilot CLI through `nice` when the plan allows it. The SDK keeps its child private,
+ * so only the exec-through-nice half applies: the CLI starts as `nice -n 5 <copilot> <connection
+ * args> --headless …` (the SDK appends its own arguments after the connection's). Unchanged when
+ * there is no priority, no stdio path, connection args already, a `.js` path (the SDK would run
+ * it with node) or any plan other than "exec-nice" (Windows, a missing `nice`, macOS DYLD_*).
+ */
+export const withCopilotAgentPriority = (
+  priority: AgentProcessPriorityShape | undefined,
+  options: CopilotClientOptions,
+): Effect.Effect<CopilotClientOptions> =>
+  Effect.gen(function* () {
+    const connection = options.connection;
+    if (priority === undefined || connection === undefined || connection.kind !== "stdio") {
+      return options;
+    }
+    const cliPath = connection.path;
+    if (
+      cliPath === undefined ||
+      cliPath.endsWith(".js") ||
+      (connection.args !== undefined && connection.args.length > 0)
+    ) {
+      return options;
+    }
+    const plan = yield* priority.plan({
+      command: cliPath,
+      // The environment the SDK spawns the CLI with.
+      env: connection.env ?? options.env,
+      cwd: options.workingDirectory,
+      shell: false,
+    });
+    const [launcher, ...launcherArgs] = plan.prefix;
+    if (plan.mode !== "exec-nice" || launcher === undefined) return options;
+    return {
+      ...options,
+      connection: RuntimeConnection.forStdio({
+        path: launcher,
+        args: [...launcherArgs, cliPath],
+        ...(connection.env ? { env: connection.env } : {}),
+      }),
+    };
+  });
 
 export function toMessage(cause: unknown, fallback: string): string {
   if (cause instanceof Error && cause.message.length > 0) {

@@ -10,6 +10,7 @@ import { ChildProcessSpawner } from "effect/process";
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeAcpAdapter } from "../Layers/AcpAdapter.ts";
+import { AgentProcessPriority } from "../agentProcessPriority.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { defaultProviderContinuationIdentity, type ProviderDriver } from "../ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
@@ -88,6 +89,7 @@ export function projectAcpRegistrySession(
 }
 
 export type AcpRegistryDriverEnv =
+  | AgentProcessPriority
   | FileSystem.FileSystem
   | Path.Path
   | ServerConfig
@@ -106,6 +108,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
       const path = yield* Path.Path;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const loggers = yield* ProviderEventLoggers;
+      const processPriority = yield* AgentProcessPriority;
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER,
         instanceId: input.instanceId,
@@ -190,6 +193,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
         provider: DRIVER,
         instanceId: input.instanceId,
         environment,
+        processPriority,
         normalizeModel: (model) => (model === "default" ? "" : model.trim()),
         ...(loggers.native ? { nativeEventLogger: loggers.native } : {}),
         makeRuntime: (options) =>

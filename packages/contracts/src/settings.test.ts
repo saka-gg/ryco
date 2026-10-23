@@ -250,6 +250,22 @@ describe("ServerSettings.enableProviderUpdateChecks", () => {
   });
 });
 
+describe("ServerSettings.lowerAgentProcessPriority", () => {
+  it("defaults on, including settings files written before the key existed", () => {
+    expect(DEFAULT_SERVER_SETTINGS.lowerAgentProcessPriority).toBe(true);
+    expect(decodeServerSettings({}).lowerAgentProcessPriority).toBe(true);
+  });
+
+  it("can be turned off and round-trips through the settings patch", () => {
+    expect(
+      decodeServerSettings({ lowerAgentProcessPriority: false }).lowerAgentProcessPriority,
+    ).toBe(false);
+    expect(
+      decodeServerSettingsPatch({ lowerAgentProcessPriority: false }).lowerAgentProcessPriority,
+    ).toBe(false);
+  });
+});
+
 describe("ServerSettings.continueThreadsAfterRestart", () => {
   it("defaults off, so old settings files decode without auto-continuation", () => {
     expect(DEFAULT_SERVER_SETTINGS.continueThreadsAfterRestart).toBe(false);

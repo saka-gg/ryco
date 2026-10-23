@@ -117,6 +117,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * `TerminalBusyError`); absent on older servers, which drop the key and write unguarded.
    */
   terminalWriteRequireIdle: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node honours `lowerAgentProcessPriority` (agents run at a lower CPU priority); absent on
+   * older servers, which drop the key.
+   */
+  agentProcessPriority: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

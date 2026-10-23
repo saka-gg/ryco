@@ -3,6 +3,7 @@ import type { ServerSettingsPatch } from "@ryco/contracts";
 
 import { useServerConfig, applySettingsUpdated } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
+import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureLocalApi } from "../../localApi";
 import { DraftInput } from "../ui/draft-input";
@@ -26,14 +27,7 @@ export function WorktreeRootSettings({
       key={environmentId ?? "disconnected"}
       projectId={projectId}
       projects={projects}
-      disabled={
-        scope === "client" ||
-        !config ||
-        (scope === "node" && !target) ||
-        Boolean(
-          target && (!target.connected || target.canManage === false || target.canMutate === false),
-        )
-      }
+      disabled={!config || isNodeSettingsTargetReadOnly(scope, target)}
     />
   );
 }

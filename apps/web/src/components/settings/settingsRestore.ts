@@ -13,6 +13,7 @@ const RESTORABLE_SETTINGS = {
   sourceControlRefreshMode: "PR & workflow updates",
   responseStreamingMode: "Response streaming",
   enableProviderUpdateChecks: "Provider update checks",
+  lowerAgentProcessPriority: "Lower agent CPU priority",
   continueThreadsAfterRestart: "Continue after restart",
   autoResumeLimitedThreads: "Auto-resume limited threads",
   snoozeLimitedThreads: "Snooze limited threads",

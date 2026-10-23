@@ -60,6 +60,7 @@ import {
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import type { OpenCodeServerOwner } from "../OpenCodeServerOwner.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import {
   buildOpenCodePermissionRules,
   isOpenCodeNativeAttachment,
@@ -164,6 +165,8 @@ export interface OpenCodeAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly serverOwner?: OpenCodeServerOwner;
+  /** Lowers a server this adapter starts itself (the computer-use path); undefined: unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 function nowIso(): string {
@@ -2213,6 +2216,9 @@ export function makeOpenCodeAdapter(
                       serverUrl,
                       ...(serverPassword ? { serverPassword } : {}),
                       ...(options?.environment ? { environment: options.environment } : {}),
+                      ...(options?.processPriority
+                        ? { processPriority: options.processPriority }
+                        : {}),
                     });
               const client = yield* openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,

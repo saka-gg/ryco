@@ -82,6 +82,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import { codexServiceTierForSelection } from "../CodexServiceTier.ts";
 import { isFatalCodexStderrMessage } from "../codexStderr.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -162,6 +163,8 @@ export interface CodexAdapterLiveOptions {
   readonly storedThreadReader?: CodexStoredThreadReader;
   /** How long the adapter's own stored-thread reader stays up unused. */
   readonly storedThreadReaderIdleTimeout?: Duration.Input;
+  /** Lowers each session's `codex app-server`; undefined spawns it unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 interface CodexAdapterSessionContext {
@@ -2035,6 +2038,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { model: input.modelSelection.model }
             : {}),
           ...(startServiceTier ? { serviceTier: startServiceTier } : {}),
+          ...(options?.processPriority ? { processPriority: options.processPriority } : {}),
         };
         const agentControl = Option.getOrUndefined(agentControlLease);
         const sessionScope = yield* Scope.make("sequential");

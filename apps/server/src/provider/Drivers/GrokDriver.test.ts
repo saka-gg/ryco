@@ -8,6 +8,7 @@ import { TestClock } from "effect/testing";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
+import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
 import { GrokDriver } from "./GrokDriver.ts";
 
 const testLayer = ServerConfig.layerTest(process.cwd(), { prefix: "grok-driver-test" }).pipe(
@@ -21,6 +22,7 @@ const testLayer = ServerConfig.layerTest(process.cwd(), { prefix: "grok-driver-t
     ),
   ),
   Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+  Layer.provideMerge(AgentProcessPriorityOffLive),
   Layer.provideMerge(ServerSettingsService.layerTest()),
 );
 

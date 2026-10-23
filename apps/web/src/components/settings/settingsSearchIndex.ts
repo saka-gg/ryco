@@ -174,6 +174,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Lower agent CPU priority",
+    owner: "node",
+    description: "Run agents and their tests and builds at a lower CPU priority.",
+    keywords: "nice cpu priority responsive load performance below normal agent processes",
+  },
+  {
+    section: "general",
     title: "New threads",
     owner: "node",
     description: "Default workspace mode for newly created drafts.",
