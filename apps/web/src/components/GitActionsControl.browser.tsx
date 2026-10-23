@@ -307,6 +307,19 @@ import { CROWN_SHIP_GRACE_MS, useCrownShipBinding } from "./chat/useCrownShipBin
 import type { CrownShipBinding } from "./overview/crown/crownTypes";
 import { presentGitActionNotices, type GitActionNotice } from "~/gitActionNotices";
 
+/**
+ * Ends the git action a test left running and hands the next test a fresh
+ * one. A run that never settles keeps ticking its elapsed time and would
+ * report into whatever presents the same checkout in a later test.
+ */
+async function settleRunningStackedAction() {
+  const running = activeRunStackedActionDeferredRef.current;
+  running.promise.catch(() => undefined);
+  running.reject(new Error("The test ended."));
+  activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function findButtonByText(text: string): HTMLButtonElement | null {
   return (Array.from(document.querySelectorAll("button")).find((button) =>
     button.textContent?.includes(text),
@@ -349,10 +362,10 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     liveBranchRef.current = BRANCH_NAME;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
+    await settleRunningStackedAction();
     vi.clearAllMocks();
-    activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
     activeDraftThreadRef.current = null;
     hasServerThreadRef.current = true;
     serverThreadWorktreePathRef.current = null;
@@ -666,8 +679,8 @@ describe("useCrownShipBinding", () => {
       await mount.unmount();
       mount.host.remove();
     }
+    await settleRunningStackedAction();
     vi.clearAllMocks();
-    activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
     gitStatusOverridesRef.current = {};
     gitActionActivityRef.current = false;
     localApiRef.current = null;
