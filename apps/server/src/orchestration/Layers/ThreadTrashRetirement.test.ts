@@ -2,9 +2,9 @@ import { assert, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { TestClock } from "effect/testing";
 
+import { readLifecycleMarker } from "../../persistence/lifecycleMarkers.ts";
 import * as NodeSqliteClient from "../../persistence/NodeSqliteClient.ts";
 import {
-  readLifecycleMarker,
   retireThreadTrash,
   TRASH_RETIRED_AT_MARKER,
   trashRetirementCommandId,

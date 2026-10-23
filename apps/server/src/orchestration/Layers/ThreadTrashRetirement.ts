@@ -23,27 +23,13 @@ import {
 import { Cause, Clock, Effect, Option } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import {
+  readLifecycleMarker,
+  writeLifecycleMarkerOnce,
+} from "../../persistence/lifecycleMarkers.ts";
 import type { OrchestrationEngineShape } from "../Services/OrchestrationEngine.ts";
 
 export const TRASH_RETIRED_AT_MARKER = "trash_retired_at";
-
-export const readLifecycleMarker = (key: string) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const rows = yield* sql<{ readonly value: string }>`
-      SELECT value FROM lifecycle_markers WHERE key = ${key}
-    `;
-    return Option.fromNullishOr(rows[0]?.value);
-  });
-
-/** Records a marker unless one exists; returns the stored value (the first writer wins). */
-export const writeLifecycleMarkerOnce = (key: string, value: string) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`INSERT OR IGNORE INTO lifecycle_markers (key, value) VALUES (${key}, ${value})`;
-    const stored = yield* readLifecycleMarker(key);
-    return Option.getOrElse(stored, () => value);
-  });
 
 export const trashRetirementCommandId = (step: "untrash" | "archive", threadId: ThreadId) =>
   CommandId.make(`trash-retirement:${step}:${threadId}`);

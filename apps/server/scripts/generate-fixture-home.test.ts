@@ -61,4 +61,72 @@ describe("generateFixtureHome", () => {
       db.close();
     }
   });
+
+  it("adds superseded latest-state history only when asked, with per-emission command ids", async () => {
+    const options = {
+      projects: 1,
+      threads: 2,
+      turns: 1,
+      archivedShare: 0,
+      usageReportsPerTurn: 1,
+      seed: 3,
+    };
+    const plain = await generateFixtureHome({ ...options, out: join(directory, "plain") });
+    const zero = await generateFixtureHome({
+      ...options,
+      out: join(directory, "zero"),
+      progressTicksPerTurn: 0,
+      reasoningFlushesPerTurn: 0,
+      subagentFlushesPerTurn: 0,
+    });
+    expect({ ...zero, dbPath: "", durationMs: 0 }).toEqual({ ...plain, dbPath: "", durationMs: 0 });
+
+    const rich = await generateFixtureHome({
+      ...options,
+      out: join(directory, "rich"),
+      progressTicksPerTurn: 8,
+      reasoningFlushesPerTurn: 3,
+      subagentFlushesPerTurn: 2,
+    });
+    expect(rich.turns).toBe(plain.turns);
+    expect(rich.reasoningWrites).toBe(rich.turns * 4);
+    expect(rich.subagentWrites).toBe(rich.turns * 3);
+    // Eight progress ticks plus a usage tick every fourth.
+    expect(rich.progressWrites).toBe(rich.turns * 10);
+    expect(rich.commands).toBe(
+      plain.commands + rich.progressWrites + rich.reasoningWrites + rich.subagentWrites,
+    );
+
+    const db = new DatabaseSync(rich.dbPath, { readOnly: true });
+    try {
+      const count = (query: string) =>
+        (db.prepare(query).get() as { readonly count: number }).count;
+      const kindCount = (kind: string) =>
+        count(
+          `SELECT COUNT(*) AS count FROM orchestration_events WHERE event_type = 'thread.activity-appended' AND json_extract(payload_json, '$.activity.kind') = '${kind}'`,
+        );
+      expect(kindCount("task.progress")).toBe(rich.progressWrites);
+      expect(kindCount("reasoning")).toBe(rich.reasoningWrites);
+      expect(kindCount("agent.message")).toBe(rich.subagentWrites);
+      // The projection keeps one row per activity id: one reasoning block and one subagent
+      // message per turn.
+      expect(
+        count(
+          "SELECT COUNT(*) AS count FROM projection_thread_activities WHERE kind = 'reasoning'",
+        ),
+      ).toBe(rich.turns);
+      expect(
+        count(
+          "SELECT COUNT(*) AS count FROM projection_thread_activities WHERE kind = 'agent.message'",
+        ),
+      ).toBe(rich.turns);
+      expect(
+        count(
+          "SELECT COUNT(*) AS count FROM orchestration_command_receipts WHERE command_id GLOB 'provider:????????-????-4???-????-????????????:thread-activity-append:*'",
+        ),
+      ).toBe(rich.progressWrites + rich.reasoningWrites + rich.subagentWrites);
+    } finally {
+      db.close();
+    }
+  });
 });

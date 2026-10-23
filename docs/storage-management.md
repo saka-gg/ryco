@@ -31,3 +31,40 @@ Temporary retention covers only allocations from `StorageService.createTemporary
 - Shared clients: schema-only storage RPC/settings contracts live in contracts; the transport/controller live in client-runtime without DOM/RN imports. Each presentation uses the existing owner/readiness gate. Older nodes without the storage capability remain disabled.
 
 Focused regressions use synthetic repositories and SQLite fixtures only. They cover dirty/ignored/unmerged data, aliases and identity changes, nested target refusal, pending turn projection with a paused reactor, delayed goal recovery, creation/activation races, source-path protection, partial/retried execution, opt-in retention, pagination and bounded accounting.
+
+## Database: event history compaction
+
+The event log (`orchestration_events` in `state.sqlite`) keeps every orchestration event. Some
+activities are not history but the latest state of something running: a task's progress, a tool
+heartbeat, a streaming subagent message, a reasoning block. Providers rewrite them many times
+under one activity id, and everything that reads them replaces the activity by id, so only the
+newest event per thread and activity id matters. The server removes the older versions in the
+background (`apps/server/src/persistence/Layers/EventLogCompaction.ts`); the groups are defined
+once in `@ryco/shared/latestStateActivities`, which also drives write pacing at ingestion and
+live frame coalescing.
+
+- Removed: superseded `thread.activity-appended` events of `task.progress`, `tool.progress`,
+  subagent `agent.message` and `reasoning` activities, only when a later event of the same thread
+  and activity id stays, and only once the event is at least 24 hours old. Also command receipts
+  older than 7 days whose command id embeds a UUID minted for one emission (`provider:<uuid>:…`,
+  `history:<uuid>`).
+- Never removed: any other event type or activity kind, the newest version of every activity,
+  `context-window.updated` samples (statistics read every one), fork copies and imported
+  activities, events of the last 24 hours, and every other command receipt (many command ids are
+  deterministic and rely on their receipt for at-most-once behaviour).
+- Equivalence: server projections rebuilt or caught up from any cursor, and clients resumed from
+  any cursor, reach the same state with or without the removed events (property tests in
+  `EventLogCompaction.replay.test.ts` and `store.compactionReplay.test.ts`). A resume cursor that
+  falls into a removed event is still anchored, because the log's range anchors it.
+- Cadence: the first pass runs 10 minutes after startup (later if the last pass finished less than
+  6 hours ago), then every 2 minutes while settled history or old receipts are still waiting,
+  then every 6 hours.
+  A pass scans at most 250,000 sequences or 2 minutes, selects on the read worker, and deletes in
+  small adaptive transactions on the main connection. Each pass logs one summary line.
+- Kill switch: `RYCO_EVENT_COMPACTION=off` disables it; `RYCO_EVENT_COMPACTION=dry-run` selects
+  and counts without deleting, under its own progress state. CLI commands never compact.
+- Removed events free pages inside the database file; the file itself does not shrink. Online
+  passes keep at most one stale version per activity whose versions straddle two passes.
+- Measure on a copy with `node apps/server/scripts/measure-event-compaction.ts --db <state.sqlite>`
+  (fixture homes from `generate-fixture-home.ts --progress-ticks-per-turn N
+  --reasoning-flushes-per-turn N --subagent-flushes-per-turn N`).
