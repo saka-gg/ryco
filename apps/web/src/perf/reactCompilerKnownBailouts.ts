@@ -114,6 +114,7 @@ export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/components/settings/ResourceTelemetryDiagnostics.tsx": ["ResourceTelemetryDiagnostics"],
   "src/components/settings/SessionImportPanel.tsx": ["SessionImportPanel"],
   "src/components/settings/StorageSettings.tsx": ["StorageEditor"],
+  "src/components/settings/WindowCaptureSettings.tsx": ["WindowCaptureSettings"],
   "src/components/settings/WorktreeRootSettings.tsx": ["WorktreeRootEditor"],
   "src/components/settings/WorktreeSubmoduleSettings.tsx": ["WorktreeSubmoduleEditor"],
   "src/components/settings/lifecycleSuggestionPolicy.ts": ["useLifecycleSuggestionPolicyEditor"],
