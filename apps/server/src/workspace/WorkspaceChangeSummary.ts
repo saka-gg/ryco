@@ -21,6 +21,8 @@ import {
 import {
   GitVcsDriver,
   type GitVcsDriverShape,
+  INTERNAL_DIFF_SUMMARY_ARGS,
+  INTERNAL_PATCH_DIFF_ARGS,
   NO_INDEX_REFRESH_DIFF_ARGS,
 } from "../vcs/GitVcsDriver.ts";
 import {
@@ -125,15 +127,8 @@ export function makeWorkspaceChangeSummary(
       const [status, diffStat, diffPatch, untrackedFiles] = yield* Effect.all(
         [
           readGit(directory, ["status", "--porcelain=v1", "-uall"]),
-          readGit(directory, ["diff", "HEAD", "--no-ext-diff", "--no-color", "--stat"]),
-          readGit(directory, [
-            "diff",
-            "HEAD",
-            "--no-ext-diff",
-            "--no-color",
-            "--patch",
-            "--minimal",
-          ]),
+          readGit(directory, [...INTERNAL_DIFF_SUMMARY_ARGS, "--stat", "HEAD"]),
+          readGit(directory, [...INTERNAL_PATCH_DIFF_ARGS, "--minimal", "HEAD"]),
           readGit(directory, ["ls-files", "--others", "--exclude-standard"]),
         ],
         { concurrency: "unbounded" },
@@ -150,9 +145,7 @@ export function makeWorkspaceChangeSummary(
                 `${input.baseHead}..HEAD`,
               ]),
               readGit(directory, [
-                "diff",
-                "--no-ext-diff",
-                "--no-color",
+                ...INTERNAL_DIFF_SUMMARY_ARGS,
                 "--stat",
                 `${input.baseHead}...HEAD`,
               ]),

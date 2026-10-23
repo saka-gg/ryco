@@ -10,7 +10,10 @@ import { ChildProcessSpawner } from "effect/process";
 import { ServerConfig } from "../config.ts";
 import * as Driver from "./GitVcsDriver.ts";
 import { readGitLocalChanges, applyGitIndexPatch } from "./GitIndexReview.ts";
-import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
+import {
+  configureHostileDiffConfig,
+  configureTestGitCommitIdentity,
+} from "./testing/GitTestRepo.ts";
 
 const testLayer = Driver.layer.pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "comparison-test-" })),
@@ -82,6 +85,29 @@ describe("Git index review", () => {
       yield* f.apply(later, "staged", 0, 0);
       expect((yield* f.read()).staged.patch).toBe("");
       expect((yield* f.git(["diff"])).stdout).toContain("+later agent edit");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("reads and stages the same patches whatever the repository's diff config says", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.write("notes.txt", "first\n\nsecond\n\nthird\n");
+      yield* f.commit("notes");
+      yield* f.write("notes.txt", "first\n\nSECOND\n\nthird\n");
+      yield* f.git(["add", "notes.txt"]);
+      yield* f.write("notes.txt", "first\n\nSECOND\n\nthird, edited\n");
+      yield* f.write("untracked.txt", "untracked\n");
+
+      const clean = yield* f.read();
+      yield* configureHostileDiffConfig(f.cwd, (_, args) => f.git(args));
+      const hostile = yield* f.read();
+
+      expect(hostile).toEqual(clean);
+      expect(clean.staged.patch).toContain("diff --git a/notes.txt b/notes.txt\n");
+      expect(clean.staged.patch).toContain("\n \n-second\n+SECOND\n \n");
+      expect(clean.unstaged.patch).toContain("\n \n-third\n+third, edited\n");
+      expect(clean.unstaged.patch).toContain("diff --git a/untracked.txt b/untracked.txt\n");
+      yield* f.apply(hostile, "unstaged");
+      expect((yield* f.read()).staged.patch).toContain("+third, edited");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
   it.effect(

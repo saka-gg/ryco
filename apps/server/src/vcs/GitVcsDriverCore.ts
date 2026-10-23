@@ -2003,7 +2003,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const stagedSummary = yield* runGitStdout(
       "GitVcsDriver.prepareCommitContext.stagedSummary",
       cwd,
-      ["diff", "--cached", "--name-status"],
+      [...GitVcsDriver.INTERNAL_DIFF_SUMMARY_ARGS, "--cached", "--name-status"],
     ).pipe(Effect.map((stdout) => stdout.trim()));
     if (stagedSummary.length === 0) {
       return null;
@@ -2012,7 +2012,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const stagedPatch = yield* runGitStdoutWithOptions(
       "GitVcsDriver.prepareCommitContext.stagedPatch",
       cwd,
-      ["diff", "--cached", "--patch", "--minimal"],
+      [...GitVcsDriver.INTERNAL_PATCH_DIFF_ARGS, "--cached", "--minimal"],
       {
         maxOutputBytes: PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES,
         truncateOutputAtMaxBytes: true,
@@ -2315,7 +2315,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.log",
           cwd,
-          ["log", "--oneline", commitRange],
+          ["log", "--oneline", "--no-decorate", "--no-color", commitRange],
           {
             maxOutputBytes: RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES,
             truncateOutputAtMaxBytes: true,
@@ -2324,7 +2324,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.diffStat",
           cwd,
-          ["diff", "--stat", diffRange],
+          [...GitVcsDriver.INTERNAL_DIFF_SUMMARY_ARGS, "--stat", diffRange],
           {
             maxOutputBytes: RANGE_DIFF_SUMMARY_MAX_OUTPUT_BYTES,
             truncateOutputAtMaxBytes: true,
@@ -2333,7 +2333,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.diffPatch",
           cwd,
-          ["diff", "--patch", "--minimal", diffRange],
+          [...GitVcsDriver.INTERNAL_PATCH_DIFF_ARGS, "--minimal", diffRange],
           {
             maxOutputBytes: RANGE_DIFF_PATCH_MAX_OUTPUT_BYTES,
             truncateOutputAtMaxBytes: true,

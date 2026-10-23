@@ -3,6 +3,7 @@ import { Cause, Effect, Exit, Option, Result, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { expect } from "vite-plus/test";
 
+import { INTERNAL_PATCH_DIFF_ARGS } from "../vcs/GitVcsDriver.ts";
 import type * as VcsProcess from "../vcs/VcsProcess.ts";
 import {
   AzureDevOpsCliError,
@@ -281,15 +282,8 @@ describe("getDiff and file contents (local git)", () => {
       // Pinned prefixes and no textconv: the user's `diff.noprefix` / `diff.srcPrefix`
       // would otherwise produce headers the page's diff parser rejects.
       assert.deepStrictEqual(calls.git.at(-1), [
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
+        ...INTERNAL_PATCH_DIFF_ARGS,
         "--find-renames",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        "--no-relative",
-        "--submodule=short",
         `${TARGET}...${HEAD}`,
       ]);
     }),
@@ -347,7 +341,7 @@ describe("getDiff and file contents (local git)", () => {
     Effect.gen(function* () {
       const { page, calls } = fakeAzure({
         invoke: readRoutes,
-        git: (args) => (args[0] === "diff" ? { stdout: "commit diff" } : {}),
+        git: (args) => (args.includes("diff") ? { stdout: "commit diff" } : {}),
       });
       const diff = yield* page.getDiff({
         cwd: "/repo",

@@ -15,6 +15,7 @@ import { Cause, Effect, Layer, FileSystem, Option, Path, Semaphore } from "effec
 
 import { CheckpointInvariantError } from "../Errors.ts";
 import { VcsProcessExitError } from "@ryco/contracts";
+import { INTERNAL_PATCH_DIFF_ARGS } from "../../vcs/GitVcsDriver.ts";
 import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
 import { CheckpointStore, type CheckpointStoreShape } from "../Services/CheckpointStore.ts";
 import { CheckpointRef } from "@ryco/contracts";
@@ -387,10 +388,11 @@ const makeCheckpointStore = Effect.gen(function* () {
     "diffCheckpointCommits",
   )(function* (input) {
     const diffArgs = [
-      "diff",
-      "--patch",
+      ...INTERNAL_PATCH_DIFF_ARGS,
       "--minimal",
-      "--no-color",
+      // Git's default for `git diff`; pinned so `diff.renames=copies` cannot
+      // turn a copied file into a rename of its source.
+      "--find-renames",
       ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
       input.fromCommitOid,
       input.toCommitOid,

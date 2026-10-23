@@ -27,6 +27,7 @@ import {
 
 import type { WorkspaceChangesSummaryGenerationInput } from "../textGeneration/TextGeneration.ts";
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import { configureHostileDiffConfig } from "../vcs/testing/GitTestRepo.ts";
 import { makeWorkspaceAccessPolicy } from "./Layers/WorkspaceAccessPolicy.ts";
 import {
   makeWorkspaceChangeSummary,
@@ -234,6 +235,31 @@ describe("workspace change summary", () => {
     const call = f.state.calls[0]!;
     expect(call.diffPatch).toContain("+export const greeting = 'goodbye';");
     expect(call.diffPatch).not.toContain("other.ts");
+  });
+
+  it("reads the same change context whatever the repository's diff config says", async () => {
+    const read = async (hostile: boolean) => {
+      const f = fixture();
+      if (hostile) {
+        await Effect.runPromise(
+          configureHostileDiffConfig(f.repo, (cwd, args) => Effect.sync(() => f.git(cwd, ...args))),
+        );
+      }
+      writeFileSync(path.join(f.checkout, "notes.txt"), "first\n\nsecond\n\nthird\n");
+      f.git(f.checkout, "add", "notes.txt");
+      f.commit(f.checkout, "Add notes");
+      writeFileSync(path.join(f.checkout, "notes.txt"), "first\n\nsecond, edited\n\nthird\n");
+      await f.summarize();
+      return f.state.calls[0]!;
+    };
+
+    const clean = await read(false);
+    const hostile = await read(true);
+
+    expect(hostile.diffPatch).toBe(clean.diffPatch);
+    expect(hostile.statusSummary).toBe(clean.statusSummary);
+    expect(clean.diffPatch).toContain("diff --git a/notes.txt b/notes.txt\n");
+    expect(clean.diffPatch).toContain("\n \n-second\n+second, edited\n \n");
   });
 
   it("summarizes unmerged commits on an otherwise clean checkout", async () => {

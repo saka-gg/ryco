@@ -7,7 +7,7 @@ import {
   GitReadComparisonInput,
   type GitReadComparisonResult,
 } from "@ryco/contracts";
-import type { GitVcsDriverShape } from "./GitVcsDriver.ts";
+import { INTERNAL_PATCH_DIFF_ARGS, type GitVcsDriverShape } from "./GitVcsDriver.ts";
 
 /** Read-only, bounded comparison of two immutable commits. Never runs external diff/textconv. */
 export const readGitComparison = Effect.fn("readGitComparison")(function* (
@@ -69,16 +69,8 @@ export const readGitComparison = Effect.fn("readGitComparison")(function* (
   }
   const patch = (yield* run(
     [
-      "diff",
-      "--patch",
-      "--no-color",
-      "--no-ext-diff",
-      "--no-textconv",
+      ...INTERNAL_PATCH_DIFF_ARGS,
       "--no-renames",
-      "--src-prefix=a/",
-      "--dst-prefix=b/",
-      "--unified=3",
-      "--submodule=short",
       ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
       baseOid,
       headOid,

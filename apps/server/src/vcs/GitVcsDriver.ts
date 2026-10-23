@@ -98,6 +98,52 @@ export const NO_INDEX_REFRESH_DIFF_ARGS = Object.freeze([
   "diff.autoRefreshIndex=false",
 ] as const);
 
+/**
+ * Leading arguments, the `diff` subcommand included, of every internal patch
+ * Ryco parses or hands on (turn diffs, comparisons, index review, pull request
+ * diffs, commit and PR text generation), so the patch keeps the format Ryco
+ * parses whatever the user's git config says. They override forced color
+ * (`color.ui=always`), external diff tools and textconv drivers
+ * (`diff.external`, `.gitattributes`), the `a/` / `b/` prefixes
+ * (`diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix` /
+ * `diff.dstPrefix`), the context size (`diff.context`), cwd-relative paths
+ * (`diff.relative`), submodule logs in place of patches (`diff.submodule`) and
+ * blank context lines printed without their leading space
+ * (`diff.suppressBlankEmpty`, which has no command-line option). Rename
+ * detection stays with each reader. Settings that keep a valid patch still
+ * apply: the diff algorithm and hunk heuristics, file order, path quoting and
+ * ignored submodules.
+ */
+export const INTERNAL_PATCH_DIFF_ARGS = Object.freeze([
+  "-c",
+  "diff.suppressBlankEmpty=false",
+  "diff",
+  "--patch",
+  "--no-color",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--src-prefix=a/",
+  "--dst-prefix=b/",
+  "--unified=3",
+  "--no-relative",
+  "--submodule=short",
+] as const);
+
+/**
+ * Leading arguments, the `diff` subcommand included, of the `--stat` and
+ * `--name-status` summaries Ryco hands on next to an
+ * {@link INTERNAL_PATCH_DIFF_ARGS} patch, so both list the same files under
+ * the same repository-root paths: `diff.relative` would otherwise limit the
+ * summary to the cwd and shorten its paths. Summaries never run external diff
+ * tools or textconv drivers and print no prefixes or hunks, so forced color is
+ * the only other setting to override.
+ */
+export const INTERNAL_DIFF_SUMMARY_ARGS = Object.freeze([
+  "diff",
+  "--no-color",
+  "--no-relative",
+] as const);
+
 export interface ExecuteGitResult {
   readonly exitCode: ChildProcessSpawner.ExitCode;
   readonly stdout: string;

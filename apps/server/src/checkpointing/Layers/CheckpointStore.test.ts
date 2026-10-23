@@ -5,6 +5,7 @@ import { it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, FileSystem, Layer, PlatformError, Scope } from "effect";
 import { describe, expect } from "vite-plus/test";
 
+import { parseTurnDiffFilesFromUnifiedDiff } from "../Diffs.ts";
 import { checkpointRefForThreadTurn, forkPinRefs } from "../Utils.ts";
 import { CheckpointStoreLive } from "./CheckpointStore.ts";
 import { CheckpointStore } from "../Services/CheckpointStore.ts";
@@ -13,7 +14,10 @@ import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import type { VcsError } from "@ryco/contracts";
 import { ServerConfig } from "../../config.ts";
 import { ThreadId } from "@ryco/contracts";
-import { configureTestGitCommitIdentity } from "../../vcs/testing/GitTestRepo.ts";
+import {
+  configureHostileDiffConfig,
+  configureTestGitCommitIdentity,
+} from "../../vcs/testing/GitTestRepo.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "ryco-checkpoint-store-test-",
@@ -510,6 +514,72 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
         expect(whitespaceIgnoredDiff).toContain("+        <div>");
         expect(whitespaceIgnoredDiff).not.toContain("-      <h1>Title</h1>");
         expect(whitespaceIgnoredDiff).not.toContain("+          <h1>Title</h1>");
+      }),
+    );
+
+    it.effect("reads the same parseable patch whatever the repository's diff config says", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const commitAll = (message: string, submoduleCommit: string) =>
+          Effect.gen(function* () {
+            yield* git(tmp, ["add", "-A"]);
+            // A submodule without a checkout: `diff.submodule=log` prints a log
+            // line in place of its patch.
+            yield* git(tmp, [
+              "update-index",
+              "--add",
+              "--cacheinfo",
+              `160000,${submoduleCommit},vendor/lib`,
+            ]);
+            yield* git(tmp, ["commit", "-m", message]);
+            return yield* git(tmp, ["rev-parse", "HEAD"]);
+          });
+        const sourceLines = Array.from({ length: 30 }, (_, index) => `source ${index + 1}\n`);
+        yield* fileSystem.makeDirectory(path.join(tmp, "nested"));
+        yield* writeTextFile(path.join(tmp, "notes.txt"), "first\n\nsecond\n\nthird\n");
+        yield* writeTextFile(path.join(tmp, "source.txt"), sourceLines.join(""));
+        yield* writeTextFile(path.join(tmp, "removed.txt"), "gone\n");
+        yield* writeTextFile(path.join(tmp, "nested", "inner.txt"), "inner\n");
+        const fromCommitOid = yield* commitAll("before", "1".repeat(40));
+        yield* writeTextFile(path.join(tmp, "notes.txt"), "first\n\nSECOND\n\nthird\n");
+        // A copy of a file that changed too: `diff.renames=copies` reports it
+        // copied from its source, which reads as a rename.
+        yield* writeTextFile(path.join(tmp, "copy.txt"), sourceLines.join(""));
+        yield* writeTextFile(
+          path.join(tmp, "source.txt"),
+          sourceLines.with(14, "source fifteen\n").join(""),
+        );
+        yield* fileSystem.remove(path.join(tmp, "removed.txt"));
+        yield* writeTextFile(path.join(tmp, "nested", "inner.txt"), "inner changed\n");
+        const toCommitOid = yield* commitAll("after", "2".repeat(40));
+        const diff = (cwd: string) =>
+          checkpointStore.diffCheckpointCommits({
+            cwd,
+            fromCommitOid,
+            toCommitOid,
+            ignoreWhitespace: false,
+          });
+
+        const clean = yield* diff(tmp);
+        yield* configureHostileDiffConfig(tmp, git);
+        yield* git(tmp, ["config", "diff.renames", "copies"]);
+
+        expect(yield* diff(tmp)).toBe(clean);
+        // `diff.relative` would limit a read from a subdirectory to that directory.
+        expect(yield* diff(path.join(tmp, "nested"))).toBe(clean);
+        expect(clean).toContain("diff --git a/notes.txt b/notes.txt\n");
+        expect(clean).toContain("@@ -1,5 +1,5 @@\n first\n \n-second\n+SECOND\n \n third\n");
+        expect(parseTurnDiffFilesFromUnifiedDiff(clean)).toEqual([
+          { path: "copy.txt", kind: "added", additions: 30, deletions: 0 },
+          { path: "nested/inner.txt", kind: "modified", additions: 1, deletions: 1 },
+          { path: "notes.txt", kind: "modified", additions: 1, deletions: 1 },
+          { path: "removed.txt", kind: "deleted", additions: 0, deletions: 1 },
+          { path: "source.txt", kind: "modified", additions: 1, deletions: 1 },
+          { path: "vendor/lib", kind: "modified", additions: 1, deletions: 1 },
+        ]);
       }),
     );
   });

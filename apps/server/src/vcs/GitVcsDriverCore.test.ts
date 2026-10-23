@@ -41,7 +41,10 @@ import {
   parseGitConfigList,
   parseListedRefs,
 } from "./GitVcsDriverCore.ts";
-import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
+import {
+  configureHostileDiffConfig,
+  configureTestGitCommitIdentity,
+} from "./testing/GitTestRepo.ts";
 
 // Observe actual destination-lock acquisition for deterministic pre-mkdir races.
 // Preserve the real semaphore/map behavior; only the get boundary is observable.
@@ -250,6 +253,51 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.instanceOf(error, GitCommandError);
         assert.include(error.detail, "multiple merge bases");
         assert.include(error.detail, "Merge or rebase");
+      }),
+    );
+
+    it.effect("reads commit and range context the same whatever the diff config says", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nsecond\n\nthird\n");
+        yield* writeTextFile(cwd, "docs/guide.txt", "intro\n");
+        yield* git(cwd, ["add", "notes.txt", "docs/guide.txt"]);
+        yield* git(cwd, ["commit", "-m", "Add notes"]);
+        yield* git(cwd, ["checkout", "-b", "feature/notes"]);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nSECOND\n\nthird\n");
+        yield* git(cwd, ["commit", "-am", "Shout the second note"]);
+        yield* writeTextFile(cwd, "notes.txt", "first\n\nSECOND\n\nthird, edited\n");
+        yield* writeTextFile(cwd, "docs/guide.txt", "intro, edited\n");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const read = (from: string) =>
+          Effect.all([
+            driver.prepareCommitContext(from),
+            driver.readRangeContext(from, initialBranch),
+          ]);
+        // A project may sit in a subdirectory; its context still covers the
+        // whole repository, as the commit does.
+        const subdirectory = nodePath.join(cwd, "docs");
+
+        const clean = yield* read(cwd);
+        assert.deepStrictEqual(yield* read(subdirectory), clean);
+        yield* configureHostileDiffConfig(cwd, git);
+        yield* git(cwd, ["config", "log.decorate", "full"]);
+
+        assert.deepStrictEqual(yield* read(cwd), clean);
+        assert.deepStrictEqual(yield* read(subdirectory), clean);
+        const [commitContext, rangeContext] = clean;
+        assert.strictEqual(commitContext?.stagedSummary, "M\tdocs/guide.txt\nM\tnotes.txt");
+        assert.include(
+          commitContext?.stagedPatch,
+          "diff --git a/docs/guide.txt b/docs/guide.txt\n",
+        );
+        assert.include(commitContext?.stagedPatch, "diff --git a/notes.txt b/notes.txt\n");
+        assert.include(commitContext?.stagedPatch, "\n \n-third\n+third, edited\n");
+        assert.include(rangeContext.diffPatch, "diff --git a/notes.txt b/notes.txt\n");
+        assert.include(rangeContext.diffPatch, "\n \n-second\n+SECOND\n \n");
+        assert.include(rangeContext.diffSummary, "notes.txt | 2 +-");
+        assert.match(rangeContext.commitSummary, /^[0-9a-f]+ Shout the second note\n$/);
       }),
     );
   });

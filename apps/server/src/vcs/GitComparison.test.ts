@@ -9,7 +9,10 @@ import { Effect, FileSystem, Layer, Option } from "effect";
 import { ServerConfig } from "../config.ts";
 import * as Driver from "./GitVcsDriver.ts";
 import { readGitComparison } from "./GitComparison.ts";
-import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
+import {
+  configureHostileDiffConfig,
+  configureTestGitCommitIdentity,
+} from "./testing/GitTestRepo.ts";
 
 const testLayer = Driver.layer.pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "comparison-test-" })),
@@ -99,6 +102,29 @@ describe("Git comparison", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("reads the same patch whatever the repository's diff config says", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.write("notes.txt", "first\n\nsecond\n\nthird\n");
+      yield* f.commit("notes");
+      const notes = (yield* f.git(["rev-parse", "HEAD"])).stdout.trim();
+      yield* f.write("notes.txt", "first\n\nSECOND\n\nthird\n");
+      yield* f.commit("shout");
+      const read = readGitComparison(f.driver.execute, {
+        cwd: f.cwd,
+        selection: { ref: notes, mode: "direct" },
+        ignoreWhitespace: false,
+      });
+
+      const clean = yield* read;
+      yield* configureHostileDiffConfig(f.cwd, (_, args) => f.git(args));
+
+      expect(yield* read).toEqual(clean);
+      expect(clean.patch).toContain("diff --git a/notes.txt b/notes.txt\n");
+      expect(clean.patch).toContain("\n \n-second\n+SECOND\n \n");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect(
     "resolves tags and commit IDs, changes revision for moved refs, rejects deleted/ambiguous refs",
     () =>
@@ -145,7 +171,7 @@ describe("Git comparison", () => {
       const moving: Driver.GitVcsDriverShape["execute"] = (input) =>
         Effect.gen(function* () {
           const result = yield* f.driver.execute(input);
-          if (input.args[0] === "diff" && !moved) {
+          if (input.args.includes("diff") && !moved) {
             moved = true;
             yield* f.git(["checkout", "--detach", f.base]);
           }
