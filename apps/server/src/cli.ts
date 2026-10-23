@@ -131,7 +131,7 @@ import type { AuthControlPlaneShape } from "./auth/Services/AuthControlPlane.ts"
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
-import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { layerConfigCli as SqlitePersistenceCliLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import {
@@ -1017,7 +1017,7 @@ const ProjectCliRuntimeLive = Layer.mergeAll(
   OrchestrationLayerLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolverLive),
     Layer.provideMerge(ProjectAvatarStoreFromConfigLayer),
-    Layer.provideMerge(SqlitePersistenceLayerLive),
+    Layer.provideMerge(SqlitePersistenceCliLayerLive),
   ),
 );
 

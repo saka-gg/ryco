@@ -56,7 +56,8 @@ if (
   throw new Error("Use positive multiples of 40 bytes and positive message count");
 const directory = mkdtempSync(join(tmpdir(), "ryco-streaming-measure-"));
 const filename = join(directory, "fixture.sqlite");
-const persistence = makeSqlitePersistenceLive(filename);
+// The worker would checkpoint and wrap the WAL this script measures with autocheckpoint 0.
+const persistence = makeSqlitePersistenceLive(filename, { checkpointWorker: false });
 const layer = Layer.mergeAll(
   OrchestrationProjectionPipelineLive,
   ProjectionThreadMessageRepositoryLive,
