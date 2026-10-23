@@ -203,6 +203,61 @@ describe("sidebar undo history", () => {
     expect(s.dispatch).toHaveBeenCalledTimes(1);
     expect(s.read()).toEqual([]);
   });
+  it("finds the newest notice whose Undo can still run", async () => {
+    const s = setup();
+    expect(s.history.latest()).toBeNull();
+    const other = { ...target, threadId: ThreadId.make("thread-b") };
+    await s.history.dispatch(target, {
+      type: "thread.settle",
+      commandId: CommandId.make("first"),
+      threadId: target.threadId,
+    });
+    let acknowledge!: (value: { sequence: number }) => void;
+    s.dispatch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    const archive = s.history.dispatch(other, {
+      type: "thread.archive",
+      commandId: CommandId.make("second"),
+      threadId: other.threadId,
+    });
+    // A notice still applying counts: its Undo waits for the acknowledgment.
+    expect(s.history.latest()).toMatchObject({ action: "archive", target: other, applying: true });
+    acknowledge({ sequence: 2 });
+    await archive;
+
+    let finish!: (value: { sequence: number }) => void;
+    s.dispatch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const undo = s.history.undo(s.history.latest()!.id);
+    // An Undo in flight is skipped, so a second press undoes the notice before it.
+    expect(s.history.latest()).toMatchObject({ action: "settle", target, pending: false });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    finish({ sequence: 3 });
+    await undo;
+    expect(s.history.latest()).toMatchObject({ action: "settle", target });
+    s.history.dispose();
+    expect(s.history.latest()).toBeNull();
+  });
+  it.each(["expiry", "generation"])("offers no keyboard Undo after %s", async (reason) => {
+    const s = setup();
+    await s.history.dispatch(target, {
+      type: "thread.settle",
+      commandId: CommandId.make("original"),
+      threadId: target.threadId,
+    });
+    if (reason === "expiry") vi.advanceTimersByTime(5_000);
+    else s.replace({ ...s.context()!, generation: {} });
+    expect(s.history.latest()).toBeNull();
+    expect(s.read()).toEqual([]);
+  });
   it("restores local unpin and refuses ABA pin changes", async () => {
     const s = setup();
     let pinned = true;
