@@ -138,9 +138,29 @@ Symlinks and submodules have no staging actions, and conflicted indexes fail wit
 explicit message. Partial creation/deletion and mode changes cannot be staged as
 individual hunks. Unsupported rendering retains the existing raw-patch fallback.
 
-Staging does not commit. Existing Ryco commit actions retain their selected-file/all-file
-staging behavior; they do not preserve partial-hunk selection. To commit precisely the
-reviewed index, use Git's staged-only commit workflow outside those actions.
+Staging does not commit by itself. **Commit staged** in the Staged changes view commits
+exactly the reviewed index: nothing is reset or added, so partial hunks stay staged as
+reviewed and unstaged edits and untracked files remain in the working tree. It generates
+the commit message from the staged diff and runs the repository's commit hooks like any
+other commit. The other Ryco commit actions keep their selected-file/all-file staging
+behavior and do not preserve partial-hunk selection. Nodes that do not advertise
+`stagedOnlyCommit` do not offer the action, because they would ignore the request and
+commit every change.
+
+### Staged-only commit
+
+`vcs.readLocalChanges` also returns a `stagedRevision`, binding the canonical worktree,
+branch, HEAD, and the staged content (the HEAD-to-index modes and object IDs, read with
+submodules never ignored), but not the unstaged patch: later agent edits to working
+files do not invalidate it. `git.runStackedAction` with `stagedOnly.expectedRevision`
+recomputes that revision before reading the commit-message context and refuses with
+`GitStagedIndexChangedError` when it differs, so a later `git add`, commit, or branch
+switch cannot slip into the commit. It refuses an empty index and unmerged entries. Right
+before `git commit` it checks HEAD, the branch, and the staged content again, covering
+changes made while the message was generated. `stagedOnly` cannot be combined with
+`filePaths`; a feature-branch commit, push, and pull request follow the same path. The
+Staged review and the commit-message context list staged submodule pointers even when
+the user's config ignores submodules, because the commit records them.
 
 ### Guarded index mutation
 

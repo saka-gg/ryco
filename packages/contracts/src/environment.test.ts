@@ -120,6 +120,16 @@ describe("ExecutionEnvironmentCapabilities.worktreeNotes", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.stagedOnlyCommit", () => {
+  it("stays absent for older nodes, which would commit every change", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.stagedOnlyCommit).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ stagedOnlyCommit: true })).capabilities.stagedOnlyCommit,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ stagedOnlyCommit: "true" }))).toThrow();
+  });
+});
+
 it("requires explicit required-worktree bootstrap support from the node", () => {
   expect(decodeDescriptor(descriptor({})).capabilities.requiredWorktreeBootstrap).toBeUndefined();
   expect(

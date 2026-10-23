@@ -28,7 +28,12 @@ import {
 } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { DEFAULT_SERVER_SETTINGS, GitCommandError, type VcsRef } from "@ryco/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
+  GitStagedIndexChangedError,
+  type VcsRef,
+} from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";
 import { withGitFilesystemGuidance } from "../git/gitFilesystemErrors.ts";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
@@ -57,12 +62,28 @@ import {
 } from "../project/worktreeSetupState.ts";
 import { resolveWorktreeSubmodules } from "../project/worktreeSubmodules.ts";
 import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
+import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
+import { readGitStagedIndex } from "./GitIndexReview.ts";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
 const PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES = 49_000;
+/**
+ * A staged-only commit's message context, read the same whatever the user's diff
+ * config. Staged submodule pointers are always listed: the commit records them.
+ */
+const STAGED_COMMIT_CONTEXT_DIFF_ARGS = [
+  "--no-color",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--src-prefix=a/",
+  "--dst-prefix=b/",
+  "--no-relative",
+  "--ignore-submodules=none",
+  "--submodule=short",
+] as const;
 const RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
 const RANGE_DIFF_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
 const RANGE_DIFF_PATCH_MAX_OUTPUT_BYTES = 59_000;
@@ -2025,12 +2046,72 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     };
   });
 
+  const readStagedIndex = (cwd: string) =>
+    readGitStagedIndex(execute, cwd).pipe(
+      Effect.provideService(WorkspaceAccessPolicy, worktreePolicy),
+    );
+
+  const prepareStagedCommitContext: GitVcsDriver.GitVcsDriverShape["prepareStagedCommitContext"] =
+    Effect.fn("prepareStagedCommitContext")(function* (cwd, expectedRevision) {
+      const staged = yield* readStagedIndex(cwd);
+      if (staged.stagedRevision !== expectedRevision) {
+        return yield* new GitStagedIndexChangedError({
+          cwd,
+          detail:
+            "The staged changes, HEAD or branch moved since your review. Review them again before committing.",
+        });
+      }
+      if (staged.empty) {
+        return yield* createGitCommandError(
+          "GitVcsDriver.prepareStagedCommitContext",
+          cwd,
+          ["diff", "--cached"],
+          "Nothing is staged to commit.",
+        );
+      }
+      const stagedSummary = yield* runGitStdout(
+        "GitVcsDriver.prepareStagedCommitContext.stagedSummary",
+        cwd,
+        ["diff", "--cached", "--name-status", ...STAGED_COMMIT_CONTEXT_DIFF_ARGS],
+      ).pipe(Effect.map((stdout) => stdout.trim()));
+      const stagedPatch = yield* runGitStdoutWithOptions(
+        "GitVcsDriver.prepareStagedCommitContext.stagedPatch",
+        cwd,
+        ["diff", "--cached", "--patch", "--minimal", ...STAGED_COMMIT_CONTEXT_DIFF_ARGS],
+        {
+          maxOutputBytes: PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES,
+          truncateOutputAtMaxBytes: true,
+        },
+      );
+      return {
+        stagedSummary,
+        stagedPatch,
+        stagedIndex: { headOid: staged.headOid, stagedDigest: staged.stagedDigest },
+      };
+    });
+
   const commit: GitVcsDriver.GitVcsDriverShape["commit"] = Effect.fn("commit")(function* (
     cwd,
     subject,
     body,
     options?: GitVcsDriver.GitCommitOptions,
   ) {
+    const expected = options?.stagedIndex;
+    if (expected) {
+      // Message generation can take a while; nothing staged since may slip in.
+      const staged = yield* readStagedIndex(cwd);
+      if (
+        staged.headOid !== expected.headOid ||
+        staged.stagedDigest !== expected.stagedDigest ||
+        staged.branch !== (expected.branch === null ? null : `refs/heads/${expected.branch}`)
+      ) {
+        return yield* new GitStagedIndexChangedError({
+          cwd,
+          detail:
+            "The staged changes, HEAD or branch moved while preparing the commit. Review them again before committing.",
+        });
+      }
+    }
     const args = ["commit", "-m", subject];
     const trimmedBody = body.trim();
     if (trimmedBody.length > 0) {
@@ -3427,6 +3508,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     refreshStatusTracking,
     refreshStatusUpstream,
     prepareCommitContext,
+    prepareStagedCommitContext,
     commit,
     pushCurrentBranch,
     pullCurrentBranch,

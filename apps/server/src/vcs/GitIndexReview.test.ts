@@ -9,7 +9,7 @@ import { Effect, FileSystem, Layer } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { ServerConfig } from "../config.ts";
 import * as Driver from "./GitVcsDriver.ts";
-import { readGitLocalChanges, applyGitIndexPatch } from "./GitIndexReview.ts";
+import { readGitLocalChanges, applyGitIndexPatch, readGitStagedIndex } from "./GitIndexReview.ts";
 import {
   configureHostileDiffConfig,
   configureTestGitCommitIdentity,
@@ -145,6 +145,70 @@ describe("Git index review", () => {
           fileId: "f".repeat(64),
         }).pipe(Effect.flip);
       }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect(
+    "binds the staged revision to HEAD, branch and staged content, not unstaged edits",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.write("shared.txt", "staged\n");
+        yield* f.git(["add", "shared.txt"]);
+        const reviewed = yield* f.read();
+        const staged = yield* readGitStagedIndex(f.driver.execute, f.cwd);
+        expect(staged.stagedRevision).toBe(reviewed.stagedRevision);
+        expect(staged).toMatchObject({
+          branch: "refs/heads/feature",
+          headOid: f.head,
+          empty: false,
+        });
+        // A staged mode change is staged content too.
+        yield* f.git(["update-index", "--chmod=+x", "shared.txt"]);
+        expect((yield* f.read()).stagedRevision).not.toBe(reviewed.stagedRevision);
+        yield* f.git(["update-index", "--chmod=-x", "shared.txt"]);
+        expect((yield* f.read()).stagedRevision).toBe(reviewed.stagedRevision);
+        // Working-file edits, untracked files and intent-to-add entries change nothing a commit records.
+        yield* f.write("shared.txt", "agent edit\n");
+        yield* f.write("untracked.txt", "untracked\n");
+        yield* f.write("intent.txt", "intent\n");
+        yield* f.git(["add", "--intent-to-add", "intent.txt"]);
+        const edited = yield* f.read();
+        expect(edited.revision).not.toBe(reviewed.revision);
+        expect(edited.stagedRevision).toBe(reviewed.stagedRevision);
+        yield* f.git(["add", "untracked.txt"]);
+        const added = (yield* f.read()).stagedRevision;
+        expect(added).not.toBe(reviewed.stagedRevision);
+        yield* f.git(["checkout", "-b", "other"]);
+        const switched = (yield* f.read()).stagedRevision;
+        expect(switched).not.toBe(added);
+        yield* f.git(["commit", "-m", "head moved"]);
+        const committed = yield* readGitStagedIndex(f.driver.execute, f.cwd);
+        expect(committed.stagedRevision).not.toBe(switched);
+        expect(committed.empty).toBe(true);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("shows a staged submodule pointer whatever the user's submodule ignore rules", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      yield* f.git(["config", "diff.ignoreSubmodules", "all"]);
+      // A not checked out submodule: its pointer alone is staged.
+      yield* fs.makeDirectory(`${f.cwd}/lib`);
+      yield* f.git(["update-index", "--add", "--cacheinfo", `160000,${f.base},lib`]);
+      const pointerOnly = yield* f.read();
+      expect(pointerOnly.staged.files).toHaveLength(1);
+      expect(pointerOnly.staged.files[0]).toMatchObject({ fileAction: false, hunkAction: false });
+      expect(pointerOnly.staged.patch).toContain(`+Subproject commit ${f.base}`);
+      const staged = yield* readGitStagedIndex(f.driver.execute, f.cwd);
+      expect(staged.empty).toBe(false);
+      expect(staged.stagedRevision).toBe(pointerOnly.stagedRevision);
+
+      yield* f.write("shared.txt", "staged\n");
+      yield* f.git(["add", "shared.txt"]);
+      const withFile = yield* f.read();
+      expect(withFile.staged.patch).toMatch(/^diff --git a\/lib b\/lib$/m);
+      expect(withFile.staged.patch).toMatch(/^diff --git a\/shared\.txt b\/shared\.txt$/m);
+      expect(withFile.staged.files).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
   it.effect("handles untracked binary and rename pairs without changing working files", () =>
     Effect.gen(function* () {

@@ -60,6 +60,8 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@ryco/contracts";
 import {
   GitVcsDriver,
+  type GitPreparedCommitContext,
+  type GitStagedIndexGuard,
   type GitStatusDetails,
   type GitWorktreeCreationContext,
 } from "../vcs/GitVcsDriver.ts";
@@ -518,7 +520,12 @@ interface CommitAndBranchSuggestion {
   body: string;
   branch?: string | undefined;
   commitMessage: string;
+  /** Set for a staged-only commit: what the commit must still find staged. */
+  stagedIndex?: GitStagedIndexGuard | undefined;
 }
+
+/** Which changes a commit records: selected files, every change, or exactly the index. */
+type CommitSelection = Pick<GitRunStackedActionInput, "filePaths" | "stagedOnly">;
 
 function isCommitAction(
   action: GitStackedAction,
@@ -1467,13 +1474,18 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       commitMessage?: string;
       /** When true, also produce a semantic feature branch name. */
       includeBranch?: boolean;
-      filePaths?: readonly string[];
+      selection: CommitSelection;
       writing: GitWriting;
     }) {
-      const context = yield* gitCore.prepareCommitContext(input.cwd, input.filePaths);
+      const stagedOnly = input.selection.stagedOnly;
+      const context: (GitPreparedCommitContext & { stagedIndex?: GitStagedIndexGuard }) | null =
+        stagedOnly
+          ? yield* gitCore.prepareStagedCommitContext(input.cwd, stagedOnly.expectedRevision)
+          : yield* gitCore.prepareCommitContext(input.cwd, input.selection.filePaths);
       if (!context) {
         return null;
       }
+      const stagedIndex = context.stagedIndex ? { stagedIndex: context.stagedIndex } : {};
 
       const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
       if (customCommit) {
@@ -1484,6 +1496,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             ? { branch: sanitizeFeatureBranchName(customCommit.subject) }
             : {}),
           commitMessage: formatCommitMessage(customCommit.subject, customCommit.body),
+          ...stagedIndex,
         };
       }
 
@@ -1504,6 +1517,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         body: generated.body,
         ...(generated.branch !== undefined ? { branch: generated.branch } : {}),
         commitMessage: formatCommitMessage(generated.subject, generated.body),
+        ...stagedIndex,
       };
     },
   );
@@ -1515,7 +1529,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     branch: string | null,
     commitMessage?: string,
     preResolvedSuggestion?: CommitAndBranchSuggestion,
-    filePaths?: readonly string[],
+    selection: CommitSelection = {},
     progressReporter?: GitActionProgressReporter,
     actionId?: string,
   ) {
@@ -1543,12 +1557,15 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         cwd,
         branch,
         ...(commitMessage ? { commitMessage } : {}),
-        ...(filePaths ? { filePaths } : {}),
+        selection,
         writing,
       });
     }
     if (!suggestion) {
       return { status: "skipped_no_changes" as const };
+    }
+    if (selection.stagedOnly && !suggestion.stagedIndex) {
+      return yield* gitManagerError("runCommitStep", "Staged-only commit lost its staged index.");
     }
 
     yield* emit({
@@ -1604,6 +1621,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     const { commitSha } = yield* gitCore.commit(cwd, suggestion.subject, suggestion.body, {
       timeoutMs: COMMIT_TIMEOUT_MS,
       ...(commitProgress ? { progress: commitProgress } : {}),
+      ...(suggestion.stagedIndex ? { stagedIndex: { ...suggestion.stagedIndex, branch } } : {}),
     });
     if (currentHookName !== null) {
       yield* emit({
@@ -2207,14 +2225,14 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     writing: GitWriting,
     cwd: string,
     branch: string | null,
-    commitMessage?: string,
-    filePaths?: readonly string[],
+    commitMessage: string | undefined,
+    selection: CommitSelection,
   ) {
     const suggestion = yield* resolveCommitAndBranchSuggestion({
       cwd,
       branch,
       ...(commitMessage ? { commitMessage } : {}),
-      ...(filePaths ? { filePaths } : {}),
+      selection,
       includeBranch: true,
       writing,
     });
@@ -2264,6 +2282,17 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             "Feature-branch checkout is only supported for commit actions.",
           );
         }
+        if (input.stagedOnly && !wantsCommit) {
+          return yield* gitManagerError(
+            "runStackedAction",
+            "Staged-only commits are only supported for commit actions.",
+          );
+        }
+        const selection: CommitSelection = input.stagedOnly
+          ? { stagedOnly: input.stagedOnly }
+          : input.filePaths
+            ? { filePaths: input.filePaths }
+            : {};
         if (input.action === "create_pr" && initialStatus.hasWorkingTreeChanges) {
           return yield* gitManagerError(
             "runStackedAction",
@@ -2319,7 +2348,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             input.cwd,
             initialStatus.branch,
             input.commitMessage,
-            input.filePaths,
+            selection,
           );
           branchStep = result.branchStep;
           commitMessageForStep = result.resolvedCommitMessage;
@@ -2347,7 +2376,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
                   currentBranch,
                   commitMessageForStep,
                   preResolvedCommitSuggestion,
-                  input.filePaths,
+                  selection,
                   options?.progressReporter,
                   progress.actionId,
                 ),

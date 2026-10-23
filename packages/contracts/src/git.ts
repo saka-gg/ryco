@@ -129,6 +129,17 @@ export const VcsPullInput = Schema.Struct({
 });
 export type VcsPullInput = typeof VcsPullInput.Type;
 
+/**
+ * Commit exactly the index as it stands, without resetting or adding files,
+ * and only while it is still the one `expectedRevision` (the `stagedRevision`
+ * of a `vcs.readLocalChanges` read) was taken from. Servers without
+ * `capabilities.stagedOnlyCommit` drop this key and commit every change.
+ */
+export const GitStagedOnlyCommit = Schema.Struct({
+  expectedRevision: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+});
+export type GitStagedOnlyCommit = typeof GitStagedOnlyCommit.Type;
+
 export const GitRunStackedActionInput = Schema.Struct({
   actionId: TrimmedNonEmptyStringSchema,
   cwd: TrimmedNonEmptyStringSchema,
@@ -140,7 +151,17 @@ export const GitRunStackedActionInput = Schema.Struct({
   filePaths: Schema.optional(
     Schema.Array(TrimmedNonEmptyStringSchema).check(Schema.isMinLength(1)),
   ),
-});
+  stagedOnly: Schema.optional(GitStagedOnlyCommit),
+}).check(
+  Schema.makeFilter((input) =>
+    input.stagedOnly === undefined || input.filePaths === undefined
+      ? undefined
+      : {
+          path: ["stagedOnly"],
+          issue: "a staged-only commit takes the index as it is; provide stagedOnly or filePaths",
+        },
+  ),
+);
 export type GitRunStackedActionInput = typeof GitRunStackedActionInput.Type;
 
 export const VcsListRefsInput = Schema.Struct({
@@ -417,9 +438,23 @@ export class GitManagerError extends Schema.TaggedError<GitManagerError>()("GitM
   }
 }
 
+/** A staged-only commit found HEAD, the branch or the staged changes moved since its review. */
+export class GitStagedIndexChangedError extends Schema.TaggedError<GitStagedIndexChangedError>()(
+  "GitStagedIndexChangedError",
+  {
+    cwd: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export const GitManagerServiceError = Schema.Union([
   GitManagerError,
   GitCommandError,
+  GitStagedIndexChangedError,
   SourceControlProviderError,
   TextGenerationError,
 ]);
@@ -588,6 +623,12 @@ export const GitLocalChangesResult = Schema.Struct({
   branch: Schema.NullOr(Schema.String),
   indexIdentity: Schema.String,
   revision: Schema.String,
+  /**
+   * Binds the worktree, branch, HEAD and the staged index content, but not the
+   * unstaged side: the `expectedRevision` of a staged-only commit. Absent on
+   * older servers.
+   */
+  stagedRevision: Schema.optional(Schema.String),
   staged: GitLocalPatch,
   unstaged: GitLocalPatch,
 });

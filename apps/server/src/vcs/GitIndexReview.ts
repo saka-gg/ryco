@@ -151,28 +151,96 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
       return { ...head, indexIdentity: bytes === null ? "missing" : hash(bytes) };
     });
   const diffArgs = [...INTERNAL_PATCH_DIFF_ARGS, "--binary", "--full-index", "--no-renames"];
+  // Some Git diff paths refresh index stat data even with optional locks disabled.
+  // Reads run against a disposable copy, keeping the live index byte-for-byte untouched.
+  const copyIndex = Effect.gen(function* () {
+    const temp = yield* Effect.acquireRelease(
+      io(root, () => fs.mkdtemp(path.join(os.tmpdir(), "ryco-index-read-"))),
+      (directory) =>
+        io(root, () => fs.rm(directory, { recursive: true, force: true })).pipe(Effect.orDie),
+    );
+    const temporaryIndex = path.join(temp, "index");
+    const bytes = yield* readIndex();
+    const env = { GIT_INDEX_FILE: temporaryIndex };
+    yield* bytes
+      ? io(root, () => fs.writeFile(temporaryIndex, bytes))
+      : run(["read-tree", "--empty"], { env }).pipe(Effect.asVoid);
+    return env;
+  });
+  /**
+   * What a commit of the index records, as HEAD → index modes and object IDs:
+   * independent of diff config, textconv and submodule ignore rules, and blind
+   * to working files. Intent-to-add entries, which a commit skips, are absent.
+   */
+  const readStagedDigest = (env: Record<string, string>) =>
+    run(
+      [
+        "diff",
+        "--cached",
+        "--raw",
+        "-z",
+        "--no-abbrev",
+        "--no-renames",
+        "--no-relative",
+        "--ignore-submodules=none",
+        "--",
+      ],
+      { env },
+    ).pipe(
+      Effect.flatMap((result) =>
+        result.stdoutTruncated
+          ? error(root, "Local changes exceed the 2 MB review limit.")
+          : Effect.succeed({ stagedDigest: hash(result.stdout), empty: result.stdout === "" }),
+      ),
+    );
+  const stagedRevisionOf = (
+    head: { readonly branch: string | null; readonly headOid: string | null },
+    stagedDigest: string,
+  ) => hash(JSON.stringify(["staged-index-v1", root, head.branch, head.headOid, stagedDigest]));
+  /** HEAD, the branch and the staged content alone: unstaged edits never move it. */
+  const readStaged = () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const before = yield* identity();
+        const env = yield* copyIndex;
+        if ((yield* run(["ls-files", "--unmerged", "-z"], { env })).stdout)
+          return yield* error(root, "Resolve merge conflicts before committing staged changes.");
+        const { stagedDigest, empty } = yield* readStagedDigest(env);
+        const after = yield* identity();
+        if (JSON.stringify(before) !== JSON.stringify(after))
+          return yield* error(
+            root,
+            "HEAD, branch or index changed while reading staged changes. Try again.",
+          );
+        return {
+          branch: before.branch,
+          headOid: before.headOid,
+          stagedDigest,
+          stagedRevision: stagedRevisionOf(before, stagedDigest),
+          empty,
+        };
+      }),
+    );
   const read = () =>
     Effect.scoped(
       Effect.gen(function* () {
         const before = yield* identity();
-        // Some Git diff paths refresh index stat data even with optional locks disabled.
-        // Read against a disposable copy, keeping the live index byte-for-byte untouched.
-        const temp = yield* Effect.acquireRelease(
-          io(root, () => fs.mkdtemp(path.join(os.tmpdir(), "ryco-index-read-"))),
-          (directory) =>
-            io(root, () => fs.rm(directory, { recursive: true, force: true })).pipe(Effect.orDie),
-        );
-        const temporaryIndex = path.join(temp, "index");
-        const bytes = yield* readIndex();
-        const env = { GIT_INDEX_FILE: temporaryIndex };
-        yield* bytes
-          ? io(root, () => fs.writeFile(temporaryIndex, bytes))
-          : run(["read-tree", "--empty"], { env }).pipe(Effect.asVoid);
+        const env = yield* copyIndex;
         const readRun = (args: readonly string[], allowNonZeroExit = false) =>
           run(args, { env, allowNonZeroExit });
         if ((yield* readRun(["ls-files", "--unmerged", "-z"])).stdout)
           return yield* error(root, "Resolve merge conflicts before staging from review.");
-        const stagedResult = yield* readRun([...diffArgs, "--cached", "--"]);
+        // Read before any untracked path enters the disposable index below.
+        const { stagedDigest } = yield* readStagedDigest(env);
+        // A commit records every staged submodule pointer whatever the user's ignore
+        // rules, so the review shows them too. With --cached this never reports dirty
+        // submodule worktrees.
+        const stagedResult = yield* readRun([
+          ...diffArgs,
+          "--cached",
+          "--ignore-submodules=none",
+          "--",
+        ]);
         if (stagedResult.stdoutTruncated)
           return yield* error(root, "Local changes exceed the 2 MB review limit.");
         const staged = stagedResult.stdout;
@@ -291,12 +359,13 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
           worktreePath: root,
           ...before,
           revision,
+          stagedRevision: stagedRevisionOf(before, stagedDigest),
           staged: describePatch(staged),
           unstaged: describePatch(unstaged),
         };
       }),
     );
-  return { root, run, gitPath, indexPath, headPath, readIndex, identity, read };
+  return { root, run, gitPath, indexPath, headPath, readIndex, identity, read, readStaged };
 });
 
 export const readGitLocalChanges = Effect.fn("readGitLocalChanges")(function* (
@@ -304,6 +373,18 @@ export const readGitLocalChanges = Effect.fn("readGitLocalChanges")(function* (
   input: GitLocalChangesInput,
 ) {
   return yield* (yield* makeReader(execute, input.cwd)).read();
+});
+
+/**
+ * The staged side of {@link readGitLocalChanges} alone: its `stagedRevision`,
+ * the content digest and HEAD it binds, and whether anything is staged.
+ * Refuses an index with unmerged entries.
+ */
+export const readGitStagedIndex = Effect.fn("readGitStagedIndex")(function* (
+  execute: GitVcsDriverShape["execute"],
+  cwd: string,
+) {
+  return yield* (yield* makeReader(execute, cwd)).readStaged();
 });
 
 /** Holds Git's own index/HEAD/ref locks. All edits happen in a disposable index;
