@@ -130,6 +130,11 @@ function categoryForCommand(command: KeybindingCommand): KeybindingCategory {
     : KEYBINDING_CATEGORIES.script;
 }
 
+/** The id of a command's row in the Keybindings panel, which settings search results reveal. */
+export function keybindingRowId(command: KeybindingCommand): string {
+  return `keybinding-${command}`;
+}
+
 export function getCommandMeta(
   command: KeybindingCommand,
   scriptTitle?: string,
