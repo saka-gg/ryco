@@ -254,7 +254,7 @@ export function LimitsView({
           <h2 className="text-lg font-semibold tracking-tight">Subscription limits</h2>
           <p className="text-xs text-muted-foreground">
             {pluralize(directAccountCount + hubAccountCount, "account")} · {summary}
-            {lastChecked ? ` · checked ${formatRelativeTimeLabel(lastChecked)}` : ""}
+            {lastChecked ? ` · checked ${formatRelativeTimeLabel(lastChecked, now)}` : ""}
             {readingHubs ? " · reading hubs…" : ""}
           </p>
         </div>
@@ -356,7 +356,7 @@ export function LimitsView({
       ) : null}
 
       {hubs.length > 0 && source !== "direct" ? (
-        <HubList hubs={hubs} multipleEnvironments={multipleEnvironments} />
+        <HubList hubs={hubs} now={now} multipleEnvironments={multipleEnvironments} />
       ) : null}
     </div>
   );
@@ -364,16 +364,18 @@ export function LimitsView({
 
 function PooledSummary({
   pooled,
+  now,
   besideDirect,
 }: {
   readonly pooled: ReadonlyArray<PooledLimitWindow>;
+  readonly now: number;
   /** Direct cards share the panel; the pool averages hub accounts only, so it says so. */
   readonly besideDirect: boolean;
 }) {
   return (
     <div className="flex flex-wrap gap-2 border-b border-border/60 px-3.5 py-2.5">
       {pooled.map((window) => {
-        const reset = formatRateLimitResetText(window.nextResetsAt);
+        const reset = formatRateLimitResetText(window.nextResetsAt, now);
         return (
           <div
             key={window.id}
@@ -427,7 +429,7 @@ function ProviderGroup({
       bodyClassName="overflow-hidden"
     >
       {pooled.length > 0 ? (
-        <PooledSummary pooled={pooled} besideDirect={group.directAccounts.length > 0} />
+        <PooledSummary pooled={pooled} now={now} besideDirect={group.directAccounts.length > 0} />
       ) : null}
       {/* Cells draw right and bottom borders; the negative margins clip the outer edges. */}
       <div className="-mr-px -mb-px grid sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
@@ -598,7 +600,13 @@ function DirectAccountCard({
   );
 }
 
-function HubHealthBadge({ health }: { readonly health: CliProxyAccountHealth }) {
+function HubHealthBadge({
+  health,
+  now,
+}: {
+  readonly health: CliProxyAccountHealth;
+  readonly now: number;
+}) {
   switch (health.kind) {
     case "ready":
       return <Badge variant="success">Ready</Badge>;
@@ -610,7 +618,7 @@ function HubHealthBadge({ health }: { readonly health: CliProxyAccountHealth }) 
           variant="warning"
           title={
             health.until
-              ? `The hub retries this account ${formatRateLimitResetText(Date.parse(health.until) / 1000) ?? "later"}.`
+              ? `The hub retries this account ${formatRateLimitResetText(Date.parse(health.until) / 1000, now) ?? "later"}.`
               : undefined
           }
         >
@@ -661,7 +669,7 @@ function HubAccountCard({
     <AccountCard
       source="hub"
       details={[plan, hubLabel].filter(Boolean).join(" · ")}
-      health={<HubHealthBadge health={health} />}
+      health={<HubHealthBadge health={health} now={now} />}
       name={
         <CliProxyAccountName account={account} className="text-[13px] leading-5 text-foreground" />
       }
@@ -788,9 +796,11 @@ function ApiKeyPanel({
 
 function HubList({
   hubs,
+  now,
   multipleEnvironments,
 }: {
   readonly hubs: ReadonlyArray<HubWithEnvironment>;
+  readonly now: number;
   readonly multipleEnvironments: boolean;
 }) {
   return (
@@ -814,7 +824,7 @@ function HubList({
             </div>
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
               {hub.version ? <span>CLIProxyAPI {hub.version}</span> : null}
-              <span>checked {formatRelativeTimeLabel(hub.checkedAt)}</span>
+              <span>checked {formatRelativeTimeLabel(hub.checkedAt, now)}</span>
               <Badge variant={hub.status === "ok" ? "success" : "error"}>
                 {hub.status === "ok" ? "Connected" : "Unreachable"}
               </Badge>

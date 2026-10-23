@@ -562,6 +562,39 @@ describe("LimitsView", () => {
     expect(document.body.textContent).not.toContain("Pace unavailable");
   });
 
+  it("words every time label against the view's clock", async () => {
+    // Both hub accounts' 5-hour windows reset 62 minutes after the reads.
+    const resetsAt = (Date.parse(checkedAt) + 62 * 60_000) / 1000;
+    const hubAccount = (authIndex: string) =>
+      account({
+        authIndex,
+        name: `claude-${authIndex}.json`,
+        quota: {
+          status: "ok",
+          checkedAt,
+          windows: [{ id: "five_hour", usedPercent: 30, windowDurationMins: 300, resetsAt }],
+        },
+      });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        providers: [codex],
+        hubs: [loopbackHub([hubAccount("a"), hubAccount("b")])],
+      },
+    ]);
+    // The view's clock runs three minutes past every read; no label may read Date.now() instead.
+    harness.result = { ...harness.result!, receivedAtMs: Date.parse(checkedAt) + 3 * 60_000 };
+    mounted = await render(view());
+
+    await expect.element(page.getByText("· checked 3m ago", { exact: false })).toBeVisible();
+    // The summary line, the direct card and the hub row.
+    expect(document.body.textContent?.match(/checked 3m ago/g)).toHaveLength(3);
+    expect(document.body.textContent).not.toContain("just now");
+    await expect.element(page.getByText("next resets in 59m", { exact: false })).toBeVisible();
+  });
+
   it("offers the provider settings when nothing reports limits", async () => {
     serve([{ environmentId: desktop, label: "This machine", status: "ok", hubs: [] }]);
     mounted = await render(
