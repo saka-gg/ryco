@@ -10,7 +10,10 @@ import {
   isAppSnapShortcut,
   isAppSnapShortcutKey,
 } from "./appSnapShortcut.ts";
-import { compileResolvedKeybindingsConfig, DEFAULT_RESOLVED_KEYBINDINGS } from "./keybindings.ts";
+import {
+  compileResolvedKeybindingsConfig,
+  NODE_DEFAULT_RESOLVED_KEYBINDINGS,
+} from "./keybindings.ts";
 
 describe("AppSnap shortcuts", () => {
   it("accepts DOM key codes, including Enter", () => {
@@ -103,19 +106,19 @@ describe("AppSnap shortcuts", () => {
     expect(
       appSnapShortcutAppConflict(
         { kind: "key-chord", modifier: "command", key: "KeyK" },
-        DEFAULT_RESOLVED_KEYBINDINGS,
+        NODE_DEFAULT_RESOLVED_KEYBINDINGS,
       ),
     ).toBe("commandPalette.toggle");
     expect(
       appSnapShortcutAppConflict(
         { kind: "key-chord", modifier: "command", key: "Digit2" },
-        DEFAULT_RESOLVED_KEYBINDINGS,
+        NODE_DEFAULT_RESOLVED_KEYBINDINGS,
       ),
     ).toBe("thread.jump.2");
     expect(
       appSnapShortcutAppConflict(
         { kind: "key-chord", modifier: "command", key: "KeyB" },
-        DEFAULT_RESOLVED_KEYBINDINGS,
+        NODE_DEFAULT_RESOLVED_KEYBINDINGS,
       ),
     ).toBeNull();
     // Configured bindings count; bindings with two modifiers never match.

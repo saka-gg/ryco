@@ -18,7 +18,12 @@ type WhenToken =
   | { type: "lparen" }
   | { type: "rparen" };
 
-export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+/**
+ * The defaults nodes serve in ServerConfig.keybindings. Clients decode those commands strictly,
+ * so this list is frozen: never add a command to it. App defaults, including the default keys of
+ * newer commands, live in client-runtime's appKeybindingDefaults.ts.
+ */
+export const NODE_DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+j", command: "terminal.toggle" },
   { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
   { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
@@ -33,9 +38,7 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+n", command: "chat.new", when: "!terminalFocus" },
   { key: "mod+shift+o", command: "chat.new", when: "!terminalFocus" },
   { key: "mod+shift+n", command: "chat.newLocal", when: "!terminalFocus" },
-  // `chat.newWithoutProject` has a client-only default (client-runtime appKeybindingDefaults.ts):
-  // clients that predate a command cannot decode a ServerConfig whose keybindings use it, and
-  // nodes send every rule here to them.
+  // `chat.newWithoutProject` is newer than this list; its default key is client-only.
   { key: "mod+s", command: "composer.stash", when: "!terminalFocus" },
   { key: "mod+shift+m", command: "modelPicker.toggle", when: "!terminalFocus" },
   { key: "mod+o", command: "editor.openFavorite" },
@@ -295,12 +298,13 @@ export function compileResolvedKeybindingsConfig(
   return compiled.slice(-MAX_KEYBINDINGS_COUNT);
 }
 
-export const DEFAULT_RESOLVED_KEYBINDINGS = compileResolvedKeybindingsConfig(DEFAULT_KEYBINDINGS);
+export const NODE_DEFAULT_RESOLVED_KEYBINDINGS =
+  compileResolvedKeybindingsConfig(NODE_DEFAULT_KEYBINDINGS);
 
 /**
  * Command overrides and disabled commands share one merge policy on every platform. Callers
- * name their defaults: nodes serve `DEFAULT_RESOLVED_KEYBINDINGS`, apps resolve against their
- * own list, which adds client-only defaults.
+ * name their defaults: nodes serve `NODE_DEFAULT_RESOLVED_KEYBINDINGS`, apps resolve against
+ * their own list, which adds client-only defaults.
  */
 export function mergeWithDefaultKeybindings(
   defaults: ResolvedKeybindingsConfig,

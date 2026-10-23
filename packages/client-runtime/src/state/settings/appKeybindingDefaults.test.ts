@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AppKeybindings, KeybindingRule } from "@ryco/contracts/keybindings";
-import { compileResolvedKeybindingsConfig, DEFAULT_KEYBINDINGS } from "@ryco/shared/keybindings";
+import {
+  compileResolvedKeybindingsConfig,
+  NODE_DEFAULT_KEYBINDINGS,
+} from "@ryco/shared/keybindings";
 import {
   APP_DEFAULT_KEYBINDINGS,
   APP_DEFAULT_RESOLVED_KEYBINDINGS,
@@ -17,7 +20,7 @@ import {
 
 const isSameRule = (left: KeybindingRule, right: KeybindingRule) =>
   left.key === right.key && left.command === right.command && left.when === right.when;
-const remainingNodeDefaults = DEFAULT_KEYBINDINGS.filter(
+const remainingNodeDefaults = NODE_DEFAULT_KEYBINDINGS.filter(
   (rule) => !SUPERSEDED_NODE_DEFAULT_KEYBINDINGS.some((superseded) => isSameRule(rule, superseded)),
 );
 
@@ -31,7 +34,7 @@ describe("app default keybindings", () => {
 
   it("supersedes only node rules and leaves no command with defaults in both lists", () => {
     for (const superseded of SUPERSEDED_NODE_DEFAULT_KEYBINDINGS) {
-      expect(DEFAULT_KEYBINDINGS).toContainEqual(superseded);
+      expect(NODE_DEFAULT_KEYBINDINGS).toContainEqual(superseded);
     }
     const nodeCommands = new Set(remainingNodeDefaults.map((rule) => rule.command));
     expect(
@@ -40,7 +43,7 @@ describe("app default keybindings", () => {
   });
 
   it("gives a new chat without a project a client-only default", () => {
-    expect(DEFAULT_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject")).toBe(
+    expect(NODE_DEFAULT_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject")).toBe(
       false,
     );
     expect(APP_DEFAULT_KEYBINDINGS).toContainEqual({
@@ -58,13 +61,17 @@ describe("app default keybindings", () => {
   describe("when a client-only rule supersedes a node rule", () => {
     const nodeRule = { key: "mod+p", command: "workspace.files", when: "!terminalFocus" } as const;
     const clientRule = { key: "mod+p", command: "projects.open", when: "!terminalFocus" } as const;
-    const defaults = composeAppDefaultKeybindings(DEFAULT_KEYBINDINGS, [nodeRule], [clientRule]);
+    const defaults = composeAppDefaultKeybindings(
+      NODE_DEFAULT_KEYBINDINGS,
+      [nodeRule],
+      [clientRule],
+    );
     const resolvedDefaults = compileResolvedKeybindingsConfig(defaults);
     const resolvedCommands = (preferences: AppKeybindings) =>
       resolveAppKeybindings(preferences, resolvedDefaults).map((rule) => rule.command);
 
     it("resolves the client-only rule in place of the node rule", () => {
-      expect(DEFAULT_KEYBINDINGS).toContainEqual(nodeRule);
+      expect(NODE_DEFAULT_KEYBINDINGS).toContainEqual(nodeRule);
       expect(defaults).not.toContainEqual(nodeRule);
       expect(defaults.at(-1)).toEqual(clientRule);
       const commands = resolvedCommands(DEFAULT_APP_KEYBINDINGS);

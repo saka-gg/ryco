@@ -9,7 +9,7 @@ import {
 import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
 import {
   compileResolvedKeybindingsConfig,
-  DEFAULT_RESOLVED_KEYBINDINGS,
+  NODE_DEFAULT_RESOLVED_KEYBINDINGS,
 } from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
@@ -767,7 +767,7 @@ describe("resolveShortcutCommand", () => {
 
   it("resolves the default split-view shortcuts from physical keys", () => {
     const resolve = (overrides: Partial<ShortcutEventLike>, context = {}) =>
-      resolveShortcutCommand(event(overrides), DEFAULT_RESOLVED_KEYBINDINGS, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform: "MacIntel",
         context,
       });
@@ -792,7 +792,7 @@ describe("resolveShortcutCommand", () => {
       null,
     );
     assert.strictEqual(
-      shortcutLabelForCommand(DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
       "⇧⌘\\",
     );
   });
@@ -800,7 +800,7 @@ describe("resolveShortcutCommand", () => {
   it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
     // The default is client-only: a node sends every default to clients that may predate the command.
     assert.isFalse(
-      DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
+      NODE_DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
     );
     const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel") =>
       resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {

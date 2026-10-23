@@ -45,7 +45,9 @@ script and project IDs on different nodes cannot collide. Only the active projec
 bindings participate in shortcut resolution; execution uses that project's node API.
 
 Legacy RPC mutation methods remain in the wire protocol for compatibility but reject writes
-with a message directing older clients to App preferences.
+with a message directing older clients to App preferences. Nodes still send their frozen
+defaults and legacy file to older clients, limited to the commands those clients know. A legacy
+rule for a newer command is reported as an invalid entry instead.
 
 A legacy file is a JSON array of rules:
 
@@ -100,7 +102,7 @@ See [`packages/contracts/src/keybindings.ts`](packages/contracts/src/keybindings
 ]
 ```
 
-For most up to date defaults, see [`DEFAULT_KEYBINDINGS` in `packages/shared/src/keybindings.ts`](packages/shared/src/keybindings.ts)
+For the current defaults, see [`APP_DEFAULT_KEYBINDINGS` in `packages/client-runtime/src/state/settings/appKeybindingDefaults.ts`](packages/client-runtime/src/state/settings/appKeybindingDefaults.ts).
 
 ## Configuration
 

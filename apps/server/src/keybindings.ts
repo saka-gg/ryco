@@ -7,6 +7,7 @@
  * @module Keybindings
  */
 import {
+  type KeybindingCommand,
   KeybindingRule,
   KeybindingsConfig,
   KeybindingsConfigError,
@@ -44,20 +45,83 @@ import { ServerConfig } from "./config.ts";
 import { writeFileStringAtomically } from "./atomicWrite.ts";
 import { fromLenientJson } from "@ryco/shared/schemaJson";
 import {
-  DEFAULT_KEYBINDINGS,
-  DEFAULT_RESOLVED_KEYBINDINGS,
+  NODE_DEFAULT_RESOLVED_KEYBINDINGS,
   compileResolvedKeybindingRule,
   compileResolvedKeybindingsConfig,
   parseKeybindingShortcut,
   mergeWithDefaultKeybindings,
 } from "@ryco/shared/keybindings";
 
-export {
-  DEFAULT_KEYBINDINGS,
-  compileResolvedKeybindingRule,
-  compileResolvedKeybindingsConfig,
-  parseKeybindingShortcut,
-};
+export { compileResolvedKeybindingRule, compileResolvedKeybindingsConfig, parseKeybindingShortcut };
+
+/**
+ * The commands a node serves in ServerConfig.keybindings, frozen when app defaults moved to the
+ * client. Clients decode these commands strictly, so a command added later is never served, not
+ * even from a hand-edited legacy file: users bind it in App preferences.
+ */
+const NODE_SERVED_KEYBINDING_COMMANDS: ReadonlySet<KeybindingCommand> = new Set<KeybindingCommand>([
+  "terminal.toggle",
+  "terminal.split",
+  "terminal.new",
+  "terminal.close",
+  "workspace.files",
+  "workspace.review",
+  "workspace.terminal",
+  "workspace.simulator",
+  "diff.toggle",
+  "commandPalette.toggle",
+  "sidebar.showInbox",
+  "sidebar.showProjects",
+  "chat.new",
+  "chat.newLocal",
+  "chat.newWithoutProject",
+  "composer.stash",
+  "editor.openFavorite",
+  "pane.split",
+  "pane.close",
+  "pane.focusNext",
+  "pane.focusPrevious",
+  "pullRequests.open",
+  "projects.open",
+  "modelPicker.toggle",
+  "modelPicker.jump.1",
+  "modelPicker.jump.2",
+  "modelPicker.jump.3",
+  "modelPicker.jump.4",
+  "modelPicker.jump.5",
+  "modelPicker.jump.6",
+  "modelPicker.jump.7",
+  "modelPicker.jump.8",
+  "modelPicker.jump.9",
+  "thread.find",
+  "thread.pinToggle",
+  "thread.previous",
+  "thread.next",
+  "thread.jump.1",
+  "thread.jump.2",
+  "thread.jump.3",
+  "thread.jump.4",
+  "thread.jump.5",
+  "thread.jump.6",
+  "thread.jump.7",
+  "thread.jump.8",
+  "thread.jump.9",
+]);
+
+/** Whether a node may serve rules for `command`: a frozen built-in command or a legacy script. */
+export function isNodeServedKeybindingCommand(command: KeybindingCommand): boolean {
+  return NODE_SERVED_KEYBINDING_COMMANDS.has(command) || command.startsWith("script.");
+}
+
+/** What a node serves for its legacy rules: its frozen defaults merged with the servable rules. */
+function mergeNodeServedKeybindings(rules: readonly KeybindingRule[]): ResolvedKeybindingsConfig {
+  return mergeWithDefaultKeybindings(
+    NODE_DEFAULT_RESOLVED_KEYBINDINGS,
+    compileResolvedKeybindingsConfig(
+      rules.filter((rule) => isNodeServedKeybindingCommand(rule.command)),
+    ),
+  );
+}
 
 export const ResolvedKeybindingFromConfig = KeybindingRule.pipe(
   Schema.decodeTo(
@@ -98,29 +162,6 @@ export const ResolvedKeybindingFromConfig = KeybindingRule.pipe(
 export const ResolvedKeybindingsFromConfig = Schema.Array(ResolvedKeybindingFromConfig).check(
   Schema.isMaxLength(MAX_KEYBINDINGS_COUNT),
 );
-
-function isSameKeybindingRule(left: KeybindingRule, right: KeybindingRule): boolean {
-  return (
-    left.command === right.command &&
-    left.key === right.key &&
-    (left.when ?? undefined) === (right.when ?? undefined)
-  );
-}
-
-function keybindingShortcutContext(rule: KeybindingRule): string | null {
-  const parsed = parseKeybindingShortcut(rule.key);
-  if (!parsed) return null;
-  const encoded = encodeShortcut(parsed);
-  if (!encoded) return null;
-  return `${encoded}\u0000${rule.when ?? ""}`;
-}
-
-function hasSameShortcutContext(left: KeybindingRule, right: KeybindingRule): boolean {
-  const leftContext = keybindingShortcutContext(left);
-  const rightContext = keybindingShortcutContext(right);
-  if (!leftContext || !rightContext) return false;
-  return leftContext === rightContext;
-}
 
 function encodeShortcut(shortcut: KeybindingShortcut): string | null {
   const modifiers: string[] = [];
@@ -206,16 +247,10 @@ export interface KeybindingsShape {
   /**
    * Await keybindings runtime readiness.
    *
-   * Readiness means the config directory exists, the watcher is attached, the
-   * startup sync has completed, and the current snapshot has been loaded.
+   * Readiness means the config directory exists, the watcher is attached, and
+   * the current snapshot has been loaded.
    */
   readonly ready: Effect.Effect<void, KeybindingsConfigError>;
-
-  /**
-   * Ensure the on-disk keybindings file exists and includes all default
-   * commands so newly-added defaults are backfilled on startup.
-   */
-  readonly syncDefaultKeybindingsOnStartup: Effect.Effect<void, KeybindingsConfigError>;
 
   /**
    * Load runtime keybindings state along with non-fatal configuration issues.
@@ -390,6 +425,18 @@ const makeKeybindings = Effect.gen(function* () {
         });
         continue;
       }
+
+      if (!isNodeServedKeybindingCommand(decodedRule.value.command)) {
+        issues.push(
+          invalidEntryIssue(index, "Set this shortcut in App preferences → Keybindings."),
+        );
+        yield* Effect.logWarning("ignoring keybinding entry for a command nodes do not serve", {
+          path: keybindingsConfigPath,
+          index,
+          command: decodedRule.value.command,
+        });
+        continue;
+      }
       keybindings.push(decodedRule.value);
     }
 
@@ -421,10 +468,7 @@ const makeKeybindings = Effect.gen(function* () {
 
   const loadConfigStateFromDisk = loadRuntimeCustomKeybindingsConfig().pipe(
     Effect.map(({ keybindings, issues }) => ({
-      keybindings: mergeWithDefaultKeybindings(
-        DEFAULT_RESOLVED_KEYBINDINGS,
-        compileResolvedKeybindingsConfig(keybindings),
-      ),
+      keybindings: mergeNodeServedKeybindings(keybindings),
       issues,
     })),
   );
@@ -445,96 +489,6 @@ const makeKeybindings = Effect.gen(function* () {
       yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
       const configState = yield* loadConfigStateFromCacheOrDisk;
       yield* emitChange(configState);
-    }),
-  );
-
-  const syncDefaultKeybindingsOnStartup = upsertSemaphore.withPermits(1)(
-    Effect.gen(function* () {
-      const configExists = yield* readConfigExists;
-      if (!configExists) {
-        yield* writeConfigAtomically(DEFAULT_KEYBINDINGS);
-        yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
-        return;
-      }
-
-      const runtimeConfig = yield* loadRuntimeCustomKeybindingsConfig();
-      if (runtimeConfig.issues.length > 0) {
-        yield* Effect.logWarning(
-          "skipping startup keybindings default sync because config has issues",
-          {
-            path: keybindingsConfigPath,
-            issues: runtimeConfig.issues,
-          },
-        );
-        yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
-        return;
-      }
-      const customConfig = runtimeConfig.keybindings;
-      const existingCommands = new Set(customConfig.map((entry) => entry.command));
-      const missingDefaults: KeybindingRule[] = [];
-      const shortcutConflictWarnings: Array<{
-        defaultCommand: KeybindingRule["command"];
-        conflictingCommand: KeybindingRule["command"];
-        key: string;
-        when: string | null;
-      }> = [];
-      for (const defaultRule of DEFAULT_KEYBINDINGS) {
-        if (existingCommands.has(defaultRule.command)) {
-          continue;
-        }
-        const conflictingEntry = customConfig.find((entry) =>
-          hasSameShortcutContext(entry, defaultRule),
-        );
-        if (conflictingEntry) {
-          shortcutConflictWarnings.push({
-            defaultCommand: defaultRule.command,
-            conflictingCommand: conflictingEntry.command,
-            key: defaultRule.key,
-            when: defaultRule.when ?? null,
-          });
-          continue;
-        }
-        missingDefaults.push(defaultRule);
-      }
-      for (const conflict of shortcutConflictWarnings) {
-        yield* Effect.logWarning("skipping default keybinding due to shortcut conflict", {
-          path: keybindingsConfigPath,
-          defaultCommand: conflict.defaultCommand,
-          conflictingCommand: conflict.conflictingCommand,
-          key: conflict.key,
-          when: conflict.when,
-          reason: "shortcut context already used by existing rule",
-        });
-      }
-      if (missingDefaults.length === 0) {
-        yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
-        return;
-      }
-
-      const matchingDefaults = DEFAULT_KEYBINDINGS.filter((defaultRule) =>
-        customConfig.some((entry) => isSameKeybindingRule(entry, defaultRule)),
-      ).map((rule) => rule.command);
-      if (matchingDefaults.length > 0) {
-        yield* Effect.logWarning("default keybinding rule already defined in user config", {
-          path: keybindingsConfigPath,
-          commands: matchingDefaults,
-        });
-      }
-
-      const nextConfig = [...customConfig, ...missingDefaults];
-      const cappedConfig =
-        nextConfig.length > MAX_KEYBINDINGS_COUNT
-          ? nextConfig.slice(-MAX_KEYBINDINGS_COUNT)
-          : nextConfig;
-      if (nextConfig.length > MAX_KEYBINDINGS_COUNT) {
-        yield* Effect.logWarning("truncating keybindings config to max entries", {
-          path: keybindingsConfigPath,
-          maxEntries: MAX_KEYBINDINGS_COUNT,
-        });
-      }
-
-      yield* writeConfigAtomically(cappedConfig);
-      yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
     }),
   );
 
@@ -602,7 +556,6 @@ const makeKeybindings = Effect.gen(function* () {
   return {
     start,
     ready: Deferred.await(startedDeferred),
-    syncDefaultKeybindingsOnStartup,
     loadConfigState: loadConfigStateFromCacheOrDisk,
     getSnapshot: loadConfigStateFromCacheOrDisk,
     get streamChanges() {
@@ -627,10 +580,7 @@ const makeKeybindings = Effect.gen(function* () {
             });
           }
           yield* writeConfigAtomically(cappedConfig);
-          const nextResolved = mergeWithDefaultKeybindings(
-            DEFAULT_RESOLVED_KEYBINDINGS,
-            compileResolvedKeybindingsConfig(cappedConfig),
-          );
+          const nextResolved = mergeNodeServedKeybindings(cappedConfig);
           yield* Cache.set(resolvedConfigCache, resolvedConfigCacheKey, {
             keybindings: nextResolved,
             issues: [],
@@ -669,10 +619,7 @@ const makeKeybindings = Effect.gen(function* () {
             });
           }
           yield* writeConfigAtomically(cappedConfig);
-          const nextResolved = mergeWithDefaultKeybindings(
-            DEFAULT_RESOLVED_KEYBINDINGS,
-            compileResolvedKeybindingsConfig(cappedConfig),
-          );
+          const nextResolved = mergeNodeServedKeybindings(cappedConfig);
           yield* Cache.set(resolvedConfigCache, resolvedConfigCacheKey, {
             keybindings: nextResolved,
             issues: [],

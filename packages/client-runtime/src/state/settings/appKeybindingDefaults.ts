@@ -1,8 +1,11 @@
 import type { KeybindingRule } from "@ryco/contracts/keybindings";
-import { compileResolvedKeybindingsConfig, DEFAULT_KEYBINDINGS } from "@ryco/shared/keybindings";
+import {
+  compileResolvedKeybindingsConfig,
+  NODE_DEFAULT_KEYBINDINGS,
+} from "@ryco/shared/keybindings";
 
 /*
- * This app's default shortcuts. Nodes send the shared `DEFAULT_KEYBINDINGS` in
+ * This app's default shortcuts. Nodes send the shared `NODE_DEFAULT_KEYBINDINGS` in
  * ServerConfig.keybindings to clients that decode its commands strictly, so a default for a
  * newer command must never go there: older apps could no longer read the node's config. New
  * defaults go into the client-only groups below, which no node writes or serves. Superseding a
@@ -60,7 +63,7 @@ export function composeAppDefaultKeybindings(
 }
 
 export const APP_DEFAULT_KEYBINDINGS = composeAppDefaultKeybindings(
-  DEFAULT_KEYBINDINGS,
+  NODE_DEFAULT_KEYBINDINGS,
   SUPERSEDED_NODE_DEFAULT_KEYBINDINGS,
   CLIENT_ONLY_DEFAULT_KEYBINDINGS,
 );
