@@ -19,6 +19,7 @@ import {
   appendSelectionQuote,
   approvalRedirectTooSoon,
   checkpointRevertUnsupportedMessage,
+  composeOutgoingPrompt,
   declineApprovalsForRedirect,
   describeApprovalRedirectRefusal,
   noteApprovalRedirectEnd,
@@ -225,7 +226,11 @@ import {
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
-import { type TerminalContextDraft, type TerminalContextSelection } from "../lib/terminalContext";
+import {
+  type FileReferenceDraft,
+  type TerminalContextDraft,
+  type TerminalContextSelection,
+} from "../lib/terminalContext";
 import {
   applyBuildModeToSend,
   attachDevicePromptScreenshot,
@@ -331,9 +336,11 @@ import { useChatSessionActions } from "../hooks/useChatSessionActions";
 import {
   buildOutgoingMessageText,
   buildOutgoingTurnAttachments,
+  clearComposerContentRefs,
   composerRefsHaveContent,
   executeChatSendTurn,
   restoreComposerContent,
+  restoreUnsentComposerContent,
   type ComposerDraftContent,
   type SendTurnComposerSnapshot,
   type SendTurnSettings,
@@ -656,7 +663,12 @@ const PROVIDER_SESSION_PREWARM_FOCUS_DWELL_MS = 400;
 function readComposerDraftContent(target: ScopedThreadRef | DraftId): ComposerDraftContent | null {
   const draft = useComposerDraftStore.getState().getComposerDraft(target);
   return draft
-    ? { prompt: draft.prompt, images: draft.images, terminalContexts: draft.terminalContexts }
+    ? {
+        prompt: draft.prompt,
+        images: draft.images,
+        terminalContexts: draft.terminalContexts,
+        fileReferences: draft.fileReferences,
+      }
     : null;
 }
 
@@ -778,6 +790,7 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
   );
+  const setComposerDraftFileReferences = useComposerDraftStore((store) => store.setFileReferences);
   const addComposerDraftSourceControlContext = useComposerDraftStore(
     (store) => store.addSourceControlContext,
   );
@@ -791,6 +804,7 @@ export default function ChatView(props: ChatViewProps) {
       (draft.prompt.length > 0 ||
         draft.images.length > 0 ||
         draft.terminalContexts.length > 0 ||
+        draft.fileReferences.length > 0 ||
         draft.sourceControlContexts.length > 0)
     );
   });
@@ -820,6 +834,7 @@ export default function ChatView(props: ChatViewProps) {
   const promptRef = useRef("");
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
+  const composerFileReferencesRef = useRef<FileReferenceDraft[]>([]);
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const readComposer = useCallback(() => composerRef.current, [composerRef]);
@@ -3175,7 +3190,12 @@ export default function ChatView(props: ChatViewProps) {
         (entry) => entry.id === id,
       );
       if (!message) return;
-      const refs = { promptRef, composerImagesRef, composerTerminalContextsRef };
+      const refs = {
+        promptRef,
+        composerImagesRef,
+        composerTerminalContextsRef,
+        composerFileReferencesRef,
+      };
       const unavailableReason = resolveQueuedMessageEditUnavailableReason({
         deliveryStatus: message.deliveryStatus,
         steering: queueState.steerAttemptsByThreadKey[activeThreadKey]?.[id] !== undefined,
@@ -3191,10 +3211,12 @@ export default function ChatView(props: ChatViewProps) {
           setComposerDraftPrompt,
           addComposerDraftImages,
           setComposerDraftTerminalContexts,
+          setComposerDraftFileReferences,
         },
         prompt: message.composer.promptForRestore ?? message.composer.prompt,
         images: message.composer.images,
         terminalContexts: message.composer.sendableTerminalContexts,
+        fileReferences: message.composer.fileReferences ?? [],
       });
       for (const context of message.composer.sourceControlContexts) {
         addComposerDraftSourceControlContext(composerDraftTarget, context);
@@ -3209,6 +3231,7 @@ export default function ChatView(props: ChatViewProps) {
       readComposer,
       removeMessageFromQueue,
       scheduleComposerFocus,
+      setComposerDraftFileReferences,
       setComposerDraftPrompt,
       setComposerDraftTerminalContexts,
     ],
@@ -4158,6 +4181,7 @@ export default function ChatView(props: ChatViewProps) {
           : (current?.prompt ?? "") !== (draft?.prompt ?? "")) ||
         current?.images !== draft?.images ||
         current?.terminalContexts !== draft?.terminalContexts ||
+        current?.fileReferences !== draft?.fileReferences ||
         current?.sourceControlContexts !== draft?.sourceControlContexts
       );
     };
@@ -4655,6 +4679,7 @@ export default function ChatView(props: ChatViewProps) {
           addComposerDraftImages,
           removeComposerDraftImage,
           setComposerDraftTerminalContexts,
+          setComposerDraftFileReferences,
           setDraftThreadContext,
           readComposerDraftContent,
         },
@@ -4669,6 +4694,7 @@ export default function ChatView(props: ChatViewProps) {
           promptRef,
           composerImagesRef,
           composerTerminalContextsRef,
+          composerFileReferencesRef,
           sendInFlightRef: threadSendsInFlight.ref(sendThreadKey),
         },
         sourceControl: {
@@ -4728,6 +4754,7 @@ export default function ChatView(props: ChatViewProps) {
         trimmedPrompt: `Continue pursuing this goal: ${objective}`,
         images: context.images,
         sendableTerminalContexts: sendState.sendableTerminalContexts,
+        fileReferences: context.fileReferences,
         sourceControlContexts: context.sourceControlContexts,
         selectedProvider: context.selectedProvider,
         selectedModel: context.selectedModel,
@@ -4777,13 +4804,14 @@ export default function ChatView(props: ChatViewProps) {
         sideContext &&
         (sideContext.images.length > 0 ||
           sideContext.terminalContexts.length > 0 ||
+          sideContext.fileReferences.length > 0 ||
           sideContext.sourceControlContexts.length > 0)
       ) {
         toastManager.add({
           type: "info",
           title: "Side questions accept text only",
           description:
-            "Remove attached images, terminal selections, and source-control references before using /btw.",
+            "Remove attached images, terminal selections, file references, and source-control references before using /btw.",
         });
         return;
       }
@@ -4844,6 +4872,7 @@ export default function ChatView(props: ChatViewProps) {
     const {
       images: composerImages,
       terminalContexts: composerTerminalContexts,
+      fileReferences: composerFileReferences,
       sourceControlContexts: composerSourceControlContexts,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
@@ -4861,6 +4890,7 @@ export default function ChatView(props: ChatViewProps) {
       prompt: promptForSend,
       imageCount: composerImages.length,
       terminalContexts: composerTerminalContexts,
+      fileReferences: composerFileReferences,
     });
     const goalCommand = parseThreadGoalSlashCommand(trimmed);
     if (
@@ -4934,22 +4964,55 @@ export default function ChatView(props: ChatViewProps) {
         notifyMutationUnavailable(reachNodeUnavailableReason);
         return;
       }
+      // File references are feedback on the plan: they refine it, and go with the text.
       const followUp = resolvePlanFollowUpSubmission({
-        draftText: trimmed,
+        draftText: composeOutgoingPrompt({
+          prompt: trimmed,
+          fileReferences: composerFileReferences,
+        }),
         planMarkdown: activeProposedPlan.planMarkdown,
       });
-      promptRef.current = "";
+      const refs = {
+        promptRef,
+        composerImagesRef,
+        composerTerminalContextsRef,
+        composerFileReferencesRef,
+      };
+      // Bound before the send: the restore below belongs to the thread shown now.
+      const showsSendThread = bindToShownThread();
+      clearComposerContentRefs(refs);
       clearComposerDraftContent(composerDraftTarget);
       setComposerDraftTokenMode(composerDraftTarget, tokenMode);
       readComposer()?.resetCursorState();
-      await onSubmitPlanFollowUp({
+      const sent = await onSubmitPlanFollowUp({
         text: followUp.text,
         interactionMode: followUp.interactionMode,
       });
+      // A refinement that did not go out comes back, chips included, as a failed send does.
+      if (!sent) {
+        restoreUnsentComposerContent({
+          refs,
+          composerHandle: { readComposer, showsSendThread },
+          draft: {
+            composerDraftTarget,
+            setComposerDraftPrompt,
+            addComposerDraftImages,
+            setComposerDraftTerminalContexts,
+            setComposerDraftFileReferences,
+            readComposerDraftContent,
+          },
+          prompt: promptForSend,
+          images: composerImages,
+          terminalContexts: composerTerminalContexts,
+          fileReferences: composerFileReferences,
+        });
+      }
       return;
     }
     const standaloneSlashCommand =
-      composerImages.length === 0 && sendableComposerTerminalContexts.length === 0
+      composerImages.length === 0 &&
+      sendableComposerTerminalContexts.length === 0 &&
+      composerFileReferences.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {
@@ -4995,6 +5058,7 @@ export default function ChatView(props: ChatViewProps) {
       trimmedPrompt: trimmed,
       images: composerImages,
       sendableTerminalContexts: sendableComposerTerminalContexts,
+      fileReferences: composerFileReferences,
       sourceControlContexts: composerSourceControlContexts,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
@@ -5257,13 +5321,14 @@ export default function ChatView(props: ChatViewProps) {
   useForegroundQueueSender(activeThreadKey, foregroundQueueSender);
 
   const onSubmitPlanFollowUp = useCallback(
+    // True once the turn is dispatched; the caller puts its draft back otherwise.
     async ({
       text,
       interactionMode: nextInteractionMode,
     }: {
       text: string;
       interactionMode: ProviderInteractionMode;
-    }) => {
+    }): Promise<boolean> => {
       const api = readEnvironmentApi(environmentId);
       if (
         !api ||
@@ -5273,7 +5338,7 @@ export default function ChatView(props: ChatViewProps) {
         isConnecting ||
         threadSendsInFlight.has(routeThreadKey)
       ) {
-        return;
+        return false;
       }
       const sendInFlight = threadSendsInFlight.ref(routeThreadKey);
       const sendLocalDispatch = bindLocalDispatch();
@@ -5281,13 +5346,13 @@ export default function ChatView(props: ChatViewProps) {
 
       const trimmed = text.trim();
       if (!trimmed) {
-        return;
+        return false;
       }
 
-      if (!(await prepareEditorSend())) return;
+      if (!(await prepareEditorSend())) return false;
       const sendCtx = readComposer()?.getSendContext();
       if (!sendCtx) {
-        return;
+        return false;
       }
       const {
         selectedProvider: ctxSelectedProvider,
@@ -5298,7 +5363,7 @@ export default function ChatView(props: ChatViewProps) {
       } = sendCtx;
       if (!canSendModelSelection(ctxSelectedModelSelection)) {
         notifySelectionBecameIneligible();
-        return;
+        return false;
       }
 
       const threadIdForSend = activeThread.id;
@@ -5388,6 +5453,7 @@ export default function ChatView(props: ChatViewProps) {
           setPlanSidebarOpen(true);
         }
         sendInFlight.current = false;
+        return true;
       } catch (err) {
         if (showsSendThread()) {
           setOptimisticUserMessages((existing) =>
@@ -5400,6 +5466,7 @@ export default function ChatView(props: ChatViewProps) {
         );
         sendInFlight.current = false;
         sendLocalDispatch.resetLocalDispatch();
+        return false;
       }
     },
     [
@@ -6683,6 +6750,7 @@ export default function ChatView(props: ChatViewProps) {
                   promptRef={promptRef}
                   composerImagesRef={composerImagesRef}
                   composerTerminalContextsRef={composerTerminalContextsRef}
+                  composerFileReferencesRef={composerFileReferencesRef}
                   shouldAutoScrollRef={isAtEndRef}
                   scheduleStickToBottom={scrollToEnd}
                   followUpSurfaceAllowsSteer={presentationTier !== "phone"}

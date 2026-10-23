@@ -9,7 +9,7 @@ import {
   THREAD_MENTION_DROP_ZONE_PROPS,
   ThreadMentionDropHint,
   useComposerThreadMentionDrop,
-} from "./ComposerThreadMentionDrop";
+} from "./ComposerMentionDrop";
 
 const environmentId = EnvironmentId.make("mention-env");
 const writing = { environmentId, threadId: ThreadId.make("writing") };

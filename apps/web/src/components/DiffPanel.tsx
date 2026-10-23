@@ -5,7 +5,16 @@ import { DiffLineBlame } from "./DiffLineBlame";
 import { DiffComparisonControls } from "./DiffComparisonControls";
 import { DiffImagePreview } from "./DiffImagePreview";
 import { useComparison } from "../rpc/useComparison";
+import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
+import {
+  formatFileReferenceTitle,
+  normalizeFileReferencePath,
+} from "@ryco/client-runtime/state/composer";
+import {
+  repositoryPathToWorkspacePath,
+  workspacePathWithinRepository,
+} from "@ryco/client-runtime/state/files";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -48,7 +57,13 @@ import {
 import { getOffThreadDiffParser, OFF_THREAD_DIFF_PARSE_MIN_CHARS } from "../lib/diffParseOffThread";
 import { ActiveDiffParser, type RenderablePatch } from "../lib/diffParsing";
 import { useDiffFileNavigation } from "../hooks/useDiffFileNavigation";
-import { DIFF_SURFACE_BASE_UNSAFE_CSS, resolveDiffThemeName } from "../lib/diffRendering";
+import {
+  DIFF_SURFACE_BASE_UNSAFE_CSS,
+  GUTTER_UTILITY_UNSAFE_CSS,
+  NEUTRAL_LINE_SELECTION_UNSAFE_CSS,
+  PLAIN_ANNOTATION_UNSAFE_CSS,
+  resolveDiffThemeName,
+} from "../lib/diffRendering";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { selectProjectByRef, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
@@ -58,6 +73,14 @@ import { formatShortTimestamp } from "../timestampFormat";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+import {
+  diffFileReference,
+  diffLineSelection,
+  fileLineSelectionRange,
+  fileLineSelectionSide,
+} from "./fileReferences/fileReferenceSelection";
+import { FileReferenceNoteComposer } from "./fileReferences/FileReferenceNoteComposer";
+import { useFileReferencePicker } from "./fileReferences/useFileReferencePicker";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
 import {
   buildDiffSearchIndex,
@@ -108,7 +131,10 @@ const DIFF_PANEL_SEARCH_UNSAFE_CSS = `
 }
 `;
 
-const DIFF_PANEL_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
+// Desktop only: the gutter `+` that adds lines to the chat, its picked range
+// and its note row.
+const DIFF_PANEL_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_EDITOR_OPEN_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}${NEUTRAL_LINE_SELECTION_UNSAFE_CSS}${PLAIN_ANNOTATION_UNSAFE_CSS}${GUTTER_UTILITY_UNSAFE_CSS}`;
+const NO_FILE_ANNOTATIONS: DiffLineAnnotation[] = [];
 const DIFF_PANEL_PHONE_UNSAFE_CSS = `${DIFF_SURFACE_BASE_UNSAFE_CSS}${DIFF_PANEL_SEARCH_UNSAFE_CSS}`;
 
 function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
@@ -433,6 +459,8 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
       : undefined,
   );
   const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd;
+  // "Add to chat" from the gutter; the frozen phone tier does not get it.
+  const fileReferencePicker = useFileReferencePicker(isPhonePresentation ? null : routeThreadRef);
   const gitStatusQuery = useGitStatus({
     environmentId: activeThread?.environmentId ?? null,
     cwd: activeCwd ?? null,
@@ -593,6 +621,19 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
         : null;
   // Local patches name repository-root paths; checkpoint and comparison images are read by blob ID.
   const imagePreviewCwd = reviewingLocal ? localChanges.data?.worktreePath : activeCwd;
+  // Every review patch names repository-root paths, while the agent and the
+  // Files panel work in the thread's folder, which can sit deeper in the
+  // repository. When the two cannot be related, the folder is taken as the
+  // root (a symlinked path, a repository without a remote).
+  const diffRepositoryRoot = reviewingLocal
+    ? (localChanges.data?.worktreePath ?? null)
+    : comparing
+      ? (comparison.data?.source.worktreePath ?? null)
+      : (activeThread?.worktreePath ?? activeProject?.repositoryIdentity?.rootPath ?? null);
+  const diffWorkspacePrefix =
+    (activeCwd && diffRepositoryRoot
+      ? workspacePathWithinRepository(activeCwd, diffRepositoryRoot)
+      : null) ?? "";
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   // The latest off-thread parse result, shown while it matches the pending parse.
@@ -941,16 +982,18 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     (filePath: string, lineNumber?: number) => {
       const api = readLocalApi();
       if (!api) return;
+      const workspacePath = repositoryPathToWorkspacePath(filePath, diffWorkspacePrefix);
       const target = resolveDiffOpenInEditorTarget({
-        cwd: activeCwd,
-        filePath,
+        // A file outside the thread's folder resolves against the repository.
+        cwd: workspacePath === null ? (diffRepositoryRoot ?? activeCwd) : activeCwd,
+        filePath: workspacePath ?? filePath,
         lineNumber,
       });
       void openInPreferredEditor(api, target).catch((error) => {
         console.warn("Failed to open diff in editor.", error);
       });
     },
-    [activeCwd],
+    [activeCwd, diffRepositoryRoot, diffWorkspacePrefix],
   );
   const toggleDiffFileCollapsed = useCallback((fileKey: string) => {
     setCollapsedDiffFileKeys((current) => {
@@ -1528,6 +1571,22 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                       const fileKey = buildFileDiffRenderKey(fileDiff);
                       const themedFileKey = `${fileKey}:${resolvedTheme}`;
                       const collapsed = collapsedDiffFileKeys.has(fileKey);
+                      const filePick =
+                        fileReferencePicker.pick?.fileKey === fileKey
+                          ? fileReferencePicker.pick
+                          : null;
+                      // Lines go to the chat under the path the agent sees;
+                      // a file outside the thread's folder cannot be named.
+                      const referencePath = repositoryPathToWorkspacePath(
+                        filePath,
+                        diffWorkspacePrefix,
+                      );
+                      const pickPath =
+                        fileReferencePicker.available &&
+                        referencePath !== null &&
+                        normalizeFileReferencePath(referencePath) !== null
+                          ? referencePath
+                          : null;
                       return (
                         <div
                           key={themedFileKey}
@@ -1554,6 +1613,39 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                         >
                           <FileDiff
                             fileDiff={fileDiff}
+                            lineAnnotations={
+                              filePick
+                                ? [
+                                    {
+                                      side: fileLineSelectionSide(filePick.selection),
+                                      lineNumber: filePick.selection.lineEnd,
+                                    },
+                                  ]
+                                : NO_FILE_ANNOTATIONS
+                            }
+                            selectedLines={
+                              filePick ? fileLineSelectionRange(filePick.selection) : null
+                            }
+                            renderAnnotation={() =>
+                              filePick ? (
+                                <FileReferenceNoteComposer
+                                  key={filePick.id}
+                                  title={formatFileReferenceTitle(filePick.selection)}
+                                  restoreComment={fileReferencePicker.restoreComment}
+                                  onCommentChange={fileReferencePicker.rememberComment}
+                                  onCancel={fileReferencePicker.cancel}
+                                  onAdd={(comment) =>
+                                    fileReferencePicker.add(
+                                      diffFileReference({
+                                        fileDiff,
+                                        selection: filePick.selection,
+                                        comment,
+                                      }),
+                                    )
+                                  }
+                                />
+                              ) : null
+                            }
                             renderHeaderMetadata={() =>
                               reviewingLocal && localScope && localFile ? (
                                 <DiffStagingActions
@@ -1634,6 +1726,16 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                                 ? DIFF_PANEL_PHONE_UNSAFE_CSS
                                 : DIFF_PANEL_UNSAFE_CSS,
                               lineHoverHighlight: "number",
+                              ...(pickPath !== null
+                                ? {
+                                    enableGutterUtility: true,
+                                    onGutterUtilityClick: (range: SelectedLineRange) =>
+                                      fileReferencePicker.open(
+                                        fileKey,
+                                        diffLineSelection(fileDiff, pickPath, range),
+                                      ),
+                                  }
+                                : {}),
                               ...(comparing && comparison.data
                                 ? {
                                     onLineClick: (line) => {

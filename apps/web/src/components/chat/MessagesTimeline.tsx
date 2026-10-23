@@ -123,9 +123,11 @@ import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic"
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
-  deriveDisplayedUserMessageState,
+  deriveDisplayedUserMessageContext,
+  fileReferenceKey,
   type ParsedTerminalContextEntry,
 } from "~/lib/terminalContext";
+import { FileReferenceChip } from "./FileReferenceChip";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ryco/contracts/settings";
@@ -1258,7 +1260,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
     () => {
       if (row.kind !== "message") return;
       if (row.message.role === "user") {
-        const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
+        const displayedUserMessage = deriveDisplayedUserMessageContext(row.message.text);
         const copyText = displayedUserMessage.copyText ?? null;
         const canRevert = typeof row.revertTurnCount === "number";
         // No actions apply (nothing to copy, no checkpoint): open no sheet.
@@ -1391,8 +1393,11 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         row.message.role === "user" &&
         (() => {
           const userImages = row.message.attachments ?? [];
-          const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
+          const displayedUserMessage = deriveDisplayedUserMessageContext(row.message.text);
           const terminalContexts = displayedUserMessage.contexts;
+          const fileReferences = displayedUserMessage.fileReferences;
+          const hasUserMessageBody =
+            displayedUserMessage.visibleText.trim().length > 0 || terminalContexts.length > 0;
           const canRevertAgentWork = typeof row.revertTurnCount === "number";
           return (
             <div className="flex justify-end">
@@ -1409,8 +1414,21 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                     messageId={row.message.id}
                   />
-                  {(displayedUserMessage.visibleText.trim().length > 0 ||
-                    terminalContexts.length > 0) && (
+                  {fileReferences.length > 0 ? (
+                    <div
+                      className={cn("flex flex-wrap gap-1", hasUserMessageBody && "mb-1")}
+                      data-user-message-file-references="true"
+                    >
+                      {fileReferences.map((reference) => (
+                        <FileReferenceChip
+                          key={fileReferenceKey(reference)}
+                          reference={reference}
+                          theme={ctx.resolvedTheme}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {hasUserMessageBody && (
                     <UserMessageBody
                       cwd={ctx.markdownCwd}
                       environmentId={ctx.activeThreadEnvironmentId}

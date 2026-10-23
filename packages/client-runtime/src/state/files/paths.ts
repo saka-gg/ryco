@@ -1,35 +1,24 @@
 import { isWindowsAbsolutePath } from "@ryco/shared/path";
 
-/**
- * Mirrors the contracts cap on `ProjectReadFileInput.relativePath`. A longer
- * path can never round-trip to the node, so it is rejected client-side instead
- * of being sent and bounced.
- */
-export const WORKSPACE_FILE_PATH_MAX_LENGTH = 512;
+import { normalizeWorkspaceRelativePath, WORKSPACE_FILE_PATH_MAX_LENGTH } from "./relativePath.ts";
 
-/**
- * Reduces a workspace-relative path to the canonical `a/b/c` form the node
- * accepts, or null when the value cannot address anything inside the root.
- *
- * Rejection (rather than clamping) is deliberate: `..` that walks past the root,
- * absolute/UNC/drive paths and `~` expansions are all escape attempts, and a
- * hostile or buggy node listing must not be able to steer a read outside the
- * workspace the user opened.
- */
-export function normalizeWorkspaceRelativePath(value: string): string | null {
-  if (value.length === 0) return null;
-  if (value.startsWith("~")) return null;
-  if (isWindowsAbsolutePath(value)) return null;
-  // Drive-RELATIVE forms ("C:x", no separator after the colon) escape the shared
-  // predicate above but resolve against the drive's current directory on a
-  // Windows node — outside the root just as surely as "C:\x".
-  if (/^[A-Za-z]:/.test(value)) return null;
+export {
+  normalizeWorkspaceRelativePath,
+  WORKSPACE_FILE_PATH_MAX_LENGTH,
+  workspaceFileBasename,
+} from "./relativePath.ts";
 
-  const unified = value.replaceAll("\\", "/");
-  if (unified.startsWith("/")) return null;
+const WINDOWS_DRIVE_ROOT_PATTERN = /^([A-Za-z]:)\//;
 
+/** `/a/b/../c` → `/a/c`; null for relative, UNC or root-escaping paths. */
+function normalizeAbsolutePath(value: string): string | null {
+  const slashPath = value.replaceAll("\\", "/");
+  const drive = WINDOWS_DRIVE_ROOT_PATTERN.exec(slashPath)?.[1];
+  if ((!slashPath.startsWith("/") && drive === undefined) || slashPath.startsWith("//")) {
+    return null;
+  }
   const segments: string[] = [];
-  for (const segment of unified.split("/")) {
+  for (const segment of slashPath.slice(drive ? drive.length + 1 : 1).split("/")) {
     if (segment.length === 0 || segment === ".") continue;
     if (segment === "..") {
       if (segments.length === 0) return null;
@@ -38,15 +27,67 @@ export function normalizeWorkspaceRelativePath(value: string): string | null {
     }
     segments.push(segment);
   }
-
-  if (segments.length === 0) return null;
-  const joined = segments.join("/");
-  return joined.length > WORKSPACE_FILE_PATH_MAX_LENGTH ? null : joined;
+  return `${drive ? `${drive}/` : "/"}${segments.join("/")}`;
 }
 
-export function workspaceFileBasename(path: string): string {
-  const segments = path.split("/").filter((segment) => segment.length > 0);
-  return segments.at(-1) ?? path;
+/**
+ * A path (an agent's file link, a markdown image) as a path inside
+ * `workspaceRoot`, or null when it addresses anything outside it. Absolute
+ * paths must sit under the root (case-insensitively on a Windows drive);
+ * relative ones resolve against it and may not walk out of it.
+ *
+ * The result was resolved and contained here, so it is checked structurally,
+ * not with `normalizeWorkspaceRelativePath`'s guesses about input it cannot
+ * resolve: a `~assets` or `C:x` directory inside the root stays reachable.
+ * Only the exact home forms (`~`, `~/…`) are still refused.
+ */
+export function resolveWorkspaceRelativePath(path: string, workspaceRoot: string): string | null {
+  if (path.length === 0 || path.includes("\0")) return null;
+  const root = normalizeAbsolutePath(workspaceRoot);
+  if (!root) return null;
+  const isAbsolute = path.startsWith("/") || path.startsWith("\\") || isWindowsAbsolutePath(path);
+  const candidate = normalizeAbsolutePath(isAbsolute ? path : `${root}/${path}`);
+  if (!candidate) return null;
+  const caseInsensitive = WINDOWS_DRIVE_ROOT_PATTERN.test(root);
+  const prefix = root.endsWith("/") ? root : `${root}/`;
+  const comparable = (value: string) => (caseInsensitive ? value.toLowerCase() : value);
+  if (!comparable(candidate).startsWith(comparable(prefix))) return null;
+  // `normalizeAbsolutePath` already dropped empty, `.` and `..` segments.
+  const relative = candidate.slice(prefix.length);
+  if (relative.length === 0 || relative.length > WORKSPACE_FILE_PATH_MAX_LENGTH) return null;
+  return relative === "~" || relative.startsWith("~/") ? null : relative;
+}
+
+/**
+ * Where `workspaceRoot` sits inside `repositoryRoot`, as a relative `a/b`
+ * prefix: "" when it is the repository root itself, null when it is not
+ * inside it (or either is not an absolute path).
+ */
+export function workspacePathWithinRepository(
+  workspaceRoot: string,
+  repositoryRoot: string,
+): string | null {
+  const workspace = normalizeAbsolutePath(workspaceRoot);
+  const repository = normalizeAbsolutePath(repositoryRoot);
+  if (!workspace || !repository) return null;
+  const caseInsensitive = WINDOWS_DRIVE_ROOT_PATTERN.test(repository);
+  const comparable = (value: string) => (caseInsensitive ? value.toLowerCase() : value);
+  if (comparable(workspace) === comparable(repository)) return "";
+  return resolveWorkspaceRelativePath(workspace, repository);
+}
+
+/**
+ * A repository-relative path (a git diff's) as a path inside the workspace
+ * folder at `workspacePrefix` (from `workspacePathWithinRepository`), or null
+ * when the file lies outside that folder.
+ */
+export function repositoryPathToWorkspacePath(
+  repositoryPath: string,
+  workspacePrefix: string,
+): string | null {
+  const path = normalizeWorkspaceRelativePath(repositoryPath);
+  if (path === null || workspacePrefix.length === 0) return path;
+  return path.startsWith(`${workspacePrefix}/`) ? path.slice(workspacePrefix.length + 1) : null;
 }
 
 export function workspaceFileParentPath(path: string): string | null {

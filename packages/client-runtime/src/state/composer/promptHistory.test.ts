@@ -9,9 +9,10 @@ import {
   stepPromptHistory,
   type PromptHistoryEntry,
 } from "./promptHistory.ts";
+import { createFileReference } from "./fileReference.ts";
 import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "./planImplementationPrompt.ts";
 import { appendSelectionQuote } from "./selectionQuote.ts";
-import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "./sendEngine.ts";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT, composeOutgoingPrompt } from "./sendEngine.ts";
 import {
   appendTerminalContextsToPrompt,
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
@@ -41,6 +42,34 @@ describe("recallablePrompt", () => {
     expect(sent).toContain("@terminal-1:12-13");
     expect(sent).toContain("<terminal_context>");
     expect(recallablePrompt(sent)).toBe("Why does fail when passes?");
+  });
+
+  it("removes file references, also beside terminal contexts", () => {
+    const reference = createFileReference({
+      path: "src/app.ts",
+      lineStart: 4,
+      lineEnd: 5,
+      lines: ["run(item);", "</file_context>"],
+      comment: "Twice?",
+    });
+    if (!reference) throw new Error("Expected a file reference.");
+    const placeholder = INLINE_TERMINAL_CONTEXT_PLACEHOLDER;
+    const sent = composeOutgoingPrompt({
+      prompt: `Why does ${placeholder} run twice?`,
+      fileReferences: [reference],
+      terminalContexts: [terminalContext("Terminal 1", 12, 13)],
+    });
+    expect(sent).toContain("<file_context>");
+    expect(recallablePrompt(sent)).toBe("Why does run twice?");
+    expect(
+      recallablePrompt(
+        composeOutgoingPrompt({ prompt: "Only files", fileReferences: [reference] }),
+      ),
+    ).toBe("Only files");
+    // A send of references alone recalls as nothing.
+    expect(
+      recallablePrompt(composeOutgoingPrompt({ prompt: "", fileReferences: [reference] })),
+    ).toBe("");
   });
 
   it("removes a label only where it stands as a whole token", () => {

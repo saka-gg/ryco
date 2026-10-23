@@ -1,4 +1,12 @@
 import {
+  deriveDisplayedUserMessageContext,
+  type FileReference,
+  fileReferenceKey,
+  formatFileReferenceLabel,
+  formatFileReferenceTitle,
+  type ParsedTerminalContextEntry,
+} from "@ryco/client-runtime/state/composer";
+import {
   readHtmlRenderAttachment,
   type HtmlRenderAttachment,
 } from "@ryco/client-runtime/state/session";
@@ -176,6 +184,60 @@ function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttac
   );
 }
 
+/**
+ * What a sent prompt carried besides its text: lines of workspace files (with
+ * the user's note) and terminal output, read back from the blocks the send
+ * wrote, the same way web shows them.
+ */
+function SentMessageContexts(props: {
+  readonly fileReferences: ReadonlyArray<FileReference>;
+  readonly terminalContexts: ReadonlyArray<ParsedTerminalContextEntry>;
+  readonly spaced: boolean;
+}) {
+  const subtle = String(useThemeColor("--color-icon-subtle"));
+  return (
+    <View className={`gap-1.5 ${props.spaced ? "mt-2" : ""}`}>
+      {props.fileReferences.map((reference) => (
+        <View
+          key={fileReferenceKey(reference)}
+          accessibilityRole="text"
+          accessibilityLabel={
+            reference.comment
+              ? `${formatFileReferenceTitle(reference)}: ${reference.comment}`
+              : formatFileReferenceTitle(reference)
+          }
+          className="gap-0.5"
+        >
+          <View className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1">
+            <SymbolView name="doc.text" size={11} tintColor={subtle} type="monochrome" />
+            <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
+              {formatFileReferenceLabel(reference)}
+            </Text>
+          </View>
+          {reference.comment ? (
+            <Text className="pl-1 text-xs text-foreground-muted" numberOfLines={3}>
+              {reference.comment}
+            </Text>
+          ) : null}
+        </View>
+      ))}
+      {props.terminalContexts.map((context) => (
+        <View
+          key={context.header}
+          accessibilityRole="text"
+          accessibilityLabel={context.header}
+          className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1"
+        >
+          <SymbolView name="terminal" size={11} tintColor={subtle} type="monochrome" />
+          <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
+            {context.header}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export function ThreadMessage(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -229,7 +291,13 @@ export function ThreadMessage(props: {
     boldFontFamily: boldFont,
     headingFontSizes: typography.headingFontSizes,
   };
-  const text = props.message.text || (props.message.streaming ? "…" : "");
+  // A sent prompt's context blocks show as chips, not as raw text; copying keeps them.
+  const sentContexts = isUser ? deriveDisplayedUserMessageContext(props.message.text) : null;
+  const sentContextCount =
+    (sentContexts?.fileReferences.length ?? 0) + (sentContexts?.contexts.length ?? 0);
+  const text =
+    (sentContexts ? sentContexts.visibleText : props.message.text) ||
+    (props.message.streaming ? "…" : "");
   const attachments = props.message.attachments ?? [];
   const hasVideoPlaybackSource = (
     attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
@@ -267,7 +335,7 @@ export function ThreadMessage(props: {
   );
   // Attachment deliveries carry a placeholder " " body, which would render as
   // a blank line above the attachment.
-  const showText = text.trim().length > 0 || attachments.length === 0;
+  const showText = text.trim().length > 0 || (attachments.length === 0 && sentContextCount === 0);
 
   return (
     <View className={`px-4 py-2 ${isUser ? "items-end" : "items-start"}`}>
@@ -302,6 +370,13 @@ export function ThreadMessage(props: {
             }}
           />
         )}
+        {sentContexts && sentContextCount > 0 ? (
+          <SentMessageContexts
+            fileReferences={sentContexts.fileReferences}
+            terminalContexts={sentContexts.contexts}
+            spaced={showText}
+          />
+        ) : null}
         {htmlRenders.length > 0 ? (
           <View className={`w-full gap-2 ${showText ? "mt-2" : ""}`}>
             {htmlRenders.map(({ attachment, htmlRender }) => (

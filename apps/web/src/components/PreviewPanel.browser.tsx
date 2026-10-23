@@ -6,10 +6,13 @@ import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import type { ComposerContextItem } from "@ryco/client-runtime/state/composer";
 
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";
 import { resetProjectPreviewAtomsForTests } from "../rpc/projectPreviewAtoms";
+import { composerContextIntake } from "../composerContextIntake";
+import { readWorkspaceFileDragSource, WORKSPACE_FILE_DRAG_TYPE } from "../workspaceFileDrag";
 import PreviewPanel from "./PreviewPanel";
 
 type PreviewWriteFileInput = {
@@ -65,9 +68,15 @@ const previewHarness = vi.hoisted(() => {
     writeFailure: null as { readonly reason: string; readonly message: string } | null,
     savedVersion: 0,
     serverThreadEnabled: true,
+    /** Server threads' worktrees by thread id; a thread without one works in the project. */
+    worktreePaths: {} as Record<string, string>,
     draftThread: null as DraftThreadStub | null,
     routeParams: { environmentId: "environment-local", threadId: "thread-1" } as Params,
+    /** The route search; `preview: "1"` is the Files panel open. */
+    search: { preview: "1" } as Record<string, string>,
     reset() {
+      this.worktreePaths = {};
+      this.search = { preview: "1" };
       this.entries = [];
       this.readFiles = new Map();
       this.binaryFiles = new Map();
@@ -87,26 +96,55 @@ const previewHarness = vi.hoisted(() => {
 vi.mock("@pierre/diffs/react", () => ({
   EditProvider: (props: { children: ReactNode }) => props.children,
   Virtualizer: (props: { children: ReactNode }) => <div>{props.children}</div>,
+  // Stands in for the renderer: the gutter `+` callback, line annotations and
+  // the highlighted lines are exposed so the panel's wiring can be driven.
   File: (props: {
     edit?: boolean;
     file: { contents: string; name: string };
     onEditChange?: (event: { file: { contents: string; name: string } }) => void;
-  }) =>
-    props.edit ? (
-      <textarea
-        aria-label={`Edit ${props.file.name}`}
-        value={props.file.contents}
-        onChange={(event) =>
-          props.onEditChange?.({
-            file: { ...props.file, contents: event.currentTarget.value },
-          })
-        }
-      />
-    ) : (
-      <pre>
-        <code>{props.file.contents}</code>
-      </pre>
-    ),
+    options?: {
+      enableGutterUtility?: boolean;
+      onGutterUtilityClick?: (range: { start: number; end: number }) => void;
+    };
+    lineAnnotations?: ReadonlyArray<{ lineNumber: number }>;
+    renderAnnotation?: (annotation: { lineNumber: number }) => ReactNode;
+    selectedLines?: { start: number; end: number } | null;
+  }) => (
+    <div
+      data-test-selected-lines={
+        props.selectedLines ? `${props.selectedLines.start}-${props.selectedLines.end}` : ""
+      }
+    >
+      {props.edit ? (
+        <textarea
+          aria-label={`Edit ${props.file.name}`}
+          value={props.file.contents}
+          onChange={(event) =>
+            props.onEditChange?.({
+              file: { ...props.file, contents: event.currentTarget.value },
+            })
+          }
+        />
+      ) : (
+        <pre>
+          <code>{props.file.contents}</code>
+        </pre>
+      )}
+      {props.options?.enableGutterUtility ? (
+        <button
+          type="button"
+          onClick={() => props.options?.onGutterUtilityClick?.({ start: 3, end: 2 })}
+        >
+          Mock gutter add
+        </button>
+      ) : null}
+      {(props.lineAnnotations ?? []).map((annotation) => (
+        <div key={annotation.lineNumber} data-test-annotation-line={annotation.lineNumber}>
+          {props.renderAnnotation?.(annotation)}
+        </div>
+      ))}
+    </div>
+  ),
 }));
 
 // The shared highlight pool spawns real workers; these tests render plain output.
@@ -120,7 +158,7 @@ vi.mock("@tanstack/react-router", () => ({
     return options?.select ? options.select(params) : params;
   }),
   useSearch: vi.fn((options?: { select?: (search: Record<string, string>) => unknown }) => {
-    const search = { preview: "1" };
+    const search = previewHarness.search;
     return options?.select ? options.select(search) : search;
   }),
   useBlocker: vi.fn(() => ({
@@ -204,13 +242,13 @@ vi.mock("../hooks/useSettings", () => ({
 }));
 
 vi.mock("../storeSelectors", () => ({
-  createThreadSelectorByRef: () => () =>
+  createThreadSelectorByRef: (ref: { threadId: string } | null) => () =>
     previewHarness.serverThreadEnabled
       ? {
-          id: ThreadId.make("thread-1"),
+          id: ThreadId.make(ref?.threadId ?? "thread-1"),
           environmentId: EnvironmentId.make("environment-local"),
           projectId: ProjectId.make("project-1"),
-          worktreePath: null,
+          worktreePath: previewHarness.worktreePaths[ref?.threadId ?? "thread-1"] ?? null,
           turnDiffSummaries: [],
         }
       : undefined,
@@ -241,10 +279,17 @@ vi.mock("./chat/ChangedFilesTree", () => ({
   ChangedFilesTree: (props: {
     files: readonly { readonly path: string }[];
     onSelectFile: (path: string) => void;
+    onFileDragStart?: (path: string, transfer: DataTransfer) => void;
   }) => (
     <div>
       {props.files.map((file) => (
-        <button key={file.path} type="button" onClick={() => props.onSelectFile(file.path)}>
+        <button
+          key={file.path}
+          type="button"
+          draggable={props.onFileDragStart ? true : undefined}
+          onDragStart={(event) => props.onFileDragStart?.(file.path, event.dataTransfer)}
+          onClick={() => props.onSelectFile(file.path)}
+        >
           {file.path}
         </button>
       ))}
@@ -252,13 +297,24 @@ vi.mock("./chat/ChangedFilesTree", () => ({
   ),
 }));
 
-function renderPreviewPanel() {
+function renderPreviewPanel(props: Partial<ComponentProps<typeof PreviewPanel>> = {}) {
   return render(
     <AppAtomRegistryProvider>
-      <PreviewPanel mode="sheet" />
+      <PreviewPanel mode="sheet" {...props} />
     </AppAtomRegistryProvider>,
   );
 }
+
+async function waitForLayout(): Promise<void> {
+  for (let frame = 0; frame < 3; frame++) {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  }
+}
+
+const PREVIEW_THREAD = {
+  environmentId: EnvironmentId.make("environment-local"),
+  threadId: ThreadId.make("thread-1"),
+};
 
 describe("PreviewPanel", () => {
   let mounted:
@@ -288,6 +344,315 @@ describe("PreviewPanel", () => {
     resetAppAtomRegistryForTests();
     resetProjectPreviewAtomsForTests();
     recordWsConnectionOpened({ environmentId: EnvironmentId.make("environment-local") });
+  });
+
+  it("opens a deep-linked file once and marks its line", async () => {
+    previewHarness.entries = [
+      { path: "src/app.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    const onRevealHandled = vi.fn();
+    const reveal = { path: "src/app.ts", line: 2 };
+
+    mounted = await renderPreviewPanel({ reveal, onRevealHandled });
+
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+      .toHaveValue("one\ntwo\nthree");
+    expect(onRevealHandled).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-2"),
+    );
+
+    await mounted.rerender(
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={onRevealHandled} />
+      </AppAtomRegistryProvider>,
+    );
+    expect(onRevealHandled).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a deep link's line when its file is left or never opened", async () => {
+    previewHarness.entries = [
+      { path: "src/app.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    previewHarness.readFiles.set("README.md", { relativePath: "README.md", contents: "# Ryco" });
+    const selectedLines = () =>
+      document
+        .querySelector("[data-test-selected-lines]")
+        ?.getAttribute("data-test-selected-lines");
+    const panel = (reveal: ComponentProps<typeof PreviewPanel>["reveal"]) => (
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>
+    );
+
+    mounted = await renderPreviewPanel({ reveal: { path: "src/app.ts", line: 2 } });
+    await vi.waitFor(() => expect(selectedLines()).toBe("2-2"));
+    // Leaving the file drops the mark; coming back does not bring it back.
+    await page.getByRole("button", { name: "README.md" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .toHaveValue("# Ryco");
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+      .toHaveValue("one\ntwo\nthree");
+    expect(selectedLines()).toBe("");
+
+    // A link whose file the unsaved-draft prompt kept from opening leaves nothing armed.
+    await page.getByRole("button", { name: "README.md" }).click();
+    await page.getByRole("textbox", { name: "Edit README.md" }).fill("# Draft");
+    previewHarness.writeFailure = { reason: "conflict", message: "External edit" };
+    await mounted.rerender(panel({ path: "src/app.ts", line: 3 }));
+    await expect
+      .element(page.getByRole("heading", { name: "Save changes before continuing?" }))
+      .toBeInTheDocument();
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .toHaveValue("# Draft");
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    await page.getByRole("button", { name: "Discard & Open" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+      .toHaveValue("one\ntwo\nthree");
+    expect(selectedLines()).toBe("");
+  });
+
+  it("shows a folder link in the tree instead of reading it", async () => {
+    previewHarness.entries = [
+      { path: "src", kind: "directory" },
+      { path: "src/app.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ];
+    mounted = await renderPreviewPanel();
+    await expect.element(page.getByRole("button", { name: "README.md" })).toBeInTheDocument();
+    await mounted.rerender(
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={{ path: "src" }} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByPlaceholder("Filter files...")).toHaveValue("src");
+    await expect.element(page.getByRole("button", { name: "README.md" })).not.toBeInTheDocument();
+    expect(previewHarness.readAttempts).not.toContain("src");
+    await expect.element(page.getByText("Open file")).toBeInTheDocument();
+  });
+
+  it("opens a linked file the listing leaves out, and lets the read decide it is gone", async () => {
+    // The listing skips ignored folders, gitignored files and entries past its cap.
+    previewHarness.entries = [{ path: "README.md", kind: "file" }];
+    previewHarness.readFiles.set("node_modules/effect/Effect.js", {
+      relativePath: "node_modules/effect/Effect.js",
+      contents: "one\ntwo\nthree",
+    });
+    const panel = (reveal: ComponentProps<typeof PreviewPanel>["reveal"]) => (
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>
+    );
+
+    mounted = await renderPreviewPanel({
+      reveal: { path: "node_modules/effect/Effect.js", line: 2 },
+    });
+    await expect.element(page.getByRole("button", { name: "README.md" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit node_modules/effect/Effect.js" }))
+      .toHaveValue("one\ntwo\nthree");
+    await waitForLayout();
+    // Still open once the listing that lacks it has loaded, with its line marked.
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit node_modules/effect/Effect.js" }))
+      .toBeInTheDocument();
+    expect(
+      document
+        .querySelector("[data-test-selected-lines]")
+        ?.getAttribute("data-test-selected-lines"),
+    ).toBe("2-2");
+
+    // A link to a file that does not exist ends on the tree once the read says so.
+    await mounted.rerender(panel({ path: "src/gone.ts", line: 1 }));
+    await vi.waitFor(() => expect(previewHarness.readAttempts).toContain("src/gone.ts"));
+    await expect.element(page.getByText("Open file")).toBeInTheDocument();
+  });
+
+  it("opens a link in the thread it switched to, even at the path the last thread had open", async () => {
+    previewHarness.entries = [{ path: "src/a.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/a.ts", { relativePath: "src/a.ts", contents: "one\ntwo" });
+    previewHarness.worktreePaths = { "thread-2": "/worktrees/thread-2" };
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/a.ts" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+
+    // A link in another split pane routes that pane's thread and opens the file in one go.
+    previewHarness.routeParams = { environmentId: "environment-local", threadId: "thread-2" };
+    await mounted.rerender(
+      <AppAtomRegistryProvider>
+        <PreviewPanel
+          mode="sheet"
+          reveal={{ path: "src/a.ts", line: 2 }}
+          onRevealHandled={() => undefined}
+        />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-2"),
+    );
+  });
+
+  it("opens a link that reopens the panel at the file it had open when it closed", async () => {
+    previewHarness.entries = [{ path: "src/a.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/a.ts", { relativePath: "src/a.ts", contents: "one\ntwo" });
+    const panel = (reveal: ComponentProps<typeof PreviewPanel>["reveal"]) => (
+      <AppAtomRegistryProvider>
+        <PreviewPanel mode="sheet" reveal={reveal} onRevealHandled={() => undefined} />
+      </AppAtomRegistryProvider>
+    );
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/a.ts" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+
+    // The sheet keeps the panel mounted while it is closed.
+    previewHarness.search = {};
+    await mounted.rerender(panel(null));
+    // A link opens it again and asks for the same file in one go.
+    previewHarness.search = { preview: "1" };
+    await mounted.rerender(panel({ path: "src/a.ts", line: 2 }));
+
+    await expect
+      .element(page.getByRole("textbox", { name: "Edit src/a.ts" }))
+      .toHaveValue("one\ntwo");
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-2"),
+    );
+
+    // Reopened without a link, the panel starts at the tree.
+    previewHarness.search = {};
+    await mounted.rerender(panel(null));
+    previewHarness.search = { preview: "1" };
+    await mounted.rerender(panel(null));
+    await expect.element(page.getByText("Open file")).toBeInTheDocument();
+  });
+
+  it("starts a new pick with an empty note", async () => {
+    previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    const release = composerContextIntake.register(PREVIEW_THREAD, () => "added");
+    try {
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "src/app.ts" }).click();
+      await page.getByRole("button", { name: "Mock gutter add" }).click();
+      const note = page.getByRole("textbox", { name: "Note on src/app.ts lines 2-3" });
+      await note.fill("Why does this run twice?");
+      await page.getByRole("button", { name: "Mock gutter add" }).click();
+      await expect.element(note).toHaveValue("");
+    } finally {
+      release();
+    }
+  });
+
+  it("adds picked lines, unsaved edits included, to the thread's composer", async () => {
+    previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
+    previewHarness.readFiles.set("src/app.ts", {
+      relativePath: "src/app.ts",
+      contents: "one\ntwo\nthree",
+    });
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "src/app.ts" }).click();
+    const editor = page.getByRole("textbox", { name: "Edit src/app.ts" });
+    await expect.element(editor).toHaveValue("one\ntwo\nthree");
+    // No composer takes context yet: nothing is offered.
+    expect(page.getByRole("button", { name: "Mock gutter add" }).query()).toBeNull();
+
+    const received: ComposerContextItem[] = [];
+    const release = composerContextIntake.register(PREVIEW_THREAD, (item) => {
+      received.push(item);
+      return "added";
+    });
+    try {
+      await editor.fill("one\nTWO\nTHREE");
+      await page.getByRole("button", { name: "Mock gutter add" }).click();
+      const note = page.getByRole("textbox", { name: "Note on src/app.ts lines 2-3" });
+      await expect.element(note).toBeInTheDocument();
+      expect(
+        document
+          .querySelector("[data-test-selected-lines]")
+          ?.getAttribute("data-test-selected-lines"),
+      ).toBe("2-3");
+      await note.fill("Uppercase?");
+      await page.getByRole("button", { name: /Add to chat/u }).click();
+
+      expect(received).toEqual([
+        {
+          kind: "file-reference",
+          reference: {
+            path: "src/app.ts",
+            lineStart: 2,
+            lineEnd: 3,
+            snippet: "TWO\nTHREE",
+            truncated: false,
+            comment: "Uppercase?",
+          },
+        },
+      ]);
+      await expect.element(note).not.toBeInTheDocument();
+    } finally {
+      release();
+    }
+  });
+
+  it("drags tree files as workspace files of the thread's workspace", async () => {
+    previewHarness.entries = [{ path: "src/app.ts", kind: "file" }];
+    mounted = await renderPreviewPanel();
+    const row = page.getByRole("button", { name: "src/app.ts" });
+    await expect.element(row).toHaveAttribute("draggable", "true");
+
+    const transfer = new DataTransfer();
+    row
+      .element()
+      .dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: transfer }));
+    expect(JSON.parse(transfer.getData(WORKSPACE_FILE_DRAG_TYPE))).toEqual({
+      environmentId: "environment-local",
+      workspaceRoot: "/repo",
+      path: "src/app.ts",
+    });
+    expect(transfer.getData("text/plain")).toBe("src/app.ts");
+    // A real transfer carries the drag's id among its types.
+    expect(readWorkspaceFileDragSource(transfer)).toMatchObject({ path: "src/app.ts" });
+    expect(readWorkspaceFileDragSource(new DataTransfer())).toBeNull();
   });
 
   it("places the workspace tree on the right and filters visible files", async () => {

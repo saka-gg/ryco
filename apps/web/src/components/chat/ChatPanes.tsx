@@ -64,7 +64,7 @@ import {
   type PaneCloseGuard,
 } from "./PaneFocus";
 import { nextPaneReactKeys } from "./paneReactKeys.logic";
-import { isInThreadMentionDropZone } from "./ComposerThreadMentionDrop";
+import { isInThreadMentionDropZone } from "./ComposerMentionDrop";
 
 const FULL_RECT: PaneRect = { left: 0, top: 0, width: 100, height: 100 };
 /**
