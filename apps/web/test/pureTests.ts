@@ -187,6 +187,7 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/ui/toast.logic.test.ts",
   "src/components/worktrees/NewWorktreeDialog.test.tsx",
   "src/components/worktrees/workspacePullRequests.logic.test.ts",
+  "src/desktopQuitGuard.logic.test.ts",
   "src/desktopRelaunchGuard.logic.test.ts",
   "src/desktopRelaunchScheduler.test.ts",
   "src/deviceName.logic.test.ts",

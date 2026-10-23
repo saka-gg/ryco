@@ -1,8 +1,9 @@
 import { isQuitShortcutChord } from "./quitShortcut.ts";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
-import type { DesktopBridge } from "@ryco/contracts";
+import type { DesktopBridge, DesktopQuitGuardResponder } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
 import { PASTE_AS_TEXT_CHANNEL } from "./editMenu.ts";
+import { answerQuitGuardRequest, DESKTOP_QUIT_GUARD_IPC } from "./quitGuardChannels.ts";
 import { DESKTOP_STARTUP_MARKS_CHANNEL, observeRendererStartupMarks } from "./startupMarks.ts";
 import { WINDOW_CAPTURE_IPC } from "./windowCaptureChannels.ts";
 
@@ -129,6 +130,18 @@ const windowCaptureBridge: DesktopBridge["windowCapture"] =
       }
     : undefined;
 
+// Main asks before a quit which chats quitting would stop. Answered here from the first
+// request on: without a responder (the app has not loaded it yet) the answer is "unavailable",
+// so main quits at once instead of waiting out its timeout.
+let quitGuardResponder: DesktopQuitGuardResponder | null = null;
+ipcRenderer.on(DESKTOP_QUIT_GUARD_IPC.request, (_event, raw: unknown) => {
+  void answerQuitGuardRequest(quitGuardResponder, raw)
+    .then((reply) => {
+      if (reply !== null) ipcRenderer.send(DESKTOP_QUIT_GUARD_IPC.reply, reply);
+    })
+    .catch(() => undefined);
+});
+
 function unwrapEnsureSshEnvironmentResult(result: unknown) {
   if (
     typeof result === "object" &&
@@ -233,6 +246,14 @@ contextBridge.exposeInMainWorld("desktopBridge", {
         listener(state);
       ipcRenderer.on("desktop:quit-shortcut-feedback", handler);
       return () => ipcRenderer.removeListener("desktop:quit-shortcut-feedback", handler);
+    },
+  },
+  quitGuard: {
+    register: (responder) => {
+      quitGuardResponder = responder;
+      return () => {
+        if (quitGuardResponder === responder) quitGuardResponder = null;
+      };
     },
   },
   appKeybindings: {

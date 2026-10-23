@@ -119,6 +119,13 @@ describe("desktop main bundle splitting", () => {
     expect(main).not.toMatch(/await import\("electron-updater"\)/);
   });
 
+  it("keeps the sandboxed preload free of runtime imports besides electron", async () => {
+    // Its build does not bundle workspace packages, and a sandboxed preload can require
+    // nothing else: a value import from `@ryco/*` would fail when the window loads.
+    const { externals } = await staticGraph("./preload.ts");
+    expect([...externals]).toEqual(["electron"]);
+  });
+
   it("keeps the launch entry free of the main bundle and of heavy dependencies", async () => {
     const { importedBy, externals } = await staticGraph("./desktopEntry.ts");
     expect(importedBy.has("./main.ts")).toBe(false);
