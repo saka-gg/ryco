@@ -1,5 +1,6 @@
 import type { HostedRpcCapability } from "@ryco/client-runtime/authorization/capabilities";
-import { OrchestrationStopBackgroundTaskError } from "@ryco/contracts";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { EnvironmentId, OrchestrationStopBackgroundTaskError, ThreadId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -185,12 +186,18 @@ describe("describeSubagentStopFailure", () => {
 });
 
 describe("subagentStopKey", () => {
-  it("tells activations of the same task apart", () => {
+  it("tells activations of the same task, and the same task of other threads, apart", () => {
+    const thread = scopeThreadRef(EnvironmentId.make("env-1"), ThreadId.make("thread-1"));
     const identity = { taskId: "t1", runtimeSessionId: "rt-1", attempt: 0 };
-    expect(subagentStopKey(identity)).toBe("rt-1:t1:0");
-    expect(subagentStopKey({ ...identity, runtimeSessionId: "rt-2" })).not.toBe(
-      subagentStopKey(identity),
-    );
-    expect(subagentStopKey({ ...identity, attempt: 1 })).not.toBe(subagentStopKey(identity));
+    const key = subagentStopKey(thread, identity);
+    expect(key).toBe("env-1:thread-1:rt-1:t1:0");
+    expect(subagentStopKey(thread, { ...identity, runtimeSessionId: "rt-2" })).not.toBe(key);
+    expect(subagentStopKey(thread, { ...identity, attempt: 1 })).not.toBe(key);
+    expect(
+      subagentStopKey(scopeThreadRef(thread.environmentId, ThreadId.make("thread-2")), identity),
+    ).not.toBe(key);
+    expect(
+      subagentStopKey(scopeThreadRef(EnvironmentId.make("env-2"), thread.threadId), identity),
+    ).not.toBe(key);
   });
 });

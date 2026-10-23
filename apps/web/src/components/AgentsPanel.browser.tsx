@@ -9,6 +9,7 @@ import { render } from "vitest-browser-react";
 
 import { deriveAgentPanelModel, deriveThreadSubagents } from "../threadWorkspaceViewModel";
 import { makeRuntimeAgent } from "./agents/agentRosterTestFixtures";
+import { agentStopRequests } from "./agents/agentStopRequests";
 import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { AgentsPanel } from "./AgentsPanel";
 
@@ -42,6 +43,7 @@ describe("AgentsPanel", () => {
   afterEach(async () => {
     await mounted?.unmount().catch(() => {});
     mounted = null;
+    agentStopRequests.clear();
     document.body.innerHTML = "";
   });
 

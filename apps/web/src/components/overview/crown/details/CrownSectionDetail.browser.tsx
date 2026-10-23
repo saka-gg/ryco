@@ -25,6 +25,7 @@ import {
   makeWorkflowMember,
 } from "../crownTestFixtures";
 import { makeRuntimeAgent } from "../../../agents/agentRosterTestFixtures";
+import { agentStopRequests } from "../../../agents/agentStopRequests";
 
 const hosts: HTMLElement[] = [];
 
@@ -67,6 +68,7 @@ function BranchControlStub(): ReactNode {
 describe("CrownSectionDetail interactions", () => {
   afterEach(() => {
     for (const host of hosts.splice(0)) host.remove();
+    agentStopRequests.clear();
   });
 
   it("opens the review from the Changes detail", async () => {
@@ -101,12 +103,17 @@ describe("CrownSectionDetail interactions", () => {
 
   it("offers Stop on live direct agents in the Subagents detail, never on workflow members", async () => {
     const stop = vi.fn<SubagentStopAction["stop"]>(() => Promise.resolve());
-    const stopAgent: SubagentStopAction = {
-      threadRef: scopeThreadRef(EnvironmentId.make("environment-local"), ThreadId.make("thread-1")),
+    // One thread per variant: a stop the node took stays pending for every
+    // control of that agent, so a second surface on the same thread shows it.
+    const stopAgentFor = (variant: string): SubagentStopAction => ({
+      threadRef: scopeThreadRef(
+        EnvironmentId.make("environment-local"),
+        ThreadId.make(`thread-${variant}`),
+      ),
       runtimeSessionId: "rt-1",
       unavailableReason: null,
       stop,
-    };
+    });
     const onOpenAgent = vi.fn();
     // Every row carries the current runtime's stop flag, as an older server
     // also sends it on workflow members (the running "review:card" here).
@@ -121,7 +128,11 @@ describe("CrownSectionDetail interactions", () => {
         section: "agents",
         variant,
         isGitRepo: true,
-        layout: crownLayoutFixture({ agentPanelModel, onOpenAgent, stopAgent }),
+        layout: crownLayoutFixture({
+          agentPanelModel,
+          onOpenAgent,
+          stopAgent: stopAgentFor(variant),
+        }),
       });
       expect(stopLabels()).toEqual(["Stop Scout"]);
       // With Stop beside it, the row still takes 30px, its divider included.

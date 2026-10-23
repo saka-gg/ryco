@@ -8,7 +8,7 @@ import {
   type SubagentStopAction,
   type SubagentStopIdentity,
 } from "@ryco/client-runtime/state/session/subagentStop";
-import { useEffect, useEffectEvent, useRef, useState, type ReactElement } from "react";
+import { useEffect, useSyncExternalStore, type ReactElement } from "react";
 
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { cn } from "~/lib/utils";
@@ -19,11 +19,8 @@ import {
   type AgentRowDecorator,
   type AgentRowDensity,
 } from "./agentRoster";
-import {
-  describeSubagentStopFailure,
-  STOP_UNCONFIRMED_MS,
-  subagentStopKey,
-} from "./agentStop.logic";
+import { describeSubagentStopFailure, subagentStopKey } from "./agentStop.logic";
+import { agentStopRequests } from "./agentStopRequests";
 
 type AgentStopVariant = "icon" | "labeled";
 
@@ -38,15 +35,8 @@ export function AgentStopButton({
   variant: AgentStopVariant;
 }) {
   const identity = subagentStopIdentity(agent, action.runtimeSessionId);
-  // A new runtime or attempt is a new stop, so it starts out not pending.
   return identity ? (
-    <AgentStopControl
-      key={subagentStopKey(identity)}
-      agent={agent}
-      identity={identity}
-      action={action}
-      variant={variant}
-    />
+    <AgentStopControl agent={agent} identity={identity} action={action} variant={variant} />
   ) : null;
 }
 
@@ -103,6 +93,7 @@ export function makeAgentStopDecorator(
  * The node accepting a stop is not the agent stopping: the row settles when
  * the provider reports the task stopped, which unmounts this. A stop that is
  * not confirmed in time, or fails, is reported and Stop is offered again.
+ * Every control for the same agent shares one request (see agentStopRequests).
  */
 function AgentStopControl({
   agent,
@@ -116,58 +107,36 @@ function AgentStopControl({
   variant: AgentStopVariant;
 }) {
   const { label } = useAgentRowIdentity(agent);
-  const [pending, setPending] = useState(false);
-  const pendingRef = useRef(false);
-  const requestVersion = useRef(0);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  const reportUnconfirmed = useEffectEvent(() => {
-    toastManager.add(
-      stackedThreadToast({
-        type: "warning",
-        title: "Stop not confirmed",
-        description: "The agent may still be running. You can try again.",
-        data: { threadRef: action.threadRef },
-      }),
-    );
-  });
-  useEffect(() => {
-    if (!pending) return;
-    const timer = window.setTimeout(() => {
-      requestVersion.current++;
-      pendingRef.current = false;
-      setPending(false);
-      reportUnconfirmed();
-    }, STOP_UNCONFIRMED_MS);
-    return () => window.clearTimeout(timer);
-  }, [pending]);
+  const key = subagentStopKey(action.threadRef, identity);
+  const pending = useSyncExternalStore(agentStopRequests.subscribe, () =>
+    agentStopRequests.isPending(key),
+  );
+  useEffect(() => agentStopRequests.watch(key), [key]);
 
   const unavailableReason = action.unavailableReason;
-  const stop = async () => {
-    if (pendingRef.current || unavailableReason !== null) return;
-    pendingRef.current = true;
-    const version = ++requestVersion.current;
-    setPending(true);
-    try {
-      await action.stop(identity);
-    } catch (cause) {
-      if (!mounted.current || version !== requestVersion.current) return;
-      pendingRef.current = false;
-      setPending(false);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not stop agent",
-          description: describeSubagentStopFailure(cause),
-          data: { threadRef: action.threadRef },
-        }),
-      );
-    }
+  const stop = () => {
+    if (unavailableReason !== null) return;
+    const { threadRef } = action;
+    agentStopRequests.start(key, () => action.stop(identity), {
+      onUnconfirmed: () =>
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Stop not confirmed",
+            description: "The agent may still be running. You can try again.",
+            data: { threadRef },
+          }),
+        ),
+      onFailed: (cause) =>
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not stop agent",
+            description: describeSubagentStopFailure(cause),
+            data: { threadRef },
+          }),
+        ),
+    });
   };
 
   const disabled = pending || unavailableReason !== null;
@@ -177,7 +146,7 @@ function AgentStopControl({
     return (
       <button
         type="button"
-        onClick={() => void stop()}
+        onClick={stop}
         disabled={disabled}
         aria-label={accessibleName}
         title={unavailableReason ?? undefined}
@@ -190,14 +159,16 @@ function AgentStopControl({
   return (
     <button
       type="button"
-      onClick={() => void stop()}
+      onClick={stop}
       disabled={disabled}
       aria-label={accessibleName}
       title={unavailableReason ?? (pending ? "Stopping…" : "Stop agent")}
       className={cn(
         "inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors enabled:hover:bg-destructive/10 enabled:hover:text-destructive-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-default",
         unavailableReason !== null && "opacity-50",
-        "pointer-coarse:relative pointer-coarse:after:absolute pointer-coarse:after:top-1/2 pointer-coarse:after:left-1/2 pointer-coarse:after:size-11 pointer-coarse:after:-translate-x-1/2 pointer-coarse:after:-translate-y-1/2",
+        // A wider touch target, but no taller than the shortest (30px) row, so
+        // it never takes a tap meant for the row above or below.
+        "pointer-coarse:relative pointer-coarse:after:absolute pointer-coarse:after:top-1/2 pointer-coarse:after:left-1/2 pointer-coarse:after:h-7 pointer-coarse:after:w-11 pointer-coarse:after:-translate-x-1/2 pointer-coarse:after:-translate-y-1/2",
       )}
     >
       {/* The composer's Stop generation square, without an icon import. */}

@@ -6,6 +6,7 @@ import type { HostedRpcCapability } from "@ryco/client-runtime/authorization/cap
 import type { SavedEnvironmentConnectionState } from "@ryco/client-runtime/connection";
 import type { WsConnectionStatus } from "@ryco/client-runtime/rpc";
 import type { SubagentStopIdentity } from "@ryco/client-runtime/state/session/subagentStop";
+import type { ScopedThreadRef } from "@ryco/contracts";
 
 import { hostedCapabilityCopy } from "~/hostedHub/switchTarget";
 
@@ -83,7 +84,10 @@ export function describeSubagentStopFailure(cause: unknown): string {
     : "Could not stop this agent.";
 }
 
-/** One activation of one task: a new runtime or attempt is a new stop. */
-export function subagentStopKey(identity: SubagentStopIdentity): string {
-  return `${identity.runtimeSessionId}:${identity.taskId}:${identity.attempt}`;
+/** One activation of one task of one thread: a new runtime or attempt is a new stop. */
+export function subagentStopKey(
+  threadRef: ScopedThreadRef,
+  identity: SubagentStopIdentity,
+): string {
+  return `${threadRef.environmentId}:${threadRef.threadId}:${identity.runtimeSessionId}:${identity.taskId}:${identity.attempt}`;
 }
