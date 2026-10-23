@@ -1,4 +1,5 @@
 import type { DesktopBridge, EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
+import { DESKTOP_THREAD_NOTIFICATION_BODY_MAX_LENGTH } from "@ryco/contracts/desktop-notifications";
 import type { ClientSettings } from "@ryco/contracts/settings";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
@@ -8,6 +9,7 @@ import {
   threadNotificationModeOf,
   threadNotificationTag,
   type ThreadAlertCopy,
+  type ThreadAlertPlan,
 } from "@ryco/client-runtime/state/settings";
 import {
   startThreadNotificationFeed,
@@ -20,6 +22,7 @@ import {
 } from "@ryco/client-runtime/state/threads";
 
 import type { stackedThreadToast, toastManager } from "../components/ui/toast";
+import { createThreadAlertBadge } from "./threadAlertBadge";
 import {
   createThreadAlertSoundPlayer,
   type ThreadAlertAudioContext,
@@ -68,7 +71,11 @@ export interface ThreadAlertsPlatform {
     readonly onClick: () => void;
     readonly onClose: () => void;
   }) => ShownWebNotification | null;
-  readonly desktopBridge: Pick<DesktopBridge, "notifyTurnComplete"> | undefined;
+  readonly desktopBridge: Pick<DesktopBridge, "notifyThread"> | undefined;
+  /** Shows how many threads alerted while Ryco was in the background; 0 clears it. */
+  readonly setBadge: (count: number) => void;
+  /** The desktop app cleared the badge itself, because one of its windows got focus. */
+  readonly subscribeBadgeCleared: (listener: () => void) => () => void;
   readonly createAudioContext: () => ThreadAlertAudioContext | null;
   readonly gestureTarget: Pick<EventTarget, "addEventListener" | "removeEventListener">;
   readonly hasUserActivation: () => boolean;
@@ -93,6 +100,9 @@ export function createBrowserThreadAlertsPlatform(): ThreadAlertsPlatform {
       return notification;
     },
     desktopBridge: window.desktopBridge,
+    setBadge: createThreadAlertBadge(window.desktopBridge),
+    subscribeBadgeCleared: (listener) =>
+      window.desktopBridge?.onNotificationBadgeCleared?.(listener) ?? (() => undefined),
     createAudioContext: () => (typeof AudioContext === "undefined" ? null : new AudioContext()),
     gestureTarget: window,
     hasUserActivation: () => navigator.userActivation?.hasBeenActive === true,
@@ -112,10 +122,10 @@ const ALERT_TOAST_VISIBLE_MS = 10_000;
 
 /**
  * Turns notification candidates into alerts: an "Open thread" toast while
- * Ryco is in front, a desktop or browser notification while it is not, and an
- * optional chime. The feed runs while any alert is on, so turning alerts back
- * on starts from a silent baseline. One toast and one notification per thread:
- * a newer alert replaces the older one.
+ * Ryco is in front, a desktop or browser notification and a badge count while
+ * it is not, and an optional chime. The feed runs while any alert is on, so
+ * turning alerts back on starts from a silent baseline. One toast and one
+ * notification per thread: a newer alert replaces the older one.
  */
 export function startThreadAlerts(
   deps: ThreadAlertsDeps,
@@ -123,6 +133,8 @@ export function startThreadAlerts(
 ): ThreadAlerts {
   const toastIdByThread = new Map<string, ToastId>();
   const webNotificationByTag = new Map<string, ShownWebNotification>();
+  // Threads that alerted while Ryco was in the background, until it is back.
+  const badgeThreads = new Set<string>();
   let feed: ThreadNotificationFeed | null = null;
   let sound: ThreadAlertSoundPlayer | null = null;
   let stopped = false;
@@ -170,19 +182,7 @@ export function startThreadAlerts(
     toastIdByThread.set(groupKey, toastId);
   };
 
-  const showSystemNotification = (event: ThreadNotificationEvent, copy: ThreadAlertCopy) => {
-    const { desktopBridge } = platform;
-    if (desktopBridge) {
-      desktopBridge
-        .notifyTurnComplete({
-          threadId: event.ref.threadId,
-          environmentId: event.ref.environmentId,
-          title: copy.title,
-          body: event.title,
-        })
-        .catch(() => undefined);
-      return;
-    }
+  const showWebNotification = (event: ThreadNotificationEvent, copy: ThreadAlertCopy) => {
     const tag = threadNotificationTag(event.ref);
     webNotificationByTag.get(tag)?.close();
     try {
@@ -208,32 +208,82 @@ export function startThreadAlerts(
     }
   };
 
+  const addToBadge = (groupKey: string) => {
+    if (badgeThreads.has(groupKey)) return;
+    badgeThreads.add(groupKey);
+    platform.setBadge(badgeThreads.size);
+  };
+
+  const clearBadge = () => {
+    if (badgeThreads.size === 0) return;
+    badgeThreads.clear();
+    platform.setBadge(0);
+  };
+
+  const playSound = (event: ThreadNotificationEvent, copy: ThreadAlertCopy) => {
+    sound?.play(copy.sound, () => {
+      const current = deps.readSettings();
+      return (
+        current !== null &&
+        hasThreadAlertSound(threadNotificationModeOf(current)) &&
+        feed?.isCurrent(event) === true
+      );
+    });
+  };
+
+  /** The in-app part of an alert: the toast, the badge count and the chime. */
+  const present = (
+    event: ThreadNotificationEvent,
+    copy: ThreadAlertCopy,
+    plan: ThreadAlertPlan,
+  ) => {
+    if (plan.toast) showToast(event, copy);
+    if (plan.badge) addToBadge(event.groupKey);
+    if (plan.sound) playSound(event, copy);
+  };
+
   const deliver = ({ event, delegated }: ThreadNotificationCandidate) => {
     const settings = deps.readSettings();
     if (stopped || settings === null || deps.isPhoneTier()) return;
-    const plan = planThreadAlert({
-      mode: threadNotificationModeOf(settings),
-      toasts: settings.threadNotificationToasts,
-      appFocused: platform.readAppFocused(),
-      threadVisible: deps
-        .readVisibleThreadRefs()
-        .some((ref) => scopedThreadKey(ref) === event.groupKey),
-      kind: event.kind,
-      delegated,
-    });
-    const copy = THREAD_ALERT_COPY[event.kind];
-    if (plan.toast) showToast(event, copy);
-    if (plan.system) showSystemNotification(event, copy);
-    if (plan.sound) {
-      sound?.play(copy.sound, () => {
-        const current = deps.readSettings();
-        return (
-          current !== null &&
-          hasThreadAlertSound(threadNotificationModeOf(current)) &&
-          feed?.isCurrent(event) === true
-        );
+    const planFor = (appFocused: boolean) =>
+      planThreadAlert({
+        mode: threadNotificationModeOf(settings),
+        toasts: settings.threadNotificationToasts,
+        appFocused,
+        threadVisible: deps
+          .readVisibleThreadRefs()
+          .some((ref) => scopedThreadKey(ref) === event.groupKey),
+        kind: event.kind,
+        delegated,
       });
+    const plan = planFor(platform.readAppFocused());
+    const copy = THREAD_ALERT_COPY[event.kind];
+    const notifyThread = platform.desktopBridge?.notifyThread;
+    if (!plan.system || notifyThread === undefined) {
+      if (plan.system) showWebNotification(event, copy);
+      present(event, copy, plan);
+      return;
     }
+    // An embedded page can hold the document's focus while the window is in
+    // front; the main process knows, and then the alert belongs in the app.
+    void notifyThread({
+      environmentId: event.ref.environmentId,
+      threadId: event.ref.threadId,
+      tag: threadNotificationTag(event.ref),
+      title: copy.title,
+      // A notification shows a line or two of it anyway.
+      body: event.title.slice(0, DESKTOP_THREAD_NOTIFICATION_BODY_MAX_LENGTH),
+    })
+      .catch((error: unknown) => {
+        console.warn("Thread notification failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return "unsupported" as const;
+      })
+      .then((result) => {
+        if (stopped || feed?.isCurrent(event) !== true) return;
+        present(event, copy, result === "window-focused" ? planFor(true) : plan);
+      });
   };
 
   const syncSettings = () => {
@@ -261,8 +311,12 @@ export function startThreadAlerts(
   };
 
   const unsubscribeSettings = deps.subscribeSettings(syncSettings);
-  // Coming back to Ryco answers the notifications that called you there.
-  const unsubscribeWindowFocus = platform.subscribeWindowFocus(closeWebNotifications);
+  // Coming back to Ryco answers the notifications and the badge that called you there.
+  const unsubscribeWindowFocus = platform.subscribeWindowFocus(() => {
+    closeWebNotifications();
+    clearBadge();
+  });
+  const unsubscribeBadgeCleared = platform.subscribeBadgeCleared(() => badgeThreads.clear());
   syncSettings();
 
   return {
@@ -274,12 +328,14 @@ export function startThreadAlerts(
       stopped = true;
       unsubscribeSettings();
       unsubscribeWindowFocus();
+      unsubscribeBadgeCleared();
       feed?.stop();
       feed = null;
       sound?.dispose();
       sound = null;
       for (const groupKey of Array.from(toastIdByThread.keys())) closeToast(groupKey);
       closeWebNotifications();
+      clearBadge();
     },
   };
 }

@@ -56,6 +56,11 @@
       "import": "./src/localIntroduction.ts",
       "require": "./src/localIntroduction.ts"
     },
+    "./desktop-notifications": {
+      "types": "./src/desktopNotifications.ts",
+      "import": "./src/desktopNotifications.ts",
+      "require": "./src/desktopNotifications.ts"
+    },
     "./desktop-native-node-claim": {
       "types": "./src/desktopNativeNodeClaim.ts",
       "import": "./src/desktopNativeNodeClaim.ts",

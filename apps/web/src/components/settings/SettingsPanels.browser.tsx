@@ -568,8 +568,6 @@ const createDesktopBridgeStub = (overrides?: {
     }),
     onUpdateState: () => () => {},
     respondToRemoteInstall: vi.fn().mockResolvedValue(idleUpdateState),
-    notifyTurnComplete: vi.fn().mockResolvedValue(undefined),
-    onTurnCompleteNotificationActivated: () => () => {},
   };
 };
 

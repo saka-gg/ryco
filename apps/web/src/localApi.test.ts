@@ -281,8 +281,6 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     respondToRemoteInstall: async () => {
       throw new Error("respondToRemoteInstall not implemented in test");
     },
-    notifyTurnComplete: async () => undefined,
-    onTurnCompleteNotificationActivated: () => () => undefined,
     ...overrides,
   };
 }

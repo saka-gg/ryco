@@ -11,9 +11,13 @@ connection supervisor. Every client runs one feed and owns only delivery:
 - The web app, in the browser and in the desktop window, turns candidates into in-app
   toasts, browser or desktop notifications, sound and a badge. A tiny shell component
   loads the alerts once the shell is idle; they wait for client settings to load, run the
-  feed while any alert is on, and stay off on the frozen phone tier.
-- The desktop main process shows the OS notification and the dock or taskbar badge for
-  the renderer.
+  feed while any alert is on, and stay off on the frozen phone tier. The badge counts the
+  threads that alerted while Ryco was in the background, on the favicon and the installed
+  app's icon in a browser, and clears when Ryco is back in front.
+- The desktop main process shows the OS notification, one per thread, and the dock or
+  taskbar badge for the renderer. While its window is in front it answers
+  `window-focused` instead, since an embedded page can hold the document's focus, and
+  the renderer alerts in the app.
 - The native app schedules local notifications while it runs.
 
 ## Integration

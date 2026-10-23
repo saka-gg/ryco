@@ -1,5 +1,4 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -100,14 +99,10 @@ export function ThreadAlertsBootstrap() {
   }, [navigateToThread]);
 
   // The main process reveals the window; the renderer opens the thread.
-  useEffect(() => {
-    const bridge = window.desktopBridge;
-    if (!bridge?.onTurnCompleteNotificationActivated) return;
-    return bridge.onTurnCompleteNotificationActivated((notification) => {
-      if (!notification.environmentId) return;
-      navigateToThread(scopeThreadRef(notification.environmentId, notification.threadId));
-    });
-  }, [navigateToThread]);
+  useEffect(
+    () => window.desktopBridge?.onThreadNotificationActivated?.(navigateToThread),
+    [navigateToThread],
+  );
 
   return null;
 }

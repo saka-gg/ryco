@@ -8,6 +8,7 @@ import {
   type OrchestrationThreadShell,
   type ScopedThreadRef,
 } from "@ryco/contracts";
+import type { DesktopThreadNotification } from "@ryco/contracts/desktop-notifications";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@ryco/contracts/settings";
 import type { EnvironmentConnection, ShellAcceptance } from "@ryco/client-runtime/connection";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -130,6 +131,8 @@ function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadSh
   let appFocused = true;
   let permission: NotificationPermission = "granted";
   const focusListeners = new Set<() => void>();
+  const badgeClearedListeners = new Set<() => void>();
+  const badges: number[] = [];
   const audio = fakeAudio();
   const webNotifications: Array<{
     readonly title: string;
@@ -158,6 +161,11 @@ function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadSh
       return notification;
     },
     desktopBridge: undefined,
+    setBadge: (count) => badges.push(count),
+    subscribeBadgeCleared: (listener) => {
+      badgeClearedListeners.add(listener);
+      return () => badgeClearedListeners.delete(listener);
+    },
     createAudioContext: () => audio as unknown as ThreadAlertAudioContext,
     gestureTarget: new EventTarget(),
     hasUserActivation: () => true,
@@ -189,6 +197,7 @@ function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadSh
     navigateToThread,
     platform,
     webNotifications,
+    badges,
     audio,
     /** The stream accepts a newer shell of one thread. */
     accept: (thread: OrchestrationThreadShell) => {
@@ -228,6 +237,10 @@ function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadSh
     },
     focusWindow: () => {
       for (const listener of Array.from(focusListeners)) listener();
+    },
+    /** The desktop app cleared the badge when one of its windows got focus. */
+    clearDesktopBadge: () => {
+      for (const listener of Array.from(badgeClearedListeners)) listener();
     },
   };
 }
@@ -319,23 +332,92 @@ describe("thread alerts", () => {
     test.accept(finished("b"));
     await test.settle();
     expect(test.webNotifications).toEqual([]);
+    // The badge needs no permission.
+    expect(test.badges).toEqual([1]);
   });
 
   it("notifies through the desktop app when it runs there", async () => {
     const test = harness({ threads: [shell("b")] });
-    const notifyTurnComplete = vi.fn(async () => undefined);
+    const notifyThread = vi.fn(
+      async (_notification: DesktopThreadNotification) => "shown" as const,
+    );
     test.setAppFocused(false);
-    test.start({ desktopBridge: { notifyTurnComplete } });
+    test.start({ desktopBridge: { notifyThread } });
 
     test.accept(finished("b"));
     await test.settle();
-    expect(notifyTurnComplete).toHaveBeenCalledWith({
-      threadId: ThreadId.make("b"),
+    expect(notifyThread).toHaveBeenCalledWith({
       environmentId: env,
+      threadId: ThreadId.make("b"),
+      tag: threadNotificationTag(ref("b")),
       title: "Finished",
       body: "Thread b",
     });
     expect(test.webNotifications).toEqual([]);
+    expect(test.toastManager.add).not.toHaveBeenCalled();
+    expect(test.badges).toEqual([1]);
+  });
+
+  it("alerts in the app when the desktop window turns out to be in front", async () => {
+    const test = harness({ threads: [shell("b")] });
+    const notifyThread = vi.fn(async () => "window-focused" as const);
+    // An embedded page holds the document's focus.
+    test.setAppFocused(false);
+    test.start({ desktopBridge: { notifyThread } });
+
+    test.accept(finished("b"));
+    await test.settle();
+    expect(addedToasts(test).map((toast) => toast.title)).toEqual(["Finished"]);
+    expect(test.badges).toEqual([]);
+  });
+
+  it("stays quiet in the desktop app about the thread on screen", async () => {
+    const test = harness({ threads: [shell("b")] });
+    const notifyThread = vi.fn(async () => "window-focused" as const);
+    test.patchSettings({ threadNotificationSound: true });
+    test.setAppFocused(false);
+    test.setVisible([ref("b")]);
+    test.start({ desktopBridge: { notifyThread } });
+
+    test.accept(finished("b"));
+    await test.settle();
+    expect(notifyThread).toHaveBeenCalled();
+    expect(test.toastManager.add).not.toHaveBeenCalled();
+    expect(test.audio.notes).toBe(0);
+    expect(test.badges).toEqual([]);
+  });
+
+  it("badges each thread once until Ryco is back in front", async () => {
+    const test = harness({ threads: [shell("b"), shell("c"), shell("d")] });
+    test.setAppFocused(false);
+    const alerts = test.start();
+
+    test.accept(shell("b", { hasPendingApprovals: true }));
+    test.accept(finished("b"));
+    test.accept(finished("c"));
+    await test.settle();
+    expect(test.badges).toEqual([1, 2]);
+
+    test.focusWindow();
+    expect(test.badges).toEqual([1, 2, 0]);
+
+    test.accept(finished("d"));
+    await test.settle();
+    alerts.stop();
+    expect(test.badges).toEqual([1, 2, 0, 1, 0]);
+  });
+
+  it("starts the count over once the desktop app cleared its badge", async () => {
+    const test = harness({ threads: [shell("b"), shell("c")] });
+    test.setAppFocused(false);
+    test.start();
+    test.accept(finished("b"));
+    await test.settle();
+
+    test.clearDesktopBadge();
+    test.accept(finished("c"));
+    await test.settle();
+    expect(test.badges).toEqual([1, 1]);
   });
 
   it("drops an alert whose shell was replaced before it was delivered", async () => {
