@@ -237,6 +237,7 @@ export const WEB_PURE_TEST_FILES = [
   "src/messageQueue.logic.test.ts",
   "src/pathEntry.test.ts",
   "src/perf/chatViewBundleSplitting.test.ts",
+  "src/perf/reactCompilerBailouts.test.ts",
   "src/perf/reactCompilerCoverage.test.ts",
   "src/perf/standardBootGraph.test.ts",
   "src/perf/tabSwitchInstrumentation.test.ts",

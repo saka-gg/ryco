@@ -119,6 +119,27 @@ Static prop-diff audit for hot-path components. Findings and Phase 2.1 follow-up
 
 Top priorities: stabilize `ChatComposer` `onSend` (not `useCallback` today), split `MessagesTimeline` row context, memoize sidebar `orderedProjectThreadKeys`.
 
+## React Compiler coverage
+
+The web build compiles web React source with the Oxc React Compiler
+(`oxc-transform-react` through `@vitejs/plugin-react`'s `compiler` option) in dev,
+build and the browser tests alike. `viteBuild/reactCompilerScope.ts` selects the
+modules it compiles. A function it cannot compile is skipped silently and only
+shows up as per-commit CPU, so `reactCompilerCoverage.test.ts` compiles every
+selected module the way the build does and checks:
+
+- the functions the compiler skips match `KNOWN_BAILOUTS` in
+  `reactCompilerKnownBailouts.ts` exactly. The list only shrinks: fix a new
+  bailout, or opt the function out;
+- every `"use no memo"` has an `OPTED_OUT` entry with its reason, and every
+  entry still opts out;
+- the hot sidebar, inbox, composer and timeline functions compile.
+
+On a failure the test prints the new or stale entries with the compiler's
+codeframes, plus the current list to paste after review. An `oxc-transform-react`
+or `@vitejs/plugin-react` bump changes compiled output: bump them on purpose,
+together, and run this test and the browser suite.
+
 ## Related docs
 
 - Server traces and OTLP export: `docs/observability.md`

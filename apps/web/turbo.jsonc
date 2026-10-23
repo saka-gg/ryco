@@ -4,8 +4,8 @@
   "tasks": {
     "dev": {
       "persistent": true,
-      // Lets `RYCO_REACT_COMPILER_CACHE=off bun dev:web` and a custom cache
-      // directory reach Vite (src/viteBuild/reactCompilerCache.ts).
+      // Unused: the web build no longer keeps a React Compiler transform
+      // cache. A follow-up removes these with the CI cache steps.
       "passThroughEnv": ["RYCO_REACT_COMPILER_CACHE", "RYCO_REACT_COMPILER_CACHE_DIR"],
     },
   },
