@@ -325,6 +325,12 @@ export function resolveManagedChatsRoot(
     : path.join(config.workspaceAccessRoot, ".ryco", "chats");
 }
 
+/**
+ * Where a running server records its pid and address, next to its database.
+ * Servers from before the database owner lock are recognized by it.
+ */
+export const SERVER_RUNTIME_STATE_FILE_NAME = "server-runtime.json";
+
 export const deriveServerPaths = Effect.fn(function* (
   baseDir: ServerConfigShape["baseDir"],
   devUrl: ServerConfigShape["devUrl"],
@@ -355,7 +361,7 @@ export const deriveServerPaths = Effect.fn(function* (
     terminalLogsDir: join(logsDir, "terminals"),
     anonymousIdPath: join(stateDir, "anonymous-id"),
     environmentIdPath: join(stateDir, "environment-id"),
-    serverRuntimeStatePath: join(stateDir, "server-runtime.json"),
+    serverRuntimeStatePath: join(stateDir, SERVER_RUNTIME_STATE_FILE_NAME),
     hubIdentityStatePath: join(stateDir, "hub-identity.json"),
     secretsDir: join(stateDir, "secrets"),
   };

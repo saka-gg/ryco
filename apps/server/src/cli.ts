@@ -136,7 +136,7 @@ import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import {
-  clearPersistedServerRuntimeState,
+  clearPersistedServerRuntimeStateIfStale,
   readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { WorkspacePaths } from "./workspace/Services/WorkspacePaths.ts";
@@ -1197,7 +1197,10 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       return Option.some(attempted.value);
     }
 
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+    yield* clearPersistedServerRuntimeStateIfStale(
+      config.serverRuntimeStatePath,
+      runtimeState.value,
+    );
     return Option.none<{ readonly origin: string }>();
   },
 );
