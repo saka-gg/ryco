@@ -16,6 +16,7 @@ import {
   TurnId,
   type AgentControlCapability,
   type OrchestrationCommand,
+  type OrchestrationEvent,
   type AgentControlProposal,
   type AgentControlProposalStreamProposalEvent,
 } from "@ryco/contracts";
@@ -25,6 +26,7 @@ import {
   Effect,
   Exit,
   Fiber,
+  Latch,
   Layer,
   Option,
   PubSub,
@@ -593,13 +595,35 @@ const providerRegistryStub = Layer.succeed(ProviderRegistry, {
   streamChanges: Stream.empty,
 });
 
-const makeMcpServerLayer = (settingsLayer: Layer.Layer<ServerSettingsService>) =>
+/** An engine double whose domain event feed never publishes unless a test passes its own. */
+const engineStub = (events?: PubSub.PubSub<OrchestrationEvent>) =>
+  Layer.effect(
+    OrchestrationEngineService,
+    Effect.gen(function* () {
+      const feed = events ?? (yield* PubSub.unbounded<OrchestrationEvent>());
+      return {
+        dispatch: die("dispatch"),
+        subscribeDomainEvents: PubSub.subscribe(feed),
+      } as unknown as OrchestrationEngineShape;
+    }),
+  );
+
+const makeMcpServerLayer = (
+  settingsLayer: Layer.Layer<ServerSettingsService>,
+  options: {
+    readonly projections?: ProjectionSnapshotQueryShape;
+    readonly events?: PubSub.PubSub<OrchestrationEvent>;
+  } = {},
+) =>
   AgentControlMcpServerLive.pipe(
     Layer.provideMerge(AgentControlSessionRegistryLive),
     Layer.provideMerge(AgentControlPolicyLive),
     Layer.provideMerge(proposalServiceStub),
     Layer.provideMerge(proposalEventsStub),
-    Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, projectionsStub)),
+    Layer.provideMerge(
+      Layer.succeed(ProjectionSnapshotQuery, options.projections ?? projectionsStub),
+    ),
+    Layer.provideMerge(engineStub(options.events)),
     Layer.provideMerge(providerRegistryStub),
     Layer.provideMerge(settingsLayer),
   );
@@ -652,6 +676,88 @@ it.live("attributes the initial listener start as a named startup phase", () =>
           phase.startsWith("agent-control.listener.start ("),
         ),
       );
+    }),
+  ),
+);
+
+it.live("wakes a private ryco_wait_threads on the engine's events for the waited thread", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const waitedThreadId = ThreadId.make("thread-waited");
+      let reads = 0;
+      const firstRead = yield* Latch.make(false);
+      const busyShell = {
+        id: waitedThreadId,
+        projectId: "project-1",
+        title: "Waited",
+        modelSelection: { instanceId: "codex", model: "gpt-5.6" },
+        runtimeMode: "auto",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurn: null,
+        createdAt: T0,
+        updatedAt: T0,
+        archivedAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+        backgroundLiveness: "working",
+      };
+      const projections: ProjectionSnapshotQueryShape = {
+        ...projectionsStub,
+        getThreadShellById: () =>
+          Effect.sync(() => {
+            reads += 1;
+            return Option.some(busyShell as never);
+          }).pipe(Effect.tap(() => firstRead.open)),
+      };
+      const context = yield* Layer.build(
+        makeMcpServerLayer(ServerSettingsService.layerTest({ agentControl: { enabled: true } }), {
+          projections,
+          events,
+        }),
+      );
+      const registry = Context.get(context, AgentControlSessionRegistry);
+      const endpoint = yield* registry.currentEndpoint;
+      const url = (endpoint as Option.Some<{ url: string }>).value.url;
+      const lease = yield* registry.issueLease({
+        threadId: callerThreadId,
+        providerInstanceId: codexInstance,
+        runtimeSessionId: RuntimeSessionId.make("runtime-wait"),
+        capabilities: [AGENT_CONTROL_CAPABILITIES.read],
+        injectionMode: "codex-http",
+      });
+      const bearer = Redacted.value(
+        (lease as Option.Some<AgentControlIssuedLease>).value.credential,
+      );
+      const call = yield* Effect.forkChild(
+        rpc(url, bearer, "tools/call", {
+          name: "ryco_wait_threads",
+          arguments: { threadIds: [waitedThreadId], timeoutMs: 1_200 },
+        }),
+      );
+      // The wait subscribes before its first read.
+      yield* firstRead.await;
+      yield* PubSub.publish(events, {
+        type: "thread.session-set",
+        aggregateKind: "thread",
+        aggregateId: waitedThreadId,
+        payload: { threadId: waitedThreadId },
+      } as unknown as OrchestrationEvent);
+      const response = yield* Fiber.join(call);
+      const result = parseBody(response).result as {
+        readonly isError?: boolean;
+        readonly structuredContent: { readonly timedOut: boolean };
+      };
+      assert.isUndefined(result.isError);
+      assert.isTrue(result.structuredContent.timedOut);
+      // The first check, the woken check and the final check at the deadline, then the result
+      // read. Without the engine's events the wait reads 3 times, the old 500 ms poll 5 times.
+      assert.strictEqual(reads, 4);
     }),
   ),
 );
@@ -720,11 +826,6 @@ const makeDeliveryLayer = (settingsLayer: Layer.Layer<ServerSettingsService>) =>
       Layer.succeed(WorkspaceAccessPolicy, {
         assertExistingPath: die("assertExistingPath"),
       } as unknown as WorkspaceAccessPolicyShape),
-    ),
-    Layer.provideMerge(
-      Layer.succeed(OrchestrationEngineService, {
-        dispatch: die("dispatch"),
-      } as unknown as OrchestrationEngineShape),
     ),
   );
 

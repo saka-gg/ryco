@@ -27,11 +27,14 @@ import {
   type ChatFileAttachment,
   type ClientOrchestrationCommand,
   type MessageId,
+  type OrchestrationEvent,
+  type OrchestrationEventType,
   type ThreadDelegatedCreateCommand,
 } from "@ryco/contracts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, FileSystem, Layer, Option, PubSub, Ref, Schema } from "effect";
+import { Clock, Effect, Fiber, FileSystem, Layer, Option, PubSub, Ref, Schema } from "effect";
+import { TestClock } from "effect/testing";
 
 import fs from "node:fs";
 import os from "node:os";
@@ -181,7 +184,14 @@ const makeTestExecution = (input: {
       OrchestrationCommandApplication,
       withApplyInternal(input.commandApplication) as never,
     ),
-    Effect.provideService(OrchestrationEngineService, (input.engine ?? {}) as never),
+    // Waits subscribe to domain events; doubles without a feed get one that never publishes.
+    Effect.provideService(OrchestrationEngineService, {
+      subscribeDomainEvents: Effect.flatMap(
+        PubSub.unbounded<OrchestrationEvent>(),
+        PubSub.subscribe,
+      ),
+      ...(input.engine as object | undefined),
+    } as never),
     Effect.provideService(ProjectionSnapshotQuery, input.projections as never),
     Effect.provideService(GitWorkflowService, (input.git ?? {}) as never),
     Effect.provideService(WorkspaceAccessPolicy, (input.workspaceAccess ?? {}) as never),
@@ -867,6 +877,237 @@ it.effect("records the requested turn and observed settled state for interrupts"
   }),
 );
 
+/** Lets forked fibers run without advancing the test clock; true once `fiber` has ended. */
+const awaitDone = (fiber: Fiber.Fiber<unknown, unknown>) =>
+  Effect.gen(function* () {
+    for (let turn = 0; turn < 50 && fiber.pollUnsafe() === undefined; turn += 1) {
+      yield* Effect.yieldNow;
+    }
+    return fiber.pollUnsafe() !== undefined;
+  });
+
+const targetEvent = (type: OrchestrationEventType) =>
+  ({
+    sequence: 1,
+    eventId: `event-${type}`,
+    aggregateKind: "thread",
+    aggregateId: threadId,
+    occurredAt: now,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type,
+    payload: { threadId },
+  }) as unknown as OrchestrationEvent;
+
+/**
+ * An executor whose target thread the test flips, with a domain event feed the test publishes
+ * to. `reads` counts target shell reads.
+ */
+const makeTargetWaitHarness = (proposal: AgentControlProposal) =>
+  Effect.gen(function* () {
+    const targetTurnId = TurnId.make("turn-target");
+    const runningTarget = {
+      ...target,
+      session: {
+        threadId,
+        status: "running" as const,
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeSessionId: RuntimeSessionId.make("runtime-target"),
+        runtimeMode: "auto" as const,
+        activeTurnId: targetTurnId,
+        lastError: null,
+        updatedAt: now,
+      },
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const events = yield* PubSub.unbounded<OrchestrationEvent>();
+    const commands = yield* Ref.make<ReadonlyArray<ClientOrchestrationCommand>>([]);
+    let current: typeof target = runningTarget;
+    let reads = 0;
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      engine: { subscribeDomainEvents: PubSub.subscribe(events) },
+      commandApplication: {
+        apply: (command: ClientOrchestrationCommand) =>
+          Ref.updateAndGet(commands, (all) => [...all, command]).pipe(
+            Effect.map((all) => ({ sequence: all.length })),
+          ),
+        applyWithDispatcher: () => Effect.die("unused"),
+      },
+      projections: {
+        getThreadShellById: () =>
+          Effect.sync(() => {
+            reads += 1;
+            return Option.some(current);
+          }),
+      },
+    });
+    return {
+      execution,
+      stores,
+      commands,
+      targetTurnId,
+      reads: () => reads,
+      running: () => runningTarget,
+      setTarget: (next: typeof target) => {
+        current = next;
+      },
+      publish: (type: OrchestrationEventType) => PubSub.publish(events, targetEvent(type)),
+    };
+  });
+
+const interruptProposal = (() => {
+  const interruptPlan = {
+    kind: "interruptThread" as const,
+    threadId,
+    turnId: TurnId.make("turn-target"),
+  };
+  return {
+    ...approvedProposal,
+    proposalId: AgentControlProposalId.make("proposal-interrupt-event"),
+    requestId: AgentControlRequestId.make("request-interrupt-event"),
+    plan: interruptPlan,
+    planDigest: computeAgentControlPlanDigest(interruptPlan),
+  } satisfies AgentControlProposal;
+})();
+
+it.effect("settles an interrupt from the session event, not a poll", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(interruptProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(interruptProposal.proposalId),
+    );
+    // Fails on the 100 ms poll: virtual time never advances here.
+    assert.isFalse(yield* awaitDone(fiber));
+    // The target check, then the first settlement check.
+    assert.strictEqual(harness.reads(), 2);
+
+    harness.setTarget(target);
+    yield* harness.publish("thread.session-set");
+    assert.isTrue(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 3);
+    assert.strictEqual(yield* Clock.currentTimeMillis, 0);
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "completed");
+    if (settled.result?.outcome !== "completed") return;
+    assert.deepStrictEqual(settled.result.execution?.interrupt, {
+      requestedTurnId: harness.targetTurnId,
+      settledStatus: "idle",
+      settledActiveTurnId: null,
+    });
+  }),
+);
+
+it.effect("re-checks a second session event within 100 ms, as the poll did", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(interruptProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(interruptProposal.proposalId),
+    );
+    assert.isFalse(yield* awaitDone(fiber));
+    // A session update that does not settle the interrupt: checked at once.
+    yield* harness.publish("thread.session-set");
+    assert.isFalse(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 3);
+    // The settling update right behind it waits for the trailing check, at most one old poll
+    // interval later.
+    harness.setTarget(target);
+    yield* harness.publish("thread.session-set");
+    assert.isFalse(yield* awaitDone(fiber));
+    yield* TestClock.adjust(99);
+    assert.isFalse(yield* awaitDone(fiber));
+    yield* TestClock.adjust(1);
+    assert.isTrue(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 4);
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "completed");
+  }),
+);
+
+it.effect("does not re-read an interrupt target for its activity or messages", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(interruptProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(interruptProposal.proposalId),
+    );
+    assert.isFalse(yield* awaitDone(fiber));
+    for (const type of [
+      "thread.activity-appended",
+      "thread.message-sent",
+      "thread.turn-diff-completed",
+    ] as const) {
+      yield* harness.publish(type);
+    }
+    assert.isFalse(yield* awaitDone(fiber));
+    assert.strictEqual(harness.reads(), 2);
+    yield* Fiber.interrupt(fiber);
+  }),
+);
+
+it.effect("queues a message once the busy target goes idle", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(approvedProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(approvedProposal.proposalId),
+    );
+    assert.isFalse(yield* awaitDone(fiber));
+    assert.deepStrictEqual(yield* Ref.get(harness.commands), []);
+
+    harness.setTarget(target);
+    yield* harness.publish("thread.session-set");
+    assert.isTrue(yield* awaitDone(fiber));
+    assert.deepStrictEqual(
+      (yield* Ref.get(harness.commands)).map((command) => command.type),
+      ["thread.turn.start"],
+    );
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "completed");
+    if (settled.result?.outcome !== "completed") return;
+    assert.strictEqual(settled.result.execution?.delivery, "queued");
+  }),
+);
+
+it.effect("fails an idle wait after 60 s with 13 checks instead of 600", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(approvedProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(approvedProposal.proposalId),
+    );
+    assert.isFalse(yield* awaitDone(fiber));
+    yield* TestClock.adjust(59_999);
+    assert.isFalse(yield* awaitDone(fiber));
+    yield* TestClock.adjust(1);
+    assert.isTrue(yield* awaitDone(fiber));
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "failed");
+    // The target check, then checks at 0, 5, ..., 60 s.
+    assert.strictEqual(harness.reads(), 1 + 13);
+    assert.deepStrictEqual(yield* Ref.get(harness.commands), []);
+  }),
+);
+
+it.effect("fails a queue wait at once when the target is archived", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeTargetWaitHarness(approvedProposal);
+    const fiber = yield* Effect.forkChild(
+      harness.execution.executeApproved(approvedProposal.proposalId),
+    );
+    assert.isFalse(yield* awaitDone(fiber));
+    // Archived while its turn still runs: only the archive can end this wait.
+    harness.setTarget({ ...harness.running(), archivedAt: now });
+    yield* harness.publish("thread.archived");
+    assert.isTrue(yield* awaitDone(fiber));
+    assert.strictEqual(yield* Clock.currentTimeMillis, 0);
+    assert.strictEqual(harness.reads(), 3);
+    const settled = yield* Ref.get(harness.stores.proposalRef);
+    assert.strictEqual(settled.result?.outcome, "failed");
+    assert.deepStrictEqual(yield* Ref.get(harness.commands), []);
+  }),
+);
 it.effect(
   "restart recovery compensates only durably owned resources and settles terminal failure",
   () =>

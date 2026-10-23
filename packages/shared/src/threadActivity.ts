@@ -83,6 +83,19 @@ export function capThreadActivitiesPreservingMilestones<
   return [...preserved, ...(checkpoint ? [checkpoint] : []), ...recent];
 }
 
+/**
+ * The activity kinds `derivePendingThreadRequests` reads: they open, resolve or clear a pending
+ * approval or user-input request.
+ */
+export const PENDING_REQUEST_ACTIVITY_KINDS = [
+  "approval.requested",
+  "approval.resolved",
+  "provider.approval.respond.failed",
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+] as const;
+
 interface PendingThreadRequestActivity {
   readonly kind: string;
   readonly payload: unknown;

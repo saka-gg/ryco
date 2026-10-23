@@ -5,8 +5,9 @@ import {
   RuntimeSessionId,
   ThreadId,
   OrchestrationProjectShell,
+  type OrchestrationEvent,
 } from "@ryco/contracts";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, PubSub, Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentControlMcpToolDeps, AgentControlMcpTools } from "./tools.ts";
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
@@ -61,7 +62,12 @@ const base: AgentControlMcpTools = {
       structuredContent: { ...(args as object), messages: [{ text: "Completed" }] },
     }),
 };
-const fixture = (overrides: Partial<AgentControlMcpToolDeps> = {}) => {
+const fixture = (
+  overrides: Partial<AgentControlMcpToolDeps> = {},
+  events: PubSub.PubSub<OrchestrationEvent> = Effect.runSync(
+    PubSub.unbounded<OrchestrationEvent>(),
+  ),
+) => {
   const projections = {
     getThreadShellById: vi.fn(() => Effect.succeed(Option.some(shell))),
     getProjectShellById: vi.fn(() => Effect.succeed(Option.some(project))),
@@ -82,7 +88,12 @@ const fixture = (overrides: Partial<AgentControlMcpToolDeps> = {}) => {
     projections,
     ...overrides,
   } as unknown as AgentControlMcpToolDeps;
-  return { projections, deps, tools: withInspectionTools(base, deps) };
+  const domainEvents = { subscribeDomainEvents: PubSub.subscribe(events) };
+  return {
+    projections,
+    deps: { ...deps, domainEvents },
+    tools: withInspectionTools(base, { ...deps, domainEvents }),
+  };
 };
 const call = (tools: AgentControlMcpTools, name: string, args: unknown) =>
   Effect.runPromise(tools.callTool(session, name, args));
@@ -188,6 +199,35 @@ describe("private thread inspection", () => {
         })
       ).structuredContent,
     ).toMatchObject({ timedOut: false });
+  });
+  it("wakes ryco_wait_threads on the waited thread's session event", async () => {
+    const events = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
+    const { tools, projections } = fixture({}, events);
+    let firstRead: () => void = () => {};
+    const firstReadDone = new Promise<void>((resolve) => {
+      firstRead = resolve;
+    });
+    projections.getThreadShellById.mockImplementation(() =>
+      Effect.sync(() => {
+        firstRead();
+        return Option.some({ ...shell, backgroundLiveness: "working" as const });
+      }),
+    );
+    const pending = call(tools, "ryco_wait_threads", { threadIds: ["child"], timeoutMs: 1_200 });
+    // The wait subscribes before its first read.
+    await firstReadDone;
+    await Effect.runPromise(
+      PubSub.publish(events, {
+        type: "thread.session-set",
+        aggregateKind: "thread",
+        aggregateId: "child",
+        payload: { threadId: "child" },
+      } as unknown as OrchestrationEvent),
+    );
+    expect((await pending).structuredContent).toMatchObject({ timedOut: true });
+    // The first check, the woken check and the final check at the deadline, then the result
+    // read. A wait without the event feed reads 3 times, the old 500 ms poll 5 times.
+    expect(projections.getThreadShellById).toHaveBeenCalledTimes(4);
   });
   it("does not report an accepted running turn as completed before session startup", async () => {
     const { tools, projections } = fixture();

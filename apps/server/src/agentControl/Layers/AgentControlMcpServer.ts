@@ -75,7 +75,8 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
   const config = yield* Effect.serviceOption(ServerConfig);
-  const engine = yield* Effect.serviceOption(OrchestrationEngineService);
+  // Required: `ryco_wait_threads` wakes on its events (without them it would only re-check every 5 s).
+  const engine = yield* OrchestrationEngineService;
   const htmlRender = yield* Effect.serviceOption(HtmlRender);
 
   const files = yield* Effect.serviceOption(WorkspaceFileSystem);
@@ -103,6 +104,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   };
   const inspectionTools = withInspectionTools(makeAgentControlMcpTools(toolDeps), {
     ...toolDeps,
+    domainEvents: engine,
     ...(Option.isSome(files) ? { files: files.value } : {}),
     ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
     ...(Option.isSome(terminals) ? { terminals: terminals.value } : {}),
@@ -126,14 +128,14 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   // Tools that show an attachment in the caller's turn share one delivery, so
   // file attachments and HTML renders draw on one serialized per-turn budget.
   const deliveryDeps =
-    Option.isSome(config) && Option.isSome(workspaceAccess) && Option.isSome(engine)
+    Option.isSome(config) && Option.isSome(workspaceAccess)
       ? {
           attachmentsDir: config.value.attachmentsDir,
           registry,
           policy,
           projections,
           workspaceAccess: workspaceAccess.value,
-          engine: engine.value,
+          engine,
         }
       : undefined;
   const delivery = deliveryDeps ? yield* makeTurnAttachmentDelivery(deliveryDeps) : undefined;

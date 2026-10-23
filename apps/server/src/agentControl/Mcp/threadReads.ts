@@ -40,6 +40,7 @@ import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
+import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   readScopedShellSnapshot,
   readThreadKeyPage,
@@ -48,6 +49,7 @@ import {
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
+import { threadWakeSource, waitUntil, type WaitWakeSource } from "../eventDrivenWait.ts";
 import { redactAgentControlSecrets } from "../ProviderInjection.ts";
 
 /** Bounded, presentation-safe tool failure. Never carries internals. */
@@ -433,48 +435,61 @@ const threadSettled = (thread: OrchestrationThreadShell): boolean =>
     !thread.backgroundLiveness &&
     thread.latestTurn?.state !== "running");
 
+/** What can end a thread wait before its next safety-net re-check. */
+export interface ThreadWaitWake {
+  /** The node's live orchestration events: a waited thread settling wakes the wait at once. */
+  readonly domainEvents: Pick<OrchestrationEngineShape, "subscribeDomainEvents">;
+  /** More change feeds that can end the wait (the external integration's grant changes). */
+  readonly extra?: ReadonlyArray<WaitWakeSource>;
+}
+
 /**
- * Wait until any requested thread settles or needs attention. `access` runs
- * before every poll and yields the caller's current visibility, so a revoked
- * grant or disabled policy ends the wait instead of leaking later state.
+ * Wait until any requested thread settles or needs attention. The wait wakes on
+ * the threads' orchestration events that can settle them (and on `wake.extra`),
+ * and re-checks at least every 5 seconds otherwise. `access` runs before every
+ * check and yields the caller's current visibility, so a revoked grant or
+ * disabled policy ends the wait instead of leaking later state.
  */
 export const waitThreads = <E>(
   projections: ProjectionSnapshotQueryShape,
   input: typeof AgentControlWaitThreadsInput.Type,
   access: Effect.Effect<ThreadVisibility, E>,
+  wake: ThreadWaitWake,
 ) =>
   Effect.gen(function* () {
-    const deadline =
-      Date.now() +
-      Math.min(input.timeoutMs ?? WAIT_THREADS_TIMEOUT_MS_DEFAULT, WAIT_THREADS_TIMEOUT_MS_MAX);
     const ids = [...new Set(input.threadIds)];
-    while (true) {
-      const visible = yield* access;
-      const states = yield* Effect.forEach(ids, (id) => projections.getThreadShellById(id), {
-        concurrency: 4,
-      });
-      const ready = states.some(
-        (state) => Option.isNone(state) || !visible(state.value) || threadSettled(state.value),
-      );
-      if (ready || Date.now() >= deadline) {
-        const threads = yield* Effect.forEach(
-          ids,
-          (threadId) =>
-            readThreadPage(projections, { threadId, messageLimit: 5 }, visible).pipe(
-              Effect.match({
-                onFailure: (failure) => ({
-                  threadId,
-                  error: [{ type: "text" as const, text: failure.reason }],
-                }),
-                onSuccess: (result) => ({ threadId, result }),
-              }),
-            ),
-          { concurrency: 4 },
+    const { value: visible, timedOut } = yield* waitUntil({
+      sources: [threadWakeSource(wake.domainEvents, ids), ...(wake.extra ?? [])],
+      timeoutMs: Math.min(
+        input.timeoutMs ?? WAIT_THREADS_TIMEOUT_MS_DEFAULT,
+        WAIT_THREADS_TIMEOUT_MS_MAX,
+      ),
+      check: Effect.gen(function* () {
+        const visible = yield* access;
+        const states = yield* Effect.forEach(ids, (id) => projections.getThreadShellById(id), {
+          concurrency: 4,
+        });
+        const done = states.some(
+          (state) => Option.isNone(state) || !visible(state.value) || threadSettled(state.value),
         );
-        return { timedOut: !ready, threads };
-      }
-      yield* Effect.sleep(Math.min(500, Math.max(1, deadline - Date.now())));
-    }
+        return { done, value: visible };
+      }),
+    });
+    const threads = yield* Effect.forEach(
+      ids,
+      (threadId) =>
+        readThreadPage(projections, { threadId, messageLimit: 5 }, visible).pipe(
+          Effect.match({
+            onFailure: (failure) => ({
+              threadId,
+              error: [{ type: "text" as const, text: failure.reason }],
+            }),
+            onSuccess: (result) => ({ threadId, result }),
+          }),
+        ),
+      { concurrency: 4 },
+    );
+    return { timedOut, threads };
   });
 
 export interface InspectThreadDeps {
