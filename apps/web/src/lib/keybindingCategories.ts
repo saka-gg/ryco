@@ -97,7 +97,12 @@ const THREAD_ATTENTION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
 
 // Back and forward (Navigation), and the thread commands that ship with them (Threads, sort
 // weights from 40).
-const NAVIGATION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+const NAVIGATION_COMMAND_META = {
+  "navigation.back": { title: "Go back", sortWeight: 1 },
+  "navigation.forward": { title: "Go forward", sortWeight: 2 },
+  "thread.interrupt": { title: "Interrupt turn", sortWeight: 40 },
+  "thread.copyReference": { title: "Copy pull request link or thread ID", sortWeight: 41 },
+} satisfies StaticCommandMetaGroup;
 
 // Close and reopen views and tabs.
 const VIEW_COMMAND_META = {} satisfies StaticCommandMetaGroup;

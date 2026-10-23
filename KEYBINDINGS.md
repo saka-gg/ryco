@@ -146,7 +146,18 @@ focused control.
 
 <!-- Attention commands -->
 
-<!-- History and navigation commands -->
+#### History and navigation
+
+- `navigation.back` / `navigation.forward`: go back or forward through the pages you opened in this
+  window (`mod+[` / `mod+]` outside the terminal). They never leave Ryco. They also work while you
+  type in the composer; other text fields keep the keys.
+- `thread.interrupt`: stop the running turn in the focused chat, like the stop button (`mod+.`
+  outside the terminal). It also works from the composer.
+- `thread.copyReference`: copy the thread's pull request link, or its thread ID when it has none
+  (`mod+shift+c` outside the terminal). Browsers on Windows and Linux may keep Ctrl+Shift+C for
+  their developer tools.
+
+These defaults live in the app, not on the node, so older apps have no keys for them.
 
 <!-- View and tab commands -->
 

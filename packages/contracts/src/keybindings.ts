@@ -65,7 +65,12 @@ export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [] as const;
 export const THREAD_ATTENTION_KEYBINDING_COMMANDS = [] as const;
 
 // Back and forward, and the thread commands that ship with them.
-export const NAVIGATION_KEYBINDING_COMMANDS = [] as const;
+export const NAVIGATION_KEYBINDING_COMMANDS = [
+  "navigation.back",
+  "navigation.forward",
+  "thread.interrupt",
+  "thread.copyReference",
+] as const;
 
 // Close and reopen views and tabs.
 export const VIEW_KEYBINDING_COMMANDS = [] as const;
