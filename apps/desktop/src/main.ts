@@ -101,6 +101,7 @@ import {
   isAppLoadRequestCurrent,
   isEarlyAppLoadStalled,
   resolveBackendAppWindowAction,
+  resolveCrashedAppWindowRecovery,
 } from "./backendAppWindowLoad.ts";
 import {
   createDesktopBackendChildEnv,
@@ -176,6 +177,12 @@ import {
 import { isBackendReadinessAborted, waitForHttpReady } from "./backendReadiness.ts";
 import { createBackendRestartBackoff } from "./backendRestartBackoff.ts";
 import { sanitizeLogValue } from "./logValue.ts";
+import { runRecoveryDialogLoop } from "./recoveryDialog.ts";
+import {
+  attachRendererCrashRecovery,
+  type RendererCrashRecovery,
+  type RendererRecoveryAttempt,
+} from "./rendererCrashRecovery.ts";
 import {
   createDesktopWindowStateStore,
   DESKTOP_WINDOW_MIN_SIZE,
@@ -575,6 +582,8 @@ const desktopWindowState = createDesktopWindowStateStore({
     ozonePlatform: app.commandLine.getSwitchValue("ozone-platform"),
   }),
 });
+// Reloads each app window whose renderer process died (keyed like appWindowContents).
+const rendererCrashRecoveries = new WeakMap<Electron.WebContents, RendererCrashRecovery>();
 // The backend child each window's app document was requested from, and when.
 // A load requested when the backend bound its port is not repeated at its
 // readiness (unless it failed or the backend took too long; see
@@ -1862,7 +1871,13 @@ function loadPackagedBackendAppWindow(
     notifyRenderersToReconnect();
     return;
   }
+  requestPackagedAppLoad(window, reason);
+}
 
+/** Load the app document from the current backend, once renderer cache maintenance is done. */
+function requestPackagedAppLoad(window: BrowserWindow, reason: string): void {
+  const contents = window.webContents;
+  const child = backendProcess;
   const request: AppLoadRequest<ChildProcess.ChildProcess> | null =
     child === null ? null : { backend: child, requestedAtMs: performance.now(), failed: false };
   if (request !== null) appLoadRequestedFrom.set(contents, request);
@@ -1926,6 +1941,36 @@ function returnWindowToBootPage(window: BrowserWindow, reason: string): void {
   appLoadRequestedFrom.delete(window.webContents);
   writeDesktopLogHeader(`window returns to the boot page reason=${reason}`);
   loadDesktopBootPage(window);
+}
+
+/**
+ * Revive a window whose renderer process died (see rendererCrashRecovery.ts).
+ * The first automatic reload of a crash streak keeps the route; later ones
+ * and the dialog's Reload open the app root, in case the route caused it.
+ */
+function recoverCrashedAppWindow(window: BrowserWindow, attempt: RendererRecoveryAttempt): void {
+  if (window.isDestroyed()) return;
+  const contents = window.webContents;
+  const keepRoute = attempt === 1;
+  if (isDevelopment) {
+    logDesktopEvent(`renderer reload attempt=${attempt} via=${keepRoute ? "reload" : "dev-url"}`);
+    if (keepRoute) contents.reload();
+    else void window.loadURL(resolveDesktopDevServerUrl());
+    return;
+  }
+  const recovery = resolveCrashedAppWindowRecovery({
+    currentUrl: contents.getURL(),
+    backendHttpUrl,
+    // backendReadyChild is never cleared and backendProcess is null once the
+    // child exits: equal means the current child is serving.
+    backendServing: backendProcess !== null && backendReadyChild === backendProcess,
+    keepRoute,
+  });
+  logDesktopEvent(`renderer reload attempt=${attempt} via=${recovery}`);
+  if (recovery === "reload") contents.reload();
+  else if (recovery === "load-app") {
+    requestPackagedAppLoad(window, `renderer-recovery attempt=${attempt}`);
+  } else returnWindowToBootPage(window, "renderer crashed while the backend is not serving");
 }
 
 /**
@@ -3467,37 +3512,39 @@ function handleBackendStartFailure(
 async function showBackendStartupFailure(detail: string): Promise<void> {
   const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
   if (window && !window.isDestroyed()) revealWindow(window);
-  for (;;) {
-    const options = {
-      type: "error" as const,
-      title: `${APP_DISPLAY_NAME} could not start`,
-      message: `${APP_DISPLAY_NAME} could not start its local server.`,
-      detail,
-      buttons: ["Retry", "Open Logs", "Quit"],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-    };
-    const { response } =
-      window && !window.isDestroyed()
-        ? await dialog.showMessageBox(window, options)
-        : await dialog.showMessageBox(options);
-    if (isQuitting) return;
-    if (response === 1) {
-      await shell.openPath(LOG_DIR).catch(() => "");
-      continue;
-    }
-    if (response === 0) {
+  const options = {
+    type: "error" as const,
+    title: `${APP_DISPLAY_NAME} could not start`,
+    message: `${APP_DISPLAY_NAME} could not start its local server.`,
+    detail,
+    buttons: ["Retry", "Open Logs", "Quit"],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  };
+  await runRecoveryDialogLoop({
+    show: () => showMessageBoxForWindow(window, options),
+    isCancelled: () => isQuitting,
+    openLogs: () => shell.openPath(LOG_DIR),
+    primary: () => {
       writeDesktopLogHeader("backend start retry requested");
       backendStartupHalted = false;
       backendFailurePolicy.reset();
       backendRestartBackoff.reset();
       startBackend();
-      return;
-    }
-    app.quit();
-    return;
-  }
+    },
+    quit: () => app.quit(),
+  });
+}
+
+/** A message box as a sheet on `window` while it is open, app-modal otherwise. */
+function showMessageBoxForWindow(
+  window: BrowserWindow | null,
+  options: Electron.MessageBoxOptions,
+): Promise<Electron.MessageBoxReturnValue> {
+  return window && !window.isDestroyed()
+    ? dialog.showMessageBox(window, options)
+    : dialog.showMessageBox(options);
 }
 
 function describeBackendStartupFailure(input: {
@@ -3808,6 +3855,7 @@ function registerIpcHandlers(): void {
     if (report === null) return;
     // Every report follows the primary shell becoming usable.
     appShellUsableContents.add(event.sender);
+    rendererCrashRecoveries.get(event.sender)?.noteShellUsable();
     markDesktopStartupPhase(
       `desktop.window.app.${report.phase}`,
       formatRendererStartupMarks(report.marks),
@@ -5102,8 +5150,41 @@ function createWindow(): BrowserWindow {
       // A dead renderer cannot reconnect in place; a later backend crash
       // restart must reload it instead of nudging it.
       appShellUsableContents.delete(window.webContents);
+      // The reload itself is scheduled by the crash recovery attached below.
     });
   }
+
+  rendererCrashRecoveries.set(
+    window.webContents,
+    attachRendererCrashRecovery(window, {
+      appName: APP_DISPLAY_NAME,
+      now: () => performance.now(),
+      isQuitting: () => isQuitting,
+      isWindowClosed: () => window.isDestroyed(),
+      // A backend app load requested after the crash (the crash marked any
+      // earlier request failed) and still waiting to navigate.
+      isLoadPending: () => {
+        if (isDevelopment || window.isDestroyed()) return false;
+        const request = appLoadRequestedFrom.get(window.webContents);
+        return request !== undefined && !request.failed;
+      },
+      describeUrl: () =>
+        window.isDestroyed()
+          ? "closed"
+          : classifyDesktopWindowStartupUrl(window.webContents.getURL()),
+      recover: (attempt) => recoverCrashedAppWindow(window, attempt),
+      reveal: () => revealWindow(window),
+      showMessageBox: (options) =>
+        showMessageBoxForWindow(window, { ...options, buttons: [...options.buttons] }),
+      openLogs: () => shell.openPath(LOG_DIR),
+      quit: () => app.quit(),
+      log: logDesktopEvent,
+      onRendererGone: () =>
+        desktopSshEnvironmentBridge?.cancelPendingPasswordPrompts(
+          "SSH authentication was cancelled because the app window crashed.",
+        ),
+    }),
+  );
 
   window.on("closed", () => {
     desktopSshEnvironmentBridge?.cancelPendingPasswordPrompts(
@@ -5534,6 +5615,14 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin" && !isQuitting) {
     app.quit();
   }
+});
+
+// Log only: Chromium restarts a GPU or utility process itself.
+app.on("child-process-gone", (_event, details) => {
+  if (isQuitting || details.reason === "clean-exit") return;
+  logDesktopEvent(
+    `child process gone type=${details.type} reason=${details.reason} exitCode=${details.exitCode}${details.name ? ` name=${sanitizeLogValue(details.name)}` : ""}`,
+  );
 });
 
 if (process.platform !== "win32") {

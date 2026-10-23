@@ -3,9 +3,10 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
 
 /**
- * main.ts only wires window-state persistence (windowState.ts holds the
- * behaviour). A misplaced call there (maximize after the first show, a flush
- * lost before `app.exit()`) breaks it silently, so these source checks pin it.
+ * main.ts only wires window-state persistence and renderer crash recovery
+ * (windowState.ts, rendererCrashRecovery.ts hold the behaviour). Its wiring is
+ * where the original bug lived (a crash handler in the packaged branch only,
+ * nothing scheduling a reload), so these source checks pin it.
  */
 async function readMain(): Promise<string> {
   return readFile(new URL("./main.ts", import.meta.url), "utf8");
@@ -18,6 +19,11 @@ function topLevelFunction(source: string, name: string): string {
   const end = source.indexOf("\n}\n", start);
   expect(end, `end of function ${name}`).toBeGreaterThan(start);
   return source.slice(start, end + 2);
+}
+
+function braceDepthAt(body: string, index: number): number {
+  const prefix = body.slice(0, index);
+  return prefix.split("{").length - prefix.split("}").length;
 }
 
 describe("main.ts window recovery wiring", () => {
@@ -37,6 +43,22 @@ describe("main.ts window recovery wiring", () => {
     expect(restore).toBeLessThan(construct);
     expect(create.slice(construct, track)).toContain("...restoredWindowState.bounds,");
     expect(track).toBeGreaterThan(construct);
+  });
+
+  it("attaches crash recovery to development and packaged windows alike", async () => {
+    const create = topLevelFunction(await readMain(), "createWindow");
+    const attach = create.indexOf("attachRendererCrashRecovery(window,");
+    expect(attach).toBeGreaterThanOrEqual(0);
+    expect(create.indexOf("attachRendererCrashRecovery(", attach + 1)).toBe(-1);
+    // Directly in the function body, outside the `if (isDevelopment) … else …` branches.
+    expect(braceDepthAt(create, attach)).toBe(1);
+    expect(create.slice(create.indexOf("if (isDevelopment) {"), attach)).toContain("\n  }\n");
+  });
+
+  it("reports a usable shell to the window's crash recovery", async () => {
+    expect(await readMain()).toContain(
+      "rendererCrashRecoveries.get(event.sender)?.noteShellUsable();",
+    );
   });
 
   it("saves the window before a relaunch exits the app", async () => {

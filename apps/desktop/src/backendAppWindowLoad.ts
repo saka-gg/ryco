@@ -138,3 +138,32 @@ export function resolveBackendAppWindowAction(input: {
   if (!currentUrl.startsWith(input.backendHttpUrl)) return "ignore";
   return input.shellUsable && input.rendererGone !== true ? "reconnect" : "load";
 }
+
+/**
+ * What a packaged window whose renderer process died does once its reload
+ * delay has passed.
+ *
+ * - `reload`: the dead document was the app on the serving backend's origin;
+ *   reloading keeps its route (hash history) and the origin's storage (drafts,
+ *   UI state).
+ * - `load-app`: load the app document fresh from the serving backend (the route
+ *   is dropped): a repeat crash in the same streak may be caused by the route
+ *   itself, and a boot page, blank or foreign document has nothing worth
+ *   keeping.
+ * - `boot-page`: the backend is not serving (starting, restarting, or halted).
+ *   The boot page shows instead of a dead window; the backend's next
+ *   `bound`/`ready` moment loads the app, or its failure dialog takes over.
+ */
+export type CrashedAppWindowRecovery = "reload" | "load-app" | "boot-page";
+
+export function resolveCrashedAppWindowRecovery(input: {
+  readonly currentUrl: string;
+  readonly backendHttpUrl: string;
+  readonly backendServing: boolean;
+  /** Keep the route: only the first automatic reload of a crash streak does. */
+  readonly keepRoute: boolean;
+}): CrashedAppWindowRecovery {
+  if (!input.backendServing || input.backendHttpUrl.length === 0) return "boot-page";
+  if (input.keepRoute && input.currentUrl.startsWith(input.backendHttpUrl)) return "reload";
+  return "load-app";
+}
