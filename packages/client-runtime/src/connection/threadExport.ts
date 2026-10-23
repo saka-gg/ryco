@@ -115,7 +115,16 @@ export async function loadThreadForExport(input: {
     if (activities.has(item.id))
       throw new Error("History contains overlapping activities. No file was saved; retry.");
     account(
-      [item.id, item.createdAt, item.kind, item.summary, item.boundary, item.forkOrigin],
+      [
+        item.id,
+        item.createdAt,
+        item.kind,
+        item.summary,
+        item.boundary,
+        item.forkOrigin,
+        // Questions and answer text; the serialized length bounds the strings it holds.
+        item.userInput ? JSON.stringify(item.userInput) : undefined,
+      ],
       true,
     );
     activities.set(item.id, item);

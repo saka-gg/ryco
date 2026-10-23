@@ -171,6 +171,7 @@ import { useThreadChecks } from "./useThreadChecks";
 import { buildThreadTimelineRows, toggleFold, type TurnHtmlRender } from "./threadActivityFold";
 import { HtmlRenderFullScreenProvider } from "./HtmlRenderFullScreen";
 import { ThreadActivityFoldRow } from "./ThreadActivityFoldRow";
+import { UserInputExchangeRow } from "./UserInputExchangeRow";
 import {
   composerFileUploadEngine,
   useComposerFileUploadMaxBytes,
@@ -290,6 +291,9 @@ function TimelineRow(props: {
   }
   if (entry.kind === "context-handoff") {
     return <ContextHandoffMarkerRow marker={entry.marker} />;
+  }
+  if (entry.kind === "user-input-exchange") {
+    return <UserInputExchangeRow exchange={entry.exchange} />;
   }
   if (entry.kind === "fork-origin") {
     return (

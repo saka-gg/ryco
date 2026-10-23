@@ -118,6 +118,7 @@ import { LazyMessageActionsSheet } from "../shell/phone/lazyPhoneThreadSurfaces"
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { ForkOriginMarkerRow } from "./ForkOriginMarkerRow";
+import { UserInputExchangeRow } from "./UserInputExchangeRow";
 import { THREAD_FORK_COPY } from "@ryco/client-runtime/state/threads";
 import { useLongPress } from "~/hooks/useLongPress";
 import { usePresentationTier } from "~/hooks/usePresentationTier";
@@ -425,6 +426,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         revealedMessageIds,
         offerFork,
         showForkOrigin: !isPhoneTier,
+        showUserInputExchanges: !isPhoneTier,
       }),
     [
       observedRunningTurnIds,
@@ -1419,6 +1421,10 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
 
       {row.kind === "fork-origin" && !isPhoneTier && (
         <ForkOriginMarkerRow marker={row.marker} environmentId={ctx.activeThreadEnvironmentId} />
+      )}
+
+      {row.kind === "user-input-exchange" && (
+        <UserInputExchangeRow exchange={row.exchange} timestampFormat={ctx.timestampFormat} />
       )}
 
       {row.kind === "message" &&

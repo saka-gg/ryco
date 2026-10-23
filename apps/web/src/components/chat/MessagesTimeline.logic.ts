@@ -36,6 +36,7 @@ import {
   placeRepliesAfterHtmlRenders,
   type ForkOriginTimelineEntry,
   type TimelineRowMessages,
+  type UserInputExchangeTimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import {
   deriveForkableReplyMessageIds,
@@ -464,6 +465,16 @@ export type MessagesTimelineRow =
       id: string;
       createdAt: string;
       marker: ForkOriginTimelineEntry;
+    }
+  | {
+      /**
+       * An agent question and the user's answers. Like a plan card it stays visible when its
+       * turn folds into "Worked for".
+       */
+      kind: "user-input-exchange";
+      id: string;
+      createdAt: string;
+      exchange: UserInputExchangeTimelineEntry;
     }
   | {
       /**
@@ -1080,6 +1091,26 @@ function deriveForkReplyByTurn(
   return byTurn;
 }
 
+/**
+ * Each answered question back as the request and resolution work rows its exchange stands in
+ * for, in the exchange's place.
+ */
+function withBareUserInputRows(
+  entries: ReadonlyArray<TimelineEntry>,
+): ReadonlyArray<TimelineEntry> {
+  if (!entries.some((entry) => entry.kind === "user-input-exchange")) return entries;
+  return entries.flatMap((entry): TimelineEntry[] =>
+    entry.kind === "user-input-exchange"
+      ? entry.workEntries.map((workEntry) => ({
+          id: workEntry.id,
+          kind: "work",
+          createdAt: workEntry.createdAt,
+          entry: workEntry,
+        }))
+      : [entry],
+  );
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestTurn?: TimelineLatestTurn | null;
@@ -1111,25 +1142,31 @@ export function deriveMessagesTimelineRows(input: {
   offerFork?: boolean | undefined;
   /** Renders a fork's origin divider; the frozen phone tier shows nothing new. */
   showForkOrigin?: boolean | undefined;
+  /**
+   * Renders answered agent questions; the frozen phone tier shows nothing new and keeps their
+   * bare "User input" rows.
+   */
+  showUserInputExchanges?: boolean | undefined;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
-  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(input.timelineEntries);
+  const sourceEntries = input.showUserInputExchanges
+    ? input.timelineEntries
+    : withBareUserInputRows(input.timelineEntries);
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(sourceEntries);
   const unsettledTurnId = deriveUnsettledTurnId(
     input.latestTurn ?? null,
     input.runningTurnId ?? null,
   );
   const forkReplyByTurn = input.offerFork
-    ? deriveForkReplyByTurn(input.timelineEntries, input.latestTurn ?? null, unsettledTurnId)
+    ? deriveForkReplyByTurn(sourceEntries, input.latestTurn ?? null, unsettledTurnId)
     : null;
   const forkFromTurn = (turnId: TurnId | null | undefined): TimelineForkRequest | undefined => {
     const messageId = turnId ? forkReplyByTurn?.get(turnId) : undefined;
     return turnId && messageId ? { messageId, turnId } : undefined;
   };
-  const timelineEntries = placeRepliesAfterHtmlRenders(
-    input.timelineEntries,
-    terminalAssistantMessageIds,
-    { runningTurnId: unsettledTurnId },
-  );
+  const timelineEntries = placeRepliesAfterHtmlRenders(sourceEntries, terminalAssistantMessageIds, {
+    runningTurnId: unsettledTurnId,
+  });
   // A render's completion is not a response boundary: the reply after it still
   // counts from the turn's start.
   const durationStartByMessageId = computeMessageDurationStart(
@@ -1326,6 +1363,17 @@ export function deriveMessagesTimelineRows(input: {
           marker: timelineEntry.marker,
         });
       }
+      continue;
+    }
+
+    // Only where they are shown: elsewhere `withBareUserInputRows` took them out.
+    if (timelineEntry.kind === "user-input-exchange") {
+      nextRows.push({
+        kind: "user-input-exchange",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        exchange: timelineEntry.exchange,
+      });
       continue;
     }
 
@@ -1582,6 +1630,10 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "fork-origin":
       // The shared decoder caches one marker per activity record.
       return a.marker === (b as typeof a).marker;
+
+    case "user-input-exchange":
+      // The shared derivation caches one exchange per answered request.
+      return a.exchange === (b as typeof a).exchange;
 
     case "html-render": {
       // Rows rebuild on every thread update; an equal page must keep its

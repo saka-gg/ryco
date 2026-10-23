@@ -7,7 +7,15 @@ import {
 import * as Schema from "effect/Schema";
 
 import { modelSelectionRequiresContextHandoff } from "./model.ts";
+import { compareThreadActivitiesInLifecycleOrder } from "./threadActivity.ts";
 import { readThreadForkedActivity } from "./threadFork.ts";
+import {
+  answerUserInputQuestions,
+  createUserInputExchangePairing,
+  readUserInputLifecycleRecord,
+  type UserInputExchange,
+  type UserInputLifecycleRecord,
+} from "./userInputExchange.ts";
 
 export type ThreadExportMessage = Pick<
   OrchestrationThread["messages"][number],
@@ -16,11 +24,15 @@ export type ThreadExportMessage = Pick<
 export interface ThreadExportActivity {
   readonly id: string;
   readonly createdAt: string;
+  /** The orchestration sequence: it orders activities recorded in the same millisecond. */
+  readonly sequence?: number;
   readonly kind: string;
   readonly summary: string;
   readonly boundary?: string;
   /** Where a forked thread's inherited history came from (`thread.forked`). */
   readonly forkOrigin?: string;
+  /** An agent question or its answers, paired into one exchange when serialized. */
+  readonly userInput?: UserInputLifecycleRecord;
 }
 export type ThreadExportSource = Pick<
   OrchestrationThread,
@@ -92,15 +104,61 @@ export function projectThreadExportActivity(
   }
   const forked = readThreadForkedActivity(activity);
   const forkOrigin = forked ? describeForkOrigin(forked) : undefined;
+  const userInput = readUserInputLifecycleRecord(activity);
   const known = ["tool.started", "tool.completed", "tool.denied"].includes(activity.kind);
   return {
     id: activity.id,
     createdAt: activity.createdAt,
-    kind: known ? activity.kind : "boundary",
+    ...(activity.sequence !== undefined ? { sequence: activity.sequence } : {}),
+    // A question keeps its kind: the transcript's order puts a request before its resolution.
+    kind: known || userInput ? activity.kind : "boundary",
     summary: known ? activity.summary : "",
     ...(boundary ? { boundary } : {}),
     ...(forkOrigin ? { forkOrigin } : {}),
+    ...(userInput ? { userInput } : {}),
   };
+}
+
+function describeUserInputExchange(exchange: UserInputExchange): string {
+  return exchange.questions
+    .map((question) =>
+      [
+        `${question.header}: ${question.question}`,
+        ...(question.options.length > 0 ? [`Options: ${question.options.join(" · ")}`] : []),
+        ...(exchange.cancelled ? [] : [`Answer: ${question.answer ?? "No answer"}`]),
+      ].join("\n"),
+    )
+    .join("\n\n");
+}
+
+interface ExportedUserInputExchange {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly exchange: UserInputExchange;
+}
+
+/**
+ * Each answered or cancelled agent question, at the time it was answered. Takes the activities
+ * in the transcript's order (`compareThreadActivitiesInLifecycleOrder`), so it pairs what the
+ * transcript shows.
+ */
+function collectUserInputExchanges(
+  activities: readonly ThreadExportActivity[],
+): ExportedUserInputExchange[] {
+  const pair = createUserInputExchangePairing<null>();
+  const exchanges: ExportedUserInputExchange[] = [];
+  for (const activity of activities) {
+    if (!activity.userInput) continue;
+    const match = pair(activity.userInput, null);
+    if (match && activity.userInput.kind === "resolved") {
+      exchanges.push({
+        id: activity.id,
+        createdAt: activity.createdAt,
+        exchange: answerUserInputQuestions(match.questions, activity.userInput),
+      });
+    }
+  }
+  return exchanges;
 }
 
 /** Export safety redactions preserve all other characters, including URL spelling. */
@@ -152,13 +210,28 @@ export function serializeThreadMarkdown(thread: ThreadExportSource): string {
       `Title: ${thread.title}\nThread: ${thread.id}\nProject: ${thread.projectId}\nCurrent provider instance: ${thread.modelSelection.instanceId}\nCurrent model: ${thread.modelSelection.model}\nCreated: ${utc(thread.createdAt)}\nUpdated: ${utc(thread.updatedAt)}\nBranch: ${thread.branch ?? "unavailable"}\nWorktree: ${thread.worktreePath ?? "unavailable"}\nWorktree ID: ${thread.worktreeId ?? "unavailable"}`,
     ),
   ];
+  // Every activity section follows the transcript's order.
+  const activities = thread.activities.toSorted(compareThreadActivitiesInLifecycleOrder);
   // A fork's messages start with the history it inherited; say where that came from first.
-  for (const activity of ordered(thread.activities)) {
+  for (const activity of activities) {
     if (activity.forkOrigin)
       sections.push(`## Fork origin · ${utc(activity.createdAt)}`, fence(activity.forkOrigin));
   }
   sections.push("## Messages");
-  for (const message of ordered(thread.messages)) {
+  // Agent questions read in place, between the messages around them.
+  const entries = ordered([
+    ...thread.messages.map((message) => ({ ...message, exchange: null })),
+    ...collectUserInputExchanges(activities),
+  ]);
+  for (const entry of entries) {
+    if (entry.exchange) {
+      sections.push(
+        `### Agent question · ${utc(entry.createdAt)}${entry.exchange.cancelled ? " · cancelled" : ""}`,
+        fence(describeUserInputExchange(entry.exchange)),
+      );
+      continue;
+    }
+    const message = entry;
     sections.push(
       `### ${message.role === "user" ? "User" : "Assistant"} · ${utc(message.createdAt)}${message.streaming ? " · in progress at snapshot" : ""}`,
       fence(message.text),
@@ -167,7 +240,7 @@ export function serializeThreadMarkdown(thread: ThreadExportSource): string {
       sections.push(`Attachments: ${message.attachmentCount} (not embedded).`);
   }
   if (!thread.messages.length) sections.push("No retained messages.");
-  for (const activity of ordered(thread.activities)) {
+  for (const activity of activities) {
     if (activity.boundary)
       sections.push(
         `### Provider/model boundary · ${utc(activity.createdAt)}`,
@@ -176,7 +249,7 @@ export function serializeThreadMarkdown(thread: ThreadExportSource): string {
   }
   sections.push("## Tool summaries");
   // Only public summary text from known lifecycle events; never traverse payloads.
-  for (const activity of ordered(thread.activities)) {
+  for (const activity of activities) {
     if (!["tool.started", "tool.completed", "tool.denied"].includes(activity.kind)) continue;
     const summary = Array.from(redactExportText(activity.summary));
     sections.push(

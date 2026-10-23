@@ -32,6 +32,7 @@ export function createThreadTimelineBuilder() {
       contextCompactionEntries: viewModel.contextCompactionEntries,
       contextHandoffEntries: viewModel.contextHandoffEntries,
       forkOriginEntries: viewModel.forkOriginEntries,
+      userInputExchangeEntries: viewModel.userInputExchangeEntries,
     });
     return { viewModel, timeline };
   };
