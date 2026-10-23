@@ -74,6 +74,75 @@ routes; the custom scheme remains for verified-email and reset links.
      background -> foreground transition re-drives reconnect for any connection
      whose heartbeat went stale while iOS suspended the socket.
 
+## Measuring renders (development client)
+
+`scripts/measure-renders.mts` counts React renders in the running development
+client, so a change to a hot screen or to the React Compiler scope comes with
+numbers. It reads a counter (`src/devtools/renderCounter.ts`) through Metro's
+Hermes inspector. `index.ts` loads the counter only in a development build whose
+Metro was started with `EXPO_PUBLIC_RYCO_RENDER_COUNTER=1`; a release bundle never
+contains it (`src/perf/devOnlyDiagnostics.test.ts`).
+
+Each streaming run starts a real turn, so use a throwaway node, never one with
+real work, and the cheapest model that answers.
+
+1. **Start a scratch node** with its own home:
+   `RYCO_HOME=<scratch dir> RYCO_PORT_OFFSET=<n> bun run dev:server -- --no-browser`.
+   Its log prints the server address (`Listening on …`) and a one-time owner
+   pairing link (`pairingUrl: …/pair#token=…`). Add a scratch Git repository as a
+   project and create **one thread per run** on the cheapest model: every run
+   adds a turn to its thread, and a longer transcript renders differently, so
+   reusing a thread makes runs incomparable (the script warns when it does).
+2. **Pair the CLI** with the same `RYCO_HOME`/`RYCO_PORT_OFFSET`. Starting a turn
+   needs an owner session, so use the owner link with its host replaced by the
+   server address: `node apps/server/src/bin.ts remote add measure '<server>/pair#token=…'`.
+   `node apps/server/src/bin.ts remote threads measure` lists the thread ids.
+3. **Start Metro with the counter** on a port of its own:
+   `cd apps/mobile && EXPO_PUBLIC_RYCO_RENDER_COUNTER=1 APP_VARIANT=development ./node_modules/.bin/expo start --dev-client --scheme ryco-dev --port 8091`.
+   Launch the dev client straight onto it, which skips the system "Open in" prompt:
+   `xcrun simctl launch <udid> dev.ryco.app.dev --initialUrl 'ryco-dev://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8091'`.
+   Pair the app with the node (steps 4–5 above, with a link from
+   `ryco auth pairing create`). If the node then shows "Unable to prepare the
+   Ryco server WebSocket connection", restart Metro with
+   `EXPO_PUBLIC_RYCO_HTTP_URL=<server>` and `EXPO_PUBLIC_RYCO_WS_URL=<server as ws://>`
+   set as well. Close React Native DevTools: the script takes the inspector.
+4. **Measure** (the CLI child inherits `RYCO_HOME`, which picks the remote):
+
+   ```sh
+   # A reply streaming into an open thread: 3 runs, one thread each.
+   RYCO_HOME=<scratch dir> RYCO_PORT_OFFSET=<n> node apps/mobile/scripts/measure-renders.mts \
+     --metro http://127.0.0.1:8091 --remote measure \
+     --thread <id1> --thread <id2> --thread <id3> \
+     --label before --json .perf-results/mobile-renders-before-stream.json
+   # A screen opening, from a freshly reloaded Home.
+   node apps/mobile/scripts/measure-renders.mts --metro http://127.0.0.1:8091 \
+     --route settings --label before --json .perf-results/mobile-renders-before-settings.json
+   # Later, after the change (restart Metro first: it keeps the Babel config it started with):
+   node apps/mobile/scripts/measure-renders.mts --compare \
+     .perf-results/mobile-renders-before-stream.json .perf-results/mobile-renders-after-stream.json
+   ```
+
+   Before each streaming run the script reloads the app, opens the thread, sends
+   the prompt with `ryco remote send`, starts recording at the first streamed
+   text and records for 12 seconds (`--window`). `--help` lists every option.
+
+Reading the tables: lead with **renders per commit**. The provider's pace decides
+how many commits land in a window, so totals only compare when the commit counts
+are close. A render counts once per committed component that did work. React
+Native's own components (`View`, `Text`, `Pressable`) are counted like any other;
+the native views beneath them are not. Each cause is one of `mount`, `state#<n>` (the hook at that index
+updated, which includes store subscriptions), `props:<changed keys>`,
+`parent-same-props<-<Parent>` (the parent re-rendered and passed equal values) or
+`context`.
+
+A streaming run fails, and stays out of the medians, when its turn fails or
+replies with under 500 characters (a failed turn streams back one line), and any
+run fails when the counter's fiber walk threw (React's internals changed). A run
+whose turn ended inside the window is kept, with a warning that names it next to
+the medians. A turn that has not ended `--turn-timeout` seconds after the window
+stops the measurement: the CLI cannot stop it, and the app re-renders for every
+thread, so later windows would record its stream as well.
+
 ## Relay E2EE runtime acceptance (owner, on a physical device)
 
 The relay E2EE protocol (`docs/relay-e2ee-protocol.md`) puts three requirements

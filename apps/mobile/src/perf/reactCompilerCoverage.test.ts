@@ -6,6 +6,15 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
+import {
+  MOBILE_APP_DIR as APP,
+  MOBILE_BABEL_CONFIG as BABEL_CONFIG,
+  BABEL_PRESET_EXPO as PRESET,
+  metroBabelCaller,
+  requireFromBabelPreset,
+  requireFromMetro,
+} from "../../test/metroBabel";
+
 /**
  * React Compiler coverage of the mobile render paths, asserted over the real
  * Babel transform.
@@ -17,15 +26,7 @@ import { describe, expect, it } from "vite-plus/test";
  */
 
 const require = createRequire(import.meta.url);
-const APP = join(import.meta.dirname, "..", "..");
-const BABEL_CONFIG = join(APP, "babel.config.js");
 const METRO_CONFIG = join(APP, "metro.config.js");
-const PRESET = require.resolve("babel-preset-expo", { paths: [APP] });
-const METRO = createRequire(
-  require.resolve("@expo/metro-config", {
-    paths: [require.resolve("expo/package.json", { paths: [APP] })],
-  }),
-).resolve("metro/package.json");
 
 interface BabelResult {
   readonly code?: string | null;
@@ -56,21 +57,14 @@ interface CompilerEvent {
   readonly detail?: { readonly reason?: string } | null;
 }
 
-const babel = createRequire(PRESET)("@babel/core") as BabelCore;
-const metroPlugins = createRequire(METRO)("metro-transform-plugins") as {
+const babel = requireFromBabelPreset("@babel/core") as BabelCore;
+const metroPlugins = requireFromMetro("metro-transform-plugins") as {
   readonly importExportPlugin: unknown;
   readonly inlineRequiresPlugin: unknown;
 };
 
-// A release `expo export:embed` transform: the caller Expo's Metro worker uses
-// once `experiments.reactCompiler` is on.
-const RELEASE_CALLER = {
-  name: "metro",
-  bundler: "metro",
-  platform: "ios",
-  supportsReactCompiler: true,
-  isDev: false,
-};
+// A release `expo export:embed` transform.
+const RELEASE_CALLER = metroBabelCaller(false);
 
 function transformWithAppConfig(relativePath: string): BabelResult {
   const result = babel.transformFileSync(join(APP, relativePath), {

@@ -315,6 +315,15 @@ Vary one dimension at a time and keep everything else fixed:
 - `--send` and a `--cpu-profile` run change the workload; compare them only with runs made the same
   way.
 
+## Mobile app renders
+
+This harness drives browsers only. The native mobile app has its own measurement: a development-only
+React render counter read through Metro's Hermes inspector, driven by
+`apps/mobile/scripts/measure-renders.mts` while a real reply streams into an open thread or while a
+screen opens. It reports renders, commits and renders per commit, with the top components and the
+cause of each render, and compares two saved runs. See "Measuring renders (development client)" in
+[apps/mobile/README.md](../apps/mobile/README.md#measuring-renders-development-client).
+
 ## Regression policy
 
 Default gates require both an absolute and relative regression, which prevents millisecond noise
