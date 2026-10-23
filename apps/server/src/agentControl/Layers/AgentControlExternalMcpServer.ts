@@ -2,6 +2,7 @@ import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
+import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -29,6 +30,8 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const integrations = yield* AgentControlExternalIntegrationService;
   const tasks = yield* AgentControlExternalTaskService;
   const projections = yield* ProjectionSnapshotQuery;
+  // Required: `ryco_wait_threads` wakes on its events (without them it would only re-check every 5 s).
+  const engine = yield* OrchestrationEngineService;
   const providers = yield* ProviderRegistry;
   const validator = yield* Effect.serviceOption(AgentControlActionValidator);
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
@@ -49,6 +52,7 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
         integrations,
         tasks,
         projections,
+        domainEvents: engine,
         getProviders: providers.getProviders,
         ...(Option.isSome(validator) ? { validator: validator.value } : {}),
         ...(Option.isSome(automations) ? { automations: automations.value } : {}),

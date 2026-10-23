@@ -14,7 +14,12 @@
  *
  * @module ThreadBackgroundLivenessService
  */
-import { INERT_TASK_TYPES, MONITOR_TASK_TYPES } from "@ryco/shared/taskClassification";
+import {
+  INERT_TASK_TYPES,
+  MONITOR_TASK_TYPES,
+  TERMINAL_TASK_STATUSES,
+  endsTaskLiveness,
+} from "@ryco/shared/taskClassification";
 import { Context, Effect, Layer } from "effect";
 
 export type ThreadBackgroundLiveness = "working" | "monitoring" | null;
@@ -29,15 +34,8 @@ interface ThreadLivenessState {
 // which in practice are PR babysitting/log tails since pacing sleeps
 // complete inside the turn; INERT_TASK_TYPES: plan-mode bookkeeping) so this
 // registry, ingestion's agentKind stamp, and the client fold can never
-// drift apart.
-
-const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
-  "completed",
-  "failed",
-  "stopped",
-  "cancelled",
-  "interrupted",
-]);
+// drift apart. The status sets are shared the same way: the Agent Control wait wake filter
+// (threadWaitWakeEvents.ts) wakes on exactly the statuses that end liveness here.
 
 export class ThreadBackgroundLivenessService extends Context.Service<
   ThreadBackgroundLivenessService,
@@ -165,7 +163,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       const parentAgentId = input.parentAgentId ?? previous?.parentAgentId;
       const terminalEvent =
         input.kind === "completed" ||
-        (input.status !== undefined && TERMINAL_STATUSES.has(input.status));
+        (input.status !== undefined && TERMINAL_TASK_STATUSES.has(input.status));
       tasks.set(input.taskId, {
         taskType,
         parentAgentId,
@@ -205,10 +203,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
 
       // Idle counts as not-live: a resting (resumable) Codex child isn't
       // doing anything, and an all-idle fleet must not pin Working.
-      const terminal =
-        input.kind === "completed" ||
-        input.status === "idle" ||
-        (input.status !== undefined && TERMINAL_STATUSES.has(input.status));
+      const terminal = input.kind === "completed" || endsTaskLiveness(input.status);
       if (terminal) {
         drop(input.threadId, input.taskId);
         return;

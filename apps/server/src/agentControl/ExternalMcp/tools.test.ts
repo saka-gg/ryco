@@ -7,8 +7,9 @@ import {
   OrchestrationThreadShell,
   type AgentControlCapability,
   type AgentControlExternalIntegration,
+  type OrchestrationEvent,
 } from "@ryco/contracts";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, PubSub, Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentControlPlanValidationError } from "../Errors.ts";
@@ -82,7 +83,10 @@ const DEFAULT_CAPABILITIES = [C.externalListProjects, C.externalCreateTask, C.ex
 
 const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
   let current = makeIntegration(capabilities);
+  const changes = Effect.runSync(PubSub.unbounded<AgentControlIntegrationId>());
+  const domainEvents = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
   const integrations = {
+    subscribeChanges: PubSub.subscribe(changes),
     authorizeTool: vi.fn((input: { readonly requiredCapability?: AgentControlCapability }) =>
       input.requiredCapability !== undefined &&
       !current.capabilities.includes(input.requiredCapability)
@@ -190,6 +194,7 @@ const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
     integrations: integrations as never,
     tasks: {} as never,
     projections: projections as never,
+    domainEvents: { subscribeDomainEvents: PubSub.subscribe(domainEvents) },
     getProviders: Effect.succeed([]),
     validator: { validateExternalSubmission } as never,
     proposals: { submit, getProposal, findByRequest } as never,
@@ -214,9 +219,16 @@ const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
     readFile,
     getFullThreadDiff,
     workspaces,
+    /** Changes the grant and publishes the change, as the integration service does. */
     revoke: (next: ReadonlyArray<AgentControlCapability>) => {
       current = makeIntegration(next);
+      Effect.runSync(PubSub.publish(changes, integrationId));
     },
+    /** Changes the grant without publishing (expiry, a disabled policy). */
+    changeSilently: (next: ReadonlyArray<AgentControlCapability>) => {
+      current = makeIntegration(next);
+    },
+    publishChange: (id: AgentControlIntegrationId) => Effect.runSync(PubSub.publish(changes, id)),
     integration: () => current,
   };
 };
@@ -360,15 +372,36 @@ describe("external Agent Control read catalog", () => {
   });
 
   it("ends a thread wait once the grant is revoked", async () => {
-    const { call, revoke, projections } = fixture([C.externalReadThreads]);
+    const { call, revoke, projections, integrations } = fixture([C.externalReadThreads]);
     projections.getThreadShellById.mockImplementation(() =>
       Effect.succeed(Option.some({ ...allowedThread, backgroundLiveness: "working" })),
     );
     const pending = call(T.waitThreads, { threadIds: [allowedThread.id], timeoutMs: 10_000 });
     await new Promise((resolve) => setTimeout(resolve, 50));
+    const revalidations = integrations.revalidate.mock.calls.length;
     revoke(DEFAULT_CAPABILITIES);
     const result = await pending;
     expect(text(result)).toBe("Thread access was revoked.");
+    // The change woke the wait: one more revalidation, no poll in between.
+    expect(integrations.revalidate.mock.calls.length).toBe(revalidations + 1);
+  });
+
+  it("ignores another integration's changes during a thread wait", async () => {
+    const { call, changeSilently, publishChange, projections, integrations } = fixture([
+      C.externalReadThreads,
+    ]);
+    projections.getThreadShellById.mockImplementation(() =>
+      Effect.succeed(Option.some({ ...allowedThread, backgroundLiveness: "working" })),
+    );
+    const pending = call(T.waitThreads, { threadIds: [allowedThread.id], timeoutMs: 300 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const revalidations = integrations.revalidate.mock.calls.length;
+    changeSilently(DEFAULT_CAPABILITIES);
+    publishChange(AgentControlIntegrationId.make("integration-other"));
+    const result = await pending;
+    // Only the final check at the deadline sees the narrowed grant.
+    expect(text(result)).toBe("Thread access was revoked.");
+    expect(integrations.revalidate.mock.calls.length).toBe(revalidations + 1);
   });
 
   it("reports hidden threads in a wait as not found without waiting", async () => {
