@@ -360,6 +360,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       row={row}
       settleEnabled={actionEnabled}
       settleLabel={actionLabel}
+      showFilters={!isPhone}
       snoozePresets={snoozePresets}
       threadActions={props.threadActions}
       onOpenPullRequest={(url) => openExternalLink(url, "Unable to open pull request link")}

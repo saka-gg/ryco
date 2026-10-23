@@ -224,6 +224,8 @@ export interface InboxSidebarRow {
   readonly latestTurnCompletedAt: string | null;
   /** The machine is implicit when every thread lives on the primary environment. */
   readonly showMachine: boolean;
+  /** The inbox's threads live on more than one machine, so a machine can narrow it. */
+  readonly spansMachines: boolean;
   /** Project icons fall back to a folder, so the name is shown once projects differ. */
   readonly showProject: boolean;
   readonly updatedAt: string;
@@ -268,6 +270,8 @@ export interface InboxSidebarSection {
 export interface InboxSidebarFilters {
   readonly query: string;
   readonly environmentId: EnvironmentId | null;
+  /** Scoped keys of the projects to keep; absent or null keeps every project. */
+  readonly projectKeys?: ReadonlyArray<string> | null;
   readonly status: InboxSidebarStatusFilter;
 }
 
@@ -961,6 +965,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     pinnedThreadKeys: input.pinnedThreadKeys,
     filters: {
       ...(input.filters.environmentId ? { environmentIds: [input.filters.environmentId] } : {}),
+      ...(input.filters.projectKeys ? { projectKeys: input.filters.projectKeys } : {}),
       text: input.filters.query,
     },
     currentThreadKey: input.activeThreadKey,
@@ -1048,6 +1053,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       showMachine:
         !singleEnvironment &&
         (input.primaryEnvironmentId == null || thread.environmentId !== input.primaryEnvironmentId),
+      spansMachines: !singleEnvironment,
       updatedAt: timestamp(thread),
       providerDriver,
       providerLabel:

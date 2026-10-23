@@ -2734,7 +2734,7 @@ export function setupChatViewBrowserSuite() {
       open: false,
       openIntent: null,
     });
-    useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
+    useInboxFilterStore.setState({ draft: "", environmentId: null, project: null, status: "all" });
     useSidebarFoldStore.getState().reset();
     useStore.setState({
       activeEnvironmentId: null,

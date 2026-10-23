@@ -722,6 +722,37 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("shows a row menu's project filter as a token before the status token", async () => {
+    useUiStateStore.setState({ sidebarMode: "inbox" });
+    useInboxFilterStore.setState({
+      project: { logicalKey: "github.com/example/ryco", label: "Ryco" },
+      status: "active",
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-omnifield-project" as MessageId,
+        targetText: "omnifield project",
+      }),
+    });
+
+    try {
+      const token = page.getByRole("button", { name: "Remove project filter Ryco" });
+      await expect.element(token).toBeInTheDocument();
+      expect(
+        [...document.querySelectorAll<HTMLElement>(".sidebar-omnifield-token")].map(
+          (element) => element.dataset.kind,
+        ),
+      ).toEqual(["project", "status"]);
+
+      await token.click();
+      await vi.waitFor(() => expect(useInboxFilterStore.getState().project).toBeNull());
+      expect(useInboxFilterStore.getState().status).toBe("active");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("hands the sidebar field's text to the command palette as Search everywhere", async () => {
     useUiStateStore.setState({ sidebarMode: "inbox" });
     const mounted = await mountChatView({
