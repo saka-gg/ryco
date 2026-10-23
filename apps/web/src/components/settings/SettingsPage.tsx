@@ -79,6 +79,7 @@ import { SETTINGS_SEARCH_INDEX, type SettingsSearchEntry } from "./settingsSearc
 import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
 import { SettingsCard, SettingsEmpty } from "./settingsLayout";
 import { useSettingsSubsections } from "./useSettingsSubsections";
+import { preloadWindowCaptureSettings } from "./WindowCaptureSettings";
 import { useActiveIndicator } from "../ui/useActiveIndicator";
 
 type SettingsDestination = "client" | "node";
@@ -308,6 +309,9 @@ const LAZY_SECTION_PANELS: Partial<Record<SettingsSectionId, PreloadableModule>>
 
 /** Starts (or joins) the chunk load of a section's body. Never rejects. */
 export function preloadSettingsSection(section: SettingsSectionId): Promise<void> {
+  // General renders with the page; only its Window capture subsection loads a
+  // chunk of its own, on desktops that offer window capture.
+  if (section === "general") return preloadWindowCaptureSettings();
   return LAZY_SECTION_PANELS[section]?.preload() ?? Promise.resolve();
 }
 

@@ -11,6 +11,7 @@ import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
+import { WindowCaptureSettings } from "./WindowCaptureSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
 import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
@@ -903,6 +904,10 @@ export function GeneralSettingsPanel() {
             }
           />
         </SettingsSection>
+      )}
+
+      {!isPhoneTier && editingScope !== "node" && (
+        <WindowCaptureSettings scope={deviceScopeLabel} />
       )}
 
       <SettingsSection title="About">

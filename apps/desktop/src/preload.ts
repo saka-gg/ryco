@@ -4,6 +4,7 @@ import type { DesktopBridge } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
 import { PASTE_AS_TEXT_CHANNEL } from "./editMenu.ts";
 import { DESKTOP_STARTUP_MARKS_CHANNEL, observeRendererStartupMarks } from "./startupMarks.ts";
+import { WINDOW_CAPTURE_IPC } from "./windowCaptureChannels.ts";
 
 // Capture before app/terminal listeners, without suppressing Electron key releases.
 function suppressQuitShortcut(event: KeyboardEvent): void {
@@ -101,6 +102,33 @@ observeRendererStartupMarks({
   report: (report) => ipcRenderer.send(DESKTOP_STARTUP_MARKS_CHANNEL, report),
 });
 
+function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
+  const wrapped = (_event: Electron.IpcRendererEvent, payload: T) => listener(payload);
+  ipcRenderer.on(channel, wrapped);
+  return () => ipcRenderer.removeListener(channel, wrapped);
+}
+
+// Window capture runs the macOS helper; elsewhere the bridge omits it, so the
+// composer shows no capture entry.
+const windowCaptureBridge: DesktopBridge["windowCapture"] =
+  process.platform === "darwin"
+    ? {
+        getState: () => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.getState),
+        setup: (permissions) => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.setup, permissions),
+        setShortcut: (shortcut) => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.setShortcut, shortcut),
+        listWindows: () => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.listWindows),
+        captureWindow: (windowId) => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.captureWindow, windowId),
+        listPendingCaptures: () => ipcRenderer.invoke(WINDOW_CAPTURE_IPC.listPendingCaptures),
+        readPendingCapture: (captureId) =>
+          ipcRenderer.invoke(WINDOW_CAPTURE_IPC.readPendingCapture, captureId),
+        acknowledgeCapture: (captureId) =>
+          ipcRenderer.invoke(WINDOW_CAPTURE_IPC.acknowledgeCapture, captureId),
+        onState: (listener) => subscribe(WINDOW_CAPTURE_IPC.state, listener),
+        onCaptured: (listener) => subscribe(WINDOW_CAPTURE_IPC.captured, listener),
+        onError: (listener) => subscribe(WINDOW_CAPTURE_IPC.error, listener),
+      }
+    : undefined;
+
 function unwrapEnsureSshEnvironmentResult(result: unknown) {
   if (
     typeof result === "object" &&
@@ -174,6 +202,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       return () => ipcRenderer.removeListener("desktop:computer-use:changed", wrapped);
     },
   },
+  ...(windowCaptureBridge ? { windowCapture: windowCaptureBridge } : {}),
   getAppBranding: () => {
     if (cachedAppBranding !== null) return cachedAppBranding;
     const result = ipcRenderer.sendSync(GET_APP_BRANDING_CHANNEL);

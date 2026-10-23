@@ -299,6 +299,10 @@
       "types": "./src/keybindings.ts",
       "import": "./src/keybindings.ts"
     },
+    "./keybindingMatch": {
+      "types": "./src/keybindingMatch.ts",
+      "import": "./src/keybindingMatch.ts"
+    },
     "./relayCodec": {
       "types": "./src/relayCodec.ts",
       "import": "./src/relayCodec.ts"

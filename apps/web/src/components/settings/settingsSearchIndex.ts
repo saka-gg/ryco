@@ -4,7 +4,11 @@ export interface SettingsSearchEntry {
   readonly section: SettingsSectionId;
   readonly owner: "client" | "node";
   readonly localOnboardingOnly?: boolean;
-  readonly desktopCapability?: "computerUse" | "quitShortcut" | "windowTranslucencySupported";
+  readonly desktopCapability?:
+    | "computerUse"
+    | "quitShortcut"
+    | "windowCapture"
+    | "windowTranslucencySupported";
   readonly title: string;
   readonly description: string;
   /** Extra match terms not present in title/description. */
@@ -60,6 +64,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     description: "Prevent accidental quits: press twice, hold, or quit immediately.",
     keywords: "ctrl cmd q exit desktop",
     desktopCapability: "quitShortcut",
+  },
+  {
+    section: "general",
+    title: "Window capture",
+    owner: "client",
+    description: "Capture shortcut and Mac permissions for attaching app windows to the composer.",
+    keywords: "screenshot snapshot appsnap screen recording input monitoring option keys hotkey",
+    desktopCapability: "windowCapture",
   },
   {
     section: "general",

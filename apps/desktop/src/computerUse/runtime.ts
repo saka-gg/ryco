@@ -1,4 +1,5 @@
 import { DesktopComputerBeta } from "./beta.ts";
+import { macPrivacySettingsUrl } from "../macAppBundle.ts";
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -404,9 +405,7 @@ export class DesktopComputerUseRuntime {
     if (process.platform !== "darwin") return;
     if (kind === "accessibility") systemPreferences.isTrustedAccessibilityClient(true);
     await shell.openExternal(
-      kind === "accessibility"
-        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        : "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+      macPrivacySettingsUrl(kind === "accessibility" ? "accessibility" : "screen-recording"),
     );
   }
   pair(browser: ComputerBrowser): ComputerUsePairing {

@@ -2,6 +2,8 @@
 
 Ryco's macOS Computer Use beta ports Synara 0.9.1's Cua runtime, native input mechanics, isolated browser tools, and view-only chat preview. The source is pinned to Cua 0.28.2 with native revision 39. Attribution and MIT licenses are in `docs/licenses/`.
 
+[Window capture](window-capture.md) into the composer runs the same native helper with its own pending store. It shares the macOS grants but does not need this beta turned on.
+
 ## Start a task
 
 1. Enable **Private Agent Control** in **Settings → Integrations** for the local desktop environment.

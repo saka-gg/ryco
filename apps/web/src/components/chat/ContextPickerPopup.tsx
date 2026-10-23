@@ -1,7 +1,7 @@
 import type { ChangeRequest, EnvironmentId, SourceControlIssueSummary } from "@ryco/contracts";
 import { type DragEvent, type ChangeEvent, useRef, useState } from "react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
-import { PaperclipIcon } from "lucide-react";
+import { AppWindowIcon, PaperclipIcon } from "lucide-react";
 import {
   useSourceControlChangeRequestList,
   useSourceControlChangeRequestSearch,
@@ -11,6 +11,7 @@ import {
 import { searchSourceControlSummaries } from "./composerSourceControlContextSearch";
 import { ContextPickerList } from "./ContextPickerList";
 import { ContextPickerTabs } from "./ContextPickerTabs";
+import { WindowCapturePicker } from "./WindowCapturePicker";
 
 type TabId = "issues" | "prs";
 
@@ -27,7 +28,10 @@ export function ContextPickerPopup(props: {
   onSelectIssue: (issue: SourceControlIssueSummary) => void;
   onSelectChangeRequest: (cr: ChangeRequest) => void;
   onAttachFile: (file: File) => void;
+  /** Present only where the desktop app can capture windows (macOS). */
+  onCaptureWindow?: (windowId: number) => void;
 }) {
+  const [view, setView] = useState<"context" | "windows">("context");
   const [activeTab, setActiveTab] = useState<TabId>("issues");
   const [query, setQuery] = useState("");
   const [isDragOver, setIsDragOver] = useState(false);
@@ -123,6 +127,14 @@ export function ContextPickerPopup(props: {
     }
   }
 
+  if (view === "windows" && props.onCaptureWindow) {
+    return (
+      <div className="flex w-80 flex-col">
+        <WindowCapturePicker onBack={() => setView("context")} onSelect={props.onCaptureWindow} />
+      </div>
+    );
+  }
+
   return (
     <div
       className="flex w-80 flex-col"
@@ -134,14 +146,27 @@ export function ContextPickerPopup(props: {
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <span className="text-sm font-medium">Add context</span>
-        <button
-          type="button"
-          aria-label="Attach file"
-          className="text-muted-foreground hover:text-foreground"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <PaperclipIcon className="size-4" />
-        </button>
+        <div className="flex items-center gap-2.5">
+          {props.onCaptureWindow ? (
+            <button
+              type="button"
+              aria-label="Capture window"
+              title="Capture window"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => setView("windows")}
+            >
+              <AppWindowIcon className="size-4" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="Attach file"
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <PaperclipIcon className="size-4" />
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"

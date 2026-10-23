@@ -65,6 +65,7 @@ export * from "./computerSpaces.ts";
 export * from "./computerAudit.ts";
 export * from "./computerPermissions.ts";
 export * from "./computerBeta.ts";
+export * from "./windowCapture.ts";
 
 export * from "./codexResetCredits.ts";
 export * from "./cliProxy.ts";

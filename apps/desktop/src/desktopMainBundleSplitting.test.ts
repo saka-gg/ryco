@@ -80,6 +80,8 @@ const LAZY_FROM_MAIN = [
   "./browser/ipc.ts",
   "./cuaDriverHost.ts",
   "./appSnapManager.ts",
+  // Composer window capture: loaded during bootstrap on macOS only.
+  "./windowCapture.ts",
 ];
 const LAZY_EXTERNALS_FROM_MAIN = [
   "electron-updater",
@@ -109,6 +111,7 @@ describe("desktop main bundle splitting", () => {
     expect(main).toContain('import("./desktopHubStack.ts")');
     expect(main).toContain('import("./sshEnvironment.ts")');
     expect(main).toContain('import("./computerUse/desktopStack.ts")');
+    expect(main).toContain('import("./windowCapture.ts")');
     // A lazy CommonJS require: the ESM namespace of electron-updater has no
     // `autoUpdater` export, so `(await import("electron-updater")).autoUpdater`
     // would be undefined.
