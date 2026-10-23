@@ -20,6 +20,7 @@ import {
 } from "@ryco/contracts";
 import { resolveStorageRetentionPolicy, retentionDue } from "@ryco/shared/storageRetention";
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
+import { databaseBackupsDirectory } from "../persistence/databaseBackups.ts";
 import { readDatabaseStorageReport } from "../persistence/databaseStorageReport.ts";
 import { EventLogCompaction } from "../persistence/Services/EventLogCompaction.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
@@ -152,6 +153,7 @@ export function makeStorageService(deps: {
         config.dbPath,
         config.dbPath + "-wal",
         config.dbPath + "-shm",
+        databaseBackupsDirectory(config.dbPath),
         config.attachmentsDir,
         config.taskFilesDir,
         config.logsDir,
@@ -554,6 +556,14 @@ export function makeStorageService(deps: {
                   label: "Node database and session history",
                   path: config.dbPath,
                   reason: "History, usage totals and provider archives are retained.",
+                },
+                {
+                  id: "database-backups",
+                  projectId: null,
+                  category: "history" as const,
+                  label: "Database backups",
+                  path: databaseBackupsDirectory(config.dbPath),
+                  reason: "Kept to undo an upgrade; the newest three are kept.",
                 },
                 {
                   id: "attachments",

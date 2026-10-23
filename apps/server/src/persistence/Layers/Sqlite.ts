@@ -2,7 +2,15 @@ import { Effect, Layer, FileSystem, Logger, Path } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
-import { runMigrations } from "../Migrations.ts";
+import {
+  BACKUP_FINALIZE_DELAY,
+  databaseBackupsDirectory,
+  finalizeDatabaseBackups,
+  needsPremigrationBackup,
+  readPremigrationBackupMode,
+  snapshotBeforeMigration,
+} from "../databaseBackups.ts";
+import { inspectMigrationLedger, runMigrations } from "../Migrations.ts";
 import * as SqliteReadClientLayer from "../SqliteReadClient.ts";
 import { BLOCKING_BUSY_TIMEOUT_MS, MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
 import { ServerConfig } from "../../config.ts";
@@ -10,6 +18,7 @@ import { trackStartupPhase } from "../../startupStallMonitor.ts";
 
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;
+  readonly readonly?: boolean;
   readonly spanAttributes?: Record<string, unknown>;
   /**
    * Bun's client switches to WAL when it opens the file unless this is set; `setup` then cannot
@@ -26,7 +35,7 @@ const defaultSqliteClientLoaders = {
   node: () => import("../NodeSqliteClient.ts"),
 } satisfies Record<string, () => Promise<Loader>>;
 
-const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
+export const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
   config: RuntimeSqliteLayerConfig,
 ) {
   const runtime = process.versions.bun !== undefined ? "bun" : "node";
@@ -35,7 +44,49 @@ const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
   return clientModule.layer(config);
 }, Layer.unwrap);
 
-const setup = Layer.effectDiscard(
+type SetupTarget = { readonly kind: "file"; readonly dbPath: string } | { readonly kind: "memory" };
+
+/**
+ * Brings the schema up to date. A file database that is about to change gets a restorable
+ * backup first (databaseBackups.ts); the backup never blocks or fails the upgrade.
+ */
+const upgradeSchema = (target: SetupTarget, options: { readonly finalize?: boolean } = {}) =>
+  target.kind === "memory"
+    ? runMigrations()
+    : Effect.gen(function* () {
+        const { dbPath } = target;
+        const mode = yield* readPremigrationBackupMode;
+        if (mode !== "off") {
+          const ledger = yield* inspectMigrationLedger();
+          if (needsPremigrationBackup(ledger)) {
+            const sql = yield* SqlClient.SqlClient;
+            yield* trackStartupPhase(
+              "persistence.migrations.backup",
+              snapshotBeforeMigration({
+                sql,
+                dbPath,
+                ledger,
+                mode,
+                openSqlite: makeRuntimeSqliteLayer,
+              }),
+            );
+          }
+        }
+        const executed = yield* runMigrations({ backupsDir: databaseBackupsDirectory(dbPath) });
+        if (mode !== "off" && (options.finalize ?? true)) {
+          // Verify, compress and prune out of boot and hydration; a short-lived process (a CLI
+          // command) is interrupted before it starts, and its raw backup stays valid.
+          yield* Effect.forkScoped(
+            Effect.delay(
+              finalizeDatabaseBackups({ dbPath, openSqlite: makeRuntimeSqliteLayer }),
+              BACKUP_FINALIZE_DELAY,
+            ),
+          );
+        }
+        return executed;
+      });
+
+const runSetup = (target: SetupTarget) =>
   Effect.gen(function* () {
     const startedAt = Date.now();
     const sql = yield* SqlClient.SqlClient;
@@ -74,12 +125,13 @@ const setup = Layer.effectDiscard(
     yield* sql`PRAGMA journal_size_limit = 67108864;`;
     // Named for the startup stall monitor: a slow ledger pass or one-time repair (9.5 s and
     // 27.4 s stalls were observed before the listener bound) is otherwise unattributed.
-    yield* trackStartupPhase("persistence.migrations", runMigrations());
+    yield* trackStartupPhase("persistence.migrations", upgradeSchema(target));
     yield* Effect.logDebug("startup sqlite setup complete", {
       durationMs: Date.now() - startedAt,
     });
-  }),
-);
+  });
+
+const makeSetup = (target: SetupTarget) => Layer.effectDiscard(runSetup(target));
 
 export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(function* (
   dbPath: string,
@@ -97,7 +149,7 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   return SqliteReadClientLayer.layer(dbPath).pipe(
     Layer.provideMerge(
       Layer.provideMerge(
-        setup,
+        makeSetup({ kind: "file", dbPath }),
         makeRuntimeSqliteLayer({
           filename: dbPath,
           disableWAL: empty,
@@ -112,7 +164,9 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
 }, Layer.unwrap);
 
 const memoryPersistence = (sqlite: Layer.Layer<SqlClient.SqlClient, SqlError>) =>
-  SqliteReadClientLayer.layerMain.pipe(Layer.provideMerge(Layer.provideMerge(setup, sqlite)));
+  SqliteReadClientLayer.layerMain.pipe(
+    Layer.provideMerge(Layer.provideMerge(makeSetup({ kind: "memory" }), sqlite)),
+  );
 
 /** A new in-memory database that runs every migration itself. */
 export const SqlitePersistenceMemoryFresh = memoryPersistence(
@@ -133,7 +187,12 @@ const buildMigratedMemoryImage = Effect.gen(function* () {
     const client = yield* NodeSqliteClient.SqliteClient;
     return yield* client.export;
   }).pipe(
-    Effect.provide(Layer.provideMerge(setup, NodeSqliteClient.layer({ filename: ":memory:" }))),
+    Effect.provide(
+      Layer.provideMerge(
+        makeSetup({ kind: "memory" }),
+        NodeSqliteClient.layer({ filename: ":memory:" }),
+      ),
+    ),
   );
 }).pipe(
   // Built once for every caller, apart from their runtimes: the migration logs
