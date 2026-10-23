@@ -286,6 +286,107 @@ describe("MessagesTimeline", () => {
     document.body.innerHTML = "";
   });
 
+  it("keeps answered and cancelled agent questions in the transcript as an exchange", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    const stopTier = syncDocumentPresentationTier();
+    const turnId = TurnId.make("turn-questions");
+    const at = (second: number) => `2026-04-13T12:00:${String(second).padStart(2, "0")}.000Z`;
+    const ask = (
+      id: string,
+      requestId: string,
+      second: number,
+      header: string,
+      text: string,
+      labels: ReadonlyArray<string>,
+    ) =>
+      ({
+        id,
+        kind: "user-input.requested",
+        tone: "info",
+        summary: "User input requested",
+        payload: {
+          requestId,
+          questions: [
+            {
+              id: text,
+              header,
+              question: text,
+              options: labels.map((label) => ({ label, description: `${label}.` })),
+            },
+          ],
+        },
+        turnId,
+        createdAt: at(second),
+      }) as unknown as OrchestrationThreadActivity;
+    const resolve = (id: string, requestId: string, second: number, payload: object) =>
+      ({
+        id,
+        kind: "user-input.resolved",
+        tone: "info",
+        summary: "User input submitted",
+        payload: { requestId, ...payload },
+        turnId,
+        createdAt: at(second),
+      }) as unknown as OrchestrationThreadActivity;
+    const viewModel = deriveThreadActivityViewModel(
+      [
+        ask("ask-1", "req-1", 2, "Library", "Which library should we use?", ["React", "Vue"]),
+        resolve("answer-1", "req-1", 3, { answers: { "Which library should we use?": "React" } }),
+        ask("ask-2", "req-2", 4, "Styling", "Which styling approach?", ["Tailwind", "CSS"]),
+        resolve("answer-2", "req-2", 5, { answers: {}, cancelled: true }),
+      ],
+      turnId,
+    );
+    const reply = {
+      id: MessageId.make("reply"),
+      role: "assistant",
+      text: "Set up with React.",
+      turnId,
+      createdAt: at(10),
+      completedAt: at(10),
+      streaming: false,
+    } as ChatMessage;
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        latestTurn={{ turnId, state: "completed", startedAt: at(1), completedAt: at(11) }}
+        timelineEntries={deriveTimelineEntries(
+          [reply],
+          [],
+          viewModel.workLogEntries,
+          [],
+          [],
+          [],
+          viewModel.userInputExchangeEntries,
+        )}
+      />,
+    );
+    try {
+      await expect.element(page.getByText("Which library should we use?")).toBeVisible();
+      await expect.element(page.getByText("Library", { exact: true })).toBeVisible();
+      const answer = page.getByText("React", { exact: true }).last();
+      await expect.element(answer).toBeVisible();
+      // The answer sits on the user's side, past the question card's right edge.
+      const question = page.getByText("Which library should we use?").element();
+      expect(answer.element().getBoundingClientRect().right).toBeGreaterThan(
+        question.getBoundingClientRect().right,
+      );
+      // A cancelled question keeps what was asked and says it went unanswered.
+      await expect.element(page.getByText("Which styling approach?")).toBeVisible();
+      await expect.element(page.getByText(/^Question cancelled · /)).toBeVisible();
+      // The bare lifecycle rows are gone, and the settled turn's fold does not hide them.
+      await expect.element(page.getByText("User input submitted")).not.toBeInTheDocument();
+      await expect.element(page.getByText("User input requested")).not.toBeInTheDocument();
+      expect(
+        document.querySelectorAll("[data-timeline-row-kind='user-input-exchange']"),
+      ).toHaveLength(2);
+    } finally {
+      await screen.unmount();
+      useTierOverrideStore.setState({ override: null });
+      stopTier();
+    }
+  });
+
   it("keeps a multi-source handoff accessible and contained across narrow light and dark layouts", async () => {
     const marker = makeContextHandoffMarker();
     const timelineEntries = [

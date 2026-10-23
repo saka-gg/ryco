@@ -2166,6 +2166,7 @@ export default function ChatView(props: ChatViewProps) {
     contextCompactionEntries,
     contextHandoffEntries,
     forkOriginEntries,
+    userInputExchangeEntries,
     pendingApprovals,
     pendingUserInputs,
     optionalUserInputs,
@@ -2491,6 +2492,7 @@ export default function ChatView(props: ChatViewProps) {
       contextCompactionEntries,
       contextHandoffEntries,
       forkOriginEntries,
+      userInputExchangeEntries,
     });
   }, [
     activeThreadId,
@@ -2499,6 +2501,7 @@ export default function ChatView(props: ChatViewProps) {
     contextHandoffEntries,
     forkOriginEntries,
     timelineMessages,
+    userInputExchangeEntries,
     workLogEntries,
   ]);
   // "Empty" for the new-thread surface means nothing to show at all, not merely

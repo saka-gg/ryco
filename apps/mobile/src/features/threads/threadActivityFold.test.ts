@@ -99,6 +99,18 @@ describe("thread activity folds", () => {
     expect(folds(rows).map((fold) => fold.id)).toEqual(["fold:turn-1:a", "fold:turn-1:b"]);
   });
 
+  it("shows an answered question as its own row between the activity around it", () => {
+    const exchange = {
+      kind: "user-input-exchange",
+      id: "user-input:answer",
+      createdAt: T0,
+      exchange: { id: "user-input:answer", questions: [] },
+    } as unknown as TimelineEntry;
+    const rows = build([work("a"), exchange, work("b")]);
+    expect(rows.map((row) => row.kind)).toEqual(["activity-fold", "entry", "activity-fold"]);
+    expect((rows[1] as TimelineEntryRow).entry).toBe(exchange);
+  });
+
   it("never emits an empty fold", () => {
     expect(folds(build([message("m")]))).toHaveLength(0);
     expect(build([])).toEqual([]);

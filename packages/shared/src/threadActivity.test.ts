@@ -5,6 +5,7 @@ import {
   CHANGED_FILE_SCAN_MAX_FILES,
   collectChangedFiles,
   compareThreadActivities,
+  compareThreadActivitiesInLifecycleOrder,
   compareThreadActivitySequence,
   derivePendingThreadRequestState,
   derivePendingThreadRequests,
@@ -275,6 +276,30 @@ describe("activity order", () => {
         entry("b", "2026-01-01T00:00:01.000Z", 7),
       ),
     ).toBeGreaterThan(0);
+  });
+
+  it("orders a lifecycle recorded in the same instant before the id decides", () => {
+    const at = "2026-01-01T00:00:01.000Z";
+    const lifecycle = (id: string, kind: string, sequence?: number) => ({
+      ...entry(id, at, sequence),
+      kind,
+    });
+    const ordered = [
+      lifecycle("a", "user-input.resolved"),
+      lifecycle("b", "tool.completed"),
+      lifecycle("c", "tool.updated"),
+      lifecycle("d", "user-input.requested"),
+      lifecycle("e", "tool.started"),
+    ].toSorted(compareThreadActivitiesInLifecycleOrder);
+
+    expect(ordered.map((value) => value.id)).toEqual(["e", "c", "d", "a", "b"]);
+    // The sequence still decides first.
+    expect(
+      compareThreadActivitiesInLifecycleOrder(
+        lifecycle("a", "user-input.resolved", 1),
+        lifecycle("b", "user-input.requested", 2),
+      ),
+    ).toBeLessThan(0);
   });
 });
 

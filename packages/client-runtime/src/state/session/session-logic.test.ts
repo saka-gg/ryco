@@ -2669,3 +2669,184 @@ describe("deriveActiveWorkStartedAt", () => {
     ).toBe("2026-02-27T21:11:00.000Z");
   });
 });
+
+describe("user input exchanges", () => {
+  const askActivity = (id: string, requestId: string, turnId: string, second: number) =>
+    makeActivity({
+      id,
+      createdAt: `2026-02-23T00:00:${String(second).padStart(2, "0")}.000Z`,
+      kind: "user-input.requested",
+      summary: "User input requested",
+      tone: "info",
+      turnId,
+      payload: {
+        requestId,
+        userInputIdentity: { requestEventId: id },
+        questions: [
+          {
+            id: "Which library?",
+            header: "Library",
+            question: "Which library?",
+            options: [
+              { label: "React", description: "React." },
+              { label: "Vue", description: "Vue." },
+            ],
+          },
+        ],
+      },
+    });
+  const answerActivity = (
+    id: string,
+    requestId: string,
+    turnId: string,
+    second: number,
+    payload: Record<string, unknown> = { answers: { "Which library?": "React" } },
+  ) =>
+    makeActivity({
+      id,
+      createdAt: `2026-02-23T00:00:${String(second).padStart(2, "0")}.000Z`,
+      kind: "user-input.resolved",
+      summary: "User input submitted",
+      tone: "info",
+      turnId,
+      payload: { requestId, ...payload },
+    });
+
+  it("keeps every turn's answered questions and replaces their bare rows in the timeline", () => {
+    const activities = [
+      askActivity("ask-1", "req-1", "turn-1", 1),
+      answerActivity("answer-1", "req-1", "turn-1", 2),
+      askActivity("ask-2", "req-2", "turn-2", 3),
+      answerActivity("answer-2", "req-2", "turn-2", 4, { answers: {}, cancelled: true }),
+      askActivity("ask-3", "req-3", "turn-2", 5),
+    ];
+    const viewModel = deriveThreadActivityViewModel(activities, TurnId.make("turn-2"));
+
+    expect(viewModel.userInputExchangeEntries).toEqual([
+      {
+        id: "user-input:answer-1",
+        activityId: "answer-1",
+        requestActivityId: "ask-1",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        turnId: "turn-1",
+        cancelled: false,
+        questions: [
+          {
+            id: "Which library?",
+            header: "Library",
+            question: "Which library?",
+            options: ["React", "Vue"],
+            answer: "React",
+          },
+        ],
+      },
+      expect.objectContaining({ id: "user-input:answer-2", cancelled: true }),
+    ]);
+    // The work log keeps the latest turn's rows; the timeline drops the ones an exchange stands
+    // in for, and the open question keeps its row.
+    expect(viewModel.workLogEntries.map((entry) => entry.id)).toEqual([
+      "ask-2",
+      "answer-2",
+      "ask-3",
+    ]);
+    expect(viewModel.workLogEntries).toEqual(
+      deriveWorkLogEntries(activities, TurnId.make("turn-2")),
+    );
+    const entries = deriveTimelineEntries(
+      [],
+      [],
+      viewModel.workLogEntries,
+      [],
+      [],
+      [],
+      viewModel.userInputExchangeEntries,
+    );
+    expect(entries.map((entry) => `${entry.kind}:${entry.id}`)).toEqual([
+      "user-input-exchange:user-input:answer-1",
+      "user-input-exchange:user-input:answer-2",
+      "work:ask-3",
+    ]);
+    expect(viewModel.pendingUserInputs.map((input) => input.requestId)).toEqual(["req-3"]);
+  });
+
+  it("carries an exchange's bare rows for a surface that shows no exchanges", () => {
+    const viewModel = deriveThreadActivityViewModel(
+      [
+        askActivity("ask-1", "req-1", "turn-1", 1),
+        answerActivity("answer-1", "req-1", "turn-1", 2),
+      ],
+      TurnId.make("turn-1"),
+    );
+    const entries = deriveTimelineEntries(
+      [],
+      [],
+      viewModel.workLogEntries,
+      [],
+      [],
+      [],
+      viewModel.userInputExchangeEntries,
+    );
+    expect(entries.map((entry) => entry.kind)).toEqual(["user-input-exchange"]);
+    // The frozen web phone tier renders these in the exchange's place, as before.
+    const [entry] = entries;
+    expect(
+      entry?.kind === "user-input-exchange" && entry.workEntries.map((row) => row.label),
+    ).toEqual(["User input requested", "User input submitted"]);
+  });
+
+  it("keeps an exchange's identity while other activities change", () => {
+    const ask = askActivity("ask-1", "req-1", "turn-1", 1);
+    const answer = answerActivity("answer-1", "req-1", "turn-1", 2);
+    const first = deriveThreadActivityViewModel([ask, answer], TurnId.make("turn-1"));
+    const later = deriveThreadActivityViewModel(
+      [
+        ask,
+        answer,
+        makeActivity({ id: "tool", createdAt: "2026-02-23T00:00:03.000Z", turnId: "turn-1" }),
+      ],
+      TurnId.make("turn-1"),
+    );
+    expect(later.userInputExchangeEntries[0]).toBe(first.userInputExchangeEntries[0]);
+  });
+
+  it("leaves an answer without its question as a plain row", () => {
+    const viewModel = deriveThreadActivityViewModel(
+      [answerActivity("answer-1", "req-1", "turn-1", 2)],
+      TurnId.make("turn-1"),
+    );
+    expect(viewModel.userInputExchangeEntries).toEqual([]);
+    expect(viewModel.workLogEntries.map((entry) => entry.label)).toEqual(["User input submitted"]);
+  });
+
+  it("orders exchanges with the messages around them", () => {
+    const viewModel = deriveThreadActivityViewModel(
+      [
+        askActivity("ask-1", "req-1", "turn-1", 1),
+        answerActivity("answer-1", "req-1", "turn-1", 2),
+      ],
+      TurnId.make("turn-1"),
+    );
+    const message = (id: string, second: number) => ({
+      id: MessageId.make(id),
+      role: "assistant" as const,
+      text: id,
+      streaming: false,
+      turnId: TurnId.make("turn-1"),
+      createdAt: `2026-02-23T00:00:${String(second).padStart(2, "0")}.000Z`,
+    });
+    const entries = deriveTimelineEntries(
+      [message("before", 0), message("after", 3)],
+      [],
+      viewModel.workLogEntries,
+      [],
+      [],
+      [],
+      viewModel.userInputExchangeEntries,
+    );
+    expect(entries.map((entry) => `${entry.kind}:${entry.id}`)).toEqual([
+      "message:before",
+      "user-input-exchange:user-input:answer-1",
+      "message:after",
+    ]);
+  });
+});

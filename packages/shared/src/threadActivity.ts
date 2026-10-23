@@ -263,6 +263,29 @@ export function compareThreadActivities(
   );
 }
 
+/** A start before its progress, progress before its completion or resolution. */
+function threadActivityLifecycleRank(kind: string): number {
+  if (kind.endsWith(".started")) return 0;
+  if (kind.endsWith(".completed") || kind.endsWith(".resolved")) return 2;
+  return 1;
+}
+
+/**
+ * The transcript's order: `compareThreadActivities`, except that activities recorded in the same
+ * instant follow their lifecycle (a request before its resolution) before the id decides.
+ */
+export function compareThreadActivitiesInLifecycleOrder(
+  left: ThreadActivityOrderKey & { readonly kind: string },
+  right: ThreadActivityOrderKey & { readonly kind: string },
+): number {
+  return (
+    compareThreadActivitySequence(left, right) ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    threadActivityLifecycleRank(left.kind) - threadActivityLifecycleRank(right.kind) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
 // ── Changed files in tool payloads ────────────────────────────────────
 
 /** Keys that name a file in a tool payload record, in lookup order. */

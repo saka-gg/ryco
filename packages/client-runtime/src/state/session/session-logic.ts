@@ -10,10 +10,11 @@ import {
   CHANGED_FILE_SCAN_MAX_DEPTH,
   CHANGED_FILE_SCAN_MAX_FILES,
   collectChangedFiles,
-  compareThreadActivitySequence,
+  compareThreadActivitiesInLifecycleOrder,
   isContextCompactionActivity,
 } from "@ryco/shared/threadActivity";
 import { readTurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
+import { parseUserInputQuestions } from "@ryco/shared/userInputExchange";
 
 import { isBackgroundTaskActivity } from "./subagentRuntime.ts";
 import {
@@ -56,6 +57,11 @@ import {
   toForkOriginTimelineEntry,
   type ForkOriginTimelineEntry,
 } from "./forkOrigin.ts";
+import {
+  createUserInputExchangeCollector,
+  userInputExchangeTimeline,
+  type UserInputExchangeTimelineEntry,
+} from "./userInputExchange.ts";
 
 export type ProviderPickerKind = ProviderDriverKind;
 
@@ -209,6 +215,12 @@ export interface ThreadActivityViewModel {
   contextCompactionEntries: ContextCompactionTimelineEntry[];
   contextHandoffEntries: ContextHandoffTimelineEntry[];
   forkOriginEntries: ForkOriginTimelineEntry[];
+  /**
+   * Every answered or cancelled agent question in the loaded activities, not only the latest
+   * turn's. `workLogEntries` keeps their request and resolution rows; in the timeline each
+   * exchange stands in for its two (`userInputExchangeTimeline`).
+   */
+  userInputExchangeEntries: UserInputExchangeTimelineEntry[];
   latestTurnHasToolActivity: boolean;
   pendingApprovals: PendingApproval[];
   pendingUserInputs: PendingUserInput[];
@@ -263,6 +275,18 @@ export type TimelineEntry =
       kind: "fork-origin";
       createdAt: string;
       marker: ForkOriginTimelineEntry;
+    }
+  | {
+      id: string;
+      /** An agent question with the user's answers; it never folds into its turn. */
+      kind: "user-input-exchange";
+      createdAt: string;
+      exchange: UserInputExchangeTimelineEntry;
+      /**
+       * The request and resolution work rows it stands in for, which the timeline leaves out. A
+       * surface that renders no exchanges (the frozen web phone tier) shows these instead.
+       */
+      workEntries: ReadonlyArray<WorkLogEntry>;
     };
 
 export function formatDuration(durationMs: number): string {
@@ -497,7 +521,7 @@ export function derivePendingApprovals(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingApproval[] {
   const openByRequestId = new Map<ApprovalRequestId, PendingApproval>();
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
 
   for (const activity of ordered) {
     updatePendingApprovalState(openByRequestId, activity, activityPayload(activity));
@@ -506,61 +530,11 @@ export function derivePendingApprovals(
   return pendingApprovalsFromState(openByRequestId);
 }
 
-function parseUserInputQuestions(
-  payload: Record<string, unknown> | null,
-): ReadonlyArray<UserInputQuestion> | null {
-  const questions = payload?.questions;
-  if (!Array.isArray(questions)) {
-    return null;
-  }
-  const parsed = questions
-    .map<UserInputQuestion | null>((entry) => {
-      if (!entry || typeof entry !== "object") return null;
-      const question = entry as Record<string, unknown>;
-      if (
-        typeof question.id !== "string" ||
-        typeof question.header !== "string" ||
-        typeof question.question !== "string" ||
-        !Array.isArray(question.options)
-      ) {
-        return null;
-      }
-      const options = question.options
-        .map<UserInputQuestion["options"][number] | null>((option) => {
-          if (!option || typeof option !== "object") return null;
-          const optionRecord = option as Record<string, unknown>;
-          if (
-            typeof optionRecord.label !== "string" ||
-            typeof optionRecord.description !== "string"
-          ) {
-            return null;
-          }
-          return {
-            label: optionRecord.label,
-            description: optionRecord.description,
-          };
-        })
-        .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0 && payload?.nonBlocking !== true) {
-        return null;
-      }
-      return {
-        id: question.id,
-        header: question.header,
-        question: question.question,
-        options,
-        multiSelect: question.multiSelect === true,
-      };
-    })
-    .filter((question): question is UserInputQuestion => question !== null);
-  return parsed.length > 0 ? parsed : null;
-}
-
 export function derivePendingUserInputs(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingUserInput[] {
   const openByRequestId = new Map<ApprovalRequestId, PendingUserInput>();
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
 
   for (const activity of ordered) {
     updatePendingUserInputState(openByRequestId, activity, activityPayload(activity));
@@ -714,7 +688,7 @@ export function deriveActivePlanState(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
 ): ActivePlanState | null {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
   let latestPlanActivity: OrchestrationThreadActivity | null = null;
   let latestPlanActivityForTurn: OrchestrationThreadActivity | null = null;
 
@@ -798,7 +772,7 @@ export function deriveWorkLogEntries(
   latestTurnId: TurnId | undefined,
   options?: { readonly agentTimeline?: boolean },
 ): WorkLogEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
   // `tool.started` never becomes a row of its own, but it carries the only
   // authoritative start time for a tool call. Index it first so the surviving
   // lifecycle entries can report how long their call actually took.
@@ -2087,42 +2061,6 @@ function extractChangedFileStats(payload: Record<string, unknown> | null): TurnD
   return changedFileStats;
 }
 
-function compareActivitiesByOrder(
-  left: OrchestrationThreadActivity,
-  right: OrchestrationThreadActivity,
-): number {
-  const sequenceComparison = compareThreadActivitySequence(left, right);
-  if (sequenceComparison !== 0) {
-    return sequenceComparison;
-  }
-
-  const createdAtComparison = left.createdAt.localeCompare(right.createdAt);
-  if (createdAtComparison !== 0) {
-    return createdAtComparison;
-  }
-
-  const lifecycleRankComparison =
-    compareActivityLifecycleRank(left.kind) - compareActivityLifecycleRank(right.kind);
-  if (lifecycleRankComparison !== 0) {
-    return lifecycleRankComparison;
-  }
-
-  return left.id.localeCompare(right.id);
-}
-
-function compareActivityLifecycleRank(kind: string): number {
-  if (kind.endsWith(".started") || kind === "tool.started") {
-    return 0;
-  }
-  if (kind.endsWith(".progress") || kind.endsWith(".updated")) {
-    return 1;
-  }
-  if (kind.endsWith(".completed") || kind.endsWith(".resolved")) {
-    return 2;
-  }
-  return 1;
-}
-
 export function hasToolActivityForTurn(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   turnId: TurnId | null | undefined,
@@ -2139,7 +2077,7 @@ export function hasToolActivityForTurn(
 export function deriveContextCompactionTimelineEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): ContextCompactionTimelineEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
   const entries: ContextCompactionTimelineEntry[] = [];
   for (const activity of ordered) {
     if (isContextCompactionActivity(activity)) {
@@ -2152,7 +2090,7 @@ export function deriveContextCompactionTimelineEntries(
 export function deriveContextHandoffTimelineEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): ContextHandoffTimelineEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
   return ordered.flatMap((activity) => {
     const entry = toContextHandoffTimelineEntry(activity);
     return entry ? [entry] : [];
@@ -2175,7 +2113,7 @@ export function deriveThreadActivityViewModel(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | null | undefined,
 ): ThreadActivityViewModel {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
   const startedAtByToolCallId = collectToolStartTimestamps(ordered);
   // A fork has no turn of its own until its first send. Its boundary turn stands in, so the
   // inherited history renders as the source rendered it with that turn as its latest instead
@@ -2187,6 +2125,7 @@ export function deriveThreadActivityViewModel(
   const contextCompactionEntries: ContextCompactionTimelineEntry[] = [];
   const contextHandoffEntries: ContextHandoffTimelineEntry[] = [];
   const forkOriginEntries: ForkOriginTimelineEntry[] = [];
+  const userInputExchanges = createUserInputExchangeCollector();
   let latestTurnHasToolActivity = false;
   let latestPlanActivity: OrchestrationThreadActivity | null = null;
   let latestPlanActivityForTurn: OrchestrationThreadActivity | null = null;
@@ -2196,6 +2135,7 @@ export function deriveThreadActivityViewModel(
 
     updatePendingApprovalState(pendingApprovalState, activity, payload);
     updatePendingUserInputState(pendingUserInputState, activity, payload);
+    userInputExchanges.observe(activity);
 
     if (activity.kind === "turn.plan.updated") {
       latestPlanActivity = activity;
@@ -2238,6 +2178,7 @@ export function deriveThreadActivityViewModel(
     contextCompactionEntries,
     contextHandoffEntries,
     forkOriginEntries,
+    userInputExchangeEntries: userInputExchanges.entries,
     latestTurnHasToolActivity,
     pendingApprovals: pendingApprovalsFromState(pendingApprovalState),
     pendingUserInputs: userInputs.filter((input) => !input.nonBlocking),
@@ -2253,6 +2194,7 @@ export function deriveTimelineEntries(
   contextCompactionEntries: ContextCompactionTimelineEntry[] = [],
   contextHandoffEntries: ContextHandoffTimelineEntry[] = [],
   forkOriginEntries: ForkOriginTimelineEntry[] = [],
+  userInputExchangeEntries: UserInputExchangeTimelineEntry[] = [],
 ): TimelineEntry[] {
   const messageRows: TimelineEntry[] = messages.map((message) => ({
     id: message.id,
@@ -2266,12 +2208,16 @@ export function deriveTimelineEntries(
     createdAt: proposedPlan.createdAt,
     proposedPlan,
   }));
-  const workRows: TimelineEntry[] = workEntries.map((entry) => ({
-    id: entry.id,
-    kind: "work",
-    createdAt: entry.createdAt,
-    entry,
-  }));
+  // An answered question renders as its exchange, not as "requested" and "submitted" rows.
+  const userInputExchanges = userInputExchangeTimeline(workEntries, userInputExchangeEntries);
+  const workRows: TimelineEntry[] = workEntries
+    .filter(userInputExchanges.keepsWorkEntry)
+    .map((entry) => ({
+      id: entry.id,
+      kind: "work",
+      createdAt: entry.createdAt,
+      entry,
+    }));
   const contextCompactionRows: TimelineEntry[] = contextCompactionEntries.map((marker) => ({
     id: marker.id,
     kind: "context-compaction",
@@ -2318,6 +2264,7 @@ export function deriveTimelineEntries(
     ...contextCompactionRows,
     ...fallbackHandoffRows,
     ...forkOriginRows,
+    ...userInputExchanges.entries,
   ].toSorted(
     (a, b) =>
       forkTimelineBand(a, inheritedPrefix) - forkTimelineBand(b, inheritedPrefix) ||

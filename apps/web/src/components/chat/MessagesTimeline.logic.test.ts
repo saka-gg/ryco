@@ -1463,6 +1463,108 @@ describe("chapter rows", () => {
     });
     expect(deriveTimelineMinimapItems(rows)[0]?.assistantText).toBe("Second update.");
   });
+
+  describe("answered agent questions", () => {
+    const exchangeEntry = (createdAt: string): TimelineEntry => {
+      const exchange = {
+        id: "user-input:answer-1",
+        activityId: "answer-1",
+        requestActivityId: "ask-1",
+        createdAt,
+        turnId,
+        cancelled: false,
+        questions: [
+          {
+            id: "Which library?",
+            header: "Library",
+            question: "Which library?",
+            options: ["React", "Vue"],
+            answer: "React",
+          },
+        ],
+      };
+      // The request and resolution rows the exchange stands in for.
+      const workEntries = [
+        makeWorkEntry({ id: "ask-1", createdAt: "2026-01-01T00:00:04Z", turnId }),
+        makeWorkEntry({ id: "answer-1", createdAt, turnId }),
+      ];
+      return { id: exchange.id, kind: "user-input-exchange", createdAt, exchange, workEntries };
+    };
+    const timelineEntries = [
+      userEntry,
+      assistant("c1", "2026-01-01T00:00:02Z", "Checking the stack."),
+      work("w1", "2026-01-01T00:00:03Z"),
+      exchangeEntry("2026-01-01T00:00:05Z"),
+      work("w2", "2026-01-01T00:00:06Z"),
+      assistant("final", "2026-01-01T00:00:20Z", "Done."),
+    ];
+    const settled = {
+      turnId,
+      state: "completed" as const,
+      startedAt: "2026-01-01T00:00:01Z",
+      completedAt: "2026-01-01T00:00:21Z",
+    };
+
+    it("stay visible when their turn folds into its disclosure", () => {
+      const rows = deriveMessagesTimelineRows({
+        ...baseInput,
+        timelineEntries,
+        latestTurn: settled,
+        showUserInputExchanges: true,
+      });
+      expect(rows.map((row) => row.id)).toEqual([
+        "user-entry",
+        "turn-fold:settled:turn-ch",
+        "user-input:answer-1",
+        "final-entry",
+      ]);
+    });
+
+    it("sit between the chapters of an open turn, never inside one", () => {
+      const rows = deriveMessagesTimelineRows({
+        ...baseInput,
+        timelineEntries,
+        latestTurn: settled,
+        turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+        showUserInputExchanges: true,
+      });
+      expect(rows.map((row) => row.id)).toEqual([
+        "user-entry",
+        "turn-fold:settled:turn-ch",
+        "chapter:c1",
+        "user-input:answer-1",
+        "chapter:w2",
+        "final-entry",
+      ]);
+      expect(chapters(rows).map((row) => row.entries.map((entry) => entry.id))).toEqual([
+        ["w1"],
+        ["w2"],
+      ]);
+    });
+
+    it("render only where they are shown, keeping their row across rebuilds", () => {
+      const derive = (show: boolean) =>
+        deriveMessagesTimelineRows({
+          ...baseInput,
+          timelineEntries,
+          latestTurn: settled,
+          turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+          showUserInputExchanges: show,
+        });
+      const first = computeStableMessagesTimelineRows(derive(true), {
+        byId: new Map(),
+        result: [],
+      });
+      expect(computeStableMessagesTimelineRows(derive(true), first)).toBe(first);
+
+      // The frozen phone tier shows nothing new: the question's bare rows stay in its turn.
+      const hidden = derive(false);
+      expect(hidden.some((row) => row.kind === "user-input-exchange")).toBe(false);
+      expect(chapters(hidden).map((row) => row.entries.map((entry) => entry.id))).toEqual([
+        ["w1", "ask-1", "answer-1", "w2"],
+      ]);
+    });
+  });
 });
 
 describe("deriveUndoTurnCountByTurnId", () => {

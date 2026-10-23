@@ -375,6 +375,10 @@
       "types": "./src/turnReply.ts",
       "import": "./src/turnReply.ts"
     },
+    "./userInputExchange": {
+      "types": "./src/userInputExchange.ts",
+      "import": "./src/userInputExchange.ts"
+    },
     "./computerFrame": {
       "types": "./src/computerFrame.ts",
       "import": "./src/computerFrame.ts"
