@@ -24,6 +24,7 @@ import {
   restoreComposerDraftAttachments,
 } from "../composerDraftPersistence";
 import type { ComposerImageAttachment } from "../composerDraftStore";
+import { deriveComposerFileUploadSendBlock } from "../composerFileUpload";
 
 const threadRef = scopeThreadRef(EnvironmentId.make("env-drafts"), ThreadId.make("thread-images"));
 const threadKey = scopedThreadKey(threadRef);
@@ -108,6 +109,51 @@ describe("composer draft attachments", () => {
     expect(restored.bytesPending).toBeUndefined();
     expect(await restored.file!.text()).toBe("pixels");
     expect(restored.previewUrl.startsWith("blob:")).toBe(true);
+  });
+
+  it("restores a folded paste's text after a reload, sendable without attaching it again", async () => {
+    const first = loadStore();
+    const file = new File(["a long log\n".repeat(4_000)], "pasted-text.txt", {
+      type: "text/plain",
+    });
+    const pasted: ComposerImageAttachment = {
+      type: "file",
+      id: "pasted-reload",
+      name: file.name,
+      mimeType: file.type,
+      sizeBytes: file.size,
+      previewUrl: "",
+      file,
+    };
+    first.getState().addImage(threadRef, pasted);
+    const persisted = await persistComposerImageBytes({ ...pasted, file });
+    expect(persisted).toEqual({
+      type: "file",
+      id: "pasted-reload",
+      name: "pasted-text.txt",
+      mimeType: "text/plain",
+      sizeBytes: file.size,
+      bytes: "local",
+    });
+    first.getState().syncPersistedAttachments(threadRef, [persisted!]);
+    composerDraftWriteScheduler.flush();
+
+    // A reload, or an app restart: no upload token to have expired, the bytes are local.
+    const second = loadStore();
+    const hydrated = second.getState().draftsByThreadKey[threadKey]!.images;
+    expect(deriveComposerFileUploadSendBlock({ attachments: hydrated, nowMs: Date.now() })).toBe(
+      "Loading 'pasted-text.txt'…",
+    );
+    await restoreComposerDraftAttachments({
+      readDrafts: () => second.getState().draftsByThreadKey,
+      restore: (key, restored) => second.getState().restoreDraftImages(key, restored),
+      bytes: composerAttachmentBytes,
+    });
+    const restored = second.getState().draftsByThreadKey[threadKey]!.images;
+    expect(await restored[0]!.file!.text()).toBe(await file.text());
+    expect(
+      deriveComposerFileUploadSendBlock({ attachments: restored, nowMs: Date.now() + 86_400_000 }),
+    ).toBeNull();
   });
 
   it("migrates the single legacy entry and moves its data URLs into IndexedDB", async () => {

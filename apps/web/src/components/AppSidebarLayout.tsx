@@ -22,6 +22,7 @@ import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { SettingsRouteBridge } from "./SettingsRouteBridge";
 import { PrimaryShellPaintMarker } from "../perf/PrimaryShellPaintMarker";
+import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 
 const THREAD_SIDEBAR_WIDTH_STORAGE_KEY = "chat_thread_sidebar_width";
 const THREAD_SIDEBAR_OPEN_STORAGE_KEY = "chat_thread_sidebar_open";
@@ -73,7 +74,7 @@ export function SettingsSurfaceMount() {
 /**
  * Shell-wide global effects shared by every application shell tier: the
  * shortcut-modifier keydown/keyup/blur sync and the desktop-bridge
- * open-settings menu action. Mounted once by the active shell (desktop
+ * open-settings and paste-as-text menu actions. Mounted once by the active shell (desktop
  * sidebar layout or the phone shell) — never by both.
  */
 export function useAppShellGlobalEffects(): void {
@@ -117,6 +118,8 @@ export function useAppShellGlobalEffects(): void {
       unsubscribe?.();
     };
   }, [openSettings]);
+
+  useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
 }
 
 /**

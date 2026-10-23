@@ -6,14 +6,27 @@ import type {
 import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { formatAttachmentBytes } from "./attachmentPreview";
 import { memo } from "react";
-import { CircleAlertIcon, FileIcon, PaperclipIcon, RotateCcwIcon, XIcon } from "lucide-react";
+import { isPastedTextAttachment } from "@ryco/client-runtime/state/composer";
+import {
+  CircleAlertIcon,
+  ClipboardPasteIcon,
+  FileIcon,
+  PaperclipIcon,
+  RotateCcwIcon,
+  XIcon,
+} from "lucide-react";
 import type { ComposerImageAttachment } from "../../composerDraftStore";
 import type { ChatFileUploadRecord } from "../../composerFileUpload";
 import { isFileUploadTokenUsable } from "../../composerFileUpload";
 import type { ComposerTrigger } from "../../composer-logic";
 import type { TerminalContextDraft } from "../../lib/terminalContext";
 import type { SessionPhase, Thread } from "../../types";
-import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
+import {
+  type ComposerPromptEditorHandle,
+  type ComposerTextPaste,
+  type ComposerTextPasteResult,
+  ComposerPromptEditor,
+} from "../ComposerPromptEditor";
 import { ComposerCommandMenuOverlay } from "./ComposerAttachmentMenus";
 import type { ComposerMenuEmptyState } from "./composerPathMenu";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
@@ -99,6 +112,7 @@ export interface ComposerPromptShellProps {
     event: KeyboardEvent,
   ) => boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLElement>) => void;
+  onComposerPasteText: (paste: ComposerTextPaste) => ComposerTextPasteResult;
 
   // Placeholder / disabled state
   activePendingProgress: ComposerPromptShellPendingProgress | null;
@@ -177,6 +191,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     onPromptChange,
     onComposerCommandKey,
     onComposerPaste,
+    onComposerPasteText,
     activePendingProgress,
     showPlanFollowUpPrompt,
     activeProposedPlan,
@@ -336,6 +351,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
             onChange={onPromptChange}
             onCommandKeyDown={onComposerCommandKey}
             onPaste={onComposerPaste}
+            onPasteText={onComposerPasteText}
             placeholder={
               isApprovalLocked
                 ? // The full approval detail renders as a scrollable block in the
@@ -446,13 +462,16 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
     image.uploadToken !== undefined &&
     image.expiresAt !== undefined &&
     isFileUploadTokenUsable(image.expiresAt, Date.now());
+  // A saved draft's file whose bytes are still loading is not missing them.
   const needsReattach =
     status === undefined
-      ? image.file === null && !hasValidUploadToken
+      ? image.file === null && !image.bytesPending && !hasValidUploadToken
       : status.kind === "needsReattach";
   const isUploading = status?.kind === "uploading" || status?.kind === "pending";
   const isUploaded = status?.kind === "uploaded";
   const progress = status?.kind === "uploading" ? status.progress : null;
+  const isPastedText = isPastedTextAttachment(image);
+  const KindIcon = isPastedText ? ClipboardPasteIcon : FileIcon;
   return (
     <div
       className="relative flex h-16 min-w-44 max-w-56 items-center gap-2 overflow-hidden rounded-lg border border-border/80 bg-background px-3 py-2"
@@ -460,7 +479,7 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
         needsReattach ? "reattach" : isUploading ? "uploading" : isUploaded ? "uploaded" : "ready"
       }
     >
-      <FileIcon className="size-4 shrink-0 text-muted-foreground" />
+      <KindIcon className="size-4 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs font-medium">{image.name}</span>
         {needsReattach ? (
@@ -495,6 +514,7 @@ const ComposerFileAttachmentRow = memo(function ComposerFileAttachmentRow({
           </span>
         ) : (
           <span className="block text-[10px] text-muted-foreground">
+            {isPastedText ? "Pasted text · " : ""}
             {formatAttachmentBytes(image.sizeBytes)}
             {isUploaded ? " · Uploaded" : ""}
           </span>

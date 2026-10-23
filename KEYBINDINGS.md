@@ -167,6 +167,13 @@ Mod+Enter in the focused composer is reserved: while a turn runs it does the opp
 follow-up setting. Do not bind `mod+enter` to commands that can fire while the composer is
 focused.
 
+The focused composer also keeps these keys, which are not configurable (see
+[docs/user/composer.md](docs/user/composer.md)):
+
+- `ArrowUp` / `ArrowDown` in an empty composer recall the thread's earlier prompts.
+- `mod+shift+v` pastes text as text, even when it is large enough to become an attachment. The
+  desktop app's **Edit > Paste as Text** does the same, and so does `cmd+alt+shift+v` on macOS.
+
 Supported operators:
 
 - `!` (not)

@@ -761,6 +761,9 @@ export interface DesktopThreadExportInput {
 
 export type DesktopThreadExportResult = { readonly status: "saved" | "cancelled" };
 
+/** The desktop menu action of Edit > Paste as Text; the app answers it with `pasteAsText`. */
+export const DESKTOP_PASTE_AS_TEXT_MENU_ACTION = "paste-as-text";
+
 export interface DesktopBridge {
   saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
   quitShortcut?: {
@@ -995,6 +998,12 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
+  /**
+   * Pastes the clipboard as plain text into the calling window's focused element. The Edit
+   * menu's Paste as Text sends `DESKTOP_PASTE_AS_TEXT_MENU_ACTION`, and the app calls this once
+   * it is ready for the paste. Absent in desktop builds that predate it.
+   */
+  pasteAsText?: () => Promise<void>;
   /** The machine woke from sleep or the screen was unlocked; live sockets may be dead. */
   onSystemResume?: (listener: () => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;

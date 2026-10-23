@@ -5,6 +5,7 @@ import {
   appendAttachmentPathLines,
   formatAttachmentPathLine,
   formatAttachmentPathLines,
+  stripAttachmentPathLines,
 } from "./attachmentPrompt.ts";
 
 const fileAttachment: ChatAttachment = {
@@ -98,5 +99,27 @@ describe("appendAttachmentPathLines", () => {
       ]),
     ).toBe("[Attached file] mystery.bin (application/octet-stream, size unknown bytes)");
     expect(appendAttachmentPathLines(undefined, ["line"])).toBe("line");
+  });
+});
+
+describe("stripAttachmentPathLines", () => {
+  it("removes the trailing path lines the formatter appended", () => {
+    const lines = formatAttachmentPathLines([
+      { attachment: fileAttachment, resolvedPath: "/tmp/attachments/report (1).bin" },
+      { attachment: unknownAttachment },
+    ]);
+    expect(stripAttachmentPathLines(appendAttachmentPathLines("please review", lines) ?? "")).toBe(
+      "please review",
+    );
+    expect(stripAttachmentPathLines(appendAttachmentPathLines("", lines) ?? "")).toBe("");
+  });
+
+  it("keeps text without trailing path lines, including one quoted mid-text", () => {
+    const line = formatAttachmentPathLine({ attachment: imageAttachment });
+    expect(stripAttachmentPathLines("please review")).toBe("please review");
+    expect(stripAttachmentPathLines(`${line}\n\nwhy is this here?`)).toBe(
+      `${line}\n\nwhy is this here?`,
+    );
+    expect(stripAttachmentPathLines("[Attached file] notes")).toBe("[Attached file] notes");
   });
 });
