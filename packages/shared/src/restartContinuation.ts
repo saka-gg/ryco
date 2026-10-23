@@ -16,6 +16,12 @@ export const ORPHANED_PROVIDER_SESSION_ERROR =
  */
 export const RESTART_CONTINUATION_NOTICE_KIND_PREFIX = "restart.continuation-";
 
+/**
+ * A continuation is never sent for work last observed longer ago than this. Clients that
+ * promise a continuation (Desktop's quit confirmation) name the same window.
+ */
+export const RESTART_CONTINUATION_MAX_AGE_MS = 30 * 60_000;
+
 /** The session fields a restart release is recognised by. */
 export interface RestartReleaseSessionState {
   readonly status: string;
