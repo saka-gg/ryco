@@ -231,6 +231,24 @@ describe("listDirectProviderAccounts", () => {
     expect(accounts[0]!.resetCredits).toBe(resetCredits);
   });
 
+  it("counts an unparsable check time as older than any other", () => {
+    const signedIn = (checkedAt: string, availableCount: number) =>
+      provider({
+        instanceId: ProviderInstanceId.make("codex"),
+        auth: { status: "authenticated", email: "a@example.com" },
+        checkedAt,
+        rateLimits: { primary: fiveHour(10), resetCredits: { availableCount } },
+      });
+    const unparsable = signedIn("not a time", 1);
+    const parsed = signedIn("2026-10-22T09:00:00.000Z", 3);
+    const { accounts } = listDirectProviderAccounts([
+      { environmentId: "m5", label: "M5", connected: true, providers: [unparsable], hubs: [] },
+      { environmentId: "m4", label: "M4", connected: true, providers: [parsed], hubs: [] },
+    ]);
+    expect(accounts[0]!.snapshot).toBe(parsed);
+    expect(accounts[0]!.resetCredits).toEqual({ availableCount: 3 });
+  });
+
   it("never lets a routed instance join a direct account with the same email", () => {
     const email = "a@example.com";
     const routedId = ProviderInstanceId.make("claudeAgent");
@@ -418,7 +436,11 @@ describe("groupSubscriptionLimits", () => {
             driver: ProviderDriverKind.make("claudeAgent"),
             rateLimits: { primary: fiveHour(10) },
           }),
-          provider({ instanceId: ProviderInstanceId.make("codex"), message: "Read failed" }),
+          provider({
+            instanceId: ProviderInstanceId.make("codex"),
+            message: "Read failed",
+            rateLimits: { planType: "plus", credits: { hasCredits: true, unlimited: false } },
+          }),
           provider({
             instanceId: ProviderInstanceId.make("copilot"),
             driver: ProviderDriverKind.make("copilot"),
@@ -436,8 +458,9 @@ describe("groupSubscriptionLimits", () => {
     expect(groups.map((group) => group.label)).toEqual(["Claude", "Codex"]);
     expect(groups[0]!.withoutLimits).toEqual([]);
     expect(groups[1]!.directAccounts).toEqual([]);
+    // A credits-only snapshot still names its plan, like an account's.
     expect(groups[1]!.withoutLimits).toEqual([
-      expect.objectContaining({ instanceId: "codex", reason: "Read failed" }),
+      expect.objectContaining({ instanceId: "codex", plan: "Plus", reason: "Read failed" }),
     ]);
   });
 });

@@ -205,22 +205,26 @@ export function LimitsView({
     );
 
   if (hubs.length === 0 && directAccountCount === 0) {
-    // A hub still being read may hold accounts, so nothing is called empty before it answers.
-    if (result.loading || readingHubs) return <StatSkeleton />;
     return (
       <div className="space-y-4">
+        {/* Stays mounted while a filter change re-reads hubs, so it keeps focus. */}
         {environmentFilter}
         {environmentNotices}
-        <StatePanel
-          icon={GaugeIcon}
-          title="No subscription limits to show"
-          description="Sign in to Claude, Codex or OpenCode Go with a subscription to see how much of it is left. To pool several subscriptions, connect a CLIProxyAPI hub in Settings → Providers."
-          action={
-            <Button size="sm" variant="outline" onClick={manageProviders}>
-              <SettingsIcon /> Open providers
-            </Button>
-          }
-        />
+        {/* A hub still being read may hold accounts, so nothing is called empty before it answers. */}
+        {result.loading || readingHubs ? (
+          <StatSkeleton />
+        ) : (
+          <StatePanel
+            icon={GaugeIcon}
+            title="No subscription limits to show"
+            description="Sign in to Claude, Codex or OpenCode Go with a subscription to see how much of it is left. To pool several subscriptions, connect a CLIProxyAPI hub in Settings → Providers."
+            action={
+              <Button size="sm" variant="outline" onClick={manageProviders}>
+                <SettingsIcon /> Open providers
+              </Button>
+            }
+          />
+        )}
       </div>
     );
   }

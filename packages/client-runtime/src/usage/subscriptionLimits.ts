@@ -119,6 +119,8 @@ export interface RoutedProviderInstance extends DirectAccountLocation {
 export interface LimitlessProviderInstance extends DirectAccountLocation {
   readonly provider: string;
   readonly snapshot: ServerProvider;
+  /** The plan its snapshot names, worded like `DirectProviderAccount.plan`. */
+  readonly plan: string | undefined;
   readonly reason: string | undefined;
 }
 
@@ -182,12 +184,17 @@ function directAccountKeyResolver(
   };
 }
 
-/** Available beats unavailable, then the newer read; an unparsable time counts as older. */
+/** A read's time in ms; an unparsable one is older than any other. */
+function checkedAtMs(location: DirectAccountLocation): number {
+  const ms = Date.parse(location.checkedAt);
+  return Number.isNaN(ms) ? -Infinity : ms;
+}
+
+/** Available beats unavailable, then the newer read. */
 function isFresher(candidate: DirectAccountLocation, current: DirectAccountLocation): boolean {
   return (
     (candidate.available && !current.available) ||
-    (candidate.available === current.available &&
-      Date.parse(candidate.checkedAt) > Date.parse(current.checkedAt))
+    (candidate.available === current.available && checkedAtMs(candidate) > checkedAtMs(current))
   );
 }
 
@@ -198,10 +205,18 @@ function newestResetCredits(
   let newest: DirectInstance | undefined;
   for (const instance of instances) {
     if (instance.provider.rateLimits?.resetCredits === undefined) continue;
-    if (!newest || Date.parse(instance.location.checkedAt) > Date.parse(newest.location.checkedAt))
-      newest = instance;
+    if (!newest || checkedAtMs(instance.location) > checkedAtMs(newest.location)) newest = instance;
   }
   return newest?.provider.rateLimits?.resetCredits;
+}
+
+/** The plan a snapshot names (`Claude Max Subscription`, `Plus`…). */
+function snapshotPlan(provider: ServerProvider): string | undefined {
+  return (
+    provider.auth.label ??
+    provider.rateLimits?.limitName ??
+    formatCliProxyPlan(provider.rateLimits?.planType)
+  );
 }
 
 /**
@@ -254,6 +269,7 @@ export function listDirectProviderAccounts(
         ...location,
         provider: subscriptionProviderForDriver(provider.driver),
         snapshot: provider,
+        plan: snapshotPlan(provider),
         reason: provider.unavailableReason ?? provider.message,
       });
       continue;
@@ -273,10 +289,7 @@ export function listDirectProviderAccounts(
       snapshot,
       available: winner.location.available,
       windows: winner.windows,
-      plan:
-        snapshot.auth.label ??
-        snapshot.rateLimits?.limitName ??
-        formatCliProxyPlan(snapshot.rateLimits?.planType),
+      plan: snapshotPlan(snapshot),
       resetCredits: newestResetCredits(instances),
       locations: instances.map(({ location }) => location),
     };

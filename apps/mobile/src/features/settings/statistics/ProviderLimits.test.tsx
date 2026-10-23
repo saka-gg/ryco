@@ -130,10 +130,14 @@ describe("native provider limits", () => {
     const windowless = {
       ...provider,
       message: "Usage could not be read.",
-      rateLimits: { credits: { hasCredits: true, unlimited: false, balance: "12" } },
+      rateLimits: {
+        planType: "plus",
+        credits: { hasCredits: true, unlimited: false, balance: "12" },
+      },
     } as ServerProvider;
     const html = render([node("M5", [windowless])]);
     expect(html).toContain("Codex");
+    expect(html).toContain("Plus");
     expect(html).toContain('data-env="M5" data-instance="test" data-allowed="true"');
     expect(html).toContain("Usage could not be read.");
     expect(html).toContain("Credits: 12");

@@ -242,7 +242,9 @@ export function ProviderLimits({
               key={`${instance.environmentId}\n${instance.instanceId}`}
               title={instance.displayName}
               snapshot={instance.snapshot}
-              detail={[instance.snapshot.status, where([instance])].filter(Boolean).join(" · ")}
+              detail={[instance.plan ?? instance.snapshot.status, where([instance])]
+                .filter(Boolean)
+                .join(" · ")}
               resets={resetCredits([instance])}
             >
               <Note>{instance.reason ?? "This provider has not reported usage limits."}</Note>

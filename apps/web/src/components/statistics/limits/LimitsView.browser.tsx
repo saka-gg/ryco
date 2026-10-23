@@ -324,6 +324,32 @@ describe("LimitsView", () => {
     await expect.element(page.getByText("No subscription limits to show")).toBeVisible();
   });
 
+  it("keeps the environment filter mounted while a filter change re-reads hubs", async () => {
+    const both = [
+      { environmentId: desktop, label: "This machine" },
+      { environmentId: ssh, label: "Build box" },
+    ];
+    const filtered = () => (
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits", environmentIds: [ssh] })}
+        onSearchChange={onSearchChange}
+      />
+    );
+    serve([{ environmentId: ssh, label: "Build box", status: "loading", hubs: [] }], both);
+    mounted = await render(filtered());
+
+    const filter = page.getByRole("combobox", { name: "Limits environment" });
+    await expect.element(filter).toBeVisible();
+    expect(document.querySelector(".animate-pulse")).not.toBeNull();
+    const trigger = filter.element();
+
+    serve([{ environmentId: ssh, label: "Build box", status: "ok", hubs: [] }], both);
+    await mounted.rerender(filtered());
+
+    await expect.element(page.getByText("No subscription limits to show")).toBeVisible();
+    expect(filter.element()).toBe(trigger);
+  });
+
   it("mixes direct and hub accounts of a provider and filters them by source", async () => {
     const routedClaude = provider({
       instanceId: ProviderInstanceId.make("claudeAgent"),
