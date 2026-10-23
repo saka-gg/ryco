@@ -60,6 +60,7 @@ import {
   PROMPT_STASH_MAX_ENTRIES,
   composerTargetKey,
   readProjectProviderCommands,
+  resolveApprovalRedirect,
   stripInlineTerminalContextPlaceholders,
   subscribeProjectProviderCommands,
   type PromptStashEntry,
@@ -366,6 +367,14 @@ export interface ChatComposerProps {
   activePendingDraftAnswers: Record<string, PendingUserInputDraftAnswer>;
   activePendingQuestionIndex: number;
   respondingRequestIds: ApprovalRequestId[];
+  /**
+   * The session's provider runtime and running turn, and the turn on which an earlier redirect
+   * declined approvals without sending. With the approvals they decide what a send does
+   * (`resolveApprovalRedirect`), so the placeholder and primary action match the send.
+   */
+  activeRuntimeSessionId: string | null;
+  activeTurnId: string | null;
+  approvalRedirectedTurnId: string | null;
 
   // Plan
   showPlanFollowUpPrompt: boolean;
@@ -569,6 +578,9 @@ export const ChatComposer = memo(
       activePendingDraftAnswers,
       activePendingQuestionIndex,
       respondingRequestIds,
+      activeRuntimeSessionId,
+      activeTurnId,
+      approvalRedirectedTurnId,
       showPlanFollowUpPrompt,
       activeProposedPlan,
       planSidebarLabel,
@@ -1178,6 +1190,11 @@ export const ChatComposer = memo(
     );
 
     const isComposerApprovalState = activePendingApproval !== null;
+    // Desktop and tablet keep the composer usable while an approval waits: a send declines it
+    // and redirects the turn. The frozen phone tier keeps its approval-only composer, and so
+    // does a turn that also waits on a question (the editor would answer that one instead).
+    const isComposerApprovalLocked =
+      isComposerApprovalState && (!followUpSurfaceAllowsSteer || pendingUserInputs.length > 0);
     const activePendingUserInput = pendingUserInputs[0] ?? null;
     const showGoalHeader =
       !isMobileViewport &&
@@ -1195,12 +1212,12 @@ export const ChatComposer = memo(
     // editor, so this decides whether the compact send affordance renders
     // beside it — nothing is swapped in or out.
     const showCollapsedMobileSendAction =
-      isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
+      isComposerCollapsedMobile && !isComposerApprovalLocked && pendingUserInputs.length === 0;
     // A disabled editor is not editable, so it cannot receive the activating
     // tap at all. The collapsed surface needs an explicit expand path in that
     // state (see the surface onClick below).
     const isComposerEditorDisabled =
-      isComposerApprovalState ||
+      isComposerApprovalLocked ||
       // Hosted text editing is local while cached conversations reconnect.
       // The independent primary-action and dispatch gates still require fresh authority.
       (!isHostedHubMode() &&
@@ -2022,31 +2039,52 @@ export const ChatComposer = memo(
       return false;
     };
 
-    const runningFollowUpPlaceholder = useMemo(
-      () =>
-        phase === "running"
-          ? describeRunningFollowUp({
-              followUpBehavior: settings.followUpBehavior,
-              steerUnavailableReason: getFollowUpSteerUnavailableReason({
-                modelSelection: selectedModelSelection,
-                runtimeMode,
-                interactionMode,
-                tokenMode,
-              }),
-              surfaceAllowsSteer: followUpSurfaceAllowsSteer,
-            }).placeholder
-          : null,
-      [
-        followUpSurfaceAllowsSteer,
-        getFollowUpSteerUnavailableReason,
-        interactionMode,
-        phase,
+    // Slash input never steers, so it never redirects either.
+    const promptIsSlashCommand = prompt.trimStart().startsWith("/");
+    const runningFollowUp = useMemo(() => {
+      if (phase !== "running") return null;
+      const steerUnavailableReason = getFollowUpSteerUnavailableReason({
+        modelSelection: selectedModelSelection,
         runtimeMode,
-        selectedModelSelection,
-        settings.followUpBehavior,
+        interactionMode,
         tokenMode,
-      ],
-    );
+      });
+      return describeRunningFollowUp({
+        followUpBehavior: settings.followUpBehavior,
+        steerUnavailableReason,
+        surfaceAllowsSteer: followUpSurfaceAllowsSteer,
+        // The same decision the send makes, from the same inputs.
+        approvalRedirect: resolveApprovalRedirect({
+          approvals: pendingApprovals,
+          runtimeSessionId: activeRuntimeSessionId,
+          activeTurnId,
+          respondingRequestIds,
+          steerAllowed: followUpSurfaceAllowsSteer && steerUnavailableReason === null,
+          isSlashCommand: promptIsSlashCommand,
+          questionPending: pendingUserInputs.length > 0,
+          redirectedTurnId: approvalRedirectedTurnId,
+        }).kind,
+      });
+    }, [
+      activeRuntimeSessionId,
+      activeTurnId,
+      approvalRedirectedTurnId,
+      followUpSurfaceAllowsSteer,
+      getFollowUpSteerUnavailableReason,
+      interactionMode,
+      pendingApprovals,
+      pendingUserInputs.length,
+      phase,
+      promptIsSlashCommand,
+      respondingRequestIds,
+      runtimeMode,
+      selectedModelSelection,
+      settings.followUpBehavior,
+      tokenMode,
+    ]);
+    const runningFollowUpPlaceholder = runningFollowUp?.placeholder ?? null;
+    // Sending now declines the waiting approvals and steers the message into the turn.
+    const sendRedirectsApproval = runningFollowUp?.redirectsApproval === true;
 
     // ------------------------------------------------------------------
     // Callbacks: images / file attachments / drag / paste
@@ -2293,7 +2331,7 @@ export const ChatComposer = memo(
       // The shortcut is still handled by the capture listener in these
       // states, preventing the browser Save dialog without mutating hidden or
       // pending-answer composer content.
-      if (isMobileViewport || isComposerApprovalState || pendingUserInputs.length > 0) {
+      if (isMobileViewport || isComposerApprovalLocked || pendingUserInputs.length > 0) {
         return;
       }
 
@@ -2497,7 +2535,7 @@ export const ChatComposer = memo(
       fileUploadRecords,
       finalizeStashEntryImages,
       getComposerDraft,
-      isComposerApprovalState,
+      isComposerApprovalLocked,
       isMobileViewport,
       pendingUserInputs.length,
       promptRef,
@@ -3033,7 +3071,7 @@ export const ChatComposer = memo(
               environmentId={environmentId}
               isComposerCollapsedMobile={isComposerCollapsedMobile}
               hasComposerHeader={hasComposerHeader}
-              isComposerApprovalState={isComposerApprovalState}
+              isApprovalLocked={isComposerApprovalLocked}
               resolvedTheme={resolvedTheme}
               composerMenuOpen={composerMenuOpen}
               composerMenuItems={composerMenuItems}
@@ -3083,10 +3121,10 @@ export const ChatComposer = memo(
               onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
             />
 
-            {/* Bottom toolbar. During a pending approval the approval card
-                above the editor carries the single action set, so the footer
-                stays hidden exactly as before. */}
-            {isComposerCollapsedMobile ? null : activePendingApproval ? null : (
+            {/* Bottom toolbar. It stays while an approval waits, except on the
+                frozen phone tier, where the approval card above the editor
+                carries the only action set. */}
+            {isComposerCollapsedMobile ? null : isComposerApprovalLocked ? null : (
               <ComposerFooter
                 isFooterCompact={isComposerFooterCompact}
                 isPrimaryActionsCompact={isComposerPrimaryActionsCompact}
@@ -3158,6 +3196,7 @@ export const ChatComposer = memo(
                 isEnvironmentUnavailable={environmentUnavailable !== null}
                 isPreparingWorktree={isPreparingWorktree}
                 hasSendableContent={composerHasSendableContent}
+                sendRedirectsApproval={sendRedirectsApproval}
                 sendDisabledReason={composerSendBlockedReason}
                 sendsQueueUntilReady={sendsQueueUntilReady}
                 mutationUnavailableReason={mutationUnavailableReason}

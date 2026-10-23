@@ -1,6 +1,7 @@
 import type { EnvironmentId, ModelSelection, ThreadId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import type { QueuedThreadMessage } from "../../state/threadOutboxModel";
 import {
   resolveThreadSendAction,
   sendThreadTurn,
@@ -77,5 +78,50 @@ describe("sendThreadTurn", () => {
     expect(d.dispatch).toHaveBeenCalledTimes(1);
     expect(d.enqueue).not.toHaveBeenCalled();
     expect(result).toBe(false);
+  });
+
+  it("steers a redirect's message right after enqueueing it", async () => {
+    const d = deps();
+    const order: string[] = [];
+    d.enqueue.mockImplementation(() => order.push("enqueue"));
+    const steer = vi.fn((_message: QueuedThreadMessage) => {
+      order.push("steer");
+    });
+    const result = await sendThreadTurn(context({ threadBusy: true }), {
+      ...d.seams,
+      beforeEnqueue: async (message) => {
+        expect(message).toMatchObject({ text: "hi", messageId: "msg-1" });
+        return "steer";
+      },
+      steer,
+    });
+    expect(result).toBe(true);
+    expect(order).toEqual(["enqueue", "steer"]);
+    expect(steer.mock.calls[0]![0]).toBe(d.enqueue.mock.calls[0]![0]);
+  });
+
+  it("sends nothing and keeps the draft when the redirect refuses", async () => {
+    const d = deps();
+    const steer = vi.fn();
+    const result = await sendThreadTurn(context({ threadBusy: true }), {
+      ...d.seams,
+      beforeEnqueue: async () => "refuse",
+      steer,
+    });
+    expect(result).toBe(false);
+    expect(d.enqueue).not.toHaveBeenCalled();
+    expect(steer).not.toHaveBeenCalled();
+  });
+
+  it("queues without steering when the redirect leaves approvals alone", async () => {
+    const d = deps();
+    const steer = vi.fn();
+    await sendThreadTurn(context({ threadBusy: true }), {
+      ...d.seams,
+      beforeEnqueue: async () => "queue",
+      steer,
+    });
+    expect(d.enqueue).toHaveBeenCalledTimes(1);
+    expect(steer).not.toHaveBeenCalled();
   });
 });

@@ -65,4 +65,53 @@ describe("describeRunningFollowUp", () => {
       }),
     ).toEqual({ effective: "queue", placeholder: null });
   });
+
+  it("redirects while approvals wait, whatever the setting, when the redirect applies", () => {
+    for (const followUpBehavior of ["queue", "steer"] as const) {
+      expect(
+        describeRunningFollowUp({
+          followUpBehavior,
+          steerUnavailableReason: null,
+          surfaceAllowsSteer: true,
+          approvalRedirect: "decline",
+          platform: MAC,
+        }),
+      ).toEqual({
+        effective: "steer",
+        placeholder: "Send a message to decline and redirect · ⌘↵ to queue instead",
+        redirectsApproval: true,
+      });
+    }
+    // No redirect (an approval being answered, one of an ended runtime): the setting decides.
+    expect(
+      describeRunningFollowUp({
+        followUpBehavior: "queue",
+        steerUnavailableReason: null,
+        surfaceAllowsSteer: true,
+        approvalRedirect: "none",
+        platform: MAC,
+      }),
+    ).toEqual({ effective: "queue", placeholder: "Queue a follow-up · ⌘↵ to steer" });
+    expect(
+      describeRunningFollowUp({
+        followUpBehavior: "steer",
+        steerUnavailableReason: "This provider cannot steer.",
+        surfaceAllowsSteer: true,
+        approvalRedirect: "decline",
+        platform: MAC,
+      }),
+    ).toEqual({ effective: "queue", placeholder: "Queue a follow-up · steering unavailable" });
+  });
+
+  it("steers after an earlier redirect declined without sending", () => {
+    expect(
+      describeRunningFollowUp({
+        followUpBehavior: "queue",
+        steerUnavailableReason: null,
+        surfaceAllowsSteer: true,
+        approvalRedirect: "steer",
+        platform: MAC,
+      }),
+    ).toEqual({ effective: "steer", placeholder: "Steer this turn · ⌘↵ to queue instead" });
+  });
 });

@@ -1,3 +1,4 @@
+import { claudeApprovalPresentation } from "../claudeApprovalPresentation.ts";
 import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
@@ -343,6 +344,8 @@ interface PendingApproval {
   readonly requestType: CanonicalRequestType;
   readonly detail?: string;
   readonly suggestions?: ReadonlyArray<PermissionUpdate>;
+  /** The CLI refused a session-wide grant for this request. */
+  readonly acceptForSessionOffered?: false;
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
@@ -5658,12 +5661,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const requestId = ApprovalRequestId.make(callbackOptions.requestId);
       const requestType = classifyRequestType(toolName);
       const detail = summarizeToolRequest(toolName, toolInput);
+      const presentation = claudeApprovalPresentation({ detail, options: callbackOptions });
       const decisionDeferred = yield* Deferred.make<ProviderApprovalDecision>();
       const pendingApproval: PendingApproval = {
         requestType,
         detail,
         decision: decisionDeferred,
         ...(callbackOptions.suggestions ? { suggestions: callbackOptions.suggestions } : {}),
+        ...(presentation.acceptForSessionOffered === false
+          ? { acceptForSessionOffered: false }
+          : {}),
       };
 
       const requestedStamp = yield* makeEventStamp();
@@ -5678,6 +5685,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: {
           requestType,
           detail,
+          ...presentation,
           args: {
             toolName,
             input: toolInput,
@@ -5711,8 +5719,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         once: true,
       });
 
-      const decision = yield* Deferred.await(decisionDeferred);
+      const requestedDecision = yield* Deferred.await(decisionDeferred);
       pendingApprovals.delete(requestId);
+      // A request that refused a session-wide grant (a client that predates the flag can still
+      // offer it) is answered, and reported, as one approval.
+      const decision: ProviderApprovalDecision =
+        requestedDecision === "acceptForSession" &&
+        pendingApproval.acceptForSessionOffered === false
+          ? "accept"
+          : requestedDecision;
 
       const resolvedStamp = yield* makeEventStamp();
       yield* offerRuntimeEventForContext(context, {

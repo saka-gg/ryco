@@ -423,6 +423,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
+  sendRedirectsApproval?: boolean;
   sendDisabledReason?: string | null | undefined;
   sendsQueueUntilReady?: string | null | undefined;
   mutationUnavailableReason?: string | null | undefined;
@@ -452,6 +453,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         isEnvironmentUnavailable={props.isEnvironmentUnavailable}
         isPreparingWorktree={props.isPreparingWorktree}
         hasSendableContent={props.hasSendableContent}
+        sendRedirectsApproval={props.sendRedirectsApproval ?? false}
         sendDisabledReason={props.sendDisabledReason}
         sendsQueueUntilReady={props.sendsQueueUntilReady}
         mutationUnavailableReason={props.mutationUnavailableReason}
@@ -552,6 +554,8 @@ export interface ComposerFooterProps {
   isEnvironmentUnavailable: boolean;
   isPreparingWorktree: boolean;
   hasSendableContent: boolean;
+  /** A send declines the waiting approval and redirects the turn. */
+  sendRedirectsApproval?: boolean;
   sendDisabledReason?: string | null | undefined;
   /** Set while a send waits in the queue for the environment; the caption says when it goes out. */
   sendsQueueUntilReady?: string | null | undefined;
@@ -751,6 +755,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           isEnvironmentUnavailable={props.isEnvironmentUnavailable}
           isPreparingWorktree={props.isPreparingWorktree}
           hasSendableContent={props.hasSendableContent}
+          sendRedirectsApproval={props.sendRedirectsApproval ?? false}
           sendDisabledReason={props.sendDisabledReason}
           sendsQueueUntilReady={props.sendsQueueUntilReady}
           mutationUnavailableReason={props.mutationUnavailableReason}

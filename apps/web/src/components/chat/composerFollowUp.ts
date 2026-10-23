@@ -1,4 +1,8 @@
 import type { FollowUpBehavior } from "@ryco/contracts";
+import {
+  APPROVAL_REDIRECT_PLACEHOLDER,
+  type ApprovalRedirect,
+} from "@ryco/client-runtime/state/composer";
 
 import { formatShortcutLabel } from "../../keybindings";
 import { isMacPlatform } from "../../lib/utils";
@@ -37,22 +41,34 @@ export interface RunningFollowUpDescription {
   readonly effective: "queue" | "steer";
   /** Composer placeholder; null where the hint is not shown (the frozen phone tier). */
   readonly placeholder: string | null;
+  /** Enter declines the waiting approvals and steers the message into the turn. */
+  readonly redirectsApproval?: true;
 }
 
 /**
  * The running-state placeholder: the effective Enter action and the alternate shortcut. Steering
- * that is unavailable for the current selection degrades to queueing and says so.
+ * that is unavailable for the current selection degrades to queueing and says so. A send that
+ * redirects (`resolveApprovalRedirect`, the same decision the send makes) steers whatever the
+ * setting says: it declines the waiting approvals first, or follows an earlier redirect.
  */
 export function describeRunningFollowUp(input: {
   readonly followUpBehavior: FollowUpBehavior;
   readonly steerUnavailableReason: string | null;
   readonly surfaceAllowsSteer: boolean;
+  readonly approvalRedirect?: ApprovalRedirect["kind"];
   readonly platform?: string;
 }): RunningFollowUpDescription {
   if (!input.surfaceAllowsSteer) return { effective: "queue", placeholder: null };
   const shortcut = followUpInvertShortcutLabel(input.platform);
   const steerAvailable = input.steerUnavailableReason === null;
-  if (input.followUpBehavior === "steer") {
+  if (input.approvalRedirect === "decline" && steerAvailable) {
+    return {
+      effective: "steer",
+      placeholder: `${APPROVAL_REDIRECT_PLACEHOLDER} · ${shortcut} to queue instead`,
+      redirectsApproval: true,
+    };
+  }
+  if (input.followUpBehavior === "steer" || input.approvalRedirect === "steer") {
     return steerAvailable
       ? { effective: "steer", placeholder: `Steer this turn · ${shortcut} to queue instead` }
       : { effective: "queue", placeholder: "Queue a follow-up · steering unavailable" };

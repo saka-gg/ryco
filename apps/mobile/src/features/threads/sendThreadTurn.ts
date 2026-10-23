@@ -45,6 +45,14 @@ export interface SendThreadTurnDeps {
   readonly enqueue: (message: QueuedThreadMessage) => void;
   /** Dispatch immediately; returns true on success, false on failure. */
   readonly dispatch: () => Promise<boolean>;
+  /**
+   * Runs before a message is enqueued: `"queue"` enqueues it as usual, `"steer"` enqueues it and
+   * hands it to `steer` (a redirect that declined the waiting approvals), `"refuse"` sends
+   * nothing and keeps the draft.
+   */
+  readonly beforeEnqueue?: (message: QueuedThreadMessage) => Promise<"queue" | "steer" | "refuse">;
+  /** Starts a steer of a message just enqueued. */
+  readonly steer?: (message: QueuedThreadMessage) => void;
 }
 
 /**
@@ -61,7 +69,7 @@ export async function sendThreadTurn(
     connected: context.connected,
   });
   if (action === "enqueue") {
-    deps.enqueue({
+    const message: QueuedThreadMessage = {
       environmentId: context.environmentId,
       threadId: context.threadId,
       messageId: deps.newMessageId() as QueuedThreadMessage["messageId"],
@@ -73,7 +81,13 @@ export async function sendThreadTurn(
       interactionMode: context.interactionMode,
       tokenMode: context.tokenMode,
       createdAt: deps.now(),
-    });
+    };
+    const route = deps.beforeEnqueue ? await deps.beforeEnqueue(message) : "queue";
+    if (route === "refuse") return false;
+    deps.enqueue(message);
+    // Marked steering right after the enqueue, before any await, so the drain never sends it
+    // as a turn of its own.
+    if (route === "steer") deps.steer?.(message);
     return true;
   }
   return deps.dispatch();
