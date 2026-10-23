@@ -9,7 +9,7 @@ import type {
   DesktopWindowCaptureState,
 } from "@ryco/contracts";
 import { replaceAppKeybindings, resetAppKeybindings } from "../../appKeybindings";
-import { WindowCaptureSettings } from "./WindowCaptureSettings";
+import { preloadWindowCaptureSettings, WindowCaptureSettings } from "./WindowCaptureSettings";
 
 const previous = window.desktopBridge;
 // The desktop app's keybindings document, which the app keybindings store reads.
@@ -177,6 +177,14 @@ it("keeps the desktop's message beside the keybinding warning while the shortcut
     )
     .toBeVisible();
   await expect.element(alert.getByText("takes it over")).not.toBeInTheDocument();
+});
+
+it("shows the permission badges in its first commit once the General section preloaded them", async () => {
+  installBridge();
+  await preloadWindowCaptureSettings();
+  const view = await render(<WindowCaptureSettings />);
+  expect(view.container.querySelector("[data-permission-status]")).not.toBeNull();
+  await expect.element(view.getByText("Granted")).toBeVisible();
 });
 
 it("renders nothing where the desktop app cannot capture windows", async () => {

@@ -15,11 +15,31 @@ import { useEffect, useState } from "react";
 
 import { useAppKeybindingsState } from "~/appKeybindings";
 import { getCommandMeta } from "~/lib/keybindingCategories";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
 import { windowCaptureErrorMessage } from "~/windowCapture";
 import { Button } from "../ui/button";
-import { PermissionStatusBadge } from "./PermissionStatusBadge";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
+
+// Its own chunk, which `preloadWindowCaptureSettings` loads with the General
+// section. Imported statically, the badge's icons would count as used by the
+// settings page as well. Icon chunks are grouped by the entries that use each
+// icon, so its question-mark icon, which the thread route also uses, would
+// regroup them and put the thread route one file over its bundle budget.
+const LazyPermissionStatusBadge = preloadableLazy(() =>
+  import("./PermissionStatusBadge").then((module) => module.PermissionStatusBadge),
+);
+
+/**
+ * Loads what this section renders from its own chunk on desktops that offer
+ * window capture; the General section's preload awaits it, so the section's
+ * first commit shows the permission badges. Never rejects.
+ */
+export function preloadWindowCaptureSettings(): Promise<void> {
+  return window.desktopBridge?.windowCapture
+    ? LazyPermissionStatusBadge.preload()
+    : Promise.resolve();
+}
 
 type ShortcutMode = "off" | "both-option-keys" | "custom";
 
@@ -112,6 +132,10 @@ export function WindowCaptureSettings({ scope }: { scope?: string }) {
   // Before hydration the defaults stand in, so a chord never skips the check.
   const keybindings = useAppKeybindingsState();
   const appBindings = keybindings.hydrated ? keybindings.bindings : DEFAULT_RESOLVED_KEYBINDINGS;
+  // A failed load leaves the badges out; it must not take the General panel down.
+  const badgesReady = useLazyComponentReady(LazyPermissionStatusBadge, api !== undefined, {
+    onLoadError: (cause) => console.warn("Permission badges failed to load.", cause),
+  });
 
   useEffect(() => {
     if (!api) return;
@@ -299,7 +323,9 @@ export function WindowCaptureSettings({ scope }: { scope?: string }) {
               className="flex items-center justify-between gap-2 rounded-[min(var(--radius-md),0.5rem)] bg-muted/50 px-2.5 py-2 text-xs"
             >
               <span className="truncate text-foreground">{label}</span>
-              <PermissionStatusBadge status={status} checked={status !== undefined} />
+              {badgesReady ? (
+                <LazyPermissionStatusBadge status={status} checked={status !== undefined} />
+              ) : null}
             </li>
           ))}
         </ul>
