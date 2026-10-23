@@ -284,6 +284,11 @@ export interface TimelineStableState {
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
+  /**
+   * Whether streaming assistant text is revealed gradually: only when the node streams
+   * token by token. Paragraph and whole-message releases land as finished blocks.
+   */
+  smoothAssistantText: boolean;
   highlightedMessageId: MessageId | null;
   threadMessageSearchQuery: string;
   threadMessageSearchOccurrencesByMessageId: ReadonlyMap<
@@ -342,6 +347,7 @@ export function buildTimelineStableState(input: TimelineStableState): TimelineSt
     workspaceRoot: input.workspaceRoot,
     skills: input.skills,
     activeThreadEnvironmentId: input.activeThreadEnvironmentId,
+    smoothAssistantText: input.smoothAssistantText,
     highlightedMessageId: input.highlightedMessageId,
     threadMessageSearchQuery: input.threadMessageSearchQuery,
     threadMessageSearchOccurrencesByMessageId: input.threadMessageSearchOccurrencesByMessageId,

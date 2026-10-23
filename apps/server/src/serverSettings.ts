@@ -60,7 +60,7 @@ import { writeFileAtomically, writeFileStringAtomically } from "./atomicWrite.ts
 import { ServerConfig } from "./config.ts";
 import { type DeepPartial } from "@ryco/shared/Struct";
 import { formatSchemaError, fromLenientJson } from "@ryco/shared/schemaJson";
-import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
+import { applyServerSettingsPatch, migrateLegacyServerSettings } from "@ryco/shared/serverSettings";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore.ts";
 import { hubKeyAddress } from "@ryco/shared/cliProxyHubUrl";
@@ -437,8 +437,14 @@ export class ServerSettingsService extends Context.Service<
 }
 
 const decodeServerSettings = Schema.decodeUnknownExit(ServerSettings);
-const decodeServerSettingsJson = Schema.decodeUnknownExit(fromLenientJson(ServerSettings));
 const decodeLenientJson = Schema.decodeUnknownExit(fromLenientJson(Schema.Unknown));
+
+/** Decodes a settings file, upgrading keys written by older versions first. */
+function decodePersistedServerSettings(raw: string) {
+  const parsed = decodeLenientJson(raw);
+  if (Exit.isFailure(parsed)) return Exit.failCause(parsed.cause);
+  return decodeServerSettings(migrateLegacyServerSettings(parsed.value));
+}
 
 type LegacyProviderSettings = ServerSettings["providers"][keyof ServerSettings["providers"]];
 
@@ -608,12 +614,14 @@ function recoverServerSettings(
   raw: string,
 ): { readonly settings: ServerSettings; readonly invalidKeys: Record<string, string> } | undefined {
   const parsed = decodeLenientJson(raw);
-  if (Exit.isFailure(parsed) || !Predicate.isObject(parsed.value)) return undefined;
+  if (Exit.isFailure(parsed)) return undefined;
+  const persisted = migrateLegacyServerSettings(parsed.value);
+  if (!Predicate.isObject(persisted)) return undefined;
   const valid: Record<string, unknown> = {};
   const invalidKeys: Record<string, string> = {};
   for (const key of Object.keys(ServerSettings.fields)) {
-    if (!Object.hasOwn(parsed.value, key)) continue;
-    const value = parsed.value[key];
+    if (!Object.hasOwn(persisted, key)) continue;
+    const value = persisted[key];
     const decoded = decodeServerSettings({ [key]: value });
     if (Exit.isSuccess(decoded)) {
       valid[key] = value;
@@ -720,7 +728,7 @@ export const makeServerSettings = Effect.gen(function* () {
 
     const bytes = yield* readRawConfig;
     const raw = textDecoder.decode(bytes);
-    const decoded = decodeServerSettingsJson(raw);
+    const decoded = decodePersistedServerSettings(raw);
     if (Exit.isSuccess(decoded)) {
       return decoded.value;
     }

@@ -11,7 +11,7 @@ const RESTORABLE_SETTINGS = {
   chatWidth: "Chat width",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",
-  enableLegacyTokenStreaming: "Stream token by token",
+  responseStreamingMode: "Response streaming",
   enableProviderUpdateChecks: "Provider update checks",
   continueThreadsAfterRestart: "Continue after restart",
   autoResumeLimitedThreads: "Auto-resume limited threads",

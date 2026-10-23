@@ -1646,6 +1646,21 @@ label:has(> select#reasoning-effort) select {
   margin-bottom: 0;
 }
 
+/* Paragraph streaming lands a reply a block at a time. Each new block (and each new list
+   item) fades in over 600ms instead of popping. @starting-style applies only when an
+   element is inserted, and ChatMarkdown sets data-streaming on block-streamed text only
+   after the blocks already shown are styled, so opening a thread, even mid-reply, never
+   replays it. Opacity only, so the layout does not move. The duration follows the motion
+   scale, which reduced motion (the OS setting or the app's) collapses to 0s. */
+.chat-markdown[data-streaming] > *,
+.chat-markdown[data-streaming] li {
+  transition: opacity calc(var(--app-motion-duration-stack, 260ms) * 600 / 260) ease-out;
+
+  @starting-style {
+    opacity: 0;
+  }
+}
+
 .chat-markdown p,
 .chat-markdown ul,
 .chat-markdown ol,

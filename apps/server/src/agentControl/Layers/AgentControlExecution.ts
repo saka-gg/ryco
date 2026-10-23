@@ -47,6 +47,7 @@ import {
 } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { ignoreAlreadyMissingGitResource } from "../../ws/context/gitErrors.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import { legacyTokenStreamingEnabled } from "../settingsControl.ts";
 import { copyArtifactsToThread, resolveThreadArtifacts } from "../artifactHandoff.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { copyTaskFilesToThread, deleteTaskFileCopies } from "../../tasks/taskFiles.ts";
@@ -851,15 +852,19 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             return yield* Effect.fail(new Error("Settings service unavailable."));
           const change = proposal.plan.change;
           const settings = yield* settingsService.value.getSettings;
-          const key =
+          // The legacy token switch maps onto `responseStreamingMode` through the patch alias.
+          const [current, patch] =
             change.kind === "legacyTokenStreaming"
-              ? "enableLegacyTokenStreaming"
-              : "enableProviderUpdateChecks";
-          if (settings[key] !== change.before)
+              ? [
+                  legacyTokenStreamingEnabled(settings),
+                  { enableLegacyTokenStreaming: change.after },
+                ]
+              : [settings.enableProviderUpdateChecks, { enableProviderUpdateChecks: change.after }];
+          if (current !== change.before)
             return yield* Effect.fail(
               new Error("Settings changed after the request was prepared."),
             );
-          yield* settingsService.value.updateSettings({ [key]: change.after });
+          yield* settingsService.value.updateSettings(patch);
           yield* checkpoint({
             ...operation.state,
             completedSteps: unique([...operation.state.completedSteps, "settings-updated"]),

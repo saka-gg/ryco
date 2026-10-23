@@ -5,6 +5,10 @@ import {
   type ServerSettings,
 } from "@ryco/contracts";
 
+/** Agent Control's legacy boolean view of `responseStreamingMode`: on only in token mode. */
+export const legacyTokenStreamingEnabled = (settings: ServerSettings): boolean =>
+  settings.responseStreamingMode === "token";
+
 /**
  * Deliberately narrow, non-secret allowlist. These are presentation/runtime
  * preferences only; workspace, provider, credential, endpoint, and Agent
@@ -17,7 +21,7 @@ export const agentControlSettingsSummary = (
     {
       kind: "legacyTokenStreaming",
       label: "Legacy token streaming",
-      value: settings.enableLegacyTokenStreaming,
+      value: legacyTokenStreamingEnabled(settings),
       changeSupported: true,
       unsupportedReason: null,
     },
@@ -51,7 +55,7 @@ export const agentControlSettingsPlan = (
         kind: "changeSettings",
         change: {
           kind: change.kind,
-          before: settings.enableLegacyTokenStreaming,
+          before: legacyTokenStreamingEnabled(settings),
           after: change.value,
         },
       };

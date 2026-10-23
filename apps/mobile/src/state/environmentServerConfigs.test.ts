@@ -18,7 +18,7 @@ describe("environment server config snapshots", () => {
       environment: { id: ENVIRONMENT_ID, label: "Node A", capabilities: {} },
       providers: [],
       settings: {
-        enableLegacyTokenStreaming: false,
+        responseStreamingMode: "turn",
         inboxPriorityModelSelection: null,
       },
     } as unknown as ServerConfig;
@@ -32,7 +32,7 @@ describe("environment server config snapshots", () => {
     });
 
     expect(readEnvironmentServerConfig(ENVIRONMENT_ID)?.settings).toMatchObject({
-      enableLegacyTokenStreaming: false,
+      responseStreamingMode: "turn",
       inboxPriorityModelSelection: { model: "gpt-5.6" },
     });
     expect(readEnvironmentServerConfig(EnvironmentId.make("node-b"))).toBeNull();

@@ -203,6 +203,16 @@ export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientS
 export const ThreadEnvMode = Schema.Literals(["local", "worktree"]);
 export type ThreadEnvMode = typeof ThreadEnvMode.Type;
 
+/**
+ * How the node delivers assistant text while a message streams:
+ * - `turn`: the whole message once it completes or the turn pauses for the user.
+ * - `paragraph`: each finished paragraph or closed code block, at most every 400 ms.
+ * - `token`: every provider delta. Legacy, kept for compatibility.
+ */
+export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph", "token"]);
+export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
+export const DEFAULT_RESPONSE_STREAMING_MODE: ResponseStreamingMode = "paragraph";
+
 const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
     Schema.decodeTo(
@@ -648,11 +658,10 @@ export const ServerSettings = Schema.Struct({
     ProjectPreferences,
   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   environmentIcon: EnvironmentMachineHint.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
-  // Legacy token-by-token assistant output. This is deliberately a fresh key
-  // (formerly `enableAssistantStreaming`): decoding drops the old key so all
-  // installations, including previous opt-ins, return to buffered output.
-  enableLegacyTokenStreaming: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
+  // A fresh key: the node migrates a saved `enableLegacyTokenStreaming: true` to `token` when it
+  // reads its settings file, and maps that key in patches from older clients and Agent Control.
+  responseStreamingMode: ResponseStreamingMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_RESPONSE_STREAMING_MODE)),
   ),
   // When disabled, the server skips provider CLI latest-version resolution
   // entirely (no npm registry contact) instead of merely hiding the update
@@ -865,6 +874,12 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   environmentIcon: Schema.optionalKey(Schema.NullOr(EnvironmentMachineKind)),
   // Server settings
+  responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  /**
+   * Older clients and Agent Control's `legacyTokenStreaming` change still write this key.
+   * True selects `token`; false leaves `token` for the default and keeps any other mode.
+   * `responseStreamingMode` wins when a patch carries both.
+   */
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),

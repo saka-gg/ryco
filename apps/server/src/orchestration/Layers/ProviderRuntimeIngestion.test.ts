@@ -28,6 +28,7 @@ import {
   ProviderItemId,
   RuntimeItemId,
   type ServerSettings,
+  type ServerSettingsPatch,
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
@@ -407,8 +408,10 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(ServerConfig.layerTest(workspaceRoot, workspaceRoot)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
+    const harnessRuntime = ManagedRuntime.make(layer);
+    runtime = harnessRuntime;
     const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
+    const serverSettings = await harnessRuntime.runPromise(Effect.service(ServerSettingsService));
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
@@ -510,6 +513,8 @@ describe("ProviderRuntimeIngestion", () => {
       emit: provider.emit,
       setProviderSession: provider.setSession,
       drain,
+      updateServerSettings: (patch: ServerSettingsPatch) =>
+        Effect.runPromise(serverSettings.updateSettings(patch)),
     };
   }
 
@@ -2668,12 +2673,10 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
-  it.each(["buffered", "streaming"] as const)(
-    "delivers generated files from %s replies into persistent history",
-    async (deliveryMode) => {
-      const harness = await createHarness({
-        serverSettings: { enableLegacyTokenStreaming: deliveryMode === "streaming" },
-      });
+  it.each(["turn", "paragraph", "token"] as const)(
+    "delivers generated files from %s-streamed replies into persistent history",
+    async (responseStreamingMode) => {
+      const harness = await createHarness({ serverSettings: { responseStreamingMode } });
       fs.writeFileSync(path.join(harness.workspaceRoot, "voice.mp3"), "ID3voice");
       const now = new Date().toISOString();
       const turnId = asTurnId("turn-delivery");
@@ -3950,8 +3953,8 @@ describe("ProviderRuntimeIngestion", () => {
     expect(proposedPlan?.planMarkdown).toBe("## Buffered plan\n\n- first\n- second");
   });
 
-  it("buffers assistant deltas by default until completion", async () => {
-    const harness = await createHarness();
+  it("holds the whole message until completion in turn mode", async () => {
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "turn" } });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -3978,7 +3981,7 @@ describe("ProviderRuntimeIngestion", () => {
       itemId: asItemId("item-buffered"),
       payload: {
         streamKind: "assistant_text",
-        delta: "buffer me",
+        delta: "buffer me\n\nand me",
       },
     });
 
@@ -4014,8 +4017,434 @@ describe("ProviderRuntimeIngestion", () => {
     const message = thread.messages.find(
       (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-buffered",
     );
-    expect(message?.text).toBe("buffer me");
+    expect(message?.text).toBe("buffer me\n\nand me");
     expect(message?.streaming).toBe(false);
+  });
+
+  describe("paragraph streaming", () => {
+    const provider = ProviderDriverKind.make("codex");
+    const threadId = asThreadId("thread-1");
+    const messageId = "assistant:item-paragraphs";
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Records the text and server-clock time of every delta the engine persists. */
+    function recordAssistantDeltas() {
+      const deltas: Array<{ readonly text: string; readonly atMs: number }> = [];
+      const activityIds: string[] = [];
+      return {
+        deltas,
+        activityIds,
+        interceptDispatch: (
+          command: OrchestrationCommand,
+          dispatch: OrchestrationEngineShape["dispatch"],
+        ) => {
+          if (
+            command.type === "thread.message.assistant.delta" &&
+            command.messageId === messageId
+          ) {
+            deltas.push({ text: command.delta, atMs: Date.now() });
+          }
+          if (command.type === "thread.activity.append") activityIds.push(command.activity.id);
+          return dispatch(command);
+        },
+      };
+    }
+
+    /**
+     * Resolves once every event emitted before it has been handled: ingestion handles
+     * events in order, and `drain` alone can run before an emitted event is even queued.
+     */
+    async function processedThrough(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      recorder: ReturnType<typeof recordAssistantDeltas>,
+      marker: string,
+    ) {
+      harness.emit({
+        type: "runtime.warning",
+        eventId: asEventId(`evt-${marker}`),
+        provider,
+        createdAt: new Date().toISOString(),
+        threadId,
+        payload: { message: marker },
+      });
+      await untilReal(() => recorder.activityIds.includes(`evt-${marker}`));
+    }
+
+    async function startTurn(harness: Awaited<ReturnType<typeof createHarness>>, turnId: TurnId) {
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId(`evt-${turnId}-started`),
+        provider,
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId,
+      });
+      await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+    }
+
+    function emitDelta(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      turnId: TurnId,
+      index: number,
+      delta: string,
+    ) {
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(`evt-${turnId}-delta-${index}`),
+        provider,
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId,
+        itemId: asItemId("item-paragraphs"),
+        payload: { streamKind: "assistant_text", delta },
+      });
+    }
+
+    function emitCompleted(harness: Awaited<ReturnType<typeof createHarness>>, turnId: TurnId) {
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId(`evt-${turnId}-completed`),
+        provider,
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId,
+        itemId: asItemId("item-paragraphs"),
+        payload: { itemType: "assistant_message", status: "completed" },
+      });
+    }
+
+    const streamedText = async (harness: Awaited<ReturnType<typeof createHarness>>) =>
+      (await harness.readModel()).threads
+        .find((thread) => thread.id === threadId)
+        ?.messages.find((message) => message.id === messageId);
+
+    it("releases finished paragraphs by default and holds open code fences", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.parse("2026-10-22T10:00:00.000Z"));
+      const recorder = recordAssistantDeltas();
+      const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+      const turnId = asTurnId("turn-paragraphs");
+      await startTurn(harness, turnId);
+
+      emitDelta(harness, turnId, 0, "First paragraph.\n\nSecond");
+      await harness.drain();
+      expect(await streamedText(harness)).toMatchObject({
+        text: "First paragraph.\n\n",
+        streaming: true,
+      });
+
+      // A second paragraph that ends within the interval waits for the interval to pass.
+      emitDelta(harness, turnId, 1, " paragraph.\n\n```ts\nconst a = 1;\n\nconst b");
+      await harness.drain();
+      expect((await streamedText(harness))?.text).toBe("First paragraph.\n\n");
+
+      vi.setSystemTime(Date.now() + 400);
+      emitDelta(harness, turnId, 2, " = 2;\n\n");
+      await harness.drain();
+      // The open fence and the blank lines inside it stay buffered.
+      expect((await streamedText(harness))?.text).toBe("First paragraph.\n\nSecond paragraph.\n\n");
+
+      vi.setSystemTime(Date.now() + 400);
+      emitDelta(harness, turnId, 3, "```\nAfter the code");
+      await harness.drain();
+      expect((await streamedText(harness))?.text).toBe(
+        "First paragraph.\n\nSecond paragraph.\n\n```ts\nconst a = 1;\n\nconst b = 2;\n\n```\n",
+      );
+
+      emitCompleted(harness, turnId);
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.messages.some((message) => message.id === messageId && !message.streaming),
+      );
+      expect(thread.messages.find((message) => message.id === messageId)?.text).toBe(
+        "First paragraph.\n\nSecond paragraph.\n\n```ts\nconst a = 1;\n\nconst b = 2;\n\n```\nAfter the code",
+      );
+      expect(recorder.deltas.map((delta) => delta.text)).toEqual([
+        "First paragraph.\n\n",
+        "Second paragraph.\n\n",
+        "```ts\nconst a = 1;\n\nconst b = 2;\n\n```\n",
+        "After the code",
+      ]);
+    });
+
+    it("bounds the persisted deltas of a long, fast answer by the pacing interval", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const startedAtMs = Date.parse("2026-10-22T10:00:00.000Z");
+      vi.setSystemTime(startedAtMs);
+      const recorder = recordAssistantDeltas();
+      const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+      const turnId = asTurnId("turn-long-answer");
+      await startTurn(harness, turnId);
+
+      // 240 short paragraphs and 8 fenced blocks with blank lines inside: ~21k characters,
+      // streamed 20 characters every 10 ms (2,000 characters a second, a fast model).
+      const blocks: string[] = [];
+      for (let index = 0; index < 240; index += 1) {
+        blocks.push(
+          `Paragraph ${index} explains one more detail of the change in plain words for the reader.`,
+        );
+        if (index % 30 === 29) blocks.push("```ts\nconst first = 1;\n\nconst second = 2;\n```");
+      }
+      const answer = `${blocks.join("\n\n")}\n\nDone.`;
+      const fences: Array<readonly [number, number]> = [];
+      for (let start = answer.indexOf("```ts"); start !== -1;) {
+        const end = answer.indexOf("\n```", start) + 5;
+        fences.push([start, end]);
+        start = answer.indexOf("```ts", end);
+      }
+
+      const deltaChars = 20;
+      const deltaIntervalMs = 10;
+      for (let offset = 0; offset < answer.length; offset += deltaChars) {
+        vi.setSystemTime(startedAtMs + (offset / deltaChars) * deltaIntervalMs);
+        emitDelta(harness, turnId, offset, answer.slice(offset, offset + deltaChars));
+        await harness.drain();
+      }
+      const streamingMs = Date.now() - startedAtMs;
+      const early = recorder.deltas.slice();
+      emitCompleted(harness, turnId);
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.messages.some((message) => message.id === messageId && !message.streaming),
+      );
+
+      expect(thread.messages.find((message) => message.id === messageId)?.text).toBe(answer);
+      // About 10 s of streaming: at most one release per 400 ms, then the remainder on
+      // completion. Token mode would persist one delta per 32 ms flush (~320), turn mode one.
+      expect(streamingMs).toBeGreaterThan(9_000);
+      expect(early.length).toBeLessThanOrEqual(Math.floor(streamingMs / 400) + 1);
+      expect(early.length).toBeGreaterThanOrEqual(20);
+      expect(recorder.deltas.length).toBe(early.length + 1);
+      let released = 0;
+      for (const [index, delta] of early.entries()) {
+        if (index > 0) {
+          expect(delta.atMs - early[index - 1]!.atMs).toBeGreaterThanOrEqual(400);
+        }
+        released += delta.text.length;
+        expect(fences.some(([start, end]) => released > start && released < end)).toBe(false);
+        expect(answer.slice(0, released)).toMatch(/(?:\n\n|```\n)$/);
+      }
+    });
+    async function completedText(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.messages.some((message) => message.id === messageId && !message.streaming),
+      );
+      return thread.messages.find((message) => message.id === messageId)!;
+    }
+
+    it("releases a block held by the interval once it passes, without a later delta", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const startedAtMs = Date.parse("2026-10-22T10:00:00.000Z");
+      vi.setSystemTime(startedAtMs);
+      const recorder = recordAssistantDeltas();
+      const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+      const turnId = asTurnId("turn-trailing");
+      await startTurn(harness, turnId);
+
+      emitDelta(harness, turnId, 0, "First.\n\n");
+      emitDelta(harness, turnId, 1, "Second.\n\nThird");
+      await processedThrough(harness, recorder, "trailing-burst");
+      expect(recorder.deltas.map((delta) => delta.text)).toEqual(["First.\n\n"]);
+
+      // The provider goes quiet; the finished paragraph still goes out once the interval
+      // has passed on the server clock.
+      vi.setSystemTime(startedAtMs + 400);
+      await untilReal(() => recorder.deltas.length === 2);
+      expect(recorder.deltas[1]).toEqual({ text: "Second.\n\n", atMs: startedAtMs + 400 });
+    });
+
+    it("keeps held text when a release fails to persist", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.parse("2026-10-22T10:00:00.000Z"));
+      const recorder = recordAssistantDeltas();
+      let failures = 0;
+      const harness = await createHarness({
+        interceptDispatch: (command, dispatch) => {
+          if (
+            failures === 0 &&
+            command.type === "thread.message.assistant.delta" &&
+            command.delta.startsWith("Second")
+          ) {
+            failures += 1;
+            return Effect.die(new Error("database is locked"));
+          }
+          return recorder.interceptDispatch(command, dispatch);
+        },
+      });
+      const turnId = asTurnId("turn-release-failure");
+      await startTurn(harness, turnId);
+
+      emitDelta(harness, turnId, 0, "First.\n\n");
+      await processedThrough(harness, recorder, "failure-0");
+      vi.setSystemTime(Date.now() + 400);
+      emitDelta(harness, turnId, 1, "Second.\n\n");
+      await processedThrough(harness, recorder, "failure-1");
+      expect(failures).toBe(1);
+      vi.setSystemTime(Date.now() + 400);
+      emitDelta(harness, turnId, 2, "Third.\n\n");
+      await processedThrough(harness, recorder, "failure-2");
+      expect((await streamedText(harness))?.text).toBe("First.\n\nSecond.\n\nThird.\n\n");
+
+      emitCompleted(harness, turnId);
+      expect((await completedText(harness)).text).toBe("First.\n\nSecond.\n\nThird.\n\n");
+    });
+
+    it("sends held text once when completing the message fails and the turn end retries", async () => {
+      const recorder = recordAssistantDeltas();
+      let failures = 0;
+      const harness = await createHarness({
+        interceptDispatch: (command, dispatch) => {
+          if (failures === 0 && command.type === "thread.message.assistant.complete") {
+            failures += 1;
+            return Effect.die(new Error("database is locked"));
+          }
+          return recorder.interceptDispatch(command, dispatch);
+        },
+      });
+      const turnId = asTurnId("turn-complete-failure");
+      await startTurn(harness, turnId);
+
+      emitDelta(harness, turnId, 0, "First.\n\nSecond");
+      emitCompleted(harness, turnId);
+      await processedThrough(harness, recorder, "complete-failure");
+      expect(failures).toBe(1);
+      expect((await streamedText(harness))?.text).toBe("First.\n\nSecond");
+
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId(`evt-${turnId}-turn-completed`),
+        provider,
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId,
+        payload: { state: "completed" },
+      });
+      expect((await completedText(harness)).text).toBe("First.\n\nSecond");
+      expect(recorder.deltas.map((delta) => delta.text)).toEqual(["First.\n\n", "Second"]);
+    });
+
+    it("sends held text first when the node switches to token streaming mid-message", async () => {
+      const recorder = recordAssistantDeltas();
+      const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+      const turnId = asTurnId("turn-to-token");
+      await startTurn(harness, turnId);
+
+      emitDelta(harness, turnId, 0, "First.\n\nSecond");
+      await processedThrough(harness, recorder, "to-token-0");
+      expect((await streamedText(harness))?.text).toBe("First.\n\n");
+
+      await harness.updateServerSettings({ responseStreamingMode: "token" });
+      emitDelta(harness, turnId, 1, " half.\n\n```ts\nx");
+      await processedThrough(harness, recorder, "to-token-1");
+      await harness.drain();
+      expect((await streamedText(harness))?.text).toBe("First.\n\nSecond half.\n\n```ts\nx");
+
+      emitCompleted(harness, turnId);
+      expect((await completedText(harness)).text).toBe("First.\n\nSecond half.\n\n```ts\nx");
+      expect(recorder.deltas.map((delta) => delta.text).join("")).toBe(
+        "First.\n\nSecond half.\n\n```ts\nx",
+      );
+    });
+
+    it("continues a fence opened by token streaming after a switch to paragraphs", async () => {
+      const recorder = recordAssistantDeltas();
+      const harness = await createHarness({
+        interceptDispatch: recorder.interceptDispatch,
+        serverSettings: { responseStreamingMode: "token" },
+      });
+      const turnId = asTurnId("turn-from-token");
+      await startTurn(harness, turnId);
+
+      emitDelta(harness, turnId, 0, "Intro\n\n```ts\nconst a = 1;\n\n");
+      await processedThrough(harness, recorder, "from-token-0");
+      await harness.updateServerSettings({ responseStreamingMode: "paragraph" });
+      // The token text went out with the marker event above. The blank line inside the
+      // fence it opened ends no block.
+      emitDelta(harness, turnId, 1, "const b = 2;\n\n");
+      await processedThrough(harness, recorder, "from-token-1");
+      expect((await streamedText(harness))?.text).toBe("Intro\n\n```ts\nconst a = 1;\n\n");
+
+      emitDelta(harness, turnId, 2, "```\n\nAfter.\n\n");
+      await processedThrough(harness, recorder, "from-token-2");
+      expect(recorder.deltas.map((delta) => delta.text)).toEqual([
+        "Intro\n\n```ts\nconst a = 1;\n\n",
+        "const b = 2;\n\n```\n\nAfter.\n\n",
+      ]);
+      emitCompleted(harness, turnId);
+      expect((await completedText(harness)).text).toBe(
+        "Intro\n\n```ts\nconst a = 1;\n\nconst b = 2;\n\n```\n\nAfter.\n\n",
+      );
+    });
+
+    it("keeps its place in the Markdown after a spill inside a code block", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.parse("2026-10-22T10:00:00.000Z"));
+      const recorder = recordAssistantDeltas();
+      const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+      const turnId = asTurnId("turn-spill-in-fence");
+      await startTurn(harness, turnId);
+
+      let code = "";
+      for (let index = 0; code.length < 26_000; index += 1) {
+        code += `const value${index} = ${index};\n${index % 50 === 49 ? "\n" : ""}`;
+      }
+      const chunks = ["Intro.\n\n```ts\n"];
+      for (let offset = 0; offset < code.length; offset += 1_000) {
+        chunks.push(code.slice(offset, offset + 1_000));
+      }
+      chunks.push(
+        "```\n\nExplanation one.\n\n",
+        "Explanation two.\n\n```\nbare\n\nblock\n\n",
+        "```\n\nEnd.\n\n",
+      );
+      for (const [index, chunk] of chunks.entries()) {
+        vi.setSystemTime(Date.now() + 400);
+        emitDelta(harness, turnId, index, chunk);
+        await processedThrough(harness, recorder, `spill-${index}`);
+      }
+
+      const texts = recorder.deltas.map((delta) => delta.text);
+      expect(texts[0]).toBe("Intro.\n\n");
+      // The spill ends inside the code block; its closer still ends a block afterwards.
+      expect(texts[1]!.length).toBeGreaterThan(24_000);
+      expect(texts[1]!.startsWith("```ts\n")).toBe(true);
+      expect(texts[2]!.endsWith("```\n\nExplanation one.\n\n")).toBe(true);
+      expect(texts.slice(3)).toEqual([
+        "Explanation two.\n\n",
+        "```\nbare\n\nblock\n\n```\n\nEnd.\n\n",
+      ]);
+      emitCompleted(harness, turnId);
+      expect((await completedText(harness)).text).toBe(chunks.join(""));
+    });
+
+    it("holds a file delivery manifest until the reply completes", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.parse("2026-10-22T10:00:00.000Z"));
+      const recorder = recordAssistantDeltas();
+      const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+      fs.writeFileSync(path.join(harness.workspaceRoot, "voice.mp3"), "ID3voice");
+      const turnId = asTurnId("turn-delivery-held");
+      await startTurn(harness, turnId);
+
+      emitDelta(
+        harness,
+        turnId,
+        0,
+        'Your narration.\n\n```ryco-attachments\n{"files":[{"path":"voice.mp3"}]}\n```\n\nEnjoy.\n\n',
+      );
+      await processedThrough(harness, recorder, "delivery-0");
+      vi.setSystemTime(Date.now() + 400);
+      emitDelta(harness, turnId, 1, "Anything else?\n\n");
+      await processedThrough(harness, recorder, "delivery-1");
+      expect(recorder.deltas.map((delta) => delta.text)).toEqual(["Your narration.\n\n"]);
+
+      emitCompleted(harness, turnId);
+      const message = await completedText(harness);
+      expect(message.text).toContain("Enjoy.");
+      expect(message.text).not.toContain("ryco-attachments");
+      expect(message.attachments).toHaveLength(1);
+    });
   });
 
   it("flushes and completes buffered assistant text when an approval request opens", async () => {
@@ -4405,7 +4834,7 @@ describe("ProviderRuntimeIngestion", () => {
   it("starts a new streaming assistant message segment after approval", async () => {
     const harness = await createHarness({
       callbackRuntime: true,
-      serverSettings: { enableLegacyTokenStreaming: true },
+      serverSettings: { responseStreamingMode: "token" },
     });
     const startedAt = "2026-03-28T07:00:00.000Z";
     const pausedAt = "2026-03-28T07:00:01.000Z";
@@ -4513,7 +4942,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("streams assistant deltas when thread.turn.start requests streaming mode", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const now = new Date().toISOString();
 
     await Effect.runPromise(
@@ -4605,7 +5034,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("coalesces live assistant deltas until completion while preserving final text", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -4689,7 +5118,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes coalesced live assistant deltas on the interval before completion", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -4759,7 +5188,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes live assistant deltas before runtime errors", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const now = new Date().toISOString();
 
     harness.emit({
@@ -4833,7 +5262,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes live assistant deltas when the coalesced buffer crosses the size threshold", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const now = new Date().toISOString();
     const oversizedText = "x".repeat(5_000);
 

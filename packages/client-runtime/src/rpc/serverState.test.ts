@@ -351,7 +351,7 @@ describe("serverState", () => {
       payload: {
         settings: {
           ...DEFAULT_SERVER_SETTINGS,
-          enableLegacyTokenStreaming: true,
+          responseStreamingMode: "token",
         },
       },
     });
@@ -363,7 +363,7 @@ describe("serverState", () => {
       providers: nextProviders,
       settings: {
         ...DEFAULT_SERVER_SETTINGS,
-        enableLegacyTokenStreaming: true,
+        responseStreamingMode: "token",
       },
     });
 
@@ -392,7 +392,7 @@ describe("serverState", () => {
         providers: nextProviders,
         settings: {
           ...DEFAULT_SERVER_SETTINGS,
-          enableLegacyTokenStreaming: true,
+          responseStreamingMode: "token",
         },
       },
       "settingsUpdated",

@@ -6,12 +6,12 @@ import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessP
 import {
   AssistantAttachmentError,
   formatAssistantDeliveryText,
+  isAssistantDeliveryFenceInfo,
   parseAssistantDelivery,
   persistAssistantAttachment,
 } from "../../assistantAttachments.ts";
 import {
   ApprovalRequestId,
-  type AssistantDeliveryMode,
   type ChatAttachment,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
   CommandId,
@@ -33,6 +33,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationTurnOutcome,
   type ProviderRuntimeEvent,
+  type ResponseStreamingMode,
 } from "@ryco/contracts";
 import { Cache, Cause, Deferred, Duration, Effect, Layer, Option, Semaphore, Stream } from "effect";
 import type { ProviderRuntimeBinding } from "../../provider/Services/ProviderSessionDirectory.ts";
@@ -43,6 +44,12 @@ import {
   historyRepairLookups,
   missingHistoryActivities,
 } from "../providerHistoryRecovery.ts";
+import {
+  ASSISTANT_TEXT_SCAN_START,
+  type AssistantTextScan,
+  scanAssistantText,
+  splitBufferedAssistantText,
+} from "@ryco/shared/assistantStreaming";
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { readEnv } from "@ryco/shared/runtimeEnv";
@@ -169,6 +176,36 @@ interface LiveAssistantDeltaBuffer {
   generation: number;
 }
 
+/** Context of the latest delta of a held message, for a release no delta triggers. */
+interface HeldAssistantDeltaSource {
+  readonly event: ProviderRuntimeEvent;
+  readonly threadId: ThreadId;
+  readonly turnId?: TurnId;
+  readonly createdAt: string;
+}
+
+/** What paragraph and turn streaming hold back of one assistant message. */
+interface HeldAssistantText {
+  /** Text not sent yet. */
+  readonly text: string;
+  /** The Markdown scan at the end of what was sent, which is where `text` starts. */
+  readonly scan: AssistantTextScan;
+  /** Server-clock time of the last release in paragraph mode, spills included. */
+  readonly releasedAtMs?: number;
+  /** A paced paragraph release is queued for this message. */
+  readonly flushScheduled: boolean;
+  readonly source?: HeldAssistantDeltaSource;
+}
+
+const NOTHING_HELD: HeldAssistantText = {
+  text: "",
+  scan: ASSISTANT_TEXT_SCAN_START,
+  flushScheduled: false,
+};
+
+// A delivery manifest is consumed when the reply completes, so it never streams.
+const PARAGRAPH_SPLIT_OPTIONS = { holdFence: isAssistantDeliveryFenceInfo };
+
 const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
 const TURN_MESSAGE_IDS_BY_TURN_TTL = Duration.minutes(120);
 const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
@@ -176,6 +213,11 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
+// Paragraph streaming releases a message's finished blocks at most this often. Every
+// release is a persisted event (and relay traffic), so a fast model costs one event per
+// interval rather than one per paragraph; blocks that finish in between land together,
+// with the next delta or a trailing release once the interval has passed.
+const MIN_ASSISTANT_RELEASE_INTERVAL_MS = 400;
 const LIVE_ASSISTANT_DELTA_FLUSH_INTERVAL = Duration.millis(32);
 const LIVE_ASSISTANT_DELTA_FLUSH_THRESHOLD_CHARS = 4_096;
 // A subagent message and a task's progress are latest-state activities that
@@ -223,6 +265,10 @@ type RuntimeIngestionInput =
       source: "coalescedActivityFlush";
       key: string;
       generation: number;
+    }
+  | {
+      source: "assistantParagraphFlush";
+      messageId: MessageId;
     };
 
 type ActivityAppendCommand = Extract<OrchestrationCommand, { type: "thread.activity.append" }>;
@@ -1311,10 +1357,10 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed(new Set<MessageId>()),
   });
 
-  const bufferedAssistantTextByMessageId = yield* Cache.make<MessageId, string>({
+  const heldAssistantTextByMessageId = yield* Cache.make<MessageId, HeldAssistantText>({
     capacity: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY,
     timeToLive: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL,
-    lookup: () => Effect.succeed(""),
+    lookup: () => Effect.succeed(NOTHING_HELD),
   });
 
   const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantSegmentState>({
@@ -1535,6 +1581,8 @@ const make = Effect.gen(function* () {
             }).pipe(Effect.andThen(Effect.failCause(cause))),
           ),
         );
+      // A later switch to paragraph mode continues the Markdown from here.
+      yield* noteSentAssistantText(buffer.messageId, buffer.text);
       if (liveAssistantDeltaBuffers.get(input.key) === buffer) {
         liveAssistantDeltaBuffers.delete(input.key);
       }
@@ -1983,37 +2031,187 @@ const make = Effect.gen(function* () {
       yield* settleCoalescedActivitiesForThread(threadId, "subagent-message");
     });
 
-  const appendBufferedAssistantText = (messageId: MessageId, delta: string) =>
-    Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
-      Effect.flatMap((existingText) =>
-        Effect.gen(function* () {
-          const nextText = Option.match(existingText, {
-            onNone: () => delta,
-            onSome: (text) => `${text}${delta}`,
-          });
-          if (nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
-            yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText);
-            return "";
-          }
-
-          // Safety valve: flush full buffered text as an assistant delta to cap memory.
-          yield* Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
-          return nextText;
-        }),
-      ),
+  const readHeldAssistantText = (messageId: MessageId) =>
+    Cache.getOption(heldAssistantTextByMessageId, messageId).pipe(
+      Effect.map(Option.getOrElse(() => NOTHING_HELD)),
     );
 
-  const takeBufferedAssistantText = (messageId: MessageId) =>
-    Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
-      Effect.flatMap((existingText) =>
-        Cache.invalidate(bufferedAssistantTextByMessageId, messageId).pipe(
-          Effect.as(Option.getOrElse(existingText, () => "")),
+  const setHeldAssistantText = (messageId: MessageId, held: HeldAssistantText) =>
+    Cache.set(heldAssistantTextByMessageId, messageId, held);
+
+  /** Records text sent as tokens, so a later switch to paragraphs starts where it ended. */
+  const noteSentAssistantText = (messageId: MessageId, text: string) =>
+    Effect.gen(function* () {
+      const held = yield* readHeldAssistantText(messageId);
+      yield* setHeldAssistantText(messageId, { ...held, scan: scanAssistantText(text, held.scan) });
+    });
+
+  /** Hands over held text, for a switch to token mode. */
+  const takeHeldAssistantText = (messageId: MessageId) =>
+    Effect.gen(function* () {
+      const held = yield* readHeldAssistantText(messageId);
+      if (held.text.length > 0) yield* setHeldAssistantText(messageId, { ...held, text: "" });
+      return held.text;
+    });
+
+  const dispatchAssistantDelta = (input: {
+    messageId: MessageId;
+    source: HeldAssistantDeltaSource;
+    commandTag: string;
+    text: string;
+  }) =>
+    orchestrationEngine.dispatch({
+      type: "thread.message.assistant.delta",
+      commandId: providerCommandId(input.source.event, input.commandTag, String(input.messageId)),
+      threadId: input.source.threadId,
+      messageId: input.messageId,
+      delta: input.text,
+      ...(input.source.turnId ? { turnId: input.source.turnId } : {}),
+      createdAt: input.source.createdAt,
+    });
+
+  /** Sends everything held as one delta. The held state moves on only once it is persisted. */
+  const sendAllHeldAssistantText = (input: {
+    messageId: MessageId;
+    held: HeldAssistantText;
+    source: HeldAssistantDeltaSource;
+    commandTag: string;
+    releasedAtMs?: number;
+  }) =>
+    Effect.gen(function* () {
+      yield* dispatchAssistantDelta({
+        messageId: input.messageId,
+        source: input.source,
+        commandTag: input.commandTag,
+        text: input.held.text,
+      });
+      yield* setHeldAssistantText(input.messageId, {
+        ...input.held,
+        text: "",
+        scan: scanAssistantText(input.held.text, input.held.scan),
+        ...(input.releasedAtMs !== undefined ? { releasedAtMs: input.releasedAtMs } : {}),
+      });
+    });
+
+  const scheduleHeldParagraphFlush = (
+    messageId: MessageId,
+    held: HeldAssistantText,
+    waitMs: number,
+  ) =>
+    Effect.gen(function* () {
+      const enqueue = enqueueRuntimeInput;
+      if (!enqueue || held.flushScheduled) return held;
+      const scheduled: HeldAssistantText = { ...held, flushScheduled: true };
+      yield* setHeldAssistantText(messageId, scheduled);
+      yield* Effect.forkScoped(
+        Effect.sleep(Duration.millis(waitMs)).pipe(
+          Effect.andThen(enqueue({ source: "assistantParagraphFlush", messageId })),
         ),
-      ),
-    );
+      );
+      return scheduled;
+    });
 
-  const clearBufferedAssistantText = (messageId: MessageId) =>
-    Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
+  /**
+   * Sends the finished blocks of a message's held text, at most once per interval. Within
+   * the interval a trailing release is queued instead, so a finished block never waits for
+   * a later delta. The held state moves on only once the release is persisted.
+   */
+  const releaseHeldParagraphs = (
+    messageId: MessageId,
+    held: HeldAssistantText,
+    commandTag: string,
+  ) =>
+    Effect.gen(function* () {
+      if (held.source === undefined || !hasRenderableAssistantText(held.text)) return held;
+      // Date.now(), not the event time: some providers stamp every delta of a part with
+      // the part's start, so event times cannot measure the gap between releases.
+      const nowMs = Date.now();
+      const sinceReleaseMs =
+        held.releasedAtMs === undefined ? undefined : nowMs - held.releasedAtMs;
+      // A clock that stepped backwards counts as elapsed, so a block is never held for it.
+      if (
+        sinceReleaseMs !== undefined &&
+        sinceReleaseMs >= 0 &&
+        sinceReleaseMs < MIN_ASSISTANT_RELEASE_INTERVAL_MS
+      ) {
+        return yield* scheduleHeldParagraphFlush(
+          messageId,
+          held,
+          MIN_ASSISTANT_RELEASE_INTERVAL_MS - sinceReleaseMs,
+        );
+      }
+      const { ready, rest, restScan } = splitBufferedAssistantText(
+        held.text,
+        held.scan,
+        PARAGRAPH_SPLIT_OPTIONS,
+      );
+      // What stays held must fit the memory cap; otherwise the whole text spills instead.
+      if (!hasRenderableAssistantText(ready) || rest.length > MAX_BUFFERED_ASSISTANT_CHARS) {
+        return held;
+      }
+      yield* dispatchAssistantDelta({ messageId, source: held.source, commandTag, text: ready });
+      const released: HeldAssistantText = {
+        ...held,
+        text: rest,
+        scan: restScan,
+        releasedAtMs: nowMs,
+      };
+      yield* setHeldAssistantText(messageId, released);
+      return released;
+    });
+
+  /**
+   * Holds a delta in paragraph or turn mode and sends what is due: finished blocks in
+   * paragraph mode, and everything held once it outgrows the memory cap.
+   */
+  const appendHeldAssistantText = (input: {
+    messageId: MessageId;
+    delta: string;
+    mode: Exclude<ResponseStreamingMode, "token">;
+    source: HeldAssistantDeltaSource;
+  }) =>
+    Effect.gen(function* () {
+      const previous = yield* readHeldAssistantText(input.messageId);
+      let held: HeldAssistantText = {
+        ...previous,
+        text: `${previous.text}${input.delta}`,
+        source: input.source,
+      };
+      // Kept before any release, so a release that fails to persist loses nothing.
+      yield* setHeldAssistantText(input.messageId, held);
+      if (input.mode === "paragraph") {
+        held = yield* releaseHeldParagraphs(input.messageId, held, "assistant-delta-paragraph");
+      }
+      if (held.text.length <= MAX_BUFFERED_ASSISTANT_CHARS) return;
+
+      // Safety valve: send everything held to cap memory.
+      yield* sendAllHeldAssistantText({
+        messageId: input.messageId,
+        held,
+        source: input.source,
+        commandTag: "assistant-delta-buffer-spill",
+        ...(input.mode === "paragraph" ? { releasedAtMs: Date.now() } : {}),
+      });
+    });
+
+  const readResponseStreamingMode = Effect.map(
+    serverSettingsService.getSettings,
+    (settings) => settings.responseStreamingMode,
+  );
+
+  /** Runs a queued paced release, unless the message completed or left paragraph mode. */
+  const flushHeldParagraphs = (input: { messageId: MessageId }) =>
+    Effect.gen(function* () {
+      const current = yield* Cache.getOption(heldAssistantTextByMessageId, input.messageId);
+      if (Option.isNone(current) || !current.value.flushScheduled) return;
+      const held: HeldAssistantText = { ...current.value, flushScheduled: false };
+      yield* setHeldAssistantText(input.messageId, held);
+      if ((yield* readResponseStreamingMode) !== "paragraph") return;
+      yield* releaseHeldParagraphs(input.messageId, held, "assistant-delta-paragraph-paced");
+    });
+
+  const clearHeldAssistantText = (messageId: MessageId) =>
+    Cache.invalidate(heldAssistantTextByMessageId, messageId);
 
   const appendBufferedProposedPlan = (planId: string, delta: string, createdAt: string) =>
     Cache.getOption(bufferedProposedPlanById, planId).pipe(
@@ -2039,8 +2237,7 @@ const make = Effect.gen(function* () {
   const clearBufferedProposedPlan = (planId: string) =>
     Cache.invalidate(bufferedProposedPlanById, planId);
 
-  const clearAssistantMessageState = (messageId: MessageId) =>
-    clearBufferedAssistantText(messageId);
+  const clearAssistantMessageState = (messageId: MessageId) => clearHeldAssistantText(messageId);
 
   const flushBufferedAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
@@ -2051,19 +2248,18 @@ const make = Effect.gen(function* () {
     commandTag: string;
   }) =>
     Effect.gen(function* () {
-      const bufferedText = yield* takeBufferedAssistantText(input.messageId);
-      if (!hasRenderableAssistantText(bufferedText)) {
+      const held = yield* readHeldAssistantText(input.messageId);
+      if (!hasRenderableAssistantText(held.text)) {
+        if (held.text.length > 0)
+          yield* setHeldAssistantText(input.messageId, { ...held, text: "" });
         return false;
       }
 
-      yield* orchestrationEngine.dispatch({
-        type: "thread.message.assistant.delta",
-        commandId: providerCommandId(input.event, input.commandTag, String(input.messageId)),
-        threadId: input.threadId,
+      yield* sendAllHeldAssistantText({
         messageId: input.messageId,
-        delta: bufferedText,
-        ...(input.turnId ? { turnId: input.turnId } : {}),
-        createdAt: input.createdAt,
+        held,
+        source: input,
+        commandTag: input.commandTag,
       });
       return true;
     });
@@ -2113,29 +2309,22 @@ const make = Effect.gen(function* () {
     hasProjectedMessage?: boolean;
   }) =>
     Effect.gen(function* () {
-      const bufferedText = yield* takeBufferedAssistantText(input.messageId);
-      const text =
-        bufferedText.length > 0
-          ? bufferedText
-          : (input.fallbackText?.trim().length ?? 0) > 0
-            ? input.fallbackText!
-            : "";
+      const held = yield* readHeldAssistantText(input.messageId);
+      // The provider's fallback text fills only a message with nothing held.
+      const text = held.text.length > 0 ? held.text : (input.fallbackText ?? "");
       const hasRenderableText = hasRenderableAssistantText(text);
 
       if (hasRenderableText) {
-        yield* orchestrationEngine.dispatch({
-          type: "thread.message.assistant.delta",
-          commandId: providerCommandId(
-            input.event,
-            input.finalDeltaCommandTag,
-            String(input.messageId),
-          ),
-          threadId: input.threadId,
+        yield* dispatchAssistantDelta({
           messageId: input.messageId,
-          delta: text,
-          ...(input.turnId ? { turnId: input.turnId } : {}),
-          createdAt: input.createdAt,
+          source: input,
+          commandTag: input.finalDeltaCommandTag,
+          text,
         });
+        // Sent: a completion retried after the dispatch below fails must not append it again.
+        if (held.text.length > 0) {
+          yield* setHeldAssistantText(input.messageId, { ...held, text: "" });
+        }
       }
 
       if (input.hasProjectedMessage || hasRenderableText) {
@@ -2990,33 +3179,28 @@ const make = Effect.gen(function* () {
           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
         }
 
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableLegacyTokenStreaming ? "streaming" : "buffered"),
-        );
-        if (assistantDeliveryMode === "buffered") {
-          const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
-          if (spillChunk.length > 0) {
-            yield* orchestrationEngine.dispatch({
-              type: "thread.message.assistant.delta",
-              commandId: providerCommandId(
-                event,
-                "assistant-delta-buffer-spill",
-                String(assistantMessageId),
-              ),
-              threadId: thread.id,
-              messageId: assistantMessageId,
-              delta: spillChunk,
-              ...(turnId ? { turnId } : {}),
-              createdAt: now,
+        const streamingMode = yield* readResponseStreamingMode;
+        if (streamingMode !== "token") {
+          // Token text still coalescing from before a mode switch goes out first, in order.
+          if (liveAssistantDeltaBuffers.size > 0) {
+            yield* flushLiveAssistantDeltaBuffersSafely({
+              commandTag: "assistant-delta-flush-before-buffered-delta",
             });
           }
+          yield* appendHeldAssistantText({
+            messageId: assistantMessageId,
+            delta: assistantDelta,
+            mode: streamingMode,
+            source: { event, threadId: thread.id, ...(turnId ? { turnId } : {}), createdAt: now },
+          });
         } else {
+          // Text held before a switch to token mode goes out first, in order.
+          const heldText = yield* takeHeldAssistantText(assistantMessageId);
           yield* appendLiveAssistantDelta({
             event,
             threadId: thread.id,
             messageId: assistantMessageId,
-            delta: assistantDelta,
+            delta: `${heldText}${assistantDelta}`,
             ...(turnId ? { turnId } : {}),
             createdAt: now,
           });
@@ -3030,12 +3214,8 @@ const make = Effect.gen(function* () {
           : undefined;
       if (pauseForUserTurnId) {
         const detailedThread = yield* getLoadedThreadDetail();
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableLegacyTokenStreaming ? "streaming" : "buffered"),
-        );
         const flushedMessageIds =
-          assistantDeliveryMode === "buffered"
+          (yield* readResponseStreamingMode) !== "token"
             ? yield* flushBufferedAssistantMessagesForTurn({
                 event,
                 threadId: thread.id,
@@ -3785,11 +3965,13 @@ const make = Effect.gen(function* () {
             ? flushReasoningSegment(input)
             : input.source === "coalescedActivityFlush"
               ? flushCoalescedActivity(input)
-              : flushLiveAssistantDeltaBuffer({
-                  key: input.key,
-                  generation: input.generation,
-                  commandTag: "assistant-delta-coalesced-interval",
-                }).pipe(Effect.asVoid);
+              : input.source === "assistantParagraphFlush"
+                ? flushHeldParagraphs(input)
+                : flushLiveAssistantDeltaBuffer({
+                    key: input.key,
+                    generation: input.generation,
+                    commandTag: "assistant-delta-coalesced-interval",
+                  }).pipe(Effect.asVoid);
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
@@ -3801,11 +3983,13 @@ const make = Effect.gen(function* () {
           source: input.source,
           ...(input.source === "history"
             ? { threadId: input.threadId }
-            : input.source === "liveAssistantFlush" ||
-                input.source === "reasoningFlush" ||
-                input.source === "coalescedActivityFlush"
-              ? { flushKey: input.key, flushGeneration: input.generation }
-              : { eventId: input.event.eventId, eventType: input.event.type }),
+            : input.source === "assistantParagraphFlush"
+              ? { messageId: input.messageId }
+              : input.source === "liveAssistantFlush" ||
+                  input.source === "reasoningFlush" ||
+                  input.source === "coalescedActivityFlush"
+                ? { flushKey: input.key, flushGeneration: input.generation }
+                : { eventId: input.event.eventId, eventType: input.event.type }),
           cause: Cause.pretty(cause),
         });
       }),

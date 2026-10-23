@@ -239,6 +239,10 @@
       "types": "./src/serverSettings.ts",
       "import": "./src/serverSettings.ts"
     },
+    "./assistantStreaming": {
+      "types": "./src/assistantStreaming.ts",
+      "import": "./src/assistantStreaming.ts"
+    },
     "./settingsSecrets": {
       "types": "./src/settingsSecrets.ts",
       "import": "./src/settingsSecrets.ts"

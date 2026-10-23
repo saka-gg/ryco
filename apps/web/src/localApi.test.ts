@@ -630,18 +630,18 @@ describe("wsApi", () => {
   it("forwards server settings updates directly to the RPC client", async () => {
     const nextSettings = {
       ...DEFAULT_SERVER_SETTINGS,
-      enableLegacyTokenStreaming: true,
+      responseStreamingMode: "token",
     };
     rpcClientMock.server.updateSettings.mockResolvedValue(nextSettings);
     const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
-    await expect(api.server.updateSettings({ enableLegacyTokenStreaming: true })).resolves.toEqual(
+    await expect(api.server.updateSettings({ responseStreamingMode: "token" })).resolves.toEqual(
       nextSettings,
     );
     expect(rpcClientMock.server.updateSettings).toHaveBeenCalledWith({
-      enableLegacyTokenStreaming: true,
+      responseStreamingMode: "token",
     });
   });
 

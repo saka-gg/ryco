@@ -67,6 +67,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The `responseStreamingMode` setting (turn, paragraph, token); absent on older servers,
+   * which drop the key from settings patches and only know the legacy token switch.
+   */
+  responseStreamingModes: Schema.optionalKey(Schema.Boolean),
   /** Server-owned worktree notes (`notes.list` / `notes.command`); absent on older servers. */
   worktreeNotes: Schema.optionalKey(Schema.Boolean),
   /**

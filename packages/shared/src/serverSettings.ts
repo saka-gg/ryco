@@ -1,5 +1,11 @@
-import { ServerSettings, type ServerSettingsPatch } from "@ryco/contracts/settings";
+import {
+  DEFAULT_RESPONSE_STREAMING_MODE,
+  type ResponseStreamingMode,
+  ServerSettings,
+  type ServerSettingsPatch,
+} from "@ryco/contracts/settings";
 import * as Equal from "effect/Equal";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
@@ -44,6 +50,33 @@ export function parsePersistedServerObservabilitySettings(
   } catch {
     return { otlpTracesUrl: undefined, otlpMetricsUrl: undefined };
   }
+}
+
+/**
+ * The streaming mode a legacy `enableLegacyTokenStreaming` value stands for: on is token
+ * output; off leaves token output for the default and keeps any other mode.
+ */
+function responseStreamingModeFromLegacyTokenStreaming(
+  enabled: boolean,
+  current: ResponseStreamingMode,
+): ResponseStreamingMode {
+  if (enabled) return "token";
+  return current === "token" ? DEFAULT_RESPONSE_STREAMING_MODE : current;
+}
+
+/**
+ * Upgrades a settings file written before `responseStreamingMode`: a saved token-streaming
+ * opt-in keeps token output. Everything else in the object is left to the schema.
+ */
+export function migrateLegacyServerSettings(persisted: unknown): unknown {
+  if (
+    !Predicate.isObject(persisted) ||
+    Object.hasOwn(persisted, "responseStreamingMode") ||
+    persisted.enableLegacyTokenStreaming !== true
+  ) {
+    return persisted;
+  }
+  return { ...persisted, responseStreamingMode: "token" satisfies ResponseStreamingMode };
 }
 
 function shouldReplaceTextGenerationModelSelection(
@@ -110,9 +143,18 @@ export function applyServerSettingsPatch(
     expectedThreadAutoSettleAfterDays: _expectedAutoSettle,
     projectPreferences: _projects,
     cliProxyHubs: _cliProxyHubs,
+    enableLegacyTokenStreaming: legacyTokenStreaming,
     ...persistedPatch
   } = patch;
   let next = deepMerge(current, persistedPatch);
+  if (patch.responseStreamingMode === undefined && legacyTokenStreaming !== undefined)
+    next = {
+      ...next,
+      responseStreamingMode: responseStreamingModeFromLegacyTokenStreaming(
+        legacyTokenStreaming,
+        current.responseStreamingMode,
+      ),
+    };
   if (patch.initialModelSelection !== undefined)
     next = { ...next, initialModelSelection: patch.initialModelSelection };
   if (patch.projectPreferences !== undefined) {

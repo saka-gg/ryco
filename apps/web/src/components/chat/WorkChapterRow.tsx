@@ -63,6 +63,8 @@ export interface WorkChapterRowProps {
   environmentId: EnvironmentId;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   searchHighlight: Omit<SkillInlineTextSearchHighlight, "cursor" | "keyPrefix"> | undefined;
+  /** Reveal the chapter's streaming message gradually; see `ChatMarkdown`'s `smoothStreaming`. */
+  smoothStreaming: boolean;
   /** The timeline's Activity + transcript panel for one tool entry. */
   renderEntryPanel: (entry: WorkLogEntry, panelId: string) => ReactNode;
 }
@@ -211,6 +213,7 @@ function ChapterBody(
             cwd={props.markdownCwd}
             environmentId={props.environmentId}
             isStreaming={row.message.streaming}
+            smoothStreaming={props.smoothStreaming}
             skills={props.skills}
             searchHighlight={props.searchHighlight}
           />
