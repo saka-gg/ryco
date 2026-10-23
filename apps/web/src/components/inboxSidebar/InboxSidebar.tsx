@@ -26,6 +26,7 @@ import { TooltipCreateHandle } from "../ui/tooltip";
 import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
+import type { InboxOrderSnapshot } from "./inboxOrderHold";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
   buildInboxSidebarModel,
@@ -36,6 +37,11 @@ import {
 } from "./inboxSidebarModel";
 import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
+import { useInboxOrderHold } from "./useInboxOrderHold";
+
+type InboxOrderHoldLogic = typeof import("./inboxOrderHold");
+// Outside the component: the React Compiler cannot lower `import()`.
+const loadInboxOrderHold = (): Promise<InboxOrderHoldLogic> => import("./inboxOrderHold");
 
 export interface InboxSidebarProps {
   readonly threadActions?: InboxThreadActions | undefined;
@@ -125,7 +131,9 @@ export function InboxSidebar(props: InboxSidebarProps) {
   // Keeps rows that did not change identical across model runs, so memoized
   // rows skip rendering when only a few threads moved.
   const [modelSharing] = useState(() => createInboxSidebarModelSharing());
-  const model = useMemo(
+  // Every section: the status filter applies after the order hold, so a row
+  // that leaves the filtered section keeps its place too.
+  const liveModel = useMemo(
     () =>
       modelSharing.share(
         buildInboxSidebarModel({
@@ -133,7 +141,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
           worktrees: props.worktrees,
           threads: props.threads,
           environments: props.environments,
-          filters: { query, environmentId, status },
+          filters: { query, environmentId, status: "all" },
           deliveryUnknownThreadKeys: props.deliveryUnknownThreadKeys,
           localQueuedThreadKeys: props.localQueuedThreadKeys,
           activeThreadKey: props.activeThreadKey,
@@ -162,19 +170,49 @@ export function InboxSidebar(props: InboxSidebarProps) {
       props.worktrees,
       query,
       settlementNowMs,
-      status,
     ],
   );
+  // While the user aims at the list, rows keep their places and show live
+  // data; once the pointer leaves, they glide to their live order. Changing
+  // what the list shows starts a new hold.
+  const [holdElement, setHoldElement] = useState<HTMLElement | null>(null);
+  const orderHold = useInboxOrderHold(holdElement);
+  // The hold's logic loads on the first hold, outside the shell's bundle;
+  // until it arrives the list keeps its live order.
+  const [holdLogic, setHoldLogic] = useState<InboxOrderHoldLogic | null>(null);
   useEffect(() => {
-    if (model.nextSettlementEvaluationAtMs === null) return;
+    if (orderHold.holding && holdLogic === null) {
+      void loadInboxOrderHold().then(setHoldLogic, () => undefined);
+    }
+  }, [holdLogic, orderHold.holding]);
+  const holding = orderHold.holding && holdLogic !== null;
+  const holdKey = JSON.stringify([query, environmentId, nestDelegated, props.aiFocusEnabled]);
+  const [heldOrder, setHeldOrder] = useState<InboxOrderSnapshot | null>(null);
+  if (holding ? heldOrder?.holdKey !== holdKey : heldOrder !== null) {
+    setHeldOrder(holding ? holdLogic.captureInboxOrder(liveModel, holdKey) : null);
+  }
+  const model = useMemo(
+    () =>
+      heldOrder && holdLogic ? holdLogic.applyInboxOrderHold(liveModel, heldOrder) : liveModel,
+    [heldOrder, holdLogic, liveModel],
+  );
+  const sections = useMemo(
+    () =>
+      status === "all"
+        ? model.sections
+        : model.sections.filter((section) => section.key === status),
+    [model.sections, status],
+  );
+  useEffect(() => {
+    if (liveModel.nextSettlementEvaluationAtMs === null) return;
     const maxTimeoutMs = 2_147_483_647;
     const delayMs = Math.min(
       maxTimeoutMs,
-      Math.max(1, model.nextSettlementEvaluationAtMs - Date.now() + 1),
+      Math.max(1, liveModel.nextSettlementEvaluationAtMs - Date.now() + 1),
     );
     const timer = window.setTimeout(() => setSettlementNowMs(Date.now()), delayMs);
     return () => window.clearTimeout(timer);
-  }, [model.nextSettlementEvaluationAtMs]);
+  }, [liveModel.nextSettlementEvaluationAtMs]);
   useEffect(() => {
     const refresh = () => setSettlementNowMs(Date.now());
     window.addEventListener("focus", refresh);
@@ -184,7 +222,6 @@ export function InboxSidebar(props: InboxSidebarProps) {
       document.removeEventListener("visibilitychange", refresh);
     };
   }, []);
-  const sections = model.sections;
   useEffect(() => {
     const counts: Partial<Record<InboxSidebarSectionKey, number>> = {};
     let total = 0;
@@ -257,8 +294,10 @@ export function InboxSidebar(props: InboxSidebarProps) {
   return (
     <InboxMotionContext value={gateRef}>
       <SidebarContent
+        ref={setHoldElement}
         className="gap-0 px-2 pt-1 pb-2"
         data-testid="inbox-sidebar"
+        onPointerOverCapture={orderHold.onPointerOverCapture}
         onViewportScroll={handleSidebarListScroll}
       >
         <InboxHoverLayer hintHandle={hintHandle} previewHandle={previewHandle}>

@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
+import { parkPointer } from "../../../test/browserPointer";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -41,7 +42,9 @@ const PROJECT_ID = ProjectId.make("project-hover-card");
 const THREAD_ID = ThreadId.make("thread-hover-card");
 
 describe("Inbox sidebar rendering and settlement", () => {
-  afterEach(() => {
+  afterEach(async () => {
+    // The list holds its order under the real pointer: keep it off the next test.
+    await parkPointer(0, 0);
     __resetEnvironmentApiOverridesForTests();
     document.body.innerHTML = "";
   });
