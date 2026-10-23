@@ -57,6 +57,24 @@ describe("settings reset ownership", () => {
     });
     expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
   });
+  it("restores the thread alert switches as local preferences", () => {
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
+    };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Thread alerts", "Alert sound", "In-app alerts"],
+      resetTheme: false,
+      patch: {
+        notifyOnTurnCompleteWhenUnfocused: true,
+        threadNotificationSound: false,
+        threadNotificationToasts: true,
+      },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
+  });
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
   });

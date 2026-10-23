@@ -1237,6 +1237,8 @@ describe("GeneralSettingsPanel observability", () => {
 
     const input = page.getByRole("textbox", { name: "Worktree branch prefix" });
     await expect.element(input).toHaveValue("team");
+    // Thread alerts belong to this device, not to the node being edited.
+    await expect.element(page.getByText("Thread alerts", { exact: true })).not.toBeInTheDocument();
     await input.fill("  team/agent  ");
     await userEvent.keyboard("{Enter}");
     expect(mockUpdateEnvironmentServerSettings).toHaveBeenLastCalledWith(environmentId, {
@@ -1554,6 +1556,90 @@ describe("GeneralSettingsPanel observability", () => {
         chatWidth: "wide",
       });
     });
+  });
+
+  it("chooses thread alerts in the browser and asks for notification permission", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings, clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+    const notification = { permission: "default", requestPermission: vi.fn() };
+    notification.requestPermission.mockImplementation(async () => {
+      notification.permission = "granted";
+      return "granted";
+    });
+    vi.stubGlobal("Notification", notification);
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const mode = page.getByRole("combobox", { name: "Thread alerts" });
+    await expect.element(mode).toMatchTextContent("Notifications");
+    await expect.element(page.getByRole("button", { name: "Allow notifications" })).toBeVisible();
+
+    await mode.click();
+    await page.getByRole("option", { name: "Notifications and sound", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        notifyOnTurnCompleteWhenUnfocused: true,
+        threadNotificationSound: true,
+      });
+    });
+    expect(notification.requestPermission).toHaveBeenCalledTimes(1);
+    await expect
+      .element(page.getByRole("button", { name: "Allow notifications" }))
+      .not.toBeInTheDocument();
+
+    await mode.click();
+    await page.getByRole("option", { name: "Sound", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        notifyOnTurnCompleteWhenUnfocused: false,
+        threadNotificationSound: true,
+      });
+    });
+
+    await page.getByLabelText("Show in-app alerts for other threads").click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        notifyOnTurnCompleteWhenUnfocused: false,
+        threadNotificationSound: true,
+        threadNotificationToasts: false,
+      });
+    });
+    expect(notification.requestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("says when the browser blocks thread notifications", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    installSettingsNativeApi({ clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+    vi.stubGlobal("Notification", { permission: "denied", requestPermission: vi.fn() });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(
+        page.getByText("Notifications are blocked in this browser. Badges and sound still work."),
+      )
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Allow notifications" }))
+      .not.toBeInTheDocument();
   });
 
   it("shows separate remote Git and PR workflow refresh controls", async () => {
