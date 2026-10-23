@@ -1,7 +1,19 @@
 /** Fresh-file production event-store/projection fixture; run with Node (server runtime).
  * node apps/server/scripts/measure-streaming-sqlite.ts [bytes=200000] [messages=1] [profile=buffered]
+ * node apps/server/scripts/measure-streaming-sqlite.ts [updates=2000] [cadenceMs=20] tools
  * Profiles model persisted batch sizes; provider/network/timer waiting is excluded.
  * Reports WAL growth, not physical disk writes or whole-application savings.
+ *
+ * `streaming-turn` is `streaming` inside a running turn, with each event's time 1 ms after the
+ * previous one as in production. `tools` models one OpenCode bash call: a pending update, then
+ * `updates` running updates `cadenceMs` apart whose activity time is the tool's start, then the
+ * completion. The other write profiles keep one constant event time, so a write that only moves
+ * `updated_at` is a no-op there: quote `streaming-turn`/`tools` for per-event row writes.
+ * `rowWrites` comes from TEMP-trigger counters inside the timed loops; set
+ * RYCO_SQLITE_FIXTURE_ROW_WRITES=0 for timings without them (compare-streaming-sqlite.ts does).
+ *
+ * Any `apps/server/src` module imported statically must exist at the
+ * RYCO_SQLITE_FIXTURE_REF baseline (streaming-sqlite-revision.ts loads it from there).
  */
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
@@ -15,9 +27,12 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  RuntimeItemId,
   ThreadId,
   type OrchestrationEvent,
+  type ProviderRuntimeEvent,
 } from "@ryco/contracts";
 import { Effect, Layer, Option } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -38,15 +53,31 @@ import {
   ThreadPriorityCandidateQuery,
   ThreadPriorityCandidateQueryLive,
 } from "../src/threadPriority/ThreadPriorityCandidateQuery.ts";
+import { installRowWriteProbe } from "./sqliteRowWriteProbe.ts";
 
-const bytes = Number(process.argv[2] ?? 200000);
 const profile = process.argv[4] ?? "buffered";
-const batchChars =
-  profile === "buffered" ? 24040 : profile === "streaming" ? 4096 : profile === "timer" ? 320 : 40;
-if (!["buffered", "streaming", "timer", "stress", "reads"].includes(profile))
-  throw new Error("Unknown profile");
-const messages = Number(process.argv[3] ?? 1);
 if (
+  !["buffered", "streaming", "streaming-turn", "timer", "stress", "reads", "tools"].includes(
+    profile,
+  )
+)
+  throw new Error("Unknown profile");
+const isTools = profile === "tools";
+// `tools`: provider updates and their cadence (ms) instead of bytes and messages.
+const bytes = Number(process.argv[2] ?? (isTools ? 2000 : 200000));
+const messages = Number(process.argv[3] ?? (isTools ? 20 : 1));
+const batchChars =
+  profile === "buffered"
+    ? 24040
+    : profile === "streaming" || profile === "streaming-turn"
+      ? 4096
+      : profile === "timer"
+        ? 320
+        : 40;
+if (isTools) {
+  if (!Number.isSafeInteger(bytes) || bytes < 1 || !Number.isSafeInteger(messages) || messages < 1)
+    throw new Error("Use a positive update count and a positive cadence in ms");
+} else if (
   !Number.isSafeInteger(bytes) ||
   bytes < 40 ||
   bytes % 40 ||
@@ -85,10 +116,13 @@ const program = Effect.gen(function* () {
   const pipeline = yield* OrchestrationProjectionPipeline;
   const repository = yield* ProjectionThreadMessageRepository;
   const now = "2026-09-01T00:00:00.000Z";
+  const nowMs = Date.parse(now);
+  const isoAt = (offsetMs: number) => new Date(nowMs + offsetMs).toISOString();
   const threadId = ThreadId.make("fixture-thread");
   const projectId = ProjectId.make("fixture-project");
+  const turnId = TurnId.make("fixture-turn");
   let id = 0;
-  const apply = (event: Pick<OrchestrationEvent, "type" | "payload">) =>
+  const apply = (event: Pick<OrchestrationEvent, "type" | "payload">, occurredAt = now) =>
     sql
       .withTransaction(
         Effect.gen(function* () {
@@ -98,7 +132,7 @@ const program = Effect.gen(function* () {
             eventId: EventId.make(key),
             aggregateKind: event.type === "project.created" ? "project" : "thread",
             aggregateId: event.type === "project.created" ? projectId : threadId,
-            occurredAt: now,
+            occurredAt,
             commandId: CommandId.make(key),
             causationEventId: null,
             correlationId: CommandId.make(key),
@@ -134,6 +168,45 @@ const program = Effect.gen(function* () {
       updatedAt: now,
     },
   });
+  const inTurn = profile === "streaming-turn" || isTools;
+  if (inTurn)
+    yield* apply({
+      type: "thread.session-set",
+      payload: {
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "opencode",
+          runtimeMode: "full-access",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: now,
+        },
+      },
+    });
+  // Row writes per table, counted by TEMP triggers on the writer connection (they never reach the
+  // main database or its WAL). Each counted write adds one temp-table UPDATE inside the timed
+  // loops, so RYCO_SQLITE_FIXTURE_ROW_WRITES=0 times without them and prints `rowWrites: null`.
+  const countRowWrites = profile !== "reads" && process.env.RYCO_SQLITE_FIXTURE_ROW_WRITES !== "0";
+  const threadRowWrites = countRowWrites
+    ? yield* installRowWriteProbe({ name: "fixture_threads", table: "projection_threads" })
+    : undefined;
+  const turnRowWrites = countRowWrites
+    ? yield* installRowWriteProbe({ name: "fixture_turns", table: "projection_turns" })
+    : undefined;
+  const rowWrites = () =>
+    threadRowWrites === undefined || turnRowWrites === undefined
+      ? Effect.succeed(null)
+      : Effect.all({ threads: threadRowWrites, turns: turnRowWrites });
+  const persistedEventsSince = (sequence: number) =>
+    sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM orchestration_events WHERE sequence > ${sequence}
+    `.pipe(Effect.map((rows) => rows[0]?.count ?? 0));
+  const [setupHead] = yield* sql<{ readonly sequence: number | null }>`
+    SELECT MAX(sequence) AS sequence FROM orchestration_events
+  `;
+  const setupSequence = setupHead?.sequence ?? 0;
   yield* sql`PRAGMA wal_autocheckpoint = 0`;
   yield* sql`PRAGMA wal_checkpoint(TRUNCATE)`;
   const settings = {
@@ -143,24 +216,138 @@ const program = Effect.gen(function* () {
   };
   const delta = "0123456789abcdefghij0123456789abcdefghij";
   const expected = delta.repeat(bytes / 40);
-  const send = (index: number, text: string, streaming: boolean) =>
-    apply({
-      type: "thread.message-sent",
-      payload: {
-        threadId,
-        messageId: MessageId.make(`message-${index}`),
-        role: "assistant",
-        text,
-        turnId: profile === "reads" ? TurnId.make("fixture-turn") : null,
-        streaming,
-        createdAt: now,
-        updatedAt: now,
+  // streaming-turn: each event 1 ms after the previous one (a reply's updatedAt is its flush time).
+  let eventClockMs = 0;
+  const send = (index: number, text: string, streaming: boolean) => {
+    const occurredAt = profile === "streaming-turn" ? isoAt(++eventClockMs) : now;
+    return apply(
+      {
+        type: "thread.message-sent",
+        payload: {
+          threadId,
+          messageId: MessageId.make(`message-${index}`),
+          role: "assistant",
+          text,
+          turnId: profile === "reads" || profile === "streaming-turn" ? turnId : null,
+          streaming,
+          createdAt: now,
+          updatedAt: occurredAt,
+        },
       },
-    });
+      occurredAt,
+    );
+  };
+  if (isTools) {
+    // One OpenCode bash call, shaped like OpenCodeAdapter's tool emission: `item.started`
+    // (pending) carries its own emission time, every running update the tool's start time
+    // (constant), the completion its end time. Bash streams its output into
+    // `state.metadata.output`, one update per chunk; the persisted payload drops it.
+    const { runtimeEventToActivities } = yield* Effect.promise(
+      () => import("../src/orchestration/Layers/ProviderRuntimeIngestion.ts"),
+    );
+    const updates = bytes;
+    const cadenceMs = messages;
+    const callId = "fixture-call";
+    const input = { command: "bun run test", description: "Run tests" };
+    const pendingAtMs = 1;
+    const startMs = 2;
+    const endMs = startMs + updates * cadenceMs;
+    const outputLine = (index: number) =>
+      `line ${String(index).padStart(6, "0")} `.padEnd(79, ".") + "\n";
+    const toolEvent = (
+      index: number,
+      type: "item.started" | "item.updated" | "item.completed",
+      state: Record<string, unknown>,
+      createdAt: string,
+    ): ProviderRuntimeEvent =>
+      ({
+        eventId: EventId.make(`fixture-tool-${index}`),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        createdAt,
+        turnId,
+        itemId: RuntimeItemId.make(callId),
+        type,
+        payload: {
+          itemType: "command_execution",
+          status: type === "item.completed" ? "completed" : ("inProgress" as const),
+          title: "bash",
+          data: { tool: "bash", state },
+        },
+      }) as ProviderRuntimeEvent;
+    let output = "";
+    const events: ProviderRuntimeEvent[] = [
+      toolEvent(0, "item.started", { status: "pending", input: {}, raw: "" }, isoAt(pendingAtMs)),
+    ];
+    for (let index = 1; index <= updates; index++) {
+      output += outputLine(index);
+      events.push(
+        toolEvent(
+          index,
+          "item.updated",
+          { status: "running", input, metadata: { output }, time: { start: nowMs + startMs } },
+          isoAt(startMs),
+        ),
+      );
+    }
+    events.push(
+      toolEvent(
+        updates + 1,
+        "item.completed",
+        {
+          status: "completed",
+          input,
+          output,
+          title: "bash",
+          metadata: { output },
+          time: { start: nowMs + startMs, end: nowMs + endMs },
+        },
+        isoAt(endMs),
+      ),
+    );
+    const start = performance.now();
+    for (const event of events) {
+      const [activity] = runtimeEventToActivities(event);
+      if (activity === undefined) throw new Error(`No activity for ${event.type}`);
+      // decider: an activity append occurs at the activity's own time.
+      yield* apply(
+        { type: "thread.activity-appended", payload: { threadId, activity } },
+        activity.createdAt,
+      );
+    }
+    const elapsedMs = performance.now() - start;
+    const walBytes = statSync(`${filename}-wal`).size;
+    const persistedEvents = yield* persistedEventsSince(setupSequence);
+    const [activityCount] = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM projection_thread_activities WHERE thread_id = ${threadId}
+    `;
+    const [thread] = yield* sql<{ readonly updatedAt: string }>`
+      SELECT updated_at AS "updatedAt" FROM projection_threads WHERE thread_id = ${threadId}
+    `;
+    const activityRows = activityCount?.count ?? 0;
+    if (activityRows !== updates + 2 || thread?.updatedAt !== isoAt(endMs))
+      throw new Error("Tool activity projection mismatch");
+    console.log(
+      JSON.stringify({
+        runtime: process.version,
+        bun: process.versions.bun ?? null,
+        profile,
+        providerUpdates: updates,
+        cadenceMs,
+        persistedEvents,
+        walBytes,
+        walBytesPerEvent: Math.round(walBytes / persistedEvents),
+        rowWrites: yield* rowWrites(),
+        activityRows,
+        settings,
+        elapsedMs,
+      }),
+    );
+    return;
+  }
   if (profile === "reads") {
     const query = yield* ProjectionSnapshotQuery;
     const priority = yield* ThreadPriorityCandidateQuery;
-    const turnId = TurnId.make("fixture-turn");
     const count = 2000;
     const body = 'ordinary completed report: "quoted" line with a backslash \\ and newline\n'
       .repeat(80)
@@ -359,6 +546,7 @@ const program = Effect.gen(function* () {
   for (let m = 0; m < messages; m++) yield* send(m, "", false);
   const completionMs = performance.now() - completionStart;
   const walBytes = statSync(`${filename}-wal`).size;
+  const persistedEvents = yield* persistedEventsSince(setupSequence);
   const hashes: string[] = [];
   for (let m = 0; m < messages; m++) {
     const row = Option.getOrThrow(
@@ -380,6 +568,9 @@ const program = Effect.gen(function* () {
       streamingMs,
       completionMs,
       walBytes,
+      persistedEvents,
+      walBytesPerEvent: Math.round(walBytes / persistedEvents),
+      rowWrites: yield* rowWrites(),
       finalContentMatches: true,
       sha256: hashes,
     }),
