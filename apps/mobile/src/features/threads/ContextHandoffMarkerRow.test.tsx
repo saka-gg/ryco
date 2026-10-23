@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import {
   CWD_RELOCATION_HANDOFF_COPY,
   FORK_HANDOFF_COPY,
+  NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY,
   type ContextHandoffTimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import {
@@ -81,6 +82,28 @@ describe("native context handoff divider", () => {
     expect(tree.props.accessibilityLabel).toBe(
       "Fresh session in the new folder. Failed: Provider exited. Send your message again to retry",
     );
+  });
+
+  it("says why a fresh session got the conversation when the provider lost its history", () => {
+    const tree = ContextHandoffMarkerRow({
+      marker: marker({ reason: "native-history-unavailable" }),
+    });
+    expect(texts(tree)).toEqual([NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY.continued]);
+    expect(tree.props.accessibilityLabel).toBe(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY.continued);
+    expect(tree.props.accessibilityHint).toBe(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY.explanation);
+    expect(elements(tree).some((element) => typeof element.type === "function")).toBe(false);
+    expect(elements(tree).find((element) => element.type === "SymbolView")?.props.name).toBe(
+      "clock.arrow.circlepath",
+    );
+
+    const failed = ContextHandoffMarkerRow({
+      marker: marker({ reason: "native-history-unavailable", status: "failed" }),
+    });
+    expect(texts(failed)).toEqual([
+      NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY.attempted,
+      "Failed",
+      NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY.retryHint,
+    ]);
   });
 
   it("reads a fork's first session as the inherited conversation reaching a fresh session", () => {

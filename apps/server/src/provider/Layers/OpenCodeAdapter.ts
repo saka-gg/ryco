@@ -207,13 +207,18 @@ function openCodeResumeCursor(sessionId: string, forgottenTurnIds: ReadonlyArray
   };
 }
 
+/**
+ * An SDK call the server answered with 404. The SDK throws an `Error` whose `cause` carries the
+ * status; older SDKs threw an object with the `response` itself.
+ */
 function isOpenCodeNotFound(error: OpenCodeRuntimeError): boolean {
   const cause = error.cause;
+  if (typeof cause !== "object" || cause === null) return false;
+  const statusOf = (value: unknown) =>
+    typeof value === "object" && value !== null ? Reflect.get(value, "status") : undefined;
   return (
-    typeof cause === "object" &&
-    cause !== null &&
-    "response" in cause &&
-    (cause.response as { readonly status?: unknown } | undefined)?.status === 404
+    statusOf(Reflect.get(cause, "response")) === 404 ||
+    statusOf(Reflect.get(cause, "cause")) === 404
   );
 }
 
@@ -2244,12 +2249,23 @@ export function makeOpenCodeAdapter(
                   }),
                 );
               }
+              // A session OpenCode no longer has fails the start in words the orchestrator
+              // recognizes (`isMissingConversationError`), so it starts fresh or carries the
+              // conversation over by context handoff instead of a silent new session.
               const adoptedSession = resumeSessionId
                 ? yield* runOpenCodeSdk("session.get", () =>
                     client.session.get({ sessionID: resumeSessionId }),
                   ).pipe(
                     Effect.map((response) => response.data),
-                    Effect.catchIf(isOpenCodeNotFound, () => Effect.succeed(undefined)),
+                    Effect.mapError((error) =>
+                      isOpenCodeNotFound(error)
+                        ? new OpenCodeRuntimeError({
+                            operation: "session.get",
+                            detail: `Session not found: ${resumeSessionId} (${error.detail})`,
+                            cause: error.cause,
+                          })
+                        : error,
+                    ),
                   )
                 : undefined;
               if (adoptedSession) {

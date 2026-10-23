@@ -298,6 +298,60 @@ describe("context handoff decider", () => {
     });
   });
 
+  // A downgraded server meets handoffs whose reason (or other field) it cannot decode.
+  describe("a handoff a newer server wrote", () => {
+    const newerHandoff = (status: string, extra: Record<string, unknown> = {}) => ({
+      id: EventId.make(`context-handoff-activity:newer-${status}`),
+      tone: "info" as const,
+      kind: "context-handoff",
+      summary: "Context handoff",
+      payload: {
+        schemaVersion: 1,
+        handoffId: `context-handoff:newer-${status}`,
+        mode: "full-context-fresh-session",
+        reason: "a-reason-this-build-does-not-know",
+        status,
+        targetMessageId: "message-before",
+        sourceSelection: { instanceId: "codex_work", model: "gpt-5.6" },
+        targetSelection: { instanceId: "codex_work", model: "gpt-5.6" },
+        ...extra,
+      },
+      turnId: null,
+      createdAt: now,
+    });
+    const decide = (activities: OrchestrationThread["activities"]) =>
+      Effect.runPromise(
+        Effect.result(
+          decideOrchestrationCommand({
+            command: makeCommand(),
+            readModel: makeReadModel(makeThread({ activities })),
+          }),
+        ),
+      );
+
+    it("stops blocking once it finished", async () => {
+      for (const status of ["consumed", "failed", "delivery-uncertain"]) {
+        const result = await decide([newerHandoff(status, { error: "Delivery failed." })]);
+        expect(result._tag, status).toBe("Success");
+      }
+    });
+
+    it("keeps blocking while it may still dispatch", async () => {
+      expect((await decide([newerHandoff("dispatching")]))._tag).toBe("Failure");
+      expect((await decide([newerHandoff("requested")]))._tag).toBe("Failure");
+    });
+
+    it("keeps blocking when its status cannot be read", async () => {
+      expect((await decide([newerHandoff("a-status-this-build-does-not-know")]))._tag).toBe(
+        "Failure",
+      );
+      expect((await decide([newerHandoff("consumed", { schemaVersion: 2 })]))._tag).toBe("Failure");
+      expect((await decide([newerHandoff("consumed", { targetMessageId: 42 })]))._tag).toBe(
+        "Failure",
+      );
+    });
+  });
+
   it("derives stable correlation ids and captures repeated A→B→A source selection", async () => {
     const command = makeCommand({
       commandId: CommandId.make("command-return-to-a"),

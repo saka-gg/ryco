@@ -1,11 +1,11 @@
 import {
   contextHandoffStatusSuffix,
-  cwdRelocationHandoffAccessibleLabel,
   forkHandoffAccessibleLabel,
   forkHandoffEndpointLabels,
-  isCwdRelocationHandoff,
   isForkHandoff,
   resolvePendingComposerHandoff,
+  resumeFallbackHandoffAccessibleLabel,
+  resumeFallbackHandoffCopy,
   type ContextHandoffEndpointLabelers,
   type ContextHandoffMarkerSubject,
   type PendingComposerHandoff as SharedPendingComposerHandoff,
@@ -126,9 +126,9 @@ export const CONTEXT_HANDOFF_ENDPOINT_LABELERS: ContextHandoffEndpointLabelers =
 };
 
 /**
- * A model change reads as `<source> to <target>`. A working-folder relocation (a chat turned
- * into a project) keeps its model, so it reads as a fresh session in the new folder instead,
- * with the shared relocation wording. A fork's handoff reads as the inherited conversation
+ * A model change reads as `<source> to <target>`. A resume fallback (a working-folder relocation,
+ * or native history the provider no longer had) keeps its model, so it reads as a fresh session
+ * instead, with the shared wording for its reason. A fork's handoff reads as the inherited conversation
  * reaching a fresh session of that model, naming the model it switched from when the first
  * message also changed provider. Handoffs recorded before they carried a reason are model
  * changes.
@@ -140,7 +140,8 @@ export function contextHandoffMarkerAccessibilityLabel(
     readonly changedFrom?: ContextHandoffEndpointSnapshot | undefined;
   },
 ): string {
-  if (isCwdRelocationHandoff(input)) return cwdRelocationHandoffAccessibleLabel(input);
+  const resumeFallback = resumeFallbackHandoffCopy(input);
+  if (resumeFallback) return resumeFallbackHandoffAccessibleLabel(resumeFallback, input);
   if (isForkHandoff(input)) {
     const labels = forkHandoffEndpointLabels(input, CONTEXT_HANDOFF_ENDPOINT_LABELERS);
     return forkHandoffAccessibleLabel(input, labels.target, labels.source);

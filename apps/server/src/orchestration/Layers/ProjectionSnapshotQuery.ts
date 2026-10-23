@@ -2273,6 +2273,23 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     `,
   });
 
+  const countThreadUserMessageRowsWithin = SqlSchema.findOne({
+    Request: Schema.Struct({
+      threadId: ThreadId,
+      createdAtOrBefore: IsoDateTime,
+      excludingMessageId: Schema.NullOr(MessageId),
+    }),
+    Result: Schema.Struct({ userMessages: NonNegativeInt }),
+    execute: ({ threadId, createdAtOrBefore, excludingMessageId }) => sql`
+      SELECT COUNT(*) AS "userMessages"
+      FROM projection_thread_messages
+      WHERE thread_id = ${threadId}
+        AND role = 'user'
+        AND created_at <= ${createdAtOrBefore}
+        AND (${excludingMessageId} IS NULL OR message_id <> ${excludingMessageId})
+    `,
+  });
+
   const listThreadMessageRowsBefore = SqlSchema.findAll({
     Request: CreatedAtHistoryBeforeQueryInput,
     Result: ProjectionThreadMessageDbRowSchema,
@@ -4950,8 +4967,15 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
 
   const countThreadUserMessages: NonNullable<
     ProjectionSnapshotQueryShape["countThreadUserMessages"]
-  > = (threadId) =>
-    countThreadUserMessageRows({ threadId }).pipe(
+  > = (threadId, bound) =>
+    (bound === undefined
+      ? countThreadUserMessageRows({ threadId })
+      : countThreadUserMessageRowsWithin({
+          threadId,
+          createdAtOrBefore: bound.createdAtOrBefore,
+          excludingMessageId: bound.excludingMessageId ?? null,
+        })
+    ).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProjectionSnapshotQuery.countThreadUserMessages:query",

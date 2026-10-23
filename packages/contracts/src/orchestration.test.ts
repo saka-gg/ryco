@@ -10,6 +10,7 @@ import {
   ContextHandoffActivityPayload,
   ContextHandoffExportChunk,
   ContextHandoffInspectionEntriesInput,
+  ContextHandoffStatus,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   FileAttachmentCreateUploadUrlInput,
@@ -1535,7 +1536,12 @@ it.effect("decodes the context handoff reason, absent on historical records", ()
 
     const historical = yield* decodeContextHandoffActivity(requested);
     assert.strictEqual(historical.reason, undefined);
-    for (const reason of ["model-change", "cwd-relocation"] as const) {
+    for (const reason of [
+      "model-change",
+      "cwd-relocation",
+      "fork",
+      "native-history-unavailable",
+    ] as const) {
       const decoded = yield* decodeContextHandoffActivity({ ...requested, reason });
       assert.strictEqual(decoded.reason, reason);
     }
@@ -1556,6 +1562,13 @@ it.effect("decodes the context handoff reason, absent on historical records", ()
     assert.strictEqual(unknownReason._tag, "Failure");
   }),
 );
+
+it("lists every context handoff payload status, and only those", () => {
+  assert.deepStrictEqual(
+    ContextHandoffActivityPayload.members.map((member) => member.fields.status.literal).toSorted(),
+    [...ContextHandoffStatus.literals].toSorted(),
+  );
+});
 
 it.effect("bounds context handoff inspection pages and export filenames", () =>
   Effect.gen(function* () {

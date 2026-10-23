@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import {
+  Cause,
   Context,
   Effect,
   Exit,
@@ -37,6 +38,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { agentControlHostContext } from "../../agentControl/ProviderInjection.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import type { OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import { isMissingConversationError } from "../resumeFailure.ts";
 import {
   buildOpenCodePermissionRules,
   isOpenCodeNativeAttachment,
@@ -74,6 +76,8 @@ const runtimeMock = {
     sessionGetCalls: [] as string[],
     sessionUpdateCalls: [] as string[],
     resumableSession: null as { id: string; directory?: string } | null,
+    /** What `session.get` throws for a session that is not resumable; unset: a legacy 404. */
+    sessionGetError: undefined as unknown,
     authHeaders: [] as Array<string | null>,
     abortCalls: [] as string[],
     abortErrorSessionIds: new Set<string>(),
@@ -132,6 +136,7 @@ const runtimeMock = {
     this.state.sessionGetCalls.length = 0;
     this.state.sessionUpdateCalls.length = 0;
     this.state.resumableSession = null;
+    this.state.sessionGetError = undefined;
     this.state.authHeaders.length = 0;
     this.state.abortCalls.length = 0;
     this.state.abortErrorSessionIds.clear();
@@ -225,7 +230,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           if (runtimeMock.state.resumableSession?.id === sessionID) {
             return { data: runtimeMock.state.resumableSession };
           }
-          throw { response: { status: 404 } };
+          throw runtimeMock.state.sessionGetError ?? { response: { status: 404 } };
         },
         update: async (input: { sessionID: string; permission?: unknown }) => {
           runtimeMock.state.sessionUpdateCalls.push(input.sessionID);
@@ -726,6 +731,57 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       assert.deepEqual(runtimeMock.state.sessionUpdateCalls, [cursor.sessionId]);
       assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
       yield* adapter.stopSession(asThreadId("thread-opencode-resume-second"));
+    }),
+  );
+
+  const resumeMissingSession = (sessionGetError: unknown) =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.sessionGetError = sessionGetError;
+      const exit = yield* adapter
+        .startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-opencodeadapter-resume-missing"),
+          provider: ProviderDriverKind.make("opencode"),
+          threadId: asThreadId("thread-opencode-resume-missing"),
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "ses_gone" },
+        })
+        .pipe(Effect.exit);
+      assert.deepEqual(runtimeMock.state.sessionGetCalls, ["ses_gone"]);
+      // Never a silent new session: the orchestrator decides between fresh and a handoff.
+      assert.equal(runtimeMock.state.sessionCreateUrls.length, 0);
+      assert.equal(Exit.isFailure(exit), true);
+      return Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
+    });
+
+  it.effect("fails a resume of a session OpenCode no longer has as a missing session", () =>
+    Effect.gen(function* () {
+      for (const sessionGetError of [
+        // What the SDK throws for the server's 404 answer.
+        new Error("Resource not found: /home/u/.local/share/opencode/storage/session/ses_gone", {
+          cause: {
+            status: 404,
+            body: { name: "NotFoundError", data: { message: "Resource not found" } },
+          },
+        }),
+        // Older SDKs threw the response itself.
+        { response: { status: 404 } },
+      ]) {
+        runtimeMock.reset();
+        const failure = yield* resumeMissingSession(sessionGetError);
+        assert.equal(isMissingConversationError(failure), true);
+        assert.match(String(Reflect.get(failure ?? {}, "detail")), /^Session not found: ses_gone/);
+      }
+    }),
+  );
+
+  it.effect("keeps any other failure of the session lookup on resume", () =>
+    Effect.gen(function* () {
+      const failure = yield* resumeMissingSession(
+        new Error("Internal server error", { cause: { status: 500, body: {} } }),
+      );
+      assert.equal(isMissingConversationError(failure), false);
+      assert.equal(Reflect.get(failure ?? {}, "detail"), "Internal server error");
     }),
   );
 

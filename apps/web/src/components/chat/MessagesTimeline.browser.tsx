@@ -557,6 +557,65 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("shows missing native history as a fresh session that says why, still inspectable", async () => {
+    const sameModel = makeContextHandoffMarker().target;
+    const continued = makeContextHandoffMarker({
+      id: "context-handoff:history-gone",
+      handoffId: ContextHandoffId.make("handoff-history-gone"),
+      reason: "native-history-unavailable",
+      status: "consumed",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const onInspectContextHandoff = vi.fn();
+    const screen = await render(
+      <div style={{ width: 320 }}>
+        <MessagesTimeline
+          {...buildProps()}
+          onInspectContextHandoff={onInspectContextHandoff}
+          timelineEntries={[
+            {
+              id: continued.id,
+              kind: "context-handoff" as const,
+              createdAt: continued.createdAt,
+              marker: continued,
+            },
+          ]}
+        />
+      </div>,
+    );
+
+    try {
+      const divider = page.getByRole("button", {
+        name: "Continued in a fresh session",
+        exact: true,
+      });
+      await expect.element(divider).toBeVisible();
+      const element = divider.element();
+      expect(element.dataset.contextHandoffReason).toBe("native-history-unavailable");
+      expect(element.querySelector(".lucide-history")).not.toBeNull();
+      expect(element.textContent).not.toContain("Fable 5");
+      expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth);
+
+      await userEvent.hover(divider);
+      await expect
+        .element(
+          page.getByText(
+            "The provider no longer has this conversation's history, so a fresh session received the conversation's context.",
+          ),
+        )
+        .toBeVisible();
+
+      await userEvent.click(divider);
+      expect(onInspectContextHandoff).toHaveBeenCalledWith(
+        continued,
+        expect.any(HTMLButtonElement),
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders activity rows instead of the empty placeholder when a thread has non-message timeline data", async () => {
     const screen = await render(
       <MessagesTimeline

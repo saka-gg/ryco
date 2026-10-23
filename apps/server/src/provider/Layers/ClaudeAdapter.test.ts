@@ -53,6 +53,8 @@ import { installProcessDeviceToolGateway } from "../../providerTools/deviceToolG
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterRequestError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import type { ClaudeTranscriptPresence } from "../claudeTranscriptPresence.ts";
+import { isMissingConversationError } from "../resumeFailure.ts";
 import {
   makeClaudeAdapter,
   type ClaudeAdapterLiveOptions,
@@ -207,6 +209,8 @@ function makeHarness(config?: {
   readonly instanceId?: ProviderInstanceId;
   readonly agentControl?: AgentControlProviderBridge;
   readonly runtimeEventQueueCapacity?: number;
+  /** What the transcript check before a resume finds; defaults to `present`. */
+  readonly transcriptPresence?: ClaudeTranscriptPresence;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -215,6 +219,7 @@ function makeHarness(config?: {
         readonly options: ClaudeQueryOptions;
       }
     | undefined;
+  const transcriptChecks: Array<string> = [];
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
@@ -225,6 +230,11 @@ function makeHarness(config?: {
     createQuery: (input) => {
       createInput = input;
       return query;
+    },
+    // Never the developer's own Claude store.
+    readTranscriptPresence: async (sessionId) => {
+      transcriptChecks.push(sessionId);
+      return config?.transcriptPresence ?? "present";
     },
     ...(config?.nativeEventLogger
       ? {
@@ -257,6 +267,8 @@ function makeHarness(config?: {
     ),
     query,
     getLastCreateQueryInput: () => createInput,
+    /** The session ids the transcript check read, in order. */
+    transcriptChecks,
   };
 }
 
@@ -382,6 +394,7 @@ function makeSequencedHarness() {
       transcriptReads.push({ sessionId, ...options });
       return transcript;
     },
+    readTranscriptPresence: async () => "present",
   };
 
   return {
@@ -4342,6 +4355,184 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(options?.sessionId, undefined);
       assert.equal(options?.resumeSessionAt, undefined);
       assert.equal(session.runtimeSessionId, "import-runtime-fixture");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails a resume whose transcript Claude deleted before the CLI starts", () => {
+    const harness = makeHarness({ transcriptPresence: "missing" });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const result = yield* adapter
+        .startSession({
+          runtimeSessionId: RuntimeSessionId.make("missing-transcript-runtime"),
+          threadId: RESUME_THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          resumeCursor: {
+            threadId: RESUME_THREAD_ID,
+            resume: "33333333-3333-4333-8333-333333333333",
+            turnCount: 4,
+            transcriptSeen: true,
+          },
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        // The orchestrator starts fresh or hands off on exactly this classification.
+        assert.equal(isMissingConversationError(result.failure), true);
+      }
+      assert.equal(harness.getLastCreateQueryInput(), undefined);
+      assert.equal(yield* adapter.hasSession(RESUME_THREAD_ID), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  for (const presence of ["present", "unknown"] as const) {
+    it.effect(`resumes when the transcript check finds it ${presence}`, () => {
+      const harness = makeHarness({ transcriptPresence: presence });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make(`transcript-${presence}-runtime`),
+          threadId: RESUME_THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          resumeCursor: {
+            threadId: RESUME_THREAD_ID,
+            resume: "33333333-3333-4333-8333-333333333333",
+            turnCount: 4,
+            transcriptSeen: true,
+          },
+          runtimeMode: "full-access",
+        });
+        assert.equal(
+          harness.getLastCreateQueryInput()?.options.resume,
+          "33333333-3333-4333-8333-333333333333",
+        );
+        assert.deepEqual(harness.transcriptChecks, ["33333333-3333-4333-8333-333333333333"]);
+        // A slow or unreadable store does not unmark the session.
+        assert.equal(
+          (session.resumeCursor as { transcriptSeen?: unknown } | undefined)?.transcriptSeen,
+          true,
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
+
+  // A wrapper binary that sets its own CLAUDE_CONFIG_DIR keeps its transcripts elsewhere, while
+  // the root Ryco resolves still has a `projects` directory from running `claude` directly.
+  it.effect("leaves a resume to Claude when its config root never held the transcript", () => {
+    const harness = makeHarness({ transcriptPresence: "missing" });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("unmarked-transcript-runtime"),
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: "33333333-3333-4333-8333-333333333333",
+          turnCount: 4,
+        },
+        runtimeMode: "full-access",
+      });
+      assert.equal(
+        harness.getLastCreateQueryInput()?.options.resume,
+        "33333333-3333-4333-8333-333333333333",
+      );
+      assert.deepEqual(harness.transcriptChecks, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  for (const presence of ["present", "missing"] as const) {
+    it.effect(`marks the cursor only when a completed turn's transcript is ${presence}`, () => {
+      const harness = makeHarness({ transcriptPresence: presence });
+      const sessionId = "33333333-3333-4333-8333-333333333333";
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events: Array<ProviderRuntimeEvent> = [];
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => events.push(event)),
+        ).pipe(Effect.forkChild);
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make(`mark-transcript-${presence}-runtime`),
+          threadId: RESUME_THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          resumeCursor: { threadId: RESUME_THREAD_ID, resume: sessionId, turnCount: 1 },
+          runtimeMode: "full-access",
+        });
+        const completeTurn = (uuid: string) =>
+          Effect.gen(function* () {
+            const turn = yield* adapter.sendTurn({
+              threadId: RESUME_THREAD_ID,
+              input: uuid,
+              attachments: [],
+            });
+            harness.query.emit({
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              errors: [],
+              session_id: sessionId,
+              uuid: `result-${uuid}`,
+            } as unknown as SDKMessage);
+            const completed = () =>
+              events.some(
+                (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+              );
+            for (let attempt = 0; attempt < 500 && !completed(); attempt++) {
+              yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 1)));
+            }
+            assert.equal(completed(), true);
+            const [session] = yield* adapter.listSessions();
+            return session?.resumeCursor as { transcriptSeen?: unknown } | undefined;
+          });
+
+        const afterFirst = yield* completeTurn("one");
+        const afterSecond = yield* completeTurn("two");
+
+        const expected = presence === "present" ? true : undefined;
+        assert.equal(afterFirst?.transcriptSeen, expected);
+        assert.equal(afterSecond?.transcriptSeen, expected);
+        // Checked once per running session, not on every turn.
+        assert.deepEqual(harness.transcriptChecks, [sessionId]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
+
+  it.effect("never checks a transcript for a fresh start", () => {
+    const harness = makeHarness({ transcriptPresence: "missing" });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("fresh-over-missing-runtime"),
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: "33333333-3333-4333-8333-333333333333",
+          turnCount: 4,
+        },
+        resumePolicy: "fresh",
+        runtimeMode: "full-access",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.resume, undefined);
+      assert.notEqual(options?.sessionId, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

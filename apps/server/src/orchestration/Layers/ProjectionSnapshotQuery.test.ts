@@ -928,6 +928,23 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             messageId: message.id,
           });
           assert.equal(wrongThread._tag, "None");
+          // Messages recorded by this one's instant, a same-instant one included.
+          const recordedBy = thread.messages.filter(
+            (entry) => entry.role === "user" && entry.createdAt <= message.createdAt,
+          );
+          assert.equal(
+            yield* snapshotQuery.countThreadUserMessages!(thread.id, {
+              createdAtOrBefore: message.createdAt,
+            }),
+            recordedBy.length,
+          );
+          assert.equal(
+            yield* snapshotQuery.countThreadUserMessages!(thread.id, {
+              createdAtOrBefore: message.createdAt,
+              excludingMessageId: message.id,
+            }),
+            recordedBy.filter((entry) => entry.id !== message.id).length,
+          );
         }
       }
     }),
