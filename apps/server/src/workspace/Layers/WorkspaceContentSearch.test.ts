@@ -1,11 +1,22 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Fiber, FileSystem, Layer, Path } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Path, Stream } from "effect";
 import { TestClock } from "effect/testing";
 
-import type { ProjectSearchContentInput } from "@ryco/contracts";
+import {
+  VcsProcessExitError,
+  type ProjectSearchContentInput,
+  type ProjectSearchContentResult,
+} from "@ryco/contracts";
 
+import type {
+  VcsDriverShape,
+  VcsWorkspaceContentFile,
+  VcsWorkspaceContentSearchOptions,
+} from "../../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
+import { configureTestGitCommitIdentity } from "../../vcs/testing/GitTestRepo.ts";
 import { WorkspaceContentSearch } from "../Services/WorkspaceContentSearch.ts";
 import { WorkspaceEntries, type WorkspaceSearchFiles } from "../Services/WorkspaceEntries.ts";
 import { WorkspaceAccessPolicyLayer } from "./WorkspaceAccessPolicy.ts";
@@ -13,12 +24,31 @@ import { makeContentSearchPage, WorkspaceContentSearchLive } from "./WorkspaceCo
 import { WorkspaceEntriesLive } from "./WorkspaceEntries.ts";
 import { WorkspacePathsLive } from "./WorkspacePaths.ts";
 
+type StreamMatches = NonNullable<VcsDriverShape["streamWorkspaceContentMatches"]>;
+
+/** Every root is a folder outside any VCS. */
+const NoVcsLayer = Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+  detect: () => Effect.succeed(null),
+});
+
+/** Every root is a git checkout whose `git grep` is `streamMatches`. */
+const gitSearchLayer = (streamMatches: StreamMatches) =>
+  Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+    // Content search reads nothing else of the handle.
+    detect: () =>
+      Effect.succeed({
+        driver: { streamWorkspaceContentMatches: streamMatches },
+      } as unknown as VcsDriverRegistry.VcsDriverHandle),
+  });
+
 const withEntries = <E>(
   entries: Layer.Layer<WorkspaceEntries, E, FileSystem.FileSystem | Path.Path>,
+  vcs: Layer.Layer<VcsDriverRegistry.VcsDriverRegistry> = NoVcsLayer,
 ) =>
   WorkspaceContentSearchLive.pipe(
     Layer.provide(WorkspacePathsLive),
     Layer.provide(entries),
+    Layer.provide(vcs),
     Layer.provideMerge(NodeServices.layer),
   );
 
@@ -27,15 +57,45 @@ const IndexedLayer = withEntries(
   WorkspaceEntriesLive.pipe(
     Layer.provide(WorkspacePathsLive),
     Layer.provide(WorkspaceAccessPolicyLayer(undefined)),
-    Layer.provide(
-      Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({ detect: () => Effect.succeed(null) }),
-    ),
+    Layer.provide(NoVcsLayer),
   ),
 );
 
+let gitGrepRuns = 0;
+
+/** Real git, counting `git grep` runs. */
+const CountingVcsProcessLayer = Layer.effect(
+  VcsProcess.VcsProcess,
+  Effect.map(Effect.service(VcsProcess.VcsProcess), (real) =>
+    VcsProcess.VcsProcess.of({
+      ...real,
+      withProcess: (input, use) => {
+        if (input.args.includes("grep")) gitGrepRuns += 1;
+        return real.withProcess(input, use);
+      },
+    }),
+  ),
+).pipe(Layer.provide(VcsProcess.layer));
+
+/** The real index and real git. */
+const GitLayer = WorkspaceContentSearchLive.pipe(
+  Layer.provide(WorkspacePathsLive),
+  Layer.provide(
+    WorkspaceEntriesLive.pipe(
+      Layer.provide(WorkspacePathsLive),
+      Layer.provide(WorkspaceAccessPolicyLayer(undefined)),
+    ),
+  ),
+  Layer.provide(VcsDriverRegistry.layer),
+  Layer.provideMerge(CountingVcsProcessLayer),
+  Layer.provideMerge(NodeServices.layer),
+);
+
 /** An index that lists `files` for every root. */
-const listedLayer = (files: Effect.Effect<WorkspaceSearchFiles>) =>
-  withEntries(Layer.mock(WorkspaceEntries)({ readSearchFiles: () => files }));
+const listedLayer = (
+  files: Effect.Effect<WorkspaceSearchFiles>,
+  vcs?: Layer.Layer<VcsDriverRegistry.VcsDriverRegistry>,
+) => withEntries(Layer.mock(WorkspaceEntries)({ readSearchFiles: () => files }), vcs);
 
 const makeTempDir = Effect.fn(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -59,6 +119,36 @@ const search = (input: Omit<ProjectSearchContentInput, "limit"> & { readonly lim
 const linesOf = (result: {
   readonly matches: ReadonlyArray<{ path: string; lineNumber: number }>;
 }) => result.matches.map((match) => `${match.path}:${match.lineNumber}`);
+
+/** Every page of a search, from `cursor` on. */
+const searchAllPages = (input: ProjectSearchContentInput) =>
+  Effect.gen(function* () {
+    const pages: ProjectSearchContentResult[] = [];
+    let cursor = input.cursor;
+    do {
+      const page = yield* search({ ...input, ...(cursor === undefined ? {} : { cursor }) });
+      pages.push(page);
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    return pages;
+  });
+
+const git = (cwd: string, args: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const process = yield* VcsProcess.VcsProcess;
+    yield* process.run({ operation: "WorkspaceContentSearch.test.git", command: "git", cwd, args });
+  });
+
+const gitFile = (path: string, ...lineNumbers: ReadonlyArray<number>): VcsWorkspaceContentFile => ({
+  path,
+  lines: lineNumbers.map((lineNumber) => ({
+    lineNumber,
+    text: "needle",
+    matchStart: 0,
+    cutStart: false,
+    cutEnd: false,
+  })),
+});
 
 describe("WorkspaceContentSearch", () => {
   it.layer(IndexedLayer)("over the workspace index", (it) => {
@@ -208,6 +298,176 @@ describe("WorkspaceContentSearch", () => {
   );
 });
 
+describe("WorkspaceContentSearch with git", () => {
+  it.layer(GitLayer)("in a git checkout", (it) => {
+    it.effect("searches with git grep and finds what scanning the index finds", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        yield* git(cwd, ["init"]);
+        yield* configureTestGitCommitIdentity(cwd, git);
+        yield* writeFile(cwd, "src/a.ts", "needle one\nNeedle two\n");
+        yield* writeFile(cwd, "dist/out.js", "needle bundled\n");
+        yield* writeFile(cwd, "words.ts", "needles needle_x (needle)\r\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "init"]);
+        yield* writeFile(cwd, ".gitignore", "*.log\n");
+        yield* writeFile(cwd, "debug.log", "needle\n");
+        yield* writeFile(cwd, "notes.md", "a needle\n");
+        yield* writeFile(cwd, "large.txt", `needle\n${"x".repeat(512 * 1024)}`);
+
+        for (const options of [{}, { caseSensitive: true }, { wholeWord: true }]) {
+          const input = { cwd, query: "needle", limit: 2, ...options };
+          const grepRunsBefore = gitGrepRuns;
+          const grepped = yield* searchAllPages(input);
+          // git answered every page: a failed or late one switches the rest to scanning.
+          expect(gitGrepRuns - grepRunsBefore).toBe(grepped.length);
+          const scanned = yield* searchAllPages({ ...input, cursor: "v1s:" });
+          expect(gitGrepRuns - grepRunsBefore).toBe(grepped.length);
+          expect(grepped.flatMap((page) => page.matches)).toEqual(
+            scanned.flatMap((page) => page.matches),
+          );
+        }
+        // Ignored, bundled and too-large files are left out by both.
+        expect(linesOf(yield* search({ cwd, query: "needle" }))).toEqual([
+          "notes.md:1",
+          "src/a.ts:1",
+          "src/a.ts:2",
+          "words.ts:1",
+        ]);
+      }),
+    );
+  });
+
+  it.effect("keeps git to the files scanning the index would read", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      yield* writeFile(cwd, "large.txt", `needle\n${"x".repeat(512 * 1024)}`);
+      yield* writeFile(cwd, "real.txt", "needle\n");
+      const grep = gitSearchLayer(() =>
+        Stream.make(
+          gitFile(" padded.txt", 1),
+          gitFile("large.txt", 1),
+          gitFile("missing.txt", 1),
+          gitFile("node_modules/pkg/index.js", 1),
+          gitFile("real.txt", 1),
+        ),
+      );
+
+      const result = yield* search({ cwd, query: "needle" }).pipe(
+        Effect.provide(listedLayer(Effect.die("git grep searched"), grep)),
+      );
+
+      expect(result).toEqual({
+        matches: [
+          { path: "real.txt", lineNumber: 1, preview: "needle", ranges: [{ start: 0, end: 6 }] },
+        ],
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("scans the index after the last file git finished when git fails", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      for (const name of ["a.txt", "b.txt", "c.txt"]) yield* writeFile(cwd, name, "needle\n");
+      const searches: VcsWorkspaceContentSearchOptions[] = [];
+      const failingGrep = gitSearchLayer((_cwd, options) => {
+        searches.push(options);
+        return Stream.concat(
+          Stream.make(gitFile("a.txt", 1)),
+          Stream.fail(
+            new VcsProcessExitError({
+              operation: "test",
+              command: "git grep",
+              cwd,
+              exitCode: 128,
+              detail: "git grep exited with code 128.",
+            }),
+          ),
+        );
+      });
+      const index = Effect.succeed({ paths: ["a.txt", "b.txt", "c.txt"], partial: false });
+
+      const result = yield* search({ cwd, query: "needle", limit: 2 }).pipe(
+        Effect.provide(listedLayer(index, failingGrep)),
+      );
+
+      expect(linesOf(result)).toEqual(["a.txt:1", "b.txt:1"]);
+      // The rest of this search scans too.
+      expect(result.nextCursor).toBe("v1s:b.txt");
+      expect(searches).toHaveLength(1);
+      expect(searches[0]).toMatchObject({ afterPath: "", maxLinesPerFile: 2 });
+      expect(searches[0]?.excludedTopLevelNames).toContain("node_modules");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("continues a git page that ran out of time by scanning the index", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      yield* writeFile(cwd, "a.txt", "needle\n");
+      yield* writeFile(cwd, "b.txt", "needle\n");
+      const stalled = yield* Deferred.make<void>();
+      let gitSearches = 0;
+      const stallingGrep = gitSearchLayer(() => {
+        gitSearches += 1;
+        return Stream.concat(
+          Stream.make(gitFile("a.txt", 1)),
+          Stream.unwrap(Deferred.succeed(stalled, undefined).pipe(Effect.as(Stream.never))),
+        );
+      });
+      const layer = listedLayer(
+        Effect.succeed({ paths: ["a.txt", "b.txt"], partial: false }),
+        stallingGrep,
+      );
+
+      const first = yield* search({ cwd, query: "needle" }).pipe(
+        Effect.provide(layer),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(stalled);
+      yield* TestClock.adjust(1_000);
+      const firstPage = yield* Fiber.join(first);
+      expect(linesOf(firstPage)).toEqual(["a.txt:1"]);
+      expect(firstPage).toMatchObject({ nextCursor: "v1s:a.txt", timedOut: true });
+
+      const nextPage = yield* search({
+        cwd,
+        query: "needle",
+        ...(firstPage.nextCursor === undefined ? {} : { cursor: firstPage.nextCursor }),
+      }).pipe(Effect.provide(layer));
+      expect(linesOf(nextPage)).toEqual(["b.txt:1"]);
+      expect(nextPage.nextCursor).toBeUndefined();
+      expect(gitSearches).toBe(1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("moves on from a git page that found nothing in time", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      for (const cursor of [undefined, "v1:b.txt"]) {
+        const started = yield* Deferred.make<void>();
+        const silentGrep = gitSearchLayer(() =>
+          Stream.unwrap(Deferred.succeed(started, undefined).pipe(Effect.as(Stream.never))),
+        );
+        const page = yield* search({
+          cwd,
+          query: "needle",
+          ...(cursor === undefined ? {} : { cursor }),
+        }).pipe(
+          Effect.provide(listedLayer(Effect.die("git grep searched"), silentGrep)),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(started);
+        yield* TestClock.adjust(1_000);
+        expect(yield* Fiber.join(page)).toEqual({
+          matches: [],
+          nextCursor: cursor === undefined ? "v1s:" : "v1s:b.txt",
+          timedOut: true,
+        });
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
 describe("makeContentSearchPage", () => {
   const match = (path: string, lineNumber: number) => ({
     path,
@@ -220,23 +480,28 @@ describe("makeContentSearchPage", () => {
     const page = makeContentSearchPage("", 10);
     expect(page.add({ path: "a.ts", matches: [match("a.ts", 1)] })).toBe(true);
     expect(page.add({ path: "b.ts", matches: [] })).toBe(true);
-    expect(page.result({ timedOut: true, partial: false })).toEqual({
+    expect(page.result({ timedOut: true, partial: false, scanIndex: false })).toEqual({
       matches: [match("a.ts", 1)],
       nextCursor: "v1:b.ts",
       timedOut: true,
     });
+    expect(page.result({ timedOut: true, partial: false, scanIndex: true }).nextCursor).toBe(
+      "v1s:b.ts",
+    );
   });
 
   it("takes an oversized first file whole so every page moves on", () => {
     const page = makeContentSearchPage("a.ts", 1);
     expect(page.add({ path: "b.ts", matches: [match("b.ts", 1), match("b.ts", 2)] })).toBe(false);
-    expect(page.result({ timedOut: false, partial: false }).nextCursor).toBe("v1:b.ts");
+    expect(page.result({ timedOut: false, partial: false, scanIndex: false }).nextCursor).toBe(
+      "v1:b.ts",
+    );
   });
 
   it("ends without a cursor when the files run out", () => {
     const page = makeContentSearchPage("a.ts", 10);
     page.add({ path: "b.ts", matches: [match("b.ts", 1)] });
-    expect(page.result({ timedOut: false, partial: false })).toEqual({
+    expect(page.result({ timedOut: false, partial: false, scanIndex: false })).toEqual({
       matches: [match("b.ts", 1)],
     });
   });

@@ -84,7 +84,11 @@ const WORKSPACE_LIST_ENTRIES_MAX = 25_000;
 /** Index construction yields to the event loop between chunks of this many paths. */
 const WORKSPACE_INDEX_BUILD_CHUNK = 20_000;
 const WORKSPACE_SCAN_READDIR_CONCURRENCY = 32;
-const IGNORED_DIRECTORY_NAMES = new Set([
+/**
+ * Folders the index leaves out: at the top of a VCS listing, at any depth of a
+ * folder walk. Content search leaves out the same ones.
+ */
+export const IGNORED_DIRECTORY_NAMES: ReadonlySet<string> = new Set([
   ".git",
   ".convex",
   "node_modules",
@@ -153,7 +157,7 @@ function toProjectEntry(entry: IndexedWorkspaceEntry): ProjectEntry {
     : { path: entry.path, kind: entry.kind, parentPath };
 }
 
-function isPathInIgnoredDirectory(relativePath: string): boolean {
+export function isPathInIgnoredDirectory(relativePath: string): boolean {
   const separatorIndex = relativePath.indexOf("/");
   const firstSegment = separatorIndex === -1 ? relativePath : relativePath.slice(0, separatorIndex);
   return IGNORED_DIRECTORY_NAMES.has(firstSegment);

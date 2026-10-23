@@ -1,5 +1,7 @@
 import type { ProjectContentMatch, ProjectContentMatchRange } from "@ryco/contracts";
 
+import type { VcsWorkspaceContentLine } from "../vcs/VcsDriver.ts";
+
 /** Ranges highlighted per matching line; the line itself is still one match. */
 const MAX_RANGES_PER_LINE = 32;
 /** A longer line is cut to a window around its first match. */
@@ -8,6 +10,7 @@ const PREVIEW_MAX_LENGTH = 1_024;
 const PREVIEW_LEADING_CONTEXT = 120;
 const PREVIEW_ELLIPSIS = "…";
 const CURSOR_PREFIX = "v1:";
+const SCAN_CURSOR_PREFIX = "v1s:";
 const REGEXP_SYNTAX_CHARACTERS = /[\\^$.*+?()[\]{}|/]/g;
 
 export interface ContentSearchOptions {
@@ -21,7 +24,20 @@ export interface LiteralMatcher {
    * Lines end at `\n` only, as in git; a trailing `\r` stays out of the preview.
    */
   readonly findMatches: (path: string, text: string, maxLines: number) => ProjectContentMatch[];
+  /**
+   * A line git found the query on, highlighted as this matcher finds it there.
+   * Where the two fold case differently, git's first match is highlighted.
+   */
+  readonly matchFoundLine: (path: string, line: VcsWorkspaceContentLine) => ProjectContentMatch;
 }
+
+/** Whether a line is already cut short at either end before its preview is built. */
+export interface MatchPreviewCut {
+  readonly cutStart: boolean;
+  readonly cutEnd: boolean;
+}
+
+const UNCUT: MatchPreviewCut = { cutStart: false, cutEnd: false };
 
 interface Occurrence {
   readonly start: number;
@@ -121,19 +137,40 @@ export function makeLiteralMatcher(query: string, options: ContentSearchOptions)
       }
       return matches;
     },
+    matchFoundLine: (path, line) => {
+      const ranges: ProjectContentMatchRange[] = [];
+      for (
+        let hit = nextHit(line.text, 0);
+        hit !== null && ranges.length < MAX_RANGES_PER_LINE;
+        hit = nextHit(line.text, hit.end)
+      ) {
+        ranges.push(hit);
+      }
+      if (ranges.length === 0 && line.matchStart < line.text.length) {
+        ranges.push({
+          start: line.matchStart,
+          end: Math.min(line.text.length, line.matchStart + query.length),
+        });
+      }
+      return { path, lineNumber: line.lineNumber, ...buildMatchPreview(line.text, ranges, line) };
+    },
   };
 }
 
 /**
  * The line itself, or past 1,024 characters a window starting a little before
- * its first range, with `…` at each cut edge. Ranges move with the window, and
- * those outside it are dropped.
+ * its first range, with `…` at each cut edge, including edges `cut` reports
+ * for a line that arrived cut short. Ranges move with the window, and those
+ * outside it are dropped.
  */
 export function buildMatchPreview(
   line: string,
   ranges: ReadonlyArray<ProjectContentMatchRange>,
+  cut: MatchPreviewCut = UNCUT,
 ): Pick<ProjectContentMatch, "preview" | "ranges"> {
-  if (line.length <= PREVIEW_MAX_LENGTH) return { preview: line, ranges };
+  if (line.length <= PREVIEW_MAX_LENGTH && !cut.cutStart && !cut.cutEnd) {
+    return { preview: line, ranges };
+  }
   const windowLength = PREVIEW_MAX_LENGTH - 2 * PREVIEW_ELLIPSIS.length;
   let start = Math.max(
     0,
@@ -142,8 +179,8 @@ export function buildMatchPreview(
   if (isLowSurrogate(line.charCodeAt(start))) start += 1;
   let end = Math.min(line.length, start + windowLength);
   if (end < line.length && isHighSurrogate(line.charCodeAt(end - 1))) end -= 1;
-  const prefix = start > 0 ? PREVIEW_ELLIPSIS : "";
-  const suffix = end < line.length ? PREVIEW_ELLIPSIS : "";
+  const prefix = start > 0 || cut.cutStart ? PREVIEW_ELLIPSIS : "";
+  const suffix = end < line.length || cut.cutEnd ? PREVIEW_ELLIPSIS : "";
   const shift = prefix.length - start;
   const shifted: ProjectContentMatchRange[] = [];
   for (const range of ranges) {
@@ -154,12 +191,24 @@ export function buildMatchPreview(
   return { preview: `${prefix}${line.slice(start, end)}${suffix}`, ranges: shifted };
 }
 
-/** A cursor that resumes after `afterPath`; the empty path resumes from the first file. */
-export function encodeContentSearchCursor(afterPath: string): string {
-  return `${CURSOR_PREFIX}${afterPath}`;
+export interface ContentSearchCursor {
+  /** The page resumes after this path in UTF-8 byte order; "" resumes from the first file. */
+  readonly afterPath: string;
+  /** Scan the index even where git could search: git ran out of time or failed on an earlier page. */
+  readonly scanIndex: boolean;
 }
 
-/** The path a cursor resumes after, or null for a cursor this node did not issue. */
-export function decodeContentSearchCursor(cursor: string): string | null {
-  return cursor.startsWith(CURSOR_PREFIX) ? cursor.slice(CURSOR_PREFIX.length) : null;
+export function encodeContentSearchCursor(cursor: ContentSearchCursor): string {
+  return `${cursor.scanIndex ? SCAN_CURSOR_PREFIX : CURSOR_PREFIX}${cursor.afterPath}`;
+}
+
+/** Where a cursor resumes, or null for a cursor this node did not issue. */
+export function decodeContentSearchCursor(cursor: string): ContentSearchCursor | null {
+  if (cursor.startsWith(SCAN_CURSOR_PREFIX)) {
+    return { afterPath: cursor.slice(SCAN_CURSOR_PREFIX.length), scanIndex: true };
+  }
+  if (cursor.startsWith(CURSOR_PREFIX)) {
+    return { afterPath: cursor.slice(CURSOR_PREFIX.length), scanIndex: false };
+  }
+  return null;
 }

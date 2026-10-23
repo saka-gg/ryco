@@ -3,7 +3,8 @@
  * a workspace's files.
  *
  * Owns literal content search over the files the workspace index lists, one
- * bounded page at a time.
+ * bounded page at a time: git checkouts through `git grep`, other folders and
+ * the rest of a search git could not finish by scanning the index.
  *
  * @module WorkspaceContentSearch
  */

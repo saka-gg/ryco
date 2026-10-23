@@ -106,6 +106,45 @@ describe("makeLiteralMatcher", () => {
   });
 });
 
+describe("matchFoundLine", () => {
+  const foundLine = (text: string, matchStart: number, cut = { start: false, end: false }) => ({
+    lineNumber: 7,
+    text,
+    matchStart,
+    cutStart: cut.start,
+    cutEnd: cut.end,
+  });
+  const matcher = makeLiteralMatcher("needle", { caseSensitive: false, wholeWord: false });
+
+  it("highlights every occurrence on a line git reported", () => {
+    expect(matcher.matchFoundLine("a.ts", foundLine("Needle and needle", 0))).toEqual({
+      path: "a.ts",
+      lineNumber: 7,
+      preview: "Needle and needle",
+      ranges: [
+        { start: 0, end: 6 },
+        { start: 11, end: 17 },
+      ],
+    });
+  });
+
+  it("falls back to git's first match where case folding differs", () => {
+    // No occurrence by this matcher's folding; git's column still marks the hit.
+    expect(matcher.matchFoundLine("a.ts", foundLine("x NEEDLX y", 2)).ranges).toEqual([
+      { start: 2, end: 8 },
+    ]);
+  });
+
+  it("marks the edges git cut off a long line", () => {
+    const { preview, ranges } = matcher.matchFoundLine(
+      "a.ts",
+      foundLine("abc needle def", 4, { start: true, end: true }),
+    );
+    expect(preview).toBe("…abc needle def…");
+    expect(preview.slice(ranges[0]?.start, ranges[0]?.end)).toBe("needle");
+  });
+});
+
 describe("buildMatchPreview", () => {
   it("keeps a short line whole", () => {
     expect(buildMatchPreview("short line", [{ start: 0, end: 5 }])).toEqual({
@@ -148,9 +187,12 @@ describe("buildMatchPreview", () => {
 });
 
 describe("content search cursors", () => {
-  it("round-trips the path a page ended at", () => {
-    for (const path of ["", "src/a.ts", "dir with spaces/ü.ts", "v1:odd"]) {
-      expect(decodeContentSearchCursor(encodeContentSearchCursor(path))).toBe(path);
+  it("round-trips the path a page ended at and whether to scan the index", () => {
+    for (const afterPath of ["", "src/a.ts", "dir with spaces/ü.ts", "v1:odd", "s:odd"]) {
+      for (const scanIndex of [false, true]) {
+        const cursor = { afterPath, scanIndex };
+        expect(decodeContentSearchCursor(encodeContentSearchCursor(cursor))).toEqual(cursor);
+      }
     }
   });
 
