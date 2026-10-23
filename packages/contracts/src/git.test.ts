@@ -104,6 +104,24 @@ describe("GitRunStackedActionInput", () => {
     expect(parsed.actionId).toBe("action-1");
     expect(parsed.action).toBe("create_pr");
   });
+
+  it("binds a staged-only commit to a review revision and never to selected files", () => {
+    const base = { actionId: "action-1", cwd: "/repo", action: "commit" };
+    const stagedOnly = { expectedRevision: "a".repeat(64) };
+
+    expect(decodeRunStackedActionInput({ ...base, stagedOnly }).stagedOnly).toEqual(stagedOnly);
+    expect(decodeRunStackedActionInput({ ...base, filePaths: ["a.txt"] }).filePaths).toEqual([
+      "a.txt",
+    ]);
+    expect(() =>
+      decodeRunStackedActionInput({ ...base, stagedOnly, filePaths: ["a.txt"] }),
+    ).toThrow(/stagedOnly or filePaths/);
+    expect(() => decodeRunStackedActionInput({ ...base, stagedOnly: {} })).toThrow();
+    expect(() =>
+      decodeRunStackedActionInput({ ...base, stagedOnly: { expectedRevision: "HEAD" } }),
+    ).toThrow();
+    expect(() => decodeRunStackedActionInput({ ...base, stagedOnly: true })).toThrow();
+  });
 });
 
 describe("GitRunStackedActionResult", () => {

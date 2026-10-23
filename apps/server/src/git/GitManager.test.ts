@@ -6,7 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
 import { ChildProcessSpawner } from "effect/process";
-import { expect } from "vite-plus/test";
+import { describe, expect } from "vite-plus/test";
 import type {
   GitActionProgressEvent,
   GitPreparePullRequestThreadInput,
@@ -19,6 +19,7 @@ import type {
 import {
   DEFAULT_SERVER_SETTINGS,
   GitCommandError,
+  GitStagedIndexChangedError,
   ProjectId,
   TextGenerationError,
 } from "@ryco/contracts";
@@ -36,6 +37,8 @@ import {
 import { type TextGenerationShape, TextGeneration } from "../textGeneration/TextGeneration.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeGitVcsDriverCore } from "../vcs/GitVcsDriverCore.ts";
+import { readGitLocalChanges } from "../vcs/GitIndexReview.ts";
+import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -291,6 +294,15 @@ function initRepo(
     yield* runGit(cwd, ["add", "README.md"]);
     yield* runGit(cwd, ["commit", "-m", "Initial commit"]);
   });
+}
+
+/** The `stagedRevision` a Staged changes review shows the user. */
+function readStagedRevision(cwd: string) {
+  return Effect.gen(function* () {
+    const git = yield* GitVcsDriver.GitVcsDriver;
+    const review = yield* readGitLocalChanges(git.execute, { cwd });
+    return review.stagedRevision!;
+  }).pipe(Effect.provide(WorkspaceAccessPolicyLayer(undefined)));
 }
 
 function createBareRemote(): Effect.Effect<
@@ -741,6 +753,7 @@ function runStackedAction(
     commitMessage?: string;
     featureBranch?: boolean;
     filePaths?: readonly string[];
+    stagedOnly?: { readonly expectedRevision: string };
     linkedIssueNumbers?: readonly number[];
   },
   options?: Parameters<GitManagerShape["runStackedAction"]>[1],
@@ -2376,6 +2389,299 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(statusStdout).not.toContain("a.txt");
     }),
   );
+
+  describe("staged-only commits", () => {
+    const LINES = Array.from({ length: 30 }, (_, index) => `line ${index}\n`).join("");
+    /** `notes.txt` with its first hunk staged and a second, later hunk only in the working file. */
+    const stagePartialEdit = (repoDir: string) =>
+      Effect.gen(function* () {
+        fs.writeFileSync(path.join(repoDir, "notes.txt"), LINES);
+        yield* runGit(repoDir, ["add", "notes.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Add notes"]);
+        const staged = LINES.replace("line 2\n", "staged edit\n");
+        fs.writeFileSync(path.join(repoDir, "notes.txt"), staged);
+        yield* runGit(repoDir, ["add", "notes.txt"]);
+        fs.writeFileSync(
+          path.join(repoDir, "notes.txt"),
+          staged.replace("line 25\n", "unstaged edit\n"),
+        );
+      });
+    const headSha = (repoDir: string) =>
+      runGit(repoDir, ["rev-parse", "HEAD"]).pipe(Effect.map((result) => result.stdout.trim()));
+
+    it.effect("commits exactly the reviewed index and keeps every unstaged change", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        yield* stagePartialEdit(repoDir);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nunstaged readme\n");
+        fs.writeFileSync(path.join(repoDir, "scratch.txt"), "untracked\n");
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        // Agent edits to working files after the review do not move what gets committed.
+        fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nlater agent edit\n");
+        const summaries: string[] = [];
+
+        const { manager } = yield* makeManager({
+          textGeneration: {
+            generateCommitMessage: (input) =>
+              Effect.sync(() => {
+                summaries.push(input.stagedSummary);
+                return { subject: "Commit the staged notes edit", body: "" };
+              }),
+          },
+        });
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        });
+
+        expect(result.commit.status).toBe("created");
+        expect(summaries).toEqual(["M\tnotes.txt"]);
+        const committed = (yield* runGit(repoDir, ["show", "HEAD:notes.txt"])).stdout;
+        expect(committed).toContain("staged edit");
+        expect(committed).not.toContain("unstaged edit");
+        expect((yield* runGit(repoDir, ["diff", "--cached", "--name-only"])).stdout).toBe("");
+        expect((yield* runGit(repoDir, ["diff"])).stdout).toContain("+unstaged edit");
+        expect(fs.readFileSync(path.join(repoDir, "notes.txt"), "utf8")).toContain("unstaged edit");
+        const status = (yield* runGit(repoDir, ["status", "--porcelain"])).stdout;
+        expect(status).toContain(" M README.md");
+        expect(status).toContain("?? scratch.txt");
+      }),
+    );
+
+    it.effect("describes a staged submodule pointer the user's config would hide", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        const pointer = yield* headSha(repoDir);
+        yield* runGit(repoDir, ["config", "diff.ignoreSubmodules", "all"]);
+        fs.mkdirSync(path.join(repoDir, "lib"));
+        yield* runGit(repoDir, ["update-index", "--add", "--cacheinfo", `160000,${pointer},lib`]);
+        fs.writeFileSync(path.join(repoDir, "a.txt"), "reviewed\n");
+        yield* runGit(repoDir, ["add", "a.txt"]);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const contexts: { summary: string; patch: string }[] = [];
+
+        const { manager } = yield* makeManager({
+          textGeneration: {
+            generateCommitMessage: (input) =>
+              Effect.sync(() => {
+                contexts.push({ summary: input.stagedSummary, patch: input.stagedPatch });
+                return { subject: "Commit the file and the submodule pointer", body: "" };
+              }),
+          },
+        });
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        });
+
+        expect(result.commit.status).toBe("created");
+        expect(contexts).toHaveLength(1);
+        expect(contexts[0]!.summary).toBe("A\ta.txt\nA\tlib");
+        expect(contexts[0]!.patch).toContain(`+Subproject commit ${pointer}`);
+        expect((yield* runGit(repoDir, ["ls-tree", "HEAD", "lib"])).stdout).toContain(
+          `160000 commit ${pointer}\tlib`,
+        );
+      }),
+    );
+
+    it.effect("creates the feature branch and pushes only the staged index", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* stagePartialEdit(repoDir);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+
+        const { manager } = yield* makeManager();
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit_push",
+          featureBranch: true,
+          stagedOnly: { expectedRevision },
+        });
+
+        expect(result.branch).toEqual({
+          status: "created",
+          name: "feature/implement-stacked-git-actions",
+        });
+        expect(result.push.status).toBe("pushed");
+        const pushed = (yield* runGit(remoteDir, [
+          "show",
+          "feature/implement-stacked-git-actions:notes.txt",
+        ])).stdout;
+        expect(pushed).toContain("staged edit");
+        expect(pushed).not.toContain("unstaged edit");
+        expect((yield* runGit(repoDir, ["diff"])).stdout).toContain("+unstaged edit");
+      }),
+    );
+
+    it.effect("refuses an empty index instead of committing working changes", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "hello\nunstaged\n");
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("Nothing is staged");
+        expect(yield* headSha(repoDir)).toBe(before);
+        expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toContain(
+          " M README.md",
+        );
+      }),
+    );
+
+    it.effect("refuses an index with unmerged entries", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "other"]);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "other\n");
+        yield* runGit(repoDir, ["commit", "-am", "Other edit"]);
+        yield* runGit(repoDir, ["checkout", "main"]);
+        fs.writeFileSync(path.join(repoDir, "README.md"), "main\n");
+        yield* runGit(repoDir, ["commit", "-am", "Main edit"]);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        yield* runGit(repoDir, ["merge", "other"], true);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("Resolve merge conflicts");
+        expect(yield* headSha(repoDir)).toBe(before);
+        expect((yield* runGit(repoDir, ["ls-files", "--unmerged"])).stdout).not.toBe("");
+      }),
+    );
+
+    it.effect("refuses an index, HEAD or branch that moved since the review", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        fs.writeFileSync(path.join(repoDir, "a.txt"), "reviewed\n");
+        yield* runGit(repoDir, ["add", "a.txt"]);
+        const { manager } = yield* makeManager();
+        const expectRefused = (expectedRevision: string) =>
+          Effect.gen(function* () {
+            const before = yield* headSha(repoDir);
+            const error = yield* runStackedAction(manager, {
+              cwd: repoDir,
+              action: "commit",
+              stagedOnly: { expectedRevision },
+            }).pipe(Effect.flip);
+            expect(error).toBeInstanceOf(GitStagedIndexChangedError);
+            expect(yield* headSha(repoDir)).toBe(before);
+          });
+
+        let expectedRevision = yield* readStagedRevision(repoDir);
+        // An agent stages more after the user reviewed the index.
+        fs.writeFileSync(path.join(repoDir, "b.txt"), "agent\n");
+        yield* runGit(repoDir, ["add", "b.txt"]);
+        yield* expectRefused(expectedRevision);
+        expect((yield* runGit(repoDir, ["diff", "--cached", "--name-only"])).stdout).toBe(
+          "a.txt\nb.txt\n",
+        );
+
+        expectedRevision = yield* readStagedRevision(repoDir);
+        yield* runGit(repoDir, ["commit", "--allow-empty", "-m", "HEAD moved"]);
+        yield* expectRefused(expectedRevision);
+
+        expectedRevision = yield* readStagedRevision(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "elsewhere"]);
+        yield* expectRefused(expectedRevision);
+      }),
+    );
+
+    it.effect("refuses changes staged while the commit message was generated", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        fs.writeFileSync(path.join(repoDir, "a.txt"), "reviewed\n");
+        fs.writeFileSync(path.join(repoDir, "b.txt"), "agent\n");
+        yield* runGit(repoDir, ["add", "a.txt"]);
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager({
+          textGeneration: {
+            generateCommitMessage: () =>
+              Effect.sync(() => {
+                spawnSync("git", ["add", "b.txt"], { cwd: repoDir });
+                return { subject: "Commit the reviewed file", body: "" };
+              }),
+          },
+        });
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(GitStagedIndexChangedError);
+        expect(yield* headSha(repoDir)).toBe(before);
+      }),
+    );
+
+    it.effect("runs commit hooks as the regular commit path does", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+        yield* stagePartialEdit(repoDir);
+        fs.writeFileSync(
+          path.join(repoDir, ".git", "hooks", "pre-commit"),
+          '#!/bin/sh\necho "hook: fail" >&2\nexit 1\n',
+          { mode: 0o755 },
+        );
+        const expectedRevision = yield* readStagedRevision(repoDir);
+        const before = yield* headSha(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          commitMessage: "Commit the staged notes edit",
+          stagedOnly: { expectedRevision },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("hook: fail");
+        expect(yield* headSha(repoDir)).toBe(before);
+        expect((yield* runGit(repoDir, ["diff", "--cached"])).stdout).toContain("+staged edit");
+      }),
+    );
+
+    it.effect("is only accepted for commit actions", () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("ryco-git-manager-");
+        yield* initRepo(repoDir);
+
+        const { manager } = yield* makeManager();
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "push",
+          stagedOnly: { expectedRevision: "0".repeat(64) },
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain("only supported for commit actions");
+      }),
+    );
+  });
 
   it.effect("creates feature branch, commits, and pushes with featureBranch option", () =>
     Effect.gen(function* () {

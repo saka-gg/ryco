@@ -1381,10 +1381,33 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               <button
                 type="button"
                 className="rounded border px-2 py-1"
-                disabled={localChanges.isLoading || localChanges.isApplying}
+                disabled={
+                  localChanges.isLoading || localChanges.isApplying || localChanges.isCommitting
+                }
                 onClick={() => void localChanges.refresh()}
               >
                 Refresh local changes
+              </button>
+            )}
+            {reviewingLocal && localScope === "staged" && localChanges.commitStaged && (
+              <button
+                type="button"
+                className="rounded border px-2 py-1 font-medium"
+                disabled={
+                  localChanges.isLoading ||
+                  localChanges.isApplying ||
+                  localChanges.isCommitting ||
+                  !localChanges.data?.stagedRevision ||
+                  localChanges.data.staged.files.length === 0
+                }
+                title="Commit exactly these staged changes; unstaged edits stay in your working files."
+                onClick={() =>
+                  void localChanges.commitStaged?.({
+                    threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
+                  })
+                }
+              >
+                Commit staged
               </button>
             )}
           </div>
@@ -1393,8 +1416,11 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               {localScope === "staged"
                 ? "HEAD → index. Unstage keeps your working files."
                 : "Index → working files. Later agent edits appear here; refresh to read external changes."}{" "}
-              Staging does not commit. Existing commit actions stage their selected files.
+              {localChanges.commitStaged
+                ? "Commit staged records exactly this index. Other commit actions stage their selected files first."
+                : "Staging does not commit. Existing commit actions stage their selected files."}
               {localChanges.isApplying && <span role="status"> Updating index…</span>}
+              {localChanges.isCommitting && <span role="status"> Committing staged changes…</span>}
               {localChanges.isLoading && <span role="status"> Refreshing local changes…</span>}
             </p>
           )}
@@ -1649,6 +1675,7 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                                   disabled={
                                     localChanges.isLoading ||
                                     localChanges.isApplying ||
+                                    localChanges.isCommitting ||
                                     !!localChanges.error
                                   }
                                   onApply={(input) => {

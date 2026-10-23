@@ -103,6 +103,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   nodeSelfUpdate: Schema.optionalKey(Schema.Boolean),
   /**
+   * `git.runStackedAction` honours `stagedOnly` and `vcs.readLocalChanges` returns
+   * `stagedRevision`; absent on older servers, which drop `stagedOnly` and commit every change.
+   */
+  stagedOnlyCommit: Schema.optionalKey(Schema.Boolean),
+  /**
    * `terminal.write` honours `requireIdle` (types only into a shell it verifies idle, else
    * `TerminalBusyError`); absent on older servers, which drop the key and write unguarded.
    */

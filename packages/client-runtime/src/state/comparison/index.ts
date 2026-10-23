@@ -1,4 +1,8 @@
-export { createLocalChangesController, type LocalChangesState } from "./localChanges.ts";
+export {
+  createLocalChangesController,
+  type LocalChangesStagedCommit,
+  type LocalChangesState,
+} from "./localChanges.ts";
 import {
   GitComparisonSelection,
   type GitComparisonSource,

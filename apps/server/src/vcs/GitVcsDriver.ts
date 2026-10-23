@@ -7,6 +7,7 @@ import { ChildProcessSpawner } from "effect/process";
 import {
   GitCommandError,
   VcsProcessExitError,
+  type GitStagedIndexChangedError,
   type VcsSwitchRefInput,
   type VcsSwitchRefResult,
   type VcsCreateRefInput,
@@ -182,6 +183,16 @@ export interface GitPreparedCommitContext {
   stagedPatch: string;
 }
 
+/** HEAD and the staged content a staged-only commit context was read from. */
+export interface GitStagedIndexGuard {
+  readonly headOid: string | null;
+  readonly stagedDigest: string;
+}
+
+export interface GitPreparedStagedCommitContext extends GitPreparedCommitContext {
+  readonly stagedIndex: GitStagedIndexGuard;
+}
+
 export interface ExecuteGitProgress {
   readonly onStdoutLine?: (line: string) => Effect.Effect<void, never>;
   readonly onStderrLine?: (line: string) => Effect.Effect<void, never>;
@@ -215,6 +226,12 @@ export interface GitCommitProgress {
 export interface GitCommitOptions {
   readonly timeoutMs?: number;
   readonly progress?: GitCommitProgress;
+  /**
+   * Commit only while HEAD and the staged content are still what
+   * {@link GitVcsDriverShape.prepareStagedCommitContext} read and HEAD is on
+   * `branch` (a branch name, null for a detached HEAD).
+   */
+  readonly stagedIndex?: GitStagedIndexGuard & { readonly branch: string | null };
 }
 
 export interface GitPushResult {
@@ -309,12 +326,22 @@ export interface GitVcsDriverShape {
     cwd: string,
     filePaths?: readonly string[],
   ) => Effect.Effect<GitPreparedCommitContext | null, GitCommandError>;
+  /**
+   * The commit context of exactly the index as it stands: nothing is reset or
+   * added. Refuses unmerged entries, an empty index, and an index whose staged
+   * revision is no longer `expectedRevision` (HEAD, the branch or the staged
+   * content moved since the review that returned it).
+   */
+  readonly prepareStagedCommitContext: (
+    cwd: string,
+    expectedRevision: string,
+  ) => Effect.Effect<GitPreparedStagedCommitContext, GitCommandError | GitStagedIndexChangedError>;
   readonly commit: (
     cwd: string,
     subject: string,
     body: string,
     options?: GitCommitOptions,
-  ) => Effect.Effect<{ commitSha: string }, GitCommandError>;
+  ) => Effect.Effect<{ commitSha: string }, GitCommandError | GitStagedIndexChangedError>;
   readonly pushCurrentBranch: (
     cwd: string,
     fallbackBranch: string | null,
