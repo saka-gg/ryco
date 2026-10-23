@@ -1,14 +1,13 @@
-import { terminalSnippetBroker } from "../../terminalSnippetInsertion";
 import type { EnvironmentId, ResolvedKeybindingsConfig, ThreadId } from "@ryco/contracts";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { memo, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { randomUUID } from "~/lib/utils";
-import { readEnvironmentApi } from "../../environmentApi";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { type TerminalContextSelection } from "../../lib/terminalContext";
 import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
 import { useStore } from "../../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../../storeSelectors";
+import { closeThreadTerminal } from "../../terminalClose";
 import { prepareThreadTerminal, resolveThreadTerminalLaunch } from "../../terminalPrepare";
 import { useLazyComponentReady } from "../../lib/preloadableLazy";
 import { LazyThreadTerminalDrawer as ThreadTerminalDrawer } from "../../workspacePanelPreload";
@@ -133,15 +132,15 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
 
   const closeTerminal = useCallback(
     (terminalId: string) => {
-      const api = readEnvironmentApi(threadRef.environmentId);
-      if (!api) return;
-      const isFinalTerminal = terminalState.terminalIds.length <= 1;
-      void terminalSnippetBroker
-        .close({ threadRef, terminalId }, api.terminal, isFinalTerminal)
-        .catch(() => undefined);
-
-      storeCloseTerminal(threadRef, terminalId);
-      bumpFocusRequestId();
+      closeThreadTerminal({
+        threadRef,
+        terminalId,
+        isFinalTerminal: terminalState.terminalIds.length <= 1,
+        onClosed: () => {
+          storeCloseTerminal(threadRef, terminalId);
+          bumpFocusRequestId();
+        },
+      });
     },
     [bumpFocusRequestId, storeCloseTerminal, terminalState.terminalIds.length, threadRef],
   );

@@ -99,6 +99,17 @@ describe("ExecutionEnvironmentCapabilities.projectSearchEmptyQuery", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.terminalWriteRequireIdle", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.terminalWriteRequireIdle).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ terminalWriteRequireIdle: true })).capabilities
+        .terminalWriteRequireIdle,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ terminalWriteRequireIdle: "true" }))).toThrow();
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.worktreeNotes", () => {
   it("stays absent for older nodes and decodes when advertised", () => {
     expect(decodeDescriptor(descriptor({})).capabilities.worktreeNotes).toBeUndefined();

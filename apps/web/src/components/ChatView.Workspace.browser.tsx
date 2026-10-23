@@ -3,6 +3,7 @@ import {
   type MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
+  TerminalBusyError,
   type ThreadId,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -10,7 +11,9 @@ import { createModelCapabilities, createModelSelection } from "@ryco/shared/mode
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
-import { useTerminalStateStore } from "../terminalStateStore";
+import { RUNNING_TERMINAL_CLOSE_CONFIRMATION } from "../terminalClose";
+import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { WsRpcFailure } from "../../test/wsRpcHarness";
 import {
   setupChatViewBrowserSuite,
   CHAT_NEW_KEYBINDING,
@@ -659,6 +662,189 @@ describe("ChatView Workspace (full app)", () => {
         { timeout: 8_000, interval: 16 },
       );
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("types a project script into the base terminal only behind the node's idle check", async () => {
+    setDraftThreadWithoutWorktree();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
+        {
+          id: "lint",
+          name: "Lint",
+          command: "bun run lint",
+          icon: "lint",
+          runOnWorktreeCreate: false,
+        },
+      ]),
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          environment: {
+            ...nextFixture.serverConfig.environment,
+            capabilities: {
+              ...nextFixture.serverConfig.environment.capabilities,
+              terminalWriteRequireIdle: true,
+            },
+          },
+        };
+      },
+      resolveRpc: (body) => {
+        // The node finds the reused shell running a command and writes nothing.
+        if (body._tag === WS_METHODS.terminalWrite && body.requireIdle === true) {
+          return new WsRpcFailure(
+            new TerminalBusyError({
+              threadId: THREAD_ID,
+              terminalId: String(body.terminalId),
+              reason: "running",
+            }),
+          );
+        }
+        return undefined;
+      },
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const runButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.title === "Run Lint",
+          ) as HTMLButtonElement | null,
+        "Unable to find Run Lint button.",
+      );
+      runButton.click();
+
+      await vi.waitFor(
+        () => {
+          const writes = wsRequests.filter((request) => request._tag === WS_METHODS.terminalWrite);
+          expect(writes).toHaveLength(2);
+          expect(writes[0]).toMatchObject({
+            terminalId: "default",
+            data: "bun run lint\r",
+            requireIdle: true,
+          });
+          // The script runs in a new terminal instead, opened before the command is typed.
+          const fallbackTerminalId = String(writes[1]?.terminalId);
+          expect(fallbackTerminalId).toMatch(/^terminal-/);
+          expect(writes[1]).toMatchObject({ data: "bun run lint\r" });
+          expect(writes[1]).not.toHaveProperty("requireIdle");
+          const fallbackOpen = wsRequests.findIndex(
+            (request) =>
+              request._tag === WS_METHODS.terminalOpen && request.terminalId === fallbackTerminalId,
+          );
+          expect(fallbackOpen).toBeGreaterThanOrEqual(0);
+          expect(fallbackOpen).toBeLessThan(wsRequests.indexOf(writes[1]!));
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("gives a project script a new terminal on nodes that cannot verify an idle shell", async () => {
+    setDraftThreadWithoutWorktree();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
+        {
+          id: "lint",
+          name: "Lint",
+          command: "bun run lint",
+          icon: "lint",
+          runOnWorktreeCreate: false,
+        },
+      ]),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const runButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.title === "Run Lint",
+          ) as HTMLButtonElement | null,
+        "Unable to find Run Lint button.",
+      );
+      runButton.click();
+
+      await vi.waitFor(
+        () => {
+          const writes = wsRequests.filter((request) => request._tag === WS_METHODS.terminalWrite);
+          expect(writes).toHaveLength(1);
+          expect(String(writes[0]?.terminalId)).toMatch(/^terminal-/);
+          expect(writes[0]).toMatchObject({ data: "bun run lint\r" });
+          expect(writes[0]).not.toHaveProperty("requireIdle");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("asks before closing a terminal whose shell runs a command", async () => {
+    setDraftThreadWithoutWorktree();
+    useTerminalStateStore.setState({ terminalStateByThreadKey: {} });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+    });
+
+    try {
+      const terminalStore = useTerminalStateStore.getState();
+      terminalStore.setTerminalOpen(THREAD_REF, true);
+      terminalStore.setTerminalActivity(THREAD_REF, "default", true);
+      const closeButton = await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label^="Close Terminal"]'),
+        "Unable to find the Close Terminal button.",
+      );
+      const closeRequests = () =>
+        wsRequests.filter((request) => request._tag === WS_METHODS.terminalClose);
+
+      closeButton.click();
+      expect(confirm).toHaveBeenCalledExactlyOnceWith(RUNNING_TERMINAL_CLOSE_CONFIRMATION);
+      await waitForLayout();
+      expect(closeRequests()).toEqual([]);
+      expect(
+        selectThreadTerminalState(
+          useTerminalStateStore.getState().terminalStateByThreadKey,
+          THREAD_REF,
+        ).terminalOpen,
+      ).toBe(true);
+
+      confirm.mockReturnValue(true);
+      closeButton.click();
+      await vi.waitFor(
+        () => {
+          expect(closeRequests()).toEqual([
+            expect.objectContaining({ threadId: THREAD_ID, terminalId: "default" }),
+          ]);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      // An idle shell closes at once.
+      confirm.mockClear();
+      useTerminalStateStore.getState().setTerminalOpen(THREAD_REF, true);
+      const idleCloseButton = await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label^="Close Terminal"]'),
+        "Unable to find the Close Terminal button again.",
+      );
+      idleCloseButton.click();
+      await vi.waitFor(
+        () => {
+          expect(closeRequests()).toHaveLength(2);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(confirm).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
       await mounted.cleanup();
     }
   });

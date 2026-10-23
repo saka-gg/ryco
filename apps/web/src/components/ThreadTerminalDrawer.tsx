@@ -2,10 +2,12 @@ import { usePaneEffect } from "./chat/PaneFocus";
 import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
+  createTerminalReplayGate,
   isTerminalEventAfterSnapshot,
   isTerminalReplayEvent,
   isTerminalSnapshotDeltaFor,
   bracketedTerminalSnippet,
+  type TerminalReplayGate,
 } from "@ryco/client-runtime/state/terminal";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 
@@ -133,6 +135,7 @@ export function writeTerminalSnapshot(terminal: Terminal, snapshot: TerminalSess
 interface CachedTerminalViewState {
   readonly fitAddon: FitAddon;
   readonly eventReconciler: ReturnType<typeof createTerminalEventReconciler>;
+  readonly replayGate: TerminalReplayGate;
   readonly hydratedSnapshot: TerminalSessionSnapshot | null;
 }
 
@@ -553,6 +556,7 @@ export function TerminalViewport({
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    const replayGate = cachedView?.state.replayGate ?? createTerminalReplayGate(terminal);
     const outputBatcher = createTerminalOutputBatcher({
       write: (data) => {
         terminal.write(data);
@@ -764,6 +768,8 @@ export function TerminalViewport({
 
     const inputDisposable = terminal.onData((data) => {
       if (inputBlocked()) return;
+      // Replayed output already had its queries answered (or timed out) when it was live.
+      if (replayGate.dropsData(data)) return;
       void api.terminal
         .write({ threadId, terminalId, data })
         .catch((err) =>
@@ -893,7 +899,7 @@ export function TerminalViewport({
           recordTerminalApply();
           return;
         }
-        writeTerminalSnapshot(activeTerminal, event.snapshot);
+        replayGate.replay(() => writeTerminalSnapshot(activeTerminal, event.snapshot));
         hydratedSnapshot = event.snapshot;
         if (snippetRequest)
           activeTerminal.write("", () => {
@@ -1052,11 +1058,13 @@ export function TerminalViewport({
           eventReconciler.reset(snapshot);
           // Output batched before the answer belongs before what it writes.
           outputBatcher.flush();
-          if (historyDelta) {
-            if (snapshot.history.length > 0) activeTerminal.write(snapshot.history);
-          } else {
-            writeTerminalSnapshot(activeTerminal, snapshot);
-          }
+          replayGate.replay(() => {
+            if (historyDelta) {
+              if (snapshot.history.length > 0) activeTerminal.write(snapshot.history);
+            } else {
+              writeTerminalSnapshot(activeTerminal, snapshot);
+            }
+          });
           appliedCursor = snapshot.cursor;
           if (snippetRequest)
             activeTerminal.write("", () => {
@@ -1119,9 +1127,13 @@ export function TerminalViewport({
         cachedView.lastAppliedTerminalEventId,
       );
       if (catchUp !== null) {
-        for (const entry of catchUp) {
-          applyTerminalEvent(entry.event);
-        }
+        // Output that arrived while the view was detached is not live either.
+        replayGate.replay(() => {
+          for (const entry of catchUp) {
+            applyTerminalEvent(entry.event);
+          }
+          outputBatcher.flush();
+        });
         lastAppliedTerminalEventIdRef.current =
           catchUp.at(-1)?.id ?? cachedView.lastAppliedTerminalEventId;
         terminalHydratedRef.current = true;
@@ -1259,7 +1271,7 @@ export function TerminalViewport({
           launchKey,
           terminal,
           element: keptElement,
-          state: { fitAddon, eventReconciler, hydratedSnapshot },
+          state: { fitAddon, eventReconciler, replayGate, hydratedSnapshot },
           lastAppliedTerminalEventId,
           appliedCursor,
         });

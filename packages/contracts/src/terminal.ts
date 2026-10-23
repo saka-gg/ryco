@@ -75,6 +75,12 @@ export const TerminalWriteInput = Schema.Struct({
       worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
     }),
   ),
+  /**
+   * Type only into a shell the server verifies idle at this moment, else fail with
+   * {@link TerminalBusyError} without writing anything. Older servers drop the key and write
+   * unguarded: send it only to nodes that advertise `capabilities.terminalWriteRequireIdle`.
+   */
+  requireIdle: Schema.optional(Schema.Literal(true)),
 });
 export type TerminalWriteInput = Schema.Codec.Encoded<typeof TerminalWriteInput>;
 
@@ -310,11 +316,38 @@ export class TerminalInputRejectedError extends Schema.TaggedError<TerminalInput
   { message: Schema.String },
 ) {}
 
+/**
+ * A `requireIdle` write found the shell busy or could not tell; nothing was written. Only
+ * `requireIdle` writes fail with it, so clients that never send the field never decode it.
+ */
+export class TerminalBusyError extends Schema.TaggedError<TerminalBusyError>()(
+  "TerminalBusyError",
+  {
+    threadId: Schema.String,
+    terminalId: Schema.String,
+    reason: Schema.Literals([
+      /** The shell runs a command. */
+      "running",
+      /** The shell is not running, or its processes could not be read. */
+      "unverified",
+      /** Input arrived moments ago: the shell may not have started its command yet. */
+      "inputRaced",
+    ]),
+  },
+) {
+  override get message() {
+    if (this.reason === "running") return "The terminal is running a command. Nothing was sent.";
+    if (this.reason === "inputRaced") return "The terminal just received input. Nothing was sent.";
+    return "Unable to verify that the terminal is idle. Nothing was sent.";
+  }
+}
+
 export const TerminalError = Schema.Union([
   TerminalCwdError,
   TerminalHistoryError,
   TerminalSessionLookupError,
   TerminalNotRunningError,
   TerminalInputRejectedError,
+  TerminalBusyError,
 ]);
 export type TerminalError = typeof TerminalError.Type;

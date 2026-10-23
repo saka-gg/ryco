@@ -2,13 +2,16 @@ import {
   type EnvironmentId,
   type ProjectScript,
   type ScopedThreadRef,
+  TerminalBusyError,
   type TerminalOpenInput,
   type ThreadId,
 } from "@ryco/contracts";
 import { projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
+import { Schema } from "effect";
 import { randomUUID } from "~/lib/utils";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useEvent } from "../../hooks/useEvent";
+import { readTerminalWriteRequireIdleSupported } from "../../terminalRequireIdle";
 import { DEFAULT_THREAD_TERMINAL_ID, type Project, type Thread } from "../../types";
 import { LastInvokedScriptByProjectSchema } from "../ChatView.logic";
 import { type NewProjectScriptInput } from "../ProjectScriptDialog";
@@ -16,6 +19,7 @@ import { useProjectScriptMutations } from "../../hooks/useProjectScriptMutations
 
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
+const isTerminalBusyError = Schema.is(TerminalBusyError);
 
 type LastInvokedScriptByProject = typeof LastInvokedScriptByProjectSchema.Type;
 
@@ -110,8 +114,11 @@ export function useChatProjectScripts(
         terminalState.terminalIds[0] ||
         DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = terminalState.runningTerminalIds.includes(baseTerminalId);
-      const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
-      const shouldCreateNewTerminal = wantsNewTerminal;
+      // The base terminal is reused only where the node verifies its shell idle before typing
+      // the command (the client's running state lags); elsewhere the script gets a new one.
+      const canReuseBaseTerminal = readTerminalWriteRequireIdleSupported(environmentId);
+      const shouldCreateNewTerminal =
+        Boolean(options?.preferNewTerminal) || isBaseTerminalBusy || !canReuseBaseTerminal;
       const targetTerminalId = shouldCreateNewTerminal
         ? `terminal-${randomUUID()}`
         : baseTerminalId;
@@ -140,31 +147,36 @@ export function useChatProjectScripts(
         worktreePath: targetWorktreePath,
         ...(options?.env ? { extraEnv: options.env } : {}),
       });
-      const openTerminalInput: TerminalOpenInput = shouldCreateNewTerminal
-        ? {
-            threadId: activeThreadId,
-            terminalId: targetTerminalId,
-            cwd: targetCwd,
-            ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
-            env: runtimeEnv,
-            cols: SCRIPT_TERMINAL_COLS,
-            rows: SCRIPT_TERMINAL_ROWS,
-          }
-        : {
-            threadId: activeThreadId,
-            terminalId: targetTerminalId,
-            cwd: targetCwd,
-            ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
-            env: runtimeEnv,
-          };
+      const openTerminalInput = (terminalId: string, isNew: boolean): TerminalOpenInput => ({
+        threadId: activeThreadId,
+        terminalId,
+        cwd: targetCwd,
+        ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
+        env: runtimeEnv,
+        ...(isNew ? { cols: SCRIPT_TERMINAL_COLS, rows: SCRIPT_TERMINAL_ROWS } : {}),
+      });
+      const writeCommand = (terminalId: string, requireIdle: boolean) =>
+        api.terminal.write({
+          threadId: activeThreadId,
+          terminalId,
+          data: `${script.command}\r`,
+          ...(requireIdle ? { requireIdle: true as const } : {}),
+        });
 
       try {
-        await api.terminal.open(openTerminalInput);
-        await api.terminal.write({
-          threadId: activeThreadId,
-          terminalId: targetTerminalId,
-          data: `${script.command}\r`,
-        });
+        await api.terminal.open(openTerminalInput(targetTerminalId, shouldCreateNewTerminal));
+        try {
+          await writeCommand(targetTerminalId, !shouldCreateNewTerminal);
+        } catch (error) {
+          // The node found the reused shell busy, or could not tell, and wrote nothing: run
+          // the script in a new terminal instead of typing into whatever runs there.
+          if (shouldCreateNewTerminal || !isTerminalBusyError(error)) throw error;
+          const fallbackTerminalId = `terminal-${randomUUID()}`;
+          storeNewTerminal(activeThreadRef, fallbackTerminalId);
+          setTerminalFocusRequestId((value) => value + 1);
+          await api.terminal.open(openTerminalInput(fallbackTerminalId, true));
+          await writeCommand(fallbackTerminalId, false);
+        }
       } catch (error) {
         setThreadError(
           activeThreadId,

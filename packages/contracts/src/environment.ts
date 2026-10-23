@@ -97,6 +97,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * reports its Ryco release and installation and can update itself; absent on older servers.
    */
   nodeSelfUpdate: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `terminal.write` honours `requireIdle` (types only into a shell it verifies idle, else
+   * `TerminalBusyError`); absent on older servers, which drop the key and write unguarded.
+   */
+  terminalWriteRequireIdle: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

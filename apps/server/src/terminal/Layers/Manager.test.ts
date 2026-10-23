@@ -1240,6 +1240,205 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       }),
   );
 
+  it.effect("types requireIdle input only into a shell a fresh process-table read finds idle", () =>
+    Effect.gen(function* () {
+      const reads: Array<ReadonlyArray<number>> = [];
+      let children: ReadonlyArray<number> = [];
+      let failRead = false;
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processTableSnapshotter: (shellPids) => {
+          reads.push(shellPids);
+          return failRead
+            ? Effect.fail(new Error("simulated process snapshot failure"))
+            : Effect.succeed({ childrenByParent: new Map([[9000, children]]) });
+        },
+        // Polling must not stand in for the write's own read.
+        subprocessPollIntervalMs: 60_000,
+        subprocessIdlePollIntervalMs: 60_000,
+      });
+      const idleWrite = (data: string) =>
+        manager.write({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          data,
+          requireIdle: true,
+        });
+      const busyReason = (data: string) =>
+        idleWrite(data).pipe(
+          Effect.flip,
+          Effect.map((error) => (error._tag === "TerminalBusyError" ? error.reason : error._tag)),
+        );
+      const settleInput = TestClock.adjust("500 millis");
+
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const readsBefore = reads.length;
+      // Nothing typed can run in a shell without input: like a fresh terminal, no read.
+      yield* idleWrite("first\r");
+      assert.equal(reads.length, readsBefore);
+
+      yield* settleInput;
+      yield* idleWrite("second\r");
+      assert.deepEqual(reads.slice(readsBefore), [[9000]]);
+
+      yield* settleInput;
+      children = [4242];
+      assert.equal(yield* busyReason("vim-input\r"), "running");
+      children = [];
+
+      yield* settleInput;
+      failRead = true;
+      assert.equal(yield* busyReason("unverifiable\r"), "unverified");
+      failRead = false;
+
+      // Enter typed just before: the shell may not have forked its command yet.
+      yield* manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "x" });
+      const readsBeforeRace = reads.length;
+      assert.equal(yield* busyReason("raced\r"), "inputRaced");
+      assert.equal(reads.length, readsBeforeRace);
+      yield* TestClock.adjust("499 millis");
+      assert.equal(yield* busyReason("still-raced\r"), "inputRaced");
+      yield* TestClock.adjust("1 millis");
+      yield* idleWrite("third\r");
+
+      expect(process.writes).toEqual(["first\r", "second\r", "x", "third\r"]);
+      assert.deepEqual(reads.slice(readsBefore), [[9000], [9000], [9000], [9000]]);
+
+      // An ended shell is never verified idle, and the input is refused, not dropped.
+      process.emitExit({ exitCode: 0, signal: 0 });
+      assert.equal(yield* busyReason("after-exit\r"), "unverified");
+      expect(process.writes).toEqual(["first\r", "second\r", "x", "third\r"]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("does not count focus reports or query replies as input for requireIdle", () =>
+    Effect.gen(function* () {
+      const reads: Array<ReadonlyArray<number>> = [];
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processTableSnapshotter: (shellPids) => {
+          reads.push(shellPids);
+          return Effect.succeed({ childrenByParent: new Map<number, number[]>() });
+        },
+        subprocessPollIntervalMs: 60_000,
+        subprocessIdlePollIntervalMs: 60_000,
+      });
+      const write = (data: string, requireIdle?: true) =>
+        manager.write({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          data,
+          ...(requireIdle ? { requireIdle } : {}),
+        });
+
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const readsBefore = reads.length;
+      // A fresh fish answers its DA1 query and reports focus: still a shell without input.
+      yield* write("\u001b[?1;2c");
+      yield* write("\u001b[I");
+      yield* write("first\r", true);
+      assert.equal(reads.length, readsBefore);
+
+      // Running a script blurs and refocuses the terminal right before its write.
+      yield* TestClock.adjust("500 millis");
+      yield* write("\u001b[O");
+      yield* write("\u001b[I\u001b[?2026;2$y");
+      yield* write("second\r", true);
+      assert.deepEqual(reads.slice(readsBefore), [[9000]]);
+
+      expect(process.writes).toEqual([
+        "\u001b[?1;2c",
+        "\u001b[I",
+        "first\r",
+        "\u001b[O",
+        "\u001b[I\u001b[?2026;2$y",
+        "second\r",
+      ]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("holds other input to the thread until a requireIdle write is done", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let gateReads = false;
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processTableSnapshotter: () =>
+          gateReads
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as({ childrenByParent: new Map<number, number[]>() }),
+              )
+            : Effect.succeed({ childrenByParent: new Map<number, number[]>() }),
+        subprocessPollIntervalMs: 60_000,
+        subprocessIdlePollIntervalMs: 60_000,
+      });
+      yield* manager.open(openInput());
+      yield* manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "ls\r" });
+      yield* TestClock.adjust("500 millis");
+      const process = ptyAdapter.processes[0]!;
+
+      gateReads = true;
+      const command = yield* manager
+        .write({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          data: "bun dev\r",
+          requireIdle: true,
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      const keystroke = yield* manager
+        .write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "y" })
+        .pipe(Effect.forkScoped);
+      for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+      // The keystroke waits on the thread lock: it cannot land between the read and the write.
+      expect(process.writes).toEqual(["ls\r"]);
+
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(command);
+      yield* Fiber.join(keystroke);
+      expect(process.writes).toEqual(["ls\r", "bun dev\r", "y"]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("reads a foreground command as busy for requireIdle input", () =>
+    Effect.gen(function* () {
+      let foreground = "zsh";
+      const ptyAdapter = new FakePtyAdapter();
+      ptyAdapter.foregroundReaders.set(9000, () => foreground);
+      const { manager } = yield* createManager(5, {
+        ptyAdapter,
+        shellResolver: () => "/bin/zsh",
+        processTableSnapshotter: () =>
+          Effect.succeed({ childrenByParent: new Map<number, number[]>() }),
+        subprocessPollIntervalMs: 1_000,
+      });
+      const tick = Effect.gen(function* () {
+        yield* TestClock.adjust("1000 millis");
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+      });
+      yield* manager.open(openInput());
+      // Polls learn the name the shell goes by while the table finds it idle.
+      yield* tick;
+      yield* manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "x" });
+      yield* tick;
+
+      // `exec vim`: no child for the table to find, but another name in the foreground.
+      foreground = "vim";
+      const error = yield* manager
+        .write({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          data: "bun dev\r",
+          requireIdle: true,
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag === "TerminalBusyError" ? error.reason : error._tag, "running");
+      expect(ptyAdapter.processes[0]!.writes).toEqual(["x"]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("does not invoke subprocess polling until a terminal session is running", () =>
     Effect.gen(function* () {
       let snapshots = 0;
@@ -1912,6 +2111,67 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
 
       const reopened = yield* manager.open(openInput());
       assert.equal(reopened.history, "prompt \u001b[32mok\u001b[0m done\n");
+    }),
+  );
+
+  it.effect("strips replayable CSI and DCS query traffic while preserving setters", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("prompt ");
+      // DECRQM/DECRPM (ANSI and private modes), XTVERSION, and kitty-keyboard query/reply traffic.
+      process.emitData("\u001b[?2026$p\u001b[?2026;2$y\u001b[4$p\u001b[4;2$y");
+      process.emitData("\u001b[>q\u001b[>0q\u001b[?u\u001b[?31u");
+      // DECRQSS and XTGETTCAP query/reply traffic in 7-bit DCS form.
+      process.emitData("\u001bP$q m\u001b\\\u001bP1$r0m\u001b\\\u001bP0$r\u001b\\");
+      process.emitData("\u001bP+q544e\u001b\\\u001bP1+r544e=1b\u001b\\");
+      // The same DCS traffic in 8-bit form.
+      process.emitData("\u0090$q m\u009c\u00901$r0m\u009c");
+      process.emitData("\u0090+q544e\u009c\u00901+r544e=1b\u009c");
+      // Setters and cursor movement share final bytes with the query families but
+      // change visible terminal state, so they must survive replay. Sixel stays too.
+      process.emitData('\u001b[!p\u001b["p\u001b[4 q\u001b[u\u001b[>1u\u001bPq#0~\u001b\\');
+      process.emitData("done\n");
+
+      yield* manager.close({ threadId: "thread-1" });
+
+      const reopened = yield* manager.open(openInput());
+      assert.equal(
+        reopened.history,
+        'prompt \u001b[!p\u001b["p\u001b[4 q\u001b[u\u001b[>1u\u001bPq#0~\u001b\\done\n',
+      );
+    }),
+  );
+
+  it.effect("strips CSI and DCS query traffic split across output chunks", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("before ");
+      process.emitData("\u001b[?2026$");
+      process.emitData("pafter ");
+      // Split after the introducer, inside the payload, and between ESC and `\` of ST.
+      process.emitData("\u001b");
+      process.emitData("P$q ");
+      process.emitData("m\u001b");
+      process.emitData("\\after ");
+      process.emitData("\u009b?3");
+      process.emitData("1uafter ");
+      process.emitData("\u0090+q544e");
+      process.emitData("\u009cafter\n");
+
+      yield* manager.close({ threadId: "thread-1" });
+
+      const reopened = yield* manager.open(openInput());
+      assert.equal(reopened.history, "before after after after after\n");
     }),
   );
 
