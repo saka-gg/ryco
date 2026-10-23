@@ -12,14 +12,15 @@ import { readVisibleThread } from "./visibleThread";
 type ThreadAlertsModule = typeof import("./threadAlerts");
 
 /**
- * Loads thread alerts the first time they are on, which keeps
- * expo-notifications off the launch path, then keeps them for the unlocked
- * workspace: a notification opened after alerts were turned off still opens
- * its thread.
+ * Loads thread alerts once they have ever been turned on, which keeps
+ * expo-notifications off the launch path of everyone else, then keeps them for
+ * the unlocked workspace: a notification posted before alerts were turned off
+ * still opens its thread, also after a relaunch.
  */
 export function ThreadAlertsBridge() {
   const { driver } = useConnectionRegistry();
-  const enabled = usePreferences().threadAlerts === true;
+  // Unset until the switch is first turned on; off afterwards is `false`.
+  const enabled = usePreferences().threadAlerts !== undefined;
   const [alertsModule, setAlertsModule] = useState<ThreadAlertsModule | null>(null);
 
   useEffect(() => {

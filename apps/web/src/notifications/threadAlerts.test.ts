@@ -168,7 +168,7 @@ function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadSh
     },
     createAudioContext: () => audio as unknown as ThreadAlertAudioContext,
     gestureTarget: new EventTarget(),
-    hasUserActivation: () => true,
+    canStartAudio: () => true,
   };
 
   const start = (overrides: Partial<ThreadAlertsPlatform> = {}) =>
@@ -420,6 +420,20 @@ describe("thread alerts", () => {
     expect(test.badges).toEqual([1, 1]);
   });
 
+  it("clears a badge an earlier page left once Ryco is in front", () => {
+    const focused = harness();
+    focused.start();
+    expect(focused.badges).toEqual([0]);
+
+    const background = harness();
+    background.setAppFocused(false);
+    background.start();
+    expect(background.badges).toEqual([]);
+    background.focusWindow();
+    background.focusWindow();
+    expect(background.badges).toEqual([0]);
+  });
+
   it("drops an alert whose shell was replaced before it was delivered", async () => {
     const test = harness({ threads: [shell("b")] });
     test.start();
@@ -440,6 +454,20 @@ describe("thread alerts", () => {
     await test.settle();
     expect(addedToasts(test).map((toast) => toast.title)).toEqual(["Needs approval", "Finished"]);
     expect(test.toastManager.close).toHaveBeenCalledWith("toast-1");
+  });
+
+  it("forgets a toast that closed on its own", async () => {
+    const test = harness({ threads: [shell("b")] });
+    test.start();
+    test.accept(shell("b", { hasPendingApprovals: true }));
+    await test.settle();
+
+    // Its visible time ran out.
+    addedToasts(test)[0]?.onClose?.();
+    test.accept(finished("b"));
+    await test.settle();
+    expect(addedToasts(test).map((toast) => toast.title)).toEqual(["Needs approval", "Finished"]);
+    expect(test.toastManager.close).not.toHaveBeenCalled();
   });
 
   it("closes a thread's toast when it comes on screen", async () => {

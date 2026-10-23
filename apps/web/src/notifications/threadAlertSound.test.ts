@@ -38,7 +38,7 @@ function player(input: { readonly state: AudioContextState; readonly activated: 
   const sound = createThreadAlertSoundPlayer({
     createAudioContext,
     gestureTarget,
-    hasUserActivation: () => input.activated,
+    canStartAudio: () => input.activated,
   });
   const gesture = async () => {
     gestureTarget.dispatchEvent(new Event("pointerdown"));

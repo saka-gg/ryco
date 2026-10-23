@@ -86,14 +86,17 @@ export interface ThreadAlertSoundPlayer {
 /**
  * Browsers start audio only after a user gesture. The context is created, or
  * resumed, on a pointer or key press, and listening stops while it runs. A
- * page that already had a gesture gets a running context at once. An alert
+ * page that already had a gesture, or needs none, gets a context at once. An alert
  * that arrives while audio is locked stays silent rather than chiming late.
  */
 export function createThreadAlertSoundPlayer(input: {
   readonly createAudioContext: () => ThreadAlertAudioContext | null;
   readonly gestureTarget: Pick<EventTarget, "addEventListener" | "removeEventListener">;
-  /** The page has had a user gesture, so a new context may start without one. */
-  readonly hasUserActivation: () => boolean;
+  /**
+   * A new context may start without a gesture: the page already had one, or
+   * (the desktop app) audio needs none.
+   */
+  readonly canStartAudio: () => boolean;
 }): ThreadAlertSoundPlayer {
   let context: ThreadAlertAudioContext | null = null;
   let listening = false;
@@ -133,7 +136,7 @@ export function createThreadAlertSoundPlayer(input: {
     current.resume().catch(() => undefined);
   }
 
-  const initial = input.hasUserActivation() ? ensureContext() : null;
+  const initial = input.canStartAudio() ? ensureContext() : null;
   setListening(initial?.state !== "running");
 
   return {

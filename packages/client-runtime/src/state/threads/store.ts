@@ -486,7 +486,21 @@ function mapThreadShell(
     latestTurn: thread.latestTurn,
     pendingSourceProposedPlan: thread.latestTurn?.sourceProposedPlan,
   };
-  const summary: SidebarThreadSummary = {
+  const summary = mapThreadSummary(thread, environmentId, session);
+  return {
+    shell,
+    session,
+    turnState,
+    summary,
+  };
+}
+
+function mapThreadSummary(
+  thread: OrchestrationThreadShell,
+  environmentId: EnvironmentId,
+  session: ThreadSession | null,
+): SidebarThreadSummary {
+  return {
     id: thread.id,
     environmentId,
     projectId: thread.projectId,
@@ -519,12 +533,6 @@ function mapThreadShell(
     priority: thread.priority,
     lineage: thread.lineage ?? null,
   };
-  return {
-    shell,
-    session,
-    turnState,
-    summary,
-  };
 }
 
 /**
@@ -535,7 +543,11 @@ export function mapThreadShellSummary(
   thread: OrchestrationThreadShell,
   environmentId: EnvironmentId,
 ): SidebarThreadSummary {
-  return mapThreadShell(thread, environmentId).summary;
+  return mapThreadSummary(
+    thread,
+    environmentId,
+    thread.session ? mapSession(thread.session) : null,
+  );
 }
 
 function mapArchivedThreadStub(

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { updatePreferences, usePreferences } from "../../state/preferencesStore";
 import { SettingsSection } from "./components/SettingsSection";
@@ -31,8 +31,12 @@ export function ThreadAlertSettings() {
     };
   }, [alertsOn]);
 
+  // The last flip of the switch wins over a permission answer still on its way.
+  const latestChange = useRef(0);
   const setAlerts = (enabled: boolean) => {
+    const change = (latestChange.current += 1);
     if (!enabled) {
+      setRequesting(false);
       setBlocked(false);
       updatePreferences({ threadAlerts: false });
       return;
@@ -42,10 +46,11 @@ export function ThreadAlertSettings() {
       .then(({ requestThreadAlertPermission }) => requestThreadAlertPermission())
       .catch(() => false)
       .then((granted) => {
+        if (change !== latestChange.current) return;
+        setRequesting(false);
         setBlocked(!granted);
         if (granted) updatePreferences({ threadAlerts: true });
-      })
-      .finally(() => setRequesting(false));
+      });
   };
 
   return (

@@ -2498,30 +2498,33 @@ describe("shell acceptance", () => {
   it("keeps applying the shell and telling other listeners when one throws", () => {
     const { supervisor, calls, record } = observedSupervisor();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    supervisor.subscribeShellAcceptance(() => {
-      throw new Error("listener failed");
-    });
-    const unsubscribe = supervisor.subscribeShellAcceptance(record("accepted"));
+    try {
+      supervisor.subscribeShellAcceptance(() => {
+        throw new Error("listener failed");
+      });
+      const unsubscribe = supervisor.subscribeShellAcceptance(record("accepted"));
 
-    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
-    supervisor.applyShellEvent(upsert(6), remote);
-    supervisor.flushShellEvents();
-    unsubscribe();
-    supervisor.applyShellEvent(upsert(7), remote);
-    supervisor.flushShellEvents();
+      supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+      supervisor.applyShellEvent(upsert(6), remote);
+      supervisor.flushShellEvents();
+      unsubscribe();
+      supervisor.applyShellEvent(upsert(7), remote);
+      supervisor.flushShellEvents();
 
-    expect(calls).toEqual([
-      "snapshot:5",
-      "reconciled",
-      "accepted:snapshot",
-      "commit:1",
-      "after:6",
-      "accepted:6",
-      "commit:1",
-      "after:7",
-    ]);
-    expect(warn).toHaveBeenCalledTimes(3);
-    warn.mockRestore();
+      expect(calls).toEqual([
+        "snapshot:5",
+        "reconciled",
+        "accepted:snapshot",
+        "commit:1",
+        "after:6",
+        "accepted:6",
+        "commit:1",
+        "after:7",
+      ]);
+      expect(warn).toHaveBeenCalledTimes(3);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

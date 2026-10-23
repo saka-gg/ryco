@@ -78,7 +78,8 @@ export interface ThreadAlertsPlatform {
   readonly subscribeBadgeCleared: (listener: () => void) => () => void;
   readonly createAudioContext: () => ThreadAlertAudioContext | null;
   readonly gestureTarget: Pick<EventTarget, "addEventListener" | "removeEventListener">;
-  readonly hasUserActivation: () => boolean;
+  /** Audio may start now, without waiting for a gesture. */
+  readonly canStartAudio: () => boolean;
 }
 
 export function createBrowserThreadAlertsPlatform(): ThreadAlertsPlatform {
@@ -105,7 +106,10 @@ export function createBrowserThreadAlertsPlatform(): ThreadAlertsPlatform {
       window.desktopBridge?.onNotificationBadgeCleared?.(listener) ?? (() => undefined),
     createAudioContext: () => (typeof AudioContext === "undefined" ? null : new AudioContext()),
     gestureTarget: window,
-    hasUserActivation: () => navigator.userActivation?.hasBeenActive === true,
+    // The desktop window plays audio without a gesture (Electron's default
+    // autoplay policy), so a window left in the background since launch chimes.
+    canStartAudio: () =>
+      window.desktopBridge !== undefined || navigator.userActivation?.hasBeenActive === true,
   };
 }
 
@@ -155,9 +159,9 @@ export function startThreadAlerts(
   const showToast = (event: ThreadNotificationEvent, copy: ThreadAlertCopy) => {
     const { groupKey } = event;
     closeToast(groupKey);
-    const toastId = deps.toastManager.add(
+    const toastId: ToastId = deps.toastManager.add({
       // No thread scope: a thread-scoped toast only shows on its own thread.
-      deps.stackedThreadToast({
+      ...deps.stackedThreadToast({
         type: copy.toastType,
         title: copy.title,
         description: event.title,
@@ -170,15 +174,13 @@ export function startThreadAlerts(
           },
         },
         actionVariant: "outline",
-        data: {
-          hideCopyButton: true,
-          dismissAfterVisibleMs: ALERT_TOAST_VISIBLE_MS,
-          onClose: () => {
-            if (toastIdByThread.get(groupKey) === toastId) toastIdByThread.delete(groupKey);
-          },
-        },
+        data: { hideCopyButton: true, dismissAfterVisibleMs: ALERT_TOAST_VISIBLE_MS },
       }),
-    );
+      // However it closes: its buttons, the visible-time limit, or a newer alert.
+      onClose: () => {
+        if (toastIdByThread.get(groupKey) === toastId) toastIdByThread.delete(groupKey);
+      },
+    });
     toastIdByThread.set(groupKey, toastId);
   };
 
@@ -208,14 +210,20 @@ export function startThreadAlerts(
     }
   };
 
+  // The installed web app's icon keeps its badge after the page goes, so one
+  // an earlier page left is cleared the first time Ryco is in front, too.
+  let badgeShown = true;
+
   const addToBadge = (groupKey: string) => {
     if (badgeThreads.has(groupKey)) return;
     badgeThreads.add(groupKey);
+    badgeShown = true;
     platform.setBadge(badgeThreads.size);
   };
 
   const clearBadge = () => {
-    if (badgeThreads.size === 0) return;
+    if (!badgeShown) return;
+    badgeShown = false;
     badgeThreads.clear();
     platform.setBadge(0);
   };
@@ -316,8 +324,12 @@ export function startThreadAlerts(
     closeWebNotifications();
     clearBadge();
   });
-  const unsubscribeBadgeCleared = platform.subscribeBadgeCleared(() => badgeThreads.clear());
+  const unsubscribeBadgeCleared = platform.subscribeBadgeCleared(() => {
+    badgeShown = false;
+    badgeThreads.clear();
+  });
   syncSettings();
+  if (platform.readAppFocused()) clearBadge();
 
   return {
     syncVisibleThreads: () => {
