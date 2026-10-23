@@ -1,4 +1,13 @@
+import {
+  DESKTOP_NAVIGATE_BACK_MENU_ACTION,
+  DESKTOP_NAVIGATE_FORWARD_MENU_ACTION,
+  type DesktopBridge,
+} from "@ryco/contracts";
 import type { RouterHistory } from "@tanstack/react-router";
+
+import { hasOpenDialogShortcutTarget } from "../keybindings";
+import { getPresentationTier } from "./presentationTier";
+import { isMacPlatform } from "./utils";
 
 export type NavigationHistoryDirection = "back" | "forward";
 
@@ -19,4 +28,39 @@ export function stepNavigationHistory(
   } else if (history.canGoBack()) {
     history.back();
   }
+}
+
+/**
+ * Steps the history for the desktop app's mouse back and forward buttons,
+ * browser keys and trackpad swipes. Windows and Linux report the mouse buttons
+ * to the desktop app, which sends them as menu actions with the rest; macOS
+ * reports them only to the page, so they are read here. Open dialogs and the
+ * phone tier keep them, as they keep the keys.
+ */
+export function installDesktopHistoryNavigation(
+  history: RouterHistory,
+  bridge: Pick<DesktopBridge, "onMenuAction"> | undefined,
+  target: Window,
+): () => void {
+  if (!bridge) return () => {};
+  const step = (direction: NavigationHistoryDirection) => {
+    if (hasOpenDialogShortcutTarget() || getPresentationTier() === "phone") return;
+    stepNavigationHistory(history, direction);
+  };
+  const unsubscribe = bridge.onMenuAction((action) => {
+    if (action === DESKTOP_NAVIGATE_BACK_MENU_ACTION) step("back");
+    else if (action === DESKTOP_NAVIGATE_FORWARD_MENU_ACTION) step("forward");
+  });
+  if (!isMacPlatform(target.navigator.platform)) return unsubscribe;
+  const onMouseUp = (event: MouseEvent) => {
+    // Buttons 3 and 4 are a mouse's back and forward buttons.
+    if (event.defaultPrevented || (event.button !== 3 && event.button !== 4)) return;
+    event.preventDefault();
+    step(event.button === 3 ? "back" : "forward");
+  };
+  target.addEventListener("mouseup", onMouseUp);
+  return () => {
+    unsubscribe();
+    target.removeEventListener("mouseup", onMouseUp);
+  };
 }
