@@ -512,10 +512,16 @@ const makeEventStore = Effect.gen(function* () {
       const sequence = Math.max(0, Math.floor(input.sequence));
       const limit = Math.max(0, Math.floor(input.limit));
       // Both counts stop one row past their limit: an inner LIMIT over the
-      // sequence key (or the stream index) never reads a payload.
+      // sequence key (or the stream index) never reads a payload. The anchor is
+      // the log's range, not the row: compaction leaves holes where superseded
+      // progress events were, and a replay from inside a hole is equivalent.
+      // MIN and MAX are single seeks at either end of the sequence key.
       const [global] = yield* sql<{ readonly anchored: number; readonly eventsAfter: number }>`
         SELECT
-          EXISTS(SELECT 1 FROM orchestration_events WHERE sequence = ${sequence}) AS "anchored",
+          (
+            ${sequence} >= (SELECT MIN(sequence) FROM orchestration_events)
+            AND ${sequence} <= (SELECT MAX(sequence) FROM orchestration_events)
+          ) AS "anchored",
           (
             SELECT count(*) FROM (
               SELECT 1 FROM orchestration_events WHERE sequence > ${sequence} LIMIT ${limit + 1}

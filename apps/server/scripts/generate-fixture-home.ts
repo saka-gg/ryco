@@ -3,6 +3,7 @@
  *
  *   node apps/server/scripts/generate-fixture-home.ts --out /tmp/ryco-fixture-home \
  *     [--projects 30] [--threads 2000] [--turns 4] [--archived 0.6] [--usage-per-turn 6] [--seed 1]
+ *     [--progress-ticks-per-turn 0] [--reasoning-flushes-per-turn 0] [--subagent-flushes-per-turn 0]
  *
  * Every row is written the way a running server writes it: commands are dispatched through the
  * real orchestration engine, so events, projections and projector cursors are consistent and the
@@ -13,6 +14,14 @@
  *
  * The output works with `bun run perf:external --fixture-home <out>` (copied per iteration) and
  * with `--base-dir <out>` for any `ryco serve` run. Deterministic for a given seed and size.
+ *
+ * Latest-state history (for event-log compaction work) is opt-in and off by default, so existing
+ * fixtures stay byte-identical: per turn, task progress ticks on 1-3 tasks (with usage ticks),
+ * live reasoning writes ending in a final one, and streaming subagent message writes ending in a
+ * final one. They are dispatched with `provider:<uuid>:…` command ids, like ingestion's, so the
+ * receipt pruning rule applies to them; their content and timing come from a separate seeded
+ * stream, so the rest of the history keeps its content (later timestamps of a thread move by the
+ * time these writes take).
  */
 import { mkdirSync, rmSync, statSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -32,6 +41,12 @@ import {
   WorktreeId,
   type OrchestrationCommand,
 } from "@ryco/contracts";
+import {
+  reasoningActivityId,
+  subagentMessageActivityId,
+  taskProgressActivityId,
+  taskUsageActivityId,
+} from "@ryco/shared/latestStateActivities";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -57,6 +72,12 @@ export interface FixtureHomeOptions {
   /** Context-window token reports per turn (providers report once per model request). */
   readonly usageReportsPerTurn: number;
   readonly seed: number;
+  /** Task progress writes per turn (default 0). */
+  readonly progressTicksPerTurn?: number;
+  /** Live reasoning writes per turn before the final one (default 0: no reasoning). */
+  readonly reasoningFlushesPerTurn?: number;
+  /** Streaming subagent message writes per turn before the final one (default 0: none). */
+  readonly subagentFlushesPerTurn?: number;
 }
 
 export interface FixtureHomeSummary {
@@ -67,6 +88,10 @@ export interface FixtureHomeSummary {
   readonly worktrees: number;
   readonly turns: number;
   readonly commands: number;
+  /** Latest-state activity writes (all zero unless the per-turn options are set). */
+  readonly progressWrites: number;
+  readonly reasoningWrites: number;
+  readonly subagentWrites: number;
   readonly durationMs: number;
   readonly dbBytes: number;
 }
@@ -99,6 +124,13 @@ const MODELS = [
   { instanceId: "claudeAgent", model: "claude-sonnet-5" },
 ] as const;
 const TOOLS = ["Read", "Edit", "Bash", "Grep", "Write"] as const;
+
+/** A UUID (version 4 layout) from a seeded stream, like the random ids providers mint. */
+function seededUuid(random: ReturnType<typeof makeRandom>): string {
+  const hex = (digits: number) =>
+    Array.from({ length: digits }, () => Math.floor(random.next() * 16).toString(16)).join("");
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-${"89ab"[Math.floor(random.next() * 4)]}${hex(3)}-${hex(12)}`;
+}
 
 function sentence(random: ReturnType<typeof makeRandom>, words: number): string {
   const parts: string[] = [];
@@ -146,27 +178,48 @@ export async function generateFixtureHome(
   const runtime = ManagedRuntime.make(layer);
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const random = makeRandom(options.seed);
+  // Latest-state content draws from its own stream, so enabling it leaves the rest unchanged.
+  const latestRandom = makeRandom(options.seed ^ 0x5bd1e995);
+  const progressTicks = options.progressTicksPerTurn ?? 0;
+  const reasoningFlushes = options.reasoningFlushesPerTurn ?? 0;
+  const subagentFlushes = options.subagentFlushesPerTurn ?? 0;
+  let progressWrites = 0;
+  let reasoningWrites = 0;
+  let subagentWrites = 0;
   let commands = 0;
   let commandSerial = 0;
-  const dispatch = async (command: Record<string, unknown>) => {
+  const dispatch = async (command: Record<string, unknown>, commandId?: string) => {
     commands += 1;
     try {
       await runtime.runPromise(
         engine.dispatch({
           ...command,
-          commandId: CommandId.make(`fixture-command-${(commandSerial += 1)}`),
+          commandId: CommandId.make(commandId ?? `fixture-command-${(commandSerial += 1)}`),
         } as unknown as OrchestrationCommand),
       );
     } catch (cause) {
       throw new Error(`Fixture command ${String(command.type)} failed`, { cause });
     }
   };
+  /** One latest-state write, dispatched the way ingestion does (`provider:<uuid>:…`). */
+  const appendLatestState = (
+    threadId: ThreadId,
+    activity: Record<string, unknown> & { readonly id: string; readonly createdAt: string },
+  ) =>
+    dispatch(
+      { type: "thread.activity.append", threadId, activity, createdAt: activity.createdAt },
+      `provider:${seededUuid(latestRandom)}:thread-activity-append:${activity.id}`,
+    );
 
   // Spread history over the last ~120 days, oldest first, so ordering looks lived-in.
   const historyStartMs = Date.parse("2026-06-01T09:00:00.000Z");
   let clockMs = historyStartMs;
   const tick = (minMs: number, maxMs: number) => {
     clockMs += random.int(minMs, maxMs);
+    return new Date(clockMs).toISOString();
+  };
+  const latestTick = (minMs: number, maxMs: number) => {
+    clockMs += latestRandom.int(minMs, maxMs);
     return new Date(clockMs).toISOString();
   };
   const totalSpanMs = 120 * 24 * 3600 * 1000;
@@ -302,6 +355,106 @@ export async function generateFixtureHome(
           });
         }
       }
+      if (progressTicks > 0) {
+        const tasks = latestRandom.int(1, 3);
+        for (let progressTick = 0; progressTick < progressTicks; progressTick += 1) {
+          const taskId = `fixture-task-${index + 1}-${turn + 1}-${(progressTick % tasks) + 1}`;
+          const createdAt = latestTick(500, 5_000);
+          const done = progressTick >= progressTicks - tasks;
+          await appendLatestState(threadId, {
+            id: taskProgressActivityId(threadId, taskId),
+            tone: "info",
+            kind: "task.progress",
+            summary: sentence(latestRandom, 5).slice(0, 120),
+            payload: {
+              taskId,
+              title: `Task ${taskId}`,
+              detail: sentence(latestRandom, latestRandom.int(8, 30)),
+              summary: sentence(latestRandom, latestRandom.int(8, 30)),
+              lastToolName: latestRandom.pick(TOOLS),
+              status: done ? "completed" : "running",
+            },
+            turnId,
+            createdAt,
+          });
+          progressWrites += 1;
+          if (progressTick % 4 === 3) {
+            await appendLatestState(threadId, {
+              id: taskUsageActivityId(threadId, taskId),
+              tone: "info",
+              kind: "task.progress",
+              summary: "Task usage updated",
+              payload: {
+                taskId,
+                usageSnapshot: true,
+                typedUsage: {
+                  totalTokens: latestRandom.int(1_000, 200_000),
+                  toolUses: progressTick,
+                  durationMs: progressTick * 5_000,
+                },
+              },
+              turnId,
+              createdAt: latestTick(100, 1_000),
+            });
+            progressWrites += 1;
+          }
+        }
+      }
+      if (reasoningFlushes > 0) {
+        const startedAt = latestTick(100, 1_000);
+        let text = "";
+        for (let flush = 0; flush <= reasoningFlushes; flush += 1) {
+          const final = flush === reasoningFlushes;
+          text = `${text} ${paragraph(latestRandom, latestRandom.int(1, 3))}`.trim();
+          const updatedAt = latestTick(900, 3_000);
+          await appendLatestState(threadId, {
+            id: reasoningActivityId(threadId, turnId, "fixture-0"),
+            tone: "info",
+            kind: "reasoning",
+            summary: "Reasoning",
+            payload: {
+              itemType: "reasoning",
+              text: final ? text.slice(0, 15_000) : `…${text.slice(-600)}`,
+              streaming: !final,
+              startedAt,
+              updatedAt,
+              ...(final ? { completedAt: updatedAt } : {}),
+            },
+            turnId,
+            createdAt: startedAt,
+          });
+          reasoningWrites += 1;
+        }
+      }
+      if (subagentFlushes > 0) {
+        const providerThreadId = `fixture-subagent-${index + 1}-${turn + 1}`;
+        let text = "";
+        for (let flush = 0; flush <= subagentFlushes; flush += 1) {
+          const final = flush === subagentFlushes;
+          text = `${text} ${sentence(latestRandom, latestRandom.int(6, 20))}`.trim();
+          const createdAt = latestTick(300, 2_000);
+          await appendLatestState(threadId, {
+            id: subagentMessageActivityId({
+              threadId,
+              providerThreadId,
+              providerItemId: "item-1",
+            }),
+            tone: "info",
+            kind: "agent.message",
+            summary: final ? "Agent message" : "Agent message streaming",
+            payload: {
+              itemType: "assistant_message",
+              text,
+              streaming: !final,
+              providerThreadId,
+              providerItemId: "item-1",
+            },
+            turnId,
+            createdAt,
+          });
+          subagentWrites += 1;
+        }
+      }
       for (let report = 0; report < options.usageReportsPerTurn; report += 1) {
         const input = random.int(2_000, 60_000);
         const output = random.int(200, 6_000);
@@ -401,6 +554,9 @@ export async function generateFixtureHome(
     worktrees: worktreeRow?.count ?? 0,
     turns: turnCount,
     commands,
+    progressWrites,
+    reasoningWrites,
+    subagentWrites,
     durationMs: Math.round(performance.now() - startedAt),
     dbBytes: statSync(dbPath).size,
   };
@@ -417,6 +573,9 @@ if (isMain) {
       archived: { type: "string", default: "0.6" },
       "usage-per-turn": { type: "string", default: "6" },
       seed: { type: "string", default: "1" },
+      "progress-ticks-per-turn": { type: "string", default: "0" },
+      "reasoning-flushes-per-turn": { type: "string", default: "0" },
+      "subagent-flushes-per-turn": { type: "string", default: "0" },
     },
   });
   if (!values.out) {
@@ -431,6 +590,9 @@ if (isMain) {
     archivedShare: Number(values.archived),
     usageReportsPerTurn: Number(values["usage-per-turn"]),
     seed: Number(values.seed),
+    progressTicksPerTurn: Number(values["progress-ticks-per-turn"]),
+    reasoningFlushesPerTurn: Number(values["reasoning-flushes-per-turn"]),
+    subagentFlushesPerTurn: Number(values["subagent-flushes-per-turn"]),
   });
   console.log(JSON.stringify(summary, null, 2));
 }

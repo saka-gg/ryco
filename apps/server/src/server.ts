@@ -65,6 +65,7 @@ import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReach
 import { desktopNativeNodeClaimRoutesLayer } from "./hubConnector/desktopNativeNodeClaimHttp.ts";
 import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { DatabaseMaintenanceLive } from "./persistence/Layers/DatabaseMaintenance.ts";
 import { ServerLifecycleEventsLive } from "./serverLifecycleEvents.ts";
 import { AnalyticsServiceLayerLive } from "./telemetry/Layers/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -601,6 +602,8 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
 // the public HTTP server, router, or any client-visible state.
 const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
+  // Background database upkeep (event-log compaction). Server only: CLI layers never build it.
+  DatabaseMaintenanceLive,
   WorktreeNotesServiceLive,
   StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
   SessionImportLive,

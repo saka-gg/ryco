@@ -5,16 +5,37 @@ import {
   OrchestrationGetSnapshotError,
   type OrchestrationEvent,
   type OrchestrationProjectShell,
+  type OrchestrationThreadShell,
   type OrchestrationWorktreeShell,
   ProjectId,
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
-import { Cause, Clock, Duration, Effect, Metric, Option, PubSub, Queue, Ref, Stream } from "effect";
+import {
+  Cause,
+  Clock,
+  Duration,
+  Effect,
+  Layer,
+  Metric,
+  Option,
+  PubSub,
+  Queue,
+  Ref,
+  Stream,
+} from "effect";
 import { TestClock } from "effect/testing";
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  EventLogCompactionLive,
+  ONLINE_COMPACTION_PASS_OPTIONS,
+} from "../../persistence/Layers/EventLogCompaction.ts";
+import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { EventLogCompaction } from "../../persistence/Services/EventLogCompaction.ts";
+import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { makeWsReplayMetrics } from "../../wsReplayMetrics.ts";
 import { ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS } from "./constants.ts";
 import {
@@ -711,5 +732,128 @@ describe("enrichOrchestrationEvents", () => {
       );
       assert.deepEqual(resolved, ["/repos/moved"]);
     }),
+  );
+});
+
+describe("resume across a compacted event log", () => {
+  it.effect(
+    "replays from a cursor whose event was compacted away instead of sending a snapshot",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-10-20T00:00:00.000Z"));
+        const store = yield* OrchestrationEventStore;
+        const compaction = yield* EventLogCompaction;
+        const threadId = ThreadId.make("thread-compacted-resume");
+        const occurredAt = "2026-10-01T00:00:00.000Z";
+        const progress = (tick: number) =>
+          store.append({
+            type: "thread.activity-appended",
+            eventId: EventId.make(`event-compacted-resume-progress-${tick}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            payload: {
+              threadId,
+              activity: {
+                id: EventId.make(`task-progress:${threadId}:task-1`),
+                tone: "info",
+                kind: "task.progress",
+                summary: `tick ${tick}`,
+                payload: { taskId: "task-1", summary: `tick ${tick}` },
+                turnId: null,
+                createdAt: occurredAt,
+              },
+            },
+          });
+        const message = (index: number) =>
+          store.append({
+            type: "thread.message-sent",
+            eventId: EventId.make(`event-compacted-resume-message-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(`message-compacted-resume-${index}`),
+              role: "assistant",
+              text: `message ${index}`,
+              turnId: null,
+              streaming: false,
+              createdAt: occurredAt,
+              updatedAt: occurredAt,
+            },
+          });
+        yield* message(0);
+        const cursor = (yield* progress(1)).sequence;
+        yield* progress(2);
+        yield* message(1);
+        yield* progress(3);
+
+        const pass = yield* compaction.runPass({
+          ...ONLINE_COMPACTION_PASS_OPTIONS,
+          interBatchPauseMs: 0,
+          idleRatio: 0,
+          receipts: null,
+        });
+        assert.equal(pass.deletedEvents, 2);
+        const remaining = yield* store.readStreamEventsPage({
+          aggregateKind: "thread",
+          streamId: threadId,
+          fromSequenceExclusive: cursor,
+          limit: 100,
+        });
+        // The cursor's own event is gone; so is the version after it.
+        assert.deepEqual(
+          remaining.events.map((event) => event.type),
+          ["thread.message-sent", "thread.activity-appended"],
+        );
+
+        const live = yield* PubSub.unbounded<OrchestrationEvent>();
+        const helpers = makeOrchestrationStreamHelpers({
+          orchestrationEngine: {
+            readEventsPage: store.readPage,
+            subscribeDomainEvents: PubSub.subscribe(live),
+          } as unknown as OrchestrationEngineShape,
+          projectionSnapshotQuery: {
+            getThreadShellById: (id: ThreadId) =>
+              Effect.succeed(Option.some({ id } as unknown as OrchestrationThreadShell)),
+            getProjectShellById: () => Effect.succeed(Option.none()),
+            getWorktreeShellById: () => Effect.succeed(Option.none()),
+          } as unknown as ProjectionSnapshotQueryShape,
+          repositoryIdentityResolver: { resolve: () => Effect.succeed(null) },
+          ...(store.probeResume ? { probeResume: store.probeResume } : {}),
+          readStreamEventsPage: store.readStreamEventsPage,
+        });
+        const items = yield* helpers
+          .makeReplayableThreadStream(
+            Effect.die("a compacted cursor must still resume, not load a snapshot"),
+            threadId,
+            { resumeFromSequence: cursor },
+          )
+          .pipe(
+            Stream.take(1 + remaining.events.length),
+            Stream.runCollect,
+            Effect.map((chunk) => Array.from(chunk)),
+          );
+        assert.deepEqual(items[0], { kind: "resumed", fromSequence: cursor });
+        assert.deepEqual(
+          items.slice(1).map((item) => ("event" in item ? item.event : null)),
+          [...remaining.events],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(EventLogCompactionLive, OrchestrationEventStoreLive).pipe(
+            Layer.provideMerge(SqlitePersistenceMemory),
+          ),
+        ),
+      ),
   );
 });

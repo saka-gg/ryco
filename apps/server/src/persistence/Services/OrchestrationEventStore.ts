@@ -100,11 +100,18 @@ export interface OrchestrationEventStoreShape {
   >;
 
   /**
-   * Payload-free resume probe for replayable subscriptions: whether the event
-   * at `sequence` is still held, and how many events follow it — in the whole
-   * log and, optionally, in one aggregate stream — each counted only up to one
-   * past its limit. Reads the sequence key and the stream index, never
-   * `payload_json`.
+   * Payload-free resume probe for replayable subscriptions: whether `sequence`
+   * lies within this log (between its first and last held sequence), and how
+   * many events follow it — in the whole log and, optionally, in one aggregate
+   * stream — each counted only up to one past its limit. Reads the sequence key
+   * and the stream index, never `payload_json`.
+   *
+   * The log may contain holes left by compaction of superseded latest-state
+   * events (`EventLogCompaction`). A cursor inside the log's range is anchored
+   * even when its own event was removed, because replay from it reaches the
+   * same state; sequences are AUTOINCREMENT and never reused, so without holes
+   * this is the same answer as "the event at `sequence` exists". A cursor below
+   * the first or above the last held sequence (a reset or foreign log) is not.
    */
   readonly probeResume?: (input: {
     readonly sequence: number;

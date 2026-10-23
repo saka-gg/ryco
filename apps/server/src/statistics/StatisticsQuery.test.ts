@@ -15,6 +15,10 @@ import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../persistence/Layers/Sqlite.ts";
+import {
+  makeEventLogCompaction,
+  ONLINE_COMPACTION_PASS_OPTIONS,
+} from "../persistence/Layers/EventLogCompaction.ts";
 import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import {
   selectStatisticsTokenActivities,
@@ -1652,6 +1656,127 @@ statisticsLayer("statistics checkpoint file totals", (it) => {
       assert.equal(snapshot.totals.filesChanged, 5);
       assert.equal(snapshot.totals.additions, 4);
       assert.equal(snapshot.totals.deletions, 3.5);
+    }),
+  );
+});
+
+const insertActivityEvent = (
+  sql: SqlClient.SqlClient,
+  input: {
+    readonly eventId: string;
+    readonly threadId: string;
+    readonly activityId: string;
+    readonly kind: string;
+    readonly turnId: string;
+    readonly createdAt: string;
+    readonly payload: object;
+  },
+) =>
+  sql`
+    INSERT INTO orchestration_events (
+      event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+      actor_kind, payload_json, metadata_json
+    ) VALUES (
+      ${input.eventId}, 'thread', ${input.threadId},
+      (SELECT COUNT(*) FROM orchestration_events WHERE stream_id = ${input.threadId}),
+      'thread.activity-appended', ${input.createdAt}, 'system',
+      ${JSON.stringify({
+        threadId: input.threadId,
+        activity: {
+          id: input.activityId,
+          turnId: input.turnId,
+          kind: input.kind,
+          createdAt: input.createdAt,
+          payload: input.payload,
+        },
+      })},
+      '{}'
+    )
+  `;
+
+statisticsLayer("statistics after event-log compaction", (it) => {
+  it.effect("are unchanged: every context-window sample stays in the log", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "compact-project", "Compaction");
+      yield* insertThread(
+        sql,
+        "compact-thread",
+        "compact-project",
+        "claudeAgent",
+        "claude-opus-5-5",
+        "2026-06-10T00:00:00.000Z",
+      );
+      let serial = 0;
+      for (const [turnIndex, turnId] of ["turn-c1", "turn-c2", "turn-c3"].entries()) {
+        for (let sample = 0; sample < 4; sample += 1) {
+          serial += 1;
+          const createdAt = `2026-06-1${turnIndex}T00:00:0${sample}.000Z`;
+          // Claude's gauge reuses one activity id for every sample.
+          yield* insertActivityEvent(sql, {
+            eventId: `compact-usage-${serial}`,
+            threadId: "compact-thread",
+            activityId: "claude-context-usage:compact-thread",
+            kind: "context-window.updated",
+            turnId,
+            createdAt,
+            payload: {
+              usedTokens: 1000 * (sample + 1),
+              lastInputTokens: 100 * (sample + 1),
+              lastOutputTokens: 10 * (sample + 1),
+              lastUsedTokens: 110 * (sample + 1),
+            },
+          });
+          yield* insertActivityEvent(sql, {
+            eventId: `compact-progress-${serial}`,
+            threadId: "compact-thread",
+            activityId: "task-progress:compact-thread:task-1",
+            kind: "task.progress",
+            turnId,
+            createdAt,
+            payload: { taskId: "task-1", summary: `step ${serial}` },
+          });
+        }
+        yield* insertTurn(
+          sql,
+          "compact-thread",
+          turnId,
+          turnIndex + 1,
+          `2026-06-1${turnIndex}T00:00:00.000Z`,
+          `2026-06-1${turnIndex}T00:01:00.000Z`,
+          '[{"path":"a.ts","kind":"modified","additions":2,"deletions":1}]',
+        );
+      }
+      yield* markProjected(sql);
+      const before = yield* recompute(sql, statistics);
+      const cached = yield* statistics.getStatistics();
+      assert.isAbove(before.totals.totalTokens, 0);
+
+      const compaction = yield* makeEventLogCompaction;
+      const pass = yield* compaction.runPass({
+        ...ONLINE_COMPACTION_PASS_OPTIONS,
+        horizon: "head",
+        interBatchPauseMs: 0,
+        idleRatio: 0,
+        receipts: null,
+      });
+      assert.equal(pass.deletedEvents, 11);
+      const [usage] = yield* sql<{ readonly count: number }>`
+        SELECT count(*) AS count FROM orchestration_events
+        WHERE json_extract(payload_json, '$.activity.kind') = 'context-window.updated'
+      `;
+      assert.equal(usage?.count, 12);
+
+      assert.deepEqual(
+        withoutGeneratedAt(yield* recompute(sql, statistics)),
+        withoutGeneratedAt(before),
+      );
+      assert.deepEqual(
+        withoutGeneratedAt(yield* statistics.getStatistics()),
+        withoutGeneratedAt(cached),
+      );
     }),
   );
 });
