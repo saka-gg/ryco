@@ -1512,6 +1512,21 @@ export function findMessagesTimelineRowIndex(
   return findTimelineMessageRowIndex(rows, messageId, messagesOfTimelineRow);
 }
 
+/** The turn a row belongs to, or null for a row outside any turn (a user message, a marker). */
+export function timelineRowTurnId(row: MessagesTimelineRow): TurnId | null {
+  switch (row.kind) {
+    case "message":
+      return row.message.turnId ?? null;
+    case "work":
+      return row.groupedEntries[0]?.turnId ?? null;
+    case "turn-fold":
+    case "chapter":
+      return row.turnId;
+    default:
+      return null;
+  }
+}
+
 export function computeStableMessagesTimelineRows(
   rows: MessagesTimelineRow[],
   previous: StableMessagesTimelineRowsState,

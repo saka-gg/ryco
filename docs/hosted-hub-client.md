@@ -879,7 +879,7 @@ session verification code: all of them live in process memory, the browser has n
 of them may enter, and each is erased when the channel — or, for the downgrade check, the
 application session — that produced it ends. Draft, terminal, general UI, script-selection,
 and other generic local-storage hooks use in-memory storage. The explicitly enabled remembered-browser
-feature stores bounded conversation text, workspace metadata, text drafts, and scroll positions in
+feature stores bounded conversation text, workspace metadata, text drafts, and reading positions in
 encrypted IndexedDB using a separate non-exportable local AES-GCM key. Relay keys and credentials
 are never reused for this storage. Disabling the feature or observing sign-out, expiry, account
 change, or loss of node eligibility deletes the corresponding records and keys. Restoring records

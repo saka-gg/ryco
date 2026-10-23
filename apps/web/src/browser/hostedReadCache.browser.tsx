@@ -43,7 +43,10 @@ import { useStore, selectThreadByRef } from "../store";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useUiStateStore } from "../uiStateStore";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { readHostedThreadScroll, saveHostedThreadScroll } from "../persistence/hostedReadViewState";
+import {
+  readThreadReadingAnchor,
+  rememberThreadReadingAnchor,
+} from "../persistence/threadReadingPositions";
 import { workspaceMetadataToCachedShellSnapshot } from "../workspaceMetadataProjection";
 import { resolveHostedRpcCapability } from "../hostedHub/capabilities";
 
@@ -164,10 +167,29 @@ const bootstrapAuthenticatedFixture = (
     });
   });
 
-/** The capture time is the one field of a saved record that depends on the clock. */
+/**
+ * The capture time, and when each reading position was left, are the fields
+ * of a saved record that depend on the clock.
+ */
 const stableRecord = (record: unknown) => {
-  const saved = record as { metadata: { capturedAt: number } };
-  return { ...saved, metadata: { ...saved.metadata, capturedAt: 0 } };
+  const saved = record as {
+    metadata: { capturedAt: number };
+    readingPositions?: Record<string, { leftAt: number }>;
+  };
+  return {
+    ...saved,
+    metadata: { ...saved.metadata, capturedAt: 0 },
+    ...(saved.readingPositions
+      ? {
+          readingPositions: Object.fromEntries(
+            Object.entries(saved.readingPositions).map(([key, anchor]) => [
+              key,
+              { ...anchor, leftAt: anchor.leftAt > 0 ? "a time" : anchor.leftAt },
+            ]),
+          ),
+        }
+      : {}),
+  };
 };
 
 describe("hosted conversation cold start", () => {
@@ -378,7 +400,7 @@ describe("hosted conversation cold start", () => {
     expect(recordWrites(second.environmentId)).toBe(1);
 
     // A scroll in one environment's thread rewrites that record alone.
-    saveHostedThreadScroll(scopedThreadKey(first.ref), 120);
+    rememberThreadReadingAnchor(scopedThreadKey(first.ref), { rowId: "a-1", offsetWithinRow: 120 });
     await vi.waitFor(() => expect(recordWrites(first.environmentId)).toBe(2), {
       timeout: 5_000,
     });
@@ -387,7 +409,7 @@ describe("hosted conversation cold start", () => {
 
     // The timeline re-reporting the same position (every streaming render)
     // writes nothing.
-    saveHostedThreadScroll(scopedThreadKey(first.ref), 120);
+    rememberThreadReadingAnchor(scopedThreadKey(first.ref), { rowId: "a-1", offsetWithinRow: 120 });
     await settle();
     expect(recordWrites(first.environmentId)).toBe(2);
 
@@ -427,7 +449,16 @@ describe("hosted conversation cold start", () => {
 
     write.mockRestore();
     useComposerDraftStore.getState().setPrompt(second.ref, "");
+    // Turning the cache off deletes what it saved, not where this session
+    // left its threads: every mode remembers that for the session.
+    await setHostedReadCacheEnabled(false);
+    expect(readThreadReadingAnchor(scopedThreadKey(first.ref))).toMatchObject({
+      rowId: "a-1",
+      offsetWithinRow: 120,
+    });
+    // Signing out does clear them.
     hostedHubStore.setState({ accountStatus: "signing-out" });
+    await vi.waitFor(() => expect(readThreadReadingAnchor(scopedThreadKey(first.ref))).toBeNull());
     await vi.waitFor(() => expect(readHostedReadCache().accountId).toBeNull());
     for (const workspace of workspaces) {
       useStore.getState().removeEnvironmentState(workspace.environmentId);
@@ -468,7 +499,7 @@ describe("hosted conversation cold start", () => {
     await vi.waitFor(() => expect(recordWrites()).toHaveLength(1), { timeout: 5_000 });
 
     // Visits order the threads (never-visited first, the routed one last), and
-    // a draft and a scroll position ride along in the record.
+    // a draft and a reading position ride along in the record.
     useUiStateStore.setState({
       threadLastVisitedAtById: {
         [key(open)]: "2026-10-02T00:00:00Z",
@@ -477,7 +508,7 @@ describe("hosted conversation cold start", () => {
       },
     });
     useComposerDraftStore.getState().setPrompt({ environmentId, threadId: open }, "Typed draft");
-    saveHostedThreadScroll(key(recent), 120);
+    rememberThreadReadingAnchor(key(recent), { rowId: "recent-2", offsetWithinRow: 120 });
     const testPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     try {
       window.history.replaceState(window.history.state, "", `/${environmentId}/${open}`);
@@ -485,7 +516,7 @@ describe("hosted conversation cold start", () => {
       await vi.waitFor(
         () => {
           const record = stableRecord(recordWrites().at(-1)![2]);
-          // The content, drafts and scroll positions are the pre-change output
+          // The content, drafts and reading positions are the pre-change output
           // byte for byte, key order included; the workspace metadata is not
           // something the content policy touches and passes through.
           expect(JSON.stringify(record)).toBe(
@@ -552,7 +583,9 @@ describe("hosted conversation cold start", () => {
               },
               drafts: { [key(open)]: "Typed draft" },
               draftSessions: {},
-              scroll: { [key(recent)]: 120 },
+              readingPositions: {
+                [key(recent)]: { rowId: "recent-2", offsetWithinRow: 120, leftAt: "a time" },
+              },
             }),
           );
         },
@@ -698,7 +731,7 @@ describe("hosted conversation cold start", () => {
         },
       },
       drafts: { [key]: "Unsent text" },
-      scroll: { [key]: 240 },
+      readingPositions: { [key]: { rowId: "saved-message", offsetWithinRow: 240 } },
     });
     localStorage.setItem(
       "ryco:hosted-read-account:v1",
@@ -733,7 +766,10 @@ describe("hosted conversation cold start", () => {
     );
     expect(useStore.getState().environmentStateById[environmentId]?.bootstrapComplete).toBe(false);
     expect(useComposerDraftStore.getState().draftsByThreadKey[key]?.prompt).toBe("Unsent text");
-    expect(readHostedThreadScroll(key)).toBe(240);
+    expect(readThreadReadingAnchor(key)).toMatchObject({
+      rowId: "saved-message",
+      offsetWithinRow: 240,
+    });
     expect(
       resolveHostedRpcCapability({
         hosted: true,

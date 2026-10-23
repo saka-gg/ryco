@@ -76,6 +76,7 @@ import { clearRightPanelSessionSearch } from "../rightPanelSessionState";
 import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
 import { useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
+import { threadReadingPositions } from "../persistence/threadReadingPositions";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
 import { browserWaitFor } from "../../test/browserWait";
 import {
@@ -2717,6 +2718,9 @@ export function setupChatViewBrowserSuite() {
     resetSavedEnvironmentRegistryStoreForTests();
     resetSavedEnvironmentRuntimeStoreForTests();
     clearRightPanelSessionSearch();
+    // Every test opens the same thread; one left mid-transcript by an earlier
+    // test would reopen there.
+    threadReadingPositions.clear();
     Reflect.deleteProperty(window, "desktopBridge");
     useComposerDraftStore.setState({
       draftsByThreadKey: {},

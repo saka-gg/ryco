@@ -18,7 +18,7 @@ export const THREAD_CONTENT_CACHE_MAX_THREADS = 32;
 export const THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES = 1_900_000;
 /** Content entries read back from one saved record. */
 export const THREAD_CONTENT_CACHE_DECODE_MAX_CONTENT_ENTRIES = THREAD_CONTENT_CACHE_MAX_THREADS;
-/** Composer drafts, and separately scroll positions, read back from one saved record. */
+/** Composer drafts read back from one saved record. */
 export const THREAD_CONTENT_CACHE_DECODE_MAX_DRAFT_ENTRIES = 64;
 /** Longest composer draft saved or read back. */
 export const THREAD_CONTENT_CACHE_MAX_DRAFT_CHARS = 100_000;

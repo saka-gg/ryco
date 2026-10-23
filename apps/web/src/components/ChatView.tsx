@@ -158,6 +158,7 @@ import {
   createWorktreeSelector,
 } from "../storeSelectors";
 import { useUiStateStore } from "../uiStateStore";
+import { readThreadReadingAnchor } from "../persistence/threadReadingPositions";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import {
   buildPlanImplementationThreadTitle,
@@ -256,6 +257,7 @@ import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
 import type { NewWorktreeDialogTab } from "./worktrees/NewWorktreeDialog";
 import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import type { ReadingPositionOutcome } from "./chat/useTimelineReadingPosition";
 import { openForkThreadDialog, useCanForkThread } from "./chat/forkThreadDialogStore";
 import {
   deriveRevertTurnCountByUserMessageId,
@@ -1094,6 +1096,32 @@ export default function ChatView(props: ChatViewProps) {
     continuesWorktreeLaunch ? activeThreadIdRaw : null,
   );
   const isActiveThreadIdFresh = deferredActiveThreadId === activeThreadIdRaw;
+  // A thread opens where its reader left it: at its end, following live
+  // output, or at a remembered row. That row is read once per opened thread
+  // and handed to the timeline, which alone decides whether it is restored
+  // and reports back (`onReadingPositionResolved`). Until then the thread
+  // neither follows nor shows the pill. The frozen phone tier always opens at
+  // its end, as it did before reading positions.
+  const threadOpening = useMemo(
+    () => ({
+      readingAnchor:
+        activeThreadIdRaw === null || presentationTierRef.current === "phone"
+          ? null
+          : readThreadReadingAnchor(routeThreadKey),
+    }),
+    [activeThreadIdRaw, routeThreadKey],
+  );
+  // Applied while rendering, before the timeline renders: a navigation runs
+  // as a transition, so the deferred timeline can mount in this same render,
+  // and it reads live follow at mount (on there means a send chose the end).
+  const [appliedThreadOpening, setAppliedThreadOpening] = useState<typeof threadOpening | null>(
+    null,
+  );
+  if (appliedThreadOpening !== threadOpening) {
+    setAppliedThreadOpening(threadOpening);
+    setTimelineLiveFollowEnabled(threadOpening.readingAnchor === null);
+    setShowScrollToBottom(false);
+  }
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode = enforceBuildMode
     ? DEFAULT_INTERACTION_MODE
@@ -3674,12 +3702,38 @@ export default function ChatView(props: ChatViewProps) {
     setShowScrollToBottom(false);
   }, []);
 
+  // Set before the composer can measure itself: a composer that resizes pins
+  // the end while `isAtEndRef` says the transcript is there. A timeline
+  // mounted in the same commit has reported already, and its report stands.
+  const reportedThreadOpeningRef = useRef<typeof threadOpening | null>(null);
+  useLayoutEffect(() => {
+    if (reportedThreadOpeningRef.current === threadOpening) return;
+    isAtEndRef.current = threadOpening.readingAnchor === null;
+  }, [threadOpening]);
+  const onReadingPositionResolved = useCallback(
+    (outcome: ReadingPositionOutcome) => {
+      reportedThreadOpeningRef.current = threadOpening;
+      showScrollDebouncer.current.cancel();
+      if (outcome === "end") {
+        // The row is gone: open at the end, following it.
+        isAtEndRef.current = true;
+        setShowScrollToBottom(false);
+        scrollToEnd(false);
+        return;
+      }
+      // Held at the row, away from the end; or the reader's own scroll took
+      // over, and reports where the list is from here.
+      isAtEndRef.current = outcome === "released";
+      setShowScrollToBottom(outcome === "restored");
+    },
+    [scrollToEnd, threadOpening],
+  );
+
   useEffect(() => {
     setPullRequestDialogState(null);
-    isAtEndRef.current = true;
-    setTimelineLiveFollowEnabled(true);
+    // A pill still debouncing belongs to the thread left; one the timeline
+    // already showed for this thread stays.
     showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
     // Honor an explicit "open the overview on the next thread" signal, set when
     // implementing a plan in a freshly created thread (`onImplementPlanInNewThread`).
     // In wide layouts the overview opens by default anyway, but in narrow and
@@ -6648,6 +6702,9 @@ export default function ChatView(props: ChatViewProps) {
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={stopTimelineLiveFollow}
                 onUserReachedEnd={resumeTimelineLiveFollow}
+                readingAnchor={threadOpening.readingAnchor}
+                detailLive={threadDetailState === "live"}
+                onReadingPositionResolved={onReadingPositionResolved}
                 canLoadOlder={activeThreadMessageHistory?.hasMoreBefore ?? false}
                 isLoadingOlder={activeThreadMessageHistoryLoad?.status === "loading"}
                 loadOlderError={activeThreadMessageHistoryLoad?.error ?? null}
