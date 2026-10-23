@@ -1,8 +1,5 @@
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
-import {
-  readHostedThreadScroll,
-  saveHostedThreadScroll,
-} from "../../persistence/hostedReadViewState";
+import type { RememberedThreadReadingAnchor } from "@ryco/client-runtime/state/threads";
 import {
   type EnvironmentId,
   type MessageId,
@@ -179,6 +176,10 @@ import {
 import { WorkChapterRow } from "./WorkChapterRow";
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import {
+  useTimelineReadingPosition,
+  type ReadingPositionOutcome,
+} from "./useTimelineReadingPosition";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by row components via useContext. Split into
@@ -293,6 +294,19 @@ interface MessagesTimelineProps {
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation?: () => void;
   onUserReachedEnd?: () => void;
+  /**
+   * Where the thread was left away from its end, as the chat view read it
+   * when the thread opened. Read on mount only: the view is keyed by thread.
+   * The chat view opens such a thread without live follow and learns from
+   * `onReadingPositionResolved` how the restore went.
+   */
+  readingAnchor?: RememberedThreadReadingAnchor | null;
+  /**
+   * The rows come from the thread's live detail. Rows painted from a read
+   * cache (message text only) or none yet may still gain the remembered row.
+   */
+  detailLive?: boolean;
+  onReadingPositionResolved?: (outcome: ReadingPositionOutcome) => void;
   canLoadOlder?: boolean;
   isLoadingOlder?: boolean;
   loadOlderError?: string | null;
@@ -359,6 +373,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onIsAtEndChange,
   onManualNavigation,
   onUserReachedEnd,
+  readingAnchor = null,
+  detailLive = true,
+  onReadingPositionResolved,
   canLoadOlder = false,
   isLoadingOlder = false,
   loadOlderError = null,
@@ -376,13 +393,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const offerFork = onForkFromMessage !== undefined && !isPhoneTier;
   // Messages open their action sheet on a phone long-press only.
   const messageActionsSheetReady = usePhoneThreadSurfaceReady(LazyMessageActionsSheet, isPhoneTier);
+  // Where this thread was left: the view is keyed by thread, and only its
+  // first layout restores.
+  const [rememberedAnchor] = useState(readingAnchor);
   const smoothAssistantText = useEnvironmentServerConfigSelector(
     activeThreadEnvironmentId,
     selectSmoothsAssistantText,
-  );
-  const initialScrollOffset = useMemo(
-    () => readHostedThreadScroll(routeThreadKey),
-    [routeThreadKey],
   );
   const turnFoldExpandedById = useUiStateStore(
     (store) => store.threadTurnFoldExpandedById[routeThreadKey] ?? EMPTY_EXPANSION_OVERRIDES,
@@ -391,10 +407,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     (store) => store.threadWorkGroupExpandedById[routeThreadKey] ?? EMPTY_EXPANSION_OVERRIDES,
   );
   // Turns seen running in this view keep their chapter outline open once they
-  // settle; a fresh load starts every settled turn folded.
+  // settle; a fresh load starts every settled turn folded. A thread reopened
+  // at a remembered row keeps the turns it watched open, so that row is
+  // still there.
   const runningTurnIdForFolds = isWorking || activeTurnInProgress ? (activeTurnId ?? null) : null;
   const [observedRunningTurnIds, setObservedRunningTurnIds] = useState<ReadonlySet<TurnId>>(
-    () => new Set(runningTurnIdForFolds === null ? [] : [runningTurnIdForFolds]),
+    () =>
+      new Set([
+        ...(rememberedAnchor?.watchedTurnIds ?? []),
+        // The one the anchor sits in, also when read back after a reload.
+        ...(rememberedAnchor?.turnId === undefined ? [] : [rememberedAnchor.turnId]),
+        ...(runningTurnIdForFolds === null ? [] : [runningTurnIdForFolds]),
+      ]),
   );
   useEffect(() => {
     if (runningTurnIdForFolds === null) return;
@@ -449,6 +473,23 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
+  const readingPosition = useTimelineReadingPosition({
+    listRef,
+    routeThreadKey,
+    rows,
+    rowsLive: detailLive,
+    openingAnchor: rememberedAnchor,
+    restoreSuppressed: targetMessageId !== null,
+    liveFollowEnabled,
+    watchedTurnIds: observedRunningTurnIds,
+    onResolved: onReadingPositionResolved,
+  });
+  const {
+    cancelRestore: cancelReadingRestore,
+    hold: readingPositionHold,
+    holdRef: readingPositionHoldRef,
+    restoring: restoringReadingPosition,
+  } = readingPosition;
   const minimapItems = useMemo(
     () => deriveTimelineMinimapItems(rows, isPhoneTier ? "phone" : "desktop"),
     [isPhoneTier, rows],
@@ -488,7 +529,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // flag is only refreshed inside the list's own layout/scroll passes, so a
   // transcript short enough never to scroll keeps whatever value it was
   // initialised with and the scroll-to-bottom pill sticks around forever.
+  // Silent while a reading-position restore holds the list: where it rests
+  // then (its end, while the restore waits for its row) is not the reader's,
+  // and a chat view told "at the end" pins it for a resizing composer, which
+  // ends the restore.
   const evaluateIsAtEnd = useCallback((): boolean | null => {
+    if (readingPositionHoldRef.current !== null) return null;
     const scrollNode = listRef.current?.getScrollableNode?.();
     if (!(scrollNode instanceof HTMLElement)) {
       return null;
@@ -496,13 +542,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const isAtEnd = isTimelineScrolledToEnd(scrollNode);
     onIsAtEndChange(isAtEnd);
     return isAtEnd;
-  }, [listRef, onIsAtEndChange]);
+  }, [listRef, onIsAtEndChange, readingPositionHoldRef]);
 
+  const { rememberPosition } = readingPosition;
   const handleScroll = useCallback(() => {
+    // A restore owns the list while it waits for its row and until that row
+    // holds still; the next pass then reports the settled position.
+    if (readingPositionHoldRef.current !== null) return;
     const isAtEnd = evaluateIsAtEnd();
     const scrollNode = listRef.current?.getScrollableNode?.();
-    if (scrollNode instanceof HTMLElement)
-      saveHostedThreadScroll(routeThreadKey, scrollNode.scrollTop);
+    const state = listRef.current?.getState?.();
+    if (scrollNode instanceof HTMLElement && isAtEnd !== null) {
+      rememberPosition(state, scrollNode, isAtEnd);
+    }
     if (
       scrollNode instanceof HTMLElement &&
       scrollNode.scrollTop <= 320 &&
@@ -519,7 +571,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       }
       onUserReachedEnd?.();
     }
-    const state = listRef.current?.getState?.();
     if (!state || minimapItems.length === 0) {
       return;
     }
@@ -545,13 +596,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, [
     canLoadOlder,
     evaluateIsAtEnd,
-    routeThreadKey,
     isLoadingOlder,
     listRef,
     minimapItems,
     minimapStripMap,
     onLoadOlder,
     onUserReachedEnd,
+    readingPositionHoldRef,
+    rememberPosition,
   ]);
 
   const listHeader = useMemo(
@@ -594,6 +646,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           onManualNavigation?.();
         };
         const handleWheel = (event: WheelEvent) => {
+          cancelReadingRestore();
           if (!contentOverflows()) return;
           if (event.deltaY < 0) {
             // Upward navigation can only move away from the end. Do not arm
@@ -606,10 +659,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           if (event.deltaY > 0) markManualScrollIntent();
         };
         const handleTouchMove = () => {
+          cancelReadingRestore();
           markManualScrollIntent();
           if (viewportIsAwayFromEnd()) onManualNavigation?.();
         };
         const handlePointerDown = (event: PointerEvent) => {
+          cancelReadingRestore();
           markManualScrollIntent();
           if (event.target === scrollNode ? contentOverflows() : viewportIsAwayFromEnd()) {
             onManualNavigation?.();
@@ -620,11 +675,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             case "PageUp":
             case "Home":
             case "ArrowUp":
+              cancelReadingRestore();
               if (contentOverflows()) breakLiveFollow();
               break;
             case "PageDown":
             case "End":
             case "ArrowDown":
+              cancelReadingRestore();
               markManualScrollIntent();
               break;
             default:
@@ -654,7 +711,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       if (frame !== null) window.cancelAnimationFrame(frame);
       removeListeners?.();
     };
-  }, [listRef, markManualScrollIntent, onManualNavigation]);
+  }, [cancelReadingRestore, listRef, markManualScrollIntent, onManualNavigation]);
 
   useEffect(
     () => () => {
@@ -665,10 +722,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
+  // Also once a restore lets go of the list: a restore that settles, or one
+  // the reader takes over, emits no scroll event of its own.
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
     return () => cancelAnimationFrame(frame);
-  }, [handleScroll, rows.length]);
+  }, [handleScroll, readingPositionHold, rows.length]);
 
   // The scroller emits no event when rows grow, shrink, or finish measuring, so
   // re-check the bottom whenever LegendList republishes a content size. Without
@@ -768,14 +827,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
 
-    onIsAtEndChange(true);
+    // A restore bringing its row back owns the list. One still waiting for
+    // its row keeps the list at its end without telling the chat view, which
+    // would then pin the end for a resizing composer and end the wait.
+    const hold = readingPositionHoldRef.current;
+    if (hold?.kind === "restoring") return;
+    if (hold === null) onIsAtEndChange(true);
     const frameId = window.requestAnimationFrame(() => {
       void listRef.current?.scrollToEnd?.({ animated: false });
     });
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, [listRef, onIsAtEndChange, rows.length]);
+  }, [listRef, onIsAtEndChange, readingPositionHoldRef, rows.length]);
 
   useEffect(() => {
     if (targetMessageId === null) {
@@ -791,6 +855,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
 
     setHighlightedMessageId(targetMessageRowHighlight ? targetMessageId : null);
+    cancelReadingRestore();
     onManualNavigation?.();
     void listRef.current?.scrollToIndex?.({
       animated: true,
@@ -827,6 +892,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       window.clearTimeout(timeoutId);
     };
   }, [
+    cancelReadingRestore,
     listRef,
     onManualNavigation,
     rows,
@@ -942,7 +1008,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         <WorktreeSetupTimelineCtx.Provider value={worktreeSetup}>
           <EnteringMessageIdCtx.Provider value={enteringMessageId}>
             <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
-              <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+              <div
+                ref={setTimelineViewportElement}
+                className="relative h-full min-h-0"
+                data-reading-position-hold={readingPosition.hold ?? undefined}
+              >
                 <div
                   ref={timelineColumnProbeRef}
                   aria-hidden
@@ -956,11 +1026,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   renderItem={renderItem}
                   estimatedItemSize={56}
                   recycleItems={false}
-                  initialScrollAtEnd={initialScrollOffset === undefined}
-                  {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
-                  maintainScrollAtEnd={liveFollowEnabled}
+                  initialScrollAtEnd={readingPosition.initialScrollAtEnd}
+                  {...(readingPosition.alwaysRender
+                    ? { alwaysRender: readingPosition.alwaysRender }
+                    : {})}
+                  // A restore measures its row into place; the list must not
+                  // pin its end or shift content under it meanwhile.
+                  maintainScrollAtEnd={liveFollowEnabled && !restoringReadingPosition}
                   maintainScrollAtEndThreshold={0.1}
-                  maintainVisibleContentPosition
+                  maintainVisibleContentPosition={!restoringReadingPosition}
                   onScroll={handleScroll}
                   // The transcript scrolls without a visible scrollbar. Hiding it
                   // also removes the gutter entirely, so the content column no longer
@@ -978,6 +1052,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   items={minimapItems}
                   stripMap={minimapStripMap}
                   onSelect={(item) => {
+                    cancelReadingRestore();
                     markManualScrollIntent();
                     onManualNavigation?.();
                     void listRef.current?.scrollToIndex({

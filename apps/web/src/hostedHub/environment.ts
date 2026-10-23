@@ -13,6 +13,7 @@ import { useCommandPaletteStore } from "../commandPaletteStore";
 import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { forgetRememberedProjectPreferences } from "../hooks/newDraftDefaults";
 import { useMessageQueueStore } from "../messageQueueStore";
+import { threadReadingPositions } from "../persistence/threadReadingPositions";
 import { setModelPickerOpen } from "../modelPickerOpenState";
 import { clearKeyedQueriesForEnvironment } from "../rpc/keyedQuery";
 import { clearProjectAtomState, clearProjectAtomStateForEnvironment } from "../rpc/projectAtoms";
@@ -120,6 +121,7 @@ export function clearWebHostedAccountScopedState(): void {
     threadWorkEntryExpandedById: {},
     defaultAdvertisedEndpointKey: null,
   });
+  threadReadingPositions.clear();
   defaultQueryClient.clear();
   clearProjectAtomState();
   clearGitAtomState();
