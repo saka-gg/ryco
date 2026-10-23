@@ -139,7 +139,8 @@ export async function generateFixtureHome(
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolverLive),
-    Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
+    // No checkpoint worker: the wal_checkpoint(TRUNCATE) below must not race it for the lock.
+    Layer.provideMerge(makeSqlitePersistenceLive(dbPath, { checkpointWorker: false })),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), out)),
     Layer.provideMerge(NodeServices.layer),
   );

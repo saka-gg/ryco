@@ -174,6 +174,70 @@ For rollback, restore a **pre-upgrade backup in a separate data directory**, kee
 the upgraded database intact; the backup will not include subsequent events.
 There is no supported in-place downgrade or automatic repair of mixed-version writes.
 
+## WAL checkpoints
+
+`node:sqlite` is synchronous, and SQLite's automatic checkpoint runs inside the
+commit that leaves the WAL at `wal_autocheckpoint` frames: copying those pages
+into the database file and syncing it blocks the event loop every 1,000 frames.
+The server now runs checkpoints on a worker thread
+(`persistence/SqliteCheckpointWorker.ts`), except where SQLite's own
+checkpoints measured faster:
+
+- On Linux the worker removed about 1 s of event-loop time per 1,000 commits
+  and passed every tail check at Ryco's streaming pace. Windows uses it too but
+  was not measured.
+- The macOS desktop app (Electron 44.7: Node 24.21, SQLite 3.53.4) keeps
+  SQLite's own checkpoints: a checkpoint costs a few milliseconds on the SSD,
+  and the worker's concurrent copy and fsync slowed the writer's other commits
+  by more than that (main-thread time per commit +52%, every tail worse).
+- `ryco serve` on a Mac with Node 24.22 (SQLite 3.54.0) was faster with the
+  worker on every measure. Which difference matters is not known, so macOS uses
+  the worker only outside Electron and with SQLite 3.54 or later.
+
+How the worker runs checkpoints:
+
+- After each autocommit statement the writer reads the WAL's frame counts with
+  `PRAGMA wal_checkpoint(NOOP)`; once 1,000 frames wait, it asks the worker for a
+  `PASSIVE` checkpoint. The worker's connection is `query_only` and never waits
+  for the writer or for readers.
+- Frames committed while a checkpoint runs get up to three more `PASSIVE` passes
+  while each makes progress, and the rest is checkpointed once the WAL stops
+  growing for 100 ms. Once nothing is behind, the writer restarts the WAL at its
+  next commit and `journal_size_limit` bounds the file. Without those passes a
+  steadily written WAL rarely empties: it grew to 12-38 MB in the measurements,
+  and commits got slower with it.
+- A read on the read worker holds a snapshot that checkpoints cannot copy past.
+  When one ends, the read worker tells the checkpointer, which retries a blocked
+  checkpoint at once instead of after its backoff.
+- The writer keeps SQLite's autocheckpoint as a backstop at 10,000 frames. It
+  still checkpoints on the main thread when writes never pause, while a long read
+  transaction pins the WAL, after one transaction larger than the backstop, and
+  for a WAL left over from a crash. In those cases the WAL file can grow to the
+  backstop, about 41 MB, where SQLite's default kept it near 4 MB.
+- `synchronous`, `journal_size_limit` and the sync method are unchanged; there is
+  no `checkpoint_fullfsync`.
+- The worker is also not used before SQLite 3.51 (older versions run `NOOP` as
+  `PASSIVE`), under Bun, for in-memory databases, or in short-lived CLI
+  processes (`ryco project`, `ryco auth`). A worker that cannot start, keeps
+  crashing, or whose checkpoints keep failing hands checkpoints back to the
+  writer (autocheckpoint 1,000) with one warning.
+- A maintenance connection that needs `wal_checkpoint(TRUNCATE)` to succeed
+  passes `{ checkpointWorker: false }` to `makeSqlitePersistenceLive`; otherwise
+  a running worker can make it return `busy = 1`.
+
+Measure commit latency, event-loop stalls and main-thread checkpoint time with a
+stopped, checkpointed fixture database (for example from
+`generate-fixture-home.ts`). `--compare` runs alternating fresh processes;
+`--base-ref` loads the server sources of an older commit for the "off" side;
+`--worker on` forces the worker also where macOS would keep it off:
+
+```sh
+node apps/server/scripts/measure-sqlite-checkpoints.ts --worker on --base <state.sqlite> --pace 10
+node apps/server/scripts/measure-sqlite-checkpoints.ts --compare 7 --base <state.sqlite> \
+  --base-ref <commit> --pace 10 --commits 3000
+# Also: --pace 2 | tight | burst, --reader (2 s read transactions), --big-txn <events>
+```
+
 ## Upstream reference
 
 [Synara 0.8.4](https://github.com/Emanuele-web04/synara/releases/tag/v0.8.4) and its

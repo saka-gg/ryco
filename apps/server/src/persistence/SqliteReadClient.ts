@@ -28,10 +28,12 @@
  * Bun, in-memory databases, and a worker that cannot start or keeps crashing
  * fall back to the main connection, which keeps every caller correct.
  *
+ * A read's snapshot keeps WAL checkpoints from copying past it, so each read
+ * that ends is reported to the main client's checkpoint worker
+ * (`walReaderReleased`, SqliteCheckpointWorker.ts).
+ *
  * @module SqliteReadClient
  */
-import { Worker } from "node:worker_threads";
-
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -46,6 +48,12 @@ import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 import * as Statement from "effect/sql/Statement";
 
 import { BLOCKING_BUSY_TIMEOUT_MS } from "./sqliteBusy.ts";
+import { walReaderReleasedHook } from "./SqliteCheckpointWorker.ts";
+import {
+  makeSqliteWorkerThread,
+  sqliteWorkerUnavailableReason,
+  type SqliteWorkerFailure,
+} from "./sqliteWorkerThread.ts";
 
 /**
  * The read client. Defaults to the main client, so code that reads through it
@@ -150,9 +158,6 @@ type WorkerReply =
       };
     };
 
-/** Consecutive start failures or crashes before the client stays on the main connection. */
-const MAX_WORKER_FAILURES = 3;
-
 export interface SqliteReadWorkerOptions {
   readonly filename: string;
   /** Test hook: the worker source. */
@@ -180,14 +185,11 @@ const workerError = (message: string, cause?: unknown) =>
   });
 
 /**
- * Owns the worker: starts it lazily, restarts it after a crash, and gives up
- * (permanently falling back) after {@link MAX_WORKER_FAILURES} consecutive
- * failures.
+ * Owns the worker through the shared supervisor (sqliteWorkerThread.ts): it
+ * starts lazily, restarts after a crash, and gives up (permanently falling
+ * back) after three consecutive failures.
  */
 const makeWorkerHost = (options: SqliteReadWorkerOptions) => {
-  let worker: Worker | undefined;
-  let ready: Promise<boolean> | undefined;
-  let failures = 0;
   let nextId = 0;
   let workerStatements = 0;
   let workerFailures = 0;
@@ -200,69 +202,49 @@ const makeWorkerHost = (options: SqliteReadWorkerOptions) => {
     for (const entry of entries) entry.reject(error);
   };
 
-  const onFailure = (current: Worker, error: SqlError) => {
-    if (worker !== current) return;
-    worker = undefined;
-    ready = undefined;
-    failures += 1;
-    workerFailures += 1;
-    lastFailure = error.message;
-    failAll(error);
-    void current.terminate().catch(() => undefined);
+  // The worker keeps the process alive only while a caller awaits its reply.
+  const settle = (id: number) => {
+    if (pending.delete(id) && pending.size === 0) thread.current()?.unref();
   };
 
-  const start = (): Promise<boolean> => {
-    if (failures >= MAX_WORKER_FAILURES) return Promise.resolve(false);
-    if (ready !== undefined) return ready;
-    let current: Worker;
-    try {
-      current = new Worker(options.workerSource ?? WORKER_SOURCE, {
-        eval: true,
-        workerData: { filename: options.filename, busyTimeoutMs: BLOCKING_BUSY_TIMEOUT_MS },
-      });
-    } catch (cause) {
-      failures += 1;
-      workerFailures += 1;
-      lastFailure = String(cause);
-      return Promise.resolve(false);
+  const onReply = (reply: Exclude<WorkerReply, { readonly ready: true }>) => {
+    const entry = pending.get(reply.id);
+    if (entry === undefined) return;
+    settle(reply.id);
+    if (reply.ok) entry.resolve(reply.rows);
+    else {
+      // Rebuild the driver error so SQLite error classification sees its codes.
+      const { message, ...codes } = reply.error;
+      entry.reject(
+        workerError("Failed to execute statement", Object.assign(new Error(message), codes)),
+      );
     }
-    // The reader must never keep the process alive.
-    current.unref();
-    worker = current;
-    ready = new Promise<boolean>((resolve) => {
-      current.on("message", (reply: WorkerReply) => {
-        if ("ready" in reply) {
-          failures = 0;
-          resolve(true);
-          return;
-        }
-        const entry = pending.get(reply.id);
-        if (entry === undefined) return;
-        pending.delete(reply.id);
-        if (reply.ok) entry.resolve(reply.rows);
-        else {
-          // Rebuild the driver error so SQLite error classification sees its codes.
-          const { message, ...codes } = reply.error;
-          entry.reject(
-            workerError("Failed to execute statement", Object.assign(new Error(message), codes)),
-          );
-        }
-      });
-      current.on("error", (cause) => {
-        onFailure(current, workerError("SQLite read worker failed", cause));
-        resolve(false);
-      });
-      current.on("exit", (code) => {
-        onFailure(current, workerError(`SQLite read worker exited with code ${code}`));
-        resolve(false);
-      });
-    });
-    return ready;
   };
+
+  const onFailure = (failure: SqliteWorkerFailure) => {
+    workerFailures += 1;
+    if (failure.kind === "construct") {
+      lastFailure = String(failure.cause);
+      return;
+    }
+    const error =
+      failure.kind === "error"
+        ? workerError("SQLite read worker failed", failure.cause)
+        : workerError(`SQLite read worker exited with code ${failure.code}`);
+    lastFailure = error.message;
+    failAll(error);
+  };
+
+  const thread = makeSqliteWorkerThread({
+    source: options.workerSource ?? WORKER_SOURCE,
+    workerData: { filename: options.filename, busyTimeoutMs: BLOCKING_BUSY_TIMEOUT_MS },
+    onMessage: (message) => onReply(message as Exclude<WorkerReply, { readonly ready: true }>),
+    onFailure,
+  });
 
   const request = (input: Omit<WorkerRequest, "id">): Effect.Effect<ReadonlyArray<any>, SqlError> =>
     Effect.callback<ReadonlyArray<any>, SqlError>((resume) => {
-      const current = worker;
+      const current = thread.current();
       if (current === undefined) {
         resume(Effect.fail(workerError("SQLite read worker is not running")));
         return;
@@ -273,29 +255,27 @@ const makeWorkerHost = (options: SqliteReadWorkerOptions) => {
         resolve: (rows) => resume(Effect.succeed(rows)),
         reject: (error) => resume(Effect.fail(error)),
       });
+      if (pending.size === 1) current.ref();
       try {
         // A worker_threads port, not a window: there is no target origin.
         // oxlint-disable-next-line unicorn/require-post-message-target-origin
         current.postMessage({ ...input, id } satisfies WorkerRequest);
       } catch (cause) {
-        pending.delete(id);
+        settle(id);
         resume(Effect.fail(workerError("Failed to send statement to SQLite read worker", cause)));
       }
       // An interrupted caller drops its reply; the worker still finishes the statement.
-      return Effect.sync(() => pending.delete(id));
+      return Effect.sync(() => settle(id));
     });
 
-  const close = Effect.promise(async () => {
-    failures = MAX_WORKER_FAILURES;
-    const current = worker;
-    worker = undefined;
-    ready = undefined;
+  const close = Effect.promise(() => {
+    const closing = thread.close();
     failAll(workerError("SQLite read worker closed"));
-    if (current !== undefined) await current.terminate().catch(() => undefined);
+    return closing;
   });
 
   return {
-    start: Effect.promise(start),
+    start: Effect.promise(thread.start),
     request,
     close,
     stats: () => ({ workerStatements, workerFailures }),
@@ -366,6 +346,14 @@ export const makeSqliteReadWorkerClient = Effect.fn("makeSqliteReadWorkerClient"
     });
   });
 
+  // A read's snapshot keeps the main connection's checkpoint worker from copying past it; tell
+  // it when the read ends, so a checkpoint it blocked runs now instead of after a backoff.
+  const readerReleased = walReaderReleasedHook(main);
+  const release =
+    readerReleased === undefined
+      ? semaphore.release(1)
+      : Effect.andThen(semaphore.release(1), Effect.sync(readerReleased));
+
   // A transaction holds the connection it started on for its whole scope.
   const transactionAcquirer: Effect.Effect<Connection, SqlError, Scope.Scope> =
     Effect.uninterruptibleMask((restore) =>
@@ -373,7 +361,7 @@ export const makeSqliteReadWorkerClient = Effect.fn("makeSqliteReadWorkerClient"
         Effect.flatMap(restore(host.start), (started) => {
           if (!started) return Effect.andThen(fallback, restore(main.reserve));
           return restore(semaphore.take(1)).pipe(
-            Effect.andThen(Scope.addFinalizer(scope, semaphore.release(1))),
+            Effect.andThen(Scope.addFinalizer(scope, release)),
             Effect.as(workerConnection),
           );
         }),
@@ -399,7 +387,7 @@ export const makeSqliteReadWorkerClient = Effect.fn("makeSqliteReadWorkerClient"
 
 /** Whether this runtime can host the read worker for `filename`. */
 export const canUseReadWorker = (filename: string): boolean =>
-  process.versions.bun === undefined && filename !== ":memory:" && filename !== "";
+  sqliteWorkerUnavailableReason(filename) === undefined;
 
 /** Provides {@link SqliteReadClient}: a worker connection where supported, else the main client. */
 export const layer = (filename: string): Layer.Layer<SqliteReadClient, never, Client.SqlClient> =>

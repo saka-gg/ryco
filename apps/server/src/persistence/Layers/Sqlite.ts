@@ -3,6 +3,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
 import { runMigrations } from "../Migrations.ts";
+import type { SqliteCheckpointWorkerOptions } from "../SqliteCheckpointWorker.ts";
 import * as SqliteReadClientLayer from "../SqliteReadClient.ts";
 import { BLOCKING_BUSY_TIMEOUT_MS, MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
 import { ServerConfig } from "../../config.ts";
@@ -11,6 +12,8 @@ import { trackStartupPhase } from "../../startupStallMonitor.ts";
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;
   readonly spanAttributes?: Record<string, unknown>;
+  /** Node only (NodeSqliteClient); Bun's client ignores it. */
+  readonly walCheckpointWorker?: boolean | SqliteCheckpointWorkerOptions;
 };
 
 type Loader = {
@@ -55,8 +58,11 @@ const setup = Layer.effectDiscard(
     // `synchronous` stays at its default on purpose (docs/streaming-sqlite.md).
     yield* sql`PRAGMA mmap_size = 268435456;`;
     yield* sql`PRAGMA cache_size = -32768;`;
-    // Long read transactions on the read worker can delay checkpoints, so the WAL may grow
-    // well past its steady size. Cap what stays on disk once it is reset (64 MiB).
+    // Checkpoints run on a worker thread where supported and faster (SqliteCheckpointWorker.ts;
+    // not in the macOS desktop app); the writer keeps SQLite's autocheckpoint as a 10,000-frame
+    // backstop. Long read transactions on the read worker can delay checkpoints, and writes
+    // without a pause keep the WAL from restarting, so it may grow well past its steady size
+    // (about 41 MB at the backstop). Cap what stays on disk once it is reset (64 MiB).
     yield* sql`PRAGMA journal_size_limit = 67108864;`;
     // Named for the startup stall monitor: a slow ledger pass or one-time repair (9.5 s and
     // 27.4 s stalls were observed before the listener bound) is otherwise unattributed.
@@ -67,8 +73,20 @@ const setup = Layer.effectDiscard(
   }),
 );
 
+export interface SqlitePersistenceOptions {
+  /**
+   * Run WAL checkpoints on a worker thread where it measured faster
+   * (SqliteCheckpointWorker.ts: not in the macOS desktop app). Defaults to true;
+   * an object sets test and measurement hooks. Short-lived processes turn it off:
+   * they serve no event loop, and a connection that needs `wal_checkpoint(TRUNCATE)`
+   * to succeed must not race the worker for the checkpoint lock.
+   */
+  readonly checkpointWorker?: boolean | SqliteCheckpointWorkerOptions;
+}
+
 export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(function* (
   dbPath: string,
+  options?: SqlitePersistenceOptions,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -84,6 +102,7 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
             "db.name": path.basename(dbPath),
             "service.name": "ryco-server",
           },
+          walCheckpointWorker: options?.checkpointWorker ?? true,
         }),
       ),
     ),
@@ -136,6 +155,19 @@ export const SqlitePersistenceMemory = Layer.unwrap(
   }),
 );
 
+/** The server's persistence: the database at `ServerConfig.dbPath`. */
 export const layerConfig = Layer.unwrap(
   Effect.map(Effect.service(ServerConfig), ({ dbPath }) => makeSqlitePersistenceLive(dbPath)),
+);
+
+/**
+ * Persistence for short-lived CLI commands (`ryco project`, `ryco auth`): no
+ * checkpoint worker. Such a process serves no clients, so moving its checkpoints
+ * off-thread gains nothing, and the trigger would be the running server's WAL
+ * backlog rather than its own writes.
+ */
+export const layerConfigCli = Layer.unwrap(
+  Effect.map(Effect.service(ServerConfig), ({ dbPath }) =>
+    makeSqlitePersistenceLive(dbPath, { checkpointWorker: false }),
+  ),
 );

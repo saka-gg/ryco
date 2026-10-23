@@ -2,9 +2,10 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { Worker } from "node:worker_threads";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import { Effect, Fiber, Layer } from "effect";
 import * as Reactivity from "effect/reactivity/Reactivity";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -186,6 +187,102 @@ it.effect("falls back to the main connection when the worker cannot start", () =
       assert.equal(stats.workerStatements, 0);
       assert.equal(stats.fallbackAcquisitions, 4);
       assert.equal(stats.workerFailures, 3);
+    }).pipe(Effect.scoped, Effect.provide(Reactivity.layer)),
+  ),
+);
+
+it.effect("restarts the read worker after it exits", () =>
+  withTempDatabase((dbPath) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE entries(id INTEGER PRIMARY KEY)`;
+      yield* sql`INSERT INTO entries(id) VALUES (7)`;
+      // Answers one statement, then its thread exits.
+      const reader = yield* makeSqliteReadWorkerClient(sql, {
+        filename: dbPath,
+        workerSource: `
+const { parentPort, workerData } = require("node:worker_threads");
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(workerData.filename, { readOnly: true });
+parentPort.on("message", (message) => {
+  parentPort.postMessage({ id: message.id, ok: true, rows: db.prepare(message.sql).all(...message.params) });
+  setImmediate(() => process.exit(3));
+});
+parentPort.postMessage({ ready: true });
+`,
+      });
+      const first = yield* reader<{ readonly id: number }>`SELECT id FROM entries`;
+      assert.deepEqual(
+        first.map((row) => row.id),
+        [7],
+      );
+      yield* Effect.promise(async () => {
+        while (statsOf(reader).workerFailures === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      });
+      const second = yield* reader<{ readonly id: number }>`SELECT id FROM entries`;
+      assert.deepEqual(
+        second.map((row) => row.id),
+        [7],
+      );
+      const stats = statsOf(reader);
+      assert.equal(stats.workerStatements, 2);
+      assert.equal(stats.workerFailures, 1);
+      assert.equal(stats.fallbackAcquisitions, 0);
+    }).pipe(Effect.scoped, Effect.provide(Reactivity.layer)),
+  ),
+);
+
+it.effect("keeps the process alive only while a read is pending", () =>
+  withTempDatabase(() =>
+    Effect.gen(function* () {
+      const reader = yield* SqliteReadClient;
+      yield* reader`SELECT 1`;
+      const ref = vi.spyOn(Worker.prototype, "ref");
+      const unref = vi.spyOn(Worker.prototype, "unref");
+      try {
+        yield* reader`SELECT 2`;
+        // Ref'd for the request (a script awaiting it must not exit), unref'd after the reply.
+        assert.equal(ref.mock.calls.length, 1);
+        assert.equal(unref.mock.calls.length, 1);
+        assert.isBelow(ref.mock.invocationCallOrder[0]!, unref.mock.invocationCallOrder[0]!);
+      } finally {
+        ref.mockRestore();
+        unref.mockRestore();
+      }
+    }),
+  ),
+);
+
+it.effect("tells the main connection when a read on the worker ends", () =>
+  withTempDatabase((dbPath) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE entries(id INTEGER PRIMARY KEY)`;
+      // The checkpoint worker's hook on the main client (NodeSqliteClient.walReaderReleased).
+      const main = sql as unknown as { walReaderReleased: () => void };
+      const original = main.walReaderReleased;
+      let released = 0;
+      main.walReaderReleased = () => {
+        released += 1;
+      };
+      try {
+        const reader = yield* makeSqliteReadWorkerClient(sql, { filename: dbPath });
+        yield* reader`SELECT COUNT(*) AS total FROM entries`;
+        assert.equal(released, 1);
+        yield* reader.withTransaction(
+          Effect.gen(function* () {
+            yield* reader`SELECT COUNT(*) AS total FROM entries`;
+            yield* reader`SELECT COUNT(*) AS total FROM entries`;
+            // Still inside the read transaction: its snapshot is held.
+            assert.equal(released, 1);
+          }),
+        );
+        assert.equal(released, 2);
+      } finally {
+        main.walReaderReleased = original;
+      }
     }).pipe(Effect.scoped, Effect.provide(Reactivity.layer)),
   ),
 );

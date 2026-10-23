@@ -3,6 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -10,6 +11,7 @@ import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import { checkpointWorkerUnavailableReason } from "../SqliteCheckpointWorker.ts";
 import { MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
 import {
   makeSqlitePersistenceLive,
@@ -120,8 +122,54 @@ it.effect("applies the A/B-tested read tuning to file databases", () => {
       readonly journal_size_limit: number;
     }>`PRAGMA journal_size_limit`;
     assert.equal(journalLimit?.journal_size_limit, 67108864);
+    // Checkpoints move to a worker where it is supported and measured faster; the writer keeps
+    // a 10,000-frame backstop. Elsewhere it keeps SQLite's default.
+    const [version] = yield* sql<{ readonly version: string }>`SELECT sqlite_version() AS version`;
+    const [autocheckpoint] = yield* sql<{
+      readonly wal_autocheckpoint: number;
+    }>`PRAGMA wal_autocheckpoint`;
+    const probe = new DatabaseSync(":memory:");
+    const hasIsTransaction = typeof probe.isTransaction === "boolean";
+    probe.close();
+    const usesWorker =
+      checkpointWorkerUnavailableReason({
+        filename: dbPath,
+        readonly: false,
+        image: false,
+        hasIsTransaction,
+        sqliteVersion: version?.version ?? "",
+        platform: process.platform,
+        electron: process.versions.electron !== undefined,
+        anyPlatform: false,
+      }) === undefined;
+    assert.equal(autocheckpoint?.wal_autocheckpoint, usesWorker ? 10_000 : 1_000);
   }).pipe(
     Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+it.effect("keeps SQLite's own checkpoints without the worker and in memory", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ryco-sqlite-no-worker-"));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+  const autocheckpoint = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const [row] = yield* sql<{ readonly wal_autocheckpoint: number }>`PRAGMA wal_autocheckpoint`;
+    return row?.wal_autocheckpoint;
+  });
+
+  return Effect.gen(function* () {
+    // Short-lived CLI processes (layerConfigCli) open the database this way.
+    const withoutWorker = yield* autocheckpoint.pipe(
+      Effect.provide(
+        makeSqlitePersistenceLive(dbPath, { checkpointWorker: false }).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+    assert.equal(withoutWorker, 1_000);
+    assert.equal(yield* autocheckpoint.pipe(Effect.provide(SqlitePersistenceMemory)), 1_000);
+  }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });
