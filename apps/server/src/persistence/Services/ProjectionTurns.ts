@@ -120,6 +120,16 @@ export interface ProjectionTurnRepositoryShape {
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
+   * Writes `next` over the row `previous` that this transaction read, or nothing when they are
+   * equal. An upsert of identical values still rewrites the row's index entries and advances the
+   * AUTOINCREMENT sequence. `next` must keep `previous`'s thread and turn ids.
+   */
+  readonly replaceByTurnId: (input: {
+    readonly previous: ProjectionTurnById;
+    readonly next: ProjectionTurnById;
+  }) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
    * Replaces any existing pending-start placeholder rows for a thread with exactly one latest pending-start row.
    */
   readonly replacePendingTurnStart: (

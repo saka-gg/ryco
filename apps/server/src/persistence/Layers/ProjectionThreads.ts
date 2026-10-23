@@ -13,6 +13,7 @@ import {
   AttachProjectionThreadToWorktreeInput,
   SetProjectionThreadManualBucketInput,
   SetProjectionThreadManualPositionInput,
+  TouchProjectionThreadInput,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
 import {
@@ -277,6 +278,39 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  // `touch` is two statements on purpose: listing the counter columns in SET makes SQLite maintain
+  // idx_projection_threads_pending_attention (its WHERE reads them) on every write. With zero
+  // deltas only the table page and idx_projection_threads_project_updated_at change. The WHERE
+  // guards make a touch that changes nothing write nothing.
+  const touchProjectionThreadUpdatedAt = SqlSchema.void({
+    Request: TouchProjectionThreadInput,
+    execute: ({ threadId, updatedAt }) =>
+      sql`
+        UPDATE projection_threads
+        SET updated_at = ${updatedAt}
+        WHERE thread_id = ${threadId}
+          AND updated_at IS NOT ${updatedAt}
+      `,
+  });
+
+  const touchProjectionThreadSummary = SqlSchema.void({
+    Request: TouchProjectionThreadInput,
+    execute: ({ threadId, updatedAt, pendingApprovalDelta, pendingUserInputDelta }) =>
+      sql`
+        UPDATE projection_threads
+        SET
+          updated_at = ${updatedAt},
+          pending_approval_count = MAX(0, pending_approval_count + ${pendingApprovalDelta}),
+          pending_user_input_count = MAX(0, pending_user_input_count + ${pendingUserInputDelta})
+        WHERE thread_id = ${threadId}
+          AND (
+            updated_at IS NOT ${updatedAt}
+            OR pending_approval_count IS NOT MAX(0, pending_approval_count + ${pendingApprovalDelta})
+            OR pending_user_input_count IS NOT MAX(0, pending_user_input_count + ${pendingUserInputDelta})
+          )
+      `,
+  });
+
   const listUsageLimitedThreadRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: Schema.Struct({ threadId: ThreadId }),
@@ -355,6 +389,12 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.setManualPosition:query")),
     );
 
+  const touch: ProjectionThreadRepositoryShape["touch"] = (input) =>
+    (input.pendingApprovalDelta === 0 && input.pendingUserInputDelta === 0
+      ? touchProjectionThreadUpdatedAt(input)
+      : touchProjectionThreadSummary(input)
+    ).pipe(Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.touch:query")));
+
   const listUsageLimitedThreadIds: ProjectionThreadRepositoryShape["listUsageLimitedThreadIds"] =
     () =>
       listUsageLimitedThreadRows(undefined).pipe(
@@ -378,6 +418,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
     attachToWorktree,
     setManualBucket,
     setManualPosition,
+    touch,
     listUsageLimitedThreadIds,
   } satisfies ProjectionThreadRepositoryShape;
 });

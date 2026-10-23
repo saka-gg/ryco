@@ -45,7 +45,7 @@ that no longer contains them; rebuilding uses the retained event log.
 ```sh
 bun install --frozen-lockfile # Bun 1.4.0
 node apps/server/scripts/compare-streaming-sqlite.ts
-# Individual run; profiles: buffered, streaming, timer, stress, reads
+# Individual run; profiles: buffered, streaming, streaming-turn, timer, stress, reads, tools
 node apps/server/scripts/measure-streaming-sqlite.ts 200000 1 buffered
 # Exact base server sources, same fixture/runtime/dependencies, no checkout needed
 RYCO_SQLITE_FIXTURE_REF=1b53113f4a91f8aefc0d42db6791940fad3b4418 node --import ./apps/server/scripts/streaming-sqlite-revision.ts apps/server/scripts/measure-streaming-sqlite.ts 200000 1 buffered
@@ -143,6 +143,62 @@ Small-page/side-context and revert medians can remain higher. Normal completed
 side-question reads keep their SQL character bound; unusual fallback bodies are
 decoded before the existing output bound. Unfinished reads remain proportional to
 the accumulated body/chunk count.
+
+## Tool-heavy turns and narrow row writes
+
+Every persisted event used to rewrite the whole `projection_threads` row (all 33 columns and the
+indexes that list them), and every reply delta in a turn also rewrote that turn's row. The thread
+row is now written narrowly for the frequent events:
+
+- `thread.activity-appended` and `thread.approval-response-requested` set only `updated_at` and
+  move the pending counters by the deltas the approval and activity projectors computed
+  (`ProjectionThreadRepository.touch`). With both deltas 0 the statement does not list the
+  counter columns, so the pending-attention index is left alone.
+- `thread.message-sent` for replies, system messages and a fork's inherited prompts sets only
+  `updated_at`; the thread's own prompts keep the full path because they move
+  `latest_user_message_at`. `thread.user-input-response-requested` sets only `updated_at`.
+- A touch that changes nothing (same time, deltas that clamp to the same counts) writes nothing.
+  `updated_at` still takes the event's time, also when that is older than the stored one.
+- The turns projector reads a turn row and writes it back only when a value changed
+  (`ProjectionTurnRepository.replaceByTurnId`). An upsert with identical values still rewrote the
+  row's index entries and advanced the `AUTOINCREMENT` sequence; skipping it changes later
+  `row_id` gaps, never their order, and `row_id` is only used for ordering.
+
+Rows stay identical to the full-row writes. Two exceptions, both on rows written by older code: a
+touch leaves legacy JSON (`model_selection_json`, `goal_json`, `usage_limit_json`) and defaults as
+they are where a full upsert re-encoded them (decoded rows are equal), and a row whose JSON no
+longer decodes no longer fails the event's projection. The differential check runs the same random
+streams through older server sources and the working tree:
+
+```sh
+node apps/server/scripts/projection-narrow-writes-equivalence.ts --against <ref> 30 150
+```
+
+Measured with the fixture above (Node 24.22.0, SQLite 3.54.0, macOS arm64, 4096-byte pages,
+synchronous FULL); base `c619866f2` through the source overlay; three alternating samples, WAL
+counts identical in every sample:
+
+```sh
+node apps/server/scripts/measure-streaming-sqlite.ts 2000 20 tools
+node apps/server/scripts/measure-streaming-sqlite.ts 200000 1 streaming-turn
+```
+
+| Profile                                 | WAL base → narrow (bytes) |        Per event | Thread / turn row writes |
+| --------------------------------------- | ------------------------: | ---------------: | -----------------------: |
+| tools (2,000 bash updates, 20 ms apart) | 172,014,152 → 122,537,072 |  85,921 → 61,207 |        2,002 → 3 / 0 → 0 |
+| streaming-turn (200 KB reply in a turn) |     5,397,232 → 3,773,952 | 107,945 → 75,479 |         52 → 52 / 50 → 2 |
+
+The `tools` profile models one OpenCode bash call: OpenCode emits a tool update per output chunk,
+each persisted payload is identical (the projection drops the streamed `metadata.output`) and
+carries the tool's start time, so after the first running update the thread row is not written
+again. In `streaming-turn` every event moves `updated_at`, so the thread row is still written per
+event, but only that column and its one index (the two extra thread writes come from the
+latest-completed-turn trigger when the turn row changes: the reply is bound, the turn completes).
+The other write profiles keep one constant event time, so a touch is a no-op there and their WAL
+drop overstates the production saving; they print `rowWrites` to show it. Timings are not claimed.
+The `rowWrites` counters are TEMP triggers that run inside the timed loops;
+`RYCO_SQLITE_FIXTURE_ROW_WRITES=0` times without them, and `compare-streaming-sqlite.ts` sets it so
+its samples stay comparable with the table above.
 
 ## Restart and downgrade limits
 

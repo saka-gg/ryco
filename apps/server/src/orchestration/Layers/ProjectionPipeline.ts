@@ -645,7 +645,11 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
   );
 });
 
-const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjectionPipeline")(
+/**
+ * Exported for the narrow-write differential test (ProjectionPipeline.narrowWrites.test.ts);
+ * production uses `OrchestrationProjectionPipelineLive`.
+ */
+export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjectionPipeline")(
   function* () {
     const sql = yield* SqlClient.SqlClient;
     const eventStore = yield* OrchestrationEventStore;
@@ -1158,24 +1162,33 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.message-sent": {
+          // Replies (streamed deltas included), system messages and a fork's inherited prompts
+          // change only updated_at. Only the thread's own prompts move latest_user_message_at.
+          if (
+            !countsTowardUserRecency(event.payload.threadId, {
+              role: event.payload.role,
+              id: event.payload.messageId,
+            })
+          ) {
+            yield* projectionThreadRepository.touch({
+              threadId: event.payload.threadId,
+              updatedAt: event.occurredAt,
+              pendingApprovalDelta: 0,
+              pendingUserInputDelta: 0,
+            });
+            return;
+          }
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
           });
           if (Option.isNone(existingRow)) {
             return;
           }
-          const summary = applyThreadShellSummaryTransition(
-            existingRow.value,
-            countsTowardUserRecency(event.payload.threadId, {
-              role: event.payload.role,
-              id: event.payload.messageId,
-            })
-              ? { latestUserMessageAt: event.payload.createdAt }
-              : {},
-          );
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            ...summary,
+            ...applyThreadShellSummaryTransition(existingRow.value, {
+              latestUserMessageAt: event.payload.createdAt,
+            }),
             updatedAt: event.occurredAt,
           });
           return;
@@ -1203,35 +1216,26 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        // The most frequent thread events. They change only updated_at and the pending counters
+        // (the deltas the pending-approval and activity projectors computed for this event), so
+        // they write those columns alone, and nothing when the row already holds them.
         case "thread.activity-appended":
         case "thread.approval-response-requested": {
-          const existingRow = yield* projectionThreadRepository.getById({
+          yield* projectionThreadRepository.touch({
             threadId: event.payload.threadId,
-          });
-          if (Option.isNone(existingRow)) {
-            return;
-          }
-          yield* projectionThreadRepository.upsert({
-            ...existingRow.value,
-            ...applyThreadShellSummaryTransition(existingRow.value, {
-              pendingApprovalDelta: attachmentSideEffects.pendingApprovalDelta,
-              pendingUserInputDelta: attachmentSideEffects.pendingUserInputDelta,
-            }),
             updatedAt: event.occurredAt,
+            pendingApprovalDelta: attachmentSideEffects.pendingApprovalDelta,
+            pendingUserInputDelta: attachmentSideEffects.pendingUserInputDelta,
           });
           return;
         }
 
         case "thread.user-input-response-requested": {
-          const existingRow = yield* projectionThreadRepository.getById({
+          yield* projectionThreadRepository.touch({
             threadId: event.payload.threadId,
-          });
-          if (Option.isNone(existingRow)) {
-            return;
-          }
-          yield* projectionThreadRepository.upsert({
-            ...existingRow.value,
             updatedAt: event.occurredAt,
+            pendingApprovalDelta: 0,
+            pendingUserInputDelta: 0,
           });
           return;
         }
@@ -1998,9 +2002,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               turnId: released.turnId,
             });
             if (Option.isSome(releasedRow)) {
-              yield* projectionTurnRepository.upsertByTurnId({
-                ...releasedRow.value,
-                ...mergeReleasedTurn(releasedRow.value, released),
+              yield* projectionTurnRepository.replaceByTurnId({
+                previous: releasedRow.value,
+                next: {
+                  ...releasedRow.value,
+                  ...mergeReleasedTurn(releasedRow.value, released),
+                },
               });
             }
           }
@@ -2022,32 +2029,35 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               existingTurn.value.state === "completed" || existingTurn.value.state === "error"
                 ? existingTurn.value.state
                 : "running";
-            yield* projectionTurnRepository.upsertByTurnId({
-              ...existingTurn.value,
-              state: nextState,
-              pendingMessageId:
-                existingTurn.value.pendingMessageId ??
-                (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),
-              sourceProposedPlanThreadId:
-                existingTurn.value.sourceProposedPlanThreadId ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.sourceProposedPlanThreadId
-                  : null),
-              sourceProposedPlanId:
-                existingTurn.value.sourceProposedPlanId ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.sourceProposedPlanId
-                  : null),
-              startedAt:
-                existingTurn.value.startedAt ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.requestedAt
-                  : event.occurredAt),
-              requestedAt:
-                existingTurn.value.requestedAt ??
-                (Option.isSome(pendingTurnStart)
-                  ? pendingTurnStart.value.requestedAt
-                  : event.occurredAt),
+            yield* projectionTurnRepository.replaceByTurnId({
+              previous: existingTurn.value,
+              next: {
+                ...existingTurn.value,
+                state: nextState,
+                pendingMessageId:
+                  existingTurn.value.pendingMessageId ??
+                  (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),
+                sourceProposedPlanThreadId:
+                  existingTurn.value.sourceProposedPlanThreadId ??
+                  (Option.isSome(pendingTurnStart)
+                    ? pendingTurnStart.value.sourceProposedPlanThreadId
+                    : null),
+                sourceProposedPlanId:
+                  existingTurn.value.sourceProposedPlanId ??
+                  (Option.isSome(pendingTurnStart)
+                    ? pendingTurnStart.value.sourceProposedPlanId
+                    : null),
+                startedAt:
+                  existingTurn.value.startedAt ??
+                  (Option.isSome(pendingTurnStart)
+                    ? pendingTurnStart.value.requestedAt
+                    : event.occurredAt),
+                requestedAt:
+                  existingTurn.value.requestedAt ??
+                  (Option.isSome(pendingTurnStart)
+                    ? pendingTurnStart.value.requestedAt
+                    : event.occurredAt),
+              },
             });
           } else {
             yield* projectionTurnRepository.upsertByTurnId({
@@ -2093,26 +2103,31 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             turnId: event.payload.turnId,
           });
           if (Option.isSome(existingTurn)) {
-            yield* projectionTurnRepository.upsertByTurnId({
-              ...existingTurn.value,
-              assistantMessageId: yield* turnAssistantMessageAfter(
-                existingTurn.value,
-                event.payload,
-              ),
-              state: event.payload.streaming
-                ? existingTurn.value.state
-                : existingTurn.value.state === "interrupted"
-                  ? "interrupted"
-                  : existingTurn.value.state === "error"
-                    ? "error"
-                    : "completed",
-              // Progress updates complete before the turn does; the turn ends
-              // with its latest completed message, not its first.
-              completedAt: event.payload.streaming
-                ? existingTurn.value.completedAt
-                : laterIsoTimestamp(existingTurn.value.completedAt, event.payload.updatedAt),
-              startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
-              requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,
+            // Every streamed delta of a reply lands here; after the first binds the reply, the
+            // row is unchanged until the reply completes, so those deltas write no turn row.
+            yield* projectionTurnRepository.replaceByTurnId({
+              previous: existingTurn.value,
+              next: {
+                ...existingTurn.value,
+                assistantMessageId: yield* turnAssistantMessageAfter(
+                  existingTurn.value,
+                  event.payload,
+                ),
+                state: event.payload.streaming
+                  ? existingTurn.value.state
+                  : existingTurn.value.state === "interrupted"
+                    ? "interrupted"
+                    : existingTurn.value.state === "error"
+                      ? "error"
+                      : "completed",
+                // Progress updates complete before the turn does; the turn ends
+                // with its latest completed message, not its first.
+                completedAt: event.payload.streaming
+                  ? existingTurn.value.completedAt
+                  : laterIsoTimestamp(existingTurn.value.completedAt, event.payload.updatedAt),
+                startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
+                requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,
+              },
             });
             return;
           }
@@ -2144,12 +2159,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             turnId: event.payload.turnId,
           });
           if (Option.isSome(existingTurn)) {
-            yield* projectionTurnRepository.upsertByTurnId({
-              ...existingTurn.value,
-              state: "interrupted",
-              completedAt: existingTurn.value.completedAt ?? event.payload.createdAt,
-              startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
-              requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,
+            yield* projectionTurnRepository.replaceByTurnId({
+              previous: existingTurn.value,
+              next: {
+                ...existingTurn.value,
+                state: "interrupted",
+                completedAt: existingTurn.value.completedAt ?? event.payload.createdAt,
+                startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
+                requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,
+              },
             });
             return;
           }
@@ -2189,16 +2207,21 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           // non-null timestamp for every checkpoint reader, so a null one is filled from
           // the diff even while the turn runs; the release then takes the later time.
           if (Option.isSome(existingTurn)) {
-            yield* projectionTurnRepository.upsertByTurnId({
-              ...existingTurn.value,
-              assistantMessageId: event.payload.assistantMessageId,
-              checkpointTurnCount: event.payload.checkpointTurnCount,
-              checkpointRef: event.payload.checkpointRef,
-              checkpointStatus: event.payload.status,
-              checkpointFiles: event.payload.files,
-              startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
-              requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
-              completedAt: existingTurn.value.completedAt ?? event.payload.completedAt,
+            // The conflict clear above never touches this turn's own row, so `existingTurn`
+            // is still what the row holds.
+            yield* projectionTurnRepository.replaceByTurnId({
+              previous: existingTurn.value,
+              next: {
+                ...existingTurn.value,
+                assistantMessageId: event.payload.assistantMessageId,
+                checkpointTurnCount: event.payload.checkpointTurnCount,
+                checkpointRef: event.payload.checkpointRef,
+                checkpointStatus: event.payload.status,
+                checkpointFiles: event.payload.files,
+                startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
+                requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
+                completedAt: existingTurn.value.completedAt ?? event.payload.completedAt,
+              },
             });
             return;
           }
