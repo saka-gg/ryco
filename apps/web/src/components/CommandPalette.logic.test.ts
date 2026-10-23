@@ -13,6 +13,7 @@ import {
   buildBrowseItemValue,
   buildMessageSearchItems,
   buildSettingsSearchItems,
+  buildSnoozeUntilGroups,
   buildThreadActionItems,
   filterBrowseEntries,
   filterCommandPaletteGroups,
@@ -244,6 +245,41 @@ describe("buildMessageSearchItems", () => {
     if (item?.kind !== "action") throw new Error("expected action item");
     await item.run();
     expect(runMessage).toHaveBeenCalledWith(result);
+  });
+});
+
+describe("buildSnoozeUntilGroups", () => {
+  it("lists each snooze time with when it wakes the thread, and snoozes until it", async () => {
+    const snooze = vi.fn();
+    const groups = buildSnoozeUntilGroups({
+      options: [
+        {
+          id: "hour",
+          label: "In 1 hour",
+          snoozedUntil: "2026-03-04T13:00:00.000Z",
+          timeLabel: "Wed 14:00",
+        },
+        {
+          id: "tomorrow",
+          label: "Tomorrow morning",
+          snoozedUntil: "2026-03-05T08:00:00.000Z",
+          timeLabel: "Thu 09:00",
+        },
+      ],
+      icon: null,
+      snooze,
+    });
+
+    expect(groups.map((group) => group.label)).toEqual(["Snooze until"]);
+    const items = groups[0]?.items ?? [];
+    expect(items.map((item) => [item.title, item.description])).toEqual([
+      ["In 1 hour", "Wed 14:00"],
+      ["Tomorrow morning", "Thu 09:00"],
+    ]);
+    const tomorrow = items[1];
+    if (tomorrow?.kind !== "action") throw new Error("expected action item");
+    await tomorrow.run();
+    expect(snooze).toHaveBeenCalledWith("2026-03-05T08:00:00.000Z");
   });
 });
 

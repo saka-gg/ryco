@@ -131,6 +131,7 @@ import {
   buildProjectActionItems,
   buildRootGroups,
   buildSettingsSearchItems,
+  buildSnoozeUntilGroups,
   buildThreadActionItems,
   type CommandPaletteMessageSearchResult,
   type CommandPaletteActionItem,
@@ -1451,6 +1452,32 @@ function OpenCommandPaletteDialog() {
     }
     pushPaletteView(splitThreadView);
     // Runs once per intent; the view captures the current items.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [openIntent]);
+
+  useLayoutEffect(() => {
+    if (openIntent?.kind !== "snooze-thread") {
+      return;
+    }
+    clearOpenIntent();
+    // Read again: the thread may have changed while the palette loaded.
+    const lifecycle = useCommandPaletteStore.getState().readCurrentThreadLifecycle?.() ?? null;
+    const reason = lifecycle?.disabledReasons.snooze ?? null;
+    if (lifecycle === null || lifecycle.snoozed || reason !== null) {
+      setOpen(false);
+      if (reason !== null) toastManager.add(stackedThreadToast({ type: "info", title: reason }));
+      return;
+    }
+    pushPaletteView({
+      // An icon the palette already loads: a new one would regroup the shell's icon chunks.
+      addonIcon: <CalendarClockIcon className={ADDON_ICON_CLASS} />,
+      groups: buildSnoozeUntilGroups({
+        options: lifecycle.snoozeOptions(),
+        icon: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+        snooze: lifecycle.snooze,
+      }),
+    });
+    // Runs once per intent; the view captures the times from now.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [openIntent]);
 

@@ -5,6 +5,7 @@ import {
   type MessageId,
   type OrchestrationReadModel,
   type ThreadId,
+  TurnId,
   WS_METHODS,
 } from "@ryco/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -19,6 +20,7 @@ import {
 } from "../environments/runtime";
 import { isMacPlatform } from "../lib/utils";
 import { useSettingsDialogStore } from "../settingsDialogStore";
+import { sidebarUndo } from "../sidebarUndo";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
@@ -77,6 +79,94 @@ import {
   waitForWsRequestsToSettle,
   wsRequests,
 } from "./ChatView.browser.helpers";
+
+// Recent, so the thread is not settled automatically by age.
+const LIFECYCLE_TURN_REQUESTED_AT = new Date(Date.now() - 120_000).toISOString();
+const LIFECYCLE_TURN_COMPLETED_AT = new Date(Date.now() - 60_000).toISOString();
+
+/** The bootstrap thread after a turn that finished, or one still running. */
+function createLifecycleSnapshot(options: { running?: boolean } = {}): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-lifecycle-shortcuts" as MessageId,
+    targetText: "lifecycle shortcuts",
+  });
+  const thread = snapshot.threads[0]!;
+  const turnId = TurnId.make("turn-lifecycle-shortcuts");
+  const requestedAt = LIFECYCLE_TURN_REQUESTED_AT;
+  return {
+    ...snapshot,
+    threads: [
+      {
+        ...thread,
+        latestTurn: options.running
+          ? {
+              turnId,
+              state: "running",
+              requestedAt,
+              startedAt: requestedAt,
+              completedAt: null,
+              assistantMessageId: null,
+            }
+          : {
+              turnId,
+              state: "completed",
+              requestedAt,
+              startedAt: requestedAt,
+              completedAt: LIFECYCLE_TURN_COMPLETED_AT,
+              assistantMessageId: null,
+            },
+        session: {
+          ...thread.session!,
+          status: options.running ? "running" : "ready",
+          activeTurnId: options.running ? turnId : null,
+        },
+      },
+    ],
+  };
+}
+
+const enableThreadLifecycle: NonNullable<
+  Parameters<typeof mountChatView>[0]["configureFixture"]
+> = (nextFixture) => {
+  const capabilities = {
+    repositoryIdentity: true,
+    threadSettlement: true,
+    threadSnooze: true,
+    threadSidebarUndo: true,
+    threadPriorityRanking: false,
+  };
+  nextFixture.serverConfig = {
+    ...nextFixture.serverConfig,
+    environment: { ...nextFixture.serverConfig.environment, capabilities },
+  };
+  nextFixture.welcome = {
+    ...nextFixture.welcome,
+    environment: { ...nextFixture.welcome.environment, capabilities },
+  };
+};
+
+/** ⌥⇧⌘ (Ctrl+Alt+Shift off macOS) plus `letter`, from the focused element. */
+function pressLifecycleChord(letter: "A" | "D" | "S" | "U"): KeyboardEvent {
+  const useMetaForMod = isMacPlatform(navigator.platform);
+  const event = new KeyboardEvent("keydown", {
+    key: letter,
+    code: `Key${letter}`,
+    altKey: true,
+    shiftKey: true,
+    metaKey: useMetaForMod,
+    ctrlKey: !useMetaForMod,
+    bubbles: true,
+    cancelable: true,
+  });
+  (document.activeElement ?? window).dispatchEvent(event);
+  return event;
+}
+
+function dispatchedCommandTypes(): unknown[] {
+  return wsRequests
+    .filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand)
+    .map((request) => (request as { type?: unknown }).type);
+}
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
@@ -639,6 +729,111 @@ describe("ChatView Navigation (full app)", () => {
       await vi.waitFor(() => {
         expect(useUiStateStore.getState().pinnedThreadKeys[THREAD_KEY]).not.toBe(true);
       });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("settles the open thread from its shortcut while the composer has focus", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot(),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      (await waitForComposerEditor()).focus();
+      const event = pressLifecycleChord("D");
+      expect(event.defaultPrevented).toBe(true);
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.settle"));
+    } finally {
+      sidebarUndo.dispose();
+      await mounted.cleanup();
+    }
+  });
+
+  it("says why a running thread cannot be settled and sends nothing", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot({ running: true }),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      expect(pressLifecycleChord("D").defaultPrevented).toBe(true);
+      await expect
+        .element(page.getByText("Wait for the running work to finish.", { exact: true }))
+        .toBeInTheDocument();
+      expect(dispatchedCommandTypes()).not.toContain("thread.settle");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens the snooze times from the snooze shortcut and snoozes until the one picked", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot(),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      pressLifecycleChord("S");
+      const palette = page.getByTestId("command-palette");
+      await expect.element(palette.getByText("Snooze until", { exact: true })).toBeInTheDocument();
+      await palette.getByText("Tomorrow morning", { exact: true }).click();
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.snooze"));
+      expect(useCommandPaletteStore.getState().open).toBe(false);
+    } finally {
+      sidebarUndo.dispose();
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the open thread unread after Mark unread until it is left", async () => {
+    const otherThreadId = "thread-lifecycle-other" as ThreadId;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(createLifecycleSnapshot(), otherThreadId),
+      configureFixture: enableThreadLifecycle,
+    });
+    const lastVisitedAt = () => useUiStateStore.getState().threadLastVisitedAtById[THREAD_KEY];
+    const markedUnread = new Date(Date.parse(LIFECYCLE_TURN_COMPLETED_AT) - 1).toISOString();
+
+    try {
+      await waitForServerConfigToApply();
+      // Opening the thread reads its finished turn.
+      await vi.waitFor(() => expect(lastVisitedAt()).toBe(LIFECYCLE_TURN_COMPLETED_AT));
+
+      pressLifecycleChord("U");
+      await expect
+        .element(page.getByText("Thread marked unread", { exact: true }))
+        .toBeInTheDocument();
+      expect(lastVisitedAt()).toBe(markedUnread);
+      await waitForLayout();
+      expect(lastVisitedAt()).toBe(markedUnread);
+
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: otherThreadId },
+      });
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath(otherThreadId),
+        "The other thread should open.",
+      );
+      await waitForLayout();
+      expect(lastVisitedAt()).toBe(markedUnread);
+
+      // Opening it again reads it.
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: THREAD_ID },
+      });
+      await vi.waitFor(() => expect(lastVisitedAt()).toBe(LIFECYCLE_TURN_COMPLETED_AT));
     } finally {
       await mounted.cleanup();
     }

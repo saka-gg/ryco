@@ -6,6 +6,7 @@ import {
 } from "@ryco/contracts";
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { type ReactNode } from "react";
+import type { ThreadSnoozeOption } from "../commandPaletteStore";
 import { sortThreads } from "../lib/threadSort";
 import type { SettingsSectionId } from "../settingsDialogStore";
 import { formatRelativeTimeLabel } from "../timestampFormat";
@@ -282,6 +283,31 @@ export function buildSettingsSearchItems(input: {
       input.runEntry(entry);
     },
   }));
+}
+
+/** The open thread's "Snooze until" view: each time, with when it wakes the thread. */
+export function buildSnoozeUntilGroups(input: {
+  options: ReadonlyArray<ThreadSnoozeOption>;
+  icon: ReactNode;
+  snooze: (snoozedUntil: string) => void;
+}): CommandPaletteGroup[] {
+  return [
+    {
+      value: "snooze-until",
+      label: "Snooze until",
+      items: input.options.map((option) => ({
+        kind: "action" as const,
+        value: `snooze-until:${option.id}`,
+        searchTerms: [option.label, option.timeLabel],
+        title: option.label,
+        description: option.timeLabel,
+        icon: input.icon,
+        run: async () => {
+          input.snooze(option.snoozedUntil);
+        },
+      })),
+    },
+  ];
 }
 
 export function filterCommandPaletteGroups(input: {

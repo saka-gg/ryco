@@ -142,7 +142,17 @@ focused control.
 
 <!-- File search commands -->
 
-<!-- Thread lifecycle commands -->
+#### Thread lifecycle
+
+- `thread.settle`: settle the open thread, or move a settled one back to Active (default `mod+alt+shift+d`)
+- `thread.snooze`: pick a time to snooze the open thread until in the command palette, or wake a snoozed one (default `mod+alt+shift+s`)
+- `thread.archive`: archive the open thread, asking first when "Confirm before archiving" is on (default `mod+alt+shift+a`)
+- `thread.markUnread`: mark the open thread unread; it stays unread until you leave it (default `mod+alt+shift+u`)
+
+These work while you type, but not in the terminal, a menu or a dialog. When the thread cannot take
+the action, for example while it is working or its machine is offline, a toast says why. Without an
+open thread the key goes to the focused control. Their defaults live in the app, not on the node,
+so older apps have no keys for them.
 
 <!-- Attention commands -->
 
