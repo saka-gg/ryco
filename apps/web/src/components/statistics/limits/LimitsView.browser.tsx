@@ -299,8 +299,18 @@ describe("LimitsView", () => {
       driver: ProviderDriverKind.make("claudeAgent"),
       displayName: "Claude personal",
       auth: { status: "authenticated", label: "Claude Max Subscription" },
-      rateLimits: { primary: { usedPercent: 40, windowDurationMins: 300 } },
+      rateLimits: { primary: { usedPercent: 90, windowDurationMins: 300 } },
     });
+    const hubAccount = (authIndex: string, usedPercent: number) =>
+      account({
+        authIndex,
+        name: `claude-${authIndex}.json`,
+        quota: {
+          status: "ok",
+          checkedAt,
+          windows: [{ id: "five_hour", usedPercent, windowDurationMins: 300 }],
+        },
+      });
     serve([
       {
         environmentId: desktop,
@@ -309,15 +319,7 @@ describe("LimitsView", () => {
         providers: [routedClaude, directClaude],
         hubs: [
           {
-            ...loopbackHub([
-              account({
-                quota: {
-                  status: "ok",
-                  checkedAt,
-                  windows: [{ id: "five_hour", usedPercent: 20, windowDurationMins: 300 }],
-                },
-              }),
-            ]),
+            ...loopbackHub([hubAccount("a", 20), hubAccount("b", 40)]),
             routedInstanceIds: [routedClaude.instanceId],
           },
         ],
@@ -330,22 +332,177 @@ describe("LimitsView", () => {
       />,
     );
 
-    await expect.element(page.getByText("1 direct · 1 via hub")).toBeVisible();
-    // Direct accounts are never averaged, so the lone hub account has no pool row.
-    await expect.element(page.getByText("40% used")).toBeVisible();
-    await expect.element(page.getByText("20% used")).toBeVisible();
-    expect(document.body.textContent).not.toContain("avg of");
+    await expect.element(page.getByText("1 direct · 2 via hub")).toBeVisible();
+    // The pool averages the hub's 20% and 40% only; the direct 90% is never averaged in.
+    await expect.element(page.getByText("70% left")).toBeVisible();
+    await expect.element(page.getByText("avg of 2 hub accounts")).toBeVisible();
+    await expect.element(page.getByText("90% used")).toBeVisible();
     await expect.element(page.getByText("Claude proxied", { exact: true })).toBeVisible();
     expect(document.body.textContent).not.toContain("99% used");
 
     await page.getByRole("radio", { name: "CLIProxyAPI" }).click();
-    await expect.element(page.getByText("1 via hub", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("2 via hub", { exact: true })).toBeVisible();
+    // Without direct cards beside it, the hub view reads as it always has.
+    await expect.element(page.getByText("avg of 2 accounts")).toBeVisible();
     expect(document.body.textContent).not.toContain("Claude Max Subscription");
     expect(document.body.textContent).not.toContain("Claude proxied");
 
     await page.getByRole("radio", { name: "Direct" }).click();
     await expect.element(page.getByText("1 direct", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("avg of");
     expect(page.getByRole("heading", { name: "Hubs" }).query()).toBeNull();
+  });
+
+  it("counts an account signed in on two nodes once", async () => {
+    serve([
+      { environmentId: desktop, label: "This machine", status: "ok", hubs: [], providers: [codex] },
+      { environmentId: ssh, label: "Build box", status: "ok", hubs: [], providers: [codex] },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("1 account · 1 direct", { exact: false })).toBeVisible();
+    await expect.element(page.getByText("signed in on 2 nodes", { exact: false })).toBeVisible();
+  });
+
+  it("keeps one email on two plans as two accounts", async () => {
+    const team = provider({
+      ...codex,
+      instanceId: ProviderInstanceId.make("codex-team"),
+      displayName: "Codex team",
+      rateLimits: { ...codex.rateLimits, planType: "plus" },
+    });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        hubs: [],
+        providers: [codex, team],
+      },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("2 accounts · 2 direct", { exact: false })).toBeVisible();
+    await expect.element(page.getByText("Direct", { exact: true }).nth(1)).toBeVisible();
+  });
+
+  it("notes a direct account a hub also holds, under every source filter", async () => {
+    const directClaude = provider({
+      instanceId: ProviderInstanceId.make("claude-personal"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude personal",
+      auth: { status: "authenticated", email: "shared.person@example.com" },
+      rateLimits: { primary: { usedPercent: 40, windowDurationMins: 300 } },
+    });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        providers: [directClaude],
+        hubs: [loopbackHub([account({ email: "Shared.Person@example.com" })])],
+      },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    const note = page.getByText("also in 127.0.0.1:8317", { exact: false });
+    await expect.element(note).toBeVisible();
+    expect(document.body.textContent?.toLowerCase()).not.toContain("shared.person@example.com");
+
+    await page.getByRole("radio", { name: "Direct" }).click();
+    await expect.element(page.getByText("1 direct", { exact: true })).toBeVisible();
+    await expect.element(note).toBeVisible();
+  });
+
+  it("takes the banked resets from the node that reported them", async () => {
+    const older = new Date(Date.parse(checkedAt) - 60_000).toISOString();
+    serve([
+      { environmentId: desktop, label: "This machine", status: "ok", hubs: [], providers: [codex] },
+      {
+        environmentId: ssh,
+        label: "Build box",
+        status: "ok",
+        hubs: [],
+        providers: [
+          provider({
+            ...codex,
+            checkedAt: older,
+            rateLimits: { ...codex.rateLimits, resetCredits: { availableCount: 2 } },
+          }),
+        ],
+      },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("signed in on 2 nodes", { exact: false })).toBeVisible();
+    await expect.element(page.getByText("2 banked resets", { exact: false })).toBeVisible();
+  });
+
+  it("judges pace against a live snapshot as soon as it arrives", async () => {
+    const pacedCodex = (checkedAtMs: number) =>
+      provider({
+        ...codex,
+        checkedAt: new Date(checkedAtMs).toISOString(),
+        rateLimits: {
+          planType: "pro",
+          // Half of the 5-hour window has passed at the check.
+          primary: {
+            usedPercent: 23,
+            windowDurationMins: 300,
+            resetsAt: (checkedAtMs + 150 * 60_000) / 1000,
+          },
+        },
+      });
+    const environment = {
+      environmentId: desktop,
+      label: "This machine",
+      status: "ok",
+      connected: true,
+      hubs: [],
+    } as const;
+    serve([{ ...environment, providers: [pacedCodex(Date.now() - 1_000)] }]);
+    // A new element each time, so React renders again instead of bailing out on equal props.
+    const view = () => (
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />
+    );
+    mounted = await render(view());
+    const reserve = page.getByRole("button", { name: /27 percentage points below even pace/ });
+    await expect.element(reserve).toBeVisible();
+
+    // A provider push read after the view's last tick; no hub read comes with it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const pushedAt = Date.now() - 5;
+    harness.result = {
+      ...harness.result!,
+      environments: [{ ...environment, providers: [pacedCodex(pushedAt)] }],
+    };
+    await mounted.rerender(view());
+
+    await expect.element(reserve).toBeVisible();
+    expect(document.body.textContent).not.toContain("Pace unavailable");
   });
 
   it("offers the provider settings when nothing reports limits", async () => {

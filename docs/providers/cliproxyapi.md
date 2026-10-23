@@ -63,7 +63,10 @@ it once per node, labelled with the node's name.
 ## Statistics → Limits
 
 The **Limits** tab on the Statistics page lists every account of every enabled hub, grouped by
-provider.
+provider, next to the accounts provider instances sign in to directly (see
+[Usage limits and pace](./usage-limits.md)). When there are both, a source filter shows all of
+them, direct accounts only, or hub accounts only. A direct account that a hub also holds (same
+provider and email) is marked **also in _hub_**; its hub card is unchanged.
 
 - **Claude**: the 5-hour window, the weekly window and any model-scoped weekly windows
   (for example Opus or Fable), plus the plan.
@@ -76,9 +79,10 @@ provider.
   traffic. The hub resets these counters when it restarts. Keys are shown as their last four
   characters only.
 
-With several accounts of one provider, a pooled row averages each window across the accounts that
-reported it. Accounts on bigger plans count the same as smaller ones, so treat the pooled value as
-a rough guide and read the per-account bars for decisions.
+With several hub accounts of one provider, a pooled row averages each window across the hub
+accounts that reported it. Direct accounts never enter the average; when they share the provider's
+panel, the row says **avg of N hub accounts**. Accounts on bigger plans count the same as smaller
+ones, so treat the pooled value as a rough guide and read the per-account bars for decisions.
 
 Pace markers work like the provider limits described in [Usage limits and pace](./usage-limits.md).
 

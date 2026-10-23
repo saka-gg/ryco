@@ -8,6 +8,7 @@ import {
   formatCliProxyPlan,
   groupCliProxyAccounts,
   groupSubscriptionLimits,
+  hubKeysByDirectAccount,
   listCliProxyApiKeys,
   listDirectProviderAccounts,
   type CliProxyAccountHealth,
@@ -40,7 +41,7 @@ import { useSettingsDialogStore } from "~/settingsDialogStore";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
 import { formatRateLimitResetText } from "../../settings/codexUsageLimits";
-import { SettingsNotice, useRelativeTimeTick } from "../../settings/settingsLayout";
+import { SettingsNotice, useRelativeLabelTick } from "../../settings/settingsLayout";
 import { Panel, Sparkline, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
 import { AccountEmail, CliProxyAccountName } from "../../usage/AccountEmail";
 import { ProviderLimitWindow } from "../../usage/ProviderLimitWindow";
@@ -66,6 +67,32 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+const secondsToMs = (seconds: number | undefined) =>
+  seconds === undefined ? undefined : seconds * 1000;
+
+/** The instants the view reads against now: checks, resets and hub retry times. */
+function limitsLabelInstants(
+  accounts: ReadonlyArray<DirectProviderAccount>,
+  hubs: ReadonlyArray<HubWithEnvironment>,
+): ReadonlyArray<number | undefined> {
+  const instants: Array<number | undefined> = [];
+  for (const account of accounts) {
+    instants.push(Date.parse(account.snapshot.checkedAt));
+    for (const { window } of account.windows) instants.push(secondsToMs(window.resetsAt));
+  }
+  for (const { hub } of hubs) {
+    instants.push(Date.parse(hub.checkedAt));
+    for (const account of hub.accounts) {
+      for (const window of account.quota.windows) instants.push(secondsToMs(window.resetsAt));
+      for (const { retryAt } of account.cooldowns) {
+        if (retryAt) instants.push(Date.parse(retryAt));
+      }
+      if (account.nextRetryAt) instants.push(Date.parse(account.nextRetryAt));
+    }
+  }
+  return instants;
+}
+
 export function LimitsView({
   search,
   onSearchChange,
@@ -74,8 +101,6 @@ export function LimitsView({
   readonly onSearchChange: (next: StatisticsSearch) => void;
 }) {
   const result = useSubscriptionLimits({ environmentIds: search.environmentIds });
-  // The tick can predate freshly received snapshots, which would make them look future-dated.
-  const now = Math.max(useRelativeTimeTick(30_000), result.receivedAtMs);
   const openSettings = useSettingsDialogStore((state) => state.openSettings);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const hubs = useMemo(
@@ -101,6 +126,15 @@ export function LimitsView({
         })),
       ),
     [result.environments],
+  );
+  // Ticks when a label, pace or health could change, and reads the clock again as soon as a
+  // snapshot changes, so a live provider push never looks future-dated to pace. The hub receipt
+  // time covers hub reads within the same render.
+  const now = Math.max(
+    useRelativeLabelTick(
+      useMemo(() => limitsLabelInstants(direct.accounts, hubs), [direct.accounts, hubs]),
+    ),
+    result.receivedAtMs,
   );
   // The filter only narrows the view while both sources have accounts to show.
   const hubAccountCount = useMemo(
@@ -136,6 +170,13 @@ export function LimitsView({
           : entry.hub.label,
       ] as const;
     }),
+  );
+  // From every hub, not the filtered groups, so the note stays under the Direct filter.
+  const alsoInHubs = new Map(
+    [...hubKeysByDirectAccount(direct.accounts, hubs)].map(([accountKey, hubKeys]) => [
+      accountKey,
+      [...new Set(hubKeys.flatMap((hubKey) => hubLabels.get(hubKey) ?? []))],
+    ]),
   );
   // The filter stays visible while it narrows the view, so it can always be cleared.
   const environmentFilter =
@@ -287,6 +328,7 @@ export function LimitsView({
           group={group}
           now={now}
           hubLabels={showHubLabels ? hubLabels : null}
+          alsoInHubs={alsoInHubs}
           multipleEnvironments={multipleEnvironments}
         />
       ))}
@@ -314,7 +356,14 @@ export function LimitsView({
   );
 }
 
-function PooledSummary({ pooled }: { readonly pooled: ReadonlyArray<PooledLimitWindow> }) {
+function PooledSummary({
+  pooled,
+  besideDirect,
+}: {
+  readonly pooled: ReadonlyArray<PooledLimitWindow>;
+  /** Direct cards share the panel; the pool averages hub accounts only, so it says so. */
+  readonly besideDirect: boolean;
+}) {
   return (
     <div className="flex flex-wrap gap-2 border-b border-border/60 px-3.5 py-2.5">
       {pooled.map((window) => {
@@ -330,7 +379,8 @@ function PooledSummary({ pooled }: { readonly pooled: ReadonlyArray<PooledLimitW
               {Math.round(100 - window.usedPercent)}% left
             </p>
             <p className="text-[11px] text-muted-foreground">
-              avg of {window.accountCount} accounts{reset ? ` · next ${reset}` : ""}
+              avg of {window.accountCount} {besideDirect ? "hub accounts" : "accounts"}
+              {reset ? ` · next ${reset}` : ""}
             </p>
           </div>
         );
@@ -346,11 +396,14 @@ function ProviderGroup({
   group,
   now,
   hubLabels,
+  alsoInHubs,
   multipleEnvironments,
 }: {
   readonly group: SubscriptionLimitGroup;
   readonly now: number;
   readonly hubLabels: HubLabels;
+  /** Labels of the hubs that also hold each direct account, by account key. */
+  readonly alsoInHubs: ReadonlyMap<string, readonly string[]>;
   readonly multipleEnvironments: boolean;
 }) {
   // A single account's window is already on its card; only shared windows are pooled.
@@ -367,7 +420,9 @@ function ProviderGroup({
       action={<span className="text-[11px] text-muted-foreground">{counts}</span>}
       bodyClassName="overflow-hidden"
     >
-      {pooled.length > 0 ? <PooledSummary pooled={pooled} /> : null}
+      {pooled.length > 0 ? (
+        <PooledSummary pooled={pooled} besideDirect={group.directAccounts.length > 0} />
+      ) : null}
       {/* Cells draw right and bottom borders; the negative margins clip the outer edges. */}
       <div className="-mr-px -mb-px grid sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {group.directAccounts.map((account) => (
@@ -375,6 +430,7 @@ function ProviderGroup({
             key={account.key}
             account={account}
             now={now}
+            alsoIn={alsoInHubs.get(account.key) ?? []}
             multipleEnvironments={multipleEnvironments}
           />
         ))}
@@ -480,25 +536,23 @@ function DirectHealthBadge({ health }: { readonly health: DirectAccountHealth })
 function DirectAccountCard({
   account,
   now,
+  alsoIn,
   multipleEnvironments,
 }: {
   readonly account: DirectProviderAccount;
   readonly now: number;
+  readonly alsoIn: readonly string[];
   readonly multipleEnvironments: boolean;
 }) {
   const { snapshot } = account;
-  const plan =
-    snapshot.auth.label ??
-    snapshot.rateLimits?.limitName ??
-    formatCliProxyPlan(snapshot.rateLimits?.planType);
   const instanceNames = [...new Set(account.locations.map((location) => location.displayName))];
   const nodes = [...new Set(account.locations.map((location) => location.environmentLabel))];
   const where = multipleEnvironments
     ? `${instanceNames.join(", ")} on ${nodes.join(" · ")}`
     : instanceNames.join(", ");
-  const details = [plan, where].filter(Boolean).join(" · ");
+  const details = [account.plan, where].filter(Boolean).join(" · ");
   const credits = snapshot.rateLimits?.credits;
-  const resets = snapshot.rateLimits?.resetCredits?.availableCount;
+  const resets = account.resetCredits?.availableCount;
   return (
     <AccountCard
       source="direct"
@@ -515,6 +569,7 @@ function DirectAccountCard({
         <>
           checked {formatRelativeTimeLabel(snapshot.checkedAt, now)}
           {nodes.length > 1 ? ` · signed in on ${nodes.length} nodes` : ""}
+          {alsoIn.length > 0 ? ` · also in ${alsoIn.join(", ")}` : ""}
           {resets ? ` · ${pluralize(resets, "banked reset")}` : ""}
           {credits?.hasCredits
             ? ` · credits ${credits.unlimited ? "unlimited" : (credits.balance ?? "available")}`
