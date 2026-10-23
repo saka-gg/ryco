@@ -14,6 +14,12 @@ import { deleteEnv } from "@ryco/shared/runtimeEnv";
 import { removeDesktopOwnedHubEnvironment } from "./hubLaunchEnvironment.ts";
 
 export const DESKTOP_BACKEND_BOOTSTRAP_FD = 3;
+/**
+ * Telemetry, lifecycle frames and the update channel, and the backend's tie to
+ * this app: the backend shuts itself down when the pipe closes
+ * (apps/server/src/desktopParentLifetime.ts). Keep it open for as long as the
+ * backend should run; stop the backend instead of closing it.
+ */
 export const DESKTOP_BACKEND_TELEMETRY_FD = 4;
 
 /**

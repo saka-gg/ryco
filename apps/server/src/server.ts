@@ -42,6 +42,7 @@ import {
   isEarlyStaticRequest,
 } from "./httpStartupGate.ts";
 import { recordDesktopStartupPhase, writeDesktopLifecycleFrame } from "./desktopLifecycle.ts";
+import { DesktopParentLossShutdownLogLive } from "./desktopParentLifetime.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { fixPath } from "./os-jank.ts";
 import { deviceWebsocketRpcRouteLayer, websocketRpcRouteLayer } from "./ws.ts";
@@ -827,28 +828,28 @@ export const makeServerLayer = Layer.unwrap(
     );
 
     // Shutdown runs these stages in reverse build order; the markers log how
-    // long each took so slow finalizers can be attributed. The startup stall
+    // long each took so slow finalizers can be attributed, after a line naming
+    // the desktop app's loss when that is the cause. The startup stall
     // monitor is built before the HTTP bind and the runtime graph (migrations,
     // read model, provider hydration), so stalls in any of them are
     // attributed, but after observability so its warnings reach the server
     // log. The hydration layer provides the same value; memoization keeps it
     // to one monitor, owned here.
     const shutdownClock = makeShutdownClock();
-    return shutdownClock
-      .marker("started")
-      .pipe(
-        Layer.provideMerge(serverApplicationLayer),
-        Layer.provideMerge(shutdownClock.marker("http-drained")),
-        Layer.provideMerge(RuntimeServicesLive),
-        Layer.provideMerge(shutdownClock.marker("runtime-services-closed")),
-        Layer.provideMerge(WorkspaceAccessPolicyLive),
-        Layer.provideMerge(HttpServerLive),
-        Layer.provideMerge(StartupStallMonitorLive),
-        Layer.provide(ObservabilityLive),
-        Layer.provideMerge(FetchHttpClient.layer),
-        Layer.provideMerge(VcsProcess.layer),
-        Layer.provideMerge(PlatformServicesLive),
-      );
+    return DesktopParentLossShutdownLogLive.pipe(
+      Layer.provideMerge(shutdownClock.marker("started")),
+      Layer.provideMerge(serverApplicationLayer),
+      Layer.provideMerge(shutdownClock.marker("http-drained")),
+      Layer.provideMerge(RuntimeServicesLive),
+      Layer.provideMerge(shutdownClock.marker("runtime-services-closed")),
+      Layer.provideMerge(WorkspaceAccessPolicyLive),
+      Layer.provideMerge(HttpServerLive),
+      Layer.provideMerge(StartupStallMonitorLive),
+      Layer.provide(ObservabilityLive),
+      Layer.provideMerge(FetchHttpClient.layer),
+      Layer.provideMerge(VcsProcess.layer),
+      Layer.provideMerge(PlatformServicesLive),
+    );
   }),
 );
 
