@@ -835,6 +835,7 @@ describe("resolveShortcutCommand", () => {
     const keybindings = compileResolvedKeybindingsConfig([
       { key: "mod+alt+a", command: "chat.newWithoutProject" },
       { key: "mod+alt+[", command: "pane.focusPrevious" },
+      { key: "mod+alt+m", command: "pane.split" },
     ]);
     const resolve = (overrides: Partial<ShortcutEventLike>, platform = "Win32") =>
       resolveShortcutCommand(event(overrides), keybindings, { platform });
@@ -856,6 +857,24 @@ describe("resolveShortcutCommand", () => {
     assert.strictEqual(
       resolve({ key: "[", code: "BracketLeft", ctrlKey: true, altKey: true }),
       "pane.focusPrevious",
+    );
+    // A layout letter still matches by its physical key: German Ctrl+Alt+Ü is the [ key.
+    assert.strictEqual(
+      resolve({ key: "ü", code: "BracketLeft", ctrlKey: true, altKey: true, ...altGraph }),
+      "pane.focusPrevious",
+    );
+    // A non-Latin layout reports its own letter (Russian "ф" on the A key) and matches by the
+    // physical key, unless AltGr typed it.
+    assert.strictEqual(
+      resolve({ key: "ф", code: "KeyA", ctrlKey: true, altKey: true }),
+      "chat.newWithoutProject",
+    );
+    assert.isNull(resolve({ key: "ф", code: "KeyA", ctrlKey: true, altKey: true, ...altGraph }));
+    // German AltGr+M types "µ", which is no layout's own letter.
+    assert.isNull(resolve({ key: "µ", code: "KeyM", ctrlKey: true, altKey: true }));
+    assert.strictEqual(
+      resolve({ key: "m", code: "KeyM", ctrlKey: true, altKey: true }),
+      "pane.split",
     );
     // macOS has no AltGr: ⌘⌥A still matches through the physical key.
     assert.strictEqual(

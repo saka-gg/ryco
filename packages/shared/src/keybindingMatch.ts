@@ -38,7 +38,10 @@ const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
 
 const LETTER_EVENT_CODE = /^Key([A-Z])$/;
 const PLAIN_LETTER_KEY = /^[a-z]$/i;
-const PLAIN_LETTER_OR_DIGIT_KEY = /^[a-z0-9]$/i;
+// A letter of a non-Latin layout (Russian Ctrl+Alt+P reports "з"), never one AltGr types on a
+// Latin layout (Polish "ą") or a shared symbol letter (German AltGr+M types "µ").
+const NON_LATIN_LETTER_KEY = /^(?![\p{Script=Latin}\p{Script=Common}])\p{L}$/u;
+const LETTER_OR_DIGIT_KEY = /^(?:\p{L}|[0-9])$/u;
 
 export function normalizeShortcutEventKey(key: string): string {
   const normalized = key.toLowerCase();
@@ -53,21 +56,29 @@ export function normalizeShortcutEventKey(key: string): string {
  * and the layout did not already produce a plain letter, so every layout that
  * does report letters (Windows/Linux Ctrl+Alt, non-QWERTY) keeps its own key.
  * Windows reports AltGr as Ctrl+Alt, and AltGr types letters such as Polish
- * "ą" on the A key, so outside macOS the fallback never applies with Ctrl held.
+ * "ą" on the A key, so outside macOS with Ctrl held the fallback applies only
+ * to the letters of a non-Latin layout, and never while AltGr is reported.
  */
 function resolveAltTransformedLetter(
   event: ShortcutEventLike,
   useMetaForMod: boolean,
 ): string | null {
   if (!event.altKey || !event.code || PLAIN_LETTER_KEY.test(event.key)) return null;
-  if (event.ctrlKey && !useMetaForMod) return null;
+  if (
+    event.ctrlKey &&
+    !useMetaForMod &&
+    (event.getModifierState?.("AltGraph") === true || !NON_LATIN_LETTER_KEY.test(event.key))
+  ) {
+    return null;
+  }
   const match = LETTER_EVENT_CODE.exec(event.code);
   return match?.[1] ? match[1].toLowerCase() : null;
 }
 
 /**
- * A character typed with AltGr (German AltGr+8 is "[") is text, not a
- * shortcut, wherever the browser reports AltGr. macOS has no AltGr; Option
+ * A symbol typed with AltGr (German AltGr+8 is "[") is text, not a shortcut,
+ * wherever the browser reports AltGr. A letter or digit still matches by its
+ * physical key (German Ctrl+Alt+Ü is the [ key). macOS has no AltGr; Option
  * belongs to ⌘⌥ chords there.
  */
 function isAltGraphCharacter(event: ShortcutEventLike, useMetaForMod: boolean): boolean {
@@ -75,7 +86,7 @@ function isAltGraphCharacter(event: ShortcutEventLike, useMetaForMod: boolean): 
     !useMetaForMod &&
     event.getModifierState?.("AltGraph") === true &&
     event.key.length === 1 &&
-    !PLAIN_LETTER_OR_DIGIT_KEY.test(event.key)
+    !LETTER_OR_DIGIT_KEY.test(event.key)
   );
 }
 

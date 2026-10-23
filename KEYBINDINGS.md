@@ -177,9 +177,10 @@ letter key, so a `mod+alt+n` binding works as ⌘⌥N. Layouts that still report
 held match by that letter.
 
 On Windows and Linux, AltGr types characters on many layouts (Polish AltGr+A types `ą`, German
-AltGr+8 types `[`), and Windows reports it as Ctrl+Alt. Those keys keep typing: the physical letter
-does not stand in while Ctrl is held, and a character typed with AltGr never matches a binding
-when the browser reports AltGr.
+AltGr+8 types `[`), and Windows reports it as Ctrl+Alt. Those keys keep typing: while Ctrl is held,
+the physical letter stands in only for the letters of a non-Latin layout (Russian Ctrl+Alt+P
+reports `з` and matches `mod+alt+p`), and a symbol typed with AltGr never matches a binding when
+the browser reports AltGr.
 
 ### `when` Conditions
 
