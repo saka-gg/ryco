@@ -6,15 +6,28 @@ import * as Schema from "effect/Schema";
 // The auto-settle interval here is this browser's own: nodes that keep their own rule ignore it,
 // so it applies only to older nodes, and is what a first connection hands to a node with none set.
 export const HOSTED_INBOX_PREFERENCES_KEY = "ryco:hosted-inbox-preferences:v1";
-const Preferences = Schema.Struct({
-  sidebarAutoSettleAfterDays: ClientSettingsSchema.fields.sidebarAutoSettleAfterDays,
-  aiFocusEnabled: ClientSettingsSchema.fields.aiFocusEnabled,
-  aiFocusRefreshIntervalMs: ClientSettingsSchema.fields.aiFocusRefreshIntervalMs,
-  notifyOnTurnCompleteWhenUnfocused: ClientSettingsSchema.fields.notifyOnTurnCompleteWhenUnfocused,
-  threadNotificationSound: ClientSettingsSchema.fields.threadNotificationSound,
-  threadNotificationToasts: ClientSettingsSchema.fields.threadNotificationToasts,
-});
-const JsonPreferences = Schema.fromJsonString(Preferences);
+const PREFERENCE_KEYS = [
+  "sidebarAutoSettleAfterDays",
+  "aiFocusEnabled",
+  "aiFocusRefreshIntervalMs",
+  "notifyOnTurnCompleteWhenUnfocused",
+  "threadNotificationSound",
+  "threadNotificationToasts",
+] as const;
+type PreferenceKey = (typeof PREFERENCE_KEYS)[number];
+
+function pickPreferences<T extends Record<PreferenceKey, unknown>>(
+  source: T,
+): Pick<T, PreferenceKey> {
+  return Object.fromEntries(PREFERENCE_KEYS.map((key) => [key, source[key]])) as Pick<
+    T,
+    PreferenceKey
+  >;
+}
+
+const JsonPreferences = Schema.fromJsonString(
+  Schema.Struct(pickPreferences(ClientSettingsSchema.fields)),
+);
 
 export function readHostedInboxPreferences(): Partial<ClientSettings> {
   try {
@@ -26,13 +39,6 @@ export function readHostedInboxPreferences(): Partial<ClientSettings> {
 }
 
 export function writeHostedInboxPreferences(settings: ClientSettings): void {
-  const value = Schema.encodeSync(JsonPreferences)({
-    sidebarAutoSettleAfterDays: settings.sidebarAutoSettleAfterDays,
-    aiFocusEnabled: settings.aiFocusEnabled,
-    aiFocusRefreshIntervalMs: settings.aiFocusRefreshIntervalMs,
-    notifyOnTurnCompleteWhenUnfocused: settings.notifyOnTurnCompleteWhenUnfocused,
-    threadNotificationSound: settings.threadNotificationSound,
-    threadNotificationToasts: settings.threadNotificationToasts,
-  });
+  const value = Schema.encodeSync(JsonPreferences)(pickPreferences(settings));
   window.localStorage.setItem(HOSTED_INBOX_PREFERENCES_KEY, value);
 }
