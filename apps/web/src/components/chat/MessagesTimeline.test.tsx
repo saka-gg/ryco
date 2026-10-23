@@ -367,6 +367,52 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Fable 5");
   });
 
+  it("says why a fresh session got the conversation when the provider lost its history", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const sameModel = makeContextHandoffMarker().target;
+    const consumed = makeContextHandoffMarker({
+      id: "context-handoff:history-gone",
+      handoffId: ContextHandoffId.make("handoff-history-gone"),
+      reason: "native-history-unavailable",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const uncertain = makeContextHandoffMarker({
+      id: "context-handoff:history-gone-uncertain",
+      handoffId: ContextHandoffId.make("handoff-history-gone-uncertain"),
+      reason: "native-history-unavailable",
+      status: "delivery-uncertain",
+      error: "Ryco restarted before the provider confirmed the message.",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[consumed, uncertain].map((marker) => ({
+          id: marker.id,
+          kind: "context-handoff" as const,
+          createdAt: marker.createdAt,
+          marker,
+        }))}
+      />,
+    );
+
+    expect(markup.match(/data-context-handoff-reason="native-history-unavailable"/g)).toHaveLength(
+      2,
+    );
+    expect(markup).toContain("Continued in a fresh session");
+    expect(markup).toContain(
+      'aria-label="Fresh session. Delivery uncertain: Ryco restarted before the provider confirmed the message"',
+    );
+    expect(markup).toContain("lucide-history");
+    // An unconfirmed delivery is never sent again, so it offers no retry.
+    expect(markup).not.toContain("data-context-handoff-retry-hint");
+    expect(markup).not.toContain("lucide-folder-input");
+    expect(markup).not.toContain("lucide-arrow-right");
+    expect(markup).not.toContain("Context handoff from");
+  });
+
   it("renders a fork's handoff as its inherited conversation reaching a fresh session", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const sameModel = makeContextHandoffMarker().target;

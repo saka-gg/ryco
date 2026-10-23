@@ -6,9 +6,21 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Result } from "effect";
 import { TestClock } from "effect/testing";
+import { isMissingConversationError } from "../resumeFailure.ts";
 import { makeRegistryAcpRuntime } from "./AcpRegistrySupport.ts";
 
-const fixture = (capabilities: object = {}, protocolVersion = 1) =>
+/** The JSON-RPC error a failing `session/load` (or failing `session/resume`) answers with. */
+interface LoadError {
+  readonly code: number;
+  readonly message: string;
+  readonly data?: unknown;
+}
+
+const fixture = (
+  capabilities: object = {},
+  protocolVersion = 1,
+  loadError: LoadError = { code: -32000, message: "Cannot load" },
+) =>
   Effect.gen(function* () {
     const dir = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "ryco-registry-runtime-"))),
@@ -30,7 +42,7 @@ createInterface({input:process.stdin}).on('line', line => {
  if(request.method==='initialize') result={protocolVersion:${protocolVersion},agentCapabilities:${JSON.stringify(capabilities)},authMethods:[{id:'login',name:'Login'}]};
  if(request.method==='session/new' && ${"silentStart" in capabilities}) return;
  if(request.method==='session/new') result={sessionId:'registry-test',models:{currentModelId:'a',availableModels:[{modelId:'a',name:'A'}]}};
- if(request.method==='session/load' || (request.method==='session/resume' && ${"failResume" in capabilities})) { process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error:{code:-32000,message:'Cannot load'}})+'\\n'); return; }
+ if(request.method==='session/load' || (request.method==='session/resume' && ${"failResume" in capabilities})) { process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error:${JSON.stringify(loadError)}})+'\\n'); return; }
  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result})+'\\n');
 });
 `,
@@ -101,6 +113,59 @@ it.effect("strict resume propagates load failures without starting a fresh conve
       ["initialize", "session/load"],
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+const failureOf = <A, E>(result: Result.Result<A, E>): E | undefined =>
+  Result.isFailure(result) ? result.failure : undefined;
+
+it.effect("strict resume names the session an agent could not find", () =>
+  Effect.gen(function* () {
+    for (const [capabilities, loadError] of [
+      // ACP's "Resource not found" for the session `session/load` was asked for.
+      [
+        { resume: true, loadSession: true },
+        { code: -32002, message: "Resource not found" },
+      ],
+      [
+        { resume: true, loadSession: true },
+        { code: -32002, message: "Resource not found", data: { uri: "old" } },
+      ],
+      // The same answer to `session/resume`.
+      [
+        { resume: true, failResume: true, sessionCapabilities: { resume: {} } },
+        { code: -32002, message: "Resource not found" },
+      ],
+    ] as const) {
+      const failure = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const { runtime } = yield* fixture(capabilities, 1, loadError);
+          return failureOf(yield* runtime.start().pipe(Effect.result));
+        }),
+      );
+      assert.equal(failure?._tag, "AcpRequestError");
+      assert.equal(failure?.message, "Session not found: old (Resource not found)");
+      assert.isTrue(isMissingConversationError(failure));
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("strict resume keeps other load failures as the agent sent them", () =>
+  Effect.gen(function* () {
+    for (const loadError of [
+      { code: -32000, message: "Cannot load" },
+      // "Resource not found" for something other than the session.
+      { code: -32002, message: "Resource not found", data: { uri: "file:///missing/cwd" } },
+    ]) {
+      const failure = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const { runtime } = yield* fixture({ resume: true, loadSession: true }, 1, loadError);
+          return failureOf(yield* runtime.start().pipe(Effect.result));
+        }),
+      );
+      assert.equal(failure?.message, loadError.message);
+      assert.isFalse(isMissingConversationError(failure));
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect("strict registry resume selects advertised session/resume before legacy loading", () =>

@@ -10,7 +10,7 @@ import type {
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
-import { ContextHandoffActivityPayload } from "@ryco/contracts";
+import { CONTEXT_HANDOFF_SCHEMA_VERSION, ContextHandoffStatus, MessageId } from "@ryco/contracts";
 import { FORKED_THREAD_RELATIONSHIP } from "@ryco/shared/threadFork";
 import { Effect, Option, Schema } from "effect";
 
@@ -91,14 +91,28 @@ function endedTurnStartMessageIds(thread: OrchestrationThread): ReadonlySet<stri
   return messageIds;
 }
 
+/**
+ * The part of a handoff activity that decides whether it is actionable. Lenient on purpose: the
+ * full payload of a newer server (for example a handoff reason this build does not know) still
+ * reads by its status, so a finished handoff never blocks reverts, promotion or the next handoff
+ * after a downgrade. A payload whose schema version, status or target cannot be read stays
+ * actionable.
+ */
+const decodeContextHandoffProgress = Schema.decodeUnknownOption(
+  Schema.Struct({
+    schemaVersion: Schema.Literal(CONTEXT_HANDOFF_SCHEMA_VERSION),
+    status: ContextHandoffStatus,
+    targetMessageId: MessageId,
+  }),
+);
+
 export function hasActionableContextHandoff(thread: OrchestrationThread): boolean {
-  const decode = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
   let endedTurnStarts: ReadonlySet<string> | undefined;
   return thread.activities.some((activity) => {
     if (activity.kind !== "context-handoff") {
       return false;
     }
-    return Option.match(decode(activity.payload), {
+    return Option.match(decodeContextHandoffProgress(activity.payload), {
       onNone: () => true,
       onSome: (payload) => {
         if (payload.status === "dispatching") return true;

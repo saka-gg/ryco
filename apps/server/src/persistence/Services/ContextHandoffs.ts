@@ -2,6 +2,7 @@ import {
   CONTEXT_HANDOFF_CONTEXT_VERSION,
   CONTEXT_HANDOFF_ERROR_MAX_CHARS,
   ContextHandoffId,
+  ContextHandoffStatus,
   IsoDateTime,
   MessageId,
   ModelSelection,
@@ -16,15 +17,9 @@ import type { Effect } from "effect";
 
 import type { ContextHandoffRepositoryError } from "../Errors.ts";
 
-export const ContextHandoffOperationalStatus = Schema.Literals([
-  "requested",
-  "preparing",
-  "dispatching",
-  "consumed",
-  "failed",
-  "delivery-uncertain",
-]);
-export type ContextHandoffOperationalStatus = typeof ContextHandoffOperationalStatus.Type;
+/** An operation record's status: the activity payload's statuses, persisted as the same literals. */
+export const ContextHandoffOperationalStatus = ContextHandoffStatus;
+export type ContextHandoffOperationalStatus = ContextHandoffStatus;
 
 const ContextDigest = TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/));
 const ContextHandoffError = TrimmedNonEmptyString.check(

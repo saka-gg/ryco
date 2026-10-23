@@ -2,6 +2,7 @@ import { useAppKeybindings } from "../appKeybindings";
 import { notifyWorktreeSubmoduleSetup } from "./worktrees/worktreeCreationNotifications";
 import { closeThreadTerminal } from "../terminalClose";
 import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
+import { ResumeFallbackHandoffIcon } from "./chat/ContextHandoffMarkerRow";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
@@ -7099,6 +7100,7 @@ export default function ChatView(props: ChatViewProps) {
                 environmentId={activeThread.environmentId}
                 threadId={activeThread.id}
                 marker={inspectedContextHandoff.marker}
+                ResumeFallbackIcon={ResumeFallbackHandoffIcon}
                 onClose={closeContextHandoffInspection}
               />
             ) : null}
@@ -7206,6 +7208,7 @@ export default function ChatView(props: ChatViewProps) {
               environmentId={activeThread.environmentId}
               threadId={activeThread.id}
               marker={inspectedContextHandoff.marker}
+              ResumeFallbackIcon={ResumeFallbackHandoffIcon}
               onClose={closeContextHandoffInspection}
             />
           ) : null}

@@ -10,10 +10,13 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   contextHandoffStatusSuffix,
   CWD_RELOCATION_HANDOFF_COPY,
-  cwdRelocationHandoffAccessibleLabel,
-  cwdRelocationHandoffHeadline,
-  cwdRelocationHandoffRetryHint,
   isCwdRelocationHandoff,
+  isModelChangeHandoff,
+  NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY,
+  resumeFallbackHandoffAccessibleLabel,
+  resumeFallbackHandoffCopy,
+  resumeFallbackHandoffHeadline,
+  resumeFallbackHandoffRetryHint,
 } from "./contextHandoff.ts";
 import {
   deriveCompletionDividerBeforeEntryId,
@@ -2359,32 +2362,62 @@ describe("deriveWorkLogEntries context window handling", () => {
           reason: "cwd-relocation",
         }),
       }),
+      makeActivity({
+        id: "handoff-history-gone",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "context-handoff",
+        summary: "Context handoff",
+        tone: "info",
+        payload: contextHandoffPayload("consumed", {
+          handoffId: "handoff-history-gone",
+          reason: "native-history-unavailable",
+        }),
+      }),
     ]);
 
-    expect(entries).toHaveLength(2);
+    expect(entries).toHaveLength(3);
     expect(entries[0]).not.toHaveProperty("reason");
     expect(entries[1]?.reason).toBe("cwd-relocation");
-    expect(entries.map(isCwdRelocationHandoff)).toEqual([false, true]);
+    expect(entries[2]?.reason).toBe("native-history-unavailable");
+    expect(entries.map(isCwdRelocationHandoff)).toEqual([false, true, false]);
+    expect(entries.map(resumeFallbackHandoffCopy)).toEqual([
+      null,
+      CWD_RELOCATION_HANDOFF_COPY,
+      NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY,
+    ]);
+    // A fresh session on the same model is not a model change.
+    expect(entries.map(isModelChangeHandoff)).toEqual([true, false, false]);
     expect(isCwdRelocationHandoff({ reason: "model-change" })).toBe(false);
+    expect(resumeFallbackHandoffCopy({ reason: "model-change" })).toBeNull();
+    expect(resumeFallbackHandoffCopy({ reason: "fork" })).toBeNull();
   });
 
-  it("names a relocation by its outcome, not by a model transition", () => {
-    expect(cwdRelocationHandoffHeadline("consumed")).toBe(
+  it("names a resume fallback by its outcome, not by a model transition", () => {
+    expect(resumeFallbackHandoffHeadline(CWD_RELOCATION_HANDOFF_COPY, "consumed")).toBe(
       "Continued in a fresh session in the new folder",
     );
-    expect(cwdRelocationHandoffHeadline("failed")).toBe(CWD_RELOCATION_HANDOFF_COPY.attempted);
-    expect(cwdRelocationHandoffHeadline("delivery-uncertain")).toBe(
+    expect(resumeFallbackHandoffHeadline(CWD_RELOCATION_HANDOFF_COPY, "failed")).toBe(
       CWD_RELOCATION_HANDOFF_COPY.attempted,
+    );
+    expect(resumeFallbackHandoffHeadline(CWD_RELOCATION_HANDOFF_COPY, "delivery-uncertain")).toBe(
+      CWD_RELOCATION_HANDOFF_COPY.attempted,
+    );
+    expect(resumeFallbackHandoffHeadline(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY, "consumed")).toBe(
+      "Continued in a fresh session",
+    );
+    expect(resumeFallbackHandoffHeadline(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY, "failed")).toBe(
+      "Fresh session",
     );
   });
 
-  it("describes a relocation divider for screen readers, with a retry hint only on failure", () => {
+  it("describes a resume-fallback divider for screen readers, with a retry hint only on failure", () => {
     const relocation = { reason: "cwd-relocation" as const };
-    expect(cwdRelocationHandoffAccessibleLabel({ ...relocation, status: "consumed" })).toBe(
+    const copy = CWD_RELOCATION_HANDOFF_COPY;
+    expect(resumeFallbackHandoffAccessibleLabel(copy, { ...relocation, status: "consumed" })).toBe(
       "Continued in a fresh session in the new folder",
     );
     expect(
-      cwdRelocationHandoffAccessibleLabel({
+      resumeFallbackHandoffAccessibleLabel(copy, {
         ...relocation,
         status: "failed",
         error: "Provider exited",
@@ -2393,16 +2426,23 @@ describe("deriveWorkLogEntries context window handling", () => {
       "Fresh session in the new folder. Failed: Provider exited. Send your message again to retry",
     );
     expect(
-      cwdRelocationHandoffAccessibleLabel({ ...relocation, status: "delivery-uncertain" }),
+      resumeFallbackHandoffAccessibleLabel(copy, { ...relocation, status: "delivery-uncertain" }),
     ).toBe("Fresh session in the new folder. Delivery uncertain");
+    expect(
+      resumeFallbackHandoffAccessibleLabel(NATIVE_HISTORY_UNAVAILABLE_HANDOFF_COPY, {
+        reason: "native-history-unavailable",
+        status: "delivery-uncertain",
+      }),
+    ).toBe("Fresh session. Delivery uncertain");
 
-    expect(cwdRelocationHandoffRetryHint({ ...relocation, status: "failed" })).toBe(
+    expect(resumeFallbackHandoffRetryHint(copy, { ...relocation, status: "failed" })).toBe(
       CWD_RELOCATION_HANDOFF_COPY.retryHint,
     );
-    expect(cwdRelocationHandoffRetryHint({ ...relocation, status: "consumed" })).toBeNull();
-    // A model change, even one recorded before handoffs carried a reason, offers no retry.
-    expect(cwdRelocationHandoffRetryHint({ status: "failed" })).toBeNull();
-    expect(cwdRelocationHandoffRetryHint({ status: "failed", reason: "model-change" })).toBeNull();
+    expect(resumeFallbackHandoffRetryHint(copy, { ...relocation, status: "consumed" })).toBeNull();
+    // An unconfirmed delivery is never sent again, so it offers no retry.
+    expect(
+      resumeFallbackHandoffRetryHint(copy, { ...relocation, status: "delivery-uncertain" }),
+    ).toBeNull();
   });
 
   it("names how an unfinished handoff ended", () => {

@@ -95,9 +95,9 @@ import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ContextHandoffRepositoryLive } from "../../persistence/Layers/ContextHandoffs.ts";
 import { ContextHandoffServiceLive } from "../contextHandoff/ContextHandoffService.ts";
 import {
-  CWD_RELOCATION_HANDOFF_ID_PREFIX,
-  cwdRelocationHandoffReference,
-} from "../contextHandoff/ContextHandoffRelocation.ts";
+  RESUME_FALLBACK_HANDOFF_ID_PREFIX,
+  resumeFallbackHandoffReference,
+} from "../contextHandoff/ContextHandoffResumeFallback.ts";
 import { ContextHandoffCoordinatorLive } from "./ContextHandoffCoordinator.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
@@ -167,6 +167,7 @@ describe("ProviderCommandReactor", () => {
     | ProjectionSnapshotQuery
     | ProjectionThreadUserInputRequestRepository
     | ProjectionPendingApprovalRepository
+    | ContextHandoffCoordinator
     | SqlClient.SqlClient,
     unknown
   > | null = null;
@@ -798,6 +799,13 @@ describe("ProviderCommandReactor", () => {
       engine,
       sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
       run: <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect),
+      /** What a boot runs before provider intents recover (OrchestrationReactor). */
+      recoverContextHandoffs: () =>
+        runtime!.runPromise(
+          Effect.flatMap(Effect.service(ContextHandoffCoordinator), (coordinator) =>
+            coordinator.recover(),
+          ),
+        ),
       startReactor,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
@@ -2569,7 +2577,12 @@ describe("ProviderCommandReactor", () => {
     const MOVED_WORKTREE = "/tmp/provider-project-worktree";
     type Harness = Awaited<ReturnType<typeof createHarness>>;
 
-    const sendMessage = (harness: Harness, messageId: string, text = messageId) =>
+    const sendMessage = (
+      harness: Harness,
+      messageId: string,
+      text = messageId,
+      createdAt = new Date().toISOString(),
+    ) =>
       Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.turn.start",
@@ -2578,7 +2591,7 @@ describe("ProviderCommandReactor", () => {
           message: { messageId: asMessageId(messageId), role: "user", text, attachments: [] },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
-          createdAt: new Date().toISOString(),
+          createdAt,
         }),
       );
     // A relocated worktree.
@@ -2605,13 +2618,27 @@ describe("ProviderCommandReactor", () => {
     // Promotion stops the sessions; the binding keeps its cursor and cwd.
     const stopRuntime = async (
       harness: Harness,
-      options?: { readonly completedTurn?: boolean },
+      options?: {
+        readonly completedTurn?: boolean;
+        /** A turn that reached the provider and was stopped before it completed. */
+        readonly interruptedTurn?: boolean;
+        readonly selection?: ModelSelection;
+      },
     ) => {
       harness.runtimeSessions.splice(0);
       const now = new Date().toISOString();
-      // The mock sendTurn projects no turn: a completed one needs a running session that
+      const selection = options?.selection ?? CLAUDE;
+      const providerName = String(selection.instanceId).startsWith("codex")
+        ? "codex"
+        : "claudeAgent";
+      const turnState = options?.completedTurn
+        ? ("completed" as const)
+        : options?.interruptedTurn
+          ? ("interrupted" as const)
+          : undefined;
+      // The mock sendTurn projects no turn: a settled one needs a running session that
       // names it, released below by the stop (see the delegation fixture).
-      if (options?.completedTurn) {
+      if (turnState !== undefined) {
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.session.set",
@@ -2620,8 +2647,8 @@ describe("ProviderCommandReactor", () => {
             session: {
               threadId: T,
               status: "running",
-              providerName: "claudeAgent",
-              providerInstanceId: CLAUDE.instanceId,
+              providerName,
+              providerInstanceId: selection.instanceId,
               runtimeSessionId: RuntimeSessionId.make("runtime-1"),
               runtimeMode: "approval-required",
               activeTurnId: asTurnId("turn-1"),
@@ -2640,20 +2667,23 @@ describe("ProviderCommandReactor", () => {
           session: {
             threadId: T,
             status: "stopped",
-            providerName: "claudeAgent",
-            providerInstanceId: CLAUDE.instanceId,
+            providerName,
+            providerInstanceId: selection.instanceId,
             runtimeSessionId: RuntimeSessionId.make("runtime-1"),
             runtimeMode: "approval-required",
             activeTurnId: null,
             lastError: null,
             updatedAt: now,
           },
-          ...(options?.completedTurn
+          ...(turnState !== undefined
             ? {
                 turnOutcome: {
                   turnId: asTurnId("turn-1"),
-                  state: "completed" as const,
-                  reason: "provider-turn-completed" as const,
+                  state: turnState,
+                  reason:
+                    turnState === "completed"
+                      ? ("provider-turn-completed" as const)
+                      : ("provider-turn-aborted" as const),
                   completedAt: now,
                 },
               }
@@ -2664,6 +2694,42 @@ describe("ProviderCommandReactor", () => {
     };
     const threadOf = async (harness: Harness) =>
       (await harness.readModel()).threads.find((entry) => entry.id === T);
+    // The mock sendTurn projects no turn: the provider ran one to completion, and its session
+    // stays live with the same runtime and modes.
+    const completeTurnOnLiveSession = async (harness: Harness) => {
+      const session = (await threadOf(harness))?.session;
+      if (!session) throw new Error("The thread has no session to complete a turn on.");
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-running-${crypto.randomUUID()}`),
+          threadId: T,
+          session: {
+            ...session,
+            status: "running",
+            activeTurnId: asTurnId("turn-1"),
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-ready-${crypto.randomUUID()}`),
+          threadId: T,
+          session: { ...session, status: "ready", activeTurnId: null, updatedAt: now },
+          turnOutcome: {
+            turnId: asTurnId("turn-1"),
+            state: "completed",
+            reason: "provider-turn-completed",
+            completedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+    };
     const handoffActivities = async (harness: Harness) =>
       ((await threadOf(harness))?.activities ?? [])
         .filter((activity) => activity.kind === CONTEXT_HANDOFF_ACTIVITY_KIND)
@@ -2692,9 +2758,9 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession).toHaveBeenCalledTimes(1);
       expect(harness.sendTurn).toHaveBeenCalledTimes(1);
       const [event] = harness.processContextHandoff.mock.calls[0]!;
-      const reference = cwdRelocationHandoffReference(event);
+      const reference = resumeFallbackHandoffReference(event);
       expect(event.payload.contextHandoff).toEqual(reference);
-      expect(reference.handoffId.startsWith(CWD_RELOCATION_HANDOFF_ID_PREFIX)).toBe(true);
+      expect(reference.handoffId.startsWith(RESUME_FALLBACK_HANDOFF_ID_PREFIX)).toBe(true);
       expect(reference.targetMessageId).toBe("after-move");
 
       const handoffs = await handoffActivities(harness);
@@ -2782,6 +2848,8 @@ describe("ProviderCommandReactor", () => {
       });
       await sendMessage(harness, "before-move");
       await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      // History to carry: without it, a missing conversation just restarts fresh.
+      await completeTurnOnLiveSession(harness);
 
       await moveWorktree(harness);
       await sendMessage(harness, "after-move");
@@ -2797,7 +2865,7 @@ describe("ProviderCommandReactor", () => {
       expect(harness.sendTurn).toHaveBeenCalledTimes(1);
       expect(
         harness.processContextHandoff.mock.calls[0]?.[0].payload.contextHandoff?.handoffId,
-      ).toMatch(CWD_RELOCATION_HANDOFF_ID_PREFIX);
+      ).toMatch(RESUME_FALLBACK_HANDOFF_ID_PREFIX);
       expect(await failuresOf(harness)).toEqual([]);
     });
 
@@ -2858,34 +2926,354 @@ describe("ProviderCommandReactor", () => {
       expect(await failuresOf(harness)).toEqual([]);
     });
 
-    it("keeps failing when a thread with a completed turn resumes a missing conversation", async () => {
+    // A queued or Agent Control message can be recorded while an earlier message's start is still
+    // resolving. It never reached the provider, so it is no history that start could lose.
+    it("starts fresh when a later message is recorded while the first one's start resolves", async () => {
+      const gate = Effect.runSync(Deferred.make<void>());
       const harness = await createHarness({
-        threadModelSelection: CLAUDE,
         startSessionEffect: ({ call }) =>
-          call === 2
-            ? Effect.fail(
-                new ProviderAdapterProcessError({
-                  provider: "codex",
-                  threadId: "thread-1",
-                  detail: "Codex App Server failed to resume the thread.",
-                  cause: new Error(
-                    "no rollout found for thread id 019a0000-0000-7000-8000-000000000002",
+          call === 1
+            ? Deferred.await(gate).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterProcessError({
+                      provider: "codex",
+                      threadId: "thread-1",
+                      detail: "Codex App Server failed to resume the thread.",
+                      cause: new Error(
+                        "no rollout found for thread id 019a0000-0000-7000-8000-000000000003",
+                      ),
+                    }),
                   ),
-                }),
+                ),
               )
             : undefined,
       });
-      await sendMessage(harness, "first");
-      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-      await stopRuntime(harness, { completedTurn: true });
-
-      await sendMessage(harness, "second");
-      await waitFor(async () => (await failuresOf(harness)).length === 1);
+      const sentAt = Date.now();
+      await sendMessage(harness, "first", "first", new Date(sentAt).toISOString());
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      await sendMessage(harness, "second", "second", new Date(sentAt + 1_000).toISOString());
+      Effect.runSync(Deferred.succeed(gate, undefined));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
       await harness.drain();
 
       expect(harness.startSession).toHaveBeenCalledTimes(2);
-      expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
-      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+      expect(harness.processContextHandoff).not.toHaveBeenCalled();
+      expect(await failuresOf(harness)).toEqual([]);
+    });
+
+    describe("when the provider no longer has the conversation", () => {
+      const CODEX: ModelSelection = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      };
+      const missingConversations = [
+        {
+          name: "Codex lost the rollout",
+          selection: CODEX,
+          // Codex app-server's actual reply for a thread without a rollout.
+          error: () =>
+            new ProviderAdapterProcessError({
+              provider: "codex",
+              threadId: "thread-1",
+              detail: "Codex App Server failed to resume the thread.",
+              cause: new Error(
+                "no rollout found for thread id 019a0000-0000-7000-8000-000000000002",
+              ),
+            }),
+        },
+        {
+          name: "Claude deleted the transcript",
+          selection: CLAUDE,
+          // What the Claude adapter's transcript check fails the start with.
+          error: () =>
+            new ProviderAdapterRequestError({
+              provider: "claudeAgent",
+              method: "session/resume",
+              detail:
+                "No conversation found with session ID 33333333-3333-4333-8333-333333333333: Claude no longer keeps its transcript.",
+            }),
+        },
+      ] as const;
+
+      for (const missing of missingConversations) {
+        it(`continues a thread with history by handoff when ${missing.name}`, async () => {
+          const harness = await createHarness({
+            threadModelSelection: missing.selection,
+            realContextHandoff: true,
+            startSessionEffect: ({ call }) =>
+              call === 2 ? Effect.fail(missing.error()) : undefined,
+          });
+          await sendMessage(harness, "first", "Summarize the notes in this folder.");
+          await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+          await stopRuntime(harness, { completedTurn: true, selection: missing.selection });
+
+          await sendMessage(harness, "second", "Now write them up as a README.");
+          await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+          await waitFor(async () =>
+            (await handoffActivities(harness)).some(
+              (entry) => entry.payload?.status === "consumed",
+            ),
+          );
+          await harness.drain();
+
+          // The resume was tried once, then a fresh session on the same instance got the context.
+          expect(harness.startSession).toHaveBeenCalledTimes(2);
+          expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty(
+            "resumePolicy",
+            "fresh",
+          );
+          expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+          expect(harness.startFreshSession.mock.calls[0]?.[1]).toMatchObject({
+            providerInstanceId: missing.selection.instanceId,
+            modelSelection: missing.selection,
+          });
+          const input = (harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string })?.input;
+          expect(input).toContain("Summarize the notes in this folder.");
+          expect(
+            input?.endsWith(
+              "<current_user_message>\nNow write them up as a README.\n</current_user_message>",
+            ),
+          ).toBe(true);
+
+          // Exactly one divider, which says why.
+          const handoffs = await handoffActivities(harness);
+          expect(handoffs).toHaveLength(1);
+          expect(handoffs[0]?.payload).toMatchObject({
+            status: "consumed",
+            reason: "native-history-unavailable",
+            targetMessageId: "second",
+            sourceSelection: missing.selection,
+            targetSelection: missing.selection,
+          });
+          expect(
+            handoffs[0]?.payload?.handoffId.startsWith(RESUME_FALLBACK_HANDOFF_ID_PREFIX),
+          ).toBe(true);
+          expect(await failuresOf(harness)).toEqual([]);
+          expect((await threadOf(harness))?.modelSelection).toEqual(missing.selection);
+        });
+      }
+
+      it("keeps the failure of a restart, which has no message to carry the conversation", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          // The restart's resume, after the starts of both turns.
+          startSessionEffect: ({ call }) =>
+            call === 3 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(harness, "first");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await stopRuntime(harness, { completedTurn: true });
+        // A live session again, so a mode change restarts it.
+        await sendMessage(harness, "second");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("cmd-runtime-mode-missing-conversation"),
+            threadId: T,
+            runtimeMode: "full-access",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await waitFor(async () =>
+          ((await threadOf(harness))?.activities ?? []).some(
+            (activity) => activity.kind === "provider.session.restart.failed",
+          ),
+        );
+        await harness.drain();
+
+        expect(harness.processContextHandoff).not.toHaveBeenCalled();
+        expect(harness.startFreshSession).not.toHaveBeenCalled();
+        expect(await handoffActivities(harness)).toEqual([]);
+      });
+
+      // Claude keeps a transcript from the first prompt, so a turn the user stopped is history
+      // a silent fresh start would lose, though no turn ever completed.
+      it("continues a thread whose only turn was stopped by handoff, not by a silent fresh start", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(harness, "first", "Refactor the settings parser.");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await stopRuntime(harness, { interruptedTurn: true });
+        const shell = (await harness.readShell()).threads.find((entry) => entry.id === T);
+        expect(shell?.latestCompletedTurnAt ?? null).toBeNull();
+        expect(shell?.latestTurn?.state).toBe("interrupted");
+
+        await sendMessage(harness, "second", "Continue where you stopped.");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+        await waitFor(async () =>
+          (await handoffActivities(harness)).some((entry) => entry.payload?.status === "consumed"),
+        );
+        await harness.drain();
+
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
+        expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+        const input = (harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string })?.input;
+        expect(input).toContain("Refactor the settings parser.");
+        const handoffs = await handoffActivities(harness);
+        expect(handoffs).toHaveLength(1);
+        expect(handoffs[0]?.payload).toMatchObject({
+          status: "consumed",
+          reason: "native-history-unavailable",
+          targetMessageId: "second",
+        });
+        expect(await failuresOf(harness)).toEqual([]);
+      });
+
+      // The first prompt reached the provider, but the session stopped before its turn.started
+      // was projected: only the sent message shows it.
+      it("continues by handoff when an earlier prompt shows no turn", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(harness, "first", "Rename the settings module.");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await stopRuntime(harness);
+        const shell = (await harness.readShell()).threads.find((entry) => entry.id === T);
+        expect(shell?.latestTurn ?? null).toBeNull();
+
+        await sendMessage(harness, "second", "Continue.");
+        await waitFor(async () =>
+          (await handoffActivities(harness)).some((entry) => entry.payload?.status === "consumed"),
+        );
+        await harness.drain();
+
+        expect(harness.startFreshSession).toHaveBeenCalledTimes(1);
+        const input = (harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string })?.input;
+        expect(input).toContain("Rename the settings module.");
+        expect((await handoffActivities(harness))[0]?.payload).toMatchObject({
+          status: "consumed",
+          reason: "native-history-unavailable",
+          targetMessageId: "second",
+        });
+        expect(await failuresOf(harness)).toEqual([]);
+      });
+
+      // The prompt was handed to the provider (sendTurn returned), but its turn.started is not
+      // projected yet: Claude may not have written the transcript, so the restart's resume finds
+      // none. A fresh session would silently drop that prompt, so the restart keeps the failure
+      // and the next turn hands the conversation off.
+      it("keeps a restart's failure after a prompt was sent but before its turn started", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          // The restart's resume, after the first turn's start.
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        // The mock projects no provider turn: only the sent message shows the prompt.
+        await sendMessage(harness, "first");
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        const shell = (await harness.readShell()).threads.find((entry) => entry.id === T);
+        expect(shell?.latestTurn ?? null).toBeNull();
+
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("cmd-runtime-mode-unstarted-turn"),
+            threadId: T,
+            runtimeMode: "full-access",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await waitFor(async () =>
+          ((await threadOf(harness))?.activities ?? []).some(
+            (activity) => activity.kind === "provider.session.restart.failed",
+          ),
+        );
+        await harness.drain();
+
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
+        expect(harness.processContextHandoff).not.toHaveBeenCalled();
+        expect(harness.startFreshSession).not.toHaveBeenCalled();
+        expect(await handoffActivities(harness)).toEqual([]);
+      });
+
+      // A cursor whose conversation never got a prompt (a Claude session is named before its
+      // first prompt) names nothing a thread without any message could lose.
+      it("starts a session fresh on a thread no message was ever sent to", async () => {
+        const harness = await createHarness({
+          threadModelSelection: CLAUDE,
+          startSessionEffect: ({ call }) =>
+            call === 1 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        // A goal starts the session before any message.
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.set",
+            commandId: CommandId.make("cmd-goal-unprompted-thread"),
+            threadId: T,
+            objective: "Keep the notes tidy",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await waitFor(() => harness.startSession.mock.calls.length === 2);
+        await harness.drain();
+
+        expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+        expect(harness.processContextHandoff).not.toHaveBeenCalled();
+        expect(await handoffActivities(harness)).toEqual([]);
+      });
+
+      it("never resends a handoff whose delivery a restart left unconfirmed", async () => {
+        const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-native-history-"));
+        createdBaseDirs.add(dbDir);
+        const dbPath = path.join(dbDir, "state.sqlite");
+        const first = await createHarness({
+          dbPath,
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+          startSessionEffect: ({ call }) =>
+            call === 2 ? Effect.fail(missingConversations[1].error()) : undefined,
+        });
+        await sendMessage(first, "first");
+        await waitFor(() => first.sendTurn.mock.calls.length === 1);
+        await stopRuntime(first, { completedTurn: true });
+        // The handoff's delivery never settles before the process exits.
+        first.sendTurn.mockImplementation(() => Effect.never);
+        await sendMessage(first, "second");
+        await waitFor(() => first.sendTurn.mock.calls.length === 2);
+        const statuses = (harness: Harness) =>
+          Effect.runPromise(
+            harness.sql<{ readonly status: string }>`
+              SELECT status FROM provider_context_handoffs
+            `,
+          ).then((rows) => rows.map((row) => row.status));
+        expect(await statuses(first)).toEqual(["dispatching"]);
+        await disposeHarness();
+
+        const second = await createHarness({
+          dbPath,
+          threadModelSelection: CLAUDE,
+          realContextHandoff: true,
+        });
+        await second.recoverContextHandoffs();
+        await Effect.runPromise(second.reactor.recoverIntents());
+        await second.drain();
+
+        expect(second.sendTurn).not.toHaveBeenCalled();
+        expect(second.startFreshSession).not.toHaveBeenCalled();
+        expect(await statuses(second)).toEqual(["delivery-uncertain"]);
+        const handoffs = (await handoffActivities(second)).map((entry) => entry.payload);
+        expect(handoffs).toHaveLength(1);
+        expect(handoffs[0]).toMatchObject({
+          status: "delivery-uncertain",
+          reason: "native-history-unavailable",
+          targetMessageId: "second",
+        });
+      });
     });
 
     it("defers a mode restart to the next turn instead of resuming a moved conversation", async () => {
@@ -3013,7 +3401,7 @@ describe("ProviderCommandReactor", () => {
       const consumed = (await handoffActivities(harness)).find(
         (entry) => entry.payload?.status === "consumed",
       );
-      expect(consumed?.payload?.handoffId.startsWith(CWD_RELOCATION_HANDOFF_ID_PREFIX)).toBe(true);
+      expect(consumed?.payload?.handoffId.startsWith(RESUME_FALLBACK_HANDOFF_ID_PREFIX)).toBe(true);
       expect(consumed?.payload).toMatchObject({ sourceSelection: CLAUDE, targetSelection: CLAUDE });
 
       const records = await Effect.runPromise(
@@ -3854,10 +4242,10 @@ describe("ProviderCommandReactor", () => {
         (live.getThreadMessageById
           ? live.getThreadMessageById(messageInput)
           : Effect.die("getThreadMessageById is not implemented")),
-      countThreadUserMessages: (threadId) =>
+      countThreadUserMessages: (threadId, bound) =>
         take("userMessageCount") ??
         (live.countThreadUserMessages
-          ? live.countThreadUserMessages(threadId)
+          ? live.countThreadUserMessages(threadId, bound)
           : Effect.die("countThreadUserMessages is not implemented")),
       getProjectShellById: (projectId) =>
         take("projectShell") ?? live.getProjectShellById(projectId),
@@ -7435,7 +7823,7 @@ describe("ProviderCommandReactor", () => {
         await second.drain();
         expect(second.abandonUnstartedTurnStart).toHaveBeenCalledTimes(1);
         const [event] = second.abandonUnstartedTurnStart.mock.calls[0]!;
-        expect(event.payload.contextHandoff).toEqual(cwdRelocationHandoffReference(event));
+        expect(event.payload.contextHandoff).toEqual(resumeFallbackHandoffReference(event));
         expect(event.payload.contextHandoff?.targetMessageId).toBe("relocation-lost");
         const failures = await activitiesOf(second, "provider.turn.start.failed");
         if (result === "unrecognized") {

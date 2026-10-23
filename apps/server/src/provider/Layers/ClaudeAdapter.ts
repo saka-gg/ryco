@@ -156,11 +156,15 @@ import {
   type DeviceToolBinding,
 } from "../../providerTools/deviceToolGateway.ts";
 import { buildTokenReductionInstructions, checkRtkAvailability } from "../../tokenReduction.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { makeClaudeEnvironment, resolveClaudeSourceRoot } from "../Drivers/ClaudeHome.ts";
 import {
   type ClaudeChainPositionBeforePrompt,
   claudeEntryBeforePrompt,
 } from "../claudeTranscriptCutoff.ts";
+import {
+  type ClaudeTranscriptPresence,
+  readClaudeTranscriptPresence,
+} from "../claudeTranscriptPresence.ts";
 import { formatProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
 import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
@@ -240,6 +244,8 @@ export interface ClaudeTranscriptEntry {
 const CLAUDE_TURN_HEADS_CAP = 64;
 const CLAUDE_REWIND_PROBE_TIMEOUT = "30 seconds";
 const CLAUDE_REWIND_TRANSCRIPT_TIMEOUT = "10 seconds";
+/** A transcript check that takes longer (a hung network mount) reads as `unknown`. */
+const CLAUDE_TRANSCRIPT_CHECK_TIMEOUT = "2 seconds";
 const CLAUDE_REWIND_QUERY_EXIT_MS = 5_000;
 /**
  * How long the CLI may take to answer its initialize control request on a runtime's first turn.
@@ -447,6 +453,10 @@ interface ClaudeSessionContext {
    * effort override inherit this. */
   currentEffort: string | undefined;
   resumeSessionId: string | undefined;
+  /** The session whose transcript the config root was seen to hold (the cursor's `transcriptSeen`). */
+  transcriptSeenFor: string | undefined;
+  /** The session a completed turn already ran the transcript check for. */
+  transcriptCheckedFor: string | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{
@@ -605,6 +615,11 @@ export interface ClaudeAdapterLiveOptions {
     sessionId: string,
     options: { readonly dir?: string; readonly includeSystemMessages: boolean },
   ) => Promise<ReadonlyArray<ClaudeTranscriptEntry>>;
+  /**
+   * Whether Claude still keeps a session's transcript, read before a resume. Defaults to
+   * `readClaudeTranscriptPresence` in the instance's config root.
+   */
+  readonly readTranscriptPresence?: (sessionId: string) => Promise<ClaudeTranscriptPresence>;
 }
 
 const CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP = 256;
@@ -2057,6 +2072,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(readOptions.dir !== undefined ? { dir: readOptions.dir } : {}),
         includeSystemMessages: readOptions.includeSystemMessages,
       }));
+  const readTranscriptPresence =
+    options?.readTranscriptPresence ??
+    (yield* resolveClaudeSourceRoot(claudeSettings, options?.environment).pipe(
+      Effect.provideService(Path.Path, path),
+      Effect.map(
+        (root) => (sessionId: string) => readClaudeTranscriptPresence({ root, sessionId }),
+      ),
+    ));
+  /** `readTranscriptPresence`; a failed or slow read is `unknown`. */
+  const checkTranscriptPresence = (sessionId: string) =>
+    Effect.tryPromise(() => readTranscriptPresence(sessionId)).pipe(
+      Effect.timeoutOption(CLAUDE_TRANSCRIPT_CHECK_TIMEOUT),
+      Effect.map(Option.getOrElse((): ClaudeTranscriptPresence => "unknown")),
+      Effect.catch(() => Effect.succeed<ClaudeTranscriptPresence>("unknown")),
+    );
   /** Threads whose session is being closed and reopened by a checkpoint revert. */
   const rewindingThreads = new Set<ThreadId>();
 
@@ -2307,6 +2337,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
+  /** The cursor's `transcriptSeen`, for the session it resumes. */
+  const transcriptSeenMarker = (context: ClaudeSessionContext) =>
+    context.resumeSessionId !== undefined && context.transcriptSeenFor === context.resumeSessionId
+      ? { transcriptSeen: true as const }
+      : {};
+
   const updateResumeCursor = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
     if (!context.session.threadId) return;
     // Yield before reading the session: a spread taken across a yield would write back a
@@ -2319,8 +2355,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       ...(context.pendingRewind ? { rewind: { at: context.pendingRewind.at } } : {}),
       turnCount: context.turns.length,
+      ...transcriptSeenMarker(context),
     };
     context.session = { ...context.session, resumeCursor, updatedAt };
+  });
+
+  /**
+   * Checks once per session, after a completed turn wrote its transcript, whether the instance's
+   * config root holds it. Only a session seen there may later read as deleted from it: a wrapper
+   * binary or a container can keep its transcripts in a store this root is not.
+   */
+  const noteTranscriptSeen = Effect.fn("noteTranscriptSeen")(function* (
+    context: ClaudeSessionContext,
+    sessionId: string,
+  ) {
+    context.transcriptCheckedFor = sessionId;
+    const presence = yield* checkTranscriptPresence(sessionId);
+    yield* Effect.annotateCurrentSpan({ "claude.transcript": presence });
+    if (presence === "present") context.transcriptSeenFor = sessionId;
   });
 
   const ensureAssistantTextBlock = Effect.fnUntraced(function* (
@@ -3013,6 +3065,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // before turn.completed goes out: ProviderService persists the live cursor
     // when it sees that event.
     if (status === "completed") context.pendingRewind = undefined;
+    const sessionId = context.resumeSessionId;
+    if (
+      status === "completed" &&
+      sessionId !== undefined &&
+      context.transcriptCheckedFor !== sessionId
+    ) {
+      yield* noteTranscriptSeen(context, sessionId);
+    }
     yield* updateResumeCursor(context);
 
     yield* emitTokenUsageSnapshot(context, usageSnapshot, turnState.turnId);
@@ -5532,10 +5592,38 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           issue: `Thread '${input.threadId}' still has runtime '${existingContext.session.runtimeSessionId ?? "legacy"}'; stop it before starting '${runtimeSessionId}'.`,
         });
       }
+      yield* failIfTranscriptMissing(input);
       const context = yield* openSessionContext(input, {});
       return { ...context.session };
     },
   );
+
+  /**
+   * Claude starts a resume of a session whose transcript it deleted (its default cleanup, a
+   * moved config) and only fails it on the first prompt, with "No conversation found". The start
+   * fails with that error instead, before any turn reaches Claude, so the orchestrator can start
+   * fresh or carry the conversation over by context handoff. Only a session whose transcript this
+   * config root was seen to hold (`transcriptSeen`) and whose `projects` directory now lacks it
+   * counts. Any other cursor (a wrapper binary or a container whose store is elsewhere, a cursor
+   * from before the marker), an unreadable store, or a config root without `projects/` resumes as
+   * before and fails on the first prompt.
+   */
+  const failIfTranscriptMissing = Effect.fn("failIfTranscriptMissing")(function* (
+    input: ProviderSessionStartInput,
+  ) {
+    if (input.resumePolicy === "fresh") return;
+    const resumeState = readClaudeResumeState(input.resumeCursor);
+    const sessionId = resumeState?.resume;
+    if (sessionId === undefined || resumeState?.transcriptSeen !== true) return;
+    const presence = yield* checkTranscriptPresence(sessionId);
+    yield* Effect.annotateCurrentSpan({ "claude.resume.transcript": presence });
+    if (presence !== "missing") return;
+    return yield* new ProviderAdapterRequestError({
+      provider: PROVIDER,
+      method: "session/resume",
+      detail: `No conversation found with session ID ${sessionId}: Claude no longer keeps its transcript.`,
+    });
+  });
 
   /**
    * Opens a query for `input` and registers its context. With `probe`, the
@@ -6142,6 +6230,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { rewind: { at: resumeState.rewindAt } }
           : {}),
         turnCount: resumeState?.turnCount ?? 0,
+        ...(resumeState?.transcriptSeen ? { transcriptSeen: true } : {}),
       },
       createdAt: startedAt,
       updatedAt: startedAt,
@@ -6174,6 +6263,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       currentApiModelId: apiModelId,
       currentEffort: effectiveEffort ?? undefined,
       resumeSessionId: sessionId,
+      transcriptSeenFor: resumeState?.transcriptSeen ? existingResumeSessionId : undefined,
+      transcriptCheckedFor: resumeState?.transcriptSeen ? existingResumeSessionId : undefined,
       pendingApprovals,
       pendingUserInputs,
       turns: [],
@@ -6945,6 +7036,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 resume: context.resumeSessionId,
                 rewind: { at: rewindPlan.at },
                 turnCount: Math.max(0, previousTurnCount - input.numTurns),
+                ...transcriptSeenMarker(context),
               };
         const reopenInput: ProviderSessionStartInput = {
           ...context.startInput,

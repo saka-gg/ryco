@@ -178,8 +178,18 @@ export type ContextHandoffMode = typeof ContextHandoffMode.Type;
  *   and the provider cannot resume its conversation there.
  * - `fork`: a forked thread's first turn delivers the inherited conversation, because no
  *   provider-native copy could stop at the fork's boundary.
+ * - `native-history-unavailable`: the provider no longer has the thread's native conversation
+ *   (for example, Claude removed an old transcript or a Codex rollout is gone), so a fresh
+ *   session on the same provider instance received the conversation. Clients that predate this
+ *   reason cannot decode the activity and show no divider for it; a server downgraded below it
+ *   treats the handoff as still in progress (see docs/context-handoffs.md).
  */
-export const ContextHandoffReason = Schema.Literals(["model-change", "cwd-relocation", "fork"]);
+export const ContextHandoffReason = Schema.Literals([
+  "model-change",
+  "cwd-relocation",
+  "fork",
+  "native-history-unavailable",
+]);
 export type ContextHandoffReason = typeof ContextHandoffReason.Type;
 
 export const ContextHandoffEndpointSnapshot = Schema.Struct({
@@ -213,6 +223,25 @@ export const ContextHandoffInspectionSummaryMetadata = Schema.Struct({
 export type ContextHandoffInspectionSummaryMetadata =
   typeof ContextHandoffInspectionSummaryMetadata.Type;
 
+/**
+ * Every status of a context handoff activity: `ContextHandoffActivityPayload` has one member per
+ * status. A reader that needs only the status (for example, whether a handoff is still in
+ * progress) decodes it with this schema, so it reads every status the payload can have.
+ */
+export const ContextHandoffStatus = Schema.Literals([
+  "requested",
+  "preparing",
+  "dispatching",
+  "consumed",
+  "failed",
+  "delivery-uncertain",
+]);
+export type ContextHandoffStatus = typeof ContextHandoffStatus.Type;
+
+/** One payload member's status: only a `ContextHandoffStatus` type-checks. */
+const contextHandoffStatus = <const S extends ContextHandoffStatus>(status: S) =>
+  Schema.Literal(status);
+
 const ContextHandoffActivityBaseFields = {
   // Decode historical records without enabling recall or persisting rendered text.
   projectMemory: Schema.optional(Schema.Unknown),
@@ -242,23 +271,23 @@ const ContextHandoffContextFields = {
 export const ContextHandoffActivityPayload = Schema.Union([
   Schema.Struct({
     ...ContextHandoffActivityBaseFields,
-    status: Schema.Literal("requested"),
+    status: contextHandoffStatus("requested"),
   }),
   Schema.Struct({
     ...ContextHandoffActivityBaseFields,
-    status: Schema.Literal("preparing"),
-  }),
-  Schema.Struct({
-    ...ContextHandoffActivityBaseFields,
-    ...ContextHandoffPresentationFields,
-    ...ContextHandoffContextFields,
-    status: Schema.Literal("dispatching"),
+    status: contextHandoffStatus("preparing"),
   }),
   Schema.Struct({
     ...ContextHandoffActivityBaseFields,
     ...ContextHandoffPresentationFields,
     ...ContextHandoffContextFields,
-    status: Schema.Literal("consumed"),
+    status: contextHandoffStatus("dispatching"),
+  }),
+  Schema.Struct({
+    ...ContextHandoffActivityBaseFields,
+    ...ContextHandoffPresentationFields,
+    ...ContextHandoffContextFields,
+    status: contextHandoffStatus("consumed"),
     inspection: Schema.optional(ContextHandoffInspectionSummaryMetadata),
   }),
   Schema.Struct({
@@ -266,7 +295,7 @@ export const ContextHandoffActivityPayload = Schema.Union([
     ...ContextHandoffPresentationFields,
     contextVersion: Schema.optional(Schema.Literal(CONTEXT_HANDOFF_CONTEXT_VERSION)),
     contextDigest: Schema.optional(ContextHandoffDigest),
-    status: Schema.Literal("failed"),
+    status: contextHandoffStatus("failed"),
     error: ContextHandoffFailure,
     inspection: Schema.optional(ContextHandoffInspectionSummaryMetadata),
   }),
@@ -274,7 +303,7 @@ export const ContextHandoffActivityPayload = Schema.Union([
     ...ContextHandoffActivityBaseFields,
     ...ContextHandoffPresentationFields,
     ...ContextHandoffContextFields,
-    status: Schema.Literal("delivery-uncertain"),
+    status: contextHandoffStatus("delivery-uncertain"),
     error: ContextHandoffFailure,
     inspection: Schema.optional(ContextHandoffInspectionSummaryMetadata),
   }),
@@ -421,14 +450,7 @@ export const ContextHandoffInspectionSummary = Schema.Struct({
   ...ContextHandoffAppliedBudget.fields,
   threadId: ThreadId,
   handoffId: ContextHandoffId,
-  status: Schema.Literals([
-    "requested",
-    "preparing",
-    "dispatching",
-    "consumed",
-    "failed",
-    "delivery-uncertain",
-  ]),
+  status: ContextHandoffStatus,
   deliveryLabel: ContextHandoffInspectionDeliveryLabel,
   sources: ContextHandoffSources,
   target: ContextHandoffEndpointSnapshot,

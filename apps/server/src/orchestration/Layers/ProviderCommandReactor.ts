@@ -126,14 +126,16 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
   readPendingGoalSyncThreads,
+  type ThreadUserMessageCountBound,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import {
-  cwdRelocationHandoffReference,
-  makeCwdRelocationRequestedActivity,
-} from "../contextHandoff/ContextHandoffRelocation.ts";
+  makeResumeFallbackRequestedActivity,
+  type ResumeFallbackReason,
+  resumeFallbackHandoffReference,
+} from "../contextHandoff/ContextHandoffResumeFallback.ts";
 import { TURN_FINALIZATION_REASON } from "../turnFinalization.ts";
 import { type CwdRelocation, resolveCwdRelocation, worktreeIdentity } from "../cwdRelocation.ts";
 import {
@@ -300,6 +302,25 @@ const cwdRelocationError = (
     reason,
     detail: CWD_RELOCATION_RESTART_DETAIL,
   });
+
+/**
+ * The provider no longer has the native conversation of a thread with history to carry (Claude
+ * removed an old transcript, a Codex rollout is gone, a node moved to a machine without the
+ * provider's store). Claude's pre-check reports a missing transcript only when the instance's
+ * `projects` directory exists without it: a config root without `projects/` (Claude never ran a
+ * session there, or runs through a wrapper or in a container) reads as unknown, so the resume
+ * goes ahead and Claude fails the first send as before. An ACP runtime that does not resume
+ * strictly (Cursor) still starts a new session silently (a follow-up). Only a turn start raises it:
+ * like a relocation, the turn carries the conversation over with a context handoff into a fresh
+ * session on the same provider instance. A restart has no message to carry the conversation, so
+ * on such a thread it keeps the provider's failure, and the next turn hands off.
+ */
+class NativeHistoryUnavailableError extends Data.TaggedError("NativeHistoryUnavailableError")<{
+  /** The provider's failure, user-facing; shown only if this ever escapes the handoff. */
+  readonly detail: string;
+}> {}
+
+type ResumeFallbackError = CwdRelocationResumeUnavailableError | NativeHistoryUnavailableError;
 
 const decodeContextHandoffActivity = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
 
@@ -615,20 +636,50 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     );
   };
 
-  const resolveUserMessageCount = (threadId: ThreadId) => {
+  const resolveUserMessageCount = (threadId: ThreadId, bound?: ThreadUserMessageCountBound) => {
     const targeted = projectionSnapshotQuery.countThreadUserMessages;
     if (targeted) {
-      return targeted(threadId);
+      return targeted(threadId, bound);
     }
     return projectionSnapshotQuery.getThreadDetailById(threadId).pipe(
       Effect.map(
         Option.match({
           onNone: () => 0,
-          onSome: (thread) => thread.messages.filter((entry) => entry.role === "user").length,
+          onSome: (thread) =>
+            thread.messages.filter(
+              (entry) =>
+                entry.role === "user" &&
+                (bound === undefined ||
+                  (entry.createdAt <= bound.createdAtOrBefore &&
+                    entry.id !== bound.excludingMessageId)),
+            ).length,
         }),
       ),
     );
   };
+
+  /**
+   * Whether a fresh session would lose part of the thread's conversation: a turn reached the
+   * provider, whatever its outcome (a stopped or failed turn still left its prompt and partial
+   * work in the native conversation), a user message was sent before this start (its prompt may
+   * have reached the provider before the projection shows its turn started), or the thread
+   * inherits a parent's history. Only messages recorded before the start count (`earlierThan`):
+   * a turn start's own message, and one queued after it (or after the restart was requested),
+   * never reached the provider. One created at the same instant counts, as the order is unknown.
+   * The one rule that decides, when the native conversation is missing, between starting fresh
+   * and carrying the conversation over (`recoverMissingConversation`). Read only then, and a
+   * count that cannot be read counts as history: nothing is ever dropped silently.
+   */
+  const threadCarriesHistory = (
+    thread: OrchestrationThreadShell,
+    earlierThan: ThreadUserMessageCountBound,
+  ) =>
+    thread.latestCompletedTurnAt != null || thread.latestTurn !== null || thread.lineage != null
+      ? Effect.succeed(true)
+      : resolveUserMessageCount(thread.id, earlierThan).pipe(
+          Effect.map((count) => count > 0),
+          Effect.catch(() => Effect.succeed(true)),
+        );
 
   const ensureRecordedWorktreeAvailable = Effect.fn("ensureRecordedWorktreeAvailable")(function* (
     thread: OrchestrationThreadShell,
@@ -753,27 +804,6 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* vcsStatusBroadcaster.refreshStatus(worktreePath).pipe(Effect.ignoreCause({ log: true }));
   }, Effect.scoped);
 
-  /**
-   * A turn's resume after a cwd move that finds no conversation (Codex lost
-   * its rollout, a provider that resumed anyway) fails as a relocation, so the
-   * turn continues with a context handoff instead of failing. Restarts keep
-   * their own failure: they have no message to carry the conversation.
-   */
-  const failMissingMovedConversation =
-    (relocation: CwdRelocation | undefined, kind: StartKind) =>
-    <A, E, R>(
-      start: Effect.Effect<A, E, R>,
-    ): Effect.Effect<A, E | CwdRelocationResumeUnavailableError, R> =>
-      relocation === undefined || kind !== "turn"
-        ? start
-        : start.pipe(
-            Effect.mapError((error): E | CwdRelocationResumeUnavailableError =>
-              isMissingConversationError(error)
-                ? cwdRelocationError(relocation, "resume-failed")
-                : error,
-            ),
-          );
-
   const ensureSessionForThread = Effect.fn("ensureSessionForThread")(function* (
     threadId: ThreadId,
     createdAt: string,
@@ -781,6 +811,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       /** The lane item's fence: a later Stop cancels this start. */
       readonly fenceSequence: number;
       readonly kind: StartKind;
+      /** A turn start's own message: history is what was recorded before it. */
+      readonly turnMessage?: { readonly id: MessageId; readonly createdAt: string };
       readonly modelSelection?: ModelSelection;
       readonly computerCatalogChanged?: boolean;
       /** Shells the caller read for this same lane item, to skip re-reading them. */
@@ -959,25 +991,6 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         });
       });
 
-    /**
-     * A start that finds no conversation to resume, on a thread no turn ever completed in and
-     * that inherits none, starts fresh instead: the persisted cursor can only name a
-     * conversation the provider never kept (a prewarm's unused thread/start, a crash before
-     * the first turn; Codex writes a rollout with the first turn), so nothing is lost. Other
-     * threads keep the failure, since their context would need a handoff.
-     */
-    const startFreshWhenConversationMissing = (start: ReturnType<typeof startProviderSession>) =>
-      thread.latestCompletedTurnAt != null || thread.lineage != null
-        ? start
-        : start.pipe(
-            Effect.catchIf(isMissingConversationError, (error) =>
-              Effect.logInfo(
-                "provider command reactor started fresh after the persisted conversation was not found",
-                { threadId, kind: options.kind, cause: Cause.pretty(Cause.fail(error)) },
-              ).pipe(Effect.andThen(startProviderSession({ resumePolicy: "fresh" }))),
-            ),
-          );
-
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
     const relocation = yield* resolveCwdRelocation(providerService, {
@@ -988,6 +1001,52 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     });
     const unresumableRelocation =
       relocation !== undefined && !relocation.resumeSurvives ? relocation : undefined;
+
+    /**
+     * A start or restart whose resume finds no conversation (`isMissingConversationError`):
+     * - On a thread without history (`threadCarriesHistory`) it starts fresh: the cursor can only
+     *   name a conversation the provider never kept (a prewarm's unused thread/start, a crash
+     *   before the first turn, a Claude session never prompted; Codex writes a rollout and Claude
+     *   a transcript with the first turn), so nothing is lost.
+     * - A turn on any other thread continues with a context handoff instead of failing: as a
+     *   relocation after a cwd move (Codex lost its rollout, a provider that resumed anyway),
+     *   otherwise as missing native history.
+     * - A restart on such a thread keeps the provider's failure: it has no message to carry the
+     *   conversation, and the next turn hands it off.
+     */
+    const recoverMissingConversation = (start: ReturnType<typeof startProviderSession>) =>
+      start.pipe(
+        Effect.catchIf(isMissingConversationError, (error) =>
+          Effect.gen(function* () {
+            const cause = Cause.pretty(Cause.fail(error));
+            const earlierThan: ThreadUserMessageCountBound = options.turnMessage
+              ? {
+                  createdAtOrBefore: options.turnMessage.createdAt,
+                  excludingMessageId: options.turnMessage.id,
+                }
+              : { createdAtOrBefore: createdAt };
+            if (!(yield* threadCarriesHistory(thread, earlierThan))) {
+              yield* Effect.logInfo(
+                "provider command reactor started fresh after the persisted conversation was not found",
+                { threadId, kind: options.kind, cause },
+              );
+              return yield* startProviderSession({ resumePolicy: "fresh" });
+            }
+            if (options.kind !== "turn") return yield* Effect.fail(error);
+            yield* Effect.logInfo(
+              "provider command reactor continues a turn by handoff after its native conversation was not found",
+              { threadId, moved: relocation !== undefined, cause },
+            );
+            return yield* Effect.fail<ResumeFallbackError>(
+              relocation !== undefined
+                ? cwdRelocationError(relocation, "resume-failed")
+                : new NativeHistoryUnavailableError({
+                    detail: userFacingFailureDetail(Cause.fail(error)),
+                  }),
+            );
+          }),
+        ),
+      );
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const currentThreadSessionTokenMode = thread.session?.tokenMode ?? DEFAULT_TOKEN_MODE;
@@ -1121,7 +1180,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       });
       const restartedSession = yield* startProviderSession(
         resumeCursor !== undefined ? { resumeCursor } : undefined,
-      ).pipe(failMissingMovedConversation(relocation, options.kind));
+      ).pipe(recoverMissingConversation);
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
         previousSessionId: existingSessionThreadId,
@@ -1150,10 +1209,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         return prewarmed.threadId;
       }
     }
-    const startedSession = yield* startProviderSession(undefined).pipe(
-      startFreshWhenConversationMissing,
-      failMissingMovedConversation(relocation, options.kind),
-    );
+    const startedSession = yield* startProviderSession(undefined).pipe(recoverMissingConversation);
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   }, Effect.scoped);
@@ -1293,6 +1349,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     readonly thread: OrchestrationThreadShell;
     readonly project: OrchestrationProjectShell | undefined;
     readonly fenceSequence: number;
+    readonly turnMessage: { readonly id: MessageId; readonly createdAt: string };
     readonly messageText: string;
     /** Excerpts of the threads the message mentions; provider input only. */
     readonly referenceContext?: string;
@@ -1343,6 +1400,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       fenceSequence: input.fenceSequence,
       kind: "turn",
+      turnMessage: input.turnMessage,
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       computerCatalogChanged,
       prefetched: { thread, project },
@@ -1895,12 +1953,12 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   });
 
   /**
-   * A relocation handoff's terminal divider is its turn start's outcome, but
-   * the intent row was recorded before the handoff existed and so carries no
-   * handoff id to settle by. Settles it once that outcome is visible; otherwise
-   * the next boot resolves it through the coordinator.
+   * A resume-fallback handoff's terminal divider is its turn start's outcome,
+   * but the intent row was recorded before the handoff existed and so carries
+   * no handoff id to settle by. Settles it once that outcome is visible;
+   * otherwise the next boot resolves it through the coordinator.
    */
-  const settleCwdRelocationTurnStart = Effect.fnUntraced(function* (
+  const settleResumeFallbackTurnStart = Effect.fnUntraced(function* (
     event: TurnStartRequestedEvent,
     reference: ContextHandoffReference,
   ) {
@@ -1919,35 +1977,47 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   });
 
   /**
-   * Continues a turn whose native conversation cannot follow the thread's
-   * moved working directory. A server-initiated context handoff on the same
-   * provider instance starts a fresh session in the new directory and sends
-   * the deterministic context document ahead of the exact message, like any
-   * handoff; the visible message is never rewritten.
+   * Continues a turn whose native conversation cannot be resumed: it cannot
+   * follow the thread's moved working directory, or the provider no longer has
+   * it. A server-initiated context handoff on the same provider instance starts
+   * a fresh session in the thread's directory and sends the deterministic
+   * context document ahead of the exact message, like any handoff; the visible
+   * message is never rewritten.
    */
-  const continueAfterCwdRelocation = Effect.fn("continueAfterCwdRelocation")(function* (input: {
+  const continueWithoutResume = Effect.fn("continueWithoutResume")(function* (input: {
     readonly event: TurnStartRequestedEvent;
     readonly fenceSequence: number;
     readonly thread: OrchestrationThreadShell;
     readonly messageText: string;
-    readonly relocation: CwdRelocationResumeUnavailableError;
+    readonly fallback: ResumeFallbackError;
     readonly baselineConfirmed: boolean;
   }) {
-    const { event, thread, relocation } = input;
-    const reference = cwdRelocationHandoffReference(event);
-    yield* Effect.logInfo("provider command reactor continues a moved conversation by handoff", {
+    const { event, thread, fallback } = input;
+    const relocation = fallback._tag === "CwdRelocationResumeUnavailableError" ? fallback : null;
+    const reason: ResumeFallbackReason = relocation
+      ? "cwd-relocation"
+      : "native-history-unavailable";
+    const reference = resumeFallbackHandoffReference(event);
+    yield* Effect.logInfo("provider command reactor continues a conversation by handoff", {
       threadId: thread.id,
       handoffId: reference.handoffId,
-      previousCwd: relocation.previousCwd,
-      cwd: relocation.cwd,
-      reason: relocation.reason,
+      reason,
+      ...(relocation
+        ? {
+            previousCwd: relocation.previousCwd,
+            cwd: relocation.cwd,
+            relocationReason: relocation.reason,
+          }
+        : {}),
     });
-    // Deterministic command id: a replay of this turn start reuses the receipt.
+    // Deterministic command id, one per turn start whatever the reason: a replay
+    // of this turn start reuses the receipt.
     yield* orchestrationEngine.dispatch({
       type: "thread.activity.append",
       commandId: CommandId.make(`server:cwd-relocation-handoff:${event.eventId}`),
       threadId: thread.id,
-      activity: makeCwdRelocationRequestedActivity({
+      activity: makeResumeFallbackRequestedActivity({
+        reason,
         reference,
         sourceSelection: thread.modelSelection,
         targetSelection: event.payload.modelSelection ?? thread.modelSelection,
@@ -1965,15 +2035,18 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     });
     // Best-effort: the outcome is already visible, and the next boot settles a
     // row this misses.
-    yield* settleCwdRelocationTurnStart(event, reference).pipe(
+    yield* settleResumeFallbackTurnStart(event, reference).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.failCause(cause)
-          : Effect.logWarning("provider command reactor could not settle a relocation turn start", {
-              threadId: thread.id,
-              handoffId: reference.handoffId,
-              cause: Cause.pretty(cause),
-            }),
+          : Effect.logWarning(
+              "provider command reactor could not settle a resume-fallback turn start",
+              {
+                threadId: thread.id,
+                handoffId: reference.handoffId,
+                cause: Cause.pretty(cause),
+              },
+            ),
       ),
     );
   });
@@ -2150,6 +2223,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       thread,
       project,
       fenceSequence,
+      turnMessage: { id: message.id, createdAt: message.createdAt },
       messageText: message.text,
       ...(referenceContext !== undefined ? { referenceContext } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
@@ -2162,20 +2236,22 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       createdAt: event.payload.createdAt,
     }).pipe(
       Effect.map(Option.some),
-      Effect.catchTag("CwdRelocationResumeUnavailableError", (relocation) =>
-        joinPreTurnBaseline(baseline, event, fenceSequence).pipe(
-          Effect.flatMap((baselineConfirmed) =>
-            continueAfterCwdRelocation({
-              event,
-              fenceSequence,
-              thread,
-              messageText: message.text,
-              relocation,
-              baselineConfirmed,
-            }),
+      Effect.catchTag(
+        ["CwdRelocationResumeUnavailableError", "NativeHistoryUnavailableError"],
+        (fallback) =>
+          joinPreTurnBaseline(baseline, event, fenceSequence).pipe(
+            Effect.flatMap((baselineConfirmed) =>
+              continueWithoutResume({
+                event,
+                fenceSequence,
+                thread,
+                messageText: message.text,
+                fallback,
+                baselineConfirmed,
+              }),
+            ),
+            Effect.as(Option.none()),
           ),
-          Effect.as(Option.none()),
-        ),
       ),
     );
     if (Option.isNone(prepared)) return;
@@ -3712,8 +3788,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             const turnStart = event?.type === "thread.turn-start-requested" ? event : undefined;
             const messageId = turnStart?.payload.messageId ?? row.messageId;
             if (messageId === null) return yield* settleWithoutOutcome(row, "event-unreadable");
-            // A plain start may have become a working-directory relocation handoff,
-            // whose deterministic reference finds the operation if it exists.
+            // A plain start may have become a resume-fallback handoff (a moved working
+            // directory or missing native history), whose deterministic reference finds
+            // the operation if it exists.
             const relocated =
               turnStart !== undefined && turnStart.payload.contextHandoff === undefined;
             const handoffStart =
@@ -3724,7 +3801,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                       ...turnStart,
                       payload: {
                         ...turnStart.payload,
-                        contextHandoff: cwdRelocationHandoffReference(turnStart),
+                        contextHandoff: resumeFallbackHandoffReference(turnStart),
                       },
                     }
                   : turnStart;

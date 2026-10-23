@@ -70,6 +70,36 @@ const failedWithStartupPhaseTimeout = (cause: Cause.Cause<EffectAcpErrors.AcpErr
     (reason) => Cause.isFailReason(reason) && isAcpStartupPhaseTimeout(reason.error),
   );
 
+const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
+
+/** ACP's "Resource not found" error code. */
+const ACP_RESOURCE_NOT_FOUND = -32002;
+
+/**
+ * A strict resume the agent answers with "Resource not found" (-32002) fails as "Session not
+ * found: <id>", so the orchestrator can tell a lost conversation from other failures
+ * (`isMissingConversationError`). Only this call site maps the code: on its own it does not say
+ * which resource is missing, but the session is the one resource `session/load` and
+ * `session/resume` look up. A `data.uri` naming something other than the session keeps the
+ * agent's error.
+ */
+const nameMissingResumeSession = (
+  error: EffectAcpErrors.AcpError,
+  sessionId: string,
+): EffectAcpErrors.AcpError => {
+  if (!isAcpRequestError(error) || error.code !== ACP_RESOURCE_NOT_FOUND) return error;
+  const uri =
+    typeof error.data === "object" && error.data !== null
+      ? Reflect.get(error.data, "uri")
+      : undefined;
+  if (typeof uri === "string" && !uri.includes(sessionId)) return error;
+  return new EffectAcpErrors.AcpRequestError({
+    code: ACP_RESOURCE_NOT_FOUND,
+    errorMessage: `Session not found: ${sessionId} (${error.errorMessage})`,
+    ...(error.data !== undefined ? { data: error.data } : {}),
+  });
+};
+
 export interface AcpSpawnInput {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
@@ -599,7 +629,8 @@ const makeAcpSessionRuntime = (
         if (options.onMcpSetupFailure) yield* options.onMcpSetupFailure();
         return yield* createSession(staticMcpServers);
       });
-      if (options.resumeSessionId) {
+      const resumeSessionId = options.resumeSessionId;
+      if (resumeSessionId) {
         const useResume =
           options.strictResume === true &&
           initializeResult.agentCapabilities?.sessionCapabilities?.resume != null;
@@ -614,7 +645,7 @@ const makeAcpSessionRuntime = (
           });
         }
         const loadPayload = {
-          sessionId: options.resumeSessionId,
+          sessionId: resumeSessionId,
           cwd: options.cwd,
           mcpServers,
         } satisfies EffectAcpSchema.LoadSessionRequest;
@@ -627,10 +658,14 @@ const makeAcpSessionRuntime = (
           ),
         ).pipe(Effect.exit);
         if (Exit.isSuccess(resumed)) {
-          sessionId = options.resumeSessionId;
+          sessionId = resumeSessionId;
           sessionSetupResult = resumed.value;
         } else {
-          if (options.strictResume || failedWithStartupPhaseTimeout(resumed.cause))
+          if (options.strictResume)
+            return yield* Effect.failCause(resumed.cause).pipe(
+              Effect.mapError((error) => nameMissingResumeSession(error, resumeSessionId)),
+            );
+          if (failedWithStartupPhaseTimeout(resumed.cause))
             return yield* Effect.failCause(resumed.cause);
           const created = yield* createSessionWithFallback;
           sessionId = created.sessionId;

@@ -261,6 +261,14 @@ export interface ThreadHistoryRepairContext {
   readonly requestActivities: ReadonlyArray<OrchestrationThreadActivity>;
 }
 
+/** Limits a user message count to the messages recorded by an instant. */
+export interface ThreadUserMessageCountBound {
+  /** Counts only messages created at or before this instant; one created at it counts. */
+  readonly createdAtOrBefore: string;
+  /** Leaves this message out, e.g. the turn start's own. */
+  readonly excludingMessageId?: MessageId;
+}
+
 export interface ProjectionSnapshotQueryShape {
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
@@ -530,13 +538,14 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<ThreadHistoryRepairContext, ProjectionRepositoryError>;
 
   /**
-   * Count projected user messages for one thread (aggregate only). Turn start
-   * uses this to detect the first user message without reading them all.
-   * Optional so existing test doubles stay valid; callers fall back to
-   * `getThreadDetailById`.
+   * Count projected user messages for one thread (aggregate only), or only
+   * those within `bound`. Turn start uses this to detect the first user
+   * message without reading them all. Optional so existing test doubles stay
+   * valid; callers fall back to `getThreadDetailById`.
    */
   readonly countThreadUserMessages?: (
     threadId: ThreadId,
+    bound?: ThreadUserMessageCountBound,
   ) => Effect.Effect<number, ProjectionRepositoryError>;
 
   /**
