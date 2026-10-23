@@ -3,15 +3,14 @@ import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco
 import type { KVService } from "../../platform/index.ts";
 import {
   APP_KEYBINDINGS_STORAGE_KEY,
-  appKeybindingsFromRules,
   createAppKeybindingsStore,
   DEFAULT_APP_KEYBINDINGS,
-  importAppKeybindings,
   keybindingsForProject,
   resolveAppKeybindings,
   scopedScriptCommand,
   validateAppKeybindings,
 } from "./appKeybindings.ts";
+import { appKeybindingsFromRules, importAppKeybindings } from "./appKeybindingsEditing.ts";
 import {
   APP_DEFAULT_KEYBINDINGS,
   APP_DEFAULT_RESOLVED_KEYBINDINGS,
@@ -194,27 +193,6 @@ describe("app-owned keybindings", () => {
         (rule) => rule.command.startsWith("projectScript.") || rule.command.startsWith("script."),
       ),
     ).toBe(false);
-  });
-
-  it("stores only actual overrides so later import can fill untouched commands", () => {
-    const fullEditor = APP_DEFAULT_KEYBINDINGS.map((rule) =>
-      rule.command === "terminal.toggle" ? { ...rule, key: "mod+x" } : rule,
-    );
-    const preferences = appKeybindingsFromRules(fullEditor);
-    expect(preferences.rules).toEqual(custom.rules);
-    expect(preferences.disabledCommands).toEqual([]);
-    const imported = importAppKeybindings(preferences, [{ key: "mod+r", command: "diff.toggle" }]);
-    expect(imported.rules).toEqual([{ key: "mod+r", command: "diff.toggle" }, ...custom.rules]);
-    expect(appKeybindingsFromRules(APP_DEFAULT_KEYBINDINGS)).toEqual(DEFAULT_APP_KEYBINDINGS);
-  });
-
-  it.each([
-    { key: "ctrl", command: "terminal.toggle" },
-    { key: "mod+x", command: "terminal.toggle", when: "terminalFocus &&" },
-  ] as const)("rejects invalid extra default-command rules before normalization: %j", (invalid) => {
-    expect(() => appKeybindingsFromRules([...APP_DEFAULT_KEYBINDINGS, invalid])).toThrow(
-      "Invalid shortcut or when expression.",
-    );
   });
 
   it("recovers corrupted data only after explicit reset; retry can reload repaired data", async () => {

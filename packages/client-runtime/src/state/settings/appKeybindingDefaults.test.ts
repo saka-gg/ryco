@@ -12,11 +12,11 @@ import {
   SUPERSEDED_NODE_DEFAULT_KEYBINDINGS,
 } from "./appKeybindingDefaults.ts";
 import {
-  appKeybindingsFromRules,
   DEFAULT_APP_KEYBINDINGS,
   resolveAppKeybindings,
   validateAppKeybindings,
 } from "./appKeybindings.ts";
+import { appKeybindingsFromRules } from "./appKeybindingsEditing.ts";
 
 const isSameRule = (left: KeybindingRule, right: KeybindingRule) =>
   left.key === right.key && left.command === right.command && left.when === right.when;

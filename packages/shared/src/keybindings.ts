@@ -298,8 +298,9 @@ export function compileResolvedKeybindingsConfig(
   return compiled.slice(-MAX_KEYBINDINGS_COUNT);
 }
 
+// Pure, so app bundles, which resolve against their own list, drop it instead of compiling it.
 export const NODE_DEFAULT_RESOLVED_KEYBINDINGS =
-  compileResolvedKeybindingsConfig(NODE_DEFAULT_KEYBINDINGS);
+  /* @__PURE__ */ compileResolvedKeybindingsConfig(NODE_DEFAULT_KEYBINDINGS);
 
 /**
  * Command overrides and disabled commands share one merge policy on every platform. Callers

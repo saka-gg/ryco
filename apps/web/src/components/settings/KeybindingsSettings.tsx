@@ -49,10 +49,9 @@ import {
   useAllAppKeybindings,
   useAppKeybindingsState,
   retryAppKeybindings,
-  replaceAppKeybindings,
   resetAppKeybindings,
-  importLegacyKeybindings,
 } from "../../appKeybindings";
+import { importLegacyKeybindings, replaceAppKeybindings } from "../../appKeybindingsEditing";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";

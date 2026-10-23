@@ -3,11 +3,8 @@ import { EnvironmentId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import {
-  resetAppKeybindings,
-  getAppKeybindings,
-  replaceAppKeybindings,
-} from "../../appKeybindings";
+import { resetAppKeybindings, getAppKeybindings } from "../../appKeybindings";
+import { replaceAppKeybindings } from "../../appKeybindingsEditing";
 import { APP_KEYBINDINGS_STORAGE_KEY } from "@ryco/client-runtime/state/settings";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { SettingsTargetProvider } from "../../settingsTarget";
