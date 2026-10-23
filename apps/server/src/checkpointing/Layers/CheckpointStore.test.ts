@@ -513,9 +513,16 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
             (execution, run) => {
               if (isProbeOf(execution, "owned")) {
                 // Git refuses to open a repository another user owns; `add` does not check.
+                // A global or system `safe.directory` (CI runners set `*`) lifts that refusal,
+                // so the probe reads neither.
                 return run({
                   ...execution,
-                  env: { ...execution.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" },
+                  env: {
+                    ...execution.env,
+                    GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
+                    GIT_CONFIG_GLOBAL: "/dev/null",
+                    GIT_CONFIG_NOSYSTEM: "1",
+                  },
                 }).pipe(
                   Effect.tap((result) =>
                     Effect.sync(() => {
