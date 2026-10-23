@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
+  type DatabaseStorageReport,
   type EnvironmentId,
   type ServerSettingsPatch,
   type StorageRetentionPolicy,
@@ -382,6 +383,9 @@ function StorageEditor({
               </Collapsible>
             </SettingsBlock>
           ) : null}
+          {state.snapshot.database ? (
+            <DatabaseStorageRows database={state.snapshot.database} />
+          ) : null}
         </>
       )}
       {state.preview ? (
@@ -453,5 +457,90 @@ function StorageEditor({
         </SettingsBlock>
       ) : null}
     </SettingsSection>
+  );
+}
+
+const formatBytes = (bytes: number) => formatStorageSize(bytes, "complete");
+
+function compactionStatus(compaction: DatabaseStorageReport["compaction"]): string {
+  const removed =
+    compaction.removedEvents > 0
+      ? `Removed ${compaction.removedEvents.toLocaleString()} superseded progress updates (${formatBytes(compaction.removedBytes)}).`
+      : "Nothing removed yet.";
+  if (!compaction.enabled) return `Off on this node. ${removed}`;
+  if (compaction.lastPassCompletedAt === null)
+    return compaction.compactedThroughSequence > 0
+      ? `${removed} The first pass is running.`
+      : "Not run yet; the first pass starts 10 minutes after the node starts.";
+  const lastRun = `last run ${new Date(compaction.lastPassCompletedAt).toLocaleString()}`;
+  if (compaction.caughtUp) return `${removed} Up to date, ${lastRun}.`;
+  const examined =
+    compaction.headSequence > 0
+      ? Math.floor((compaction.compactedThroughSequence / compaction.headSequence) * 100)
+      : 0;
+  return `${removed} Catching up: ${examined}% of history examined, ${lastRun}.`;
+}
+
+/**
+ * The node's database, from the last scan, inside the storage card. Kept in this module: it is
+ * part of the lazy settings chunk, so the app shell's static graph does not grow.
+ */
+function DatabaseStorageRows({ database }: { database: DatabaseStorageReport }) {
+  const value = (text: string) => (
+    <span className="text-xs tabular-nums text-muted-foreground">{text}</span>
+  );
+  const shrinking = database.autoVacuum !== "none";
+  return (
+    <>
+      <SettingsBlock className="pt-4 pb-1">
+        <h3 className="text-[13px] font-semibold text-foreground">Database</h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Chats, history and settings of this node, in one SQLite file.
+        </p>
+      </SettingsBlock>
+      <SettingsRow
+        title="Database file"
+        description={
+          database.walBytes > 0
+            ? `On disk, including ${formatBytes(database.walBytes)} of recent writes not yet merged into the file.`
+            : "On disk; recent writes are merged into the file."
+        }
+        control={value(formatBytes(database.fileBytes + database.walBytes))}
+      />
+      <SettingsRow
+        title="Free space inside the file"
+        description="Left by removed data. SQLite reuses it for new data before the file grows."
+        control={value(formatBytes(database.freePages * database.pageSize))}
+      />
+      <SettingsRow
+        title="Automatic shrinking"
+        description={
+          database.autoVacuum === "incremental"
+            ? "Free space beyond 1 MiB is returned to the disk, up to 4 MiB a minute."
+            : database.autoVacuum === "full"
+              ? "SQLite returns free space to the disk at every removal."
+              : "This database was created before automatic shrinking. Its free space is reused, but the file does not get smaller."
+        }
+        control={
+          <Badge variant="outline" size="sm">
+            {shrinking ? "On" : "Off"}
+          </Badge>
+        }
+      />
+      <SettingsRow
+        title="History compaction"
+        description="Removes older copies of progress updates once they are a day old; only the newest copy of each is ever shown."
+        status={compactionStatus(database.compaction)}
+      />
+      <SettingsRow
+        title="Estimated reclaimable"
+        description={
+          database.compaction.estimatedCompactableBytes === null
+            ? "Free space inside the file. An estimate of superseded history follows the first compaction pass."
+            : `Free space plus about ${formatBytes(database.compaction.estimatedCompactableBytes)} of superseded history not yet removed.`
+        }
+        control={value(formatBytes(database.reclaimableBytes))}
+      />
+    </>
   );
 }

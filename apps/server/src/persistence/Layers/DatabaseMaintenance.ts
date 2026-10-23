@@ -11,10 +11,23 @@
  * never compacts. `RYCO_EVENT_COMPACTION=off` disables it, `dry-run` selects and counts without
  * deleting (under its own state), anything else (default) runs it.
  *
+ * It also returns free pages to the file system on databases created with
+ * `auto_vacuum = INCREMENTAL` (every database created since that became the default in
+ * `Sqlite.ts`): once a minute, when more than 256 pages (1 MiB at 4 KiB pages) are free, it frees
+ * up to 1,024 of them down to that floor, in transactions of 128 single-page
+ * `PRAGMA incremental_vacuum(1)` steps with a pause after each. Single steps on purpose: through
+ * node:sqlite's `StatementSync.run()` an `incremental_vacuum(N)` frees one page while Bun's client
+ * frees N, so one page per statement is the only bound both runtimes keep. The floor stays free
+ * for new writes, which SQLite places in free pages before it grows the file. Older databases
+ * (`NONE`) keep their free pages inside the file; changing the mode needs an offline VACUUM.
+ * The file shrinks once the WAL is checkpointed. This runs regardless of the compaction setting.
+ *
  * @module DatabaseMaintenance
  */
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { Cause, Clock, Duration, Effect, Layer, Option } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 import {
   type CompactionLastPass,
@@ -161,11 +174,154 @@ export const makeDatabaseMaintenance = (options: DatabaseMaintenanceOptions) =>
     yield* Effect.forkScoped(loop);
   });
 
+/** `PRAGMA auto_vacuum` as a name: 0 none, 1 full, 2 incremental. */
+export type AutoVacuumMode = "none" | "full" | "incremental";
+
+export const autoVacuumModeOf = (value: unknown): AutoVacuumMode =>
+  Number(value) === 2 ? "incremental" : Number(value) === 1 ? "full" : "none";
+
+export interface FreePageReclaimOptions {
+  readonly interval: Duration.Input;
+  /** Free pages that stay in the file for new writes; nothing runs at or below it. */
+  readonly floorPages: number;
+  readonly maxPagesPerTick: number;
+  /** Single-page steps per transaction. */
+  readonly chunkPages: number;
+  /** Shortest pause after a chunk. */
+  readonly chunkPauseMs: number;
+  /** The pause after a chunk is also at least this many times its duration. */
+  readonly idleRatio: number;
+  /** A tick whose longest chunk exceeds this logs a warning. */
+  readonly slowChunkWarningMs: number;
+}
+
+export const DEFAULT_FREE_PAGE_RECLAIM_OPTIONS: FreePageReclaimOptions = {
+  interval: "1 minute",
+  floorPages: 256,
+  maxPagesPerTick: 1_024,
+  chunkPages: 128,
+  chunkPauseMs: 2,
+  idleRatio: 3,
+  slowChunkWarningMs: 50,
+};
+
+export interface FreePageReclaimResult {
+  readonly autoVacuum: AutoVacuumMode;
+  readonly freePagesBefore: number;
+  readonly freePagesAfter: number;
+  readonly reclaimedPages: number;
+  /** Duration of each chunk transaction, in order (for measurements). */
+  readonly chunkDurationsMs: ReadonlyArray<number>;
+  readonly maxChunkMs: number;
+}
+
+const pragmaNumber = (rows: ReadonlyArray<Record<string, unknown>>, name: string) =>
+  Number(rows[0]?.[name] ?? 0);
+
+/**
+ * One reclaim tick on the main connection: nothing unless the database is incremental and more
+ * than `floorPages` pages are free; then single-page steps down to the floor, at most
+ * `maxPagesPerTick`, `chunkPages` per transaction.
+ */
+export const reclaimFreePages = (
+  options: Omit<FreePageReclaimOptions, "interval" | "slowChunkWarningMs">,
+): Effect.Effect<FreePageReclaimResult, SqlError, SqlClient.SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const autoVacuum = autoVacuumModeOf(
+      pragmaNumber(yield* sql<{ readonly auto_vacuum: number }>`PRAGMA auto_vacuum`, "auto_vacuum"),
+    );
+    const readFreePages = sql<{ readonly freelist_count: number }>`PRAGMA freelist_count`.pipe(
+      Effect.map((rows) => pragmaNumber(rows, "freelist_count")),
+    );
+    const freePagesBefore = yield* readFreePages;
+    const chunkDurationsMs: Array<number> = [];
+    let freePages = freePagesBefore;
+    let reclaimedPages = 0;
+    if (autoVacuum === "incremental" && freePages > options.floorPages) {
+      while (reclaimedPages < options.maxPagesPerTick && freePages > options.floorPages) {
+        // Timed from inside the transaction: waiting for the connection is contention.
+        let startedAt = performance.now();
+        const chunk = yield* sql.withTransaction(
+          Effect.gen(function* () {
+            startedAt = performance.now();
+            // Read again under the transaction: other writes may have used free pages.
+            const before = yield* readFreePages;
+            const steps = Math.min(
+              options.chunkPages,
+              options.maxPagesPerTick - reclaimedPages,
+              Math.max(0, before - options.floorPages),
+            );
+            for (let step = 0; step < steps; step += 1) {
+              yield* sql`PRAGMA incremental_vacuum(1)`;
+            }
+            return { before, after: steps > 0 ? yield* readFreePages : before, steps };
+          }),
+        );
+        const elapsedMs = performance.now() - startedAt;
+        freePages = chunk.after;
+        if (chunk.steps === 0) break;
+        chunkDurationsMs.push(elapsedMs);
+        reclaimedPages += Math.max(0, chunk.before - chunk.after);
+        // A step that freed nothing (another writer took the pages) ends the tick.
+        if (chunk.after >= chunk.before) break;
+        if (reclaimedPages < options.maxPagesPerTick && freePages > options.floorPages) {
+          yield* Effect.sleep(
+            Math.ceil(Math.max(options.chunkPauseMs, elapsedMs * options.idleRatio)),
+          );
+        }
+      }
+    }
+    return {
+      autoVacuum,
+      freePagesBefore,
+      freePagesAfter: freePages,
+      reclaimedPages,
+      chunkDurationsMs,
+      maxChunkMs: chunkDurationsMs.reduce((max, ms) => Math.max(max, ms), 0),
+    } satisfies FreePageReclaimResult;
+  });
+
+/** Forks the reclaim loop: one tick per interval, failures logged and retried next tick. */
+export const makeFreePageReclaim = (options: FreePageReclaimOptions) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const tick = reclaimFreePages(options).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.tap((result) => {
+        if (result.chunkDurationsMs.length === 0) return Effect.void;
+        const summary = {
+          reclaimedPages: result.reclaimedPages,
+          freePagesBefore: result.freePagesBefore,
+          freePagesAfter: result.freePagesAfter,
+          chunks: result.chunkDurationsMs.length,
+          maxChunkMs: Math.round(result.maxChunkMs * 100) / 100,
+        };
+        return result.maxChunkMs > options.slowChunkWarningMs
+          ? Effect.logWarning("database free-page reclaim had a slow chunk", summary)
+          : Effect.logDebug("database free-page reclaim", summary);
+      }),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("database free-page reclaim failed; retrying later", {
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+    yield* Effect.forkScoped(
+      Effect.forever(Effect.sleep(options.interval).pipe(Effect.andThen(tick))),
+    );
+  });
+
 export const DatabaseMaintenanceLive = Layer.effectDiscard(
   Effect.suspend(() =>
-    makeDatabaseMaintenance({
-      ...DEFAULT_DATABASE_MAINTENANCE_OPTIONS,
-      setting: parseEventCompactionSetting(readEnv(EVENT_COMPACTION_ENV)),
-    }),
+    Effect.all([
+      makeDatabaseMaintenance({
+        ...DEFAULT_DATABASE_MAINTENANCE_OPTIONS,
+        setting: parseEventCompactionSetting(readEnv(EVENT_COMPACTION_ENV)),
+      }),
+      makeFreePageReclaim(DEFAULT_FREE_PAGE_RECLAIM_OPTIONS),
+    ]),
   ),
 ).pipe(Layer.provide(EventLogCompactionLive));

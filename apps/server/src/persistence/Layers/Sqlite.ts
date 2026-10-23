@@ -11,6 +11,11 @@ import { trackStartupPhase } from "../../startupStallMonitor.ts";
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;
   readonly spanAttributes?: Record<string, unknown>;
+  /**
+   * Bun's client switches to WAL when it opens the file unless this is set; `setup` then cannot
+   * choose `auto_vacuum` first. Node's client sets no pragmas at open and ignores it.
+   */
+  readonly disableWAL?: boolean;
 };
 
 type Loader = {
@@ -42,6 +47,15 @@ const setup = Layer.effectDiscard(
         ? BLOCKING_BUSY_TIMEOUT_MS
         : MAIN_CONNECTION_BUSY_TIMEOUT_MS;
     yield* sql.unsafe(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+    // A new database returns its free pages to the file system (DatabaseMaintenance reclaims
+    // them a little at a time). SQLite only takes this before the first table exists, and only
+    // before WAL: switching to WAL writes the header and pins NONE (probed on SQLite 3.54).
+    // Existing databases keep their mode; changing it needs a VACUUM. `sqlite_master`, not the
+    // `sqlite_schema` alias: that needs SQLite 3.33, newer than some system builds Bun loads.
+    const [schema] = yield* sql<{ readonly tables: number }>`
+      SELECT count(*) AS tables FROM sqlite_master
+    `;
+    if (Number(schema?.tables ?? 0) === 0) yield* sql`PRAGMA auto_vacuum = INCREMENTAL;`;
     yield* sql`PRAGMA journal_mode = WAL;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
     // Read-path tuning, adopted from a repeated A/B on a synthetic 5k-thread / 400k-activity
@@ -73,6 +87,12 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
+  // Only a database without content needs `setup` to choose auto_vacuum before WAL. Every other
+  // file keeps the Bun client's own WAL switch, which retries SQLITE_BUSY (setup's does not).
+  const empty = yield* fs.stat(dbPath).pipe(
+    Effect.map((info) => Number(info.size) === 0),
+    Effect.orElseSucceed(() => true),
+  );
 
   return SqliteReadClientLayer.layer(dbPath).pipe(
     Layer.provideMerge(
@@ -80,6 +100,7 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
         setup,
         makeRuntimeSqliteLayer({
           filename: dbPath,
+          disableWAL: empty,
           spanAttributes: {
             "db.name": path.basename(dbPath),
             "service.name": "ryco-server",
