@@ -527,6 +527,17 @@ function mapThreadShell(
   };
 }
 
+/**
+ * The summary a `thread-upserted` event writes for `thread` (a relocated
+ * checkout's path aside), for consumers that follow shell events one by one.
+ */
+export function mapThreadShellSummary(
+  thread: OrchestrationThreadShell,
+  environmentId: EnvironmentId,
+): SidebarThreadSummary {
+  return mapThreadShell(thread, environmentId).summary;
+}
+
 function mapArchivedThreadStub(
   stub: OrchestrationArchivedThreadStub,
   environmentId: EnvironmentId,

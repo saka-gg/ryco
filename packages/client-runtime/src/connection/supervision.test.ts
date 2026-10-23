@@ -41,6 +41,7 @@ import {
   SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS,
   SavedEnvironmentCredentialError,
   savedEnvironmentRetryDelayMs,
+  type ShellAcceptance,
 } from "./supervision.ts";
 
 type Record = { readonly environmentId: EnvironmentId; readonly lastConnectedAt?: string };
@@ -2416,6 +2417,111 @@ describe("shell frame batching", () => {
     supervisor.resetShellProjection(remote);
     expect(calls[0]).toBe("commit:4");
     expect(supervisor.readShellProjectionSequence(remote)).toBeNull();
+  });
+});
+
+describe("shell acceptance", () => {
+  const upsert = (sequence: number) =>
+    ({ kind: "thread-upserted", sequence, thread: { id: "thread-1" } }) as never;
+  const shellSnapshot = (snapshotSequence: number) =>
+    ({
+      snapshotSequence,
+      updatedAt: "2026-10-12T00:00:00.000Z",
+      projects: [],
+      worktrees: [],
+      threads: [{ id: "thread-1" }],
+    }) as never;
+
+  function observedSupervisor() {
+    const calls: string[] = [];
+    const sink = {
+      applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<unknown>) => {
+        calls.push(`commit:${events.length}`);
+        return events.map(() => undefined);
+      },
+      afterShellEventApplied: (_environmentId: EnvironmentId, event: any) => {
+        calls.push(`after:${event.sequence}`);
+      },
+      syncServerShellSnapshot: (_environmentId: EnvironmentId, snapshot: any) => {
+        calls.push(`snapshot:${snapshot.snapshotSequence}`);
+      },
+      reconcileSnapshotDerivedState: () => {
+        calls.push("reconciled");
+      },
+    };
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: sink,
+      scheduleShellFrame: () => undefined,
+    });
+    const record = (prefix: string) => (acceptance: ShellAcceptance) => {
+      calls.push(
+        acceptance.kind === "snapshot"
+          ? `${prefix}:snapshot`
+          : `${prefix}:${acceptance.events.map((event) => event.sequence).join(",")}`,
+      );
+    };
+    return { supervisor, calls, record };
+  }
+
+  it("reports a snapshot once it is applied, and none the projection already holds", () => {
+    const { supervisor, calls, record } = observedSupervisor();
+    supervisor.subscribeShellAcceptance(record("accepted"));
+
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    expect(calls).toEqual(["snapshot:5", "reconciled", "accepted:snapshot"]);
+
+    calls.length = 0;
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    supervisor.syncShellSnapshot(shellSnapshot(4), remote);
+    expect(calls).toEqual([]);
+  });
+
+  it("reports a batch's accepted events in order after their after-hooks", () => {
+    const { supervisor, calls, record } = observedSupervisor();
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    supervisor.subscribeShellAcceptance(record("accepted"));
+    calls.length = 0;
+
+    supervisor.applyShellEvent(upsert(4), remote);
+    supervisor.applyShellEvent(upsert(6), remote);
+    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
+    supervisor.skipShellEvent(7, remote);
+    supervisor.applyShellEvent(
+      { kind: "thread-removed", sequence: 8, threadId: "thread-1" } as never,
+      remote,
+    );
+    supervisor.flushShellEvents();
+
+    expect(calls).toEqual(["commit:3", "after:6", "after:8", "accepted:6,8"]);
+  });
+
+  it("keeps applying the shell and telling other listeners when one throws", () => {
+    const { supervisor, calls, record } = observedSupervisor();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    supervisor.subscribeShellAcceptance(() => {
+      throw new Error("listener failed");
+    });
+    const unsubscribe = supervisor.subscribeShellAcceptance(record("accepted"));
+
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    supervisor.applyShellEvent(upsert(6), remote);
+    supervisor.flushShellEvents();
+    unsubscribe();
+    supervisor.applyShellEvent(upsert(7), remote);
+    supervisor.flushShellEvents();
+
+    expect(calls).toEqual([
+      "snapshot:5",
+      "reconciled",
+      "accepted:snapshot",
+      "commit:1",
+      "after:6",
+      "accepted:6",
+      "commit:1",
+      "after:7",
+    ]);
+    expect(warn).toHaveBeenCalledTimes(3);
+    warn.mockRestore();
   });
 });
 

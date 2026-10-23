@@ -141,6 +141,7 @@ export const CLIENT_RUNTIME_PURE_TEST_FILES = [
   "src/state/threads/threadForkAttempt.test.ts",
   "src/state/threads/threadInbox.test.ts",
   "src/state/threads/threadLineage.test.ts",
+  "src/state/threads/threadNotificationFeed.test.ts",
   "src/state/threads/threadNotifications.test.ts",
   "src/state/threads/threadPriorityRefresh.test.ts",
   "src/state/threads/threadSort.test.ts",
