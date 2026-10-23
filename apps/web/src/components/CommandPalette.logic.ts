@@ -7,10 +7,14 @@ import {
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { type ReactNode } from "react";
 import { sortThreads } from "../lib/threadSort";
+import type { SettingsSectionId } from "../settingsDialogStore";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
+import type { SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
 export const RECENT_THREAD_LIMIT = 12;
+/** Settings results show only while typing, under Threads, at most this many. */
+export const SETTINGS_SEARCH_RESULT_LIMIT = 8;
 export const ITEM_ICON_CLASS = "size-4 text-muted-foreground/80";
 export const ADDON_ICON_CLASS = "size-4";
 
@@ -261,12 +265,32 @@ export function buildMessageSearchItems(input: {
   });
 }
 
+export function buildSettingsSearchItems(input: {
+  entries: ReadonlyArray<SettingsSearchEntry>;
+  sectionTitles: Readonly<Record<SettingsSectionId, string>>;
+  icon: ReactNode;
+  runEntry: (entry: SettingsSearchEntry) => void;
+}): CommandPaletteActionItem[] {
+  return input.entries.map((entry) => ({
+    kind: "action" as const,
+    value: `settings:${entry.owner}:${entry.section}:${entry.title}`,
+    searchTerms: [entry.title, entry.description, entry.keywords ?? ""],
+    title: entry.title,
+    description: input.sectionTitles[entry.section],
+    icon: input.icon,
+    run: async () => {
+      input.runEntry(entry);
+    },
+  }));
+}
+
 export function filterCommandPaletteGroups(input: {
   activeGroups: ReadonlyArray<CommandPaletteGroup>;
   query: string;
   isInSubmenu: boolean;
   projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
   threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
+  settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
   messageSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
   const isActionsFilter = input.query.startsWith(">");
@@ -303,6 +327,13 @@ export function filterCommandPaletteGroups(input: {
         items: input.threadSearchItems,
       });
     }
+    if (input.settingsSearchItems && input.settingsSearchItems.length > 0) {
+      searchableGroups.push({
+        value: "settings-search",
+        label: "Settings",
+        items: input.settingsSearchItems,
+      });
+    }
     if (input.messageSearchItems && input.messageSearchItems.length > 0) {
       searchableGroups.push({
         value: "messages-search",
@@ -331,6 +362,7 @@ export function filterCommandPaletteGroups(input: {
           entry !== null,
       )
       .toSorted((left, right) => right.rank - left.rank || left.index - right.index)
+      .slice(0, group.value === "settings-search" ? SETTINGS_SEARCH_RESULT_LIMIT : undefined)
       .map((entry) => entry.item);
 
     if (items.length === 0) {

@@ -12,11 +12,15 @@ import {
   buildBrowseGroups,
   buildBrowseItemValue,
   buildMessageSearchItems,
+  buildSettingsSearchItems,
   buildThreadActionItems,
   filterBrowseEntries,
   filterCommandPaletteGroups,
+  SETTINGS_SEARCH_RESULT_LIMIT,
+  type CommandPaletteActionItem,
   type CommandPaletteGroup,
 } from "./CommandPalette.logic";
+import { SETTINGS_SECTION_TITLES, type SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const PROJECT_ID = ProjectId.make("project-1");
@@ -240,6 +244,94 @@ describe("buildMessageSearchItems", () => {
     if (item?.kind !== "action") throw new Error("expected action item");
     await item.run();
     expect(runMessage).toHaveBeenCalledWith(result);
+  });
+});
+
+describe("buildSettingsSearchItems", () => {
+  function settingsEntry(
+    title: string,
+    overrides: Partial<SettingsSearchEntry> = {},
+  ): SettingsSearchEntry {
+    return { section: "appearance", owner: "client", title, description: "", ...overrides };
+  }
+
+  function actionItem(value: string, title: string): CommandPaletteActionItem {
+    return { kind: "action", value, searchTerms: [title], title, icon: null, run: async () => {} };
+  }
+
+  function settingsItems(entries: ReadonlyArray<SettingsSearchEntry>, runEntry = vi.fn()) {
+    return buildSettingsSearchItems({
+      entries,
+      sectionTitles: SETTINGS_SECTION_TITLES,
+      icon: null,
+      runEntry,
+    });
+  }
+
+  it("lists settings between threads and messages, described by their section", async () => {
+    const diffStyle = settingsEntry("Diff style", {
+      description: "Preview unified and split layouts for code changes.",
+      keywords: "side by side",
+    });
+    const runEntry = vi.fn();
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "diff",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [actionItem("thread:diff", "Diff review")],
+      settingsSearchItems: settingsItems([diffStyle], runEntry),
+      messageSearchItems: [actionItem("message:diff", "the diff looks right")],
+    });
+
+    expect(groups.map((group) => [group.value, group.label])).toEqual([
+      ["threads-search", "Threads"],
+      ["settings-search", "Settings"],
+      ["messages-search", "Messages"],
+    ]);
+    const item = groups[1]?.items[0];
+    expect(item).toMatchObject({ title: "Diff style", description: "Appearance" });
+    if (item?.kind !== "action") throw new Error("expected action item");
+    await item.run();
+    expect(runEntry).toHaveBeenCalledWith(diffStyle);
+  });
+
+  it("shows settings only while typing at the root, never under the actions filter", () => {
+    const settingsSearchItems = settingsItems([settingsEntry("Diff style")]);
+    const groupsFor = (query: string, isInSubmenu = false) =>
+      filterCommandPaletteGroups({
+        activeGroups: [],
+        query,
+        isInSubmenu,
+        projectSearchItems: [],
+        threadSearchItems: [],
+        settingsSearchItems,
+      }).map((group) => group.value);
+
+    expect(groupsFor("diff")).toEqual(["settings-search"]);
+    expect(groupsFor("")).toEqual([]);
+    expect(groupsFor(">diff")).toEqual([]);
+    expect(groupsFor("diff", true)).toEqual([]);
+  });
+
+  it("keeps the best matches, at most the limit", () => {
+    const entries = [
+      ...Array.from({ length: SETTINGS_SEARCH_RESULT_LIMIT + 1 }, (_, index) =>
+        settingsEntry(`Option ${index}`, { description: "Changes the font." }),
+      ),
+      settingsEntry("Font"),
+    ];
+    const [group] = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "font",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [],
+      settingsSearchItems: settingsItems(entries),
+    });
+
+    expect(group?.items).toHaveLength(SETTINGS_SEARCH_RESULT_LIMIT);
+    expect(group?.items[0]?.title).toBe("Font");
   });
 });
 

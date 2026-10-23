@@ -18,6 +18,7 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
 import { isMacPlatform } from "../lib/utils";
+import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
@@ -29,6 +30,7 @@ import {
   DEFAULT_VIEWPORT,
   LOCAL_ENVIRONMENT_ID,
   NOW_ISO,
+  PHONE_VIEWPORT,
   PROJECT_ID,
   PROJECT_LOGICAL_KEY,
   REMOTE_ENVIRONMENT_ID,
@@ -888,6 +890,65 @@ describe("ChatView Navigation (full app)", () => {
         .element(palette.getByText("New thread in Project", { exact: true }))
         .not.toBeInTheDocument();
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("finds a setting while typing and reveals it in its section", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-command-palette-settings-search" as MessageId,
+        targetText: "command palette settings search",
+      }),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      useCommandPaletteStore.getState().setOpen(true);
+      const palette = page.getByTestId("command-palette");
+      await page.getByPlaceholder("Search commands, projects, and threads...").fill("diff style");
+      await expect.element(palette.getByText("Settings", { exact: true })).toBeInTheDocument();
+      await expect.element(palette.getByText("Appearance", { exact: true })).toBeInTheDocument();
+      await palette.getByText("Diff style", { exact: true }).click();
+
+      await waitForURL(mounted.router, (path) => path === "/settings", "Settings should open.");
+      expect(useSettingsDialogStore.getState()).toMatchObject({
+        section: "appearance",
+        editingScope: "client",
+      });
+      await vi.waitFor(() =>
+        expect(document.activeElement?.getAttribute("data-settings-section")).toBe("Diff style"),
+      );
+    } finally {
+      useSettingsDialogStore.getState().closeSettings();
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps Settings results off the frozen phone tier", async () => {
+    const mounted = await mountChatView({
+      viewport: PHONE_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-command-palette-phone-settings" as MessageId,
+        targetText: "command palette phone settings",
+      }),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await vi.waitFor(() =>
+        expect(document.documentElement.getAttribute("data-tier")).toBe("phone"),
+      );
+      useCommandPaletteStore.getState().setOpen(true);
+      const palette = page.getByTestId("command-palette");
+      await page.getByPlaceholder("Search commands, projects, and threads...").fill("diff style");
+      await expect
+        .element(palette.getByText("No matching commands, projects, or threads."))
+        .toBeInTheDocument();
+      expect(palette.element().textContent).not.toContain("Diff style");
+    } finally {
+      useCommandPaletteStore.getState().setOpen(false);
       await mounted.cleanup();
     }
   });

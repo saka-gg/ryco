@@ -3,6 +3,7 @@
 import { useAppKeybindings } from "../appKeybindings";
 
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import { useSettingsPageTarget } from "../hooks/useSettingsPageTarget";
 import { useThreadExportAction } from "../hooks/useThreadExportAction";
 
 import { DeviceIcon } from "./DeviceIcon";
@@ -129,6 +130,7 @@ import {
   buildMessageSearchItems,
   buildProjectActionItems,
   buildRootGroups,
+  buildSettingsSearchItems,
   buildThreadActionItems,
   type CommandPaletteMessageSearchResult,
   type CommandPaletteActionItem,
@@ -145,6 +147,13 @@ import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
+import {
+  filterSettingsSearchEntries,
+  readSettingsSearchScope,
+  SETTINGS_LINK_SECTIONS,
+  SETTINGS_SECTION_TITLES,
+} from "./settings/settingsSearchIndex";
+import { requestSettingsReveal } from "./settings/settingsSearchReveal";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
 import { LazyCreatePullRequestDialogHost } from "./pullRequests/create/lazyCreatePullRequestDialogHost";
 import {
@@ -1191,6 +1200,8 @@ function OpenCommandPaletteDialog() {
   );
 
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
+  const showSettingsSection = useSettingsDialogStore((s) => s.showSection);
+  const settingsPageTarget = useSettingsPageTarget();
   const openSourceControlSettings = useCallback(() => {
     setOpen(false);
     openSettings("source-control");
@@ -1823,12 +1834,35 @@ function OpenCommandPaletteDialog() {
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   const activeGroups = currentView ? currentView.groups : rootGroups;
 
+  // The rows the settings page would list for this query, for the device it
+  // would open. Statistics opens its own page, which the action above offers.
+  // The frozen phone tier keeps its own settings sheet.
+  const settingsSearchItems =
+    presentationTier === "phone"
+      ? []
+      : buildSettingsSearchItems({
+          entries: filterSettingsSearchEntries(
+            deferredQuery,
+            readSettingsSearchScope(settingsPageTarget),
+          ).filter((entry) => !SETTINGS_LINK_SECTIONS.has(entry.section)),
+          sectionTitles: SETTINGS_SECTION_TITLES,
+          icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
+          runEntry: (entry) => {
+            setOpen(false);
+            // Open on the device the results were checked against.
+            openSettings(entry.section, settingsPageTarget.environmentId);
+            showSettingsSection(entry.owner, entry.section);
+            requestSettingsReveal(entry.targetId ?? entry.title);
+          },
+        });
+
   const filteredGroups = filterCommandPaletteGroups({
     activeGroups,
     query: deferredQuery,
     isInSubmenu: currentView !== null,
     projectSearchItems: projectSearchItems,
     threadSearchItems: allThreadItems,
+    settingsSearchItems,
     messageSearchItems,
   });
 
