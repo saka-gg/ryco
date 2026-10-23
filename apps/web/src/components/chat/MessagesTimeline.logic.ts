@@ -30,6 +30,7 @@ import { htmlRenderMetadataEqual, type HtmlRenderMetadata } from "@ryco/shared/h
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import {
   collectTurnHtmlRenders,
+  deriveRevertTurnCountByUserMessageId as deriveRevertTurnCountForMessages,
   deriveTerminalAssistantMessageIds,
   findTimelineMessageRowIndex,
   isBlankSettledReply,
@@ -863,37 +864,13 @@ export function deriveRevertTurnCountByUserMessageId(input: {
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   inferredCheckpointTurnCountByTurnId: Readonly<Partial<Record<TurnDiffSummary["turnId"], number>>>;
 }): Map<MessageId, number> {
-  const byUserMessageId = new Map<MessageId, number>();
-  let pendingUserMessageId: MessageId | null = null;
-
-  for (const entry of input.timelineEntries) {
-    if (entry.kind !== "message") {
-      continue;
-    }
-
-    if (entry.message.role === "user") {
-      pendingUserMessageId = entry.message.id;
-      continue;
-    }
-
-    if (!pendingUserMessageId) {
-      continue;
-    }
-
-    const summary = input.turnDiffSummaryByAssistantMessageId.get(entry.message.id);
-    if (!summary) {
-      continue;
-    }
-
-    const turnCount =
-      summary.checkpointTurnCount ?? input.inferredCheckpointTurnCountByTurnId[summary.turnId];
-    if (typeof turnCount === "number") {
-      byUserMessageId.set(pendingUserMessageId, Math.max(0, turnCount - 1));
-    }
-    pendingUserMessageId = null;
-  }
-
-  return byUserMessageId;
+  return deriveRevertTurnCountForMessages({
+    messages: input.timelineEntries.flatMap((entry) =>
+      entry.kind === "message" ? [entry.message] : [],
+    ),
+    turnDiffSummaryByAssistantMessageId: input.turnDiffSummaryByAssistantMessageId,
+    inferredCheckpointTurnCountByTurnId: input.inferredCheckpointTurnCountByTurnId,
+  });
 }
 
 /**

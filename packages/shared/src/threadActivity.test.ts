@@ -12,6 +12,7 @@ import {
   isContextCompactionActivity,
   isTerminalContextHandoffActivity,
   isThreadActivityMilestone,
+  latestCheckpointRevertActivity,
   resolveRevertRetention,
   retainThreadMessagesAfterForkRevert,
   retainThreadMessagesAfterRevert,
@@ -276,6 +277,26 @@ describe("activity order", () => {
         entry("b", "2026-01-01T00:00:01.000Z", 7),
       ),
     ).toBeGreaterThan(0);
+  });
+
+  it("picks the newest revert journal row, past failed ones when asked", () => {
+    const revert = (id: string, status: string, createdAt: string, sequence?: number) => ({
+      ...entry(id, createdAt, sequence),
+      kind: "checkpoint.revert",
+      payload: { status },
+    });
+    const kept = revert("kept", "completed", "2026-01-01T00:00:01.000Z", 3);
+    const refused = revert("refused", "failed", "2026-01-01T00:00:02.000Z", 4);
+    const activities = [
+      refused,
+      kept,
+      { ...entry("tool", "2026-01-01T00:00:09.000Z", 9), kind: "tool.completed", payload: {} },
+    ];
+
+    expect(latestCheckpointRevertActivity(activities)).toBe(refused);
+    expect(latestCheckpointRevertActivity(activities, { skipFailed: true })).toBe(kept);
+    expect(latestCheckpointRevertActivity([refused], { skipFailed: true })).toBeNull();
+    expect(latestCheckpointRevertActivity([])).toBeNull();
   });
 
   it("orders a lifecycle recorded in the same instant before the id decides", () => {

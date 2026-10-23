@@ -324,6 +324,11 @@ export const CheckpointRevertActivityPayload = Schema.Struct({
   detail: Schema.optional(TrimmedNonEmptyString),
   /** Restore cwd, recorded from "rolling-back" on so startup recovery can finish. */
   cwd: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * `false` on every phase of a conversation-only revert (`thread.conversation.revert`),
+   * so startup recovery never restores files the user chose to keep. Absent means restore.
+   */
+  restoreFiles: Schema.optional(Schema.Boolean),
 });
 export type CheckpointRevertActivityPayload = typeof CheckpointRevertActivityPayload.Type;
 
@@ -2202,6 +2207,16 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/**
+ * Rewinds the conversation to checkpoint `turnCount` and leaves the files as they are.
+ * A command of its own, not an option of `thread.checkpoint.revert`: an older server
+ * rejects it instead of ignoring the option and restoring files.
+ */
+const ThreadConversationRevertCommand = Schema.Struct({
+  ...ThreadCheckpointRevertCommand.fields,
+  type: Schema.Literal("thread.conversation.revert"),
+});
+
 const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
@@ -2420,6 +2435,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
+  ThreadConversationRevertCommand,
   ThreadSessionStopCommand,
   WorktreeCreateCommand,
   WorktreeArchiveCommand,
@@ -2464,6 +2480,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
+  ThreadConversationRevertCommand,
   ThreadSessionStopCommand,
   WorktreeCreateCommand,
   WorktreeArchiveCommand,
@@ -3058,6 +3075,12 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
 export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  /**
+   * `false` for `thread.conversation.revert`: rewind the conversation, leave the files.
+   * Absent (older events) means restore them. The event projects nothing, so a reader
+   * that ignores the field changes no state.
+   */
+  restoreFiles: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 

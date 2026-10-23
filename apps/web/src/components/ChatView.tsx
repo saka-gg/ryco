@@ -41,7 +41,12 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
 import { isThreadHistoryAnchorMissing } from "@ryco/client-runtime/connection";
-import { deriveThreadBackgroundWork } from "@ryco/client-runtime/state/session";
+import {
+  deriveThreadBackgroundWork,
+  keptChangesRestoreNote,
+  revertKeptChangesDiscardedBy,
+  selectConversationRevertSupported,
+} from "@ryco/client-runtime/state/session";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { useSideChatStore } from "../sideChatStore";
@@ -360,7 +365,21 @@ import {
   type ForegroundQueueTarget,
 } from "../messageQueueDrain";
 import type { QueuedMessage } from "../messageQueue.logic";
-import { deriveComposerFileUploadSendBlock } from "~/composerFileUpload";
+import {
+  deriveComposerFileUploadSendBlock,
+  useEnvironmentFileUploadCapability,
+} from "~/composerFileUpload";
+import { getEnvironmentHttpBaseUrl } from "~/environments/runtime/catalog";
+import { readLocalApi } from "~/localApi";
+import {
+  CheckpointRevertChoiceDialog,
+  useCheckpointRevertChoice,
+} from "./chat/CheckpointRevertChoiceDialog";
+import {
+  composerContentWithReturnedMessage,
+  loadSentMessageFiles,
+  type ReturnedSentMessageFiles,
+} from "./chat/editFromHere";
 import { ComposerQueuedMessages, type QueuedMessagesWait } from "./chat/ComposerQueuedMessages";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
@@ -4099,38 +4118,175 @@ export default function ChatView(props: ChatViewProps) {
     runProjectScript,
   });
 
-  const onRevertToTurnCount = useCallback(
+  const conversationRevertSupported = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectConversationRevertSupported,
+  );
+  const revertChoice = useCheckpointRevertChoice();
+  const requestRevertChoice = revertChoice.requestChoice;
+  const settleRevertChoice = revertChoice.settle;
+  useEffect(() => () => settleRevertChoice(null), [routeThreadKey, settleRevertChoice]);
+  const fileUploadMaxBytes = useEnvironmentFileUploadCapability(environmentId);
+
+  /** What every revert checks first; null when it may not run now. */
+  const resolveRevertPreconditions = useCallback(() => {
+    // A revert rewrites the checkout now or not at all; it is never queued.
+    if (mutationUnavailableReason !== null) {
+      notifyMutationUnavailable(mutationUnavailableReason);
+      return null;
+    }
+    const providerInstanceId =
+      activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId;
+    const provider = providerInstanceId
+      ? composerProviderStatuses.find((entry) => entry.instanceId === providerInstanceId)
+      : undefined;
+    return {
+      thread: activeThread ?? null,
+      environmentUnavailable: activeEnvironmentUnavailable,
+      environmentUnavailableLabel: activeEnvironmentUnavailableLabel,
+      turnInProgress: phase === "running" || isSendBusy || isConnecting,
+      providerRefusal: checkpointRevertUnsupportedMessage(provider),
+    };
+  }, [
+    activeEnvironmentUnavailable,
+    activeEnvironmentUnavailableLabel,
+    activeThread,
+    composerProviderStatuses,
+    isConnecting,
+    isSendBusy,
+    mutationUnavailableReason,
+    notifyMutationUnavailable,
+    phase,
+  ]);
+
+  // "Undo" on a turn's changed files: the files go back, after a confirmation.
+  const onUndoToTurnCount = useCallback(
     async (turnCount: number) => {
-      // A revert rewrites the checkout now or not at all; it is never queued.
-      if (mutationUnavailableReason !== null) {
-        notifyMutationUnavailable(mutationUnavailableReason);
-        return;
-      }
-      const providerInstanceId =
-        activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId;
-      const provider = providerInstanceId
-        ? composerProviderStatuses.find((entry) => entry.instanceId === providerInstanceId)
-        : undefined;
-      await revertToTurnCount({
-        thread: activeThread ?? null,
+      const preconditions = resolveRevertPreconditions();
+      if (preconditions === null) return;
+      const keptChangesTurnCount = revertKeptChangesDiscardedBy(
+        preconditions.thread?.activities ?? [],
         turnCount,
-        environmentUnavailable: activeEnvironmentUnavailable,
-        environmentUnavailableLabel: activeEnvironmentUnavailableLabel,
-        turnInProgress: phase === "running" || isSendBusy || isConnecting,
-        providerRefusal: checkpointRevertUnsupportedMessage(provider),
+      );
+      await revertToTurnCount({
+        ...preconditions,
+        turnCount,
+        choose: async () => {
+          const localApi = readLocalApi();
+          if (!localApi) return null;
+          const confirmed = await localApi.dialogs.confirm(
+            [
+              `Revert this thread to checkpoint ${turnCount}?`,
+              "The agent forgets the newer turns, and the files in this checkout go back to how they were at that checkpoint. Changes made since then, including your own edits, are discarded.",
+              ...(keptChangesTurnCount === null
+                ? []
+                : [keptChangesRestoreNote(keptChangesTurnCount)]),
+              "This action cannot be undone.",
+            ].join("\n"),
+          );
+          return confirmed ? "restore-files" : null;
+        },
+      });
+    },
+    [resolveRevertPreconditions, revertToTurnCount],
+  );
+
+  /**
+   * Puts a reverted message back into its thread's composer, below what the
+   * user drafted since. Only the draft store is written once the view shows
+   * another thread. The draft is read from the store, not `promptRef`: the
+   * revert can outlive this view, and a remounted view keeps its own draft
+   * there while this one's ref stays frozen.
+   */
+  const returnSentMessageToComposer = useCallback(
+    (input: {
+      readonly returned: ReturnedSentMessageFiles;
+      readonly target: ScopedThreadRef;
+      readonly live: boolean;
+    }) => {
+      const { returned, target, live } = input;
+      const streamsUploads =
+        fileUploadMaxBytes !== null && getEnvironmentHttpBaseUrl(target.environmentId) !== null;
+      const { prompt, attachments } = composerContentWithReturnedMessage({
+        returned,
+        draftPrompt: readComposerDraftContent(target)?.prompt ?? "",
+        environmentId: target.environmentId,
+        uploadThreadId: streamsUploads ? target.threadId : null,
+      });
+      restoreComposerContent({
+        refs: {
+          promptRef,
+          composerImagesRef,
+          composerTerminalContextsRef,
+          composerFileReferencesRef,
+        },
+        composerHandle: { readComposer },
+        draft: {
+          composerDraftTarget: target,
+          setComposerDraftPrompt,
+          addComposerDraftImages,
+          setComposerDraftTerminalContexts,
+          setComposerDraftFileReferences,
+        },
+        prompt,
+        images: attachments,
+        append: true,
+        live,
+      });
+      if (live) scheduleComposerFocus();
+    },
+    [
+      addComposerDraftImages,
+      fileUploadMaxBytes,
+      readComposer,
+      scheduleComposerFocus,
+      setComposerDraftFileReferences,
+      setComposerDraftPrompt,
+      setComposerDraftTerminalContexts,
+    ],
+  );
+
+  // "Edit from here" under a sent message: rewind to before it, keeping the
+  // files or not, and return its prompt and attachments to the composer.
+  const onEditFromHere = useCallback(
+    async (messageId: MessageId, turnCount: number) => {
+      const preconditions = resolveRevertPreconditions();
+      if (preconditions === null) return;
+      const thread = preconditions.thread;
+      const message = thread?.messages.find(
+        (entry) => entry.id === messageId && entry.role === "user",
+      );
+      if (!thread || !message || routeKind !== "server") return;
+      const target = routeThreadRef;
+      const showsThread = bindToShownThread();
+      await revertToTurnCount<ReturnedSentMessageFiles>({
+        ...preconditions,
+        turnCount,
+        choose: () =>
+          requestRevertChoice({
+            keepFilesAvailable: conversationRevertSupported,
+            keptChangesTurnCount: revertKeptChangesDiscardedBy(thread.activities, turnCount),
+          }),
+        prepare: () =>
+          loadSentMessageFiles({
+            environmentId: target.environmentId,
+            threadId: thread.id,
+            message,
+            composerAttachments: readComposerDraftContent(target)?.images ?? [],
+          }),
+        onReverted: (returned) =>
+          returnSentMessageToComposer({ returned, target, live: showsThread() }),
       });
     },
     [
-      activeEnvironmentUnavailable,
-      activeEnvironmentUnavailableLabel,
-      activeThread,
-      composerProviderStatuses,
-      isConnecting,
-      isSendBusy,
-      mutationUnavailableReason,
-      notifyMutationUnavailable,
-      phase,
+      bindToShownThread,
+      conversationRevertSupported,
+      requestRevertChoice,
+      resolveRevertPreconditions,
+      returnSentMessageToComposer,
       revertToTurnCount,
+      routeKind,
+      routeThreadRef,
     ],
   );
 
@@ -5803,20 +5959,22 @@ export default function ChatView(props: ChatViewProps) {
   // the callback reference is fully stable and never busts context identity.
   const revertTurnCountRef = useRef(revertTurnCountByUserMessageId);
   revertTurnCountRef.current = revertTurnCountByUserMessageId;
-  const onRevertToTurnCountRef = useRef(onRevertToTurnCount);
-  onRevertToTurnCountRef.current = onRevertToTurnCount;
+  const onEditFromHereRef = useRef(onEditFromHere);
+  onEditFromHereRef.current = onEditFromHere;
+  const onUndoToTurnCountRef = useRef(onUndoToTurnCount);
+  onUndoToTurnCountRef.current = onUndoToTurnCount;
   const onRevertUserMessage = useCallback((messageId: MessageId) => {
     const targetTurnCount = revertTurnCountRef.current.get(messageId);
     if (typeof targetTurnCount !== "number") {
       return;
     }
-    void onRevertToTurnCountRef.current(targetTurnCount);
+    void onEditFromHereRef.current(messageId, targetTurnCount);
   }, []);
   // The changed-files card already resolved its rollback target when the row
   // was derived, so this only has to dispatch. Same ref indirection as above so
   // the callback identity never busts the timeline's stable context.
   const onUndoTurn = useCallback((turnCount: number) => {
-    void onRevertToTurnCountRef.current(turnCount);
+    void onUndoToTurnCountRef.current(turnCount);
   }, []);
   // Composer focus or the first keystroke starts the provider session the next send
   // would start (`provider.prewarmSession`), so the send does not wait for the provider
@@ -6926,6 +7084,10 @@ export default function ChatView(props: ChatViewProps) {
               contained
             />
           ) : null}
+          <CheckpointRevertChoiceDialog
+            request={revertChoice.request}
+            onSettle={settleRevertChoice}
+          />
         </div>
         {/* end chat column */}
         {isPhoneTier ? null : inspectedContextHandoff && !shouldUseRightPanelSheet ? (

@@ -64,6 +64,25 @@ describe("createThreadListRowAnnotator", () => {
     expect(gone[2]).not.toBe(ready[2]);
   });
 
+  it("flags the sent messages that offer Edit from here, and drops the flag while busy", () => {
+    const annotate = createThreadListRowAnnotator();
+    const user = MessageId.make("user-1");
+    const editable = annotate(rows, {
+      forkableMessageIds: NONE,
+      editableMessageIds: new Set([user]),
+      highlightedMessageId: null,
+    });
+    expect(editable[0]).toMatchObject({ editable: true, id: rows[0]!.id });
+    expect(editable[1]).toBe(rows[1]);
+
+    const busy = annotate(rows, {
+      forkableMessageIds: NONE,
+      editableMessageIds: NONE,
+      highlightedMessageId: null,
+    });
+    expect(busy[0]).toBe(rows[0]);
+  });
+
   describe("a turn that answered with a page and ended on a blank reply", () => {
     const turnId = TurnId.make("turn-page");
     const chat = (id: string, overrides: Partial<ChatMessage>): ChatMessage =>

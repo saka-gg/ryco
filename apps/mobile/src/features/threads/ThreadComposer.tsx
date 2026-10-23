@@ -30,6 +30,7 @@ import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingCont
 export interface ThreadComposerHandle {
   /** The composer holds typed text (attachments live in the owning screen). */
   readonly hasText: () => boolean;
+  readonly getText: () => string;
   /** Replaces the typed text, e.g. with a queued message pulled back for editing. */
   readonly setText: (text: string) => void;
   readonly focus: () => void;
@@ -86,6 +87,7 @@ export function ThreadComposer(props: {
     ref,
     () => ({
       hasText: () => text.trim().length > 0,
+      getText: () => text,
       setText,
       focus: () => editorRef.current?.focus(),
     }),

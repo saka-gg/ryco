@@ -1,4 +1,5 @@
 import {
+  CHECKPOINT_REVERT_ACTIVITY_KIND,
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
   type OrchestrationThreadActivity,
@@ -261,6 +262,34 @@ export function compareThreadActivities(
     left.createdAt.localeCompare(right.createdAt) ||
     left.id.localeCompare(right.id)
   );
+}
+
+function isFailedCheckpointRevert(activity: Pick<OrchestrationThreadActivity, "payload">): boolean {
+  const { payload } = activity;
+  return (
+    payload !== null &&
+    typeof payload === "object" &&
+    "status" in payload &&
+    payload.status === "failed"
+  );
+}
+
+/**
+ * A thread's newest `checkpoint.revert` journal row in display order, or null. With
+ * `skipFailed`, rows of reverts that failed are passed over: a failed revert changed nothing,
+ * so the row before it still says what the thread's reverts left in its checkout. The server's
+ * shared-checkout check and every client's restore warning pick their row here.
+ */
+export function latestCheckpointRevertActivity<
+  T extends ThreadActivityOrderKey & Pick<OrchestrationThreadActivity, "kind" | "payload">,
+>(activities: ReadonlyArray<T>, options?: { readonly skipFailed?: boolean }): T | null {
+  let latest: T | null = null;
+  for (const activity of activities) {
+    if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) continue;
+    if (options?.skipFailed === true && isFailedCheckpointRevert(activity)) continue;
+    if (latest === null || compareThreadActivities(activity, latest) > 0) latest = activity;
+  }
+  return latest;
 }
 
 /** A start before its progress, progress before its completion or resolution. */

@@ -5,7 +5,7 @@ import {
   type HostedRuntimeTimers,
 } from "../authorization/runtime.ts";
 import type { HostedHubState } from "../authorization/state.ts";
-import { isAwaitingAdmission, RpcRequestRefusedError } from "../rpc/protocol.ts";
+import { isAwaitingAdmission, isDefiniteDispatchFailure } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
 import { RpcTransportDisposedError } from "../rpc/wsTransport.ts";
 import type { HostedReceiptedRequestOwner } from "./transport.ts";
@@ -77,10 +77,7 @@ function isTransportFailure(error: unknown): boolean {
  * would wait for a readiness that never comes, then misreport it as a drop.
  */
 function isDeliveryUnknown(error: unknown, lostSinceSend: boolean): boolean {
-  if (error instanceof RpcRequestRefusedError) return false;
-  if (hasTag(error, "OrchestrationDispatchCommandError") || hasTag(error, "AuthRpcError")) {
-    return false;
-  }
+  if (isDefiniteDispatchFailure(error)) return false;
   return lostSinceSend || isTransportFailure(error);
 }
 

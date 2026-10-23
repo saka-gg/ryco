@@ -2,7 +2,8 @@
 
 A fork is a new thread that starts with a copy of another thread's conversation up to one reply.
 You keep working in the fork while the original stays exactly as it was. Use it to try another
-approach from an earlier point, or to continue a conversation in a fresh worktree.
+approach from an earlier point, or to continue a conversation in a fresh worktree. To rewind the
+thread itself and resend an earlier prompt, use [Edit from here](edit-from-here.md).
 
 ## Where to fork
 

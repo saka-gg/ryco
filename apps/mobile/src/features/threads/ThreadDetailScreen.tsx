@@ -40,6 +40,8 @@ import {
   APPROVAL_REDIRECT_PLACEHOLDER,
   approvalRedirectTooSoon,
   declineApprovalsForRedirect,
+  appendReturnedComposerPrompt,
+  checkpointRevertUnsupportedMessage,
   deriveProviderSelectionPolicy,
   describeApprovalRedirectRefusal,
   getProviderInteractionModeToggle,
@@ -55,7 +57,16 @@ import {
   type ApprovalSightings,
 } from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
-import type { PendingApproval, TimelineEntry } from "@ryco/client-runtime/state/session";
+import {
+  deriveRevertTurnCountByUserMessageId,
+  inferCheckpointTurnCountByTurnId,
+  readCheckpointRevertPhase,
+  revertKeptChangesDiscardedBy,
+  selectConversationRevertSupported,
+  subscribeCheckpointReverts,
+  type PendingApproval,
+  type TimelineEntry,
+} from "@ryco/client-runtime/state/session";
 import {
   buildQueuedMessageSteerCommand,
   collectQueuedMessageSteerOutcomes,
@@ -154,6 +165,11 @@ import {
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { useRepositoryStatus } from "../newTask/useNewTaskRepository";
 import { AgentControlProposalCard } from "./AgentControlProposalCard";
+import {
+  runEditFromHere,
+  subscribeReturnedSentMessages,
+  takeReturnedSentMessages,
+} from "./editFromHere";
 import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { PendingUserInputCard } from "./PendingUserInputCard";
@@ -218,6 +234,7 @@ import {
 
 const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
 const NO_PENDING_APPROVALS: PendingApproval[] = [];
+const NO_REVERT_TARGETS: ReadonlyMap<MessageId, number> = new Map();
 /** How long the message a link opened the thread at stays highlighted. */
 const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
 
@@ -242,13 +259,15 @@ function TimelineRow(props: {
   readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender> | undefined;
   /** Present only on a reply that can be forked right now. */
   readonly onForkFromMessage?: ((message: ChatMessage) => void) | undefined;
+  /** Present only on a sent message the thread can be rewound to before right now. */
+  readonly onEditFromMessage?: ((message: ChatMessage) => void) | undefined;
   /** The blank reply a page row stands in for; its fork starts from that reply. */
   readonly forkReply?: ChatMessage | undefined;
   readonly onOpenThread: (threadId: ThreadId, messageId: MessageId | null) => void;
   /** The message a link opened this thread at. */
   readonly highlighted?: boolean | undefined;
 }) {
-  const { entry, onForkFromMessage, forkReply } = props;
+  const { entry, onForkFromMessage, onEditFromMessage, forkReply } = props;
   if (entry.kind === "message") {
     const message = (
       <ThreadMessage
@@ -259,6 +278,7 @@ function TimelineRow(props: {
         onForkFromHere={
           onForkFromMessage ? () => onForkFromMessage(forkReply ?? entry.message) : undefined
         }
+        onEditFromHere={onEditFromMessage ? () => onEditFromMessage(entry.message) : undefined}
       />
     );
     return props.highlighted ? <View className="bg-primary/10">{message}</View> : message;
@@ -530,6 +550,14 @@ export function ThreadDetailScreen(props: {
     [environmentId, outboxMessages, threadId],
   );
   const outboxThreadKey = scopedThreadKey(scopeThreadRef(environmentId, threadId));
+  // "Edit from here" of this thread, from the question until the node's verdict. Kept per
+  // thread outside this screen, so leaving and coming back neither forgets nor ends it.
+  const revertPhase = useSyncExternalStore(
+    subscribeCheckpointReverts,
+    () => readCheckpointRevertPhase(outboxThreadKey),
+    () => readCheckpointRevertPhase(outboxThreadKey),
+  );
+  const revertBusy = revertPhase === "reverting";
   const queueHold = useSyncExternalStore(
     subscribeThreadOutbox,
     () => getThreadOutboxHold(outboxThreadKey),
@@ -763,7 +791,7 @@ export function ThreadDetailScreen(props: {
     hasPendingApproval: pendingApprovals.length > 0,
     hasPendingUserInput: pendingUserInputs.length > 0,
     hasQueuedMessage: queuedMessages.length > 0,
-    isRevertingCheckpoint: actionBusy,
+    isRevertingCheckpoint: actionBusy || revertBusy,
     mutationAllowed: !cachedView.actionsDisabled,
     environmentAvailable: connectionUiState === "connected" && hydratedFromCacheAt === null,
     // Native mobile is the intended phone surface. Only the frozen web phone
@@ -966,6 +994,35 @@ export function ThreadDetailScreen(props: {
       threadWorktreePath,
     ],
   );
+  // "Edit from here": each sent message's revert target (shared with web), offered while the
+  // thread is idle and the node takes mutations.
+  const revertTurnCountByUserMessageId = useMemo(() => {
+    if (!threadMessages || !threadTurnDiffSummaries) return NO_REVERT_TARGETS;
+    return deriveRevertTurnCountByUserMessageId({
+      messages: threadMessages,
+      turnDiffSummaryByAssistantMessageId: new Map(
+        threadTurnDiffSummaries.flatMap((summary) =>
+          summary.assistantMessageId ? [[summary.assistantMessageId, summary] as const] : [],
+        ),
+      ),
+      inferredCheckpointTurnCountByTurnId:
+        inferCheckpointTurnCountByTurnId(threadTurnDiffSummaries),
+    });
+  }, [threadMessages, threadTurnDiffSummaries]);
+  const revertOffered =
+    revertPhase === null &&
+    !sendBusy &&
+    sessionPhase !== "running" &&
+    connectionUiState === "connected" &&
+    !cachedView.actionsDisabled;
+  const editableMessageIds = useMemo(
+    () =>
+      revertOffered && revertTurnCountByUserMessageId.size > 0
+        ? new Set(revertTurnCountByUserMessageId.keys())
+        : NO_FORKABLE_MESSAGES,
+    [revertOffered, revertTurnCountByUserMessageId],
+  );
+  const conversationRevertSupported = selectConversationRevertSupported(environmentServerConfig);
   // A link to another thread of this environment (a fork's source link), optionally at one of
   // its messages: back to it when it is the previous screen (pointing it at the message first),
   // otherwise pushed so Back returns here.
@@ -1227,6 +1284,95 @@ export function ThreadDetailScreen(props: {
     }
   }, [attachments, enqueueFileUpload, fileUploadMaxBytes]);
 
+  // Rewinds to before a sent message (keeping the files or not). Its prompt and attachments
+  // wait for the composer (`takeReturnedSentMessages`) once the node has rewound the thread.
+  const editFromHere = useCallback(
+    (message: ChatMessage) => {
+      const turnCount = revertTurnCountByUserMessageId.get(message.id);
+      if (turnCount === undefined || revertPhase !== null || !thread) return;
+      const providerInstanceId =
+        thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+      const threadRef = scopeThreadRef(environmentId, threadId);
+      setSendError(null);
+      void runEditFromHere({
+        api: environmentApi ?? null,
+        environmentId,
+        threadId,
+        threadKey: outboxThreadKey,
+        message,
+        turnCount,
+        environmentUnavailable: connectionUiState !== "connected",
+        turnInProgress: sessionPhase === "running" || sendBusy,
+        providerRefusal: checkpointRevertUnsupportedMessage(
+          providers.find((provider) => provider.instanceId === providerInstanceId),
+        ),
+        keepFilesAvailable: conversationRevertSupported,
+        keptChangesTurnCount: revertKeptChangesDiscardedBy(thread.activities, turnCount),
+        composerAttachments: attachments,
+        fileUploadsSupported: fileUploadMaxBytes !== null,
+        readThread: () => selectThreadByRef(useStore.getState(), threadRef),
+        subscribe: (listener) => useStore.subscribe(listener),
+      }).then((result) => {
+        if (result.error) setSendError(result.error);
+        // The revert's own row stays out of the timeline, so its note shows here.
+        if (result.kind === "returned" && result.notice) {
+          Alert.alert(result.notice.title, result.notice.detail);
+        }
+      });
+    },
+    [
+      attachments,
+      connectionUiState,
+      conversationRevertSupported,
+      environmentApi,
+      environmentId,
+      fileUploadMaxBytes,
+      outboxThreadKey,
+      providers,
+      revertPhase,
+      revertTurnCountByUserMessageId,
+      sendBusy,
+      sessionPhase,
+      thread,
+      threadId,
+    ],
+  );
+  // Takes what "Edit from here" returned into the composer: right away, or once this thread's
+  // screen is back if it was closed while the node reverted.
+  const takeReturnedMessages = useCallback(() => {
+    const composer = composerRef.current;
+    if (!composer) return;
+    const returned = takeReturnedSentMessages(outboxThreadKey);
+    if (returned.length === 0) return;
+    let text = composer.getText();
+    const returnedAttachments: DraftComposerAttachment[] = [];
+    for (const entry of returned) {
+      text = appendReturnedComposerPrompt(text, entry.prompt);
+      returnedAttachments.push(...entry.attachments);
+    }
+    composer.setText(text);
+    if (returnedAttachments.length > 0) {
+      setAttachments((current) => [...current, ...returnedAttachments]);
+      for (const attachment of returnedAttachments) {
+        if (attachment.type === "file") enqueueFileUpload(attachment);
+      }
+    }
+    composer.focus();
+  }, [enqueueFileUpload, outboxThreadKey]);
+  useEffect(() => {
+    takeReturnedMessages();
+    return subscribeReturnedSentMessages(takeReturnedMessages);
+  }, [takeReturnedMessages]);
+  // Rows keep the handler they were rendered with (LegendList re-renders a row only when its
+  // item changes), so they call through a ref that always holds the current one.
+  const editFromHereRef = useRef(editFromHere);
+  useEffect(() => {
+    editFromHereRef.current = editFromHere;
+  }, [editFromHere]);
+  const onEditFromMessage = useCallback((message: ChatMessage) => {
+    editFromHereRef.current(message);
+  }, []);
+
   const pasteImages = useCallback(
     async (uris: ReadonlyArray<string>) => {
       const images = await convertPastedImagesToAttachments({
@@ -1355,6 +1501,11 @@ export function ThreadDetailScreen(props: {
       sideChatStore.getState().open(sideChatKey, selectedModelSelection, sideQuestion || undefined);
       if (sideQuestion) sendSideQuestion();
       return true;
+    }
+    if (readCheckpointRevertPhase(outboxThreadKey) === "reverting") {
+      // The node refuses turns until the revert ends, and the edited prompt is on its way back.
+      setSendError("Wait for the revert to finish.");
+      return false;
     }
     const state = useStore.getState();
     const currentThread = selectThreadByRef(state, scopeThreadRef(environmentId, threadId));
@@ -1656,8 +1807,13 @@ export function ThreadDetailScreen(props: {
   const [annotateRows] = useState(createThreadListRowAnnotator);
   const highlightedMessageId = messageAnchor?.messageId ?? null;
   const listRows = useMemo(
-    () => annotateRows(timelineRows, { forkableMessageIds, highlightedMessageId }),
-    [annotateRows, forkableMessageIds, highlightedMessageId, timelineRows],
+    () =>
+      annotateRows(timelineRows, {
+        forkableMessageIds,
+        editableMessageIds,
+        highlightedMessageId,
+      }),
+    [annotateRows, editableMessageIds, forkableMessageIds, highlightedMessageId, timelineRows],
   );
 
   const renderItem = ({ item }: LegendListRenderItemProps<ThreadListRow>) =>
@@ -1675,6 +1831,7 @@ export function ThreadDetailScreen(props: {
         entry={item.entry}
         turnHtmlRenders={item.turnHtmlRenders}
         onForkFromMessage={item.forkable ? openForkSheet : undefined}
+        onEditFromMessage={item.editable ? onEditFromMessage : undefined}
         forkReply={item.forkReply}
         highlighted={item.highlighted}
         onOpenThread={openThread}

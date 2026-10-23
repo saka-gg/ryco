@@ -137,6 +137,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.approval.respond":
     case "thread.user-input.respond":
     case "thread.checkpoint.revert":
+    case "thread.conversation.revert":
     case "thread.session.stop":
     case "thread.attach-to-worktree":
     case "thread.status-bucket.override":
