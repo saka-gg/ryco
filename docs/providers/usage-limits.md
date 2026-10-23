@@ -25,7 +25,8 @@ once, with its freshest reading and the nodes it was seen on. Instances count as
 they report the same provider, email and plan; a node that reports no plan joins only when that is
 unambiguous. Banked Codex resets come from the newest read that reported them. Instances routed
 through a hub show a note instead of their own limits, and direct accounts never enter a hub's
-pooled average.
+pooled average. The iOS app's Limits tab lists accounts the same way, naming the devices each is
+signed in on, with a banked-reset block for each device's Codex instance.
 
 Claude instances with a separate home use that home's credential file for usage reads. They do not
 fall back to the default account's global macOS Keychain entry. Refreshes are persisted only to the

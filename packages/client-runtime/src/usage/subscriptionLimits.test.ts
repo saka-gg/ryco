@@ -402,6 +402,43 @@ describe("groupSubscriptionLimits", () => {
     ]);
     expect(groups[1]!.routed).toEqual([]);
     expect(groups[1]!.pooled).toEqual([]);
+    expect(groups.flatMap((group) => group.withoutLimits)).toEqual([]);
+  });
+
+  it("lists the instances without limits it is given under their provider", () => {
+    const { accounts, withoutLimits } = listDirectProviderAccounts([
+      {
+        environmentId: "m5",
+        label: "M5",
+        connected: true,
+        hubs: [],
+        providers: [
+          provider({
+            instanceId: ProviderInstanceId.make("claude"),
+            driver: ProviderDriverKind.make("claudeAgent"),
+            rateLimits: { primary: fiveHour(10) },
+          }),
+          provider({ instanceId: ProviderInstanceId.make("codex"), message: "Read failed" }),
+          provider({
+            instanceId: ProviderInstanceId.make("copilot"),
+            driver: ProviderDriverKind.make("copilot"),
+          }),
+        ],
+      },
+    ]);
+    const groups = groupSubscriptionLimits({
+      hubs: [],
+      direct: accounts,
+      routed: [],
+      withoutLimits: withoutLimits.filter((instance) => instance.driver === "codex"),
+    });
+
+    expect(groups.map((group) => group.label)).toEqual(["Claude", "Codex"]);
+    expect(groups[0]!.withoutLimits).toEqual([]);
+    expect(groups[1]!.directAccounts).toEqual([]);
+    expect(groups[1]!.withoutLimits).toEqual([
+      expect.objectContaining({ instanceId: "codex", reason: "Read failed" }),
+    ]);
   });
 });
 

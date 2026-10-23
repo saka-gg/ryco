@@ -317,6 +317,8 @@ export interface SubscriptionLimitGroup {
   readonly directAccounts: ReadonlyArray<DirectProviderAccount>;
   readonly hubAccounts: ReadonlyArray<CliProxyHubAccountEntry>;
   readonly routed: ReadonlyArray<RoutedProviderInstance>;
+  /** The instances without limits the caller asked to list under this provider. */
+  readonly withoutLimits: ReadonlyArray<LimitlessProviderInstance>;
   /**
    * Averages over the enabled hub accounts only. Direct accounts are never averaged: different
    * accounts are not one allowance, and a direct account may be one a hub holds too.
@@ -332,12 +334,18 @@ function accountLabel(account: DirectProviderAccount): string {
   ).toLowerCase();
 }
 
-/** Direct and hub accounts grouped by provider (Claude, Codex, Antigravity first). */
+/**
+ * Direct and hub accounts grouped by provider (Claude, Codex, Antigravity first). Instances
+ * without limits join their provider's group only when passed in `withoutLimits`, such as Codex
+ * instances that still hold banked resets.
+ */
 export function groupSubscriptionLimits(input: {
   readonly hubs: ReadonlyArray<CliProxyEnvironmentHub>;
   readonly direct: ReadonlyArray<DirectProviderAccount>;
   readonly routed: ReadonlyArray<RoutedProviderInstance>;
+  readonly withoutLimits?: ReadonlyArray<LimitlessProviderInstance>;
 }): SubscriptionLimitGroup[] {
+  const withoutLimits = input.withoutLimits ?? [];
   const hubGroups = new Map(
     groupCliProxyAccounts(input.hubs).map((group) => [group.provider, group] as const),
   );
@@ -345,6 +353,7 @@ export function groupSubscriptionLimits(input: {
   const providers = new Set([
     ...hubGroups.keys(),
     ...input.direct.map((account) => account.provider),
+    ...withoutLimits.map((instance) => instance.provider),
   ]);
   return [...providers]
     .toSorted(
@@ -362,6 +371,7 @@ export function groupSubscriptionLimits(input: {
         directAccounts,
         hubAccounts: hubGroup?.accounts ?? [],
         routed: input.routed.filter((instance) => instance.provider === provider),
+        withoutLimits: withoutLimits.filter((instance) => instance.provider === provider),
         pooled: hubGroup?.pooled ?? [],
       };
     });
