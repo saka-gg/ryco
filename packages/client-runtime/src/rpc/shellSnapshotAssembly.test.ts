@@ -1,11 +1,15 @@
 import {
   ORCHESTRATION_WS_METHODS,
+  OrchestrationShellStreamWireItem,
   ProjectId,
   ThreadId,
   type OrchestrationArchivedThreadStub,
   type OrchestrationShellStreamItem,
+  type OrchestrationShellSubscriptionItem,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
+import * as Schema from "effect/Schema";
 import { Stream } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -75,6 +79,12 @@ const removed = (sequence: number): OrchestrationShellStreamItem => ({
   threadId: ThreadId.make("gone"),
 });
 
+/** The snapshot an `accept` delivered, if it delivered one. */
+const snapshotOf = (delivered: OrchestrationShellSubscriptionItem | null) =>
+  delivered !== null && !isUnknownUnionMember(delivered) && delivered.kind === "snapshot"
+    ? delivered.snapshot
+    : undefined;
+
 describe("createShellSnapshotAssembler", () => {
   it("reassembles pages into one snapshot item in order", () => {
     const assembler = createShellSnapshotAssembler();
@@ -106,9 +116,7 @@ describe("createShellSnapshotAssembler", () => {
       settlementPolicy: { autoSettleAfterDays: null },
     } as OrchestrationShellStreamItem);
     const delivered = assembler.accept({ kind: "snapshot-end" });
-    expect(
-      delivered?.kind === "snapshot" ? delivered.snapshot.settlementPolicy : undefined,
-    ).toEqual({ autoSettleAfterDays: null });
+    expect(snapshotOf(delivered)?.settlementPolicy).toEqual({ autoSettleAfterDays: null });
   });
 
   it("passes a legacy snapshot and other items through unchanged", () => {
@@ -126,7 +134,18 @@ describe("createShellSnapshotAssembler", () => {
     expect(assembler.accept(begin(1))).toBeNull();
     expect(assembler.accept(removed(10))).toEqual(removed(10));
     expect(assembler.accept({ kind: "snapshot-threads", threads: [thread("a")] })).toBeNull();
-    expect(assembler.accept({ kind: "snapshot-end" })?.kind).toBe("snapshot");
+    expect(assembler.accept({ kind: "snapshot-end" })).toMatchObject({ kind: "snapshot" });
+  });
+
+  it("passes a kind a newer node added through without breaking the snapshot around it", () => {
+    const assembler = createShellSnapshotAssembler();
+    const [unknown] = Schema.decodeUnknownSync(
+      Schema.toCodecJson(Schema.NonEmptyArray(OrchestrationShellStreamWireItem)),
+    )([{ kind: "thread-teleported", sequence: 11, threadId: "thread-a" }]);
+    expect(assembler.accept(begin(1))).toBeNull();
+    expect(assembler.accept(unknown!)).toBe(unknown);
+    expect(assembler.accept({ kind: "snapshot-threads", threads: [thread("a")] })).toBeNull();
+    expect(snapshotOf(assembler.accept({ kind: "snapshot-end" }))?.threads).toEqual([thread("a")]);
   });
 
   it("never completes a snapshot from pages of an earlier attempt", () => {
@@ -145,9 +164,7 @@ describe("createShellSnapshotAssembler", () => {
     assembler.accept(begin(1));
     assembler.accept({ kind: "snapshot-threads", threads: [thread("new")] });
     const snapshot = assembler.accept({ kind: "snapshot-end" });
-    expect(snapshot?.kind === "snapshot" && snapshot.snapshot.threads.map((t) => t.id)).toEqual([
-      "new",
-    ]);
+    expect(snapshotOf(snapshot)?.threads.map((t) => t.id)).toEqual(["new"]);
   });
 
   it("assembles archived stub pages into the snapshot's stubs, counted with the shells", () => {
@@ -180,10 +197,9 @@ describe("createShellSnapshotAssembler", () => {
     const assembler = createShellSnapshotAssembler();
     assembler.accept(begin(1, 1));
     assembler.accept({ kind: "snapshot-threads", threads: [thread("x", now)] });
-    const delivered = assembler.accept({ kind: "snapshot-end" });
-    expect(delivered?.kind === "snapshot" && "archivedThreadStubs" in delivered.snapshot).toBe(
-      false,
-    );
+    const delivered = snapshotOf(assembler.accept({ kind: "snapshot-end" }));
+    expect(delivered).toBeDefined();
+    expect(delivered).not.toHaveProperty("archivedThreadStubs");
   });
 
   it("never carries stubs of an unfinished snapshot into the next one", () => {
@@ -192,10 +208,9 @@ describe("createShellSnapshotAssembler", () => {
     assembler.accept({ kind: "snapshot-archived-threads", threads: [stub("stale")] });
     assembler.accept(begin(1));
     assembler.accept({ kind: "snapshot-threads", threads: [thread("a")] });
-    const delivered = assembler.accept({ kind: "snapshot-end" });
-    expect(delivered?.kind === "snapshot" && "archivedThreadStubs" in delivered.snapshot).toBe(
-      false,
-    );
+    const delivered = snapshotOf(assembler.accept({ kind: "snapshot-end" }));
+    expect(delivered).toBeDefined();
+    expect(delivered).not.toHaveProperty("archivedThreadStubs");
   });
 
   it("reports a count mismatch but still delivers what arrived", () => {
@@ -203,7 +218,7 @@ describe("createShellSnapshotAssembler", () => {
     const assembler = createShellSnapshotAssembler(onIncomplete);
     assembler.accept(begin(2));
     assembler.accept({ kind: "snapshot-threads", threads: [thread("a")] });
-    expect(assembler.accept({ kind: "snapshot-end" })?.kind).toBe("snapshot");
+    expect(assembler.accept({ kind: "snapshot-end" })).toMatchObject({ kind: "snapshot" });
     expect(onIncomplete).toHaveBeenCalledWith({ expected: 2, received: 1 });
   });
 });

@@ -1,5 +1,6 @@
 import { rejectRemoteKeybindingWrite } from "../state/settings/appKeybindings.ts";
 import type { EnvironmentApi, EnvironmentId } from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 import type { WsRpcClient } from "../rpc/index.ts";
 
@@ -61,7 +62,11 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       clear: (input) => rpcClient.terminal.clear(input as never),
       restart: (input) => rpcClient.terminal.restart(input as never),
       close: (input) => rpcClient.terminal.close(input as never),
-      onEvent: (callback) => rpcClient.terminal.onEvent(callback),
+      // The connection records event types a newer node added; this API never sees them.
+      onEvent: (callback) =>
+        rpcClient.terminal.onEvent((event) => {
+          if (!isUnknownUnionMember(event)) callback(event);
+        }),
     },
     projects: {
       listEntries: rpcClient.projects.listEntries,

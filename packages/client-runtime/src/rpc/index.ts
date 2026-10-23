@@ -3,6 +3,7 @@ export * from "./attachmentRead.ts";
 export * from "./checkpointDiffStore.ts";
 export * from "./invalidation.ts";
 export * from "./keyedQuery.ts";
+export * from "./newerNodeState.ts";
 export * from "./protocol.ts";
 export * from "./providerCatalogCache.ts";
 export * from "./deviceRpcClient.ts";

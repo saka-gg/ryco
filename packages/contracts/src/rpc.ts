@@ -289,7 +289,7 @@ import {
   TerminalClearInput,
   TerminalCloseInput,
   TerminalError,
-  TerminalEvent,
+  TerminalWireEvent,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalRestartInput,
@@ -299,7 +299,7 @@ import {
   TerminalWriteInput,
 } from "./terminal.ts";
 import {
-  ServerConfigStreamEvent,
+  ServerConfigStreamWireEvent,
   ServerSubscribeConfigInput,
   ServerConfig,
   ServerLocalDiagnosticsMetrics,
@@ -2292,14 +2292,14 @@ export const WsContextHandoffReadExportChunkRpc = Rpc.make(
 
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: TerminalSubscribeEventsInput,
-  success: TerminalEvent,
+  success: TerminalWireEvent,
   error: Schema.Union([AuthRpcError, TerminalSubscriptionResyncError]),
   stream: true,
 });
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
   payload: ServerSubscribeConfigInput,
-  success: ServerConfigStreamEvent,
+  success: ServerConfigStreamWireEvent,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError]),
   stream: true,
 });

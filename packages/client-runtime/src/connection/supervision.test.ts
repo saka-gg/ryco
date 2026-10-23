@@ -6,8 +6,10 @@ import type {
   ScopedThreadRef,
   ThreadId,
 } from "@ryco/contracts";
+import { UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { isEnvironmentNodeNewer, resetNewerNodeStateForTests } from "../rpc/newerNodeState.ts";
 import type { ResumableSubscriptionOptions } from "../rpc/wsRpcClient.ts";
 import type { SubscriptionFailureKind } from "../rpc/wsTransport.ts";
 import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
@@ -70,6 +72,7 @@ function makeSupervisor(
     readonly scheduleShellFrame?: (callback: () => void) => void;
     readonly threadWindowActivityPayloads?: "preview";
     readonly disconnectSavedEnvironment?: (environmentId: EnvironmentId) => Promise<void>;
+    readonly applyThreadDetailEvent?: (environmentId: EnvironmentId, event: unknown) => void;
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
@@ -78,7 +81,7 @@ function makeSupervisor(
     isHostedMode: () => overrides.isHostedMode ?? false,
     syncThreadDetailSnapshot: () => undefined,
     syncThreadWindowSnapshot: overrides.syncThreadWindowSnapshot ?? (() => undefined),
-    applyThreadDetailEvent: () => undefined,
+    applyThreadDetailEvent: overrides.applyThreadDetailEvent ?? (() => undefined),
     isThreadDetailSubscriptionNonIdle: overrides.isThreadDetailSubscriptionNonIdle ?? (() => true),
     listThreadBodies: overrides.listThreadBodies,
     evictThreadBodies: overrides.evictThreadBodies,
@@ -461,6 +464,40 @@ describe("thread subscription resume", () => {
     expect(thread.resumeFrom()).toBe(7);
     thread.emit({ kind: "resumed", fromSequence: 7 });
     expect(thread.resumeFrom()).toBe(7);
+  });
+
+  it("skips what a newer node added but resumes after its events", () => {
+    resetNewerNodeStateForTests();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const applied: Array<unknown> = [];
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      applyThreadDetailEvent: (_environmentId, event) => applied.push(event),
+    });
+    const thread = threadConnection("manual");
+    supervisor.register(thread.connection);
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+    // What the codec decodes an event type and an item kind this build does not know to.
+    const unknownEvent = (sequence: number) =>
+      Object.assign(new UnknownUnionMember("type", "thread.teleported"), {
+        sequence,
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+      });
+
+    thread.emit(windowSnapshot(5));
+    expect(isEnvironmentNodeNewer(remote)).toBe(false);
+    thread.emit({ kind: "event", event: unknownEvent(6) });
+    expect(thread.resumeFrom()).toBe(6);
+    thread.emit({ kind: "event", event: { sequence: 7 } });
+    thread.emit({ kind: "event", event: unknownEvent(8) });
+    thread.emit(new UnknownUnionMember("kind", "snapshot-page"));
+
+    expect(applied).toEqual([{ sequence: 7 }]);
+    expect(thread.resumeFrom()).toBe(8);
+    expect(isEnvironmentNodeNewer(remote)).toBe(true);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+    resetNewerNodeStateForTests();
   });
 
   it("always takes a fresh snapshot over the Hub relay", () => {
@@ -2335,6 +2372,29 @@ describe("shell frame batching", () => {
     supervisor.flushShellEvents();
 
     expect(calls).toEqual(["commit:priorities,6", "after:6:context:6:applied=2"]);
+  });
+
+  it("moves the shell's sequence past an event a newer node added, in order", () => {
+    const { sink, calls } = recordingSink();
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: sink,
+      scheduleShellFrame: () => undefined,
+    });
+    supervisor.syncShellSnapshot(shellSnapshot(5), remote);
+    calls.length = 0;
+
+    // Buffered before the skip, so the skip must not make it look already applied.
+    supervisor.applyShellEvent(upsert(6), remote);
+    supervisor.skipShellEvent(7, remote);
+    supervisor.applyShellEvent(upsert(8), remote);
+    supervisor.skipShellEvent(9, remote);
+
+    expect(supervisor.readShellProjectionSequence(remote)).toBe(9);
+    expect(calls).toEqual([
+      "commit:6,8",
+      "after:6:context:6:applied=2",
+      "after:8:context:8:applied=2",
+    ]);
   });
 
   it("applies buffered items before a snapshot, a projection reset or a resume read", () => {

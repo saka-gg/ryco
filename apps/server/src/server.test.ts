@@ -40,6 +40,7 @@ import {
   WsRpcGroup,
   EditorId,
 } from "@ryco/contracts";
+import { isUnknownUnionMember, type UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
 import {
@@ -1119,6 +1120,16 @@ const withWsRpcClient = <A, E, R>(
   wsUrl: string,
   f: (client: WsRpcClient) => Effect.Effect<A, E, R>,
 ) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
+
+/** What the server under test sends: its own contract knows every member (see `WsTestClient`). */
+const knownMember = <A>(value: A): Exclude<A, UnknownUnionMember> => {
+  if (isUnknownUnionMember(value)) {
+    throw new Error(
+      `The server sent ${value.tag} "${value.value}", which its contract does not know`,
+    );
+  }
+  return value as Exclude<A, UnknownUnionMember>;
+};
 
 const makeWsMainRpcClient = RpcClient.make(WsHostedRpcGroup);
 
@@ -3582,7 +3593,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const wsUrl = yield* getWsServerUrl("/ws");
       const events = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(2), Stream.runCollect),
+          client[WS_METHODS.subscribeServerConfig]({}).pipe(
+            Stream.map(knownMember),
+            Stream.take(2),
+            Stream.runCollect,
+          ),
         ),
       );
 
@@ -3643,6 +3658,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         const events = yield* Effect.scoped(
           withWsRpcClient(wsUrl, (client) =>
             client[WS_METHODS.subscribeServerConfig]({ providerStatuses: "delta" }).pipe(
+              Stream.map(knownMember),
               Stream.take(2),
               Stream.runCollect,
             ),
@@ -3701,6 +3717,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           Effect.scoped(
             withWsRpcClient(wsUrl, (client) =>
               client[WS_METHODS.subscribeServerConfig](input).pipe(
+                Stream.map(knownMember),
                 Stream.take(1),
                 Stream.runCollect,
                 Effect.map((events) => Array.from(events)[0]),
@@ -3761,7 +3778,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const wsUrl = yield* getWsServerUrl("/ws");
       const events = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(2), Stream.runCollect),
+          client[WS_METHODS.subscribeServerConfig]({}).pipe(
+            Stream.map(knownMember),
+            Stream.take(2),
+            Stream.runCollect,
+          ),
         ),
       );
       const [first, second] = Array.from(events);
@@ -6173,6 +6194,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6244,6 +6266,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const items = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ snapshotDelivery: "paged" }).pipe(
+            Stream.map(knownMember),
             Stream.takeUntil((item) => item.kind === "snapshot-end"),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)),
@@ -6277,6 +6300,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)[0]),
@@ -6317,6 +6341,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)[0]),
@@ -6335,6 +6360,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       return yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell](subscribeShellInput(input)).pipe(
+            Stream.map(knownMember),
             Stream.takeUntil((item) => item.kind === "snapshot-end" || item.kind === "snapshot"),
             Stream.runCollect,
             Effect.map((collected) => Array.from(collected)),
@@ -6559,6 +6585,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 10 }).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6585,6 +6612,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             threadId: ThreadId.make("thread-shell-resume"),
             resumeFromSequence: 10,
           }).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6607,6 +6635,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 10 }).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)[0]),
@@ -6625,6 +6654,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ resumeFromSequence: 1 }).pipe(
+            Stream.map(knownMember),
             Stream.take(1),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)[0]),
@@ -6710,6 +6740,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6796,6 +6827,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
+            Stream.map(knownMember),
             Stream.take(3),
             Stream.runCollect,
             Effect.map((items) => Array.from(items)),
@@ -6875,6 +6907,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
+            Stream.map(knownMember),
             Stream.tap((item) => {
               const next = item.kind === "event" ? item.event.sequence + 1 : 11;
               return next <= 22 ? PubSub.publish(livePubSub, makeActivityEvent(next)) : Effect.void;
@@ -7055,7 +7088,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      const replayedEvent = replayResult.events[0];
+      const replayedEvent = replayResult.events.map(knownMember)[0];
       assert.equal(replayedEvent?.type, "project.created");
       assert.deepEqual(
         replayedEvent && replayedEvent.type === "project.created"

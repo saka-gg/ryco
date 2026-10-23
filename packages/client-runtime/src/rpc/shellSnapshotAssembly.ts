@@ -1,10 +1,11 @@
 import type {
   OrchestrationArchivedThreadStub,
   OrchestrationShellSnapshotBeginItem,
-  OrchestrationShellStreamItem,
+  OrchestrationShellStreamWireItem,
   OrchestrationShellSubscriptionItem,
   OrchestrationThreadShell,
 } from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 /**
  * Reassembles a paged shell snapshot (`snapshotDelivery: "paged"`) into the
@@ -14,7 +15,8 @@ import type {
  * snapshot completed, exactly as if it had preceded a single `snapshot` item.
  *
  * A server that does not page (an older one) sends `snapshot` items, which
- * pass through unchanged. Archived stubs (`snapshot-archived-threads`, for
+ * pass through unchanged, as do kinds a newer node added, for the subscriber
+ * to skip. Archived stubs (`snapshot-archived-threads`, for
  * `archivedThreads: "stub"`) land in the snapshot's `archivedThreadStubs`;
  * the thread count covers full shells and stubs together. One assembler serves one subscription attempt; call
  * `reset` when the subscription restarts so a half-received snapshot from the
@@ -22,7 +24,7 @@ import type {
  */
 export interface ShellSnapshotAssembler {
   readonly accept: (
-    item: OrchestrationShellStreamItem,
+    item: OrchestrationShellStreamWireItem,
   ) => OrchestrationShellSubscriptionItem | null;
   readonly reset: () => void;
 }
@@ -43,6 +45,7 @@ export function createShellSnapshotAssembler(
   return {
     reset,
     accept: (item) => {
+      if (isUnknownUnionMember(item)) return item;
       switch (item.kind) {
         case "snapshot-begin":
           // A new snapshot supersedes one that never ended.

@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ForwardCompatibleUnion, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const DEFAULT_TERMINAL_ID = "default";
 
@@ -199,6 +199,14 @@ export const TerminalEvent = Schema.Union([
   TerminalActivityEvent,
 ]);
 export type TerminalEvent = typeof TerminalEvent.Type;
+
+/**
+ * A terminal event as a client decodes it: an event type a newer node adds
+ * decodes to an `UnknownUnionMember` the client skips, instead of ending the
+ * terminal event stream for every terminal.
+ */
+export const TerminalWireEvent = ForwardCompatibleUnion(TerminalEvent.members, "type");
+export type TerminalWireEvent = typeof TerminalWireEvent.Type;
 
 /**
  * `replay: "metadata"` asks for history-free catch-up events (`replay: true`) for running
