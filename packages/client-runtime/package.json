@@ -126,6 +126,10 @@
       "types": "./src/state/tasks/index.ts",
       "import": "./src/state/tasks/index.ts"
     },
+    "./state/dailyRecap": {
+      "types": "./src/state/dailyRecap/index.ts",
+      "import": "./src/state/dailyRecap/index.ts"
+    },
     "./state/nodeUpdate": {
       "types": "./src/state/nodeUpdate/index.ts",
       "import": "./src/state/nodeUpdate/index.ts"
