@@ -1020,7 +1020,7 @@ it.effect("ryco_settings_summary is separately capability-gated and never expose
   Effect.gen(function* () {
     const settings = {
       ...DEFAULT_SERVER_SETTINGS,
-      enableLegacyTokenStreaming: true,
+      responseStreamingMode: "token",
       providers: {
         ...DEFAULT_SERVER_SETTINGS.providers,
         opencode: {

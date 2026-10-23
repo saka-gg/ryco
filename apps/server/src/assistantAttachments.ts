@@ -39,6 +39,10 @@ const Manifest = Schema.Struct({
   ),
 });
 
+/** Whether a code fence's info string marks a file delivery manifest. */
+export const isAssistantDeliveryFenceInfo = (info: string): boolean =>
+  info.trim() === "ryco-attachments";
+
 /** Only explicit, top-level delivery fences are actionable; examples inside other fences aren't. */
 export function parseAssistantAttachments(text: string): {
   text: string;
@@ -76,7 +80,7 @@ export function parseAssistantAttachments(text: string): {
       fence = {
         char: open[1]![0]!,
         length: open[1]!.length,
-        delivery: open[2]!.trim() === "ryco-attachments",
+        delivery: isAssistantDeliveryFenceInfo(open[2]!),
         body: [],
       };
       if (!fence.delivery) output.push(line);

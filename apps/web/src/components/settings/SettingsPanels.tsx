@@ -12,8 +12,9 @@ import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { UsageLimitSettings } from "./UsageLimitSettings";
-import { ArchiveIcon, ArchiveX, ChevronRightIcon, MessageCircleDashedIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
+import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ORCHESTRATION_WS_METHODS,
   type DesktopUpdateChannel,
@@ -56,7 +57,6 @@ import {
 } from "../../store";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { DraftInput } from "../ui/draft-input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -69,7 +69,6 @@ import {
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
-  SettingsCard,
 } from "./settingsLayout";
 import { LifecycleSuggestionSettings } from "./LifecycleSettings";
 import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
@@ -360,108 +359,7 @@ export function useSettingsRestore(onRestored?: () => void) {
   };
 }
 
-function LegacyFeaturesSection({
-  searchTargetId,
-  nodeScopeLabel,
-}: {
-  searchTargetId: string | null;
-  nodeScopeLabel: string;
-}) {
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
-  const targeted = searchTargetId === "legacy-token-streaming";
-  const [open, setOpen] = useState(targeted);
-  const tokenStreamingRowRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!targeted) return;
-    setOpen(true);
-    const frame = requestAnimationFrame(() => {
-      tokenStreamingRowRef.current?.scrollIntoView({ block: "center" });
-      tokenStreamingRowRef.current?.querySelector<HTMLElement>("[role=switch]")?.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [targeted]);
-
-  return (
-    <section data-settings-section="Legacy features" className="min-w-0 scroll-mt-6">
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 rounded-[min(var(--radius-md),0.5rem)] px-0.5 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
-          <span className="min-w-0">
-            <span className="block text-[13px] font-semibold text-foreground">Legacy features</span>
-            <span className="block text-xs text-muted-foreground">
-              Compatibility controls you shouldn&apos;t normally need.
-            </span>
-          </span>
-          <ChevronRightIcon
-            aria-hidden
-            className="size-4 text-muted-foreground transition-transform duration-(--app-motion-duration-chip) group-data-panel-open:rotate-90"
-          />
-        </CollapsibleTrigger>
-        <CollapsiblePanel>
-          <div className="pt-2.5">
-            <SettingsCard>
-              <div ref={tokenStreamingRowRef} id="legacy-token-streaming">
-                <SettingsRow
-                  title="Stream token by token (legacy)"
-                  description="Paint assistant output token by token instead of in complete chunks. This legacy mode is significantly slower and makes long responses harder to follow."
-                  owner="node"
-                  scope={nodeScopeLabel}
-                  resetAction={
-                    settings.enableLegacyTokenStreaming !==
-                    DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming ? (
-                      <SettingResetButton
-                        label="legacy token streaming"
-                        onClick={() =>
-                          updateSettings({
-                            enableLegacyTokenStreaming:
-                              DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming,
-                          })
-                        }
-                      />
-                    ) : null
-                  }
-                  control={
-                    <Switch
-                      checked={settings.enableLegacyTokenStreaming}
-                      onCheckedChange={(checked) => {
-                        if (!checked) {
-                          updateSettings({ enableLegacyTokenStreaming: false });
-                          return;
-                        }
-                        void (async () => {
-                          const api = readLocalApi();
-                          const confirmed = await (api ?? ensureLocalApi()).dialogs.confirm(
-                            [
-                              "Turn on token-by-token output?",
-                              "It is significantly slower than buffered output and makes long responses harder to follow. This switch exists only for backwards compatibility.",
-                            ].join("\n"),
-                          );
-                          if (confirmed) {
-                            updateSettings({
-                              enableLegacyTokenStreaming: true,
-                            });
-                          }
-                        })();
-                      }}
-                      aria-label="Stream token by token (legacy)"
-                    />
-                  }
-                />
-              </div>
-            </SettingsCard>
-          </div>
-        </CollapsiblePanel>
-      </Collapsible>
-    </section>
-  );
-}
-
-export function GeneralSettingsPanel({
-  searchTargetId = null,
-}: {
-  searchTargetId?: string | null;
-}) {
+export function GeneralSettingsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const isPhoneTier = usePresentationTier() === "phone";
@@ -663,6 +561,7 @@ export function GeneralSettingsPanel({
         />
       </SettingsSection>
       {isPhoneTier && <SourceControlPreferences />}
+      {!isPhoneTier && <ResponseStreamingSettings />}
       <SettingsSection title="Provider updates" owner="node">
         <SettingsRow
           title="Provider update checks"
@@ -1005,15 +904,6 @@ export function GeneralSettingsPanel({
           />
         </SettingsSection>
       )}
-
-      {!isPhoneTier
-        ? editingScope !== "client" && (
-            <LegacyFeaturesSection
-              searchTargetId={searchTargetId}
-              nodeScopeLabel={nodeScopeLabel}
-            />
-          )
-        : null}
 
       <SettingsSection title="About">
         {editingScope !== "node" && <AboutBrandingHeader />}

@@ -22,6 +22,7 @@ import {
   memo,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -75,6 +76,12 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   environmentId?: EnvironmentId;
   isStreaming?: boolean;
+  /**
+   * Reveal streaming text gradually (the default). Off for text that arrives as finished
+   * blocks, such as paragraph-streamed replies: each block appears at once, and blocks that
+   * arrive after the message is on screen fade in.
+   */
+  smoothStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   searchHighlight?: Omit<SkillInlineTextSearchHighlight, "cursor" | "keyPrefix"> | undefined;
 }
@@ -650,7 +657,10 @@ function ChatMarkdown(props: ChatMarkdownProps) {
   const isStreaming = Boolean(props.isStreaming);
   // Reveal streamed text at a steady, adaptive cadence so tokens appear fluidly
   // instead of in the bursts that land in the store. Governs cadence only.
-  const smoothedText = useSmoothStreamedText(props.text, isStreaming);
+  const smoothedText = useSmoothStreamedText(
+    props.text,
+    isStreaming && props.smoothStreaming !== false,
+  );
   // Bounding the markdown re-parse is the deferred value's job, not a fixed
   // timer's: React coalesces adaptively, so a cheap parse updates every frame
   // (which is what makes the smoothing above visible) while an expensive one
@@ -667,11 +677,29 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   cwd,
   environmentId,
   isStreaming = false,
+  smoothStreaming = true,
   skills = EMPTY_MARKDOWN_SKILLS,
   searchHighlight,
   allowTerminalInsertion = false,
 }: ChatMarkdownProps) {
   usePerfMark("ChatMarkdown");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const fadeArrivingBlocks = isStreaming && !smoothStreaming;
+  // Arms the fade of arriving blocks (index.css) only once the blocks already on screen
+  // have their styles, so mounting or remounting a streaming message never fades it in.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    if (!fadeArrivingBlocks) {
+      root.removeAttribute("data-streaming");
+      return;
+    }
+    if (root.hasAttribute("data-streaming")) return;
+    // Reading a computed style styles the current blocks first; @starting-style then
+    // applies only to blocks inserted later.
+    if (root.lastElementChild) void getComputedStyle(root.lastElementChild).opacity;
+    root.setAttribute("data-streaming", "");
+  }, [fadeArrivingBlocks]);
   const completedText = isStreaming ? "" : text;
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
@@ -975,7 +1003,10 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   );
 
   return (
-    <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80">
+    <div
+      ref={rootRef}
+      className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80"
+    >
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         components={markdownComponents}

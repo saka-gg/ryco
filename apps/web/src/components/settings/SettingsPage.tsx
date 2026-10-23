@@ -315,18 +315,12 @@ function navDescription(item: NavItem, destination: SettingsDestination): string
   return typeof item.description === "string" ? item.description : item.description[destination];
 }
 
-function SectionPanel({
-  section,
-  searchTargetId,
-}: {
-  section: SettingsSectionId;
-  searchTargetId: string | null;
-}) {
+function SectionPanel({ section }: { section: SettingsSectionId }) {
   switch (section) {
     case "account":
       return <LazyAccountSettingsPanel />;
     case "general":
-      return <GeneralSettingsPanel searchTargetId={searchTargetId} />;
+      return <GeneralSettingsPanel />;
     case "inbox":
       return <LazyAiFocusSettings />;
     case "providers":
@@ -1182,10 +1176,7 @@ export function SettingsPage() {
                         />
                       ) : (
                         <Suspense fallback={<PanelFallback />}>
-                          <SectionPanel
-                            section={effectiveSection}
-                            searchTargetId={searchTargetId}
-                          />
+                          <SectionPanel section={effectiveSection} />
                         </Suspense>
                       )}
                     </div>

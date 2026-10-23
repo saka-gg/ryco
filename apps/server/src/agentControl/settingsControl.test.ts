@@ -20,6 +20,26 @@ describe("Agent Control settings allowlist", () => {
     expect(CHANGE_KINDS).toEqual(["legacyTokenStreaming", "providerUpdateChecks"]);
   });
 
+  it("reads the legacy token switch from the response streaming mode", () => {
+    for (const [responseStreamingMode, value] of [
+      ["turn", false],
+      ["paragraph", false],
+      ["token", true],
+    ] as const) {
+      const settings = { ...DEFAULT_SERVER_SETTINGS, responseStreamingMode };
+      expect(agentControlSettingsSummary(settings).settings[0]).toMatchObject({
+        kind: "legacyTokenStreaming",
+        value,
+      });
+      expect(
+        agentControlSettingsPlan(settings, { kind: "legacyTokenStreaming", value: !value }),
+      ).toEqual({
+        kind: "changeSettings",
+        change: { kind: "legacyTokenStreaming", before: value, after: !value },
+      });
+    }
+  });
+
   it("never exposes the usage-limit recovery settings", () => {
     const summary = agentControlSettingsSummary({
       ...DEFAULT_SERVER_SETTINGS,

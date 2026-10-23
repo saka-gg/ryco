@@ -7,6 +7,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ProviderDriverKind,
+  type ServerConfig,
   type ServerProviderSkill,
   type TurnId,
 } from "@ryco/contracts";
@@ -174,6 +175,7 @@ import {
   workEntryRawCommand,
 } from "./workChapters.logic";
 import { WorkChapterRow } from "./WorkChapterRow";
+import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
 
 // ---------------------------------------------------------------------------
@@ -372,6 +374,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const offerFork = onForkFromMessage !== undefined && !isPhoneTier;
   // Messages open their action sheet on a phone long-press only.
   const messageActionsSheetReady = usePhoneThreadSurfaceReady(LazyMessageActionsSheet, isPhoneTier);
+  const smoothAssistantText = useEnvironmentServerConfigSelector(
+    activeThreadEnvironmentId,
+    selectSmoothsAssistantText,
+  );
   const initialScrollOffset = useMemo(
     () => readHostedThreadScroll(routeThreadKey),
     [routeThreadKey],
@@ -860,6 +866,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         workspaceRoot,
         skills,
         activeThreadEnvironmentId,
+        smoothAssistantText,
         highlightedMessageId,
         threadMessageSearchQuery,
         threadMessageSearchOccurrencesByMessageId,
@@ -887,6 +894,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      smoothAssistantText,
       highlightedMessageId,
       threadMessageSearchQuery,
       threadMessageSearchOccurrencesByMessageId,
@@ -1250,6 +1258,16 @@ function TimelineMinimap({
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
 
+/**
+ * Token streaming lands text in network clumps that the reveal smooths. Paragraph and
+ * whole-message releases are finished blocks, so they appear at once (and fade in). Nodes
+ * that predate the modes stream as before.
+ */
+function selectSmoothsAssistantText(config: ServerConfig | null): boolean {
+  if (config?.environment.capabilities.responseStreamingModes !== true) return true;
+  return config.settings.responseStreamingMode === "token";
+}
+
 function renderChapterEntryPanel(entry: TimelineWorkEntry, panelId: string) {
   return (
     <WorkEntryExpandedPanel
@@ -1383,6 +1401,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
           environmentId={ctx.activeThreadEnvironmentId}
           skills={ctx.skills}
           searchHighlight={chapterSearchHighlight}
+          smoothStreaming={ctx.smoothAssistantText}
           renderEntryPanel={renderChapterEntryPanel}
         />
       )}
@@ -1537,6 +1556,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     cwd={ctx.markdownCwd}
                     environmentId={ctx.activeThreadEnvironmentId}
                     isStreaming={assistantResponseStillInProgress}
+                    smoothStreaming={ctx.smoothAssistantText}
                     skills={ctx.skills}
                     searchHighlight={messageSearchHighlight}
                   />

@@ -193,18 +193,28 @@ describe("ClientSettings.chatWidth", () => {
   });
 });
 
-describe("ServerSettings.enableLegacyTokenStreaming", () => {
-  it("defaults to buffered output and deliberately ignores the retired key", () => {
-    expect(DEFAULT_SERVER_SETTINGS.enableLegacyTokenStreaming).toBe(false);
-    expect(
-      decodeServerSettings({ enableAssistantStreaming: true }).enableLegacyTokenStreaming,
-    ).toBe(false);
+describe("ServerSettings.responseStreamingMode", () => {
+  it("defaults to paragraph streaming and ignores the retired keys", () => {
+    expect(DEFAULT_SERVER_SETTINGS.responseStreamingMode).toBe("paragraph");
+    expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");
+    expect(decodeServerSettings({ enableAssistantStreaming: true }).responseStreamingMode).toBe(
+      "paragraph",
+    );
   });
 
-  it("round-trips the fresh legacy setting key", () => {
-    expect(
-      decodeServerSettings({ enableLegacyTokenStreaming: true }).enableLegacyTokenStreaming,
-    ).toBe(true);
+  it("round-trips every mode and rejects unknown ones", () => {
+    for (const responseStreamingMode of ["turn", "paragraph", "token"] as const) {
+      expect(decodeServerSettings({ responseStreamingMode }).responseStreamingMode).toBe(
+        responseStreamingMode,
+      );
+      expect(decodeServerSettingsPatch({ responseStreamingMode }).responseStreamingMode).toBe(
+        responseStreamingMode,
+      );
+    }
+    expect(() => decodeServerSettingsPatch({ responseStreamingMode: "sentence" })).toThrow();
+  });
+
+  it("still accepts the legacy token switch in patches from older clients", () => {
     expect(
       decodeServerSettingsPatch({ enableLegacyTokenStreaming: true }).enableLegacyTokenStreaming,
     ).toBe(true);

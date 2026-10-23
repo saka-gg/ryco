@@ -1026,7 +1026,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         enableLegacyTokenStreaming: true,
       });
       let stored = yield* serverSettings.getSettings;
-      assert.equal(stored.enableLegacyTokenStreaming, true);
+      assert.equal(stored.responseStreamingMode, "token");
       assert.equal(stored.providers.opencode.serverPassword, "legacy-password");
       assert.equal(stored.providers.opencode.serverUrl, serverUrl);
       assert.equal(stored.observability.otlpTracesUrl, otlpTracesUrl);
@@ -1496,6 +1496,56 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         [{ name: "CODEX_HOME", value: "/fixture/codex-home", sensitive: false }],
       );
       assert.deepEqual(yield* unreadableSettingsBackups, []);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("keeps a saved token-streaming opt-in when it reads an older settings file", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const cases = [
+        [{ enableLegacyTokenStreaming: true }, "token"],
+        [{ enableLegacyTokenStreaming: false }, "paragraph"],
+        [{}, "paragraph"],
+        // A file that already has the new key keeps it.
+        [{ enableLegacyTokenStreaming: true, responseStreamingMode: "turn" }, "turn"],
+        // So does a file the per-key recovery has to read.
+        [{ enableLegacyTokenStreaming: true, worktreeBranchPrefix: "/" }, "token"],
+      ] as const;
+      for (const [persisted, mode] of cases) {
+        yield* fs.writeFileString(settingsPath, JSON.stringify(persisted));
+        assert.equal((yield* loadSettingsInFreshService()).responseStreamingMode, mode);
+      }
+
+      // The next save writes the new key and drops the old one.
+      yield* fs.writeFileString(settingsPath, JSON.stringify({ enableLegacyTokenStreaming: true }));
+      yield* inFreshService((settings) =>
+        settings.updateSettings({ worktreeBranchPrefix: "team" }),
+      );
+      const rewritten = JSON.parse(yield* fs.readFileString(settingsPath));
+      assert.equal(rewritten.responseStreamingMode, "token");
+      assert.notProperty(rewritten, "enableLegacyTokenStreaming");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("maps the legacy token switch that older clients still write", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      yield* settings.updateSettings({ responseStreamingMode: "turn" });
+      // Off keeps a mode other than token.
+      yield* settings.updateSettings({ enableLegacyTokenStreaming: false });
+      assert.equal((yield* settings.getSettings).responseStreamingMode, "turn");
+      yield* settings.updateSettings({ enableLegacyTokenStreaming: true });
+      assert.equal((yield* settings.getSettings).responseStreamingMode, "token");
+      // Off leaves token output for the default.
+      yield* settings.updateSettings({ enableLegacyTokenStreaming: false });
+      assert.equal((yield* settings.getSettings).responseStreamingMode, "paragraph");
+      // The new key wins when a patch carries both.
+      yield* settings.updateSettings({
+        responseStreamingMode: "turn",
+        enableLegacyTokenStreaming: true,
+      });
+      assert.equal((yield* settings.getSettings).responseStreamingMode, "turn");
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 

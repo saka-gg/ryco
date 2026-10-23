@@ -112,10 +112,10 @@ describe("environment server config store", () => {
     expect(readEnvironmentServerConfig(NODE_A)).toBe(first);
     expect(readEnvironmentServerConfig(NODE_B)).toBeNull();
 
-    patchEnvironmentServerSettings(NODE_A, { enableLegacyTokenStreaming: true });
-    expect(readEnvironmentServerConfig(NODE_A)?.settings.enableLegacyTokenStreaming).toBe(true);
+    patchEnvironmentServerSettings(NODE_A, { responseStreamingMode: "token" });
+    expect(readEnvironmentServerConfig(NODE_A)?.settings.responseStreamingMode).toBe("token");
     // A patch for an environment without a config has nothing to apply to.
-    patchEnvironmentServerSettings(NODE_B, { enableLegacyTokenStreaming: true });
+    patchEnvironmentServerSettings(NODE_B, { responseStreamingMode: "token" });
     expect(readEnvironmentServerConfig(NODE_B)).toBeNull();
   });
 
@@ -266,7 +266,7 @@ describe("environment thread capabilities", () => {
       withCapabilities(NODE_A, { threadSettlement: true }, ["codex", "claude"]),
       "providerStatusesDelta",
     );
-    patchEnvironmentServerSettings(NODE_A, { enableLegacyTokenStreaming: true });
+    patchEnvironmentServerSettings(NODE_A, { responseStreamingMode: "token" });
     forgetEnvironmentServerConfig(NODE_A);
     expect(getReportedThreadCapabilitiesSnapshot()).toBe(snapshot);
     expect(resolveEnvironmentThreadCapabilities(NODE_A)).toBe(resolved);
@@ -338,7 +338,7 @@ describe("environment auto-settle rule", () => {
     subscribeReportedThreadCapabilities(listener);
     writeEnvironmentServerConfig(NODE_A, ruleConfig(NODE_A, { nodeAutoSettlement: true }));
     const snapshot = getReportedThreadCapabilitiesSnapshot();
-    patchEnvironmentServerSettings(NODE_A, { enableLegacyTokenStreaming: true });
+    patchEnvironmentServerSettings(NODE_A, { responseStreamingMode: "token" });
     expect(getReportedThreadCapabilitiesSnapshot()).toBe(snapshot);
 
     patchEnvironmentServerSettings(NODE_A, { threadAutoSettleAfterDays: 3 });
@@ -584,7 +584,7 @@ describe("startActiveEnvironmentServerConfigProjection", () => {
     expect(sources.at(-1)).toBe("snapshot");
     expect(providers).toHaveBeenCalledOnce();
 
-    patchEnvironmentServerSettings(NODE_B, { enableLegacyTokenStreaming: true });
+    patchEnvironmentServerSettings(NODE_B, { responseStreamingMode: "token" });
     expect(sources.at(-1)).toBe("settingsUpdated");
     stopProviders();
     stopUpdates();
@@ -595,7 +595,7 @@ describe("startActiveEnvironmentServerConfigProjection", () => {
     const configA = config(NODE_A, ["codex"]);
     writeEnvironmentServerConfig(NODE_A, configA);
     const stop = startActiveEnvironmentServerConfigProjection(activeSource(NODE_A).source);
-    const optimistic = { ...DEFAULT_SERVER_SETTINGS, enableLegacyTokenStreaming: true };
+    const optimistic = { ...DEFAULT_SERVER_SETTINGS, responseStreamingMode: "token" as const };
     applySettingsUpdated(optimistic);
     expect(getServerConfig()?.settings).toBe(optimistic);
 
@@ -612,7 +612,7 @@ describe("startActiveEnvironmentServerConfigProjection", () => {
     expect(getServerConfig()?.settings).toBe(optimistic);
 
     // The node's settings event replaces the write and keeps the providers.
-    const confirmed = { ...DEFAULT_SERVER_SETTINGS, enableLegacyTokenStreaming: false };
+    const confirmed = { ...DEFAULT_SERVER_SETTINGS, responseStreamingMode: "turn" as const };
     writeEnvironmentServerConfig(NODE_A, { ...withClaude, settings: confirmed }, "settingsUpdated");
     expect(getServerConfig()?.settings).toBe(confirmed);
     expect(shownProviderIds()).toEqual(["codex", "claude"]);
@@ -627,7 +627,7 @@ describe("startActiveEnvironmentServerConfigProjection", () => {
     applyProvidersUpdated({ providers: refreshed });
     expect(getServerConfig()?.providers).toBe(refreshed);
 
-    const settings = { ...DEFAULT_SERVER_SETTINGS, enableLegacyTokenStreaming: true };
+    const settings = { ...DEFAULT_SERVER_SETTINGS, responseStreamingMode: "token" as const };
     writeEnvironmentServerConfig(NODE_A, { ...configA, settings }, "settingsUpdated");
     expect(getServerConfig()?.settings).toBe(settings);
     expect(getServerConfig()?.providers).toBe(refreshed);
@@ -645,13 +645,13 @@ describe("startActiveEnvironmentServerConfigProjection", () => {
     writeEnvironmentServerConfig(NODE_B, configB);
     const driver = activeSource(NODE_A);
     const stop = startActiveEnvironmentServerConfigProjection(driver.source);
-    applySettingsUpdated({ ...DEFAULT_SERVER_SETTINGS, enableLegacyTokenStreaming: true });
+    applySettingsUpdated({ ...DEFAULT_SERVER_SETTINGS, responseStreamingMode: "token" });
 
     const snapshot = config(NODE_A, ["codex", "opencode"]);
     writeEnvironmentServerConfig(NODE_A, snapshot);
     expect(getServerConfig()).toBe(snapshot);
 
-    applySettingsUpdated({ ...DEFAULT_SERVER_SETTINGS, enableLegacyTokenStreaming: true });
+    applySettingsUpdated({ ...DEFAULT_SERVER_SETTINGS, responseStreamingMode: "token" });
     driver.setActive(NODE_B);
     expect(getServerConfig()).toBe(configB);
     driver.setActive(NODE_A);
@@ -725,9 +725,9 @@ describe("a connection writing its config before any projection runs", () => {
     node.emit({
       version: 1,
       type: "settingsUpdated",
-      payload: { settings: { ...DEFAULT_SERVER_SETTINGS, enableLegacyTokenStreaming: true } },
+      payload: { settings: { ...DEFAULT_SERVER_SETTINGS, responseStreamingMode: "token" } },
     } as ServerConfigStreamEvent);
-    expect(getServerConfig()?.settings.enableLegacyTokenStreaming).toBe(true);
+    expect(getServerConfig()?.settings.responseStreamingMode).toBe("token");
     expect(getServerConfigUpdatedNotification()?.source).toBe("settingsUpdated");
     stop();
   });

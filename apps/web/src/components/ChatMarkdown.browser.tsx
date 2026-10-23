@@ -77,6 +77,21 @@ import ChatMarkdown from "./ChatMarkdown";
 import { resetCodeHighlightQueueForTests } from "./chat/codeHighlightQueue";
 import { syncDocumentPresentationTier } from "../lib/presentationTier";
 
+/** The running opacity transitions of an element (the streaming fade-in). */
+function opacityTransitions(element: Element) {
+  return element
+    .getAnimations()
+    .filter(
+      (animation) =>
+        animation instanceof CSSTransition && animation.transitionProperty === "opacity",
+    );
+}
+
+const nextFrame = () =>
+  new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+
 describe("ChatMarkdown", () => {
   afterEach(() => {
     openInPreferredEditorMock.mockClear();
@@ -251,6 +266,131 @@ describe("ChatMarkdown", () => {
       expect(document.querySelector(".chat-markdown-shiki")).toBeNull();
       expect(getSharedHighlighterMock).not.toHaveBeenCalled();
       expect(codeToHtmlMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("fades in blocks that arrive while a message streams, and never in history", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={"First paragraph.\n\n"}
+        cwd="/repo/project"
+        isStreaming
+        smoothStreaming={false}
+      />,
+    );
+
+    try {
+      const root = document.querySelector<HTMLElement>(".chat-markdown")!;
+      expect(root.hasAttribute("data-streaming")).toBe(true);
+      await screen.rerender(
+        <ChatMarkdown
+          text={"First paragraph.\n\n- one\n- two\n\n"}
+          cwd="/repo/project"
+          isStreaming
+          smoothStreaming={false}
+        />,
+      );
+      await vi.waitFor(() => expect(root.querySelector("ul")).not.toBeNull());
+      const list = root.querySelector("ul")!;
+      expect(getComputedStyle(list).transitionProperty).toBe("opacity");
+      expect(getComputedStyle(list).transitionDuration).toBe("0.6s");
+      expect(getComputedStyle(list.querySelector("li")!).transitionProperty).toBe("opacity");
+      expect(opacityTransitions(list)).toHaveLength(1);
+
+      await screen.rerender(
+        <ChatMarkdown text={"First paragraph.\n\n- one\n- two\n\n"} cwd="/repo/project" />,
+      );
+      expect(root.hasAttribute("data-streaming")).toBe(false);
+      expect(getComputedStyle(root.querySelector("p")!).transitionDuration).toBe("0s");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not fade in the blocks already there when a streaming message mounts", async () => {
+    // Opening a thread mid-reply, or scrolling a row of the running turn back into view.
+    const screen = await render(
+      <ChatMarkdown
+        text={"First.\n\n- one\n- two\n\n"}
+        cwd="/repo/project"
+        isStreaming
+        smoothStreaming={false}
+      />,
+    );
+
+    try {
+      const root = document.querySelector<HTMLElement>(".chat-markdown")!;
+      expect(root.hasAttribute("data-streaming")).toBe(true);
+      await nextFrame();
+      for (const block of root.querySelectorAll("p, ul, li")) {
+        expect(opacityTransitions(block)).toEqual([]);
+      }
+
+      await screen.rerender(
+        <ChatMarkdown
+          text={"First.\n\n- one\n- two\n\nSecond.\n\n"}
+          cwd="/repo/project"
+          isStreaming
+          smoothStreaming={false}
+        />,
+      );
+      await vi.waitFor(() => expect(root.querySelectorAll("p")).toHaveLength(2));
+      expect(opacityTransitions(root.querySelectorAll("p")[1]!)).toHaveLength(1);
+      expect(opacityTransitions(root.querySelector("p")!)).toEqual([]);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("leaves text revealed token by token without the fade", async () => {
+    // Token streaming and streaming reasoning keep the gradual reveal, which already
+    // eases new text in; a fade on top would replay whenever a block changes shape.
+    const screen = await render(
+      <ChatMarkdown text={"Steps:\n\n"} cwd="/repo/project" isStreaming />,
+    );
+
+    try {
+      const root = document.querySelector<HTMLElement>(".chat-markdown")!;
+      await screen.rerender(
+        <ChatMarkdown text={"Steps:\n\n- one\n\n"} cwd="/repo/project" isStreaming />,
+      );
+      expect(root.hasAttribute("data-streaming")).toBe(false);
+      await vi.waitFor(() => expect(root.querySelector("ul")).not.toBeNull());
+      expect(getComputedStyle(root.querySelector("ul")!).transitionDuration).toBe("0s");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows a released block whole when the reveal is not smoothed", async () => {
+    const block = "Second paragraph with enough words to take several frames to reveal.";
+    const screen = await render(
+      <ChatMarkdown text={"First.\n\n"} cwd="/repo/project" isStreaming smoothStreaming={false} />,
+    );
+
+    try {
+      const root = document.querySelector<HTMLElement>(".chat-markdown")!;
+      const seen: string[] = [];
+      const observer = new MutationObserver(() => {
+        const text = root.querySelectorAll("p")[1]?.textContent;
+        if (text !== undefined) seen.push(text);
+      });
+      observer.observe(root, { childList: true, subtree: true, characterData: true });
+      await screen.rerender(
+        <ChatMarkdown
+          text={`First.\n\n${block}\n\n`}
+          cwd="/repo/project"
+          isStreaming
+          smoothStreaming={false}
+        />,
+      );
+      await vi.waitFor(() => expect(root.querySelectorAll("p")[1]?.textContent).toBe(block));
+      observer.disconnect();
+      // Never a partly revealed paragraph on the way.
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every((text) => text === block)).toBe(true);
     } finally {
       await screen.unmount();
     }

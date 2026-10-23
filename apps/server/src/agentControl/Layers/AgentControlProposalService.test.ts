@@ -149,8 +149,8 @@ enabledLayer("AgentControlProposalService", (it) => {
         assert.strictEqual(unchanged.status, "approved");
         assert.strictEqual(unchanged.result, null);
         assert.strictEqual(
-          (yield* settings.getSettings).enableLegacyTokenStreaming,
-          before.enableLegacyTokenStreaming,
+          (yield* settings.getSettings).responseStreamingMode,
+          before.responseStreamingMode,
         );
       }),
   );

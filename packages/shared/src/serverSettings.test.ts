@@ -4,6 +4,7 @@ import { createModelSelection } from "./model.ts";
 import {
   applyServerSettingsPatch,
   extractPersistedServerObservabilitySettings,
+  migrateLegacyServerSettings,
   normalizePersistedServerSettingString,
   parsePersistedServerObservabilitySettings,
 } from "./serverSettings.ts";
@@ -200,6 +201,51 @@ describe("serverSettings helpers", () => {
       enabled: true,
       config: { homePath: "~/.codex" },
     });
+  });
+});
+
+describe("response streaming mode", () => {
+  const withMode = (responseStreamingMode: "turn" | "paragraph" | "token") => ({
+    ...DEFAULT_SERVER_SETTINGS,
+    responseStreamingMode,
+  });
+
+  it("maps the legacy token switch that older clients write", () => {
+    const patch = (current: "turn" | "paragraph" | "token", enabled: boolean) =>
+      applyServerSettingsPatch(withMode(current), { enableLegacyTokenStreaming: enabled });
+    expect(patch("turn", true).responseStreamingMode).toBe("token");
+    expect(patch("token", false).responseStreamingMode).toBe("paragraph");
+    expect(patch("turn", false).responseStreamingMode).toBe("turn");
+    expect(patch("paragraph", false).responseStreamingMode).toBe("paragraph");
+    expect(patch("turn", true)).not.toHaveProperty("enableLegacyTokenStreaming");
+  });
+
+  it("lets the new key win when a patch carries both", () => {
+    expect(
+      applyServerSettingsPatch(withMode("paragraph"), {
+        responseStreamingMode: "turn",
+        enableLegacyTokenStreaming: true,
+      }).responseStreamingMode,
+    ).toBe("turn");
+  });
+
+  it("upgrades a saved token-streaming opt-in and leaves everything else alone", () => {
+    expect(migrateLegacyServerSettings({ enableLegacyTokenStreaming: true, a: 1 })).toEqual({
+      enableLegacyTokenStreaming: true,
+      a: 1,
+      responseStreamingMode: "token",
+    });
+    for (const persisted of [
+      { enableLegacyTokenStreaming: false },
+      { enableLegacyTokenStreaming: true, responseStreamingMode: "turn" },
+      { enableLegacyTokenStreaming: "yes" },
+      {},
+      [],
+      "text",
+      null,
+    ]) {
+      expect(migrateLegacyServerSettings(persisted)).toBe(persisted);
+    }
   });
 });
 

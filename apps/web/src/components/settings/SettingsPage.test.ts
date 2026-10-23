@@ -229,18 +229,20 @@ describe("§13.5's pointer names a section this dialog actually has", () => {
   });
 });
 
-describe("legacy token streaming search", () => {
-  it("routes the legacy result to the revealable General-settings row", () => {
+describe("response streaming search", () => {
+  it("routes paragraph and token queries to the General-settings row", () => {
     const entry = SETTINGS_SEARCH_INDEX.find(
-      (candidate) => candidate.title === "Stream token by token (legacy)",
+      (candidate) => candidate.title === "Response streaming",
     );
     expect(entry).toMatchObject({
       section: "general",
-      targetId: "legacy-token-streaming",
+      owner: "node",
+      targetId: "response-streaming",
     });
-    expect(`${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase()).toContain(
-      "token streaming",
-    );
+    const text = `${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase();
+    for (const query of ["paragraph", "token", "streaming", "legacy"]) {
+      expect(text).toContain(query);
+    }
   });
 });
 

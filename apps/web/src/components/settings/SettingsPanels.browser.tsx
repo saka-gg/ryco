@@ -1285,30 +1285,7 @@ describe("GeneralSettingsPanel observability", () => {
     expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
   });
 
-  it("reveals and focuses legacy token streaming when settings search targets it", async () => {
-    useTierOverrideStore.setState({ override: "desktop" });
-    syncDocumentPresentationTier();
-    installSettingsNativeApi();
-    setServerConfigSnapshot(createBaseServerConfig());
-
-    mounted = await render(
-      <AppAtomRegistryProvider>
-        <GeneralSettingsPanel searchTargetId="legacy-token-streaming" />
-      </AppAtomRegistryProvider>,
-    );
-
-    await expect.element(page.getByText("Legacy features", { exact: true })).toBeInTheDocument();
-    await expect
-      .element(page.getByText("Stream token by token (legacy)", { exact: true }))
-      .toBeInTheDocument();
-    const tokenStreamingSwitch = page.getByLabelText("Stream token by token (legacy)");
-    await expect.element(tokenStreamingSwitch).toBeInTheDocument();
-    await vi.waitFor(() => {
-      expect(document.activeElement).toBe(tokenStreamingSwitch.element());
-    });
-  });
-
-  it("confirms legacy token streaming before enabling and disables it immediately", async () => {
+  it("chooses how responses stream and confirms the legacy token mode", async () => {
     useTierOverrideStore.setState({ override: "desktop" });
     syncDocumentPresentationTier();
     const confirm = vi
@@ -1319,42 +1296,95 @@ describe("GeneralSettingsPanel observability", () => {
       .fn<LocalApi["server"]["updateSettings"]>()
       .mockImplementation(async (patch) => ({
         ...DEFAULT_SERVER_SETTINGS,
-        enableLegacyTokenStreaming:
-          patch.enableLegacyTokenStreaming ?? DEFAULT_SERVER_SETTINGS.enableLegacyTokenStreaming,
+        responseStreamingMode:
+          patch.responseStreamingMode ?? DEFAULT_SERVER_SETTINGS.responseStreamingMode,
       }));
     installSettingsNativeApi({ confirm, updateSettings });
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      environment: {
+        ...config.environment,
+        capabilities: { ...config.environment.capabilities, responseStreamingModes: true },
+      },
+    });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const select = page.getByLabelText("Response streaming");
+    await expect.element(select).toHaveTextContent("Paragraphs");
+    await expect
+      .element(page.getByText("Each paragraph or code block appears once it is finished."))
+      .toBeInTheDocument();
+
+    await select.click();
+    await page.getByRole("option", { name: "Whole messages" }).click();
+    await vi.waitFor(() =>
+      expect(updateSettings).toHaveBeenLastCalledWith({ responseStreamingMode: "turn" }),
+    );
+    await expect.element(select).toHaveTextContent("Whole messages");
+    expect(confirm).not.toHaveBeenCalled();
+
+    await select.click();
+    await page.getByRole("option", { name: "Token by token (legacy)" }).click();
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    await expect.element(select).toHaveTextContent("Whole messages");
+
+    await select.click();
+    await page.getByRole("option", { name: "Token by token (legacy)" }).click();
+    await vi.waitFor(() => {
+      expect(confirm).toHaveBeenCalledTimes(2);
+      expect(updateSettings).toHaveBeenLastCalledWith({ responseStreamingMode: "token" });
+    });
+    await expect.element(select).toHaveTextContent("Token by token");
+    await expect.element(select).not.toHaveTextContent("(legacy)");
+  });
+
+  it("keeps response streaming read-only on a node that predates the modes", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    installSettingsNativeApi();
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await render(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel searchTargetId="legacy-token-streaming" />
+        <GeneralSettingsPanel />
       </AppAtomRegistryProvider>,
     );
 
-    const tokenStreamingSwitch = page.getByLabelText("Stream token by token (legacy)");
-    await expect.element(tokenStreamingSwitch).not.toBeChecked();
+    const select = page.getByLabelText("Response streaming");
+    await expect.element(select).toBeDisabled();
+    // The client cannot tell what such a node does, so it claims no mode for it.
+    await expect.element(select).toHaveTextContent("Set by the node");
+    await expect.element(select).not.toHaveTextContent("Paragraphs");
+    await expect
+      .element(page.getByText("Each paragraph or code block appears once it is finished."))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByText(/This node does not support response streaming modes/))
+      .toBeInTheDocument();
+  });
 
-    await tokenStreamingSwitch.click();
-    await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
-    expect(updateSettings).not.toHaveBeenCalled();
-    await expect.element(tokenStreamingSwitch).not.toBeChecked();
+  it("does not call a node unsupported before its config has loaded", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    syncDocumentPresentationTier();
+    installSettingsNativeApi();
 
-    await tokenStreamingSwitch.click();
-    await vi.waitFor(() => {
-      expect(confirm).toHaveBeenCalledTimes(2);
-      expect(updateSettings).toHaveBeenLastCalledWith({
-        enableLegacyTokenStreaming: true,
-      });
-    });
-    await expect.element(tokenStreamingSwitch).toBeChecked();
-
-    await tokenStreamingSwitch.click();
-    await vi.waitFor(() =>
-      expect(updateSettings).toHaveBeenLastCalledWith({
-        enableLegacyTokenStreaming: false,
-      }),
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
     );
-    expect(confirm).toHaveBeenCalledTimes(2);
+
+    await expect.element(page.getByLabelText("Response streaming")).toBeDisabled();
+    await expect
+      .element(page.getByText(/This node does not support response streaming modes/))
+      .not.toBeInTheDocument();
   });
 
   it("edits locally without depending on a node editor", async () => {

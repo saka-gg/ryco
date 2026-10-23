@@ -544,8 +544,6 @@ export type AgentTokenMode = typeof AgentTokenMode.Type;
 export const DEFAULT_AGENT_TOKEN_MODE: AgentTokenMode = "off";
 export const ProviderRequestKind = Schema.Literals(["command", "file-read", "file-change"]);
 export type ProviderRequestKind = typeof ProviderRequestKind.Type;
-export const AssistantDeliveryMode = Schema.Literals(["buffered", "streaming"]);
-export type AssistantDeliveryMode = typeof AssistantDeliveryMode.Type;
 export const ProviderApprovalDecision = Schema.Literals([
   "accept",
   "acceptForSession",

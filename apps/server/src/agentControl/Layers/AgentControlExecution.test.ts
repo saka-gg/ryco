@@ -1182,8 +1182,37 @@ it.effect("executes only the captured non-secret setting and rejects stale befor
       yield* execution.executeApproved(proposal.proposalId);
       assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, expected);
     }
-    assert.isTrue((yield* settings.getSettings).enableLegacyTokenStreaming);
-  }).pipe(Effect.provide(ServerSettingsService.layerTest({ enableLegacyTokenStreaming: false }))),
+    assert.strictEqual((yield* settings.getSettings).responseStreamingMode, "token");
+  }).pipe(Effect.provide(ServerSettingsService.layerTest({ responseStreamingMode: "paragraph" }))),
+);
+
+it.effect("maps the legacy token switch onto the response streaming mode", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettingsService;
+    for (const [before, after, mode] of [
+      [false, true, "token"],
+      [true, false, "paragraph"],
+    ] as const) {
+      const nextPlan = {
+        kind: "changeSettings" as const,
+        change: { kind: "legacyTokenStreaming" as const, before, after },
+      };
+      const proposal = {
+        ...approvedProposal,
+        plan: nextPlan,
+        planDigest: computeAgentControlPlanDigest(nextPlan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      const execution = yield* makeTestExecution({
+        ...stores,
+        projections: {},
+        commandApplication: {},
+      });
+      yield* execution.executeApproved(proposal.proposalId);
+      assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+      assert.strictEqual((yield* settings.getSettings).responseStreamingMode, mode);
+    }
+  }).pipe(Effect.provide(ServerSettingsService.layerTest({ responseStreamingMode: "turn" }))),
 );
 
 it.effect(

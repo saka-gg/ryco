@@ -145,11 +145,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
-    title: "Stream token by token (legacy)",
+    title: "Response streaming",
     owner: "node",
-    description: "Compatibility mode for token-by-token assistant output.",
-    keywords: "token streaming assistant output streaming tokens buffered",
-    targetId: "legacy-token-streaming",
+    description:
+      "Show replies a paragraph at a time, a whole message at a time, or token by token.",
+    keywords:
+      "stream streaming paragraph token turn whole message buffered output assistant legacy",
+    targetId: "response-streaming",
   },
   {
     section: "general",
