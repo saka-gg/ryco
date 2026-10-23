@@ -123,6 +123,8 @@ import { UsageServiceLive } from "./usage/UsageService.ts";
 import { CliProxyServiceLive } from "./cliProxy/CliProxyService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
+import { EventLoopMonitorLive } from "./observability/EventLoopMonitor.ts";
+import { HeapSnapshotLive } from "./observability/HeapSnapshot.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
@@ -829,12 +831,16 @@ export const makeServerLayer = Layer.unwrap(
 
     // Shutdown runs these stages in reverse build order; the markers log how
     // long each took so slow finalizers can be attributed, after a line naming
-    // the desktop app's loss when that is the cause. The startup stall
-    // monitor is built before the HTTP bind and the runtime graph (migrations,
-    // read model, provider hydration), so stalls in any of them are
-    // attributed, but after observability so its warnings reach the server
-    // log. The hydration layer provides the same value; memoization keeps it
-    // to one monitor, owned here.
+    // the desktop app's loss when that is the cause. The stall monitors are
+    // built before the HTTP bind and the runtime graph (migrations, read
+    // model, provider hydration), so stalls in any of them are attributed,
+    // but after observability so their warnings and spans reach the server
+    // log and the tracer. The startup monitor watches the first 30 s at a
+    // fine grain; the hydration layer provides the same value and memoization
+    // keeps it to one monitor, owned here. The lifetime event-loop monitor
+    // and the SIGUSR2 heap-snapshot handler run only in this server layer,
+    // never in provider tests or CLI commands; closing the lifetime monitor
+    // last writes the stalls of its open window.
     const shutdownClock = makeShutdownClock();
     return DesktopParentLossShutdownLogLive.pipe(
       Layer.provideMerge(shutdownClock.marker("started")),
@@ -845,6 +851,8 @@ export const makeServerLayer = Layer.unwrap(
       Layer.provideMerge(WorkspaceAccessPolicyLive),
       Layer.provideMerge(HttpServerLive),
       Layer.provideMerge(StartupStallMonitorLive),
+      Layer.provideMerge(HeapSnapshotLive),
+      Layer.provideMerge(EventLoopMonitorLive),
       Layer.provide(ObservabilityLive),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provideMerge(VcsProcess.layer),

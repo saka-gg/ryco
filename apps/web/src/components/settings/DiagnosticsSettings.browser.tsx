@@ -167,7 +167,7 @@ const serverConfig = {
   observability,
   settings: DEFAULT_SERVER_SETTINGS,
 } satisfies ServerConfig;
-const getSnapshot = vi.fn(async () => snapshot);
+const getSnapshot = vi.fn(async (): Promise<DiagnosticsSnapshot> => snapshot);
 const getHistory = vi.fn(async () => history);
 function mount(connected = true) {
   return render(
@@ -206,6 +206,56 @@ describe("Diagnostics settings with actual connection capability", () => {
     await expect.element(page.getByText(/12 retained samples/)).toBeVisible();
     await expect
       .element(page.getByText("diagnostics-agent", { exact: true }).first())
+      .toBeVisible();
+  });
+
+  it("lists the server's event-loop stalls", async () => {
+    getSnapshot.mockImplementation(async () => ({
+      ...snapshot,
+      eventLoop: {
+        thresholdMs: 2_000,
+        windowMs: 30_000,
+        historyFilePaths: ["/tmp/logs/event-loop-stalls.ndjson"],
+        recent: [
+          {
+            time: now,
+            kind: "event-loop",
+            durationMs: 6_200,
+            count: 3,
+            totalMs: 11_000,
+            cpuUserMs: 6_000,
+            uptimeMs: 20_000,
+            phases: ["persistence.migrations (6100 ms)"],
+          },
+        ],
+        last24h: { records: 1, stalls: 3, longestMs: 6_200, threadpoolStalls: 0 },
+      },
+    }));
+    try {
+      await mount();
+      await expect
+        .element(page.getByText("3 stalls in the last 24 h, longest 6.2 s", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByText("3 stalls, 11 s in total", { exact: true }))
+        .toBeVisible();
+      await expect.element(page.getByText("during startup", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("CPU-bound (JavaScript or garbage collection)", { exact: true }))
+        .toBeVisible();
+    } finally {
+      getSnapshot.mockImplementation(async () => snapshot);
+    }
+  });
+
+  it("says when the node's server does not record stalls", async () => {
+    await mount();
+    await expect
+      .element(
+        page.getByText("This node's server does not record stalls. Update it to see them here.", {
+          exact: true,
+        }),
+      )
       .toBeVisible();
   });
 

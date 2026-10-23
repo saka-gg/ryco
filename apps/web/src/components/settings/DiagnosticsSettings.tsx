@@ -19,6 +19,7 @@ import { ResourceTelemetryDiagnostics } from "./ResourceTelemetryDiagnostics";
 import { ProcessDiagnosticsSection } from "./ProcessDiagnosticsSection";
 import { DetailedTraceDiagnostics, DiagnosticsTraceId } from "./DetailedTraceDiagnostics";
 import { DiagnosticsSupportSections } from "./DiagnosticsPanel";
+import { EventLoopStallsDiagnostics } from "./EventLoopStallsDiagnostics";
 import { NotificationsTestSection } from "./NotificationsTestSection";
 import { SettingsPageContainer, SettingsSection, SettingsToolbar } from "./settingsLayout";
 import {
@@ -840,6 +841,8 @@ function DiagnosticsSettingsContent({
               <OverviewMetric label="Latest failure" value={latestFailure} />
             </div>
           </SettingsSection>
+
+          <EventLoopStallsDiagnostics snapshot={snapshot} nowMs={nowMs} />
 
           <SettingsSection title="Why was this slow?">
             <EvidenceRow

@@ -128,6 +128,12 @@ export const trackStartupLayer = <ROut, E, RIn>(
     trackStartupPhase(name, Layer.buildWithMemoMap(layer, memoMap, scope)),
   );
 
+/** `name (duration ms)`, with `, in flight` for a phase that has not ended by `nowMs`. */
+const describePhase = (record: PhaseRecord, nowMs: number) =>
+  `${record.name} (${(record.endedAtMs ?? nowMs) - record.startedAtMs} ms${
+    record.endedAtMs === null ? ", in flight" : ""
+  })`;
+
 /**
  * Phases that overlapped `[nowMs - windowMs, nowMs]`: everything still in flight plus phases that
  * ended inside the window (a blocking phase usually completes before the delayed sample runs).
@@ -137,16 +143,127 @@ export const describeStartupPhasesOverlapping = (
   windowMs: number,
 ): ReadonlyArray<string> => {
   const windowStartMs = nowMs - windowMs;
-  const describe = (record: PhaseRecord) =>
-    `${record.name} (${(record.endedAtMs ?? nowMs) - record.startedAtMs} ms${
-      record.endedAtMs === null ? ", in flight" : ""
-    })`;
   return [
-    ...[...inFlightPhases.values()].map(describe),
+    ...[...inFlightPhases.values()].map((record) => describePhase(record, nowMs)),
     ...recentlyEndedPhases
       .filter((record) => record.endedAtMs !== null && record.endedAtMs >= windowStartMs)
-      .map(describe),
+      .map((record) => describePhase(record, nowMs)),
   ];
+};
+
+const phaseOverlapMs = (record: PhaseRecord, startMs: number, endMs: number, nowMs: number) =>
+  Math.max(0, Math.min(record.endedAtMs ?? nowMs, endMs) - Math.max(record.startedAtMs, startMs));
+
+/**
+ * Phases that overlapped the wall-clock interval `[startMs, endMs]`, for attributing a stall that
+ * just ended. Unlike {@link describeStartupPhasesOverlapping}, phases that started after the
+ * interval are left out. Phases that started or ended inside the interval come first (a blocking
+ * phase usually ends right after the stall), longest overlap first; phases that covered the whole
+ * interval follow, most recently started first. Both are capped at `limit`.
+ */
+export const describeStartupPhasesInInterval = (
+  startMs: number,
+  endMs: number,
+  limit = Number.POSITIVE_INFINITY,
+  nowMs = Date.now(),
+): ReadonlyArray<string> => {
+  const candidates = [...inFlightPhases.values(), ...recentlyEndedPhases].filter(
+    (record) => record.startedAtMs <= endMs && (record.endedAtMs ?? nowMs) >= startMs,
+  );
+  const inside = candidates
+    .filter(
+      (record) =>
+        record.startedAtMs > startMs || (record.endedAtMs !== null && record.endedAtMs < endMs),
+    )
+    .toSorted(
+      (left, right) =>
+        phaseOverlapMs(right, startMs, endMs, nowMs) - phaseOverlapMs(left, startMs, endMs, nowMs),
+    );
+  const insideSet = new Set(inside);
+  const spanning = candidates
+    .filter((record) => !insideSet.has(record))
+    .toSorted((left, right) => right.startedAtMs - left.startedAtMs);
+  return [...inside, ...spanning].slice(0, limit).map((record) => describePhase(record, nowMs));
+};
+
+/** One threadpool canary: issued and settled times on the canary's clock. */
+export interface ThreadpoolCanaryResult {
+  readonly startedAtMs: number;
+  readonly settledAtMs: number;
+  /** Whether {@link ThreadpoolCanary.markPendingReported} was called while it was pending. */
+  readonly reportedPending: boolean;
+}
+
+export interface ThreadpoolCanaryProbe {
+  /** Canaries that settled since the previous probe, oldest first. */
+  readonly settled: ReadonlyArray<ThreadpoolCanaryResult>;
+  /**
+   * The canary that was already in flight at this probe, if any; a probe that finds none issues
+   * a new one and reports it here only from the next probe on.
+   */
+  readonly pending: { readonly startedAtMs: number; readonly reported: boolean } | null;
+}
+
+export interface ThreadpoolCanary {
+  readonly probe: () => ThreadpoolCanaryProbe;
+  /** Marks the pending canary as reported, so it is reported once however long it hangs. */
+  readonly markPendingReported: () => void;
+}
+
+export interface ThreadpoolCanaryOptions {
+  /** Directory the canary `stat`s; default `os.tmpdir()`. */
+  readonly directory?: string;
+  /** Clock for issue and settle times; default `Date.now`. */
+  readonly now?: () => number;
+  /**
+   * Least time between issuing two canaries; default 0 (a new one at the first probe after the
+   * last settled). A pending canary is still checked at every probe.
+   */
+  readonly minIssueIntervalMs?: number;
+  readonly stat?: (directory: string, callback: () => void) => void;
+}
+
+/**
+ * A libuv threadpool canary: one `fs.stat` in flight at a time, whose callback latency is the
+ * queueing delay of the shared pool (plus any event-loop block before the callback could run,
+ * which callers that also watch the loop must discount).
+ */
+export const makeThreadpoolCanary = (options: ThreadpoolCanaryOptions = {}): ThreadpoolCanary => {
+  const directory = options.directory ?? NodeOS.tmpdir();
+  const now = options.now ?? Date.now;
+  const minIssueIntervalMs = options.minIssueIntervalMs ?? 0;
+  const stat = options.stat ?? ((target, callback) => NodeFS.stat(target, () => callback()));
+  let pending: { readonly startedAtMs: number; reported: boolean } | null = null;
+  let settled: Array<ThreadpoolCanaryResult> = [];
+  let lastIssuedAtMs = Number.NEGATIVE_INFINITY;
+  return {
+    probe() {
+      const taken = settled;
+      settled = [];
+      if (pending !== null) {
+        return { settled: taken, pending: { ...pending } };
+      }
+      const issuedAtMs = now();
+      if (issuedAtMs - lastIssuedAtMs < minIssueIntervalMs) {
+        return { settled: taken, pending: null };
+      }
+      lastIssuedAtMs = issuedAtMs;
+      const canary = { startedAtMs: issuedAtMs, reported: false };
+      pending = canary;
+      stat(directory, () => {
+        settled.push({
+          startedAtMs: canary.startedAtMs,
+          settledAtMs: now(),
+          reportedPending: canary.reported,
+        });
+        if (pending === canary) pending = null;
+      });
+      return { settled: taken, pending: null };
+    },
+    markPendingReported() {
+      if (pending !== null) pending.reported = true;
+    },
+  };
 };
 
 const logStall = (report: StartupStallReport) =>
@@ -176,9 +293,7 @@ export const runStartupStallMonitor = (
         (created) => Effect.sync(() => created.disable()),
       );
       const startedAtMs = Date.now();
-      const canaryDirectory = NodeOS.tmpdir();
-      let pendingCanary: { readonly startedAtMs: number; reported: boolean } | null = null;
-      const settledCanaryDelays: Array<number> = [];
+      const canary = makeThreadpoolCanary();
       let stalls = 0;
       let maxEventLoopDelayMs = 0;
       let maxThreadpoolDelayMs = 0;
@@ -204,23 +319,20 @@ export const runStartupStallMonitor = (
           yield* report("event-loop", eventLoopDelayMs, nowMs);
         }
 
-        for (const delayMs of settledCanaryDelays.splice(0)) {
+        const probe = canary.probe();
+        for (const settled of probe.settled) {
+          const delayMs = settled.settledAtMs - settled.startedAtMs;
           maxThreadpoolDelayMs = Math.max(maxThreadpoolDelayMs, delayMs);
           if (delayMs >= options.threadpoolStallMs) yield* report("threadpool", delayMs, nowMs);
         }
-        if (pendingCanary === null) {
-          const canary = { startedAtMs: nowMs, reported: false };
-          pendingCanary = canary;
-          NodeFS.stat(canaryDirectory, () => {
-            settledCanaryDelays.push(Date.now() - canary.startedAtMs);
-            if (pendingCanary === canary) pendingCanary = null;
-          });
-        } else if (
-          !pendingCanary.reported &&
-          nowMs - pendingCanary.startedAtMs >= options.threadpoolStallMs
+        const pending = probe.pending;
+        if (
+          pending !== null &&
+          !pending.reported &&
+          nowMs - pending.startedAtMs >= options.threadpoolStallMs
         ) {
-          pendingCanary.reported = true;
-          yield* report("threadpool-pending", nowMs - pendingCanary.startedAtMs, nowMs);
+          canary.markPendingReported();
+          yield* report("threadpool-pending", nowMs - pending.startedAtMs, nowMs);
         }
       }
 

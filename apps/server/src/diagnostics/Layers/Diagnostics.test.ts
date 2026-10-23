@@ -8,6 +8,11 @@ import { DiagnosticsSnapshot } from "@ryco/contracts";
 import { vi } from "vite-plus/test";
 
 import type { ServerConfigShape } from "../../config.ts";
+import {
+  encodeStallLine,
+  eventLoopStallLogPath,
+  type EventLoopStallLine,
+} from "../../observability/EventLoopStallLog.ts";
 import type { EffectTraceRecord, TraceRecord } from "../../observability/TraceRecord.ts";
 import { formatProviderEventLogLine } from "../../provider/providerEventLogRecords.ts";
 import { makeServerLogFileLogger } from "../../serverLogger.ts";
@@ -200,6 +205,165 @@ describe("Diagnostics", () => {
         assert.equal(snapshot.tracing.summary?.latestWarningAndErrorLogs[0]?.message, "[redacted]");
         assert.equal(JSON.stringify(snapshot).includes("private-value"), false);
         assert.equal(snapshot.resources.host?.cpuCount, os.cpus().length);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("reports event-loop stall history from the stall log and its backup", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-diag-"));
+      try {
+        const config = makeDiagnosticsConfig(tempDir);
+        const logPath = eventLoopStallLogPath(config.serverTracePath);
+        const nowMs = Date.now();
+        const stallAt = (agoMs: number, overrides: Partial<EventLoopStallLine> = {}) =>
+          encodeStallLine({
+            time: new Date(nowMs - agoMs).toISOString(),
+            kind: "event-loop",
+            durationMs: 2_500,
+            count: 1,
+            totalMs: 2_500,
+            phases: ["provider.probe:token=private-value (2400 ms)"],
+            ...overrides,
+          });
+        fs.writeFileSync(
+          `${logPath}.1`,
+          [
+            stallAt(25 * 60 * 60_000, { durationMs: 9_000 }),
+            stallAt(5 * 60 * 60_000),
+            stallAt(4 * 60 * 60_000, { kind: "threadpool", durationMs: 7_000 }),
+            "",
+          ].join("\n"),
+        );
+        fs.writeFileSync(
+          logPath,
+          [
+            stallAt(60_000, { durationMs: 6_200, count: 3, totalMs: 11_000 }),
+            stallAt(1_000),
+            "",
+          ].join("\n"),
+        );
+        const diagnostics = yield* makeDiagnosticsService(config);
+        const snapshot = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
+        Schema.decodeUnknownSync(DiagnosticsSnapshot)(snapshot);
+        const history = snapshot.eventLoop;
+        assert.ok(history !== undefined);
+        assert.deepStrictEqual(
+          history.recent.map((record) => [record.kind, record.durationMs]),
+          [
+            ["event-loop", 2_500],
+            ["event-loop", 6_200],
+            ["threadpool", 7_000],
+            ["event-loop", 2_500],
+            ["event-loop", 9_000],
+          ],
+        );
+        assert.deepStrictEqual(history.last24h, {
+          records: 4,
+          stalls: 5,
+          longestMs: 6_200,
+          threadpoolStalls: 1,
+        });
+        assert.deepStrictEqual(history.historyFilePaths, [logPath, `${logPath}.1`]);
+        assert.equal(history.thresholdMs, 2_000);
+        assert.equal(JSON.stringify(history).includes("private-value"), false);
+        assert.equal(
+          snapshot.warnings.some((warning) => warning.code.startsWith("diagnostics.event-loop")),
+          false,
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("re-reads the stall log as soon as it changes", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-diag-"));
+      try {
+        const config = makeDiagnosticsConfig(tempDir);
+        const logPath = eventLoopStallLogPath(config.serverTracePath);
+        const record = (durationMs: number) =>
+          `${encodeStallLine({
+            time: new Date().toISOString(),
+            kind: "event-loop",
+            durationMs,
+            count: 1,
+            totalMs: durationMs,
+          })}\n`;
+        const diagnostics = yield* makeDiagnosticsService(config);
+        const fresh = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
+        assert.deepStrictEqual(fresh.eventLoop?.recent, []);
+        assert.equal(
+          fresh.warnings.some((warning) => warning.code.startsWith("diagnostics.event-loop")),
+          false,
+        );
+
+        fs.writeFileSync(logPath, record(3_000));
+        const first = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
+        assert.deepStrictEqual(
+          first.eventLoop?.recent.map((stall) => stall.durationMs),
+          [3_000],
+        );
+        fs.appendFileSync(logPath, record(4_000));
+        const second = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
+        assert.deepStrictEqual(
+          second.eventLoop?.recent.map((stall) => stall.durationMs).toSorted(),
+          [3_000, 4_000],
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("keeps good stall records and warns once about malformed ones", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-diag-"));
+      try {
+        const config = makeDiagnosticsConfig(tempDir);
+        const logPath = eventLoopStallLogPath(config.serverTracePath);
+        fs.writeFileSync(
+          logPath,
+          [
+            encodeStallLine({
+              time: new Date().toISOString(),
+              kind: "event-loop",
+              durationMs: 2_000,
+              count: 1,
+              totalMs: 2_000,
+            }),
+            "{not json",
+            JSON.stringify({ time: new Date().toISOString(), kind: "event-loop", durationMs: -1 }),
+            // Hand-edited: a fractional optional field must not break the snapshot.
+            JSON.stringify({
+              time: new Date().toISOString(),
+              kind: "event-loop",
+              durationMs: 2_100.5,
+              cpuUserMs: 10.25,
+            }),
+            // Hand-edited: a kind that ends in a space once cut to its length limit.
+            JSON.stringify({
+              time: new Date().toISOString(),
+              kind: `${"k".repeat(63)} tail`,
+              durationMs: 2_200,
+            }),
+            "",
+          ].join("\n"),
+        );
+        const diagnostics = yield* makeDiagnosticsService(config);
+        const snapshot = yield* diagnostics.getSnapshot({ providers: [], terminals: [] });
+        Schema.decodeUnknownSync(DiagnosticsSnapshot)(snapshot);
+        // The RPC layer encodes the snapshot, which is stricter about trimmed strings.
+        Schema.encodeUnknownSync(DiagnosticsSnapshot)(snapshot);
+        assert.equal(snapshot.eventLoop?.recent.length, 3);
+        const malformed = snapshot.warnings.filter(
+          (warning) => warning.code === "diagnostics.event-loop-history-malformed-lines",
+        );
+        assert.equal(malformed.length, 1);
+        assert.equal(malformed[0]?.count, 2);
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }

@@ -85,6 +85,11 @@ pair of files per thread: `<threadId>.native.log` (provider protocol messages) a
   days are removed and the directory is kept under 512 MiB (oldest first), at boot and hourly.
   Terminal histories in `logs/terminals/` get the same sweep (90 days, 256 MiB).
 
+The event-loop stall history, `event-loop-stalls.ndjson`, sits next to the trace file (so
+`RYCO_TRACE_FILE` moves it too), with one backup `.1`; both rotate at 512 KiB. Heap snapshots taken
+with `kill -USR2` are written to `logs/` as `server-<pid>-<time>.heapsnapshot`. See
+[Event-Loop Stalls](#event-loop-stalls) and [Heap Snapshots](#heap-snapshots).
+
 The Diagnostics panel reads provider failures (`runtime.error`, failed turns, errored session exits)
 from the canonical logs of the most recently active threads, and server failures from
 `logs/server.log` (`serverLogPath`), which the desktop backend writes.
@@ -366,6 +371,90 @@ That is a server-side acknowledgment metric. It does not measure:
 
 If you need those later, add client-side instrumentation or a dedicated server fanout metric.
 
+## Event-Loop Stalls
+
+The server watches its own event loop for as long as it runs
+(`apps/server/src/observability/EventLoopMonitor.ts`). A 1 s timer measures the gap between its own
+callbacks. When a gap is 2 s or longer, the time the loop was busy inside it (event-loop
+utilization: JavaScript, garbage collection or synchronous I/O) tells a stall from a pause:
+
+- busy for 2 s or more: a **stall**, recorded with its busy time as the duration;
+- otherwise mostly idle: the machine slept, the process was stopped (`SIGSTOP`) or a VM paused. That
+  is never a stall; the window logs one Debug line, `event loop gap while idle`.
+
+A libuv threadpool canary (one `fs.stat` at most every 5 s, one in flight at a time) runs
+alongside. A canary that takes 2 s or more while the loop was free is a `threadpool` record; one
+still unanswered after 2 s of free loop time is a `threadpool-pending` record instead, written once
+and not again when the canary finally completes. A canary that overlapped any loop gap of 2 s or
+more is not counted, since the loop, not the threadpool, may have held its callback. Saturations of
+8 s or more are always caught; shorter ones only when a canary lands in them.
+
+Each record carries the evidence to tell stalls apart: CPU time (user and system), major and minor
+page faults, involuntary context switches, RSS and heap used at the stall, the 1-minute load average
+and core count, the tracked startup phases (`trackStartupPhase`) that overlapped it, the pid and the
+process uptime. Records from the first minute are shown as "during startup".
+
+Records are bounded per 30 s window. The first stall of each kind is written at once, so a crash or
+restart right after it still leaves it on disk. Later stalls of that kind in the same window are
+folded into one record (`count`, `totalMs`, and the evidence of the longest) written when the window
+closes or the server shuts down. Each record also becomes:
+
+- a root span `server.eventLoop.stall` or `server.threadpool.stall` at level Warn, so it survives
+  `RYCO_TRACE_MIN_LEVEL=Warn` and the short-span filter, carrying the warning log (`event loop stalled
+  for 3000 ms`) that also shows in Diagnostics' latest warnings;
+- an increment of `ryco_server_event_loop_stalls_total` (label `kind`) by its `count`.
+
+Settings > Diagnostics > Event-loop stalls shows the last 24 h, the newest records and a hint read
+from the evidence (CPU-bound, memory pressure, kernel time, or waiting on disk or a lock). Offline,
+read the file directly:
+
+```bash
+jq -c '{time, kind, durationMs, count, cpuUserMs, majorPageFaults, phases}' \
+  ~/.ryco/userdata/logs/event-loop-stalls.ndjson
+```
+
+Platform notes:
+
+- macOS and Windows keep the monotonic clock running across machine sleep, so sleep shows up as an
+  idle gap and is filtered out. Linux stops the clock during suspend, so sleep is invisible there.
+- A process stopped while it was running JavaScript counts the stop as busy time; machine sleep almost
+  always catches an idle loop.
+- Bun (the desktop app's development backend) reports no event-loop utilization. There the process
+  CPU time inside the gap stands in for it (records say `busySource: "cpu"`), so stalls spent waiting
+  in synchronous I/O are undercounted.
+- Page-fault counts are 0 on Windows and the load average is left out there.
+- Two servers sharing one `RYCO_HOME` append to the same file; `pid` tells them apart. Each rotates
+  it on its own size count, so a rotation can drop the other's newest records, as with the trace
+  file.
+- If the runtime cannot take readings at all, the monitor logs one warning and stays off; the
+  server starts regardless.
+
+## Heap Snapshots
+
+On macOS and Linux, `SIGUSR2` makes a running server write a V8 heap snapshot into its logs
+directory:
+
+```bash
+kill -USR2 "$(jq -r .pid ~/.ryco/userdata/server-runtime.json)"
+```
+
+- The file is `logs/server-<pid>-<ISO time>.heapsnapshot`, readable only by its owner (mode 0600):
+  it holds tokens and thread content, so treat it like a credential and delete it after use. Open it in
+  Chrome DevTools > Memory.
+- Writing it blocks the server for seconds to a minute and needs about the heap's size in free
+  memory. Until stall-aware deadlines land, that pause can also expire in-flight provider and git
+  timeouts; take snapshots when no turn is running if you can.
+- At most 3 snapshots are kept in the logs directory, whichever process wrote them (the pid changes
+  on every restart); older ones are removed just before a new one is written, together with
+  unfinished `.partial` files from writes that died. Move a snapshot elsewhere to keep it.
+- It refuses, with a warning, when free disk space plus what the cleanup would free is below twice
+  the heap's size plus 1 GiB. A second request within 10 s of a written snapshot is ignored.
+- The write appears in the server log (`Writing heap snapshot`, then `Wrote heap snapshot` with path,
+  size and duration), as a `server.heapSnapshot` span, and as the tracked phase
+  `server.heap-snapshot`, so the stall it causes names it.
+- Windows has no `SIGUSR2`, so there is no trigger there yet. Only the server installs the handler;
+  `ryco` CLI commands do not.
+
 ## Common Workflows
 
 ### "Why did this request fail?"
@@ -575,6 +664,11 @@ Current high-value span and metric boundaries include:
 - git command execution and git hook events
 - terminal session lifecycle
 - sqlite query execution
+- event-loop and threadpool stalls for the server's whole life (`server.eventLoop.stall`,
+  `server.threadpool.stall`; `ryco_server_event_loop_stalls_total`,
+  `ryco_server_event_loop_stall_max_ms` and `ryco_server_event_loop_utilization`, the last two per
+  30 s window)
+- heap snapshots (`server.heapSnapshot`)
 
 ### Client perf profiling
 
