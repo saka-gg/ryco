@@ -6,7 +6,15 @@ import { expect } from "vite-plus/test";
 
 import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@ryco/contracts";
 
+import os from "node:os";
+
+import { agentCommandResolves, resolveNiceExecutable } from "@ryco/shared/processPriority";
+
 import { ServerConfig } from "../config.ts";
+import {
+  type AgentProcessPriorityShape,
+  makeAgentProcessPriority,
+} from "../provider/agentProcessPriority.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
 import { makeThreadPriorityTestInput } from "../threadPriority/threadPriorityTestFixtures.ts";
@@ -32,6 +40,7 @@ function makeFakeCodexBinary(
     forbidReasoningEffort?: boolean;
     stdinMustContain?: string;
     stdinMustNotContain?: string;
+    niceFile?: string;
   },
 ) {
   return Effect.gen(function* () {
@@ -80,6 +89,9 @@ function makeFakeCodexBinary(
         "  shift",
         "done",
         'stdin_content="$(cat)"',
+        ...(input.niceFile !== undefined
+          ? [`ps -o nice= -p $$ > ${JSON.stringify(input.niceFile)}`]
+          : []),
         ...(input.requireImage
           ? [
               'if [ "$seen_image" != "1" ]; then',
@@ -156,6 +168,8 @@ function withFakeCodexEnv<A, E, R>(
     forbidReasoningEffort?: boolean;
     stdinMustContain?: string;
     stdinMustNotContain?: string;
+    niceFile?: string;
+    processPriority?: AgentProcessPriorityShape;
   },
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
 ) {
@@ -164,7 +178,11 @@ function withFakeCodexEnv<A, E, R>(
     const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-codex-text-" });
     const codexPath = yield* makeFakeCodexBinary(tempDir, input);
     const config = Schema.decodeSync(CodexSettings)({ binaryPath: codexPath });
-    const textGeneration = yield* makeCodexTextGeneration(config);
+    const textGeneration = yield* makeCodexTextGeneration(
+      config,
+      undefined,
+      input.processPriority ? { processPriority: input.processPriority } : undefined,
+    );
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
@@ -367,6 +385,44 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           expect(generated.title).toBe("Investigate websocket reconnect regressions aft...");
         }),
     ),
+  );
+
+  const fakeCodexNiceness = (processPriority: AgentProcessPriorityShape | undefined) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-codex-nice-" });
+      const niceFile = path.join(dir, "nice");
+      yield* withFakeCodexEnv(
+        {
+          output: JSON.stringify({ title: "Lower priority" }),
+          niceFile,
+          ...(processPriority ? { processPriority } : {}),
+        },
+        (textGeneration) =>
+          textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Run agents at a lower priority",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          }),
+      );
+      return Number((yield* fs.readFileString(niceFile)).trim());
+    }).pipe(Effect.scoped);
+
+  it.effect.skipIf(process.platform === "win32" || resolveNiceExecutable() === null)(
+    "runs codex exec at the server's niceness + 5 with agent priority",
+    () =>
+      Effect.gen(function* () {
+        const priority = makeAgentProcessPriority({
+          enabled: Effect.succeed(true),
+          platform: process.platform,
+          niceExecutable: resolveNiceExecutable,
+          commandResolves: agentCommandResolves,
+          lowerChild: () => "unchanged",
+        });
+        expect(yield* fakeCodexNiceness(priority)).toBe(Math.min(19, os.getPriority() + 5));
+        expect(yield* fakeCodexNiceness(undefined)).toBe(os.getPriority());
+      }),
   );
 
   it.effect("falls back when thread title normalization becomes whitespace-only", () =>

@@ -5,6 +5,8 @@ import {
   isClaudeNativeCompaction,
 } from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
+import { appendClaudeStderrTail, prepareClaudeCodeSpawn } from "../claudeCodeSpawn.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
 import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
 import {
@@ -426,6 +428,11 @@ interface ClaudeSessionContext {
   readonly turnHeads: Array<{ readonly turnId: TurnId; readonly head: string }>;
   /** A rewind that later resumes must keep honoring until a turn completes. */
   pendingRewind: { readonly at: string } | undefined;
+  /**
+   * The Claude Code stderr tail when Ryco spawned the CLI itself (agent priority); the SDK
+   * appends it to its exit errors only for its own spawn.
+   */
+  readonly processStderrTail?: () => string;
   /** Reopen probe in progress: stream exits and error results feed `probeFailure`. */
   probing: boolean;
   probeFailure: Deferred.Deferred<string> | undefined;
@@ -610,6 +617,8 @@ export interface ClaudeAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
   /** Test seam: a small capacity makes runtime-event backpressure deterministic. */
   readonly runtimeEventQueueCapacity?: number;
+  /** Runs each session's Claude Code through `nice`; undefined keeps the SDK's own spawn. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
   /** Reads a session's main transcript chain. Defaults to the SDK's `getSessionMessages`. */
   readonly readSessionMessages?: (
     sessionId: string,
@@ -669,6 +678,16 @@ function hasDurableClaudeSessionId(message: SDKMessage): boolean {
     message.subtype !== "hook_progress" &&
     message.subtype !== "hook_response"
   );
+}
+
+/** An SDK exit error with the stderr tail the SDK adds only for its own spawn (see claudeCodeSpawn). */
+function withClaudeProcessStderr<A>(
+  context: Pick<ClaudeSessionContext, "processStderrTail">,
+  cause: A,
+): A {
+  return context.processStderrTail
+    ? appendClaudeStderrTail(cause, context.processStderrTail())
+    : cause;
 }
 
 function toMessage(cause: unknown, fallback: string): string {
@@ -1972,6 +1991,20 @@ function toRequestError(threadId: ThreadId, method: string, cause: unknown): Pro
     detail: toMessage(cause, `${method} failed`),
     cause,
   });
+}
+
+/**
+ * {@link toRequestError} for an SDK call on a live session. When the CLI exits, the SDK rejects
+ * every pending call with its exit error; this restores the stderr tail on it first (see
+ * {@link withClaudeProcessStderr}), so the text and its classification match the SDK's own spawn.
+ */
+function toSessionRequestError(
+  context: Pick<ClaudeSessionContext, "processStderrTail">,
+  threadId: ThreadId,
+  method: string,
+  cause: unknown,
+): ProviderAdapterError {
+  return toRequestError(threadId, method, withClaudeProcessStderr(context, cause));
 }
 
 function sdkMessageType(value: unknown): string | undefined {
@@ -5118,7 +5151,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     Effect.tryPromise({
       // Invoke through the query object: SDK methods rely on `this`.
       try: () => context.query.interrupt(),
-      catch: (cause) => toRequestError(context.session.threadId, "turn/interrupt", cause),
+      catch: (cause) =>
+        toSessionRequestError(context, context.session.threadId, "turn/interrupt", cause),
     }).pipe(
       Effect.timeoutOption("5 seconds"),
       Effect.tap(() =>
@@ -5389,7 +5423,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const runSdkStream = (context: ClaudeSessionContext): Effect.Effect<void, Error> =>
     Stream.fromAsyncIterable(context.query, (cause) =>
-      toError(cause, "Claude runtime stream failed."),
+      toError(withClaudeProcessStderr(context, cause), "Claude runtime stream failed."),
     ).pipe(
       Stream.takeWhile(() => !context.stopped),
       Stream.runForEach((message) =>
@@ -6101,10 +6135,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : {}),
     };
+    // Only when agent priority changes the argv; otherwise the SDK spawns Claude Code itself.
+    const claudeCodeSpawn = yield* prepareClaudeCodeSpawn(options?.processPriority, {
+      binaryPath: claudeBinaryPath,
+      env: claudeEnvironment,
+      cwd: input.cwd,
+    });
     const queryOptions: ClaudeQueryOptions = {
       ...(input.cwd ? { cwd: input.cwd } : {}),
       ...(apiModelId ? { model: apiModelId } : {}),
       pathToClaudeCodeExecutable: claudeBinaryPath,
+      ...(claudeCodeSpawn
+        ? { spawnClaudeCodeProcess: claudeCodeSpawn.spawnClaudeCodeProcess }
+        : {}),
       // The SDK only reads appended text from `systemPrompt.append`; a top-level
       // `appendSystemPrompt` query option is silently dropped.
       systemPrompt: appendSystemPrompt
@@ -6160,6 +6203,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       "claude.query.settings_json": JSON.stringify(settings),
       "claude.query.extra_args_json": JSON.stringify(extraArgs),
       "claude.query.path_to_executable": claudeBinaryPath,
+      "claude.query.process_priority": claudeCodeSpawn ? "exec-nice" : "sdk-default",
     });
 
     const queryRuntime = yield* Effect.try({
@@ -6245,6 +6289,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnHeads: [...(openOptions.turnHeads ?? [])],
       pendingRewind:
         existingResumeSessionId && resumeState?.rewindAt ? { at: resumeState.rewindAt } : undefined,
+      ...(claudeCodeSpawn ? { processStderrTail: claudeCodeSpawn.stderrTail } : {}),
       probing: openOptions.probe === true,
       probeFailure: openOptions.probe === true ? Deferred.makeUnsafe<string>() : undefined,
       promptQueue,
@@ -6390,7 +6435,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           queryRuntime.initializationResult?.() ??
           queryRuntime.mcpServerStatus?.() ??
           Promise.resolve(),
-        catch: (cause) => toMessage(cause, "Claude rejected the reopened conversation."),
+        catch: (cause) =>
+          toMessage(
+            withClaudeProcessStderr(context, cause),
+            "Claude rejected the reopened conversation.",
+          ),
       });
       const probe = yield* Effect.raceFirst(
         controlRequest.pipe(Effect.asVoid),
@@ -6433,7 +6482,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const initialized = yield* Effect.tryPromise({
       // Invoke through the query object: SDK methods rely on `this`.
       try: () => context.query.initializationResult!(),
-      catch: (cause) => toRequestError(threadId, "initialize", cause),
+      catch: (cause) => toSessionRequestError(context, threadId, "initialize", cause),
     }).pipe(Effect.timeoutOption(Duration.millis(CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS)));
     if (Option.isSome(initialized)) {
       context.cliInitialized = true;
@@ -6467,7 +6516,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),
-          catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
+          catch: (cause) => toSessionRequestError(context, input.threadId, "turn/setModel", cause),
         });
         context.currentApiModelId = apiModelId;
         context.lastKnownContextWindow = undefined;
@@ -6505,7 +6554,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.currentPermissionMode = undefined;
       yield* Effect.tryPromise({
         try: () => context.query.setPermissionMode(targetPermissionMode),
-        catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
+        catch: (cause) =>
+          toSessionRequestError(context, input.threadId, "turn/setPermissionMode", cause),
       });
       context.currentPermissionMode = targetPermissionMode;
     }
@@ -6776,7 +6826,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           cancelQueued
             ? context.query.interrupt({ cancelQueued: true })
             : context.query.interrupt(),
-        catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
+        catch: (cause) => toSessionRequestError(context, threadId, "turn/interrupt", cause),
       });
       if (target !== undefined && target.steerPromptUuids.size > 0) {
         const receipt = readClaudeInterruptReceipt(rawReceipt);
@@ -6905,7 +6955,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (!context.liveTaskIds.has(taskId)) return Promise.resolve();
         return context.query.stopTask!(taskId);
       },
-      catch: (cause) => toRequestError(threadId, "task/stop", cause),
+      catch: (cause) => toSessionRequestError(context, threadId, "task/stop", cause),
     }).pipe(Effect.timeoutOption("5 seconds"));
     if (Option.isNone(outcome)) {
       return yield* new ProviderAdapterRequestError({

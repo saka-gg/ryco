@@ -54,6 +54,10 @@ import {
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import {
+  type AgentProcessPriorityShape,
+  spawnAgentProcess,
+} from "../provider/agentProcessPriority.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
 /**
@@ -74,6 +78,7 @@ const ClaudeOutputEnvelope = Schema.Struct({
 export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(function* (
   claudeSettings: ClaudeSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
@@ -198,13 +203,15 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         },
       );
 
-      const child = yield* commandSpawner
-        .spawn(command)
-        .pipe(
-          Effect.mapError((cause) =>
-            normalizeCliError("claude", operation, cause, "Failed to spawn Claude CLI process"),
-          ),
-        );
+      const child = yield* spawnAgentProcess(
+        commandSpawner,
+        options?.processPriority,
+        command,
+      ).pipe(
+        Effect.mapError((cause) =>
+          normalizeCliError("claude", operation, cause, "Failed to spawn Claude CLI process"),
+        ),
+      );
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [

@@ -1,3 +1,4 @@
+import type { AgentProcessPriorityShape } from "../provider/agentProcessPriority.ts";
 import { Effect, Option, Ref, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -74,6 +75,7 @@ function isTextGenerationError(error: unknown): error is TextGenerationError {
 export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(function* (
   cursorSettings: CursorSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -104,6 +106,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       const runtime = yield* makeCursorAcpRuntime({
         cursorSettings,
         environment,
+        ...(options?.processPriority ? { processPriority: options.processPriority } : {}),
         childProcessSpawner: commandSpawner,
         cwd,
         clientInfo: { name: "ryco-git-text", version: "0.0.0" },

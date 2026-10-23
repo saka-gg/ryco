@@ -1,8 +1,19 @@
 import { Effect } from "effect";
+import * as PlatformError from "effect/PlatformError";
+import { type ChildProcess, ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { applyCursorAcpModelSelection, buildCursorAcpSpawnInput } from "./CursorAcpSupport.ts";
+import {
+  type AgentProcessPriorityShape,
+  makeAgentProcessPriority,
+} from "../agentProcessPriority.ts";
+
+import {
+  applyCursorAcpModelSelection,
+  buildCursorAcpSpawnInput,
+  makeCursorAcpRuntime,
+} from "./CursorAcpSupport.ts";
 
 const parameterizedGpt54ConfigOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> = [
   {
@@ -119,5 +130,53 @@ describe("applyCursorAcpModelSelection", () => {
       { type: "config", configId: "context", value: "1m" },
       { type: "config", configId: "fast", value: "true" },
     ]);
+  });
+});
+
+describe("makeCursorAcpRuntime agent priority", () => {
+  const linuxExecNice = makeAgentProcessPriority({
+    enabled: Effect.succeed(true),
+    platform: "linux",
+    niceExecutable: () => "/usr/bin/nice",
+    commandResolves: async () => true,
+    lowerChild: () => "lowered",
+  });
+
+  /** Records the spawned argv, then refuses the spawn so the runtime stops there. */
+  const spawnedArgv = async (processPriority?: AgentProcessPriorityShape) => {
+    const spawned: Array<ReadonlyArray<string>> = [];
+    const spawner = ChildProcessSpawner.make((command) => {
+      const standard = command as ChildProcess.StandardCommand;
+      spawned.push([standard.command, ...standard.args]);
+      return Effect.fail(
+        PlatformError.systemError({
+          _tag: "PermissionDenied",
+          module: "ChildProcess",
+          method: "spawn",
+          description: "test spawner refuses",
+        }),
+      );
+    });
+    const error = await Effect.runPromise(
+      makeCursorAcpRuntime({
+        cursorSettings: { apiEndpoint: "", binaryPath: "/opt/cursor/agent" },
+        childProcessSpawner: spawner,
+        cwd: "/tmp",
+        clientInfo: { name: "ryco-test", version: "0.0.0" },
+        ...(processPriority ? { processPriority } : {}),
+      }).pipe(Effect.scoped, Effect.flip),
+    );
+    expect(error._tag).toBe("AcpSpawnError");
+    return spawned;
+  };
+
+  it("starts the Cursor agent through nice when a priority is given", async () => {
+    expect(await spawnedArgv(linuxExecNice)).toEqual([
+      ["/usr/bin/nice", "-n", "5", "/opt/cursor/agent", "acp"],
+    ]);
+  });
+
+  it("starts it unchanged without one (provider probes)", async () => {
+    expect(await spawnedArgv()).toEqual([["/opt/cursor/agent", "acp"]]);
   });
 });

@@ -72,6 +72,15 @@ describe("settings reset ownership", () => {
       patch: { autoResumeLimitedThreads: false, snoozeLimitedThreads: false },
     });
   });
+  it("restores the lowered agent CPU priority to on, on the node only", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, lowerAgentProcessPriority: false };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Lower agent CPU priority"],
+      resetTheme: false,
+      patch: { lowerAgentProcessPriority: true },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
   it("restores continue-after-restart to off on the node only", () => {
     const settings = { ...DEFAULT_UNIFIED_SETTINGS, continueThreadsAfterRestart: true };
     expect(settingsRestorePlan(settings, "system", "node")).toEqual({

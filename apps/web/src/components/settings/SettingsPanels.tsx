@@ -77,7 +77,7 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
 import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
-import { settingsScopeLabel } from "./settingsSections.logic";
+import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 
 const TIMESTAMP_FORMAT_LABELS = {
@@ -364,10 +364,17 @@ export function GeneralSettingsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const isPhoneTier = usePresentationTier() === "phone";
+  const serverConfig = useServerConfig();
   const supportsProjectPreferences =
-    useServerConfig()?.environment.capabilities.projectPreferences === true;
+    serverConfig?.environment.capabilities.projectPreferences === true;
+  const supportsAgentProcessPriority =
+    serverConfig?.environment.capabilities.agentProcessPriority === true;
   const settingsTarget = useSettingsTarget();
   const editingScope = useSettingsEditingScope();
+  // As for usage-limit recovery: an older node would drop the key, and client-only editing or an
+  // unreachable or read-only node cannot change it.
+  const agentProcessPriorityDisabled =
+    !supportsAgentProcessPriority || isNodeSettingsTargetReadOnly(editingScope, settingsTarget);
   const appLabel = useAppPreferencesLabel();
   const scopeOptions = {
     appLabel,
@@ -593,6 +600,45 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+      {!isPhoneTier && (
+        <SettingsSection title="Agent processes" owner="node">
+          <SettingsRow
+            title="Lower agent CPU priority"
+            description="Run agents and everything they start (tests, builds, browsers) at a lower CPU priority, so Ryco, its UI and Git stay responsive when agents load this machine. Applies to agents started after the change (OpenCode: when its shared server restarts)."
+            owner="node"
+            scope={nodeScopeLabel}
+            status={
+              supportsAgentProcessPriority
+                ? undefined
+                : "This node does not support agent priority. Update the node to change this setting."
+            }
+            resetAction={
+              !agentProcessPriorityDisabled &&
+              settings.lowerAgentProcessPriority !==
+                DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority ? (
+                <SettingResetButton
+                  label="lower agent CPU priority"
+                  onClick={() =>
+                    updateSettings({
+                      lowerAgentProcessPriority: DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.lowerAgentProcessPriority}
+                disabled={agentProcessPriorityDisabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ lowerAgentProcessPriority: Boolean(checked) })
+                }
+                aria-label="Lower agent CPU priority"
+              />
+            }
+          />
+        </SettingsSection>
+      )}
       {!isPhoneTier && <UsageLimitSettings />}
       {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
       {!isPhoneTier && <ProjectDefaultsSection />}

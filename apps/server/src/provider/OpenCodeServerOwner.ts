@@ -2,6 +2,7 @@ import type { OpenCodeSettings } from "@ryco/contracts";
 import { Effect, Exit, Fiber, Scope } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
+import type { AgentProcessPriorityShape } from "./agentProcessPriority.ts";
 import {
   OpenCodeRuntime,
   type OpenCodeRuntimeError,
@@ -25,6 +26,13 @@ interface OwnedServer {
 export const makeOpenCodeServerOwner = Effect.fn("makeOpenCodeServerOwner")(function* (
   settings: Pick<OpenCodeSettings, "binaryPath" | "serverPassword">,
   environment: NodeJS.ProcessEnv = process.env,
+  options?: {
+    /**
+     * Lowers the shared server. The plan is made when the server starts, so a setting change
+     * reaches OpenCode when its shared server restarts (after its last lease and the idle TTL).
+     */
+    readonly processPriority?: AgentProcessPriorityShape | undefined;
+  },
 ): Effect.fn.Return<OpenCodeServerOwner, never, OpenCodeRuntime | Scope.Scope> {
   const runtime = yield* OpenCodeRuntime;
   const ownerScope = yield* Effect.scope;
@@ -67,6 +75,7 @@ export const makeOpenCodeServerOwner = Effect.fn("makeOpenCodeServerOwner")(func
                   binaryPath: settings.binaryPath,
                   ...(settings.serverPassword ? { serverPassword: settings.serverPassword } : {}),
                   environment,
+                  ...(options?.processPriority ? { processPriority: options.processPriority } : {}),
                 })
                 .pipe(Effect.provideService(Scope.Scope, processScope)),
             ),

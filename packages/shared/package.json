@@ -179,6 +179,10 @@
       "types": "./src/shell.ts",
       "import": "./src/shell.ts"
     },
+    "./processPriority": {
+      "types": "./src/processPriority.ts",
+      "import": "./src/processPriority.ts"
+    },
     "./shellEnvironment": {
       "types": "./src/shellEnvironment.ts",
       "import": "./src/shellEnvironment.ts"

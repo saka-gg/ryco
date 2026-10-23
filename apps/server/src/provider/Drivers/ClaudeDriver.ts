@@ -28,6 +28,7 @@ import {
   refreshClaudeProviderUsage,
 } from "../Layers/ClaudeProvider.ts";
 import { makeCachedClaudeUsageProbe } from "../Layers/ClaudeUsage.ts";
+import { AgentProcessPriority } from "../agentProcessPriority.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { ModelManifest } from "../ModelManifest.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -78,6 +79,7 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
 });
 
 export type ClaudeDriverEnv =
+  | AgentProcessPriority
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | HttpClient.HttpClient
@@ -117,6 +119,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const processPriority = yield* AgentProcessPriority;
       // Optional so tests and stripped-down layer stacks fall back to the
       // bundled model catalog instead of failing driver construction.
       const modelManifest = yield* Effect.serviceOption(ModelManifest);
@@ -154,11 +157,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const adapterOptions = {
         instanceId,
         environment: processEnv,
+        processPriority,
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
-      const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv, {
+        processPriority,
+      });
 
       // Per-instance capabilities cache: keyed on binary + resolved HOME so
       // account-specific probes never share auth metadata across instances.

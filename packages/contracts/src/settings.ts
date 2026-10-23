@@ -667,6 +667,10 @@ export const ServerSettings = Schema.Struct({
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Agent CLIs and everything they start run at a lower CPU priority (nice +5, Below Normal on
+  // Windows), read at each agent launch. Node-scoped; deliberately not in Agent Control's
+  // settings allowlist (an agent must not raise its own priority).
+  lowerAgentProcessPriority: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Opt-in automatic "continue" turn after a server restart. Node-scoped; never part of
   // Agent Control's settings allowlist (an agent must not grant itself unattended resumption).
   continueThreadsAfterRestart: Schema.Boolean.pipe(
@@ -882,6 +886,7 @@ export const ServerSettingsPatch = Schema.Struct({
    */
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  lowerAgentProcessPriority: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),

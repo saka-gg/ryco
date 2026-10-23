@@ -1211,6 +1211,77 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
+  it("turns agent CPU priority off on a node that supports it", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    const environmentId = EnvironmentId.make("environment-priority");
+    const base = createBaseServerConfig();
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsEditingScopeProvider value="node">
+          <SettingsTargetProvider
+            value={{
+              environmentId,
+              nodeLabel: "Build node",
+              serverConfig: {
+                ...base,
+                environment: {
+                  ...base.environment,
+                  capabilities: { ...base.environment.capabilities, agentProcessPriority: true },
+                },
+              },
+              primary: false,
+              connected: true,
+            }}
+          >
+            <GeneralSettingsPanel />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
+      </AppAtomRegistryProvider>,
+    );
+
+    const prioritySwitch = page.getByLabelText("Lower agent CPU priority");
+    await expect.element(prioritySwitch).toBeChecked();
+    await expect.element(prioritySwitch).toBeEnabled();
+    await prioritySwitch.click();
+    await vi.waitFor(() => {
+      expect(mockUpdateEnvironmentServerSettings).toHaveBeenCalledWith(environmentId, {
+        lowerAgentProcessPriority: false,
+      });
+    });
+  });
+
+  it("disables agent CPU priority on a node without the capability", async () => {
+    useTierOverrideStore.setState({ override: "desktop" });
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsEditingScopeProvider value="node">
+          <SettingsTargetProvider
+            value={{
+              environmentId: EnvironmentId.make("environment-old-node"),
+              nodeLabel: "Old node",
+              serverConfig: createBaseServerConfig(),
+              primary: false,
+              connected: true,
+            }}
+          >
+            <GeneralSettingsPanel />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByLabelText("Lower agent CPU priority")).toBeDisabled();
+    await expect
+      .element(
+        page.getByText(
+          "This node does not support agent priority. Update the node to change this setting.",
+        ),
+      )
+      .toBeVisible();
+    await page.getByLabelText("Lower agent CPU priority").click({ force: true });
+    expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
+  });
+
   it("validates, saves, clears and resets the selected node's worktree branch prefix", async () => {
     useTierOverrideStore.setState({ override: "desktop" });
     const environmentId = EnvironmentId.make("environment-prefix");

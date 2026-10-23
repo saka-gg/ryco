@@ -1,3 +1,4 @@
+import type { AgentProcessPriorityShape } from "../provider/agentProcessPriority.ts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -76,6 +77,7 @@ function isTextGenerationError(error: unknown): error is TextGenerationError {
 export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(function* (
   grokSettings: GrokSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -107,6 +109,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       const runtime = yield* makeGrokAcpRuntime({
         grokSettings,
         environment,
+        ...(options?.processPriority ? { processPriority: options.processPriority } : {}),
         childProcessSpawner: commandSpawner,
         cwd,
         clientInfo: { name: "ryco-git-text", version: "0.0.0" },

@@ -34,6 +34,7 @@ import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
 import { makeCodexStoredThreadReader } from "../Layers/CodexStoredThreadReader.ts";
+import { AgentProcessPriority } from "../agentProcessPriority.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -102,6 +103,7 @@ export function makeCodexMaintenanceResolver(explicitSharedHomePath: string | un
  * registered driver and the runtime satisfies them once.
  */
 export type CodexDriverEnv =
+  | AgentProcessPriority
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | HttpClient.HttpClient
@@ -147,6 +149,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const processPriority = yield* AgentProcessPriority;
       const { environment: processEnv, layout: homeLayout } = yield* resolveCodexInstanceLayout(
         config,
         environment,
@@ -229,10 +232,13 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         instanceId,
         environment: codexEnvironment,
         storedThreadReader,
+        processPriority,
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, codexEnvironment);
+      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, codexEnvironment, {
+        processPriority,
+      });
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place

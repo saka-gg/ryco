@@ -16,6 +16,7 @@ import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/sett
 import { createModelSelection } from "@ryco/shared/model";
 import { useServerConfig, applySettingsUpdated } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
+import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureEnvironmentApi } from "../../environmentApi";
 import { ensureLocalApi } from "../../localApi";
@@ -44,14 +45,7 @@ export function ProjectPreferenceSettings({
   const scope = useSettingsEditingScope();
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
   const capability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings, environmentId ?? null);
-  const disabled =
-    !capability.allowed ||
-    scope === "client" ||
-    !config ||
-    (scope === "node" && !target) ||
-    Boolean(
-      target && (!target.connected || target.canManage === false || target.canMutate === false),
-    );
+  const disabled = !capability.allowed || !config || isNodeSettingsTargetReadOnly(scope, target);
   if (config?.environment.capabilities.projectPreferences !== true)
     return (
       <SettingsRow

@@ -27,6 +27,7 @@ import {
   checkOpenCodeProviderStatus,
   makePendingOpenCodeProvider,
 } from "../Layers/OpenCodeProvider.ts";
+import { AgentProcessPriority } from "../agentProcessPriority.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import { OpenCodeRuntime } from "../opencodeRuntime.ts";
@@ -78,6 +79,7 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
 });
 
 export type OpenCodeDriverEnv =
+  | AgentProcessPriority
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | HttpClient.HttpClient
@@ -119,6 +121,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const processPriority = yield* AgentProcessPriority;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
@@ -143,21 +146,21 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       });
       const serverOwner =
         effectiveConfig.serverUrl.trim().length === 0
-          ? yield* makeOpenCodeServerOwner(effectiveConfig, processEnv)
+          ? yield* makeOpenCodeServerOwner(effectiveConfig, processEnv, { processPriority })
           : undefined;
 
       const adapter = yield* makeOpenCodeAdapter(effectiveConfig, {
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         instanceId,
         environment: processEnv,
+        processPriority,
         ...(serverOwner ? { serverOwner } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeOpenCodeTextGeneration(
-        effectiveConfig,
-        processEnv,
-        serverOwner ? { serverOwner } : undefined,
-      );
+      const textGeneration = yield* makeOpenCodeTextGeneration(effectiveConfig, processEnv, {
+        processPriority,
+        ...(serverOwner ? { serverOwner } : {}),
+      });
 
       const checkProvider = checkOpenCodeProviderStatus(
         effectiveConfig,

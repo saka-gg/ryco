@@ -1,5 +1,13 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -30,6 +38,7 @@ import {
   RuntimeSessionId,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
+import { agentCommandResolves, resolveNiceExecutable } from "@ryco/shared/processPriority";
 import { assert, describe, it, vi } from "@effect/vitest";
 import { TestClock } from "effect/testing";
 import {
@@ -61,6 +70,8 @@ import {
   type ClaudeTranscriptEntry,
 } from "./ClaudeAdapter.ts";
 import type { AgentControlProviderBridge } from "../../agentControl/ProviderInjection.ts";
+import { makeAgentProcessPriority } from "../agentProcessPriority.ts";
+import { isMissingConversationError } from "../resumeFailure.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
@@ -11080,4 +11091,169 @@ describe("ClaudeAdapterLive steering", () => {
       Effect.provide(harness.layer),
     );
   });
+});
+
+describe("ClaudeAdapterLive agent process priority", () => {
+  const priorityAdapterLayer = (
+    options: ClaudeAdapterLiveOptions,
+    claudeConfig: Partial<ClaudeSettings> = {},
+  ) =>
+    Layer.effect(
+      ClaudeAdapter,
+      Effect.gen(function* () {
+        return yield* makeClaudeAdapter(Schema.decodeSync(ClaudeSettings)(claudeConfig), options);
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+  const startPrioritySession = (adapter: ClaudeAdapterShape, id: string) =>
+    adapter.startSession({
+      runtimeSessionId: RuntimeSessionId.make(`test-claudeadapter-priority-${id}`),
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+
+  const linuxExecNice = makeAgentProcessPriority({
+    enabled: Effect.succeed(true),
+    platform: "linux",
+    niceExecutable: () => "/usr/bin/nice",
+    commandResolves: async () => true,
+    lowerChild: () => "lowered",
+  });
+
+  it.effect("gives the SDK a spawn hook only when agent priority execs through nice", () => {
+    const captured: Array<ClaudeQueryOptions> = [];
+    const createQuery: ClaudeAdapterLiveOptions["createQuery"] = (input) => {
+      captured.push(input.options);
+      return new FakeClaudeQuery();
+    };
+    return Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* startPrioritySession(adapter, "hook");
+        yield* adapter.stopAll();
+      }).pipe(
+        Effect.provide(priorityAdapterLayer({ createQuery, processPriority: linuxExecNice })),
+      );
+      assert.equal(typeof captured[0]?.spawnClaudeCodeProcess, "function");
+      assert.equal(captured[0]?.pathToClaudeCodeExecutable, "claude");
+
+      yield* Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* startPrioritySession(adapter, "default");
+        yield* adapter.stopAll();
+      }).pipe(Effect.provide(priorityAdapterLayer({ createQuery })));
+      assert.isUndefined(captured[1]?.spawnClaudeCodeProcess);
+    }).pipe(Effect.provideService(Random.Random, makeDeterministicRandomService()));
+  });
+
+  it.live.skipIf(process.platform === "win32")(
+    "restores the stderr reason on control requests the exiting CLI rejects",
+    () => {
+      const query = new FakeClaudeQuery();
+      let cliExited: Promise<void> = Promise.resolve();
+      const createQuery: ClaudeAdapterLiveOptions["createQuery"] = (input) => {
+        // Start a short-lived "CLI" through the hook (a command other than the binary path is
+        // spawned unchanged), so the hook's stderr tail is real.
+        const child = input.options.spawnClaudeCodeProcess!({
+          command: "/bin/sh",
+          args: ["-c", "echo 'error: unknown option --thinking-display' >&2; exit 1"],
+          env: { ...process.env },
+          signal: new AbortController().signal,
+        });
+        cliExited = new Promise((resolve) => child.once("exit", () => resolve()));
+        return query;
+      };
+      // Like the SDK: once the CLI exited, every pending control request rejects with the plain
+      // exit error a custom spawner gets.
+      Object.assign(query, {
+        setModel: async () => {
+          await cliExited;
+          throw new Error("Claude Code process exited with code 1");
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* startPrioritySession(adapter, "request-error");
+        const error = yield* adapter
+          .sendTurn({
+            threadId: THREAD_ID,
+            input: "hello",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-opus-4-6",
+            },
+            attachments: [],
+          })
+          .pipe(Effect.flip);
+        yield* adapter.stopAll().pipe(Effect.ignore);
+        assert.equal(error._tag, "ProviderAdapterRequestError");
+        assert.equal(
+          (error as { readonly detail?: string }).detail,
+          "Claude Code process exited with code 1. stderr: error: unknown option --thinking-display",
+        );
+      }).pipe(
+        Effect.provide(priorityAdapterLayer({ createQuery, processPriority: linuxExecNice })),
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      );
+    },
+  );
+
+  const realNice = process.platform !== "win32" && resolveNiceExecutable() !== null;
+  it.live.skipIf(!realNice)(
+    "reports a Claude Code exit with the same stderr reason as the SDK's own spawn",
+    () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), "ryco-claude-priority-"));
+      const fakeClaude = path.join(root, "claude");
+      writeFileSync(
+        fakeClaude,
+        "#!/bin/sh\necho 'No conversation found with session ID: x' >&2\nexit 1\n",
+      );
+      chmodSync(fakeClaude, 0o755);
+      const realQuery: ClaudeAdapterLiveOptions["createQuery"] = (input) =>
+        runClaudeSdkQuery({
+          prompt: input.prompt,
+          options: input.options,
+        }) as unknown as ReturnType<NonNullable<ClaudeAdapterLiveOptions["createQuery"]>>;
+      const priority = makeAgentProcessPriority({
+        enabled: Effect.succeed(true),
+        platform: process.platform,
+        niceExecutable: resolveNiceExecutable,
+        commandResolves: agentCommandResolves,
+        lowerChild: () => "unchanged",
+      });
+      const runtimeErrorMessage = (options: ClaudeAdapterLiveOptions) =>
+        Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const log = yield* makeRuntimeEventLog(adapter);
+          yield* startPrioritySession(adapter, "exit");
+          const error = yield* log
+            .waitFor((event) => event.type === "runtime.error")
+            .pipe(Effect.timeout("10 seconds"));
+          yield* adapter.stopAll().pipe(Effect.ignore);
+          return error.type === "runtime.error" ? error.payload.message : undefined;
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(priorityAdapterLayer(options, { binaryPath: fakeClaude })),
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        );
+      return Effect.gen(function* () {
+        const sdkDefault = yield* runtimeErrorMessage({ createQuery: realQuery });
+        const lowered = yield* runtimeErrorMessage({
+          createQuery: realQuery,
+          processPriority: priority,
+        });
+        assert.equal(
+          sdkDefault,
+          "Claude Code process exited with code 1. stderr: No conversation found with session ID: x",
+        );
+        assert.equal(lowered, sdkDefault);
+        assert.isTrue(isMissingConversationError(lowered));
+      }).pipe(Effect.ensuring(Effect.sync(() => rmSync(root, { recursive: true, force: true }))));
+    },
+  );
 });

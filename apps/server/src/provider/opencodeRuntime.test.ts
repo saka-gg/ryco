@@ -6,6 +6,7 @@ import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
+import { makeAgentProcessPriority } from "./agentProcessPriority.ts";
 import { OPENCODE_NON_JSON_HEALTH_MESSAGE } from "./openCodeVersion.ts";
 import {
   assertSupportedOpenCodeBinary,
@@ -299,4 +300,97 @@ describe("OpenCode serve teardown", () => {
       }).pipe(Effect.provide(layer));
     },
   );
+});
+
+describe("OpenCode agent priority", () => {
+  const linuxExecNice = makeAgentProcessPriority({
+    enabled: Effect.succeed(true),
+    platform: "linux",
+    niceExecutable: () => "/usr/bin/nice",
+    commandResolves: async () => true,
+    lowerChild: () => "lowered",
+  });
+
+  /** Answers `--version` and `serve` like OpenCode 1.18 and records every argv. */
+  function servingRuntimeLayer() {
+    const spawned: Array<ReadonlyArray<string>> = [];
+    const encoder = new TextEncoder();
+    const spawner = ChildProcessSpawner.make((command) => {
+      const standard = command as unknown as {
+        readonly command: string;
+        readonly args: ReadonlyArray<string>;
+      };
+      spawned.push([standard.command, ...standard.args]);
+      const version = standard.args.includes("--version");
+      return Effect.succeed(
+        ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(2_147_483_001),
+          exitCode: version ? Effect.succeed(ChildProcessSpawner.ExitCode(0)) : Effect.never,
+          isRunning: Effect.succeed(!version),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.make(
+            encoder.encode(
+              version
+                ? "opencode v1.18.34\n"
+                : "opencode server listening on http://127.0.0.1:4096\n",
+            ),
+          ),
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        }),
+      );
+    });
+    const layer = OpenCodeRuntimeLive.pipe(
+      Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+    );
+    return { layer, spawned };
+  }
+
+  effectIt.live("starts the managed server through nice and keeps the version gate normal", () => {
+    const { layer, spawned } = servingRuntimeLayer();
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      yield* runtime
+        .startOpenCodeServerProcess({
+          binaryPath: "opencode",
+          port: 4096,
+          processPriority: linuxExecNice,
+        })
+        .pipe(Effect.scoped);
+      expect(spawned).toEqual([
+        ["opencode", "--version"],
+        ["/usr/bin/nice", "-n", "5", "opencode", "serve", "--hostname=127.0.0.1", "--port=4096"],
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  effectIt.live("connectToOpenCodeServer forwards the priority; probes stay unwrapped", () => {
+    const { layer, spawned } = servingRuntimeLayer();
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      yield* runtime
+        .connectToOpenCodeServer({
+          binaryPath: "opencode",
+          verifiedBinaryVersion: "1.18.34",
+          port: 4096,
+          processPriority: linuxExecNice,
+        })
+        .pipe(Effect.scoped);
+      yield* runtime
+        .connectToOpenCodeServer({
+          binaryPath: "opencode",
+          verifiedBinaryVersion: "1.18.34",
+          port: 4096,
+        })
+        .pipe(Effect.scoped);
+      expect(spawned.map((argv) => argv.slice(0, 2))).toEqual([
+        ["/usr/bin/nice", "-n"],
+        ["opencode", "serve"],
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
 });
