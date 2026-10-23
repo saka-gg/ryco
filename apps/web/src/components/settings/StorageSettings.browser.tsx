@@ -41,6 +41,7 @@ vi.mock("../../environments/runtime", () => {
   };
 });
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
+let scanned: Record<string, unknown> = {};
 beforeEach(() => {
   fixtures.ready = true;
   fixtures.settings = DEFAULT_SERVER_SETTINGS;
@@ -80,13 +81,14 @@ beforeEach(() => {
       reason: "Never scanned or removed.",
     },
   ];
-  fixtures.scan.mockResolvedValue({
+  scanned = {
     entries,
     history: [],
     truncated: false,
     nextCursor: null,
     scannedAt: new Date().toISOString(),
-  });
+  };
+  fixtures.scan.mockResolvedValue(scanned);
   fixtures.preview.mockResolvedValue({
     entries: [entries[1]],
     token: "fixture-preview",
@@ -148,4 +150,84 @@ it("makes automatic cleanup an explicit opt-in and keeps synchronized ownership 
   fixtures.ready = false;
   await mounted.rerender(<StorageSettings />);
   await expect.element(mounted.getByRole("button", { name: "Rescan" })).toBeDisabled();
+});
+
+it("shows the node's database from the scan, and nothing from a node without the report", async () => {
+  mounted = await render(<StorageSettings />);
+  await mounted.getByRole("button", { name: "Scan storage" }).click();
+  await expect.element(mounted.getByRole("checkbox", { name: /Completed checkout/ })).toBeVisible();
+  expect(mounted.container.textContent).not.toContain("Automatic shrinking");
+
+  fixtures.scan.mockResolvedValue({
+    ...scanned,
+    database: {
+      fileBytes: 8 * 1024 * 1024,
+      walBytes: 1024 * 1024,
+      pageSize: 4096,
+      pageCount: 2048,
+      freePages: 512,
+      autoVacuum: "incremental",
+      compaction: {
+        enabled: true,
+        headSequence: 1000,
+        compactedThroughSequence: 400,
+        caughtUp: false,
+        lastPassCompletedAt: "2026-10-23T12:00:00.000Z",
+        removedEvents: 1200,
+        removedBytes: 2 * 1024 * 1024,
+        estimatedCompactableBytes: 3 * 1024 * 1024,
+      },
+      reclaimableBytes: 5 * 1024 * 1024,
+    },
+  });
+  await mounted.getByRole("button", { name: "Rescan" }).click();
+  await expect
+    .element(mounted.getByRole("heading", { name: "Database", exact: true }))
+    .toBeVisible();
+  // File plus write-ahead log: what the database occupies on disk.
+  await expect.element(mounted.getByText("9.0 MiB", { exact: true })).toBeVisible();
+  await expect.element(mounted.getByText(/including 1\.0 MiB of recent writes/)).toBeVisible();
+  await expect.element(mounted.getByText("2.0 MiB", { exact: true })).toBeVisible();
+  await expect.element(mounted.getByText(/Free space beyond 1 MiB is returned/)).toBeVisible();
+  await expect
+    .element(
+      mounted.getByText(
+        /superseded progress updates \(2\.0 MiB\)\. Catching up: 40% of history examined/,
+      ),
+    )
+    .toBeVisible();
+  await expect.element(mounted.getByText("5.0 MiB", { exact: true })).toBeVisible();
+  await expect.element(mounted.getByText(/about 3\.0 MiB of superseded history/)).toBeVisible();
+});
+
+it("says when a database cannot shrink and compaction is off", async () => {
+  fixtures.scan.mockResolvedValue({
+    ...scanned,
+    database: {
+      fileBytes: 1024,
+      walBytes: 0,
+      pageSize: 4096,
+      pageCount: 1,
+      freePages: 0,
+      autoVacuum: "none",
+      compaction: {
+        enabled: false,
+        headSequence: 0,
+        compactedThroughSequence: 0,
+        caughtUp: false,
+        lastPassCompletedAt: null,
+        removedEvents: 0,
+        removedBytes: 0,
+        estimatedCompactableBytes: null,
+      },
+      reclaimableBytes: 0,
+    },
+  });
+  mounted = await render(<StorageSettings />);
+  await mounted.getByRole("button", { name: "Scan storage" }).click();
+  await expect.element(mounted.getByText(/created before automatic shrinking/)).toBeVisible();
+  await expect.element(mounted.getByText("Off on this node. Nothing removed yet.")).toBeVisible();
+  await expect
+    .element(mounted.getByText(/An estimate of superseded history follows the first/))
+    .toBeVisible();
 });

@@ -4,10 +4,11 @@ import { ProviderProtectedPaths, type ProviderProtectedPathsShape } from "./prov
 import { workspaceSessionActive } from "../workspace/lifecycleSafety.ts";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
+import { Context, Effect, FileSystem, Layer, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
+  type DatabaseStorageReport,
   ProjectId,
   StorageCleanupPreview,
   StorageCleanupResult,
@@ -19,6 +20,8 @@ import {
 } from "@ryco/contracts";
 import { resolveStorageRetentionPolicy, retentionDue } from "@ryco/shared/storageRetention";
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
+import { readDatabaseStorageReport } from "../persistence/databaseStorageReport.ts";
+import { EventLogCompaction } from "../persistence/Services/EventLogCompaction.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
 import {
   ProjectionSnapshotQuery,
@@ -99,6 +102,8 @@ export function makeStorageService(deps: {
   git: Pick<GitWorkflowServiceShape, "removeWorktree" | "listWorktreePaths">;
   /** Records a removed checkout on its workspace record (shared lifecycle state). */
   recordCheckoutRemoval?: (checkoutPath: string) => Effect.Effect<void>;
+  /** The node's database (size, free space, compaction); every scan page carries it. */
+  readDatabase?: Effect.Effect<DatabaseStorageReport>;
 }) {
   const { sql, config, settings, snapshots, providers, terminals, policy, git } = deps;
   const resolveProtectedSources = (
@@ -480,7 +485,7 @@ export function makeStorageService(deps: {
       } satisfies StorageEntry;
     });
 
-  const scan = (projectId?: ProjectId, cursor?: string) =>
+  const scanInventory = (projectId?: ProjectId, cursor?: string) =>
     scanLock.withPermit(
       Effect.gen(function* () {
         const context = yield* inventory();
@@ -669,6 +674,20 @@ export function makeStorageService(deps: {
           })),
         } satisfies StorageSnapshot;
       }).pipe(Effect.mapError(failure)),
+    );
+
+  // On every page, not only the first: a page replaces the shown snapshot, and the report is a
+  // few header reads. Retention scans use `scanInventory`; nobody sees their report.
+  const scan = (projectId?: ProjectId, cursor?: string) =>
+    scanInventory(projectId, cursor).pipe(
+      Effect.flatMap((snapshot) =>
+        deps.readDatabase
+          ? Effect.map(deps.readDatabase, (database): StorageSnapshot => ({
+              ...snapshot,
+              database,
+            }))
+          : Effect.succeed(snapshot),
+      ),
     );
 
   const preview = (principalKey: string, entryIds: readonly string[]) =>
@@ -1029,7 +1048,7 @@ export function makeStorageService(deps: {
       ].some((value) => value?.automatic)
     )
       return;
-    const snapshot = yield* scan(undefined, retentionCursor);
+    const snapshot = yield* scanInventory(undefined, retentionCursor);
     retentionCursor = snapshot.nextCursor ?? undefined;
     const rows = yield* sql<OwnedStorageRow>`SELECT * FROM storage_owned_entries WHERE ${sql.in(
       "id",
@@ -1148,8 +1167,12 @@ export const StorageServiceLive = Layer.effect(
             }
           }).pipe(Effect.ignore({ log: true })),
       });
+    const databaseServices = yield* Effect.context<
+      SqlClient.SqlClient | ServerConfig | FileSystem.FileSystem | EventLogCompaction
+    >();
     const service = makeStorageService({
       recordCheckoutRemoval,
+      readDatabase: readDatabaseStorageReport().pipe(Effect.provideContext(databaseServices)),
       providerProtection: Option.getOrElse(protection, () => ({ resolve: () => null })),
       sql: yield* SqlClient.SqlClient,
       config: yield* ServerConfig,
