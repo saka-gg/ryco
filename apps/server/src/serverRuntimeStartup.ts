@@ -378,6 +378,10 @@ export const makeCommandGate = (options: CommandGateOptions = {}) =>
 
 export const recordStartupHeartbeat = Effect.gen(function* () {
   const analytics = yield* AnalyticsService;
+  // The counts only feed the heartbeat; skip the query when telemetry is off.
+  if (!analytics.enabled) {
+    return;
+  }
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
 
   const { threadCount, projectCount } = yield* projectionSnapshotQuery.getCounts().pipe(

@@ -1,8 +1,11 @@
 /**
- * AnalyticsServiceLive - Anonymous PostHog telemetry layer.
+ * AnalyticsServiceLive - Opt-in anonymous PostHog telemetry layer.
  *
- * Persists a random installation-scoped anonymous id to state dir, buffers
- * events in memory, and flushes batches to PostHog over Effect HttpClient.
+ * Off unless the operator sets both `RYCO_TELEMETRY_ENABLED=true` and a
+ * `RYCO_POSTHOG_KEY`: Ryco ships no analytics key, so by default this is a
+ * no-op that sends nothing and writes no install id. When enabled, it persists
+ * a random installation-scoped anonymous id to the state dir, buffers events in
+ * memory, and flushes batches to PostHog over Effect HttpClient.
  *
  * @module AnalyticsServiceLive
  */
@@ -28,14 +31,18 @@ interface BufferedAnalyticsEvent {
   readonly capturedAt: string;
 }
 
-const TelemetryEnvConfig = Config.all({
-  posthogKey: Config.String("RYCO_POSTHOG_KEY").pipe(
-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
-  ),
+// Read first, on its own: until an operator opts in, nothing else is parsed.
+const TelemetryOptInConfig = Config.all({
+  // No default key: Ryco owns no analytics project, so nothing is sent unless
+  // an operator configures one.
+  posthogKey: Config.String("RYCO_POSTHOG_KEY").pipe(Config.withDefault("")),
+  enabled: Config.Boolean("RYCO_TELEMETRY_ENABLED").pipe(Config.withDefault(false)),
+});
+
+const TelemetryDeliveryConfig = Config.all({
   posthogHost: Config.String("RYCO_POSTHOG_HOST").pipe(
     Config.withDefault("https://us.i.posthog.com"),
   ),
-  enabled: Config.Boolean("RYCO_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
   flushBatchSize: Config.Number("RYCO_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   flushIntervalMs: Config.Number("RYCO_TELEMETRY_FLUSH_INTERVAL_MS").pipe(Config.withDefault(1000)),
   maxBufferedEvents: Config.Number("RYCO_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
@@ -43,11 +50,51 @@ const TelemetryEnvConfig = Config.all({
   ),
 });
 
+const atLeast = (value: number, minimum: number, fallback: number) =>
+  Number.isFinite(value) ? Math.max(minimum, Math.floor(value)) : fallback;
+
+// Telemetry is optional: a variable that cannot be parsed turns it off instead
+// of failing the server's boot.
+const readOrDisable = <A>(config: Config.Config<A>) =>
+  config.pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("invalid telemetry configuration; telemetry stays off", { cause }).pipe(
+        Effect.as(null),
+      ),
+    ),
+  );
+
 const makeAnalyticsService = Effect.gen(function* () {
-  const telemetryConfig = yield* TelemetryEnvConfig;
+  const optIn = yield* readOrDisable(TelemetryOptInConfig);
+  const posthogKey = optIn?.posthogKey.trim() ?? "";
+  if (optIn === null || !optIn.enabled || posthogKey.length === 0) {
+    if (optIn?.enabled) {
+      yield* Effect.logWarning(
+        "RYCO_TELEMETRY_ENABLED is set but RYCO_POSTHOG_KEY is not; telemetry stays off",
+      );
+    }
+    // No identifier, buffer, timer or finalizer: disabled telemetry does no work.
+    return AnalyticsService.disabled;
+  }
+
+  const delivery = yield* readOrDisable(TelemetryDeliveryConfig);
+  if (delivery === null) {
+    return AnalyticsService.disabled;
+  }
+  const telemetryConfig = {
+    posthogHost: delivery.posthogHost.trim().replace(/\/+$/, ""),
+    flushBatchSize: atLeast(delivery.flushBatchSize, 1, 20),
+    flushIntervalMs: atLeast(delivery.flushIntervalMs, 0, 1000),
+    maxBufferedEvents: atLeast(delivery.maxBufferedEvents, 1, 1_000),
+  };
+
+  const identifier = yield* getTelemetryIdentifier(posthogKey);
+  if (identifier === null) {
+    return AnalyticsService.disabled;
+  }
+
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig;
-  const identifier = yield* getTelemetryIdentifier;
   const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
   const clientType = serverConfig.mode === "desktop" ? "desktop-app" : "cli-web-client";
   const context = yield* Effect.context<never>();
@@ -94,10 +141,8 @@ const makeAnalyticsService = Effect.gen(function* () {
   const sendBatch = Effect.fn("sendBatch")(function* (
     events: ReadonlyArray<BufferedAnalyticsEvent>,
   ) {
-    if (!telemetryConfig.enabled || !identifier) return;
-
     const payload = {
-      api_key: telemetryConfig.posthogKey,
+      api_key: posthogKey,
       batch: events.map((event) => ({
         event: event.event,
         distinct_id: identifier,
@@ -195,8 +240,6 @@ const makeAnalyticsService = Effect.gen(function* () {
 
   const record: AnalyticsServiceShape["record"] = Effect.fn("record")(
     function* (event, properties) {
-      if (!telemetryConfig.enabled || !identifier) return;
-
       const enqueueResult = yield* enqueueBufferedEvent(event, properties);
       if (enqueueResult.dropped) {
         yield* Effect.logDebug("analytics buffer full; dropping oldest event", {
@@ -229,6 +272,7 @@ const makeAnalyticsService = Effect.gen(function* () {
   );
 
   return {
+    enabled: true,
     record,
     flush,
   } satisfies AnalyticsServiceShape;
