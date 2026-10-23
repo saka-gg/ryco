@@ -102,7 +102,9 @@ const isKeybindingCommand = Schema.is(KeybindingCommandSchema);
  * Decodes the saved document one entry at a time. Persisted data is otherwise decoded strictly,
  * but this document is shared by every build that runs in the profile or installation: an
  * outdated tab or a downgraded app must keep the shortcuts it knows when a newer one saved more.
- * What it cannot use is retained, never dropped. A document without both lists still fails, and
+ * What it cannot use is retained, except entries without a command, which no version can use.
+ * A rule it can use is written back in its decoded form, so a field added to rules later would
+ * be lost here and needs its own handling. A document without both lists still fails, and
  * writes stay strict through `validateAppKeybindings`.
  */
 function decodePersistedAppKeybindings(input: unknown): {

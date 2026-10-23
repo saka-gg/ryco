@@ -46,8 +46,8 @@ bindings participate in shortcut resolution; execution uses that project's node 
 
 Legacy RPC mutation methods remain in the wire protocol for compatibility but reject writes
 with a message directing older clients to App preferences. Nodes still send their frozen
-defaults and legacy file to older clients, limited to the commands those clients know. A legacy
-rule for a newer command is reported as an invalid entry instead.
+defaults and legacy file to older clients, limited to the commands nodes served when app defaults
+moved into the app. A legacy rule for a newer command is reported as an invalid entry instead.
 
 A legacy file is a JSON array of rules:
 
