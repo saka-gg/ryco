@@ -59,6 +59,7 @@ import {
   Settings2Icon,
   SettingsIcon,
   SquarePenIcon,
+  TextSearchIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -426,8 +427,8 @@ function unavailableDescription(
 }
 
 export function CommandPaletteDialog() {
-  // A workspace search (quick open) takes the command list's place while the
-  // store names one.
+  // A workspace search (quick open or find in files) takes the command list's
+  // place while the store names one.
   const showsCommands = useCommandPaletteStore(
     (store) => store.open && store.workspaceSearchMode === null,
   );
@@ -1497,6 +1498,18 @@ function OpenCommandPaletteDialog() {
       keepOpen: true,
       run: async () => {
         openWorkspaceSearch("files");
+      },
+    });
+    actionItems.push({
+      kind: "action",
+      value: "action:find-in-files",
+      searchTerms: ["find in files", "search files", "search contents", "grep", "text"],
+      title: "Find in files",
+      icon: <TextSearchIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "workspace.findInFiles",
+      keepOpen: true,
+      run: async () => {
+        openWorkspaceSearch("content");
       },
     });
   }

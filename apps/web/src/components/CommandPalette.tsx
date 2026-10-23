@@ -38,8 +38,8 @@ export function preloadCommandPaletteDialog(): Promise<void> {
 }
 
 /**
- * Quick open follows the global navigation rules, except that it also opens
- * while typing in the chat composer, as thread search does.
+ * Quick open and find in files follow the global navigation rules, except that
+ * they also open while typing in the chat composer, as thread search does.
  */
 function shouldIgnoreWorkspaceSearchShortcut(event: globalThis.KeyboardEvent): boolean {
   const fromComposer =
@@ -148,11 +148,17 @@ export function CommandPalette({ children }: { children: ReactNode }) {
         store.toggleOpen();
         return;
       }
-      if (command !== "workspace.quickOpen" || getPresentationTier() === "phone") return;
+      const mode =
+        command === "workspace.quickOpen"
+          ? "files"
+          : command === "workspace.findInFiles"
+            ? "content"
+            : null;
+      if (mode === null || getPresentationTier() === "phone") return;
       if (!store.open && shouldIgnoreWorkspaceSearchShortcut(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      store.openWorkspaceSearch("files");
+      store.openWorkspaceSearch(mode);
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);

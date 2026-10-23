@@ -5,8 +5,11 @@ type CommandPaletteOpenIntent =
   /** Opens with `query` already typed, e.g. the sidebar field's "Search everywhere". */
   | { kind: "search"; query: string; requestId: number };
 
-/** A search of the routed thread's workspace the palette shows in place of its commands. */
-export type WorkspaceSearchMode = "files";
+/**
+ * A search of the routed thread's workspace the palette shows in place of its
+ * commands: files by name (quick open) or their contents (find in files).
+ */
+export type WorkspaceSearchMode = "files" | "content";
 
 interface CommandPaletteStore {
   open: boolean;

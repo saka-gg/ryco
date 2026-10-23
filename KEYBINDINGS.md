@@ -147,6 +147,9 @@ focused control.
   composer. That key used to open the Files panel: this app moves `workspace.files` to
   `mod+shift+e`, while older apps keep `mod+p` for it. Both defaults live in the app, not on the
   node.
+- `workspace.findInFiles`: search the contents of the current thread's project and open a match at
+  its line in the Files panel. It defaults to `mod+shift+f` outside the terminal, in the app only,
+  and also works while typing in the composer.
 
 <!-- Thread lifecycle commands -->
 

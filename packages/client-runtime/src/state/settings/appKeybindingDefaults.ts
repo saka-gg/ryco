@@ -30,6 +30,7 @@ const CORE_CLIENT_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
 // Quick open and find in files.
 const FILE_SEARCH_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   { key: "mod+p", command: "workspace.quickOpen", when: "!terminalFocus" },
+  { key: "mod+shift+f", command: "workspace.findInFiles", when: "!terminalFocus" },
   { key: "mod+shift+e", command: "workspace.files", when: "!terminalFocus" },
 ];
 

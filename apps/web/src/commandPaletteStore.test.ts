@@ -24,6 +24,15 @@ describe("workspace search mode", () => {
     expect(state()).toMatchObject({ open: true, workspaceSearchMode: "files" });
   });
 
+  it("switches between quick open and find in files", () => {
+    state().openWorkspaceSearch("files");
+    state().openWorkspaceSearch("content");
+    expect(state()).toMatchObject({ open: true, workspaceSearchMode: "content" });
+
+    state().openWorkspaceSearch("files");
+    expect(state()).toMatchObject({ open: true, workspaceSearchMode: "files" });
+  });
+
   it("goes back to the command list on the palette key", () => {
     state().openWorkspaceSearch("files");
     state().toggleOpen();

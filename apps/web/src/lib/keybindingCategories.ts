@@ -89,6 +89,7 @@ const CORE_COMMAND_META = {
 // Quick open and find in files.
 const FILE_SEARCH_COMMAND_META = {
   "workspace.quickOpen": { title: "Quick open file", sortWeight: 5 },
+  "workspace.findInFiles": { title: "Find in files", sortWeight: 6 },
 } satisfies StaticCommandMetaGroup;
 
 // Settle, snooze, archive, mark unread and undo for threads (Threads, sort weights from 20).

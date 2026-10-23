@@ -800,13 +800,19 @@ describe("resolveShortcutCommand", () => {
     );
   });
 
-  it("opens quick open on mod+p and the Files panel on mod+shift+e by default", () => {
+  it("opens quick open on mod+p, find in files on mod+shift+f and the Files panel on mod+shift+e by default", () => {
     const resolve = (
       overrides: Partial<ShortcutEventLike>,
       keybindings = APP_DEFAULT_RESOLVED_KEYBINDINGS,
       context = {},
     ) => resolveShortcutCommand(event(overrides), keybindings, { platform: "MacIntel", context });
     assert.strictEqual(resolve({ key: "p", code: "KeyP", metaKey: true }), "workspace.quickOpen");
+    assert.strictEqual(
+      resolve({ key: "F", code: "KeyF", metaKey: true, shiftKey: true }),
+      "workspace.findInFiles",
+    );
+    // Thread search keeps mod+f.
+    assert.strictEqual(resolve({ key: "f", code: "KeyF", metaKey: true }), "thread.find");
     assert.strictEqual(
       resolve({ key: "E", code: "KeyE", metaKey: true, shiftKey: true }),
       "workspace.files",

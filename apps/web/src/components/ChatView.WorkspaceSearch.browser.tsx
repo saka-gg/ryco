@@ -1,4 +1,10 @@
-import { MessageId, WS_METHODS, type ProjectEntry } from "@ryco/contracts";
+import {
+  MessageId,
+  WS_METHODS,
+  type ExecutionEnvironmentCapabilities,
+  type ProjectContentMatch,
+  type ProjectEntry,
+} from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -28,7 +34,16 @@ const WORKSPACE_ENTRIES: ProjectEntry[] = [
   { path: "src/wide.ts", kind: "file", parentPath: "src" },
 ];
 
-/** Stands in for the node's ranking: the entries whose path holds the query. */
+const WORKSPACE_LINES: ProjectContentMatch[] = [
+  { path: "README.md", lineNumber: 3, preview: "Read the Wide guide.", ranges: [] },
+  { path: "src/wide.ts", lineNumber: 2, preview: "export const wide = true;", ranges: [] },
+  { path: "src/wide.ts", lineNumber: 7, preview: "  return wide;", ranges: [] },
+];
+
+/**
+ * Stands in for the node's searches: the entries whose path holds the query,
+ * and the lines that hold it, as one page.
+ */
 function resolveWorkspaceSearchRpc(body: NormalizedWsRpcRequestBody): unknown | undefined {
   if (body._tag === WS_METHODS.projectsSearchEntries) {
     const query = typeof body.query === "string" ? body.query.toLowerCase() : "";
@@ -37,7 +52,37 @@ function resolveWorkspaceSearchRpc(body: NormalizedWsRpcRequestBody): unknown | 
       truncated: false,
     };
   }
+  if (body._tag === WS_METHODS.projectsSearchContent) {
+    const fold = (text: string) => (body.caseSensitive === true ? text : text.toLowerCase());
+    const query = fold(String(body.query));
+    const matches = WORKSPACE_LINES.flatMap((line) => {
+      const start = fold(line.preview).indexOf(query);
+      return start === -1 ? [] : [{ ...line, ranges: [{ start, end: start + query.length }] }];
+    });
+    return { matches };
+  }
   return resolveWorkSurfaceRpc(body);
+}
+
+type FixtureConfigurer = NonNullable<Parameters<typeof mountChatView>[0]["configureFixture"]>;
+
+/** A node that also advertises `capabilities`. */
+function withCapabilities(
+  capabilities: Partial<ExecutionEnvironmentCapabilities>,
+): FixtureConfigurer {
+  return (fixture) => {
+    fixture.serverConfig = {
+      ...fixture.serverConfig,
+      environment: {
+        ...fixture.serverConfig.environment,
+        capabilities: { ...fixture.serverConfig.environment.capabilities, ...capabilities },
+      },
+    };
+  };
+}
+
+function contentSearchRequests() {
+  return wsRequests.filter((request) => request._tag === WS_METHODS.projectsSearchContent);
 }
 
 function snapshot() {
@@ -47,12 +92,13 @@ function snapshot() {
   });
 }
 
-function pressModKey(target: EventTarget, key: string): KeyboardEvent {
+function pressModKey(target: EventTarget, key: string, shiftKey = false): KeyboardEvent {
   const useMetaForMod = isMacPlatform(navigator.platform);
   const event = new KeyboardEvent("keydown", {
     key,
     metaKey: useMetaForMod,
     ctrlKey: !useMetaForMod,
+    shiftKey,
     bubbles: true,
     cancelable: true,
   });
@@ -66,6 +112,14 @@ async function waitForQuickOpenInput(): Promise<HTMLInputElement> {
     "Quick open should have opened.",
   );
   return waitForCommandPaletteInput("Go to file");
+}
+
+async function waitForFindInFilesInput(): Promise<HTMLInputElement> {
+  await waitForElement(
+    () => document.querySelector('[data-testid="find-in-files"]'),
+    "Find in files should have opened.",
+  );
+  return waitForCommandPaletteInput("Search in Project");
 }
 
 describe("ChatView workspace search", () => {
@@ -110,18 +164,7 @@ describe("ChatView workspace search", () => {
       viewport: DEFAULT_VIEWPORT,
       snapshot: snapshot(),
       resolveRpc: resolveWorkspaceSearchRpc,
-      configureFixture: (fixture) => {
-        fixture.serverConfig = {
-          ...fixture.serverConfig,
-          environment: {
-            ...fixture.serverConfig.environment,
-            capabilities: {
-              ...fixture.serverConfig.environment.capabilities,
-              projectSearchEmptyQuery: true,
-            },
-          },
-        };
-      },
+      configureFixture: withCapabilities({ projectSearchEmptyQuery: true }),
     });
 
     try {
@@ -189,6 +232,168 @@ describe("ChatView workspace search", () => {
         "The palette should offer Go to file with its shortcut.",
       );
       expect(shortcut.textContent).toBe(isMacPlatform(navigator.platform) ? "⌘P" : "Ctrl+P");
+      const findShortcut = [
+        ...document.querySelectorAll('[data-testid="command-palette"] [role="option"]'),
+      ]
+        .find((option) => option.textContent?.startsWith("Find in files"))
+        ?.querySelector('[data-slot="command-shortcut"]');
+      expect(findShortcut?.textContent).toBe(
+        isMacPlatform(navigator.platform) ? "⇧⌘F" : "Ctrl+Shift+F",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("finds lines in the workspace and opens one at its line", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshot(),
+      resolveRpc: resolveWorkspaceSearchRpc,
+      configureFixture: withCapabilities({ projectContentSearch: true }),
+    });
+    const navigations: Record<string, unknown>[] = [];
+    const unsubscribe = mounted.router.subscribe("onBeforeNavigate", (event) => {
+      navigations.push(event.toLocation.search);
+    });
+
+    try {
+      expect(pressModKey(window, "F", true).defaultPrevented).toBe(true);
+      const input = await waitForFindInFilesInput();
+      const findInFiles = page.getByTestId("find-in-files");
+      await expect
+        .element(findInFiles.getByRole("status"))
+        .toHaveTextContent("Type to search in files.");
+
+      await page.getByPlaceholder("Search in Project").fill("wide");
+      await expect
+        .element(findInFiles.getByRole("status"))
+        .toHaveTextContent("3 results in 2 files");
+      // Grouped by file in the node's order, each line highlighted where it matched.
+      expect(
+        [...document.querySelectorAll('[data-testid="find-in-files"] [role="option"]')].map(
+          (option) => option.getAttribute("aria-label"),
+        ),
+      ).toEqual([
+        "README.md:3, Read the Wide guide.",
+        "src/wide.ts:2, export const wide = true;",
+        "src/wide.ts:7, return wide;",
+      ]);
+      expect(
+        [
+          ...document.querySelectorAll(
+            '[data-testid="find-in-files"] mark.thread-message-search-highlight',
+          ),
+        ].map((mark) => mark.textContent),
+      ).toEqual(["Wide", "wide", "wide"]);
+      expect(contentSearchRequests().at(-1)).toMatchObject({
+        cwd: "/repo/project",
+        query: "wide",
+        limit: 200,
+      });
+      expect(contentSearchRequests().at(-1)).not.toHaveProperty("caseSensitive");
+
+      await dispatchInputKey(input, { key: "ArrowDown" });
+      await dispatchInputKey(input, { key: "Enter" });
+
+      await vi.waitFor(() => {
+        expect(useCommandPaletteStore.getState().open).toBe(false);
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === WS_METHODS.projectsReadFile &&
+              request.relativePath === "src/wide.ts",
+          ),
+        ).toBe(true);
+      });
+      expect(navigations).toContainEqual(
+        expect.objectContaining({
+          workspaceTab: "files",
+          workspaceFile: "src/wide.ts",
+          workspaceFileLine: 2,
+        }),
+      );
+    } finally {
+      unsubscribe();
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps each search's query and starts from the last one on reopen", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshot(),
+      resolveRpc: resolveWorkspaceSearchRpc,
+      configureFixture: withCapabilities({ projectContentSearch: true }),
+    });
+
+    try {
+      pressModKey(window, "F", true);
+      await waitForFindInFilesInput();
+      const findInFiles = page.getByTestId("find-in-files");
+      await page.getByPlaceholder("Search in Project").fill("wide");
+      await expect
+        .element(findInFiles.getByRole("status"))
+        .toHaveTextContent("3 results in 2 files");
+
+      await findInFiles.getByRole("button", { name: "Match case" }).click();
+      await expect
+        .element(findInFiles.getByRole("status"))
+        .toHaveTextContent("2 results in 1 file");
+      expect(contentSearchRequests().at(-1)).toMatchObject({ query: "wide", caseSensitive: true });
+
+      // Switching to quick open and back keeps both queries.
+      pressModKey(window, "p");
+      await waitForQuickOpenInput();
+      await page.getByPlaceholder("Go to file").fill("wid");
+      pressModKey(window, "F", true);
+      const restored = await waitForFindInFilesInput();
+      expect(restored.value).toBe("wide");
+      await expect
+        .element(findInFiles.getByRole("button", { name: "Match case" }))
+        .toHaveAttribute("aria-pressed", "true");
+      pressModKey(window, "p");
+      expect((await waitForQuickOpenInput()).value).toBe("wid");
+
+      // Closed and opened again, find in files searches its last query again, selected.
+      useCommandPaletteStore.getState().setOpen(false);
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-testid="find-in-files"]')).toBeNull(),
+      );
+      const requestsBefore = contentSearchRequests().length;
+      pressModKey(window, "F", true);
+      const reopened = await waitForFindInFilesInput();
+      expect(reopened.value).toBe("wide");
+      await vi.waitFor(() => {
+        expect(reopened.selectionStart).toBe(0);
+        expect(reopened.selectionEnd).toBe(4);
+      });
+      await expect
+        .element(findInFiles.getByRole("status"))
+        .toHaveTextContent("2 results in 1 file");
+      expect(contentSearchRequests().length).toBeGreaterThan(requestsBefore);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("asks to update a node that cannot search file contents", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshot(),
+      resolveRpc: resolveWorkspaceSearchRpc,
+    });
+
+    try {
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      expect(pressModKey(editor, "F", true).defaultPrevented).toBe(true);
+      await waitForFindInFilesInput();
+      await page.getByPlaceholder("Search in Project").fill("wide");
+      await expect
+        .element(page.getByTestId("find-in-files").getByRole("status"))
+        .toHaveTextContent("Update Ryco on this node to search file contents.");
+      expect(contentSearchRequests()).toEqual([]);
     } finally {
       await mounted.cleanup();
     }
