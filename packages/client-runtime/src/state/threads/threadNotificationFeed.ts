@@ -10,6 +10,7 @@ import { isDelegatedThreadLineage } from "./threadLineage.ts";
 import {
   createThreadNotificationProjector,
   type ThreadNotificationEvent,
+  type ThreadNotificationProjectorInput,
 } from "./threadNotifications.ts";
 import type { SidebarThreadOrStub } from "./types.ts";
 
@@ -54,13 +55,18 @@ export function startThreadNotificationFeed(input: {
   readonly readEnvironmentThreads: (
     environmentId: EnvironmentId,
   ) => ReadonlyArray<SidebarThreadOrStub>;
+  /** `isThreadSnoozed` from `@ryco/shared/threadSnooze`; see the projector. */
+  readonly isSnoozed: ThreadNotificationProjectorInput["isSnoozed"];
   readonly now: () => number;
   readonly onCandidate: (candidate: ThreadNotificationCandidate) => void;
 }): ThreadNotificationFeed {
   const { source } = input;
   const readToken = (environmentId: EnvironmentId) =>
     source.read(environmentId)?.shellSnapshotReadiness.read() ?? null;
-  const projector = createThreadNotificationProjector({ readGeneration: readToken });
+  const projector = createThreadNotificationProjector({
+    readGeneration: readToken,
+    isSnoozed: input.isSnoozed,
+  });
   const tracked = new Map<EnvironmentId, TrackedConnection>();
   let pending: ThreadNotificationCandidate[] = [];
   let stopped = false;

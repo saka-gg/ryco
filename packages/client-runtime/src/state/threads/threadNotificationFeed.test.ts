@@ -10,6 +10,7 @@ import {
   type OrchestrationThreadShell,
   type ThreadLineage,
 } from "@ryco/contracts";
+import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentConnection } from "../../connection/connection.ts";
@@ -141,6 +142,7 @@ function harness() {
       source,
       readEnvironmentThreads: (environmentId) =>
         Object.values(selectEnvironmentState(state, environmentId).sidebarThreadSummaryById),
+      isSnoozed: isThreadSnoozed,
       now: () => nowMs,
       onCandidate: (candidate) => delivered.push(candidate),
     });
