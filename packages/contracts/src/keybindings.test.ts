@@ -7,6 +7,7 @@ import {
   KeybindingRule,
   ResolvedKeybindingRule,
   ResolvedKeybindingsConfig,
+  STATIC_KEYBINDING_COMMANDS,
 } from "./keybindings.ts";
 
 const decode = <S extends Schema.Top>(
@@ -20,6 +21,16 @@ const decode = <S extends Schema.Top>(
   >;
 
 const decodeResolvedRule = Schema.decodeUnknownEffect(ResolvedKeybindingRule as never);
+
+it("lists every static command once", () => {
+  const seen = new Set<string>();
+  const duplicates = STATIC_KEYBINDING_COMMANDS.filter((command) => {
+    if (seen.has(command)) return true;
+    seen.add(command);
+    return false;
+  });
+  assert.deepStrictEqual(duplicates, []);
+});
 
 it.effect("parses keybinding rules", () =>
   Effect.gen(function* () {

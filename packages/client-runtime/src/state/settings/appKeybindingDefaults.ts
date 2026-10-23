@@ -11,9 +11,9 @@ import {
  * defaults go into the client-only groups below, which no node writes or serves. Superseding a
  * node rule changes only this app's defaults; nodes keep serving their list unchanged.
  *
- * A new command takes four places: `STATIC_KEYBINDING_COMMANDS` in contracts, its default key in
- * its group here (if it has one), its title in the web app's keybinding categories, and its entry
- * in KEYBINDINGS.md. Never add it to the node list.
+ * A new command takes four places, each with one group per feature: the command in contracts'
+ * keybindings.ts, its default key here (if it has one), its title in the web app's
+ * keybindingCategories.ts, and its entry in KEYBINDINGS.md. Never add it to the node list.
  */
 
 /** Node default rules this app replaces, matched by key, command and `when`. */
