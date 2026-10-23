@@ -80,9 +80,15 @@ export const AGENT_STATUS_VISUALS: Record<
 
 /**
  * Renders around a finished row, e.g. to set a control beside it: a row that
- * opens its agent is a button, so nothing interactive can go inside it.
+ * opens its agent is a button, so nothing interactive can go inside it. The
+ * row fills its wrapper, which takes the row's height from
+ * {@link AGENT_ROW_HEIGHT_CLASS}, so a list's divider stays inside that height.
  */
-export type AgentRowDecorator = (agent: RuntimeSubagent, row: ReactElement) => ReactNode;
+export type AgentRowDecorator = (
+  agent: RuntimeSubagent,
+  row: ReactElement,
+  density: AgentRowDensity,
+) => ReactNode;
 
 interface AgentRosterContextValue extends AgentRosterIdentity {
   readonly onOpenAgent: ((agentId: string) => void) | null;
@@ -351,20 +357,28 @@ export function PhaseMemberDots({
 }
 
 /**
- * Row geometry per density; updates never change a row's height.
+ * Row geometry per density, with its height in {@link AGENT_ROW_HEIGHT_CLASS};
+ * updates never change a row's height.
  * - panel: monogram, then two lines (label + time, then activity + role/run), 40px.
  * - compact: one line (monogram, label, activity, status word + time), 30px.
  * - mini: compact without the activity, for columns too narrow to show it.
  */
 const AGENT_ROW_GRID_CLASS = {
   panel:
-    "grid h-10 w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
+    "grid w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
   compact:
-    "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
-  mini: "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+    "grid w-full grid-cols-[1.125rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+  mini: "grid w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
 } as const;
 
 export type AgentRowDensity = keyof typeof AGENT_ROW_GRID_CLASS;
+
+/** A row's fixed height; a decorated row's wrapper takes it instead. */
+export const AGENT_ROW_HEIGHT_CLASS: Record<AgentRowDensity, string> = {
+  panel: "h-10",
+  compact: "h-[30px]",
+  mini: "h-[30px]",
+};
 
 /** Fixed-height row: what the agent is, then what it is doing now. */
 export function AgentRow({
@@ -457,6 +471,7 @@ export function AgentRow({
 
   const className = cn(
     AGENT_ROW_GRID_CLASS[density],
+    decorateRow ? "h-full" : AGENT_ROW_HEIGHT_CLASS[density],
     "outline-none transition-colors",
     onOpenAgent && "hover:bg-accent/35 focus-visible:ring-2 focus-visible:ring-ring/50",
   );
@@ -478,5 +493,5 @@ export function AgentRow({
       {content}
     </div>
   );
-  return decorateRow ? decorateRow(agent, row) : row;
+  return decorateRow ? decorateRow(agent, row, density) : row;
 }

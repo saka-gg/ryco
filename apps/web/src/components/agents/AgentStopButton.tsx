@@ -13,7 +13,12 @@ import { useEffect, useEffectEvent, useRef, useState, type ReactElement } from "
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { cn } from "~/lib/utils";
 import type { RuntimeSubagent } from "../../threadWorkspaceViewModel";
-import { useAgentRowIdentity, type AgentRowDecorator } from "./agentRoster";
+import {
+  AGENT_ROW_HEIGHT_CLASS,
+  useAgentRowIdentity,
+  type AgentRowDecorator,
+  type AgentRowDensity,
+} from "./agentRoster";
 import {
   describeSubagentStopFailure,
   STOP_UNCONFIRMED_MS,
@@ -48,16 +53,19 @@ export function AgentStopButton({
 /**
  * Wraps a roster row so its Stop sits beside it rather than inside it (an
  * opening row is a button). The wrapper is there for every row, so a row never
- * remounts when it becomes stoppable; on hover or focus, Stop takes the place
- * of the row's time and status, and on touch it stays in view.
+ * remounts when it becomes stoppable, and it takes the row's height, so a list
+ * divider on it adds none. On hover or focus, Stop takes the place of the row's
+ * time and status, and on touch it stays in view.
  */
 function AgentStopRow({
   agent,
   row,
+  density,
   action,
 }: {
   agent: RuntimeSubagent;
   row: ReactElement;
+  density: AgentRowDensity;
   action: SubagentStopAction;
 }) {
   const stoppable = subagentStopIdentity(agent, action.runtimeSessionId) !== null;
@@ -65,6 +73,7 @@ function AgentStopRow({
     <div
       className={cn(
         "group/agent-row relative",
+        AGENT_ROW_HEIGHT_CLASS[density],
         stoppable &&
           // The opening row keeps its hover tint while the pointer is on Stop.
           "[&:hover>button[data-agent-row]]:bg-accent/35 [&_[data-agent-row-aside]]:transition-opacity [&:focus-within_[data-agent-row-aside]]:opacity-0 [&:hover_[data-agent-row-aside]]:opacity-0 pointer-coarse:[&_[data-agent-row-aside]]:opacity-0",
@@ -85,7 +94,9 @@ export function makeAgentStopDecorator(
   action: SubagentStopAction | null,
 ): AgentRowDecorator | null {
   if (!action) return null;
-  return (agent, row) => <AgentStopRow agent={agent} row={row} action={action} />;
+  return (agent, row, density) => (
+    <AgentStopRow agent={agent} row={row} density={density} action={action} />
+  );
 }
 
 /**
