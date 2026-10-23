@@ -90,7 +90,6 @@ import {
   Fiber,
   Layer,
   Option,
-  PubSub,
   Schedule,
   Schema,
   Scope,
@@ -1483,20 +1482,20 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     Effect.scoped(
       Effect.gen(function* () {
         // Subscribed before every check, so a release in between is not missed.
-        const subscription = yield* orchestrationEngine.subscribeDomainEvents;
-        while (true) {
-          const thread = yield* resolveThread(threadId);
-          if (!thread || !isThreadWorking(thread)) return thread;
-          while (true) {
-            const event = yield* PubSub.take(subscription);
-            if (
+        const events = yield* orchestrationEngine.subscribeDomainEvents;
+        const thread = yield* resolveThread(threadId);
+        if (!thread || !isThreadWorking(thread)) return thread;
+        return yield* events.pipe(
+          Stream.filter(
+            (event) =>
               event.aggregateId === threadId &&
-              (event.type === "thread.session-set" || event.type === "thread.deleted")
-            ) {
-              break;
-            }
-          }
-        }
+              (event.type === "thread.session-set" || event.type === "thread.deleted"),
+          ),
+          Stream.mapEffect(() => resolveThread(threadId)),
+          Stream.filter((current) => !current || !isThreadWorking(current)),
+          Stream.runHead,
+          Effect.map(Option.getOrUndefined),
+        );
       }),
     );
 
@@ -1508,19 +1507,22 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
    */
   const awaitFirstTurnUnderway = (input: {
     readonly threadId: ThreadId;
-    readonly subscription: PubSub.Subscription<OrchestrationEvent>;
+    readonly events: Stream.Stream<OrchestrationEvent>;
     readonly turnStarted: Deferred.Deferred<void>;
   }) => {
-    const watch = Effect.gen(function* () {
-      while (true) {
-        const event = yield* PubSub.take(input.subscription);
-        if (event.aggregateId !== input.threadId) continue;
-        if (event.type === "thread.message-sent" && event.payload.role === "assistant") return;
-        if (event.type === "thread.session-set" && event.payload.session.activeTurnId !== null) {
-          yield* Deferred.succeed(input.turnStarted, undefined);
-        }
-      }
-    });
+    const watch = input.events.pipe(
+      Stream.filter((event) => event.aggregateId === input.threadId),
+      Stream.mapEffect((event) =>
+        event.type === "thread.message-sent" && event.payload.role === "assistant"
+          ? Effect.succeed(true)
+          : event.type === "thread.session-set" && event.payload.session.activeTurnId !== null
+            ? Deferred.succeed(input.turnStarted, undefined).pipe(Effect.as(false))
+            : Effect.succeed(false),
+      ),
+      Stream.filter(Boolean),
+      Stream.runHead,
+      Effect.asVoid,
+    );
     return Effect.raceFirst(
       watch,
       Deferred.await(input.turnStarted).pipe(
@@ -2263,7 +2265,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       // Best-effort and detached: it must never fail or delay a turn whose
       // session is already started. Subscribed now, so the turn's start is seen.
       const generationScope = yield* Scope.make();
-      const subscription = yield* orchestrationEngine.subscribeDomainEvents.pipe(
+      const events = yield* orchestrationEngine.subscribeDomainEvents.pipe(
         Scope.provide(generationScope),
       );
       yield* generateFirstTurnTitleAndBranch({
@@ -2276,7 +2278,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         messageText: message.text,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
         ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
-        underway: awaitFirstTurnUnderway({ threadId, subscription, turnStarted }).pipe(
+        underway: awaitFirstTurnUnderway({ threadId, events, turnStarted }).pipe(
           Effect.ensuring(Scope.close(generationScope, Exit.void)),
         ),
       }).pipe(Effect.ensuring(Scope.close(generationScope, Exit.void)), Effect.forkScoped);
@@ -3604,10 +3606,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
     // Subscribed synchronously: every request committed after this point is
     // delivered live, and startup intent recovery replays the ones before it.
-    const subscription = yield* orchestrationEngine.subscribeDomainEvents;
-    yield* Effect.forkScoped(
-      Stream.runForEach(Stream.fromSubscription(subscription), processEvent),
-    );
+    const events = yield* orchestrationEngine.subscribeDomainEvents;
+    yield* Effect.forkScoped(Stream.runForEach(events, processEvent));
     yield* Effect.forkScoped(
       sweepLiveness.pipe(
         Effect.repeat(

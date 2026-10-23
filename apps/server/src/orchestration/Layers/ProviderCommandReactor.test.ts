@@ -103,7 +103,10 @@ import { CheckpointReactor, type CheckpointReactorShape } from "../Services/Chec
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
-import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
+import {
+  ORCHESTRATION_DOMAIN_EVENT_BUS_CAPACITY,
+  OrchestrationEngineLive,
+} from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
@@ -6531,6 +6534,82 @@ describe("ProviderCommandReactor", () => {
       await respondApproval(harness, { threadId: T2, runtimeSessionId: "runtime-t2", tag: "t2" });
       await waitFor(() => harness.respondToRequest.mock.calls.length === 1);
       await Effect.runPromise(Deferred.succeed(gate, undefined));
+    });
+
+    it("a Stop committed while the lanes are full and the bus overflows still cancels the queued start", async () => {
+      const releaseFirst = Effect.runSync(Deferred.make<void>());
+      const secondInterrupted = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        reactorOptions: { lifecycleCapacity: 1 },
+        startSessionEffect: ({ call }) =>
+          call === 1
+            ? Deferred.await(releaseFirst).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterProcessError({
+                      provider: "codex",
+                      threadId: "thread-1",
+                      detail: "first start failed",
+                    }),
+                  ),
+                ),
+              )
+            : call === 2
+              ? Effect.never.pipe(
+                  Effect.onInterrupt(() => Deferred.succeed(secondInterrupted, undefined)),
+                )
+              : undefined,
+      });
+      // The first start holds the only lifecycle slot; the second waits for it in enqueue.
+      await startTurn(harness, { messageId: "full-lanes-1" });
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      await startTurn(harness, { messageId: "full-lanes-2" });
+
+      // More commits than the bus holds while the reactor's consumer cannot read: the old bus
+      // stopped the command worker here.
+      const flood = await Effect.runPromise(
+        Effect.forEach(
+          Array.from(
+            { length: ORCHESTRATION_DOMAIN_EVENT_BUS_CAPACITY + 510 },
+            (_, index) => index,
+          ),
+          (index) =>
+            harness.engine.dispatch({
+              type: "project.meta.update",
+              commandId: CommandId.make(`cmd-full-lanes-flood-${index}`),
+              projectId: asProjectId("project-1"),
+              title: `Flood ${index}`,
+            }),
+          { discard: true },
+        ).pipe(Effect.timeoutOption("15 seconds")),
+      );
+      expect(Option.isSome(flood)).toBe(true);
+
+      // Committed, but the consumer notes it only after replaying the flood from the store.
+      await stopSession(harness, "full-lanes");
+      await Effect.runPromise(Deferred.succeed(releaseFirst, undefined));
+      await waitFor(
+        async () => (await activitiesOf(harness, "provider.turn.start.cancelled")).length === 1,
+        10_000,
+      );
+      await harness.drain();
+
+      const [cancelled] = await activitiesOf(harness, "provider.turn.start.cancelled");
+      expect(cancelled?.payload).toMatchObject({
+        messageId: "full-lanes-2",
+        reason: "stopped-before-start",
+      });
+      // Either the second start never began, or it began and was interrupted by the Stop.
+      const startCalls = harness.startSession.mock.calls.length;
+      expect([1, 2]).toContain(startCalls);
+      if (startCalls === 2) {
+        expect(Effect.runSync(Deferred.isDone(secondInterrupted))).toBe(true);
+      }
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect((await readThread(harness))?.session).toMatchObject({
+        status: "stopped",
+        activeTurnId: null,
+      });
     });
 
     it("Stop cancels an in-flight first session start and acknowledges the dispatch", async () => {

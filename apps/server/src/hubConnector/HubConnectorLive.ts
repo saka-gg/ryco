@@ -801,7 +801,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         const engine = yield* Effect.serviceOption(OrchestrationEngineService);
         if (Option.isSome(engine)) {
           const changes = yield* engine.value.subscribeDomainEvents;
-          yield* Stream.fromSubscription(changes).pipe(
+          yield* changes.pipe(
             Stream.runForEach((event) => Effect.sync(() => sync.notifyChanged(event))),
             Effect.forkScoped,
           );
