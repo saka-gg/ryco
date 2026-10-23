@@ -1,6 +1,5 @@
 import type { CommandId, ScopedThreadRef } from "@ryco/contracts";
 
-import { forEachWithConcurrency } from "../../concurrency.ts";
 import { scopedThreadKey } from "../../scoped.ts";
 import type {
   SidebarActionCommand,
@@ -21,6 +20,21 @@ export type SidebarBatchCommand = Extract<
   SidebarActionCommand,
   { type: "thread.settle" | "thread.unsettle" | "thread.snooze" | "thread.unsnooze" }
 >;
+
+/**
+ * Runs `run` for each item, at most SIDEBAR_UNDO_BATCH_CONCURRENCY at once; `run` handles its
+ * own failures. Not the shared forEachWithConcurrency: the web app also loads that module with
+ * lazy chunks, so importing it on the Inbox's path would give it a chunk file of its own.
+ */
+async function inPool<T>(items: readonly T[], run: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await run(items[next++]!);
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SIDEBAR_UNDO_BATCH_CONCURRENCY, items.length) }, worker),
+  );
+}
 
 export interface SidebarUndoBatchResult {
   readonly applied: readonly ScopedThreadRef[];
@@ -44,7 +58,7 @@ export async function dispatchSidebarUndoBatch(input: {
   readonly targets: readonly ScopedThreadRef[];
   /** Builds each target's command; every command has the same type. */
   readonly command: (target: ScopedThreadRef) => SidebarBatchCommand;
-  readonly describe?: SidebarUndoDescribe;
+  readonly describe?: SidebarUndoDescribe | undefined;
 }): Promise<SidebarUndoBatchResult> {
   const targets = [
     ...new Map(input.targets.map((target) => [scopedThreadKey(target), target])).values(),
@@ -90,8 +104,8 @@ export async function dispatchSidebarUndoBatch(input: {
   };
   const restore = async (live: readonly ScopedThreadRef[]) => {
     const errors: unknown[] = [];
-    await forEachWithConcurrency(live.length, SIDEBAR_UNDO_BATCH_CONCURRENCY, async (index) => {
-      const send = sent.get(scopedThreadKey(live[index]!))!;
+    await inPool(live, async (member) => {
+      const send = sent.get(scopedThreadKey(member))!;
       try {
         await send.context.api.orchestration.dispatchCommand({
           type: "thread.sidebar.undo",
@@ -132,8 +146,7 @@ export async function dispatchSidebarUndoBatch(input: {
   const applied: ScopedThreadRef[] = [];
   const failed: { target: ScopedThreadRef; error: unknown }[] = [];
   let withoutUndo = 0;
-  await forEachWithConcurrency(queue.length, SIDEBAR_UNDO_BATCH_CONCURRENCY, async (index) => {
-    const { target, context, command } = queue[index]!;
+  await inPool(queue, async ({ target, context, command }) => {
     try {
       await context.api.orchestration.dispatchCommand(command);
       applied.push(target);
