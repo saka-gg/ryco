@@ -3266,6 +3266,66 @@ describe("ProviderRuntimeIngestion", () => {
     expect(rawOutput?.content).toBe('import * as Effect from "effect/Effect"\n');
   });
 
+  it("persists credential-named tool parameters redacted and leaves the provider's input alone", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    const input = {
+      url: "https://api.example.com/deploy",
+      headers: { Authorization: "Bearer live-secret", Accept: "application/json" },
+    };
+    Object.freeze(input.headers);
+    Object.freeze(input);
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-tool-started-with-credentials"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-tool-credentials"),
+      itemId: asItemId("item-tool-credentials"),
+      payload: {
+        itemType: "mcp_tool_call",
+        status: "inProgress",
+        title: "MCP tool call",
+        data: { toolName: "mcp__http__fetch", input },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "evt-tool-started-with-credentials",
+      ),
+    );
+    const activity = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === "evt-tool-started-with-credentials",
+    );
+    expect(activity?.payload).toMatchObject({
+      data: {
+        toolName: "mcp__http__fetch",
+        input: {
+          url: "https://api.example.com/deploy",
+          headers: { Authorization: "[redacted]", Accept: "application/json" },
+        },
+      },
+    });
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const appended = events.filter(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.id === "evt-tool-started-with-credentials",
+    );
+    expect(appended).toHaveLength(1);
+    expect(JSON.stringify(activity)).not.toContain("live-secret");
+    expect(JSON.stringify(appended)).not.toContain("live-secret");
+    expect(input.headers.Authorization).toBe("Bearer live-secret");
+  });
+
   it("normalizes command execution activities to ran-command summaries", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

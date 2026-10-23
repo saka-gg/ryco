@@ -4255,6 +4255,74 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "redacts credentials in the approval detail but runs the tool with its own input",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        const session = yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-credential-detail"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+        });
+
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+        const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+        assert.equal(typeof canUseTool, "function");
+        if (!canUseTool) {
+          return;
+        }
+
+        const toolInput = {
+          url: "https://api.example.com/deploy",
+          headers: { Authorization: "Bearer live-secret", Accept: "application/json" },
+          token: "ghp_live",
+        };
+        const permissionPromise = canUseTool("mcp__http__fetch", toolInput, {
+          signal: new AbortController().signal,
+          requestId: "permission-credential-detail",
+          toolUseID: "tool-credential-detail",
+        });
+
+        const requested = yield* Stream.runHead(adapter.streamEvents);
+        assert.equal(requested._tag, "Some");
+        if (requested._tag !== "Some" || requested.value.type !== "request.opened") {
+          return;
+        }
+        assert.equal(
+          requested.value.payload.detail,
+          'mcp__http__fetch: {"url":"https://api.example.com/deploy","headers":{"Authorization":"[redacted]","Accept":"application/json"},"token":"[redacted]"}',
+        );
+
+        yield* adapter.respondToRequest(
+          session.threadId,
+          ApprovalRequestId.make(String(requested.value.requestId)),
+          "accept",
+        );
+        yield* Stream.runHead(adapter.streamEvents);
+        const permissionResult = (yield* Effect.promise(() => permissionPromise)) as {
+          behavior: string;
+          updatedInput?: Record<string, unknown>;
+        };
+
+        assert.equal(permissionResult.behavior, "allow");
+        assert.equal(permissionResult.updatedInput, toolInput);
+        assert.deepEqual(permissionResult.updatedInput, {
+          url: "https://api.example.com/deploy",
+          headers: { Authorization: "Bearer live-secret", Accept: "application/json" },
+          token: "ghp_live",
+        });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("continues an imported native copy in a mapped cwd without resuming the source", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

@@ -113,6 +113,7 @@ import {
 } from "@ryco/shared/model";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
+import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
 import {
   resolveHtmlRenderToolKind,
   resolveHtmlRenderToolPresentation,
@@ -1364,7 +1365,8 @@ function summarizeToolRequest(toolName: string, input: Record<string, unknown>):
     }
   }
 
-  const serialized = JSON.stringify(input);
+  // The summary is persisted with the approval and the tool activity: redact before truncating.
+  const serialized = JSON.stringify(redactToolParameterCredentials(input));
   if (serialized.length <= 400) {
     return `${toolName}: ${serialized}`;
   }
