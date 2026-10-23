@@ -14,6 +14,7 @@ import {
   useMemo,
   useRef,
   type CSSProperties,
+  type ReactElement,
   type ReactNode,
 } from "react";
 
@@ -77,33 +78,44 @@ export const AGENT_STATUS_VISUALS: Record<
   },
 };
 
+/**
+ * Renders around a finished row, e.g. to set a control beside it: a row that
+ * opens its agent is a button, so nothing interactive can go inside it.
+ */
+export type AgentRowDecorator = (agent: RuntimeSubagent, row: ReactElement) => ReactNode;
+
 interface AgentRosterContextValue extends AgentRosterIdentity {
   readonly onOpenAgent: ((agentId: string) => void) | null;
+  readonly decorateRow: AgentRowDecorator | null;
 }
 
 const AgentRosterContext = createContext<AgentRosterContextValue>({
   identities: new Map(),
   labels: new Map(),
   onOpenAgent: null,
+  decorateRow: null,
 });
 
 /**
  * Supplies roster identities for every row below it. With an opener, rows are
- * buttons that open the agent; without one they are static.
+ * buttons that open the agent; without one they are static. A decorator
+ * renders around every row.
  */
 export function AgentRosterProvider({
   model,
   onOpenAgent = null,
+  decorateRow = null,
   children,
 }: {
   model: AgentPanelModel;
   onOpenAgent?: ((agentId: string) => void) | null | undefined;
+  decorateRow?: AgentRowDecorator | null | undefined;
   children: ReactNode;
 }) {
   const identity = useMemo(() => buildAgentRosterIdentity(model), [model]);
   const value = useMemo<AgentRosterContextValue>(
-    () => ({ ...identity, onOpenAgent }),
-    [identity, onOpenAgent],
+    () => ({ ...identity, onOpenAgent, decorateRow }),
+    [identity, onOpenAgent, decorateRow],
   );
   return <AgentRosterContext value={value}>{children}</AgentRosterContext>;
 }
@@ -362,7 +374,7 @@ export function AgentRow({
   agent: RuntimeSubagent;
   density?: AgentRowDensity;
 }) {
-  const { onOpenAgent } = use(AgentRosterContext);
+  const { onOpenAgent, decorateRow } = use(AgentRosterContext);
   const { label, role } = useAgentRowIdentity(agent);
   const visuals = AGENT_STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
@@ -394,7 +406,10 @@ export function AgentRow({
             {activityLine}
           </span>
         ) : null}
-        <span className="inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
+        <span
+          data-agent-row-aside
+          className="inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70"
+        >
           {statusWord}
           <AgentElapsed agent={agent} />
         </span>
@@ -411,7 +426,10 @@ export function AgentRow({
           <AgentMonogram agent={agent} label={label} />
         </span>
         <AgentLabel label={label} className="col-start-2 row-start-1" />
-        <span className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
+        <span
+          data-agent-row-aside
+          className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70"
+        >
           {statusWord}
           <AgentElapsed agent={agent} />
         </span>
@@ -425,7 +443,10 @@ export function AgentRow({
           {activityLine}
         </span>
         {aside ? (
-          <span className="col-start-3 row-start-2 max-w-32 truncate text-right text-[10.5px] text-muted-foreground/65">
+          <span
+            data-agent-row-aside
+            className="col-start-3 row-start-2 max-w-32 truncate text-right text-[10.5px] text-muted-foreground/65"
+          >
             {aside}
           </span>
         ) : null}
@@ -440,7 +461,7 @@ export function AgentRow({
     onOpenAgent && "hover:bg-accent/35 focus-visible:ring-2 focus-visible:ring-ring/50",
   );
   const densityAttribute = density === "panel" ? {} : { "data-density": density };
-  return onOpenAgent ? (
+  const row = onOpenAgent ? (
     <button
       type="button"
       className={className}
@@ -457,4 +478,5 @@ export function AgentRow({
       {content}
     </div>
   );
+  return decorateRow ? decorateRow(agent, row) : row;
 }

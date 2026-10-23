@@ -1,3 +1,5 @@
+import type { ScopedThreadRef } from "@ryco/contracts";
+
 import { isActiveSubagentStatus, type RuntimeSubagent } from "./subagentRuntime.ts";
 
 /**
@@ -15,6 +17,8 @@ export interface SubagentStopIdentity {
 
 /** What a surface needs to offer Stop on agent rows; the app owns gating and the request. */
 export interface SubagentStopAction {
+  /** The thread whose agents this stops. */
+  readonly threadRef: ScopedThreadRef;
   /** The thread's current provider runtime: agents an earlier runtime reported can't be stopped. */
   readonly runtimeSessionId: string | null;
   /** Why Stop is shown but can't be used right now, or null when it can. */
