@@ -59,6 +59,10 @@
       "types": "./src/diagnosticRedaction.ts",
       "import": "./src/diagnosticRedaction.ts"
     },
+    "./toolParameterRedaction": {
+      "types": "./src/toolParameterRedaction.ts",
+      "import": "./src/toolParameterRedaction.ts"
+    },
     "./desktopResourceTelemetry": {
       "types": "./src/desktopResourceTelemetry.ts",
       "import": "./src/desktopResourceTelemetry.ts"

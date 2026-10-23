@@ -54,6 +54,7 @@ import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
+import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { findThreadSession } from "../../provider/threadSessionLookup.ts";
@@ -388,6 +389,26 @@ function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
 
+/**
+ * The detail of an approval or tool activity. A detail that is a whole JSON object loses its
+ * credential-named parameters before truncation would leave it unparseable.
+ */
+function toolActivityDetail(detail: string): string {
+  return truncateDetail(redactToolParameterCredentials(detail));
+}
+
+/**
+ * Tool data as persisted: no HTML tool page, no credential-named parameter, and no oversized
+ * string. Redaction runs before the cap so a structured parameter string is still whole. The
+ * provider keeps its own input: redaction returns new values and never mutates `data`.
+ */
+function toolActivityData(itemType: string, data: unknown): unknown {
+  return capActivityData(
+    itemType,
+    redactToolParameterCredentials(withoutHtmlRenderToolMarkup(data)),
+  );
+}
+
 /** The recorded limit message is bounded by the contract (1,000 characters). */
 function truncateUsageLimitMessage(value: string): string {
   return value.length > 1_000 ? `${value.slice(0, 997)}...` : value;
@@ -713,7 +734,7 @@ export function runtimeEventToActivities(
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
-            ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.detail ? { detail: toolActivityDetail(event.payload.detail) } : {}),
             ...(event.payload.reason
               ? { reason: truncateDetail(event.payload.reason, 1_000) }
               : {}),
@@ -1235,14 +1256,9 @@ export function runtimeEventToActivities(
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.itemId ? { providerItemId: event.itemId } : {}),
             ...(event.providerRefs ? { providerRefs: event.providerRefs } : {}),
-            ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.detail ? { detail: toolActivityDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined
-              ? {
-                  data: capActivityData(
-                    event.payload.itemType,
-                    withoutHtmlRenderToolMarkup(event.payload.data),
-                  ),
-                }
+              ? { data: toolActivityData(event.payload.itemType, event.payload.data) }
               : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId
@@ -1271,14 +1287,9 @@ export function runtimeEventToActivities(
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.itemId ? { providerItemId: event.itemId } : {}),
             ...(event.providerRefs ? { providerRefs: event.providerRefs } : {}),
-            ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.detail ? { detail: toolActivityDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined
-              ? {
-                  data: capActivityData(
-                    event.payload.itemType,
-                    withoutHtmlRenderToolMarkup(event.payload.data),
-                  ),
-                }
+              ? { data: toolActivityData(event.payload.itemType, event.payload.data) }
               : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId
@@ -1307,14 +1318,9 @@ export function runtimeEventToActivities(
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.itemId ? { providerItemId: event.itemId } : {}),
             ...(event.providerRefs ? { providerRefs: event.providerRefs } : {}),
-            ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.detail ? { detail: toolActivityDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined
-              ? {
-                  data: capActivityData(
-                    event.payload.itemType,
-                    withoutHtmlRenderToolMarkup(event.payload.data),
-                  ),
-                }
+              ? { data: toolActivityData(event.payload.itemType, event.payload.data) }
               : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
             ...(event.payload.parentToolUseId

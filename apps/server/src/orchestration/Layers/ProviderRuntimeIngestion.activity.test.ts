@@ -1,6 +1,7 @@
 import {
   EventId,
   ProviderDriverKind,
+  RuntimeRequestId,
   RuntimeTaskId,
   RuntimeSessionId,
   ThreadId,
@@ -369,5 +370,113 @@ describe("runtimeEventToActivities for Ryco HTML tool calls", () => {
         },
       },
     ]);
+  });
+});
+
+describe("runtimeEventToActivities credential-named tool parameters", () => {
+  const deepFreeze = <T>(value: T): T => {
+    if (value !== null && typeof value === "object") {
+      for (const entry of Object.values(value)) deepFreeze(entry);
+      Object.freeze(value);
+    }
+    return value;
+  };
+
+  it("persists tool data redacted while the provider keeps its own input", () => {
+    const input = deepFreeze({
+      url: "https://api.example.com/deploy",
+      headers: { Authorization: "Bearer live-secret", Accept: "application/json" },
+      body: '{"target":"staging","apiKey":"live-key"}',
+    });
+    const activities = (["item.started", "item.updated", "item.completed"] as const).flatMap(
+      (type) =>
+        runtimeEventToActivities({
+          ...base,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          type,
+          eventId: EventId.make(`evt-${type}`),
+          payload: {
+            itemType: "mcp_tool_call",
+            status: type === "item.completed" ? "completed" : "inProgress",
+            title: "MCP tool call",
+            data: { toolName: "mcp__http__fetch", input },
+          },
+        }),
+    );
+
+    expect(activities).toHaveLength(3);
+    for (const activity of activities) {
+      expect(activity.payload).toMatchObject({
+        data: {
+          toolName: "mcp__http__fetch",
+          input: {
+            url: "https://api.example.com/deploy",
+            headers: { Authorization: "[redacted]", Accept: "application/json" },
+            body: '{"target":"staging","apiKey":"[redacted]"}',
+          },
+        },
+      });
+    }
+    expect(JSON.stringify(activities)).not.toMatch(/live-secret|live-key/u);
+    expect(input.headers.Authorization).toBe("Bearer live-secret");
+    expect(input.body).toBe('{"target":"staging","apiKey":"live-key"}');
+  });
+
+  it("redacts Codex MCP arguments and keeps commands reviewable", () => {
+    const [mcp] = runtimeEventToActivities({
+      ...base,
+      type: "item.completed",
+      eventId: EventId.make("evt-codex-mcp"),
+      payload: {
+        itemType: "mcp_tool_call",
+        status: "completed",
+        title: "MCP tool call",
+        data: {
+          item: {
+            type: "mcpToolCall",
+            tool: "create_issue",
+            server: "github",
+            arguments: { repo: "ryco", github_token: "ghp_live", max_tokens: 5 },
+          },
+        },
+      },
+    });
+    const command = "curl -H 'Authorization: Bearer live-secret' https://api.example.com";
+    const [execution] = runtimeEventToActivities({
+      ...base,
+      type: "item.completed",
+      eventId: EventId.make("evt-codex-command"),
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Command run",
+        detail: command,
+        data: { item: { type: "commandExecution", command } },
+      },
+    });
+
+    expect(mcp?.payload).toMatchObject({
+      data: { item: { arguments: { repo: "ryco", github_token: "[redacted]", max_tokens: 5 } } },
+    });
+    expect(execution?.payload).toMatchObject({
+      detail: command,
+      data: { item: { command } },
+    });
+  });
+
+  it("redacts a structured approval detail before truncating it", () => {
+    const detail = JSON.stringify({ apiKey: "live-key", notes: "x".repeat(400) });
+    const [approval] = runtimeEventToActivities({
+      ...base,
+      type: "request.opened",
+      eventId: EventId.make("evt-approval-structured"),
+      requestId: RuntimeRequestId.make("req-structured"),
+      payload: { requestType: "dynamic_tool_call", detail },
+    });
+
+    const redacted = (approval?.payload as { detail?: string } | undefined)?.detail ?? "";
+    expect(redacted.startsWith('{"apiKey":"[redacted]","notes":"xxx')).toBe(true);
+    expect(redacted).toHaveLength(180);
+    expect(redacted).not.toContain("live-key");
   });
 });
