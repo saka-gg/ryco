@@ -39,6 +39,11 @@ export class WorkspaceEntriesBrowseError extends Schema.TaggedError<WorkspaceEnt
   },
 ) {}
 
+export interface WorkspaceSearchFiles {
+  readonly paths: ReadonlyArray<string>;
+  readonly partial: boolean;
+}
+
 /**
  * WorkspaceEntriesShape - Service API for workspace entry search and cache
  * invalidation.
@@ -65,6 +70,16 @@ export interface WorkspaceEntriesShape {
   readonly search: (
     input: ProjectSearchEntriesInput,
   ) => Effect.Effect<ProjectSearchEntriesResult, WorkspaceEntriesError>;
+
+  /**
+   * Every indexed file of the root in UTF-8 byte order, for content search.
+   * Like `search`, it answers from the current index without waiting for a
+   * pending rebuild. `partial` marks an index that covers only part of the
+   * workspace.
+   */
+  readonly readSearchFiles: (
+    cwd: string,
+  ) => Effect.Effect<WorkspaceSearchFiles, WorkspaceEntriesError>;
 
   /**
    * Mark the workspace root's entries as changed. A root in recent use is

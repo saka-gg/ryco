@@ -34,6 +34,7 @@ import {
 
 import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
 import type { VcsDriverShape } from "../../vcs/VcsDriver.ts";
+import { sortPathsByUtf8 } from "../pathOrder.ts";
 import {
   WorkspaceEntries,
   WorkspaceEntriesBrowseError,
@@ -105,6 +106,8 @@ interface WorkspaceIndex {
   readonly partial: boolean;
   /** The listEntries payload, built on first request and dropped when `entries` change. */
   listing: ProjectListEntriesResult | null;
+  /** Its files in UTF-8 byte order for content search, built and dropped like `listing`. */
+  searchFiles: ReadonlyArray<string> | null;
 }
 
 interface WorkspaceIndexSlot {
@@ -535,6 +538,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       entries,
       partial,
       listing: null,
+      searchFiles: null,
     } satisfies WorkspaceIndex;
   });
 
@@ -670,6 +674,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       entries,
       partial: truncated,
       listing: null,
+      searchFiles: null,
     } satisfies WorkspaceIndex;
   });
 
@@ -1068,6 +1073,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       }
       index.entries.push(toIndexedEntry(filePath, "file"));
       index.listing = null;
+      index.searchFiles = null;
       // Visible immediately; a background rebuild settles its ignore status.
       yield* markRootChanged(slot);
     }
@@ -1295,6 +1301,16 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     },
   );
 
+  const readSearchFiles: WorkspaceEntriesShape["readSearchFiles"] = Effect.fn(
+    "WorkspaceEntries.readSearchFiles",
+  )(function* (cwd) {
+    const { index } = yield* readIndex(yield* normalizeWorkspaceRoot(cwd));
+    index.searchFiles ??= sortPathsByUtf8(
+      index.entries.flatMap((entry) => (entry.kind === "file" ? [entry.path] : [])),
+    );
+    return { paths: index.searchFiles, partial: index.partial };
+  });
+
   const listEntries: WorkspaceEntriesShape["listEntries"] = Effect.fn(
     "WorkspaceEntries.listEntries",
   )(function* (input) {
@@ -1316,6 +1332,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     recordFileWrite,
     listEntries,
     search,
+    readSearchFiles,
   } satisfies WorkspaceEntriesShape;
 });
 
