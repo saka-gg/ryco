@@ -21,6 +21,7 @@ import {
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
+import { assertTurnIdsOnly } from "../testUtils/adapterRetention.ts";
 import { makeCursorAdapter } from "./CursorAdapter.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* CursorAdapter`.
@@ -1689,5 +1690,29 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         yield* adapter.stopSession(threadId);
       }).pipe(Effect.provide(customAdapterLayer));
     },
+  );
+
+  it.effect("retention: reports completed turn ids without keeping prompts or results", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-retention-thread");
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-cursoradapter-retention"),
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+      const first = yield* adapter.sendTurn({ threadId, input: "first prompt", attachments: [] });
+      const second = yield* adapter.sendTurn({ threadId, input: "second prompt", attachments: [] });
+
+      assertTurnIdsOnly(yield* adapter.readThread(threadId), [first.turnId, second.turnId]);
+      yield* adapter.stopSession(threadId);
+    }),
   );
 });

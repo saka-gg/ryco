@@ -61,6 +61,12 @@ import {
   type ClaudeTranscriptEntry,
 } from "./ClaudeAdapter.ts";
 import type { AgentControlProviderBridge } from "../../agentControl/ProviderInjection.ts";
+import {
+  assertTurnIdsOnly,
+  drainRuntimeEvents,
+  makeRetentionProbe,
+  type RetentionProbe,
+} from "../testUtils/adapterRetention.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
@@ -11075,6 +11081,153 @@ describe("ClaudeAdapterLive steering", () => {
         lifecycleFor(log, turn.turnId).map((event) => event.type),
         ["turn.started", "turn.completed"],
       );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
+
+describe("ClaudeAdapterLive retention", () => {
+  const sdkSessionId = "sdk-session-retention";
+
+  // Plain functions: an Effect.gen frame would keep its last round's tracked objects alive.
+  function emitToolRound(
+    query: FakeClaudeQuery,
+    probe: RetentionProbe,
+    turnTag: string,
+    round: number,
+  ): void {
+    const toolUseId = `toolu-${turnTag}-${round}`;
+    query.emit({
+      type: "assistant",
+      session_id: sdkSessionId,
+      uuid: `assistant-${turnTag}-${round}`,
+      parent_tool_use_id: null,
+      message: probe.track({
+        id: `msg-${turnTag}-${round}`,
+        role: "assistant",
+        model: "claude-retention",
+        content: [
+          { type: "text", text: probe.payload(1_000) },
+          { type: "tool_use", id: toolUseId, name: "Read", input: { file_path: `/f${round}.ts` } },
+        ],
+      }),
+    } as unknown as SDKMessage);
+    query.emit({
+      type: "user",
+      session_id: sdkSessionId,
+      uuid: `user-${turnTag}-${round}`,
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [
+          probe.track({ type: "tool_result", tool_use_id: toolUseId, content: probe.payload() }),
+        ],
+      },
+    } as unknown as SDKMessage);
+  }
+
+  function emitSentinel(query: FakeClaudeQuery, tag: string): void {
+    query.emit({
+      type: "stream_event",
+      session_id: sdkSessionId,
+      uuid: `sentinel-${tag}`,
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: `sentinel-${tag}` },
+      },
+    } as unknown as SDKMessage);
+  }
+
+  function emitResult(query: FakeClaudeQuery, tag: string): void {
+    query.emit({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      errors: [],
+      session_id: sdkSessionId,
+      uuid: `result-${tag}`,
+    } as unknown as SDKMessage);
+  }
+
+  const isSentinel = (tag: string) => (event: ProviderRuntimeEvent) =>
+    event.type === "content.delta" && event.payload.delta === `sentinel-${tag}`;
+  const isTurnCompleted = (event: ProviderRuntimeEvent) => event.type === "turn.completed";
+
+  const resumeTurnCount = (adapter: ClaudeAdapterShape) =>
+    Effect.map(
+      adapter.listSessions(),
+      ([session]) => (session?.resumeCursor as { turnCount?: number } | undefined)?.turnCount,
+    );
+
+  it.effect("retention: keeps no SDK message bodies during or after a long turn", () => {
+    const harness = makeHarness();
+    const probe = makeRetentionProbe();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const events = yield* drainRuntimeEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claude-retention-long-turn"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "go", attachments: [] });
+
+      for (let round = 0; round < 100; round += 1) emitToolRound(harness.query, probe, "t1", round);
+      const sentinelSeen = events.expect(isSentinel("t1"));
+      emitSentinel(harness.query, "t1");
+      yield* sentinelSeen;
+      assert.equal(probe.tracked, 200);
+      assert.equal(yield* Effect.promise(probe.reachable), 0, "reachable mid-turn");
+
+      const completed = events.expect(isTurnCompleted);
+      emitResult(harness.query, "t1");
+      yield* completed;
+      assert.equal(yield* Effect.promise(probe.reachable), 0, "reachable after the turn");
+      assertTurnIdsOnly(yield* adapter.readThread(THREAD_ID), [turn.turnId]);
+      assert.equal(yield* resumeTurnCount(adapter), 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("retention: retained state grows with turns, not events", () => {
+    const harness = makeHarness();
+    const probe = makeRetentionProbe();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const events = yield* drainRuntimeEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claude-retention-two-turns"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turnIds: Array<TurnId> = [];
+      for (const [tag, rounds] of [
+        ["t1", 5],
+        ["t2", 200],
+      ] as const) {
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: tag, attachments: [] });
+        turnIds.push(turn.turnId);
+        for (let round = 0; round < rounds; round += 1) {
+          emitToolRound(harness.query, probe, tag, round);
+        }
+        const completed = events.expect(isTurnCompleted);
+        emitResult(harness.query, tag);
+        yield* completed;
+      }
+
+      assert.equal(probe.tracked, 410);
+      assert.equal(yield* Effect.promise(probe.reachable), 0);
+      assertTurnIdsOnly(yield* adapter.readThread(THREAD_ID), turnIds);
+      assert.equal(yield* resumeTurnCount(adapter), 2);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

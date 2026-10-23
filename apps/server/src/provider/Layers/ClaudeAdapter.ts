@@ -190,6 +190,7 @@ import {
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
 import {
   AGENT_CONTROL_INTERNAL_SERVER_NAME,
   agentControlHostContext,
@@ -266,7 +267,6 @@ interface ClaudeTurnState {
   readonly promptUuid?: string;
   readonly openedBy: ClaudeTurnOpener;
   readonly startedAt: string;
-  readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -332,7 +332,6 @@ function makeClaudeTurnState(input: {
     ...(input.promptUuid !== undefined ? { promptUuid: input.promptUuid } : {}),
     openedBy: input.openedBy,
     startedAt: input.startedAt,
-    items: [],
     assistantTextBlocks: new Map(),
     assistantTextBlockOrder: [],
     capturedProposedPlanKeys: new Set(),
@@ -459,10 +458,8 @@ interface ClaudeSessionContext {
   transcriptCheckedFor: string | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  readonly turns: Array<{
-    id: TurnId;
-    items: Array<unknown>;
-  }>;
+  /** Completed turn ids only (resume `turnCount`, `readThread`); never message bodies. */
+  readonly completedTurnIds: Array<TurnId>;
   readonly inFlightTools: Map<number, ToolInFlight>;
   /**
    * Block indexes of dropped subagent narration, keyed by parent_tool_use_id.
@@ -2328,13 +2325,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         issue: "Session thread id is not initialized yet.",
       });
     }
-    return {
-      threadId,
-      turns: context.turns.map((turn) => ({
-        id: turn.id,
-        items: [...turn.items],
-      })),
-    };
+    return providerThreadSnapshotFromTurnIds(threadId, context.completedTurnIds);
   });
 
   /** The cursor's `transcriptSeen`, for the session it resumes. */
@@ -2354,7 +2345,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       ...(context.pendingRewind ? { rewind: { at: context.pendingRewind.at } } : {}),
-      turnCount: context.turns.length,
+      turnCount: context.completedTurnIds.length,
       ...transcriptSeenMarker(context),
     };
     context.session = { ...context.session, resumeCursor, updatedAt };
@@ -3052,10 +3043,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     yield* sealTurnSegment(context, turnState, status, result);
 
-    context.turns.push({
-      id: turnState.turnId,
-      items: [...turnState.items],
-    });
+    context.completedTurnIds.push(turnState.turnId);
     if (turnState.lastChainUuid !== undefined) {
       context.turnHeads.push({ turnId: turnState.turnId, head: turnState.lastChainUuid });
       if (context.turnHeads.length > CLAUDE_TURN_HEADS_CAP) context.turnHeads.shift();
@@ -3571,10 +3559,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    if (context.turnState) {
-      context.turnState.items.push(message.message);
-    }
-
     for (const toolResult of toolResultBlocksFromUserMessage(message)) {
       const toolEntry = Array.from(context.inFlightTools.entries()).find(
         ([, tool]) => tool.itemId === toolResult.toolUseId,
@@ -3925,7 +3909,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.turnState) {
-      context.turnState.items.push(message.message);
       yield* backfillAssistantTextBlocksFromSnapshot(context, message);
     }
 
@@ -6267,7 +6250,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       transcriptCheckedFor: resumeState?.transcriptSeen ? existingResumeSessionId : undefined,
       pendingApprovals,
       pendingUserInputs,
-      turns: [],
+      completedTurnIds: [],
       inFlightTools,
       suppressedSubagentBlocks: new Map(),
       taskAgents: new Map(),
@@ -7027,7 +7010,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
 
         const previousTurnCount =
-          readClaudeResumeState(previousCursor)?.turnCount ?? context.turns.length;
+          readClaudeResumeState(previousCursor)?.turnCount ?? context.completedTurnIds.length;
         const nextCursor =
           rewindPlan.kind === "fresh" || context.resumeSessionId === undefined
             ? { threadId }

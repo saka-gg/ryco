@@ -79,6 +79,7 @@ import {
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import { applyCursorAcpModelSelection, makeCursorAcpRuntime } from "../acp/CursorAcpSupport.ts";
 import {
@@ -150,7 +151,8 @@ interface CursorSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /** Completed turn ids only; never prompts (base64 images) or results. */
+  readonly turnIds: Array<TurnId>;
   readonly subagentEvents: ReturnType<typeof makeAcpSubagentRuntimeEvents>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
@@ -844,7 +846,7 @@ export function makeCursorAdapter(
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
-            turns: [],
+            turnIds: [],
             subagentEvents: makeAcpSubagentRuntimeEvents(),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
@@ -1152,7 +1154,7 @@ export function makeCursorAdapter(
               Effect.ensuring(ctx.agentControl ? ctx.agentControl.retireTurn(turnId) : Effect.void),
             );
 
-          ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+          ctx.turnIds.push(turnId);
           ctx.session = {
             ...ctx.session,
             activeTurnId: turnId,
@@ -1250,7 +1252,7 @@ export function makeCursorAdapter(
     const readThread: CursorAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        return { threadId, turns: ctx.turns };
+        return providerThreadSnapshotFromTurnIds(threadId, ctx.turnIds);
       });
 
     // Cursor cannot forget turns; ProviderService refuses before reaching this.

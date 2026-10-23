@@ -61,6 +61,7 @@ import {
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import {
   applyAcpModelSelection,
@@ -133,7 +134,8 @@ interface AcpSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /** Completed turn ids only; never prompts (base64 images) or results. */
+  readonly turnIds: Array<TurnId>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   currentModelId: string | undefined;
@@ -644,7 +646,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
-            turns: [],
+            turnIds: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             currentModelId: boundModelId,
@@ -943,10 +945,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 });
               }
 
-              ctx.turns = [
-                ...ctx.turns,
-                { id: prepared.turnId, items: [{ prompt: prepared.promptParts, result }] },
-              ];
+              ctx.turnIds.push(prepared.turnId);
               ctx.session = {
                 ...ctx.session,
                 activeTurnId: prepared.turnId,
@@ -1044,7 +1043,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
     const readThread: AcpAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        return { threadId, turns: ctx.turns };
+        return providerThreadSnapshotFromTurnIds(threadId, ctx.turnIds);
       });
 
     // ACP sessions cannot forget turns; ProviderService refuses before reaching this.
