@@ -22,7 +22,12 @@ const labels = {
 };
 const visible = new Map<
   number,
-  { toastId: ReturnType<typeof toastManager.add>; pending: boolean; applying: boolean | undefined }
+  {
+    toastId: ReturnType<typeof toastManager.add>;
+    pending: boolean;
+    applying: boolean | undefined;
+    count: number | undefined;
+  }
 >();
 export function presentSidebarUndoNotices(notices: readonly SidebarUndoNotice[]) {
   for (const [id, entry] of visible) {
@@ -33,22 +38,27 @@ export function presentSidebarUndoNotices(notices: readonly SidebarUndoNotice[])
   }
   for (const notice of notices) {
     const previous = visible.get(notice.id);
+    // A bulk notice brings its own copy.
     const options = stackedThreadToast({
       type: "info",
-      title: notice.applying
-        ? {
-            archive: "Archiving thread…",
-            settle: "Settling thread…",
-            snooze: "Snoozing thread…",
-            unpin: "Unpinning thread…",
-          }[notice.action]
-        : labels[notice.action],
+      title:
+        notice.copy?.title ??
+        (notice.applying
+          ? {
+              archive: "Archiving thread…",
+              settle: "Settling thread…",
+              snooze: "Snoozing thread…",
+              unpin: "Unpinning thread…",
+            }[notice.action]
+          : labels[notice.action]),
       timeout: 0,
-      description: notice.threadTitle,
+      description: notice.copy?.description ?? notice.threadTitle,
       actionProps: {
         children: notice.pending ? "Undoing…" : "Undo",
         disabled: notice.pending,
-        "aria-label": `Undo ${notice.action}${notice.threadTitle ? ` ${notice.threadTitle}` : ""}`,
+        "aria-label":
+          notice.copy?.undoLabel ??
+          `Undo ${notice.action}${notice.threadTitle ? ` ${notice.threadTitle}` : ""}`,
         onClick: () => void sidebarUndo.undo(notice.id),
       },
       data: { onClose: () => sidebarUndo.dismiss(notice.id) },
@@ -58,11 +68,17 @@ export function presentSidebarUndoNotices(notices: readonly SidebarUndoNotice[])
         toastId: toastManager.add(options),
         pending: notice.pending,
         applying: notice.applying,
+        count: notice.count,
       });
-    else if (previous.pending !== notice.pending || previous.applying !== notice.applying) {
+    else if (
+      previous.pending !== notice.pending ||
+      previous.applying !== notice.applying ||
+      previous.count !== notice.count
+    ) {
       toastManager.update(previous.toastId, options);
       previous.pending = notice.pending;
       previous.applying = notice.applying;
+      previous.count = notice.count;
     }
   }
 }

@@ -1,4 +1,10 @@
-import type { ScopedThreadRef } from "@ryco/contracts";
+import type { SidebarUndoDescribe } from "@ryco/client-runtime/state/threads";
+import {
+  dispatchSidebarUndoBatch,
+  type SidebarBatchCommand,
+  type SidebarUndoBatchResult,
+} from "@ryco/client-runtime/state/threads/sidebarUndoBatch";
+import type { ScopedThreadRef, ThreadId } from "@ryco/contracts";
 
 import {
   canArchiveSidebarThread,
@@ -8,7 +14,7 @@ import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { readEnvironmentApi } from "./environmentApi";
 import { newCommandId } from "./lib/utils";
 import { readLocalApi } from "./localApi";
-import { sidebarUndo } from "./sidebarUndo";
+import { readSidebarUndoContext, sidebarUndo } from "./sidebarUndo";
 import type { SidebarThreadSummary } from "./types";
 
 // The lifecycle changes every surface makes (Inbox rows and menus, the project
@@ -18,6 +24,16 @@ import type { SidebarThreadSummary } from "./types";
 
 const errorDescription = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
+
+const settlementCommand = (threadId: ThreadId, settled: boolean) =>
+  settled
+    ? ({ type: "thread.settle", commandId: newCommandId(), threadId } as const)
+    : ({ type: "thread.unsettle", commandId: newCommandId(), threadId, reason: "user" } as const);
+
+const snoozeCommand = (threadId: ThreadId, snoozedUntil: string | null) =>
+  snoozedUntil
+    ? ({ type: "thread.snooze", commandId: newCommandId(), threadId, snoozedUntil } as const)
+    : ({ type: "thread.unsnooze", commandId: newCommandId(), threadId } as const);
 
 /** Settles a thread, or moves it back to Active. Resolves whether the node took it. */
 export async function dispatchThreadSettlement(
@@ -32,17 +48,9 @@ export async function dispatchThreadSettlement(
     });
     return false;
   }
-  const command = settled
-    ? ({ type: "thread.settle", commandId: newCommandId(), threadId: target.threadId } as const)
-    : ({
-        type: "thread.unsettle",
-        commandId: newCommandId(),
-        threadId: target.threadId,
-        reason: "user",
-      } as const);
   const failureTitle = settled ? "Could not settle thread" : "Could not move thread to Active";
   try {
-    await sidebarUndo.dispatch(target, command);
+    await sidebarUndo.dispatch(target, settlementCommand(target.threadId, settled));
     return true;
   } catch (error) {
     toastManager.add({
@@ -67,16 +75,8 @@ export async function dispatchThreadSnooze(
     });
     return;
   }
-  const command = snoozedUntil
-    ? ({
-        type: "thread.snooze",
-        commandId: newCommandId(),
-        threadId: target.threadId,
-        snoozedUntil,
-      } as const)
-    : ({ type: "thread.unsnooze", commandId: newCommandId(), threadId: target.threadId } as const);
   try {
-    await sidebarUndo.dispatch(target, command);
+    await sidebarUndo.dispatch(target, snoozeCommand(target.threadId, snoozedUntil));
   } catch (error) {
     toastManager.add({
       type: "error",
@@ -84,6 +84,111 @@ export async function dispatchThreadSnooze(
       description: errorDescription(error, "The request failed."),
     });
   }
+}
+
+const threadCount = (count: number) => (count === 1 ? "1 thread" : `${count} threads`);
+
+/** A bulk notice's copy; `count` is what its Undo still restores. */
+const bulkNoticeCopy =
+  (action: "settle" | "snooze", applyingVerb: string, doneVerb: string): SidebarUndoDescribe =>
+  ({ count, applying }) => ({
+    title: applying
+      ? `${applyingVerb} ${threadCount(count)}…`
+      : `${threadCount(count)} ${doneVerb}`,
+    undoLabel: `Undo ${action} for ${threadCount(count)}`,
+  });
+
+/**
+ * Sends one lifecycle command to each thread, with one Undo notice for the lot.
+ * Shows at most one toast each for failed threads, skipped threads (their
+ * machine is not ready) and threads whose machine cannot undo. Never rejects.
+ */
+async function dispatchThreadBatch(
+  targets: readonly ScopedThreadRef[],
+  command: (threadId: ThreadId) => SidebarBatchCommand,
+  copy: { readonly failure: (threads: string) => string; readonly notice?: SidebarUndoDescribe },
+): Promise<SidebarUndoBatchResult | null> {
+  let result: SidebarUndoBatchResult;
+  try {
+    result = await dispatchSidebarUndoBatch({
+      history: sidebarUndo,
+      readContext: readSidebarUndoContext,
+      newCommandId,
+      targets,
+      command: (target) => command(target.threadId),
+      describe: copy.notice,
+    });
+  } catch (error) {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: copy.failure(threadCount(targets.length)),
+        description: errorDescription(error, "The request failed."),
+      }),
+    );
+    return null;
+  }
+  const { applied, skipped, failed, withoutUndo } = result;
+  const [firstFailure] = failed;
+  if (firstFailure) {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: copy.failure(threadCount(failed.length)),
+        description: errorDescription(firstFailure.error, "The request failed."),
+      }),
+    );
+  }
+  if (skipped.length > 0) {
+    toastManager.add({
+      type: "warning",
+      title: `Skipped ${threadCount(skipped.length)}`,
+      description: `${skipped.length === 1 ? "Its" : "Their"} machine is not ready. Try again when it reconnects.`,
+    });
+  }
+  // The notice counts only what its Undo restores; say why the rest is missing.
+  if (withoutUndo > 0 && applied.length > withoutUndo) {
+    toastManager.add({
+      type: "info",
+      title: `${threadCount(withoutUndo)} cannot be undone`,
+      description: `Update ${withoutUndo === 1 ? "its" : "their"} machine to use Undo.`,
+    });
+  }
+  return result;
+}
+
+/** Settles threads, or moves them back to Active, at most 100 at once. */
+export function dispatchThreadSettlementBatch(
+  targets: readonly ScopedThreadRef[],
+  settled: boolean,
+): Promise<SidebarUndoBatchResult | null> {
+  return dispatchThreadBatch(
+    targets,
+    (threadId) => settlementCommand(threadId, settled),
+    settled
+      ? {
+          failure: (threads) => `Could not settle ${threads}`,
+          notice: bulkNoticeCopy("settle", "Settling", "settled"),
+        }
+      : { failure: (threads) => `Could not move ${threads} to Active` },
+  );
+}
+
+/** Snoozes threads until `snoozedUntil`, or wakes them with null, at most 100 at once. */
+export function dispatchThreadSnoozeBatch(
+  targets: readonly ScopedThreadRef[],
+  snoozedUntil: string | null,
+): Promise<SidebarUndoBatchResult | null> {
+  return dispatchThreadBatch(
+    targets,
+    (threadId) => snoozeCommand(threadId, snoozedUntil),
+    snoozedUntil
+      ? {
+          failure: (threads) => `Could not snooze ${threads}`,
+          notice: bulkNoticeCopy("snooze", "Snoozing", "snoozed"),
+        }
+      : { failure: (threads) => `Could not unsnooze ${threads}` },
+  );
 }
 
 type ArchiveThread = (target: ScopedThreadRef) => Promise<void>;
