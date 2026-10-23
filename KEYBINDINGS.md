@@ -148,7 +148,14 @@ focused control.
 
 <!-- History and navigation commands -->
 
-<!-- View and tab commands -->
+#### Tabs and panes
+
+- `view.close`: close the active workspace tab, else the workspace panel when it shows only its launcher, else the focused split pane. It defaults to `mod+w` outside the terminal; in the focused terminal `mod+w` stays `terminal.close`. When there is nothing to close, the key goes on to the window's Close command (File > Close on macOS, the window menu on Windows and Linux). Holding the key closes one view.
+- `view.reopenClosed`: reopen the most recently closed tab or pane, opening its thread when you have moved on. It defaults to `mod+shift+t` outside the terminal. Each window remembers its last 20 closed tabs and panes until it reloads.
+
+Both defaults live in the app, not on the node, so older apps have no keys for them. A regular
+browser tab keeps `mod+w` and `mod+shift+t` for the browser, so the defaults work in the desktop app
+and in an installed web app; in a browser tab, bind other keys.
 
 #### Scripts
 
