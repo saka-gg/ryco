@@ -4,13 +4,20 @@
  *
  * @module usage/subscriptionLimits
  */
-import type { CliProxyHubSnapshot, ProviderInstanceId, ServerProvider } from "@ryco/contracts";
+import type {
+  CliProxyHubSnapshot,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ServerProvider,
+  ServerProviderRateLimits,
+} from "@ryco/contracts";
 
 import {
+  cliProxyHubIdentity,
   cliProxyProviderLabel,
   cliProxyProviderRank,
-  cliProxyPoolableWindows,
   findCliProxyRouteForInstance,
+  formatCliProxyPlan,
   groupCliProxyAccounts,
   type CliProxyEnvironmentHub,
   type CliProxyHubAccountEntry,
@@ -19,7 +26,6 @@ import {
   clampUsedPercent,
   describeRateLimitWindow,
   isRateLimitSnapshotAvailable,
-  poolLimitWindows,
   type LabelledLimitWindow,
   type PooledLimitWindow,
 } from "./limits.ts";
@@ -35,7 +41,7 @@ export function subscriptionProviderForDriver(driver: string): string {
   return DRIVER_PROVIDERS[driver] ?? driver;
 }
 
-/** A provider instance's reported windows; a window without a duration takes its slot's name. */
+/** An instance's reported windows; one without a valid duration takes its slot's name. */
 export function providerLimitWindows(provider: ServerProvider): LabelledLimitWindow[] {
   const limits = provider.rateLimits;
   if (!limits) return [];
@@ -44,19 +50,24 @@ export function providerLimitWindows(provider: ServerProvider): LabelledLimitWin
     [limits.secondary, "Weekly"],
     [limits.tertiary, "Monthly"],
   ] as const;
-  return slots.flatMap(([window, fallback]) =>
-    window
-      ? [
-          {
-            label:
-              window.windowDurationMins === undefined
-                ? fallback
-                : describeRateLimitWindow(window).label,
-            window,
-          },
-        ]
-      : [],
-  );
+  return slots.flatMap(([window, fallback]) => {
+    if (!window) return [];
+    const { label } = describeRateLimitWindow(window);
+    return [{ label: label === "Window" ? fallback : label, window }];
+  });
+}
+
+/** When the soonest of these windows resets after `nowMs`, in epoch ms; null when none will. */
+export function nextLimitResetAtMs(
+  windows: Iterable<LabelledLimitWindow>,
+  nowMs: number,
+): number | null {
+  let next: number | null = null;
+  for (const { window } of windows) {
+    const reset = (window.resetsAt ?? NaN) * 1000;
+    if (Number.isFinite(reset) && reset > nowMs && (next === null || reset < next)) next = reset;
+  }
+  return next;
 }
 
 /** A connected environment's providers and hubs, as the limits view reads them. */
@@ -68,11 +79,18 @@ export interface SubscriptionLimitsEnvironment {
   readonly hubs: ReadonlyArray<CliProxyHubSnapshot>;
 }
 
+/** One enabled provider instance on one environment. */
 export interface DirectAccountLocation {
   readonly environmentId: string;
   readonly environmentLabel: string;
   readonly instanceId: ProviderInstanceId;
   readonly displayName: string;
+  readonly driver: ProviderDriverKind;
+  /** Whether this instance's limits are live enough for pace (`isRateLimitSnapshotAvailable`). */
+  readonly available: boolean;
+  /** Whether the instance is signed in; reset redemption gates on this, not on `available`. */
+  readonly authenticated: boolean;
+  readonly checkedAt: string;
 }
 
 /** An account provider instances sign in to themselves, counted once across environments. */
@@ -83,6 +101,10 @@ export interface DirectProviderAccount {
   readonly snapshot: ServerProvider;
   readonly available: boolean;
   readonly windows: ReadonlyArray<LabelledLimitWindow>;
+  /** The plan the freshest snapshot names (`Claude Max Subscription`, `Plus`…). */
+  readonly plan: string | undefined;
+  /** Banked resets from the newest read that reported them, which may not be the snapshot's. */
+  readonly resetCredits: ServerProviderRateLimits["resetCredits"];
   /** Every instance signed in to the account, in environment order. */
   readonly locations: ReadonlyArray<DirectAccountLocation>;
 }
@@ -91,6 +113,13 @@ export interface DirectProviderAccount {
 export interface RoutedProviderInstance extends DirectAccountLocation {
   readonly provider: string;
   readonly hubLabel: string;
+}
+
+/** An enabled instance no hub routes that reports no limit windows. */
+export interface LimitlessProviderInstance extends DirectAccountLocation {
+  readonly provider: string;
+  readonly snapshot: ServerProvider;
+  readonly reason: string | undefined;
 }
 
 export type DirectAccountHealth =
@@ -110,18 +139,88 @@ function providerName(provider: ServerProvider): string {
   return provider.displayName ?? provider.instanceId;
 }
 
+interface DirectInstance {
+  readonly provider: ServerProvider;
+  readonly location: DirectAccountLocation;
+  readonly windows: ReadonlyArray<LabelledLimitWindow>;
+}
+
+function emailAccountKey(provider: ServerProvider): string | undefined {
+  const email = provider.auth.email?.toLowerCase();
+  return email ? `${subscriptionProviderForDriver(provider.driver)}\n${email}` : undefined;
+}
+
+function planKey(provider: ServerProvider): string | undefined {
+  return provider.rateLimits?.planType?.toLowerCase();
+}
+
 /**
- * Direct accounts across environments and the instances hubs route instead. Instances signed in
- * to the same email of the same provider are one account; the freshest available snapshot wins.
+ * Keys an instance's account by provider, email and plan, so one email on two plans (a personal
+ * and a team workspace) stays two accounts. A planless snapshot from an older node joins its
+ * email's only known plan, and stays apart when several are known. An instance without an email
+ * is its own account. Keys never contain credentials.
+ */
+function directAccountKeyResolver(
+  instances: ReadonlyArray<DirectInstance>,
+): (instance: DirectInstance) => string {
+  // Every instance counts, read or not, so a plan without windows still makes the email ambiguous.
+  const plansByEmail = new Map<string, Set<string>>();
+  for (const { provider } of instances) {
+    const email = emailAccountKey(provider);
+    const plan = planKey(provider);
+    if (email && plan) plansByEmail.set(email, (plansByEmail.get(email) ?? new Set()).add(plan));
+  }
+  return ({ provider, location }) => {
+    const email = emailAccountKey(provider);
+    const known = email ? plansByEmail.get(email) : undefined;
+    const plan = planKey(provider) ?? (known?.size === 1 ? [...known][0] : undefined);
+    if (email && plan) return `${email}\n${plan}`;
+    if (email && !known) return email;
+    // No email, or a planless snapshot of an email with several plans: never merged.
+    const slug = subscriptionProviderForDriver(provider.driver);
+    return `${slug}\n${location.environmentId}\n${provider.instanceId}`;
+  };
+}
+
+/** Available beats unavailable, then the newer read; an unparsable time counts as older. */
+function isFresher(candidate: DirectAccountLocation, current: DirectAccountLocation): boolean {
+  return (
+    (candidate.available && !current.available) ||
+    (candidate.available === current.available &&
+      Date.parse(candidate.checkedAt) > Date.parse(current.checkedAt))
+  );
+}
+
+/** Banked resets from the newest read that reported them. */
+function newestResetCredits(
+  instances: ReadonlyArray<DirectInstance>,
+): ServerProviderRateLimits["resetCredits"] {
+  let newest: DirectInstance | undefined;
+  for (const instance of instances) {
+    if (instance.provider.rateLimits?.resetCredits === undefined) continue;
+    if (!newest || Date.parse(instance.location.checkedAt) > Date.parse(newest.location.checkedAt))
+      newest = instance;
+  }
+  return newest?.provider.rateLimits?.resetCredits;
+}
+
+/**
+ * Direct accounts across environments, the instances hubs route instead, and the instances that
+ * report no limits. Instances signed in to the same email and plan of the same provider are one
+ * account; the freshest available snapshot wins.
+ *
+ * A hub-routed instance is set aside before any keying: it never supplies windows, never becomes
+ * an account's location and never matches a direct account's email.
  */
 export function listDirectProviderAccounts(
   environments: ReadonlyArray<SubscriptionLimitsEnvironment>,
 ): {
   readonly accounts: DirectProviderAccount[];
   readonly routed: RoutedProviderInstance[];
+  readonly withoutLimits: LimitlessProviderInstance[];
 } {
-  const byKey = new Map<string, DirectProviderAccount>();
   const routed: RoutedProviderInstance[] = [];
+  const direct: DirectInstance[] = [];
   for (const environment of environments) {
     for (const provider of environment.providers) {
       if (!provider.enabled) continue;
@@ -130,6 +229,10 @@ export function listDirectProviderAccounts(
         environmentLabel: environment.label,
         instanceId: provider.instanceId,
         displayName: providerName(provider),
+        driver: provider.driver,
+        available: isRateLimitSnapshotAvailable(provider, environment.connected),
+        authenticated: provider.auth.status === "authenticated",
+        checkedAt: provider.checkedAt,
       };
       const slug = subscriptionProviderForDriver(provider.driver);
       const hub = findCliProxyRouteForInstance(environment.hubs, provider.instanceId);
@@ -137,30 +240,75 @@ export function listDirectProviderAccounts(
         routed.push({ ...location, provider: slug, hubLabel: hub.label });
         continue;
       }
-      const windows = providerLimitWindows(provider);
-      if (windows.length === 0) continue;
-      const email = provider.auth.email?.toLowerCase();
-      const key = email
-        ? `${slug}\n${email}`
-        : `${slug}\n${environment.environmentId}\n${provider.instanceId}`;
-      const available = isRateLimitSnapshotAvailable(provider, environment.connected);
-      const existing = byKey.get(key);
-      const fresher =
-        !existing ||
-        (available && !existing.available) ||
-        (available === existing.available &&
-          Date.parse(provider.checkedAt) > Date.parse(existing.snapshot.checkedAt));
-      byKey.set(key, {
-        key,
-        provider: slug,
-        snapshot: fresher ? provider : existing.snapshot,
-        available: fresher ? available : existing.available,
-        windows: fresher ? windows : existing.windows,
-        locations: [...(existing?.locations ?? []), location],
-      });
+      direct.push({ provider, location, windows: providerLimitWindows(provider) });
     }
   }
-  return { accounts: [...byKey.values()], routed };
+
+  const accountKey = directAccountKeyResolver(direct);
+  const byKey = new Map<string, DirectInstance[]>();
+  const withoutLimits: LimitlessProviderInstance[] = [];
+  for (const instance of direct) {
+    const { provider, location } = instance;
+    if (instance.windows.length === 0) {
+      withoutLimits.push({
+        ...location,
+        provider: subscriptionProviderForDriver(provider.driver),
+        snapshot: provider,
+        reason: provider.unavailableReason ?? provider.message,
+      });
+      continue;
+    }
+    const key = accountKey(instance);
+    byKey.set(key, [...(byKey.get(key) ?? []), instance]);
+  }
+
+  const accounts = [...byKey].map(([key, instances]): DirectProviderAccount => {
+    const winner = instances.reduce((best, next) =>
+      isFresher(next.location, best.location) ? next : best,
+    );
+    const snapshot = winner.provider;
+    return {
+      key,
+      provider: subscriptionProviderForDriver(snapshot.driver),
+      snapshot,
+      available: winner.location.available,
+      windows: winner.windows,
+      plan:
+        snapshot.auth.label ??
+        snapshot.rateLimits?.limitName ??
+        formatCliProxyPlan(snapshot.rateLimits?.planType),
+      resetCredits: newestResetCredits(instances),
+      locations: instances.map(({ location }) => location),
+    };
+  });
+  return { accounts, routed, withoutLimits };
+}
+
+/**
+ * The hubs that also hold each direct account, as `cliProxyHubIdentity` keys by account key: hub
+ * accounts of the same provider with the same email. A hub account named only by its credential
+ * file never matches.
+ */
+export function hubKeysByDirectAccount(
+  accounts: ReadonlyArray<DirectProviderAccount>,
+  hubs: ReadonlyArray<CliProxyEnvironmentHub>,
+): ReadonlyMap<string, readonly string[]> {
+  const hubKeysByEmail = new Map<string, Set<string>>();
+  for (const entry of hubs) {
+    const hubKey = cliProxyHubIdentity(entry);
+    for (const account of entry.hub.accounts) {
+      if (!account.email) continue;
+      const email = `${account.provider}\n${account.email.toLowerCase()}`;
+      hubKeysByEmail.set(email, (hubKeysByEmail.get(email) ?? new Set()).add(hubKey));
+    }
+  }
+  const matches = new Map<string, readonly string[]>();
+  for (const account of accounts) {
+    const email = emailAccountKey(account.snapshot);
+    const hubKeys = email ? hubKeysByEmail.get(email) : undefined;
+    if (hubKeys) matches.set(account.key, [...hubKeys]);
+  }
+  return matches;
 }
 
 export interface SubscriptionLimitGroup {
@@ -169,7 +317,10 @@ export interface SubscriptionLimitGroup {
   readonly directAccounts: ReadonlyArray<DirectProviderAccount>;
   readonly hubAccounts: ReadonlyArray<CliProxyHubAccountEntry>;
   readonly routed: ReadonlyArray<RoutedProviderInstance>;
-  /** Averages over the available direct accounts and the enabled hub accounts together. */
+  /**
+   * Averages over the enabled hub accounts only. Direct accounts are never averaged: different
+   * accounts are not one allowance, and a direct account may be one a hub holds too.
+   */
   readonly pooled: ReadonlyArray<PooledLimitWindow>;
 }
 
@@ -188,7 +339,7 @@ export function groupSubscriptionLimits(input: {
   readonly routed: ReadonlyArray<RoutedProviderInstance>;
 }): SubscriptionLimitGroup[] {
   const hubGroups = new Map(
-    groupCliProxyAccounts(input.hubs).map((group) => [group.provider, group.accounts] as const),
+    groupCliProxyAccounts(input.hubs).map((group) => [group.provider, group] as const),
   );
   // A routed instance only annotates a group; it adds no account of its own.
   const providers = new Set([
@@ -201,7 +352,7 @@ export function groupSubscriptionLimits(input: {
         cliProxyProviderRank(left) - cliProxyProviderRank(right) || left.localeCompare(right),
     )
     .map((provider) => {
-      const hubAccounts = hubGroups.get(provider) ?? [];
+      const hubGroup = hubGroups.get(provider);
       const directAccounts = input.direct
         .filter((account) => account.provider === provider)
         .toSorted((left, right) => accountLabel(left).localeCompare(accountLabel(right)));
@@ -209,14 +360,9 @@ export function groupSubscriptionLimits(input: {
         provider,
         label: cliProxyProviderLabel(provider),
         directAccounts,
-        hubAccounts,
+        hubAccounts: hubGroup?.accounts ?? [],
         routed: input.routed.filter((instance) => instance.provider === provider),
-        pooled: poolLimitWindows([
-          ...directAccounts
-            .filter((account) => account.available)
-            .map((account) => account.windows),
-          ...hubAccounts.map((entry) => cliProxyPoolableWindows(entry.account)),
-        ]),
+        pooled: hubGroup?.pooled ?? [],
       };
     });
 }

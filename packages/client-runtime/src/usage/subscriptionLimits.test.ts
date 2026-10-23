@@ -10,7 +10,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   directAccountHealth,
   groupSubscriptionLimits,
+  hubKeysByDirectAccount,
   listDirectProviderAccounts,
+  nextLimitResetAtMs,
   providerLimitWindows,
 } from "./subscriptionLimits.ts";
 
@@ -45,6 +47,22 @@ function hub(accounts: CliProxyAccount[], routed: ProviderInstanceId[] = []): Cl
   };
 }
 
+function hubAccount(
+  overrides: Partial<CliProxyAccount> & Pick<CliProxyAccount, "authIndex">,
+): CliProxyAccount {
+  return {
+    provider: "claude",
+    name: `${overrides.authIndex}.json`,
+    status: "active",
+    disabled: false,
+    unavailable: false,
+    cooldowns: [],
+    requests: { success: 0, failed: 0, recent: [] },
+    quota: { status: "ok", windows: [] },
+    ...overrides,
+  };
+}
+
 const fiveHour = (usedPercent: number, resetsAt?: number) => ({
   usedPercent,
   windowDurationMins: 300,
@@ -65,6 +83,34 @@ describe("providerLimitWindows", () => {
     );
     expect(windows.map((window) => window.label)).toEqual(["5h", "Weekly", "Monthly"]);
   });
+
+  it("falls back to the slot name for a zero or invalid duration", () => {
+    const windows = providerLimitWindows(
+      provider({
+        instanceId: ProviderInstanceId.make("codex"),
+        rateLimits: {
+          primary: { usedPercent: 10, windowDurationMins: 0 },
+          secondary: { usedPercent: 20, windowDurationMins: Number.NaN },
+        },
+      }),
+    );
+    expect(windows.map((window) => window.label)).toEqual(["Short window", "Weekly"]);
+  });
+});
+
+describe("nextLimitResetAtMs", () => {
+  it("returns the soonest future reset in milliseconds", () => {
+    const windows = [
+      { label: "past", window: fiveHour(10, 1_000) },
+      { label: "later", window: fiveHour(10, 9_000) },
+      { label: "sooner", window: fiveHour(10, 5_000) },
+      { label: "invalid", window: fiveHour(10, Number.NaN) },
+      { label: "none", window: fiveHour(10) },
+    ];
+    expect(nextLimitResetAtMs(windows, 2_000_000)).toBe(5_000_000);
+    expect(nextLimitResetAtMs(windows, 9_000_000)).toBeNull();
+    expect(nextLimitResetAtMs([], 0)).toBeNull();
+  });
 });
 
 describe("listDirectProviderAccounts", () => {
@@ -73,13 +119,13 @@ describe("listDirectProviderAccounts", () => {
     const older = provider({
       instanceId: ProviderInstanceId.make("codex"),
       auth: { status: "authenticated", email },
-      rateLimits: { primary: fiveHour(10) },
+      rateLimits: { planType: "plus", primary: fiveHour(10) },
     });
     const newer = provider({
       instanceId: ProviderInstanceId.make("codex"),
       auth: { status: "authenticated", email: email.toLowerCase() },
       checkedAt: "2026-10-22T10:05:00.000Z",
-      rateLimits: { primary: fiveHour(30) },
+      rateLimits: { planType: "plus", primary: fiveHour(30) },
     });
     const { accounts } = listDirectProviderAccounts([
       { environmentId: "m5", label: "M5", connected: true, providers: [older], hubs: [] },
@@ -87,6 +133,7 @@ describe("listDirectProviderAccounts", () => {
     ]);
     expect(accounts).toHaveLength(1);
     expect(accounts[0]!.snapshot).toBe(newer);
+    expect(accounts[0]!.plan).toBe("Plus");
     expect(accounts[0]!.locations.map((location) => location.environmentLabel)).toEqual([
       "M5",
       "M4",
@@ -106,11 +153,115 @@ describe("listDirectProviderAccounts", () => {
     ]);
     expect(accounts[0]!.snapshot).toBe(live);
     expect(accounts[0]!.available).toBe(true);
+    expect(
+      accounts[0]!.locations.map(({ environmentId, available, authenticated, checkedAt }) => ({
+        environmentId,
+        available,
+        authenticated,
+        checkedAt,
+      })),
+    ).toEqual([
+      {
+        environmentId: "m5",
+        available: true,
+        authenticated: true,
+        checkedAt: "2026-10-22T10:00:00.000Z",
+      },
+      {
+        environmentId: "m4",
+        available: false,
+        authenticated: true,
+        checkedAt: "2026-10-22T11:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("keeps one email on two plans apart and joins a planless snapshot only when unambiguous", () => {
+    const signedIn = (instanceId: string, planType?: string) =>
+      provider({
+        instanceId: ProviderInstanceId.make(instanceId),
+        auth: { status: "authenticated", email: "a@example.com" },
+        rateLimits: { ...(planType ? { planType } : {}), primary: fiveHour(10) },
+      });
+    const keysOf = (providers: ServerProvider[]) =>
+      listDirectProviderAccounts([
+        { environmentId: "m5", label: "M5", connected: true, providers, hubs: [] },
+      ]).accounts.map((account) => account.locations.map((location) => location.instanceId));
+
+    expect(keysOf([signedIn("plus", "plus"), signedIn("team", "Team")])).toEqual([
+      ["plus"],
+      ["team"],
+    ]);
+    expect(keysOf([signedIn("plus", "plus"), signedIn("old")])).toEqual([["plus", "old"]]);
+    expect(keysOf([signedIn("plus", "plus"), signedIn("team", "team"), signedIn("old")])).toEqual([
+      ["plus"],
+      ["team"],
+      ["old"],
+    ]);
+    // A plan reported without windows still makes the email ambiguous.
+    const teamWithoutWindows = provider({
+      instanceId: ProviderInstanceId.make("team"),
+      auth: { status: "authenticated", email: "a@example.com" },
+      rateLimits: { planType: "team", credits: { hasCredits: true, unlimited: false } },
+    });
+    expect(keysOf([signedIn("plus", "plus"), teamWithoutWindows, signedIn("old")])).toEqual([
+      ["plus"],
+      ["old"],
+    ]);
+  });
+
+  it("takes banked resets from the newest read that reported them", () => {
+    const resetCredits = { availableCount: 2 };
+    const reported = provider({
+      instanceId: ProviderInstanceId.make("codex"),
+      auth: { status: "authenticated", email: "a@example.com" },
+      rateLimits: { primary: fiveHour(10), resetCredits },
+    });
+    const newer = provider({
+      instanceId: ProviderInstanceId.make("codex"),
+      auth: { status: "authenticated", email: "a@example.com" },
+      checkedAt: "2026-10-22T10:05:00.000Z",
+      rateLimits: { primary: fiveHour(20) },
+    });
+    const { accounts } = listDirectProviderAccounts([
+      { environmentId: "m5", label: "M5", connected: true, providers: [reported], hubs: [] },
+      { environmentId: "m4", label: "M4", connected: true, providers: [newer], hubs: [] },
+    ]);
+    expect(accounts[0]!.snapshot).toBe(newer);
+    expect(accounts[0]!.resetCredits).toBe(resetCredits);
+  });
+
+  it("never lets a routed instance join a direct account with the same email", () => {
+    const email = "a@example.com";
+    const routedId = ProviderInstanceId.make("claudeAgent");
+    const claude = (instanceId: ProviderInstanceId, usedPercent: number, checkedAt: string) =>
+      provider({
+        instanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        auth: { status: "authenticated", email },
+        checkedAt,
+        rateLimits: { primary: fiveHour(usedPercent) },
+      });
+    const direct = claude(ProviderInstanceId.make("claude-personal"), 10, "2026-10-22T10:00:00Z");
+    const { accounts, routed } = listDirectProviderAccounts([
+      { environmentId: "m5", label: "M5", connected: true, providers: [direct], hubs: [] },
+      {
+        environmentId: "m4",
+        label: "M4",
+        connected: true,
+        providers: [claude(routedId, 99, "2026-10-22T11:00:00Z")],
+        hubs: [hub([], [routedId])],
+      },
+    ]);
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]!.snapshot).toBe(direct);
+    expect(accounts[0]!.locations.map((location) => location.environmentId)).toEqual(["m5"]);
+    expect(routed.map((instance) => instance.environmentId)).toEqual(["m4"]);
   });
 
   it("keeps instances without an email apart and skips routed, disabled and limitless ones", () => {
     const routedId = ProviderInstanceId.make("claudeAgent");
-    const { accounts, routed } = listDirectProviderAccounts([
+    const { accounts, routed, withoutLimits } = listDirectProviderAccounts([
       {
         environmentId: "m5",
         label: "M5",
@@ -135,13 +286,26 @@ describe("listDirectProviderAccounts", () => {
             enabled: false,
             rateLimits: { primary: fiveHour(3) },
           }),
-          provider({ instanceId: ProviderInstanceId.make("none") }),
+          provider({ instanceId: ProviderInstanceId.make("none"), message: "No usage yet" }),
+          provider({
+            instanceId: ProviderInstanceId.make("off-none"),
+            enabled: false,
+          }),
         ],
       },
     ]);
     expect(accounts.map((account) => account.snapshot.instanceId)).toEqual(["a", "b"]);
     expect(routed).toEqual([
       expect.objectContaining({ instanceId: routedId, provider: "claude", hubLabel: "home" }),
+    ]);
+    expect(withoutLimits).toEqual([
+      expect.objectContaining({
+        instanceId: "none",
+        environmentLabel: "M5",
+        provider: "codex",
+        authenticated: true,
+        reason: "No usage yet",
+      }),
     ]);
   });
 });
@@ -151,6 +315,8 @@ describe("directAccountHealth", () => {
     const base = {
       key: "k",
       provider: "codex",
+      plan: undefined,
+      resetCredits: undefined,
       locations: [],
       windows: [{ label: "5h", window: fiveHour(100) }],
     };
@@ -174,7 +340,7 @@ describe("directAccountHealth", () => {
 });
 
 describe("groupSubscriptionLimits", () => {
-  it("pools direct and hub windows of a provider by label", () => {
+  it("groups direct and hub accounts by provider and pools only the hub accounts", () => {
     const routedId = ProviderInstanceId.make("claudeAgent");
     const environment = {
       environmentId: "m5",
@@ -183,20 +349,14 @@ describe("groupSubscriptionLimits", () => {
       hubs: [
         hub(
           [
-            {
+            hubAccount({
               authIndex: "1",
-              provider: "claude",
-              name: "one.json",
-              status: "active",
-              disabled: false,
-              unavailable: false,
-              cooldowns: [],
-              requests: { success: 0, failed: 0, recent: [] },
-              quota: {
-                status: "ok",
-                windows: [{ id: "five_hour", ...fiveHour(20, 2_000) }],
-              },
-            },
+              quota: { status: "ok", windows: [{ id: "five_hour", ...fiveHour(20, 2_000) }] },
+            }),
+            hubAccount({
+              authIndex: "2",
+              quota: { status: "ok", windows: [{ id: "five_hour", ...fiveHour(40, 3_000) }] },
+            }),
           ],
           [routedId],
         ),
@@ -209,7 +369,7 @@ describe("groupSubscriptionLimits", () => {
         provider({
           instanceId: ProviderInstanceId.make("claude-personal"),
           driver: ProviderDriverKind.make("claudeAgent"),
-          rateLimits: { primary: fiveHour(40, 1_000) },
+          rateLimits: { primary: fiveHour(90, 1_000) },
         }),
         provider({
           instanceId: ProviderInstanceId.make("codex"),
@@ -227,8 +387,9 @@ describe("groupSubscriptionLimits", () => {
     expect(groups.map((group) => group.label)).toEqual(["Claude", "Codex"]);
     const claude = groups[0]!;
     expect(claude.directAccounts).toHaveLength(1);
-    expect(claude.hubAccounts).toHaveLength(1);
+    expect(claude.hubAccounts).toHaveLength(2);
     expect(claude.routed).toHaveLength(1);
+    // The direct account's 90% is never averaged in.
     expect(claude.pooled).toEqual([
       {
         id: "5h",
@@ -236,9 +397,48 @@ describe("groupSubscriptionLimits", () => {
         windowDurationMins: 300,
         usedPercent: 30,
         accountCount: 2,
-        nextResetsAt: 1_000,
+        nextResetsAt: 2_000,
       },
     ]);
     expect(groups[1]!.routed).toEqual([]);
+    expect(groups[1]!.pooled).toEqual([]);
+  });
+});
+
+describe("hubKeysByDirectAccount", () => {
+  it("matches a direct account to hub accounts of its provider by email", () => {
+    const { accounts } = listDirectProviderAccounts([
+      {
+        environmentId: "m5",
+        label: "M5",
+        connected: true,
+        hubs: [],
+        providers: [
+          provider({
+            instanceId: ProviderInstanceId.make("claude"),
+            driver: ProviderDriverKind.make("claudeAgent"),
+            auth: { status: "authenticated", email: "Alice@example.com" },
+            rateLimits: { primary: fiveHour(10) },
+          }),
+          provider({
+            instanceId: ProviderInstanceId.make("codex"),
+            auth: { status: "authenticated", email: "alice@example.com" },
+            rateLimits: { primary: fiveHour(10) },
+          }),
+        ],
+      },
+    ]);
+    const matches = hubKeysByDirectAccount(accounts, [
+      {
+        environmentId: "m5",
+        hub: hub([
+          hubAccount({ authIndex: "1", email: "alice@example.com" }),
+          // Named only by its credential file, which never matches.
+          hubAccount({ authIndex: "2", provider: "codex", name: "codex-alice@example.com.json" }),
+        ]),
+      },
+    ]);
+    const claude = accounts.find((account) => account.provider === "claude")!;
+    expect([...matches]).toEqual([[claude.key, ["https://hub.example.com"]]]);
   });
 });

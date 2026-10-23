@@ -331,8 +331,10 @@ describe("LimitsView", () => {
     );
 
     await expect.element(page.getByText("1 direct · 1 via hub")).toBeVisible();
-    // The pool averages the direct 40% and the hub's 20%.
-    await expect.element(page.getByText("70% left")).toBeVisible();
+    // Direct accounts are never averaged, so the lone hub account has no pool row.
+    await expect.element(page.getByText("40% used")).toBeVisible();
+    await expect.element(page.getByText("20% used")).toBeVisible();
+    expect(document.body.textContent).not.toContain("avg of");
     await expect.element(page.getByText("Claude proxied", { exact: true })).toBeVisible();
     expect(document.body.textContent).not.toContain("99% used");
 
