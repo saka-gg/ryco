@@ -8,24 +8,16 @@ import {
   type ModelPickerJumpKeybindingCommand,
   type ThreadJumpKeybindingCommand,
 } from "@ryco/contracts";
+import {
+  matchesKeybindingModifiers,
+  matchesKeybindingShortcut,
+  normalizeShortcutEventKey,
+  type ShortcutEventLike,
+  type ShortcutModifierStateLike,
+} from "@ryco/shared/keybindingMatch";
 import { isMacPlatform } from "./lib/utils";
 
-export interface ShortcutEventLike {
-  type?: string;
-  code?: string;
-  key: string;
-  metaKey: boolean;
-  ctrlKey: boolean;
-  shiftKey: boolean;
-  altKey: boolean;
-}
-
-export interface ShortcutModifierStateLike {
-  metaKey: boolean;
-  ctrlKey: boolean;
-  shiftKey: boolean;
-  altKey: boolean;
-}
+export type { ShortcutEventLike, ShortcutModifierStateLike };
 
 export interface ShortcutMatchContext {
   terminalFocus: boolean;
@@ -55,73 +47,14 @@ const TERMINAL_WORD_FORWARD = "\u001bf";
 const TERMINAL_LINE_START = "\u0001";
 const TERMINAL_LINE_END = "\u0005";
 const TERMINAL_DELETE_TO_LINE_START = "\u0015";
-const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
-  BracketLeft: ["["],
-  BracketRight: ["]"],
-  Backslash: ["\\"],
-  Digit0: ["0"],
-  Digit1: ["1"],
-  Digit2: ["2"],
-  Digit3: ["3"],
-  Digit4: ["4"],
-  Digit5: ["5"],
-  Digit6: ["6"],
-  Digit7: ["7"],
-  Digit8: ["8"],
-  Digit9: ["9"],
-};
-
 const BARE_MODIFIER_KEYS = new Set(["alt", "altgraph", "control", "ctrl", "meta", "os", "shift"]);
-
-function normalizeEventKey(key: string): string {
-  const normalized = key.toLowerCase();
-  if (normalized === "esc") return "escape";
-  return normalized;
-}
-
-const LETTER_EVENT_CODE = /^Key([A-Z])$/;
-const PLAIN_LETTER_KEY = /^[a-z]$/i;
-
-/**
- * macOS Option rewrites the produced character: Option+N is the "Dead" tilde
- * key and Option+P yields "π", so `event.key` never names the letter of an
- * `alt+<letter>` binding. Fall back to the physical key only while Alt is held
- * and the layout did not already produce a plain letter, so every layout that
- * does report letters (Windows/Linux Ctrl+Alt, non-QWERTY) keeps its own key.
- */
-function resolveAltTransformedLetter(event: ShortcutEventLike): string | null {
-  if (!event.altKey || !event.code || PLAIN_LETTER_KEY.test(event.key)) return null;
-  const match = LETTER_EVENT_CODE.exec(event.code);
-  return match?.[1] ? match[1].toLowerCase() : null;
-}
-
-function resolveEventKeys(event: ShortcutEventLike): Set<string> {
-  const keys = new Set([normalizeEventKey(event.key)]);
-  const altLetter = resolveAltTransformedLetter(event);
-  if (altLetter) keys.add(altLetter);
-  const aliases = event.code ? EVENT_CODE_KEY_ALIASES[event.code] : undefined;
-  if (!aliases) return keys;
-
-  for (const alias of aliases) {
-    keys.add(alias);
-  }
-  return keys;
-}
 
 function matchesShortcutModifiers(
   event: ShortcutModifierStateLike,
   shortcut: KeybindingShortcut,
   platform = navigator.platform,
 ): boolean {
-  const useMetaForMod = isMacPlatform(platform);
-  const expectedMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
-  const expectedCtrl = shortcut.ctrlKey || (shortcut.modKey && !useMetaForMod);
-  return (
-    event.metaKey === expectedMeta &&
-    event.ctrlKey === expectedCtrl &&
-    event.shiftKey === shortcut.shiftKey &&
-    event.altKey === shortcut.altKey
-  );
+  return matchesKeybindingModifiers(event, shortcut, isMacPlatform(platform));
 }
 
 function matchesShortcut(
@@ -129,12 +62,11 @@ function matchesShortcut(
   shortcut: KeybindingShortcut,
   platform = navigator.platform,
 ): boolean {
-  if (!matchesShortcutModifiers(event, shortcut, platform)) return false;
-  return resolveEventKeys(event).has(shortcut.key);
+  return matchesKeybindingShortcut(event, shortcut, isMacPlatform(platform));
 }
 
 export function isBareModifierKeyEvent(event: Pick<ShortcutEventLike, "key">): boolean {
-  return BARE_MODIFIER_KEYS.has(normalizeEventKey(event.key));
+  return BARE_MODIFIER_KEYS.has(normalizeShortcutEventKey(event.key));
 }
 
 export function matchesExactShortcut(
@@ -676,7 +608,7 @@ export function terminalDeleteShortcutData(
     return null;
   }
 
-  const key = normalizeEventKey(event.key);
+  const key = normalizeShortcutEventKey(event.key);
   if (key !== "backspace") {
     return null;
   }
@@ -696,7 +628,7 @@ export function terminalNavigationShortcutData(
 
   if (event.shiftKey) return null;
 
-  const key = normalizeEventKey(event.key);
+  const key = normalizeShortcutEventKey(event.key);
   if (key !== "arrowleft" && key !== "arrowright") {
     return null;
   }

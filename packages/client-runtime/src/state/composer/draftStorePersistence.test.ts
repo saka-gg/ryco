@@ -2,7 +2,12 @@ import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
-import { createComposerDraftStore, DraftId, type ComposerDraftImage } from "./draftStore.ts";
+import {
+  createComposerDraftStore,
+  DraftId,
+  hasVerifiedPersistedAttachment,
+  type ComposerDraftImage,
+} from "./draftStore.ts";
 import {
   COMPOSER_DRAFT_INDEX_STORAGE_KEY,
   COMPOSER_DRAFT_STORAGE_KEY,
@@ -279,6 +284,89 @@ describe("composer draft persistence", () => {
       ["present", "blob:x"],
     ]);
     expect(draft.persistedAttachments.map((attachment) => attachment.id)).toEqual(["present"]);
+  });
+
+  it("counts a staged attachment as saved only once storage reads it back", async () => {
+    const { storage, values } = makeStorage();
+    let storedIds: string[] = [];
+    const { useComposerDraftStore } = createComposerDraftStore<ComposerDraftImage>({
+      storage,
+      flushStorage: () => undefined,
+      revokePreviewUrl: () => undefined,
+      hydrateImages: () => [],
+      readPersistedAttachmentIds: () => storedIds,
+    });
+    const image = (id: string): ComposerDraftImage => ({
+      type: "image",
+      id,
+      name: `${id}.png`,
+      mimeType: "image/png",
+      sizeBytes: 4,
+      previewUrl: `blob:${id}`,
+    });
+    const draft = () => useComposerDraftStore.getState().getComposerDraft(threadRef)!;
+    useComposerDraftStore.getState().addImages(threadRef, [image("kept"), image("lost")]);
+    // The write keeps one of the two, e.g. storage filled up.
+    storedIds = ["kept"];
+    useComposerDraftStore
+      .getState()
+      .syncPersistedAttachments(threadRef, [localImage("kept"), localImage("lost")]);
+    expect(hasVerifiedPersistedAttachment(draft(), "kept")).toBe(false);
+
+    await Promise.resolve();
+    expect(hasVerifiedPersistedAttachment(draft(), "kept")).toBe(true);
+    expect(hasVerifiedPersistedAttachment(draft(), "lost")).toBe(false);
+
+    // A draft hydrated from storage holds what storage holds.
+    const hydrated = createComposerDraftStore<ComposerDraftImage>({
+      storage: makeStorage({ initial: Object.fromEntries(values) }).storage,
+      flushStorage: () => undefined,
+      revokePreviewUrl: () => undefined,
+      hydrateImages: () => [],
+      readPersistedAttachmentIds: () => [],
+    });
+    const restored = hydrated.useComposerDraftStore.getState().getComposerDraft(threadRef)!;
+    expect(hasVerifiedPersistedAttachment(restored, "kept")).toBe(true);
+  });
+
+  it("verifies a staged draft under the key it moved to before the read-back", async () => {
+    const { storage } = makeStorage();
+    const draftKey = "draft-before-promotion";
+    const threadKey = scopedThreadKey(threadRef);
+    const readKeys: string[] = [];
+    const { useComposerDraftStore } = createComposerDraftStore<ComposerDraftImage>({
+      storage,
+      flushStorage: () => undefined,
+      revokePreviewUrl: () => undefined,
+      hydrateImages: () => [],
+      readPersistedAttachmentIds: (key) => {
+        readKeys.push(key);
+        return key === threadKey ? ["kept"] : [];
+      },
+    });
+    const draftId = DraftId.make(draftKey);
+    useComposerDraftStore.getState().addImages(draftId, [
+      {
+        type: "image",
+        id: "kept",
+        name: "kept.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+        previewUrl: "blob:kept",
+      },
+    ]);
+    useComposerDraftStore.getState().syncPersistedAttachments(draftId, [localImage("kept")]);
+    // The draft moves to its thread's key (e.g. a promotion) before the read-back runs.
+    useComposerDraftStore.setState((state) => {
+      const { [draftKey]: moved, ...rest } = state.draftsByThreadKey;
+      return { draftsByThreadKey: { ...rest, [threadKey]: moved! } };
+    });
+
+    await Promise.resolve();
+    const draft = useComposerDraftStore.getState().draftsByThreadKey[threadKey]!;
+    expect(readKeys).toEqual([threadKey]);
+    expect(draft.persistedAttachmentsUnverified).toBeUndefined();
+    expect(hasVerifiedPersistedAttachment(draft, "kept")).toBe(true);
   });
 
   it("promotes every draft of materialized threads in one pass", () => {

@@ -478,6 +478,8 @@ export interface ComposerFooterProps {
   onSelectIssue: (issue: SourceControlIssueSummary) => void;
   onSelectChangeRequest: (cr: ChangeRequest) => void;
   onAttachFile: (file: File) => void;
+  /** Present only where the desktop app can capture windows (macOS). */
+  onCaptureWindow?: (windowId: number) => void;
   executionTargets?: ReadonlyArray<ComposerExecutionTarget>;
   selectedExecutionEnvironmentId?: EnvironmentId;
   executionTargetLocked?: boolean;
@@ -607,6 +609,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           onSelectIssue={props.onSelectIssue}
           onSelectChangeRequest={props.onSelectChangeRequest}
           onAttachFile={props.onAttachFile}
+          {...(props.onCaptureWindow ? { onCaptureWindow: props.onCaptureWindow } : {})}
         />
         <ProviderModelPicker
           openOnHover

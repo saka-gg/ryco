@@ -30,6 +30,18 @@ import type {
   ComputerTurnIntent,
 } from "./computerBeta.ts";
 import type {
+  DesktopAppSnapCapture,
+  DesktopAppSnapErrorEvent,
+  DesktopAppSnapPermissionKind,
+  DesktopAppSnapShortcut,
+  DesktopAppSnapWindowEntry,
+} from "./computerPermissions.ts";
+import type {
+  DesktopWindowCapturePendingEntry,
+  DesktopWindowCaptureShortcutResult,
+  DesktopWindowCaptureState,
+} from "./windowCapture.ts";
+import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitReadImageBlobInput,
@@ -803,6 +815,40 @@ export interface DesktopBridge {
     openBrowserSetup(browser: ComputerBrowser): Promise<void>;
     stop(): Promise<void>;
     onState(listener: (state: ComputerUseState) => void): () => void;
+  };
+  /**
+   * Window capture into the composer. Only the macOS desktop app exposes it;
+   * web, hosted and other desktop platforms leave it undefined.
+   */
+  windowCapture?: {
+    /** Current state after a preflight grant check; never raises a macOS prompt. */
+    getState(): Promise<DesktopWindowCaptureState>;
+    /**
+     * Guides the user through the given grants (the picker asks for Screen
+     * Recording alone), or through those the current setup needs.
+     */
+    setup(
+      permissions?: readonly DesktopAppSnapPermissionKind[],
+    ): Promise<DesktopWindowCaptureState>;
+    /**
+     * Saves and arms the global shortcut; null turns it off. One that macOS,
+     * another app or typing uses is reported and not saved.
+     */
+    setShortcut(
+      shortcut: DesktopAppSnapShortcut | null,
+    ): Promise<DesktopWindowCaptureShortcutResult>;
+    listWindows(): Promise<readonly DesktopAppSnapWindowEntry[]>;
+    /** The capture stays pending in the desktop app until it is acknowledged. */
+    captureWindow(windowId: number): Promise<DesktopAppSnapCapture>;
+    /** Captures not yet acknowledged (e.g. taken while no composer was open), without bytes. */
+    listPendingCaptures(): Promise<readonly DesktopWindowCapturePendingEntry[]>;
+    /** One pending capture with its bytes; null once it was acknowledged. */
+    readPendingCapture(captureId: string): Promise<DesktopAppSnapCapture | null>;
+    acknowledgeCapture(captureId: string): Promise<void>;
+    onState(listener: (state: DesktopWindowCaptureState) => void): () => void;
+    /** A capture the global shortcut took; it is pending until acknowledged. */
+    onCaptured(listener: (capture: DesktopAppSnapCapture) => void): () => void;
+    onError(listener: (error: DesktopAppSnapErrorEvent) => void): () => void;
   };
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;

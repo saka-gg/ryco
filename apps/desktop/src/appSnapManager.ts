@@ -460,14 +460,17 @@ export function isPathInsideDirectory(directory: string, candidate: string): boo
 
 function permissionRequiredMessage(permissions: {
   accessibility?: DesktopAppSnapPermission | undefined;
-  inputMonitoring: DesktopAppSnapPermission;
+  /** Omitted when the listener runs without its own keyboard event tap. */
+  inputMonitoring?: DesktopAppSnapPermission | undefined;
   screenRecording: DesktopAppSnapPermission;
 }): string {
   const missing: string[] = [];
   if (permissions.accessibility !== undefined && permissions.accessibility !== "granted") {
     missing.push("Accessibility");
   }
-  if (permissions.inputMonitoring !== "granted") missing.push("Input Monitoring");
+  if (permissions.inputMonitoring !== undefined && permissions.inputMonitoring !== "granted") {
+    missing.push("Input Monitoring");
+  }
   if (permissions.screenRecording !== "granted") missing.push("Screen Recording");
   return `Allow ${missing.join(" and ")} in macOS System Settings, then try again.`;
 }
@@ -567,6 +570,12 @@ export class DesktopAppSnapManager {
   #pendingCapturesLoadPromise: Promise<void> | null = null;
   #captureReadQueue: Promise<void> = Promise.resolve();
   #shortcut: DesktopAppSnapShortcut = DEFAULT_APP_SNAP_SHORTCUT;
+  // Off, the listener serves only explicit requests (window list, picker
+  // captures): no event tap, no reserved accelerator, Screen Recording only.
+  #shortcutEnabled = true;
+  // Whether the running listener installed its own keyboard event tap; only
+  // then does its `ready` line prove Input Monitoring.
+  #watchUsesEventTap = false;
   #registeredAccelerator: string | null = null;
   #pendingWindowRequests = new Map<string, PendingAppSnapRequest<DesktopAppSnapWindowEntry[]>>();
   #pendingCaptureRequests = new Map<string, PendingAppSnapRequest<DesktopAppSnapCapture>>();
@@ -721,6 +730,54 @@ export class DesktopAppSnapManager {
     return { state: this.getState(), availability };
   }
 
+  /**
+   * Arms or disarms the capture shortcut without touching the listener's
+   * request lane. Disarmed, an enabled listener still lists and captures
+   * windows on request, needing only Screen Recording.
+   */
+  async setShortcutEnabled(enabled: boolean): Promise<DesktopAppSnapState> {
+    if (this.#platform !== "macos" || this.#disposed || this.#shortcutEnabled === enabled) {
+      return this.getState();
+    }
+    this.#stopWatchProcess();
+    this.#releaseShortcutReservation();
+    this.#shortcutEnabled = enabled;
+    if (this.#enabled) await this.#reconcileWatchProcess();
+    this.#emitState();
+    return this.getState();
+  }
+
+  /**
+   * Whether the listener runs and can take window requests, with its own
+   * status message. Unlike `getState().status` this ignores a sticky
+   * permission-setup failure, which leaves a running listener working.
+   */
+  listenerState(): { readonly listening: boolean; readonly message: string | null } {
+    return {
+      listening: !this.#disposed && this.#enabled && this.#watchProcess !== null,
+      message: this.#message,
+    };
+  }
+
+  /** Only both-Option-keys detection runs its own event tap and needs Input Monitoring. */
+  #needsEventTap(): boolean {
+    return this.#shortcutEnabled && this.#shortcut.kind === "both-option-keys";
+  }
+
+  #hasListenerPermissions(): boolean {
+    return (
+      this.#screenRecordingPermission === "granted" &&
+      (!this.#needsEventTap() || this.#inputMonitoringPermission === "granted")
+    );
+  }
+
+  #listenerPermissionRequiredMessage(): string {
+    return permissionRequiredMessage({
+      ...(this.#needsEventTap() ? { inputMonitoring: this.#inputMonitoringPermission } : {}),
+      screenRecording: this.#screenRecordingPermission,
+    });
+  }
+
   async requestPermissions(
     permissions?: readonly DesktopAppSnapPermissionKind[],
   ): Promise<DesktopAppSnapState> {
@@ -785,12 +842,21 @@ export class DesktopAppSnapManager {
     return this.getState();
   }
 
-  async listPendingCaptures(): Promise<DesktopAppSnapCapture[]> {
+  /** Pending captures without their bytes, so listing them copies no image. */
+  async listPendingCaptureEntries(): Promise<Omit<DesktopAppSnapCapture, "bytes">[]> {
     await this.#ensurePendingCapturesLoaded();
-    return this.#pendingCaptures.map(({ capture }) => ({
-      ...capture,
-      bytes: new Uint8Array(capture.bytes),
-    }));
+    return this.#pendingCaptures.map(({ capture: { bytes: _bytes, ...entry } }) => entry);
+  }
+
+  /**
+   * One pending capture with its bytes; null once it was acknowledged. The
+   * bytes are the stored ones, not a copy: callers hand them to IPC, whose
+   * structured clone gives the renderer its own, and never write to them.
+   */
+  async readPendingCapture(captureId: string): Promise<DesktopAppSnapCapture | null> {
+    await this.#ensurePendingCapturesLoaded();
+    const record = this.#pendingCaptures.find(({ capture }) => capture.id === captureId);
+    return record ? { ...record.capture } : null;
   }
 
   async acknowledgeCapture(captureId: string): Promise<void> {
@@ -1547,7 +1613,7 @@ export class DesktopAppSnapManager {
       );
       this.#emitCaptureError(
         "pending-capture-overflow",
-        `Synara could retain only the latest ${MAX_PENDING_CAPTURES} AppSnaps while the composer was unavailable. The oldest capture was discarded.`,
+        `Only the latest ${MAX_PENDING_CAPTURES} captures are kept while no composer can take them. The oldest capture was discarded.`,
         discardedRecord.capture.capturedAt,
         false,
       );
@@ -1605,19 +1671,10 @@ export class DesktopAppSnapManager {
       this.#setState("disabled", null);
       return;
     }
-    if (
-      this.#inputMonitoringPermission !== "granted" ||
-      this.#screenRecordingPermission !== "granted"
-    ) {
+    if (!this.#hasListenerPermissions()) {
       this.#stopWatchProcess();
       this.#releaseShortcutReservation();
-      this.#setState(
-        "permission-required",
-        permissionRequiredMessage({
-          inputMonitoring: this.#inputMonitoringPermission,
-          screenRecording: this.#screenRecordingPermission,
-        }),
-      );
+      this.#setState("permission-required", this.#listenerPermissionRequiredMessage());
       return;
     }
     if (!FS.existsSync(this.#options.helperPath)) {
@@ -1626,12 +1683,14 @@ export class DesktopAppSnapManager {
       this.#setState("error", "The AppSnap native helper is missing from this desktop build.");
       return;
     }
-    if (this.#shortcut.kind === "key-chord" && !this.#reserveShortcut(this.#shortcut)) {
+    const chord =
+      this.#shortcutEnabled && this.#shortcut.kind === "key-chord" ? this.#shortcut : null;
+    if (chord && !this.#reserveShortcut(chord)) {
       this.#stopWatchProcess();
       this.#setState("error", "The AppSnap shortcut is already used by macOS or another app.");
       return;
     }
-    if (this.#shortcut.kind === "both-option-keys") this.#releaseShortcutReservation();
+    if (!chord) this.#releaseShortcutReservation();
     if (this.#watchProcess) return;
     try {
       await FS.promises.mkdir(this.#options.captureDirectory, { recursive: true, mode: 0o700 });
@@ -1640,8 +1699,7 @@ export class DesktopAppSnapManager {
         this.#disposed ||
         !this.#enabled ||
         this.#watchProcess ||
-        this.#inputMonitoringPermission !== "granted" ||
-        this.#screenRecordingPermission !== "granted"
+        !this.#hasListenerPermissions()
       ) {
         if (!this.#watchProcess) this.#releaseShortcutReservation();
         return;
@@ -1659,9 +1717,12 @@ export class DesktopAppSnapManager {
   #startWatchProcess(): void {
     this.#intentionalWatchStop = false;
     this.#setState("starting", null);
-    // Key chords are detected by Electron's reserved accelerator; the helper
-    // only captures on demand, driven by "trigger" lines on its stdin.
-    const shortcutArguments = this.#shortcut.kind === "key-chord" ? ["--external-trigger"] : [];
+    // Key chords are detected by Electron's reserved accelerator, and a
+    // disarmed shortcut detects nothing; the helper then only captures on
+    // demand, driven by stdin lines, with no keyboard event tap.
+    const usesEventTap = this.#needsEventTap();
+    const shortcutArguments = usesEventTap ? [] : ["--external-trigger"];
+    this.#watchUsesEventTap = usesEventTap;
     const child = this.#options.spawn(
       this.#options.helperPath,
       [
@@ -1731,7 +1792,7 @@ export class DesktopAppSnapManager {
   }
 
   #handleShortcutTrigger(): void {
-    if (this.#disposed || !this.#enabled) return;
+    if (this.#disposed || !this.#enabled || !this.#shortcutEnabled) return;
     try {
       this.#watchProcess?.stdin?.write("trigger\n");
     } catch {
@@ -2014,9 +2075,10 @@ export class DesktopAppSnapManager {
   #handleWatchMessage(child: AppSnapHelperProcess, message: AppSnapHelperMessage): void {
     if (this.#disposed || this.#watchProcess !== child) return;
     if (message.type === "ready") {
-      // `ready` only proves the event tap installed, i.e. Input Monitoring.
+      // From a tapping listener `ready` proves the event tap installed, i.e.
+      // Input Monitoring; an external-trigger listener reports it at once.
       // Screen Recording state is owned by permission checks and capture errors.
-      this.#inputMonitoringPermission = "granted";
+      if (this.#watchUsesEventTap) this.#inputMonitoringPermission = "granted";
       this.#setState("ready", null);
       return;
     }
@@ -2121,13 +2183,7 @@ export class DesktopAppSnapManager {
     if (isPermissionErrorCode(message.code)) {
       this.#stopWatchProcess();
       this.#releaseShortcutReservation();
-      this.#setState(
-        "permission-required",
-        permissionRequiredMessage({
-          inputMonitoring: this.#inputMonitoringPermission,
-          screenRecording: this.#screenRecordingPermission,
-        }),
-      );
+      this.#setState("permission-required", this.#listenerPermissionRequiredMessage());
     }
     // Benign overlap errors surface as a toast without yanking Synara to the
     // foreground while the user is still working in the captured app.

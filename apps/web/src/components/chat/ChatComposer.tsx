@@ -141,6 +141,11 @@ import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { LazyDelegationDock } from "./chatViewLazySurfaces";
 import { useComposerImageAttachments } from "./useComposerImageAttachments";
 import {
+  captureWindowIntoComposer,
+  registerWindowCaptureSink,
+  type WindowCaptureSink,
+} from "../../windowCapture";
+import {
   ComposerMentionDropHint,
   THREAD_MENTION_DROP_ZONE_PROPS,
   threadMentionDropLabel,
@@ -2250,6 +2255,45 @@ export const ChatComposer = memo(
       [applyPromptReplacement, promptRef],
     );
 
+    // Window captures (macOS desktop) enter this draft through the same
+    // attachment path. The focused pane's composer takes shortcut captures; the
+    // picker in this composer's attachment menu captures into this one.
+    const windowCaptureAttachRef = useRef<WindowCaptureSink["attach"]>(async () => "unavailable");
+    // A layout effect, like the sink registration below and declared before
+    // it: a sink for a new draft never reaches the previous draft's attach.
+    useLayoutEffect(() => {
+      windowCaptureAttachRef.current = async ({ attachmentId, file }) => {
+        if (!activeThreadId) return "unavailable";
+        const attached = await addComposerAttachments([file], { attachmentIds: [attachmentId] });
+        return attached.includes(attachmentId) ? "attached" : "rejected";
+      };
+    }, [activeThreadId, addComposerAttachments]);
+    // Registered while focused even when it cannot take attachments, so a
+    // shortcut capture waits for this chat instead of reaching another pane's.
+    // The sink changes once it can, and registering again delivers it.
+    const canAttachWindowCapture = activeThreadId !== null;
+    const windowCaptureSink = useMemo<WindowCaptureSink>(
+      () => ({
+        target: composerDraftTarget,
+        available: canAttachWindowCapture,
+        attach: (input) => windowCaptureAttachRef.current(input),
+        focus: focusComposer,
+      }),
+      [canAttachWindowCapture, composerDraftTarget, focusComposer],
+    );
+    usePaneEffect(() => registerWindowCaptureSink(windowCaptureSink), [windowCaptureSink]);
+    // Offered only while this composer can take attachments.
+    const canCaptureWindow =
+      canAttachWindowCapture &&
+      typeof window !== "undefined" &&
+      window.desktopBridge?.windowCapture !== undefined;
+    const handleCaptureWindow = useCallback(
+      (windowId: number) => {
+        void captureWindowIntoComposer(windowId, windowCaptureSink);
+      },
+      [windowCaptureSink],
+    );
+
     // A thread dropped on the composer becomes an `@thread:` mention at the
     // caret; the server hands the agent an excerpt of it with the message.
     const insertThreadMention = useCallback(
@@ -3351,6 +3395,7 @@ export const ChatComposer = memo(
                 onAttachFile={(file) => {
                   void addComposerAttachments([file]);
                 }}
+                {...(canCaptureWindow ? { onCaptureWindow: handleCaptureWindow } : {})}
                 executionTargets={props.executionTargets}
                 selectedExecutionEnvironmentId={environmentId}
                 executionTargetLocked={props.executionTargetLocked}

@@ -14,6 +14,7 @@ import * as OS from "node:os";
 import * as Path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DesktopComputerUseRuntime } from "./computerUse/runtime.ts";
+import type { DesktopWindowCapture } from "./windowCapture.ts";
 
 import {
   app,
@@ -21,6 +22,7 @@ import {
   type BrowserWindowConstructorOptions,
   clipboard,
   dialog,
+  globalShortcut,
   ipcMain,
   Menu,
   nativeImage,
@@ -458,6 +460,9 @@ let mainWindow: BrowserWindow | null = null;
 let computerUseRuntime: DesktopComputerUseRuntime | null = null;
 /** Registers the Computer-use and project browser IPC once its stack has loaded. */
 let registerComputerUseStackIpc: ((runtime: DesktopComputerUseRuntime) => void) | null = null;
+let desktopWindowCapture: DesktopWindowCapture | null = null;
+/** Registers composer window capture IPC once its module has loaded (macOS only). */
+let registerWindowCaptureIpc: (() => void) | null = null;
 const desktopAuthorizationBroker = new DesktopAuthorizationCallbackBroker();
 let desktopHostedIdentityCoordinator: DesktopHostedIdentityCoordinator | null = null;
 let desktopHostedIdentityStatus: DesktopHostedIdentityStatus = {
@@ -5217,6 +5222,43 @@ async function startDesktopComputerUse(): Promise<void> {
 }
 
 /**
+ * Loads composer window capture (macOS only) beside the backend start. Arming
+ * a saved shortcut runs in the background; it only preflights macOS grants.
+ */
+async function loadDesktopWindowCapture(): Promise<void> {
+  if (process.platform !== "darwin") return;
+  try {
+    const stack = await import("./windowCapture.ts");
+    const capture = stack.createDesktopWindowCapture({
+      stateDir: STATE_DIR,
+      resourcesDir: app.isPackaged ? process.resourcesPath : Path.join(__dirname, "../resources"),
+      executablePath: app.getPath("exe"),
+      appDisplayName: app.getName(),
+      shortcutRegistry: globalShortcut,
+      openExternal: (url) => void shell.openExternal(url),
+      send: (channel, payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+      },
+      revealWindow: revealOrOpenMainWindow,
+    });
+    desktopWindowCapture = capture;
+    registerWindowCaptureIpc = () =>
+      stack.registerWindowCaptureIpc(ipcMain, capture, () => mainWindow);
+    // A saved combo another app held may be free once the user switches back.
+    app.on("did-become-active", () => capture.retryHeldShortcut());
+    void capture.start().catch((error: unknown) => {
+      writeDesktopLogHeader(
+        `window capture start failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+      );
+    });
+  } catch (error) {
+    writeDesktopLogHeader(
+      `window capture unavailable message=${sanitizeLogValue(formatErrorMessage(error))}`,
+    );
+  }
+}
+
+/**
  * On a version change, drop the renderer's V8 code-cache entries the new
  * version left stale, so entries for chunks of earlier builds stop
  * accumulating. Chunks the update did not change (the byte-stable vendor
@@ -5321,6 +5363,7 @@ async function bootstrap(): Promise<void> {
   // Computer use only feeds the envelope's bridge binding: it runs beside the
   // port selection and the shell environment, and nothing else waits for it.
   const computerUseStart = startDesktopComputerUse();
+  const windowCaptureLoad = loadDesktopWindowCapture();
   const selectedPort = await selectDesktopBackendPort(configuredBackendPort);
   backendPort = selectedPort.port;
   backendPortPersistable = selectedPort.persistable;
@@ -5368,6 +5411,9 @@ async function bootstrap(): Promise<void> {
 
   registerIpcHandlers();
   if (computerUseRuntime) registerComputerUseStackIpc?.(computerUseRuntime);
+  // Loaded beside the backend start; its handlers exist before any window loads.
+  await windowCaptureLoad;
+  registerWindowCaptureIpc?.();
   forwardSystemResumeToRenderers();
   desktopWorkspaceActivity.attachPower(powerMonitor);
   startDesktopKeepAwake();
@@ -5390,6 +5436,7 @@ app.on(
       discardEarlyDesktopBackend();
       shellEnvironmentAbortController.abort();
       computerUseRuntime?.dispose();
+      desktopWindowCapture?.dispose();
       desktopKeepAwake?.dispose();
       updateInstallInFlight = false;
       remoteAppInstaller.dispose();

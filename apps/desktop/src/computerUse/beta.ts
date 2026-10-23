@@ -1,6 +1,5 @@
 import { readComputerAuditHistory } from "@ryco/shared/computerAuditHistory";
 import { ComputerGetAuditHistoryInput } from "@ryco/contracts";
-import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync } from "node:fs";
@@ -19,6 +18,7 @@ import { CuaDriverHost } from "../cuaDriverHost.ts";
 import { ComputerFrameTap } from "../computerFrameTap.ts";
 import { EscapeKillSwitchMonitor } from "../escapeKillSwitchMonitor.ts";
 import { registerComputerDesktopLifecycle } from "../computerDesktopLifecycle.ts";
+import { macPrivacySettingsUrl, resolveMacAppBundle } from "../macAppBundle.ts";
 import { record, textArg } from "./native.ts";
 
 const PERMISSIONS = ["accessibility", "inputMonitoring", "screenRecording"] as const;
@@ -44,33 +44,6 @@ interface Task {
 }
 const taskKey = (task: { threadId: string; turnId: string }) =>
   JSON.stringify([task.threadId, task.turnId]);
-
-const BUNDLE_IDENTIFIER_PATTERN = /<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/;
-
-/**
- * The app bundle's identifier, read from its Info.plist. Bundles are written
- * as XML plists, so this is a file read rather than a PlistBuddy process on the
- * startup path; a binary plist (rare, hand-edited bundles) still uses it.
- */
-export function readBundleIdentifier(
-  infoPlistPath: string,
-  readFile: (path: string) => Buffer = (path) => readFileSync(path),
-): string | null {
-  try {
-    const contents = readFile(infoPlistPath);
-    if (contents.subarray(0, 6).toString("latin1") !== "bplist") {
-      return BUNDLE_IDENTIFIER_PATTERN.exec(contents.toString("utf8"))?.[1]?.trim() || null;
-    }
-    return (
-      execFileSync("/usr/libexec/PlistBuddy", ["-c", "Print:CFBundleIdentifier", infoPlistPath], {
-        encoding: "utf8",
-        timeout: 1000,
-      }).trim() || null
-    );
-  } catch {
-    return null;
-  }
-}
 
 /** Desktop ownership and presentation only. Tool authority remains server-owned. */
 export class DesktopComputerBeta {
@@ -117,13 +90,7 @@ export class DesktopComputerBeta {
     } catch {
       /* Missing or invalid preferences retain disabled defaults. */
     }
-    const executable = app.getPath("exe");
-    const appEnd = executable.indexOf(".app/");
-    const bundlePath = appEnd >= 0 ? executable.slice(0, appEnd + 4) : undefined;
-    let bundleId = "com.laurinfrank.ryco";
-    if (bundlePath && process.platform === "darwin") {
-      bundleId = readBundleIdentifier(join(bundlePath, "Contents", "Info.plist")) ?? bundleId;
-    }
+    const { bundlePath, bundleId } = resolveMacAppBundle(app.getPath("exe"), process.platform);
     const helperPath = join(options.resourcesDir, "ryco-computer-ui-helper");
     this.permissions = new DesktopAppSnapManager({
       platform: process.platform,
@@ -139,14 +106,7 @@ export class DesktopComputerBeta {
         this.publishState();
       },
       openSettingsPane: (pane) => {
-        const suffix = {
-          accessibility: "Accessibility",
-          "input-monitoring": "ListenEvent",
-          "screen-recording": "ScreenCapture",
-        }[pane];
-        void shell.openExternal(
-          `x-apple.systempreferences:com.apple.preference.security?Privacy_${suffix}`,
-        );
+        void shell.openExternal(macPrivacySettingsUrl(pane));
       },
     });
     this.tap = new ComputerFrameTap({

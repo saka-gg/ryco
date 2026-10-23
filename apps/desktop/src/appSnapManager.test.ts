@@ -396,11 +396,11 @@ describe("AppSnap shortcut availability", () => {
       onCaptured: vi.fn(),
       onError: vi.fn(),
     });
-    const shortcut = { kind: "key-chord", modifier: "option", key: "KeyS" } as const;
+    const shortcut = { kind: "key-chord", modifier: "control", key: "KeyG" } as const;
 
     expect(manager.checkShortcut(shortcut)).toEqual({ available: true, reason: null });
-    expect(register).toHaveBeenCalledWith("Alt+S", expect.any(Function));
-    expect(unregister).toHaveBeenCalledWith("Alt+S");
+    expect(register).toHaveBeenCalledWith("Control+G", expect.any(Function));
+    expect(unregister).toHaveBeenCalledWith("Control+G");
 
     const result = await manager.setShortcut(shortcut);
     expect(result.availability).toEqual({ available: true, reason: null });
@@ -419,7 +419,7 @@ describe("AppSnap shortcut availability", () => {
       onError: vi.fn(),
     });
 
-    expect(manager.checkShortcut({ kind: "key-chord", modifier: "option", key: "KeyS" })).toEqual({
+    expect(manager.checkShortcut({ kind: "key-chord", modifier: "control", key: "KeyG" })).toEqual({
       available: false,
       reason: "macOS or another app is already using this shortcut.",
     });
@@ -492,6 +492,123 @@ describe("AppSnap shortcut availability", () => {
     await manager.setEnabled(false);
     expect(unregister).toHaveBeenLastCalledWith("Alt+S");
     manager.dispose();
+  });
+});
+
+describe("AppSnap listener without an armed shortcut", () => {
+  function fixture() {
+    const children: FakeChildProcess[] = [];
+    const spawn = vi.fn(() => {
+      const child = createFakeChildProcess();
+      children.push(child);
+      return child;
+    });
+    const register = vi.fn((_accelerator: string, _callback: () => void) => true);
+    const unregister = vi.fn();
+    const manager = new DesktopAppSnapManager({
+      platform: "darwin",
+      helperPath: process.execPath,
+      captureDirectory: "/tmp/ryco-window-capture-test",
+      excludedBundleId: SYNARA_DEVELOPMENT_BUNDLE_ID,
+      spawn: spawn as unknown as typeof ChildProcess.spawn,
+      shortcutRegistry: { register, unregister },
+      onState: vi.fn(),
+      onCaptured: vi.fn(),
+      onError: vi.fn(),
+    });
+    function replyPermissions(index: number, permissions: Record<string, string>) {
+      const child = children[index]!;
+      child.stdout.end(`${JSON.stringify({ type: "permissions", ...permissions })}\n`);
+      child.stderr.end();
+      child.emit("close", 0, null);
+    }
+    async function enable(permissions: Record<string, string>) {
+      const enabling = manager.setEnabled(true);
+      await flushPromises();
+      replyPermissions(children.length - 1, permissions);
+      return enabling;
+    }
+    return { manager, children, spawn, register, unregister, enable };
+  }
+
+  it("serves picker requests with only Screen Recording and no event tap or accelerator", async () => {
+    const f = fixture();
+    try {
+      await f.manager.setShortcut({ kind: "key-chord", modifier: "option", key: "KeyS" });
+      await f.manager.setShortcutEnabled(false);
+      f.register.mockClear();
+      await f.enable({ inputMonitoring: "denied", screenRecording: "granted" });
+
+      expect(f.spawn).toHaveBeenLastCalledWith(
+        process.execPath,
+        expect.arrayContaining(["--watch", "--external-trigger"]),
+        expect.any(Object),
+      );
+      expect(f.register).not.toHaveBeenCalled();
+      const watchChild = f.children.at(-1)!;
+      watchChild.stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
+      // An external-trigger listener reports ready at once; it proves nothing
+      // about Input Monitoring.
+      expect(f.manager.getState()).toMatchObject({
+        status: "ready",
+        inputMonitoringPermission: "denied",
+      });
+
+      const listing = f.manager.listWindows();
+      await flushPromises();
+      const requestId = watchChild.stdin.read()?.toString().trimEnd().slice("list-windows ".length);
+      watchChild.stdout.write(`${JSON.stringify({ type: "windows", requestId, windows: [] })}\n`);
+      expect(await listing).toEqual([]);
+    } finally {
+      f.manager.dispose();
+    }
+  });
+
+  it("requires Input Monitoring only while the both-Option-keys shortcut is armed", async () => {
+    const f = fixture();
+    try {
+      const state = await f.enable({ inputMonitoring: "denied", screenRecording: "granted" });
+      expect(state).toMatchObject({
+        status: "permission-required",
+        message: "Allow Input Monitoring in macOS System Settings, then try again.",
+      });
+      expect(f.manager.listenerState()).toEqual({
+        listening: false,
+        message: "Allow Input Monitoring in macOS System Settings, then try again.",
+      });
+      expect(f.spawn).toHaveBeenCalledTimes(1);
+
+      // Disarming the shortcut leaves a listener that needs no event tap.
+      const disarmed = await f.manager.setShortcutEnabled(false);
+      expect(disarmed.status).toBe("starting");
+      expect(f.manager.listenerState().listening).toBe(true);
+      expect(f.spawn).toHaveBeenCalledTimes(2);
+      expect(f.spawn.mock.calls[1]).toEqual([
+        process.execPath,
+        expect.arrayContaining(["--external-trigger"]),
+        expect.any(Object),
+      ]);
+
+      // Arming again restarts the listener and asks for the missing grant.
+      const armed = await f.manager.setShortcutEnabled(true);
+      expect(f.children[1]!.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(armed.status).toBe("permission-required");
+    } finally {
+      f.manager.dispose();
+    }
+  });
+
+  it("reserves a key chord without Input Monitoring", async () => {
+    const f = fixture();
+    try {
+      await f.manager.setShortcut({ kind: "key-chord", modifier: "control", key: "KeyG" });
+      f.register.mockClear();
+      const state = await f.enable({ inputMonitoring: "denied", screenRecording: "granted" });
+      expect(state.status).toBe("starting");
+      expect(f.register).toHaveBeenCalledWith("Control+G", expect.any(Function));
+    } finally {
+      f.manager.dispose();
+    }
   });
 });
 
@@ -917,7 +1034,7 @@ describe("AppSnap helper protocol", () => {
       await vi.waitFor(() => {
         expect(onCaptured).toHaveBeenCalledTimes(PROVIDER_SEND_TURN_MAX_ATTACHMENTS + 1);
       });
-      const pendingCaptures = await manager.listPendingCaptures();
+      const pendingCaptures = await manager.listPendingCaptureEntries();
       expect(pendingCaptures).toHaveLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
       expect(pendingCaptures[0]?.id).toBe("capture-1");
       expect(onError).toHaveBeenCalledWith(
@@ -1055,7 +1172,7 @@ describe("AppSnap helper protocol", () => {
       watchChild.stdout.write(`${capturedMessage}\n`);
       await vi.waitFor(() => expect(onCaptured).toHaveBeenCalledTimes(1));
       expect(FS.existsSync(capturePath)).toBe(false);
-      expect(await manager.listPendingCaptures()).toHaveLength(1);
+      expect(await manager.listPendingCaptureEntries()).toHaveLength(1);
     } finally {
       rename.mockRestore();
       manager.dispose();
@@ -1124,7 +1241,7 @@ describe("AppSnap helper protocol", () => {
         onCaptured: vi.fn(),
         onError: vi.fn(),
       });
-      const restored = await restoredManager.listPendingCaptures();
+      const restored = await restoredManager.listPendingCaptureEntries();
       expect(restored).toHaveLength(1);
       expect(restored[0]).toMatchObject({
         id: "capture-restart",
@@ -1133,10 +1250,11 @@ describe("AppSnap helper protocol", () => {
         sourceBundleIdentifier: "com.apple.Safari",
         sourceWindowTitle: "Synara",
       });
-      expect(Buffer.from(restored[0]!.bytes)).toEqual(captureBytes);
+      const restoredBytes = (await restoredManager.readPendingCapture("capture-restart"))?.bytes;
+      expect(Buffer.from(restoredBytes!)).toEqual(captureBytes);
 
       await restoredManager.acknowledgeCapture("capture-restart");
-      expect(await restoredManager.listPendingCaptures()).toEqual([]);
+      expect(await restoredManager.listPendingCaptureEntries()).toEqual([]);
       restoredManager.dispose();
 
       const finalManager = new DesktopAppSnapManager({
@@ -1148,7 +1266,7 @@ describe("AppSnap helper protocol", () => {
         onCaptured: vi.fn(),
         onError: vi.fn(),
       });
-      expect(await finalManager.listPendingCaptures()).toEqual([]);
+      expect(await finalManager.listPendingCaptureEntries()).toEqual([]);
       finalManager.dispose();
     } finally {
       firstManager.dispose();
@@ -1175,7 +1293,7 @@ describe("AppSnap helper protocol", () => {
     });
 
     try {
-      const recovered = await manager.listPendingCaptures();
+      const recovered = await manager.listPendingCaptureEntries();
       expect(recovered).toHaveLength(1);
       expect(recovered[0]).toMatchObject({
         id: captureId,
@@ -1183,7 +1301,9 @@ describe("AppSnap helper protocol", () => {
         name: `appsnap-${captureId}.png`,
         sourceAppName: null,
       });
-      expect(Buffer.from(recovered[0]!.bytes)).toEqual(captureBytes);
+      expect(Buffer.from((await manager.readPendingCapture(captureId))!.bytes)).toEqual(
+        captureBytes,
+      );
       expect(FS.existsSync(helperPath)).toBe(false);
       manager.dispose();
 
@@ -1197,7 +1317,7 @@ describe("AppSnap helper protocol", () => {
         onError: vi.fn(),
         now,
       });
-      expect(await restartedManager.listPendingCaptures()).toHaveLength(1);
+      expect(await restartedManager.listPendingCaptureEntries()).toHaveLength(1);
       restartedManager.dispose();
     } finally {
       manager.dispose();
@@ -1344,9 +1464,18 @@ describe("AppSnap window picker requests", () => {
       expect(capture).toMatchObject({ id: requestId, name: "req-capture.png" });
       // The durable capture resolves before asynchronous helper-file cleanup.
       await expect.poll(() => FS.existsSync(capturePath)).toBe(false);
-      expect(await manager.listPendingCaptures()).toHaveLength(1);
+      // Listing entries copies no image; bytes are read one capture at a time.
+      const entries = await manager.listPendingCaptureEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ id: requestId, sourceAppName: "Safari" });
+      expect(entries[0]).not.toHaveProperty("bytes");
+      const read = await manager.readPendingCapture(requestId);
+      expect(read?.bytes).toEqual(new Uint8Array(captureBytes));
+      // The stored bytes go out as they are; IPC copies them for the renderer.
+      expect((await manager.readPendingCapture(requestId))?.bytes).toBe(read?.bytes);
       await manager.acknowledgeCapture(capture.id);
-      expect(await manager.listPendingCaptures()).toHaveLength(0);
+      expect(await manager.listPendingCaptureEntries()).toHaveLength(0);
+      expect(await manager.readPendingCapture(requestId)).toBeNull();
     } finally {
       dispose();
     }
@@ -1404,7 +1533,7 @@ describe("AppSnap window picker requests", () => {
         await flushPromises();
         expect(onCaptured).not.toHaveBeenCalled();
         expect(onError).not.toHaveBeenCalled();
-        expect(await manager.listPendingCaptures()).toHaveLength(0);
+        expect(await manager.listPendingCaptureEntries()).toHaveLength(0);
       } finally {
         dispose();
       }
@@ -1463,7 +1592,7 @@ describe("AppSnap window picker requests", () => {
       });
 
       expect(onCaptured).not.toHaveBeenCalled();
-      expect(await manager.listPendingCaptures()).toHaveLength(0);
+      expect(await manager.listPendingCaptureEntries()).toHaveLength(0);
       expect(FS.existsSync(capturePath)).toBe(false);
     } finally {
       releaseRename();
@@ -1501,7 +1630,7 @@ describe("AppSnap window picker requests", () => {
         onCaptured: vi.fn(),
         onError: vi.fn(),
       });
-      expect(await restoredManager.listPendingCaptures()).toHaveLength(0);
+      expect(await restoredManager.listPendingCaptureEntries()).toHaveLength(0);
       expect(FS.existsSync(orphanedPickerPath)).toBe(false);
       restoredManager.dispose();
     } finally {
@@ -1571,17 +1700,19 @@ describe("AppSnap window picker requests", () => {
         onCaptured: vi.fn(),
         onError: vi.fn(),
       });
-      const restored = await restoredManager.listPendingCaptures();
+      const restored = await restoredManager.listPendingCaptureEntries();
       expect(restored).toHaveLength(1);
       expect(restored[0]).toMatchObject({
         id: requestId,
         name: "req-capture.png",
         sourceAppName: "Safari",
       });
-      expect(Buffer.from(restored[0]!.bytes)).toEqual(captureBytes);
+      expect(Buffer.from((await restoredManager.readPendingCapture(requestId))!.bytes)).toEqual(
+        captureBytes,
+      );
 
       await restoredManager.acknowledgeCapture(capture.id);
-      expect(await restoredManager.listPendingCaptures()).toHaveLength(0);
+      expect(await restoredManager.listPendingCaptureEntries()).toHaveLength(0);
       restoredManager.dispose();
 
       const finalManager = new DesktopAppSnapManager({
@@ -1594,7 +1725,7 @@ describe("AppSnap window picker requests", () => {
         onCaptured: vi.fn(),
         onError: vi.fn(),
       });
-      expect(await finalManager.listPendingCaptures()).toHaveLength(0);
+      expect(await finalManager.listPendingCaptureEntries()).toHaveLength(0);
       finalManager.dispose();
     } finally {
       firstManager.dispose();

@@ -69,7 +69,8 @@ vi.mock("../cuaDriverHost.ts", () => ({
     resumeDesktop() {}
   },
 }));
-import { DesktopComputerBeta, readBundleIdentifier } from "./beta.ts";
+import { DesktopComputerBeta } from "./beta.ts";
+import { readBundleIdentifier } from "../macAppBundle.ts";
 let directory: string | undefined;
 let beta: DesktopComputerBeta | undefined;
 afterEach(async () => {

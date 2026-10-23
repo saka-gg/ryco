@@ -84,15 +84,19 @@ async function readFileAsBase64(file: File): Promise<string> {
 }
 
 /**
- * A composer entry for a file the user attached: a fresh id, and a blob
- * preview for images. Non-image files stream through the upload queue
- * (`enqueueComposerFileUpload`) where the machine supports it.
+ * A composer entry for a file the user attached: a fresh id unless the caller
+ * brings one, and a blob preview for images. Non-image files stream through
+ * the upload queue (`enqueueComposerFileUpload`) where the machine supports it.
  */
-export function composerAttachmentFromFile(file: File, name: string): ComposerImageAttachment {
+export function composerAttachmentFromFile(
+  file: File,
+  name: string,
+  id: string = randomUUID(),
+): ComposerImageAttachment {
   const isImage = file.type.startsWith("image/");
   return {
     type: isImage ? "image" : "file",
-    id: randomUUID(),
+    id,
     name,
     mimeType: file.type || "application/octet-stream",
     sizeBytes: file.size,
@@ -222,9 +226,22 @@ export interface UseComposerImageAttachmentsParams {
   focusComposer: () => void;
 }
 
+export interface ComposerAttachmentOptions {
+  /**
+   * Ids for the attachments, by file index; others get a fresh id. A caller
+   * that may deliver the same content twice (window captures) uses a stable
+   * id to recognize it in the draft.
+   */
+  readonly attachmentIds?: ReadonlyArray<string | undefined>;
+}
+
 export interface UseComposerImageAttachmentsResult {
   isDragOverComposer: boolean;
-  addComposerAttachments: (files: File[]) => Promise<void>;
+  /** Resolves with the ids of the files attached directly; references are not counted. */
+  addComposerAttachments: (
+    files: File[],
+    options?: ComposerAttachmentOptions,
+  ) => Promise<readonly string[]>;
   removeComposerImage: (imageId: string) => void;
   retryComposerFileUpload: (imageId: string) => void;
   onComposerPaste: (event: React.ClipboardEvent<HTMLElement>) => void;
@@ -332,9 +349,12 @@ export function useComposerImageAttachments(
   );
 
   const addPlannedComposerAttachments = useCallback(
-    (planned: ReadonlyArray<PlannedComposerAttachment>) => {
+    (
+      planned: ReadonlyArray<PlannedComposerAttachment>,
+      attachmentIdFor?: (file: File) => string | undefined,
+    ): string[] => {
       const nextImages = planned.map(({ file, name, streamsUpload }) => {
-        const attachment = composerAttachmentFromFile(file, name);
+        const attachment = composerAttachmentFromFile(file, name, attachmentIdFor?.(file));
         if (streamsUpload) {
           enqueueFileUpload(file, attachment.id);
         }
@@ -345,19 +365,20 @@ export function useComposerImageAttachments(
       } else if (nextImages.length > 1) {
         addComposerImagesToDraft(nextImages);
       }
+      return nextImages.map((image) => image.id);
     },
     [addComposerImage, addComposerImagesToDraft, enqueueFileUpload],
   );
 
   const addDirectComposerAttachments = useCallback(
-    (files: File[]) => {
-      if (!activeThreadId || files.length === 0) return;
+    (files: File[], attachmentIds?: ReadonlyArray<string | undefined>): string[] => {
+      if (!activeThreadId || files.length === 0) return [];
       if (pendingUserInputCount > 0) {
         toastManager.add({
           type: "error",
           title: "Attach files after answering plan questions.",
         });
-        return;
+        return [];
       }
       const plan = planDirectComposerAttachments({
         files,
@@ -365,8 +386,12 @@ export function useComposerImageAttachments(
         fileUploadMaxBytes,
         streamFiles: true,
       });
-      addPlannedComposerAttachments(plan.accepted);
+      const attached = addPlannedComposerAttachments(
+        plan.accepted,
+        attachmentIds && ((file) => attachmentIds[files.indexOf(file)]),
+      );
       setThreadError(activeThreadId, plan.error);
+      return attached;
     },
     [
       activeThreadId,
@@ -481,8 +506,8 @@ export function useComposerImageAttachments(
   );
 
   const addComposerAttachments = useCallback(
-    async (files: File[]) => {
-      if (files.length === 0) return;
+    async (files: File[], options?: ComposerAttachmentOptions): Promise<readonly string[]> => {
+      if (files.length === 0) return [];
 
       const { direct, references } = resolveComposerAttachmentRouting({
         fileUploadMaxBytes,
@@ -490,12 +515,17 @@ export function useComposerImageAttachments(
         files,
       });
 
-      if (direct.length > 0) {
-        addDirectComposerAttachments(direct);
-      }
+      const attached =
+        direct.length > 0
+          ? addDirectComposerAttachments(
+              direct,
+              options?.attachmentIds &&
+                direct.map((file) => options.attachmentIds?.[files.indexOf(file)]),
+            )
+          : [];
 
       if (references.length === 0) {
-        return;
+        return attached;
       }
 
       const fileReferences = (
@@ -507,6 +537,7 @@ export function useComposerImageAttachments(
         )
       ).filter((reference): reference is string => reference !== null);
       insertComposerFileReferences(fileReferences);
+      return attached;
     },
     [
       addDirectComposerAttachments,
