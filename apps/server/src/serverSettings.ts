@@ -836,66 +836,74 @@ export const makeServerSettings = Effect.gen(function* () {
     );
 
   /**
+   * The secret store changes of one settings update, staged around its settings.json write. A
+   * key is stored at once, and `restore` puts back the value it replaced (or removes it) if the
+   * update fails before that write completes. Keys are only removed by `removeStale`, once the
+   * written file no longer refers to them: a leftover key is harmless, a missing one loses a
+   * saved secret.
+   */
+  const makeSecretChanges = () => {
+    const replaced: Array<{ readonly name: string; readonly previous: Uint8Array | null }> = [];
+    const stale = new Set<string>();
+    return {
+      store: (name: string, value: Uint8Array) =>
+        Effect.gen(function* () {
+          const previous = yield* secretStore.get(name);
+          // Recorded first: a write that fails may already have replaced the key.
+          replaced.push({ name, previous });
+          yield* secretStore.set(name, value);
+        }),
+      removeAfterWrite: (name: string) => {
+        stale.add(name);
+      },
+      restore: Effect.suspend(() =>
+        Effect.forEach(
+          replaced.toReversed(),
+          ({ name, previous }) =>
+            (previous ? secretStore.set(name, previous) : secretStore.remove(name)).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("failed to restore a settings secret", { name, cause }),
+              ),
+            ),
+          { discard: true },
+        ),
+      ),
+      removeStale: Effect.suspend(() =>
+        Effect.forEach(
+          stale,
+          (name) =>
+            secretStore
+              .remove(name)
+              .pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("failed to remove an unused settings secret", { name, cause }),
+                ),
+              ),
+          { discard: true },
+        ),
+      ),
+    };
+  };
+  type SecretChanges = ReturnType<typeof makeSecretChanges>;
+
+  /**
    * Same contract as sensitive environment variables: a redacted entry keeps the stored key, a
-   * submitted value replaces it, and an empty unredacted value removes it.
-   *
-   * New keys are stored before settings.json is written, and `restore` puts back the keys they
-   * replaced if that write fails. Keys are only removed by `removeStale`, once the written file
-   * no longer refers to them: a leftover key is harmless, a missing one loses the hub's key.
+   * submitted value replaces it, and an empty unredacted value removes it. Keys are stored and
+   * removed through `secrets` (see {@link makeSecretChanges}).
    */
   const persistCliProxyHubSecrets = (
     current: ServerSettings,
     next: ServerSettings,
-  ): Effect.Effect<
-    {
-      readonly settings: ServerSettings;
-      readonly restore: Effect.Effect<void>;
-      readonly removeStale: Effect.Effect<void>;
-    },
-    ServerSettingsError
-  > => {
-    const replaced: Array<{ readonly name: string; readonly previous: Uint8Array | null }> = [];
-    const stale: Array<{ readonly hubId: string; readonly name: string }> = [];
-    const restore = Effect.suspend(() =>
-      Effect.forEach(
-        replaced.toReversed(),
-        ({ name, previous }) =>
-          (previous ? secretStore.set(name, previous) : secretStore.remove(name)).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("failed to restore a CLIProxyAPI hub secret", {
-                name,
-                cause,
-              }),
-            ),
-          ),
-        { discard: true },
-      ),
-    );
-    const removeStale = Effect.suspend(() =>
-      Effect.forEach(
-        stale,
-        ({ hubId, name }) =>
-          secretStore.remove(name).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("failed to remove an unused CLIProxyAPI hub secret", {
-                hubId,
-                cause,
-              }),
-            ),
-          ),
-        { discard: true },
-      ),
-    );
+    secrets: SecretChanges,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> => {
     const storeKey = (hubId: string, name: string, label: string, value: string) =>
-      Effect.gen(function* () {
-        const previous = yield* secretStore.get(name);
-        yield* secretStore.set(name, textEncoder.encode(value));
-        replaced.push({ name, previous });
-      }).pipe(
-        Effect.mapError((cause) =>
-          toSettingsError(`failed to persist the ${label} of hub ${hubId}`, cause),
-        ),
-      );
+      secrets
+        .store(name, textEncoder.encode(value))
+        .pipe(
+          Effect.mapError((cause) =>
+            toSettingsError(`failed to persist the ${label} of hub ${hubId}`, cause),
+          ),
+        );
     return Effect.gen(function* () {
       const cliProxyHubs: Record<string, CliProxyHubConfig> = {};
       for (const [hubId, entry] of Object.entries(next.cliProxyHubs)) {
@@ -959,7 +967,7 @@ export const makeServerSettings = Effect.gen(function* () {
             if (plaintext) yield* storeKey(hubId, secretName, field.label, plaintext);
             hub[field.value] = "";
           } else {
-            stale.push({ hubId, name: secretName });
+            secrets.removeAfterWrite(secretName);
             delete hub[field.redacted];
             if (hub[field.value] !== undefined) hub[field.value] = "";
           }
@@ -969,27 +977,27 @@ export const makeServerSettings = Effect.gen(function* () {
       for (const hubId of Object.keys(current.cliProxyHubs)) {
         if (Object.hasOwn(next.cliProxyHubs, hubId)) continue;
         for (const field of CLI_PROXY_HUB_SECRETS) {
-          stale.push({ hubId, name: cliProxyHubSecretName(hubId, field.suffix) });
+          secrets.removeAfterWrite(cliProxyHubSecretName(hubId, field.suffix));
         }
       }
-      return {
-        settings: { ...next, cliProxyHubs: cliProxyHubs as ServerSettings["cliProxyHubs"] },
-        restore,
-        removeStale,
-      };
-    }).pipe(Effect.onError(() => restore));
+      return { ...next, cliProxyHubs: cliProxyHubs as ServerSettings["cliProxyHubs"] };
+    });
   };
 
+  /** Stores and removes sensitive environment variables' keys through `secrets`. */
   const persistProviderEnvironmentSecrets = (
     current: ServerSettings,
     next: ServerSettings,
+    secrets: SecretChanges,
   ): Effect.Effect<ServerSettings, ServerSettingsError> =>
     Effect.gen(function* () {
       const providerInstances: Record<string, ProviderInstanceConfig> = {
         ...next.providerInstances,
       };
 
-      const nextSecretKeys = new Set<string>();
+      // Keys the written settings refer to (stored, or kept redacted) and keys they may not.
+      const referenced = new Set<string>();
+      const unreferenced = new Set<string>();
       for (const [instanceId, instance] of Object.entries(next.providerInstances)) {
         if (!instance.environment) continue;
         const environment: ProviderInstanceEnvironmentVariable[] = [];
@@ -999,42 +1007,31 @@ export const makeServerSettings = Effect.gen(function* () {
             name: variable.name,
           });
           if (!variable.sensitive) {
-            yield* secretStore
-              .remove(secretName)
-              .pipe(
-                Effect.mapError((cause) =>
-                  toSettingsError(`failed to remove environment secret ${variable.name}`, cause),
-                ),
-              );
+            unreferenced.add(secretName);
             environment.push(redactProviderEnvironmentVariable(variable));
             continue;
           }
 
-          nextSecretKeys.add(secretName);
           if (!variable.valueRedacted) {
             if (variable.value.length > 0) {
-              yield* secretStore
-                .set(secretName, textEncoder.encode(variable.value))
+              yield* secrets
+                .store(secretName, textEncoder.encode(variable.value))
                 .pipe(
                   Effect.mapError((cause) =>
                     toSettingsError(`failed to persist environment secret ${variable.name}`, cause),
                   ),
                 );
+              referenced.add(secretName);
               environment.push({ ...variable, value: "", valueRedacted: true });
             } else {
-              yield* secretStore
-                .remove(secretName)
-                .pipe(
-                  Effect.mapError((cause) =>
-                    toSettingsError(`failed to remove environment secret ${variable.name}`, cause),
-                  ),
-                );
+              unreferenced.add(secretName);
               const { valueRedacted: _omit, ...rest } = variable;
               environment.push(rest);
             }
             continue;
           }
 
+          referenced.add(secretName);
           environment.push(redactProviderEnvironmentVariable(variable));
         }
         providerInstances[instanceId] = {
@@ -1046,22 +1043,11 @@ export const makeServerSettings = Effect.gen(function* () {
       for (const [instanceId, instance] of Object.entries(current.providerInstances)) {
         for (const variable of instance.environment ?? []) {
           if (!variable.sensitive) continue;
-          const secretName = providerEnvironmentSecretName({
-            instanceId,
-            name: variable.name,
-          });
-          if (nextSecretKeys.has(secretName)) continue;
-          yield* secretStore
-            .remove(secretName)
-            .pipe(
-              Effect.mapError((cause) =>
-                toSettingsError(
-                  `failed to remove stale environment secret ${variable.name}`,
-                  cause,
-                ),
-              ),
-            );
+          unreferenced.add(providerEnvironmentSecretName({ instanceId, name: variable.name }));
         }
+      }
+      for (const secretName of unreferenced) {
+        if (!referenced.has(secretName)) secrets.removeAfterWrite(secretName);
       }
 
       return {
@@ -1251,36 +1237,36 @@ export const makeServerSettings = Effect.gen(function* () {
             );
             yield* Effect.addFinalizer(() => Effect.sync(release));
           }
-          const withProviderSecrets =
-            JSON.stringify(current.providerInstances) === JSON.stringify(rawNext.providerInstances)
-              ? validated
-              : yield* persistProviderEnvironmentSecrets(current, validated);
-          const hubSecrets =
-            JSON.stringify(current.cliProxyHubs) === JSON.stringify(rawNext.cliProxyHubs)
-              ? undefined
-              : yield* persistCliProxyHubSecrets(current, withProviderSecrets);
-          const restoreHubSecrets = hubSecrets?.restore ?? Effect.void;
-          const next = yield* Schema.decodeEffect(ServerSettings)(
-            hubSecrets?.settings ?? withProviderSecrets,
-          ).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({
-                  settingsPath: "<memory>",
-                  detail: `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
-                  cause,
-                }),
-            ),
-            Effect.onError(() => restoreHubSecrets),
-          );
+          const secrets = makeSecretChanges();
+          const next = yield* Effect.gen(function* () {
+            const withProviderSecrets =
+              JSON.stringify(current.providerInstances) ===
+              JSON.stringify(rawNext.providerInstances)
+                ? validated
+                : yield* persistProviderEnvironmentSecrets(current, validated, secrets);
+            const withHubSecrets =
+              JSON.stringify(current.cliProxyHubs) === JSON.stringify(rawNext.cliProxyHubs)
+                ? withProviderSecrets
+                : yield* persistCliProxyHubSecrets(current, withProviderSecrets, secrets);
+            return yield* Schema.decodeEffect(ServerSettings)(withHubSecrets).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ServerSettingsError({
+                    settingsPath: "<memory>",
+                    detail: `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
+                    cause,
+                  }),
+              ),
+            );
+          }).pipe(Effect.onError(() => secrets.restore));
           yield* storageLifecycleLock.withPermit(
             Effect.gen(function* () {
-              yield* writeSettingsAtomically(next).pipe(Effect.onError(() => restoreHubSecrets));
+              yield* writeSettingsAtomically(next).pipe(Effect.onError(() => secrets.restore));
               yield* Cache.set(settingsCache, cacheKey, next);
               yield* emitChange(next);
             }),
           );
-          if (hubSecrets) yield* hubSecrets.removeStale;
+          yield* secrets.removeStale;
           const materialized = yield* materializeSecrets(next);
           return resolveTextGenerationProvider(materialized);
         }).pipe(Effect.scoped, Effect.uninterruptible),

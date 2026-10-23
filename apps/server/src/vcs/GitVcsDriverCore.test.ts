@@ -306,7 +306,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
               if (command === "rev-parse" && input.args.includes("--git-common-dir")) {
                 return ok(".git\n");
               }
-              if (command === "--git-dir") {
+              if (input.operation === "GitVcsDriver.fetchRemoteForStatus") {
                 return ok();
               }
               if (command === "remote" && input.args.length === 1) {
@@ -353,6 +353,18 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.isDefined(fetchCall);
         assert.equal(fetchCall?.env?.GIT_TERMINAL_PROMPT, "0");
         assert.equal(fetchCall?.env?.SSH_ASKPASS_REQUIRE, "never");
+        // A polled fetch starts no auto-maintenance, also not in submodule fetches.
+        assert.deepStrictEqual(fetchCall?.args, [
+          "-c",
+          "maintenance.auto=false",
+          "--git-dir",
+          nodePath.resolve("/repo", ".git"),
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "--no-auto-gc",
+          "origin",
+        ]);
         assert.deepStrictEqual(
           calls
             .filter((call) => call.args.includes("diff") && call.args.includes("--numstat"))
@@ -613,6 +625,35 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.isFalse(yield* driver.refreshStatusUpstream("/repo"));
         assert.equal(fetches, 1);
       }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
+    it.effect("does not start git auto-maintenance from a status fetch", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir("git-vcs-driver-remote-");
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+        yield* git(cwd, ["repack", "-d"]);
+        yield* git(cwd, ["commit", "--allow-empty", "-m", "Second commit"]);
+        yield* git(cwd, ["repack", "-d"]);
+        // Two packs make `gc --auto` due, and without detaching it would run inside the fetch.
+        // Newer git defaults to geometric repacking instead, which these packs do not trigger.
+        yield* git(cwd, ["config", "gc.autoPackLimit", "1"]);
+        yield* git(cwd, ["config", "gc.autoDetach", "false"]);
+        yield* git(cwd, ["config", "maintenance.autoDetach", "false"]);
+        yield* git(cwd, ["config", "maintenance.gc.enabled", "true"]);
+        yield* git(cwd, ["config", "maintenance.geometric-repack.enabled", "false"]);
+        const packCount = git(cwd, ["count-objects", "-v"]).pipe(
+          Effect.map((stdout) => stdout.match(/^packs: (\d+)$/m)?.[1]),
+        );
+        assert.equal(yield* packCount, "2");
+
+        assert.isTrue(yield* (yield* GitVcsDriver.GitVcsDriver).refreshStatusUpstream(cwd));
+
+        assert.equal(yield* packCount, "2");
+      }),
     );
 
     it.effect("recomputes upstream counts only while HEAD stays on the status's branch", () =>

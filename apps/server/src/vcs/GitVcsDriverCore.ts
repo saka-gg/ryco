@@ -1302,12 +1302,27 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   ): Effect.Effect<boolean, GitCommandError> => {
     const fetchCwd =
       path.basename(gitCommonDir) === ".git" ? path.dirname(gitCommonDir) : gitCommonDir;
+    // A polled fetch must not start `git maintenance run --auto` (`gc --auto`): when
+    // that gc fails, for example on a repository with missing objects, git retries
+    // it on every fetch and leaves a full-size `tmp_pack_*` behind each time.
+    // `--no-auto-gc` covers this fetch; `maintenance.auto=false` reaches the
+    // submodule fetches it starts, which do not get the flag.
     return statusFetchPermits
       .withPermits(1)(
         executeGit(
           "GitVcsDriver.fetchRemoteForStatus",
           fetchCwd,
-          ["--git-dir", gitCommonDir, "fetch", "--quiet", "--no-tags", remoteName],
+          [
+            "-c",
+            "maintenance.auto=false",
+            "--git-dir",
+            gitCommonDir,
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-auto-gc",
+            remoteName,
+          ],
           {
             allowNonZeroExit: true,
             env: STATUS_UPSTREAM_REFRESH_ENV,

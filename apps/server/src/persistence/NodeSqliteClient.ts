@@ -10,6 +10,7 @@ import * as Cache from "effect/Cache";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
@@ -143,10 +144,8 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
       return value;
     };
 
-    const prepareCache = yield* Cache.make({
-      capacity: options.prepareCacheSize ?? 200,
-      timeToLive: options.prepareCacheTTL ?? Duration.minutes(10),
-      lookup: (sql: string) =>
+    const prepareCache = yield* Cache.makeWith(
+      (sql: string) =>
         Effect.try({
           try: () => db.prepare(sql),
           catch: (cause) =>
@@ -157,7 +156,14 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
               }),
             }),
         }),
-    });
+      {
+        capacity: options.prepareCacheSize ?? 200,
+        // A failed prepare (a schema lock, or a table another process is still
+        // migrating) must not outlive its cause: it is retried on the next call.
+        timeToLive: (exit) =>
+          Exit.isSuccess(exit) ? (options.prepareCacheTTL ?? Duration.minutes(10)) : Duration.zero,
+      },
+    );
 
     /**
      * Runs one synchronous statement. A busy database is retried
