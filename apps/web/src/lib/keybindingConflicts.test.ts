@@ -1,4 +1,4 @@
-import { scopedScriptCommand } from "@ryco/client-runtime/state/settings";
+import { APP_DEFAULT_KEYBINDINGS, scopedScriptCommand } from "@ryco/client-runtime/state/settings";
 import { describe, expect, it } from "vite-plus/test";
 import type { KeybindingRule } from "@ryco/contracts";
 import { buildConflictIndex, detectConflictsAt } from "./keybindingConflicts";
@@ -84,6 +84,10 @@ describe("buildConflictIndex", () => {
   it("returns an empty index when there are no conflicts", () => {
     const draft = [r("mod+t", "chat.new"), r("mod+j", "terminal.toggle")];
     expect(buildConflictIndex(draft).size).toBe(0);
+  });
+
+  it("finds no two app defaults on the same key and context", () => {
+    expect([...buildConflictIndex(APP_DEFAULT_KEYBINDINGS)]).toEqual([]);
   });
 });
 

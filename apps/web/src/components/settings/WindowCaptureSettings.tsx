@@ -10,7 +10,7 @@ import {
   appSnapShortcutAppConflict,
   appSnapShortcutLabels,
 } from "@ryco/shared/appSnapShortcut";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
+import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
 import { useEffect, useState } from "react";
 
 import { useAppKeybindingsState } from "~/appKeybindings";
@@ -131,7 +131,9 @@ export function WindowCaptureSettings({ scope }: { scope?: string }) {
   const [recording, setRecording] = useState(false);
   // Before hydration the defaults stand in, so a chord never skips the check.
   const keybindings = useAppKeybindingsState();
-  const appBindings = keybindings.hydrated ? keybindings.bindings : DEFAULT_RESOLVED_KEYBINDINGS;
+  const appBindings = keybindings.hydrated
+    ? keybindings.bindings
+    : APP_DEFAULT_RESOLVED_KEYBINDINGS;
   // A failed load leaves the badges out; it must not take the General panel down.
   const badgesReady = useLazyComponentReady(LazyPermissionStatusBadge, api !== undefined, {
     onLoadError: (cause) => console.warn("Permission badges failed to load.", cause),

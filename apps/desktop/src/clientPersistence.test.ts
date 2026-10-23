@@ -307,11 +307,37 @@ describe("installation-owned app keybindings", () => {
       "client-settings.json",
     ]);
   });
-  it("retains the previous document when a new payload fails validation", () => {
+  it("writes entries from a newer version unchanged", () => {
+    const file = makeTempPath("app-keybindings.json");
+    const document = JSON.stringify({
+      version: 2,
+      rules: [
+        { key: "mod+shift+t", command: "view.futureCommand", extra: 1 },
+        { key: "mod+x", command: "terminal.toggle" },
+      ],
+      disabledCommands: ["future.command", "chat.new"],
+    });
+    writeAppKeybindings(file, document);
+    expect(JSON.stringify(JSON.parse(readAppKeybindings(file)!))).toBe(document);
+  });
+  it.each([
+    { name: "broken JSON", payload: "{broken" },
+    {
+      name: "rules that are not a list",
+      payload: JSON.stringify({ rules: "x", disabledCommands: [] }),
+    },
+    {
+      name: "too many rules",
+      payload: JSON.stringify({
+        rules: Array.from({ length: 257 }, () => ({ key: "mod+x", command: "terminal.toggle" })),
+        disabledCommands: [],
+      }),
+    },
+  ])("retains the previous document when a new payload has $name", ({ payload }) => {
     const file = makeTempPath("app-keybindings.json");
     const preferences = { rules: [], disabledCommands: [] };
     writeAppKeybindings(file, JSON.stringify(preferences));
-    expect(() => writeAppKeybindings(file, "{broken")).toThrow();
+    expect(() => writeAppKeybindings(file, payload)).toThrow();
     expect(JSON.parse(readAppKeybindings(file)!)).toEqual(preferences);
   });
 });

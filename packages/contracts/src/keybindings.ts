@@ -49,6 +49,27 @@ export const MODEL_PICKER_KEYBINDING_COMMANDS = [
 ] as const;
 export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMANDS)[number];
 
+/*
+ * Commands of features built in parallel, one group each, so their changes never touch the same
+ * lines. Never give these commands a node default: their default keys go into the matching group
+ * in client-runtime's appKeybindingDefaults.ts.
+ */
+
+// Quick open and find in files.
+export const FILE_SEARCH_KEYBINDING_COMMANDS = [] as const;
+
+// Settle, snooze, archive, mark unread and undo for threads.
+export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [] as const;
+
+// The next thread that needs attention.
+export const THREAD_ATTENTION_KEYBINDING_COMMANDS = [] as const;
+
+// Back and forward, and the thread commands that ship with them.
+export const NAVIGATION_KEYBINDING_COMMANDS = [] as const;
+
+// Close and reopen views and tabs.
+export const VIEW_KEYBINDING_COMMANDS = [] as const;
+
 /**
  * Every built-in command a key can be bound to. Some ship without a default
  * key, so this — not the default keymap — is the list a keybindings editor
@@ -69,8 +90,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "sidebar.showProjects",
   "chat.new",
   "chat.newLocal",
-  // Start a chat in its own Ryco-managed folder instead of a project; no default key (users bind
-  // it), because a default reaches clients that cannot decode a command newer than they are.
+  // Start a chat in its own Ryco-managed folder instead of a project. Its default key is
+  // client-only, because nodes send their defaults to clients that cannot decode a newer command.
   "chat.newWithoutProject",
   "composer.stash",
   "editor.openFavorite",
@@ -83,7 +104,13 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "projects.open",
   ...MODEL_PICKER_KEYBINDING_COMMANDS,
   ...THREAD_KEYBINDING_COMMANDS,
+  ...FILE_SEARCH_KEYBINDING_COMMANDS,
+  ...THREAD_LIFECYCLE_KEYBINDING_COMMANDS,
+  ...THREAD_ATTENTION_KEYBINDING_COMMANDS,
+  ...NAVIGATION_KEYBINDING_COMMANDS,
+  ...VIEW_KEYBINDING_COMMANDS,
 ] as const;
+export type StaticKeybindingCommand = (typeof STATIC_KEYBINDING_COMMANDS)[number];
 
 export const SCRIPT_RUN_COMMAND_PATTERN = Schema.TemplateLiteral([
   Schema.Literal("script."),

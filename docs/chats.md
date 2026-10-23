@@ -16,8 +16,8 @@ These entry points start a chat on the node you are working with:
 - The **+** button of the sidebar's **Chats** section, which appears once there is a chat. When
   the node has no projects, the sidebar's new-thread button also starts a chat.
 - **New chat without a project** and **No project** in the command palette.
-- The `chat.newWithoutProject` shortcut. It has no default key; bind one in your keybindings, for
-  example `mod+alt+n` (⌘⌥N on macOS, Ctrl+Alt+N elsewhere). See [KEYBINDINGS.md](../KEYBINDINGS.md).
+- The `chat.newWithoutProject` shortcut, ⌘⌥N on macOS and Ctrl+Alt+N elsewhere (`mod+alt+n`).
+  Older apps have no default key for it; bind one there. See [KEYBINDINGS.md](../KEYBINDINGS.md).
 
 Ryco's apps keep one thread per chat. While a chat is open, **New thread** (`chat.new`,
 `chat.newLocal`) starts another chat instead of a second thread in the same folder, and no picker

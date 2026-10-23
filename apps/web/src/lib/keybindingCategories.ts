@@ -1,4 +1,4 @@
-import type { KeybindingCommand } from "@ryco/contracts";
+import type { KeybindingCommand, StaticKeybindingCommand } from "@ryco/contracts";
 
 export interface KeybindingCategory {
   readonly id: string;
@@ -6,22 +6,25 @@ export interface KeybindingCategory {
   readonly sortWeight: number;
 }
 
-export const KEYBINDING_CATEGORIES: Record<string, KeybindingCategory> = {
+/** Keyed by command prefix (`thread.next` → Threads). Categories without commands are not shown. */
+export const KEYBINDING_CATEGORIES = {
   terminal: { id: "terminal", label: "Terminal", sortWeight: 10 },
   workspace: { id: "workspace", label: "Workspace", sortWeight: 20 },
   diff: { id: "diff", label: "Diff", sortWeight: 30 },
   commandPalette: { id: "commandPalette", label: "Command palette", sortWeight: 40 },
   sidebar: { id: "sidebar", label: "Sidebar", sortWeight: 50 },
+  navigation: { id: "navigation", label: "Navigation", sortWeight: 55 },
   chat: { id: "chat", label: "Chat", sortWeight: 60 },
   composer: { id: "composer", label: "Composer", sortWeight: 70 },
   editor: { id: "editor", label: "Editor", sortWeight: 80 },
   modelPicker: { id: "modelPicker", label: "Model picker", sortWeight: 90 },
   thread: { id: "thread", label: "Threads", sortWeight: 100 },
+  view: { id: "view", label: "Tabs", sortWeight: 104 },
   pane: { id: "pane", label: "Split view", sortWeight: 105 },
   pullRequests: { id: "pullRequests", label: "Pull requests", sortWeight: 107 },
   projects: { id: "projects", label: "Projects", sortWeight: 108 },
   script: { id: "script", label: "Project scripts", sortWeight: 110 },
-} as const;
+} as const satisfies Record<string, KeybindingCategory>;
 
 export interface KeybindingCommandMeta {
   readonly category: KeybindingCategory;
@@ -29,7 +32,11 @@ export interface KeybindingCommandMeta {
   readonly sortWeight: number;
 }
 
-const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category">> = {
+type StaticCommandMeta = Omit<KeybindingCommandMeta, "category">;
+type StaticCommandMetaGroup = Partial<Record<StaticKeybindingCommand, StaticCommandMeta>>;
+
+// Commands outside the feature groups below.
+const CORE_COMMAND_META = {
   "terminal.toggle": { title: "Toggle terminal drawer", sortWeight: 1 },
   "terminal.split": { title: "Split terminal", sortWeight: 2 },
   "terminal.new": { title: "New terminal", sortWeight: 3 },
@@ -77,14 +84,45 @@ const STATIC_COMMAND_META: Record<string, Omit<KeybindingCommandMeta, "category"
   "pullRequests.open": { title: "Open pull requests", sortWeight: 1 },
   // Not "Show Projects": that is the sidebar mode (`sidebar.showProjects`).
   "projects.open": { title: "Open projects page", sortWeight: 1 },
+} satisfies StaticCommandMetaGroup;
+
+// Quick open and find in files.
+const FILE_SEARCH_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+
+// Settle, snooze, archive, mark unread and undo for threads (Threads, sort weights from 20).
+const THREAD_LIFECYCLE_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+
+// The next thread that needs attention (Threads, sort weights from 30).
+const THREAD_ATTENTION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+
+// Back and forward (Navigation), and the thread commands that ship with them (Threads, sort
+// weights from 40).
+const NAVIGATION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+
+// Close and reopen views and tabs.
+const VIEW_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+
+// Typed over every static command, so a command without a title fails typecheck.
+const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticCommandMeta>> = {
+  ...CORE_COMMAND_META,
+  ...FILE_SEARCH_COMMAND_META,
+  ...THREAD_LIFECYCLE_COMMAND_META,
+  ...THREAD_ATTENTION_COMMAND_META,
+  ...NAVIGATION_COMMAND_META,
+  ...VIEW_COMMAND_META,
 };
+
+function isStaticCommand(command: KeybindingCommand): command is StaticKeybindingCommand {
+  return Object.hasOwn(STATIC_COMMAND_META, command);
+}
 
 function categoryForCommand(command: KeybindingCommand): KeybindingCategory {
   const dotIndex = command.indexOf(".");
   const root = dotIndex === -1 ? command : command.slice(0, dotIndex);
-  if (root === "script") return KEYBINDING_CATEGORIES.script!;
-  const category = KEYBINDING_CATEGORIES[root];
-  return category ?? KEYBINDING_CATEGORIES.script!;
+  // `projectScript.*` joins `script.*` under Project scripts. Every static command has a category.
+  return Object.hasOwn(KEYBINDING_CATEGORIES, root)
+    ? KEYBINDING_CATEGORIES[root as keyof typeof KEYBINDING_CATEGORIES]
+    : KEYBINDING_CATEGORIES.script;
 }
 
 export function getCommandMeta(
@@ -92,8 +130,8 @@ export function getCommandMeta(
   scriptTitle?: string,
 ): KeybindingCommandMeta {
   const category = categoryForCommand(command);
-  const staticMeta = STATIC_COMMAND_META[command];
-  if (staticMeta) {
+  if (isStaticCommand(command)) {
+    const staticMeta = STATIC_COMMAND_META[command];
     return { category, title: staticMeta.title, sortWeight: staticMeta.sortWeight };
   }
   // script.<id>.run — derive title from the id if no friendly title was provided.
