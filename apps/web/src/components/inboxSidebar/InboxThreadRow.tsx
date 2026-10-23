@@ -14,20 +14,19 @@ import { useNavigate } from "@tanstack/react-router";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import { endPaneDrag, startPaneDrag } from "../../chatPanesStore";
-import { readEnvironmentApi } from "../../environmentApi";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useSettings } from "../../hooks/useSettings";
 import { useGitStatus } from "../../lib/gitStatusState";
 import { openExternalLink } from "../../lib/openExternalLink";
 import { buildPullRequestLocation } from "../../pullRequestsRoute";
-import { cn, newCommandId } from "../../lib/utils";
+import { cn } from "../../lib/utils";
 import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
 import { useSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
-import { sidebarUndo } from "../../sidebarUndo";
 import {
   getSourceControlPresentation,
   resolveChangeRequestPresentation,
 } from "../../sourceControlPresentation";
+import { dispatchThreadSettlement, dispatchThreadSnooze } from "../../threadLifecycleCommands";
 import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { DeviceIcon } from "../DeviceIcon";
@@ -52,7 +51,6 @@ import {
   MenuPopup,
   MenuTrigger,
 } from "../ui/menu";
-import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
 import {
@@ -129,26 +127,6 @@ function StateLine(props: { readonly line: InboxStateLine; readonly row: InboxSi
   );
 }
 
-/** Kept outside the row: the React Compiler cannot lower throw inside try. */
-async function dispatchThreadSnooze(
-  row: InboxSidebarRow,
-  snoozedUntil: string | null,
-): Promise<void> {
-  const api = readEnvironmentApi(row.environmentId);
-  if (!api) throw new Error("The owning machine is not connected.");
-  await sidebarUndo.dispatch(
-    { environmentId: row.environmentId, threadId: row.threadId },
-    snoozedUntil
-      ? {
-          type: "thread.snooze",
-          commandId: newCommandId(),
-          threadId: row.threadId,
-          snoozedUntil,
-        }
-      : { type: "thread.unsnooze", commandId: newCommandId(), threadId: row.threadId },
-  );
-}
-
 function RunningClock(props: { readonly since: string }) {
   const now = useInboxClock();
   return <>{formatElapsedClockLabel(props.since, now)}</>;
@@ -169,7 +147,6 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly motionEnabled: boolean;
   readonly previewHandle: InboxPreviewHandle;
   readonly onOpenRow: (row: InboxSidebarRow) => void;
-  readonly onSetSettlement: (row: InboxSidebarRow, settled: boolean) => Promise<boolean>;
 }) {
   const { row } = props;
   const isPhone = usePresentationTier() === "phone";
@@ -324,7 +301,9 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     };
     // Promise `.finally` instead of try/finally keeps the row compilable by
     // the React Compiler (it cannot lower try without catch).
-    const ok = await props.onSetSettlement(row, !row.settled).finally(() => setPending(false));
+    const ok = await dispatchThreadSettlement(threadRef, !row.settled).finally(() =>
+      setPending(false),
+    );
     if (!ok) restore();
     // A thread the server keeps in place must not stay collapsed.
     else if (collapse) window.setTimeout(() => shell?.isConnected && restore(), 5_000);
@@ -337,15 +316,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   const handleSnooze = async (snoozedUntil: string | null) => {
     if (pending || !(snoozedUntil ? row.canSnooze : row.canUnsnooze)) return;
     setPending(true);
-    await dispatchThreadSnooze(row, snoozedUntil)
-      .catch((error: unknown) => {
-        toastManager.add({
-          type: "error",
-          title: "Could not update snooze",
-          description: error instanceof Error ? error.message : "The request failed.",
-        });
-      })
-      .finally(() => setPending(false));
+    await dispatchThreadSnooze(threadRef, snoozedUntil).finally(() => setPending(false));
   };
   const handleMenuOpenChange = (open: boolean) => {
     setMenuOpen(open);

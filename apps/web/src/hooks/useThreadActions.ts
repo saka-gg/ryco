@@ -4,6 +4,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
+import { isThreadArchiveBlockedByTurn } from "@ryco/client-runtime/state/lifecycle";
 import { type ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { THREAD_DELETE_UNDO_MS } from "@ryco/shared/workspaceLifecycle";
 import { useRouter } from "@tanstack/react-router";
@@ -158,7 +159,7 @@ export function useThreadActions() {
       const resolved = resolveThreadTarget(target);
       if (!resolved) return;
       const { thread, threadRef } = resolved;
-      if (thread.session?.status === "running" && thread.session.activeTurnId != null) {
+      if (isThreadArchiveBlockedByTurn(thread)) {
         throw new Error("Cannot archive a running thread.");
       }
 
