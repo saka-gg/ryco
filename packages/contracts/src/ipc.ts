@@ -184,6 +184,8 @@ import type {
   ProjectReadFileResult,
   ProjectStageFileReferenceInput,
   ProjectStageFileReferenceResult,
+  ProjectSearchContentInput,
+  ProjectSearchContentResult,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
   ProjectWriteFileInput,
@@ -1367,6 +1369,14 @@ export interface EnvironmentApi {
     readIcon: (input: ProjectReadIconInput) => Promise<ProjectReadIconResult>;
     readFileBinary: (input: ProjectReadFileBinaryInput) => Promise<ProjectReadFileBinaryResult>;
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
+    /**
+     * Only for nodes that advertise `projectContentSearch`. Aborting `signal` withdraws the
+     * request, and the node stops searching.
+     */
+    searchContent: (
+      input: ProjectSearchContentInput,
+      options?: { readonly signal?: AbortSignal | undefined },
+    ) => Promise<ProjectSearchContentResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
     stageFileReference: (
       input: ProjectStageFileReferenceInput,
