@@ -122,6 +122,13 @@ const apiKey = (keyHint: string): CliProxyApiKeyUsage => ({
 describe("LimitsView", () => {
   let mounted: Awaited<ReturnType<typeof render>> | null = null;
   const onSearchChange = vi.fn<(next: StatisticsSearch) => void>();
+  // A new element each time, so a rerender renders again instead of bailing out on equal props.
+  const view = () => (
+    <LimitsView
+      search={parseStatisticsSearch({ view: "limits" })}
+      onSearchChange={onSearchChange}
+    />
+  );
 
   beforeEach(() => {
     onSearchChange.mockReset();
@@ -284,6 +291,37 @@ describe("LimitsView", () => {
     await expect.element(page.getByRole("button", { name: "Connect a hub" })).toBeVisible();
     expect(document.body.textContent).not.toContain("direct.person@example.com");
     expect(page.getByRole("radiogroup", { name: "Limit source" }).query()).toBeNull();
+  });
+
+  it("shows direct accounts while hubs are still being read", async () => {
+    const environment = { environmentId: desktop, label: "This machine", providers: [codex] };
+    serve([{ ...environment, status: "loading", hubs: [] }]);
+    mounted = await render(view());
+
+    await expect.element(page.getByText("23% used")).toBeVisible();
+    await expect.element(page.getByText("reading hubs…", { exact: false })).toBeVisible();
+    expect(page.getByRole("button", { name: "Connect a hub" }).query()).toBeNull();
+    expect(page.getByRole("alert").query()).toBeNull();
+
+    serve([{ ...environment, status: "ok", hubs: [] }]);
+    await mounted.rerender(view());
+
+    await expect.element(page.getByRole("button", { name: "Connect a hub" })).toBeVisible();
+    expect(document.body.textContent).not.toContain("reading hubs");
+  });
+
+  it("waits for hub reads before saying there is nothing to show", async () => {
+    const environment = { environmentId: desktop, label: "This machine" };
+    serve([{ ...environment, status: "loading", hubs: [] }]);
+    mounted = await render(view());
+
+    expect(document.querySelector(".animate-pulse")).not.toBeNull();
+    expect(document.body.textContent).not.toContain("No subscription limits to show");
+
+    serve([{ ...environment, status: "ok", hubs: [] }]);
+    await mounted.rerender(view());
+
+    await expect.element(page.getByText("No subscription limits to show")).toBeVisible();
   });
 
   it("mixes direct and hub accounts of a provider and filters them by source", async () => {
@@ -481,13 +519,6 @@ describe("LimitsView", () => {
       hubs: [],
     } as const;
     serve([{ ...environment, providers: [pacedCodex(Date.now() - 1_000)] }]);
-    // A new element each time, so React renders again instead of bailing out on equal props.
-    const view = () => (
-      <LimitsView
-        search={parseStatisticsSearch({ view: "limits" })}
-        onSearchChange={onSearchChange}
-      />
-    );
     mounted = await render(view());
     const reserve = page.getByRole("button", { name: /27 percentage points below even pace/ });
     await expect.element(reserve).toBeVisible();

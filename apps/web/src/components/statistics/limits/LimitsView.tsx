@@ -153,9 +153,10 @@ export function LimitsView({
       }),
     [direct, hubs, source],
   );
+  const readingHubs = result.environments.some((environment) => environment.status === "loading");
   const failedEnvironments = result.environments.filter(
     (environment): environment is LimitsEnvironmentResult & { message: string } =>
-      environment.status !== "ok",
+      environment.status === "failed" || environment.status === "unsupported",
   );
   const multipleEnvironments = result.environments.length > 1;
   // A loopback hub is a different machine on each node, so its label names the node too.
@@ -203,9 +204,9 @@ export function LimitsView({
       result.environments.length === 1 ? result.environments[0]!.environmentId : null,
     );
 
-  if (result.loading && result.environments.length === 0) return <StatSkeleton />;
-
   if (hubs.length === 0 && directAccountCount === 0) {
+    // A hub still being read may hold accounts, so nothing is called empty before it answers.
+    if (result.loading || readingHubs) return <StatSkeleton />;
     return (
       <div className="space-y-4">
         {environmentFilter}
@@ -250,6 +251,7 @@ export function LimitsView({
           <p className="text-xs text-muted-foreground">
             {pluralize(directAccountCount + hubAccountCount, "account")} · {summary}
             {lastChecked ? ` · checked ${formatRelativeTimeLabel(lastChecked)}` : ""}
+            {readingHubs ? " · reading hubs…" : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -333,7 +335,7 @@ export function LimitsView({
         />
       ))}
 
-      {hubs.length === 0 ? (
+      {hubs.length === 0 && !readingHubs ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-dashed px-4 py-3 text-xs text-muted-foreground">
           <span>
             Pool several subscriptions behind a CLIProxyAPI hub to see each one&apos;s quota and
