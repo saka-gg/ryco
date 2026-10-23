@@ -38,6 +38,9 @@ vi.mock("./ServerStateBootstrap", () => ({
 vi.mock("./MessageQueueDrainBridge", () => ({
   MessageQueueDrainBridge: () => <div data-testid="message-queue-drain" />,
 }));
+vi.mock("../notifications/ThreadAlertsBootstrap", () => ({
+  ThreadAlertsBootstrap: () => <div data-testid="thread-alerts" />,
+}));
 vi.mock("./ThreadPriorityRefreshBridge", () => ({
   ThreadPriorityRefreshBridge: () => <div data-testid="thread-priority-refresh" />,
 }));
@@ -76,6 +79,7 @@ async function mountShell(status: GateStatus) {
 const mountedOwners = () => ({
   serverStateBootstrap: document.querySelector('[data-testid="server-state-bootstrap"]') !== null,
   messageQueueDrain: document.querySelector('[data-testid="message-queue-drain"]') !== null,
+  threadAlerts: document.querySelector('[data-testid="thread-alerts"]') !== null,
   coordinatorOwner:
     document.querySelector('[data-testid="connection-coordinator"]')?.getAttribute("data-owner") ??
     null,
@@ -95,13 +99,14 @@ afterEach(async () => {
 });
 
 describe("hosted workspace owners by gate state", () => {
-  it("runs the config projection and the follow-up queue, and no connection owner, for a cached shell", async () => {
+  it("runs the config projection, the follow-up queue and thread alerts, and no connection owner, for a cached shell", async () => {
     await mountShell("hosted-cached");
 
     await expect.element(page.getByTestId("app-sidebar-layout")).toBeInTheDocument();
     expect(mountedOwners()).toEqual({
       serverStateBootstrap: true,
       messageQueueDrain: true,
+      threadAlerts: true,
       coordinatorOwner: null,
     });
     expect(document.querySelector('[data-testid="thread-priority-refresh"]')).toBeNull();
@@ -115,6 +120,7 @@ describe("hosted workspace owners by gate state", () => {
     expect(mountedOwners()).toEqual({
       serverStateBootstrap: true,
       messageQueueDrain: true,
+      threadAlerts: true,
       coordinatorOwner: "hosted-lifecycle",
     });
     expect(document.querySelector('[data-testid="thread-priority-refresh"]')).not.toBeNull();
@@ -127,6 +133,7 @@ describe("hosted workspace owners by gate state", () => {
     expect(mountedOwners()).toEqual({
       serverStateBootstrap: false,
       messageQueueDrain: true,
+      threadAlerts: true,
       coordinatorOwner: null,
     });
   });
@@ -157,18 +164,21 @@ describe("hosted workspace owners by gate state", () => {
     const layout = page.getByTestId("app-sidebar-layout").element();
     const bootstrap = page.getByTestId("server-state-bootstrap").element();
     const queue = page.getByTestId("message-queue-drain").element();
+    const alerts = page.getByTestId("thread-alerts").element();
 
     await mounted!.rerender(<RootAppShell authGateState={{ status: "hosted-cached" }} />);
     expect(mountedOwners().coordinatorOwner).toBeNull();
     expect(page.getByTestId("app-sidebar-layout").element()).toBe(layout);
     expect(page.getByTestId("server-state-bootstrap").element()).toBe(bootstrap);
     expect(page.getByTestId("message-queue-drain").element()).toBe(queue);
+    expect(page.getByTestId("thread-alerts").element()).toBe(alerts);
 
     await mounted!.rerender(<RootAppShell authGateState={{ status: "hosted-hub" }} />);
     expect(mountedOwners().coordinatorOwner).toBe("hosted-lifecycle");
     expect(page.getByTestId("app-sidebar-layout").element()).toBe(layout);
     expect(page.getByTestId("server-state-bootstrap").element()).toBe(bootstrap);
     expect(page.getByTestId("message-queue-drain").element()).toBe(queue);
+    expect(page.getByTestId("thread-alerts").element()).toBe(alerts);
     expect(coordinatorMounts.map((mount) => mount.recoveryOwner)).not.toContain("generic");
   });
 

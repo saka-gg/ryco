@@ -64,6 +64,7 @@ import {
 import { ServerStateBootstrap } from "./ServerStateBootstrap";
 import { ThreadPriorityRefreshBridge } from "./ThreadPriorityRefreshBridge";
 import { MessageQueueDrainBridge } from "./MessageQueueDrainBridge";
+import { ThreadAlertsBootstrap } from "../notifications/ThreadAlertsBootstrap";
 import { getRoutedHostedNode } from "../hostedHub/nodeRoutes";
 
 export interface RootAppShellProps {
@@ -75,18 +76,20 @@ export interface RootAppShellProps {
 type ShellGateStatus = RootAppShellProps["authGateState"]["status"];
 
 /** Workspace owners a gate state can opt into beyond what its authentication already mounts. */
-type ShellOwner = "serverStateBootstrap" | "messageQueueDrain";
+type ShellOwner = "serverStateBootstrap" | "messageQueueDrain" | "threadAlerts";
 
 /**
  * The owners a hosted-cached shell runs. The shell stays mounted through an
  * in-app node switch and shows last-known data read-only, so the config
- * projection and the follow-up queue keep working across it; the queue only
- * dispatches through the capability-gated send path. Every other owner stays
- * off, because a cached view owns no connection lifecycle.
+ * projection, the follow-up queue and thread alerts keep working across it;
+ * the queue only dispatches through the capability-gated send path, and alerts
+ * only read shells the other live connections accepted. Every other owner
+ * stays off, because a cached view owns no connection lifecycle.
  */
 const HOSTED_CACHED_OWNERS: ReadonlySet<ShellOwner> = new Set([
   "serverStateBootstrap",
   "messageQueueDrain",
+  "threadAlerts",
 ]);
 
 function hostedCachedRunsOwner(status: ShellGateStatus, owner: ShellOwner): boolean {
@@ -145,6 +148,9 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
+        {chatAvailable || hostedCachedRunsOwner(authGateState.status, "threadAlerts") ? (
+          <ThreadAlertsBootstrap />
+        ) : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
           <EventRouter hosted={authGateState.status === "hosted-hub"} />

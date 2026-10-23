@@ -9,7 +9,9 @@ register device tokens, send remote push messages, or provide background deliver
 connection supervisor. Every client runs one feed and owns only delivery:
 
 - The web app, in the browser and in the desktop window, turns candidates into in-app
-  toasts, browser or desktop notifications, sound and a badge.
+  toasts, browser or desktop notifications, sound and a badge. A tiny shell component
+  loads the alerts once the shell is idle; they wait for client settings to load, run the
+  feed while any alert is on, and stay off on the frozen phone tier.
 - The desktop main process shows the OS notification and the dock or taskbar badge for
   the renderer.
 - The native app schedules local notifications while it runs.
@@ -46,7 +48,9 @@ connection supervisor. Every client runs one feed and owns only delivery:
 6. The feed clears an environment whose connection is removed or replaced, and `stop()`
    resets the projector. It retains only transition metadata, not message bodies or audio.
 
-The projector shares the Inbox's activity and snooze classification. It emits approval,
+The projector shares the Inbox's activity and snooze classification. The caller passes
+the snooze rule (`isThreadSnoozed` from `@ryco/shared/threadSnooze`), so a client that
+loads its alerts lazily shares the copy its shell already loaded. It emits approval,
 input, ready-plan, completed-turn, and failed-turn transitions. Live background work
 postpones completion. Repeated upserts, archived threads, stale generations, old sequences,
 and threads first seen without a baseline do not generate alerts. Already known terminal

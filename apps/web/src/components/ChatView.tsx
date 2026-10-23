@@ -420,7 +420,6 @@ import {
   useServerConfig,
 } from "~/rpc/serverState";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { createTurnCompletionTracker } from "../lib/turnCompletion.logic";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
 import { useHostedDeliveryNotice, useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
@@ -2140,65 +2139,6 @@ export default function ChatView(props: ChatViewProps) {
     Object.values(serverConfig.settings.cliProxyHubs).some((hub) => hub.enabled);
   const activeThreadSessionProviderInstanceId = activeThread?.session?.providerInstanceId ?? null;
   const phase = derivePhase(activeThread?.session ?? null);
-
-  // Native desktop notification when a turn the user watched running completes
-  // while the Ryco window is unfocused. Only fires for turns observed running in
-  // this session (never for history loaded on mount), at most once per turn. The
-  // main process authoritatively re-checks focus; the `document.hasFocus()`
-  // pre-check just avoids a wasted IPC round-trip when we're clearly focused.
-  const notifyOnTurnComplete = settings.notifyOnTurnCompleteWhenUnfocused;
-  const turnCompletionTrackerRef = useRef(createTurnCompletionTracker());
-  const turnCompletionTrackerThreadKeyRef = useRef(activeThreadKey);
-  useEffect(() => {
-    const tracker = turnCompletionTrackerRef.current;
-    // ChatView follows thread navigation: only turns watched in this thread
-    // since it was opened count, as when every open mounted a fresh view.
-    if (turnCompletionTrackerThreadKeyRef.current !== activeThreadKey) {
-      turnCompletionTrackerThreadKeyRef.current = activeThreadKey;
-      tracker.reset();
-    }
-    const observation = {
-      turnId: activeLatestTurn?.turnId ?? null,
-      running: phase === "running",
-      settled: latestTurnSettled,
-      completedAt: activeLatestTurn?.completedAt ?? null,
-      state: activeLatestTurn?.state ?? null,
-    };
-    // A running turn is recorded whatever the pane's focus; only its
-    // completion waits for the focused pane of a server thread.
-    if (observation.running) {
-      tracker.observe(observation);
-      return;
-    }
-    if (!paneFocused || !serverThread?.id) return;
-    // Every ending notifies, however the turn ended.
-    if (tracker.observe(observation) === null) return;
-
-    if (!notifyOnTurnComplete) return;
-    if (typeof document !== "undefined" && document.hasFocus()) return;
-    const bridge = typeof window !== "undefined" ? window.desktopBridge : undefined;
-    if (!bridge?.notifyTurnComplete) return;
-    const title = activeThread?.title?.trim() ? activeThread.title : "Ryco";
-    void bridge
-      .notifyTurnComplete({
-        threadId: serverThread.id,
-        environmentId: serverThread.environmentId,
-        title,
-        body: "The agent finished responding.",
-      })
-      .catch(() => undefined);
-  }, [
-    phase,
-    latestTurnSettled,
-    activeLatestTurn?.turnId,
-    activeLatestTurn?.completedAt,
-    activeLatestTurn?.state,
-    notifyOnTurnComplete,
-    serverThread?.id,
-    serverThread?.environmentId,
-    activeThread?.title,
-    activeThreadKey,
-  ]);
 
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const backgroundWork = useMemo(
