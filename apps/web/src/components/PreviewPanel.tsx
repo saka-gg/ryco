@@ -5,7 +5,7 @@ import {
   formatFileReferenceTitle,
   normalizeFileReferencePath,
 } from "@ryco/client-runtime/state/composer";
-import { useParams, useSearch } from "@tanstack/react-router";
+import { useSearch } from "@tanstack/react-router";
 import { Schema } from "effect";
 import {
   ArrowLeftIcon,
@@ -44,12 +44,8 @@ import { useSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
 import { useProjectListEntries, useProjectReadFile } from "~/rpc/useProjectPreview";
-import { selectProjectByRef, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
-import { resolveThreadRouteRef } from "../threadRoutes";
-import { DraftId, useComposerDraftStore } from "../composerDraftStore";
-import type { TurnDiffSummary } from "../types";
 import { useEvent } from "../hooks/useEvent";
+import { useRouteWorkspaceTarget } from "../hooks/useRouteWorkspaceTarget";
 import { endWorkspaceFileDrag, startWorkspaceFileDrag } from "../workspaceFileDrag";
 import type { WorkspaceFileReveal } from "../workspaceRouteSearch";
 import { ChangedFilesTree } from "./chat/ChangedFilesTree";
@@ -162,7 +158,6 @@ function buildPreviewFileCacheKey(filePath: string, contents: string): string {
   return `preview:${filePath}:${contents.length}:${fnv1a32(contents).toString(36)}`;
 }
 
-const EMPTY_TURN_DIFF_SUMMARIES: readonly TurnDiffSummary[] = [];
 const NO_FILE_ANNOTATIONS: LineAnnotation[] = [];
 
 /** The line a deep link marks in its file; `token` lets the same link reveal again. */
@@ -268,58 +263,11 @@ export default function PreviewPanel({
   // full-width file view with a back-to-tree affordance. Tree data, filter,
   // and file loading logic are shared with the desktop presentations.
   const isPhonePresentation = mode === "phone";
-  const routeThreadRef = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteRef(params),
-  });
-  const routeDraftId = useParams({
-    strict: false,
-    select: (params) => (typeof params.draftId === "string" ? DraftId.make(params.draftId) : null),
-  });
   const previewSearch = useSearch({
     strict: false,
     select: (search) => parsePreviewRouteSearch(search),
   });
-  const serverThread = useStore(
-    useMemo(() => createThreadSelectorByRef(routeThreadRef), [routeThreadRef]),
-  );
-  const draftThread = useComposerDraftStore((store) => {
-    if (serverThread) return null;
-    if (routeDraftId) return store.getDraftSession(routeDraftId);
-    if (routeThreadRef) return store.getDraftThreadByRef(routeThreadRef);
-    return null;
-  });
-  const activeThread = useMemo(() => {
-    if (serverThread) {
-      return {
-        id: serverThread.id,
-        environmentId: serverThread.environmentId,
-        projectId: serverThread.projectId,
-        worktreePath: serverThread.worktreePath,
-        turnDiffSummaries: serverThread.turnDiffSummaries,
-      };
-    }
-    if (draftThread) {
-      return {
-        id: draftThread.threadId,
-        environmentId: draftThread.environmentId,
-        projectId: draftThread.projectId,
-        worktreePath: draftThread.worktreePath,
-        turnDiffSummaries: EMPTY_TURN_DIFF_SUMMARIES,
-      };
-    }
-    return undefined;
-  }, [serverThread, draftThread]);
-  const activeProjectId = activeThread?.projectId ?? null;
-  const activeProject = useStore((store) =>
-    activeThread && activeProjectId
-      ? selectProjectByRef(store, {
-          environmentId: activeThread.environmentId,
-          projectId: activeProjectId,
-        })
-      : undefined,
-  );
-  const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const { activeThread, activeCwd } = useRouteWorkspaceTarget();
   const activeEnvironmentId = activeThread?.environmentId ?? null;
   const activeThreadId = activeThread?.id ?? null;
   const activeThreadRef = useMemo(
