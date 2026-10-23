@@ -4,6 +4,7 @@ import {
   RuntimeTaskId,
   RuntimeSessionId,
   ThreadId,
+  TurnId,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -89,6 +90,49 @@ describe("runtimeEventToActivities task progress", () => {
     expect(usagePayload.role).toBe("reviewer");
     expect(usagePayload.agentKind).toBe("agent");
     expect(usagePayload).not.toHaveProperty("status");
+  });
+});
+
+describe("runtimeEventToActivities runtime notices", () => {
+  it("labels a notice by its own message, with its detail as the body", () => {
+    const activities = runtimeEventToActivities({
+      ...base,
+      type: "runtime.notice",
+      eventId: EventId.make("evt-retry"),
+      turnId: TurnId.make("turn-1"),
+      payload: { message: "Retrying request (2/10) in 4s", detail: "API overloaded (HTTP 529)" },
+    } satisfies ProviderRuntimeEvent);
+
+    expect(activities).toEqual([
+      {
+        id: "evt-retry",
+        createdAt: base.createdAt,
+        tone: "info",
+        kind: "runtime.notice",
+        summary: "Retrying request (2/10) in 4s",
+        payload: { detail: "API overloaded (HTTP 529)" },
+        turnId: "turn-1",
+      },
+    ]);
+  });
+
+  it("bounds a long body and keeps a notice without one empty", () => {
+    const [long] = runtimeEventToActivities({
+      ...base,
+      type: "runtime.notice",
+      eventId: EventId.make("evt-output"),
+      payload: { message: "Command output", detail: "x".repeat(10_000) },
+    } satisfies ProviderRuntimeEvent);
+    const [bare] = runtimeEventToActivities({
+      ...base,
+      type: "runtime.notice",
+      eventId: EventId.make("evt-bare"),
+      payload: { message: "Recalled 2 memories" },
+    } satisfies ProviderRuntimeEvent);
+
+    expect((long?.payload as { readonly detail?: string } | undefined)?.detail?.length).toBe(4_000);
+    expect(bare?.payload).toEqual({});
+    expect(bare?.turnId).toBeNull();
   });
 });
 

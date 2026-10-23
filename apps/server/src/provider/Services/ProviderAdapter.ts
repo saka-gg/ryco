@@ -204,6 +204,14 @@ export interface ProviderAdapterShape<TError> {
    * lists only what it probed outside any project.
    */
   readonly readProjectCommands?: (cwd: string) => Effect.Effect<ProviderProjectCommands, TError>;
+  /**
+   * The full command list a running session in `cwd` last pushed (Claude's
+   * `commands_changed`), or undefined when none did. While present it supersedes the cached
+   * `readProjectCommands` read: it is the live CLI's own list, fresher than any probe.
+   */
+  readonly readLiveProjectCommands?: (
+    cwd: string,
+  ) => Effect.Effect<ProviderProjectCommands | undefined>;
 
   /** Read stored history without resuming, acquiring a writer, or starting a turn. */
   readonly readThreadHistory?: (input: {

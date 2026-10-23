@@ -237,7 +237,11 @@ type ResolveClaudeRateLimits = (
   version: string | null,
 ) => Effect.Effect<ServerProviderRateLimits | undefined>;
 
-function parseClaudeInitializationCommands(
+/**
+ * Claude Code's slash commands as the composer lists them: the `initialize` result's
+ * `commands`, and the full list a live session pushes with `commands_changed`.
+ */
+export function parseClaudeSlashCommands(
   commands: ReadonlyArray<ClaudeSlashCommand> | undefined,
 ): ReadonlyArray<ServerProviderSlashCommand> {
   return dedupeSlashCommands(
@@ -372,7 +376,7 @@ const probeClaudeCapabilities = (
         email: account?.email,
         subscriptionType: account?.subscriptionType,
         tokenSource: account?.tokenSource,
-        slashCommands: parseClaudeInitializationCommands(init.commands),
+        slashCommands: parseClaudeSlashCommands(init.commands),
       } satisfies ClaudeCapabilitiesProbe;
     });
   }).pipe(

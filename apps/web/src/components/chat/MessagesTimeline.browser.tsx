@@ -1177,6 +1177,46 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("shows a runtime notice's body with its line breaks and no empty-output note", async () => {
+    const body = "Usage: 42% of the weekly limit\n  Resets Monday 09:00";
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "notice-entry",
+            kind: "work",
+            createdAt: "2026-04-13T12:00:00.000Z",
+            entry: {
+              id: "notice",
+              createdAt: "2026-04-13T12:00:00.000Z",
+              label: "Command output",
+              detail: body,
+              tone: "info",
+            },
+          },
+        ]}
+      />,
+    );
+
+    try {
+      const row = document.querySelector<HTMLElement>("[data-tool-entry-kind='expandable']");
+      expect(row).not.toBeNull();
+      await row!.click();
+      const detail = await vi.waitFor(() => {
+        const block = document.querySelector<HTMLElement>('[data-work-entry-detail="true"]');
+        expect(block).not.toBeNull();
+        return block!;
+      });
+      expect(detail.textContent).toBe(body);
+      expect(getComputedStyle(detail).whiteSpace).toBe("pre-wrap");
+      // A notice has no output to miss: the panel does not claim one was lost.
+      await expect.element(page.getByText("No output was captured.")).not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("loads the full output of a previewed tool payload when its row expands", async () => {
     resetActivityPayloadAtomsForTests();
     let attempts = 0;

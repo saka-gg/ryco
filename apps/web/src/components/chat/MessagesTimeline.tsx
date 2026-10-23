@@ -158,7 +158,12 @@ import {
   resolveWorkEntryStatus,
   workEntryActivityMeta,
 } from "./workEntryActivity";
-import { isFileReadToolEntry, workEntryPreview, workEntryRawCommand } from "./workChapters.logic";
+import {
+  classifyChapterStep,
+  isFileReadToolEntry,
+  workEntryPreview,
+  workEntryRawCommand,
+} from "./workChapters.logic";
 import { WorkChapterRow } from "./WorkChapterRow";
 import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
 
@@ -3107,6 +3112,9 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
   // The collapsed row truncates its detail behind a hover tooltip, which taps
   // cannot reach; the panel carries the full text so it stays available.
   const detailText = workEntry.detail?.trim() || null;
+  // A runtime notice's detail is provider prose (a hook's reason, a slash command's
+  // output) with its own line breaks, and a notice has no output to miss.
+  const isNotice = classifyChapterStep(workEntry) === "note";
 
   return (
     <div
@@ -3118,6 +3126,7 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
       <WorkEntryActivitySection
         workEntry={workEntry}
         detailText={detailText !== inputLine ? detailText : null}
+        preserveDetailLineBreaks={isNotice}
         timestampFormat={timestampFormat}
       />
 
@@ -3128,7 +3137,7 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
           environmentId={activeThreadEnvironmentId}
           isStreaming={false}
         />
-      ) : fullOutput.status === "loading" ? null : (
+      ) : fullOutput.status === "loading" || isNotice ? null : (
         <p className="text-[11px] italic text-muted-foreground/45">No output was captured.</p>
       )}
       <WorkEntryOutputStatus fullOutput={fullOutput} />
@@ -3190,9 +3199,11 @@ function WorkEntryOutputStatus(props: { fullOutput: ActivityPayloadOutput }) {
 function WorkEntryActivitySection(props: {
   workEntry: TimelineWorkEntry;
   detailText: string | null;
+  /** Keep the detail's own line breaks (multi-line provider text) instead of reflowing it. */
+  preserveDetailLineBreaks: boolean;
   timestampFormat: TimestampFormat;
 }) {
-  const { workEntry, detailText, timestampFormat } = props;
+  const { workEntry, detailText, preserveDetailLineBreaks, timestampFormat } = props;
   const statusLabel = formatWorkEntryStatusLabel(resolveWorkEntryStatus(workEntry));
   const elapsed = formatWorkEntryElapsed(workEntry);
   const lastActivityAt = workEntry.lastActivityAt ?? workEntry.createdAt;
@@ -3231,7 +3242,13 @@ function WorkEntryActivitySection(props: {
             {/* The collapsed row truncates this and reveals the rest on hover,
                 which a touch device cannot do — so the panel carries the full
                 text on every tier, not just phone. */}
-            <dd data-work-entry-detail="true" className="wrap-break-word text-foreground/84">
+            <dd
+              data-work-entry-detail="true"
+              className={cn(
+                "wrap-break-word text-foreground/84",
+                preserveDetailLineBreaks && "whitespace-pre-wrap",
+              )}
+            >
               {detailText}
             </dd>
           </>

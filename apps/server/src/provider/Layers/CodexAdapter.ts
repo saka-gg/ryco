@@ -83,6 +83,7 @@ import {
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { codexServiceTierForSelection } from "../CodexServiceTier.ts";
+import { isFatalCodexStderrMessage } from "../codexStderr.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
@@ -279,13 +280,6 @@ function normalizeFileSizeBytes(size: number | bigint | undefined): number {
     return size > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(size);
   }
   return typeof size === "number" && Number.isFinite(size) ? size : 0;
-}
-
-const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
-
-function isFatalCodexProcessStderrMessage(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return FATAL_CODEX_STDERR_SNIPPETS.some((snippet) => normalized.includes(snippet));
 }
 
 function readTokenReductionInstructions(tokenMode: AgentTokenMode) {
@@ -1829,7 +1823,7 @@ function mapToRuntimeEvents(
 
   if (event.method === "process/stderr") {
     const message = event.message ?? "Codex process stderr";
-    const isFatal = isFatalCodexProcessStderrMessage(message);
+    const isFatal = isFatalCodexStderrMessage(message);
     return [
       isFatal
         ? {
