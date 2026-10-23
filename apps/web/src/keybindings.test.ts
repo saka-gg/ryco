@@ -6,10 +6,10 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
+import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
 import {
   compileResolvedKeybindingsConfig,
   DEFAULT_RESOLVED_KEYBINDINGS,
-  mergeWithDefaultKeybindings,
 } from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
@@ -798,18 +798,12 @@ describe("resolveShortcutCommand", () => {
   });
 
   it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
-    // No default: a node sends every default to clients that may predate the command.
+    // The default is client-only: a node sends every default to clients that may predate the command.
     assert.isFalse(
       DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
     );
-    // `chat.newWithoutProject` has no default key; this is a user's binding.
-    const keybindings = mergeWithDefaultKeybindings(
-      compileResolvedKeybindingsConfig([
-        { key: "mod+alt+n", command: "chat.newWithoutProject", when: "!terminalFocus" },
-      ]),
-    );
     const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel") =>
-      resolveShortcutCommand(event(overrides), keybindings, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform,
         context: { terminalFocus: false },
       });

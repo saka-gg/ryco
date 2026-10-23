@@ -85,6 +85,48 @@ describe("local app keybindings", () => {
       )
       .toBe("j");
   });
+  it("treats client-only defaults as defaults when editing and resetting a command", async () => {
+    await mount();
+    await page.getByLabelText("Search keybindings").fill("without a project");
+    const reset = page.getByRole("button", {
+      name: "Reset New chat without a project to default",
+      exact: true,
+    });
+    const chip = page.getByRole("button", {
+      name: "Edit shortcut for chat.newWithoutProject",
+      exact: true,
+    });
+    await expect.element(chip).toBeInTheDocument();
+    expect(reset.elements()).toHaveLength(0);
+    await chip.click();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "y",
+        code: "KeyY",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await expect
+      .poll(
+        () =>
+          getAppKeybindings().find((rule) => rule.command === "chat.newWithoutProject")?.shortcut
+            .key,
+      )
+      .toBe("y");
+    await reset.click();
+    await expect
+      .poll(
+        () =>
+          getAppKeybindings().find((rule) => rule.command === "chat.newWithoutProject")?.shortcut,
+      )
+      .toMatchObject({ key: "n", altKey: true, modKey: true });
+    expect(JSON.parse(localStorage.getItem(APP_KEYBINDINGS_STORAGE_KEY)!)).toEqual({
+      rules: [],
+      disabledCommands: [],
+    });
+  });
   it("shows the app-owned persistence and reviewed import controls", async () => {
     await mount();
     await expect.element(page.getByText("Saved in this app", { exact: true })).toBeInTheDocument();

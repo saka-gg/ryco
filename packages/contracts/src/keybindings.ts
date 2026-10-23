@@ -69,8 +69,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "sidebar.showProjects",
   "chat.new",
   "chat.newLocal",
-  // Start a chat in its own Ryco-managed folder instead of a project; no default key (users bind
-  // it), because a default reaches clients that cannot decode a command newer than they are.
+  // Start a chat in its own Ryco-managed folder instead of a project. Its default key is
+  // client-only, because nodes send their defaults to clients that cannot decode a newer command.
   "chat.newWithoutProject",
   "composer.stash",
   "editor.openFavorite",

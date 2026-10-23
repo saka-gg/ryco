@@ -421,7 +421,10 @@ const makeKeybindings = Effect.gen(function* () {
 
   const loadConfigStateFromDisk = loadRuntimeCustomKeybindingsConfig().pipe(
     Effect.map(({ keybindings, issues }) => ({
-      keybindings: mergeWithDefaultKeybindings(compileResolvedKeybindingsConfig(keybindings)),
+      keybindings: mergeWithDefaultKeybindings(
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        compileResolvedKeybindingsConfig(keybindings),
+      ),
       issues,
     })),
   );
@@ -625,6 +628,7 @@ const makeKeybindings = Effect.gen(function* () {
           }
           yield* writeConfigAtomically(cappedConfig);
           const nextResolved = mergeWithDefaultKeybindings(
+            DEFAULT_RESOLVED_KEYBINDINGS,
             compileResolvedKeybindingsConfig(cappedConfig),
           );
           yield* Cache.set(resolvedConfigCache, resolvedConfigCacheKey, {
@@ -666,6 +670,7 @@ const makeKeybindings = Effect.gen(function* () {
           }
           yield* writeConfigAtomically(cappedConfig);
           const nextResolved = mergeWithDefaultKeybindings(
+            DEFAULT_RESOLVED_KEYBINDINGS,
             compileResolvedKeybindingsConfig(cappedConfig),
           );
           yield* Cache.set(resolvedConfigCache, resolvedConfigCacheKey, {

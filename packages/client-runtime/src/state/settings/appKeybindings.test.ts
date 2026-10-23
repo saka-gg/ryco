@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco/contracts";
 import type { KVService } from "../../platform/index.ts";
-import { DEFAULT_RESOLVED_KEYBINDINGS, DEFAULT_KEYBINDINGS } from "@ryco/shared/keybindings";
 import {
   APP_KEYBINDINGS_STORAGE_KEY,
   appKeybindingsFromRules,
@@ -13,6 +12,10 @@ import {
   scopedScriptCommand,
   validateAppKeybindings,
 } from "./appKeybindings.ts";
+import {
+  APP_DEFAULT_KEYBINDINGS,
+  APP_DEFAULT_RESOLVED_KEYBINDINGS,
+} from "./appKeybindingDefaults.ts";
 import {
   applyServerConfigEvent,
   clearServerState,
@@ -142,7 +145,7 @@ describe("app-owned keybindings", () => {
     ]);
     expect(app.getSnapshot().bindings.some((rule) => rule.command === "chat.new")).toBe(false);
     await app.update(() => DEFAULT_APP_KEYBINDINGS);
-    expect(app.getSnapshot().bindings).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
+    expect(app.getSnapshot().bindings).toEqual(APP_DEFAULT_RESOLVED_KEYBINDINGS);
   });
 
   it("retains unbinding through reload, while newly introduced defaults remain available", () => {
@@ -190,7 +193,7 @@ describe("app-owned keybindings", () => {
   });
 
   it("stores only actual overrides so later import can fill untouched commands", () => {
-    const fullEditor = DEFAULT_KEYBINDINGS.map((rule) =>
+    const fullEditor = APP_DEFAULT_KEYBINDINGS.map((rule) =>
       rule.command === "terminal.toggle" ? { ...rule, key: "mod+x" } : rule,
     );
     const preferences = appKeybindingsFromRules(fullEditor);
@@ -198,14 +201,14 @@ describe("app-owned keybindings", () => {
     expect(preferences.disabledCommands).toEqual([]);
     const imported = importAppKeybindings(preferences, [{ key: "mod+r", command: "diff.toggle" }]);
     expect(imported.rules).toEqual([{ key: "mod+r", command: "diff.toggle" }, ...custom.rules]);
-    expect(appKeybindingsFromRules(DEFAULT_KEYBINDINGS)).toEqual(DEFAULT_APP_KEYBINDINGS);
+    expect(appKeybindingsFromRules(APP_DEFAULT_KEYBINDINGS)).toEqual(DEFAULT_APP_KEYBINDINGS);
   });
 
   it.each([
     { key: "ctrl", command: "terminal.toggle" },
     { key: "mod+x", command: "terminal.toggle", when: "terminalFocus &&" },
   ] as const)("rejects invalid extra default-command rules before normalization: %j", (invalid) => {
-    expect(() => appKeybindingsFromRules([...DEFAULT_KEYBINDINGS, invalid])).toThrow(
+    expect(() => appKeybindingsFromRules([...APP_DEFAULT_KEYBINDINGS, invalid])).toThrow(
       "Invalid shortcut or when expression.",
     );
   });
@@ -222,7 +225,7 @@ describe("app-owned keybindings", () => {
     await expect(app.reload()).rejects.toThrow();
     await app.reset();
     expect(app.getSnapshot().hydrated).toBe(true);
-    expect(app.getSnapshot().bindings).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
+    expect(app.getSnapshot().bindings).toEqual(APP_DEFAULT_RESOLVED_KEYBINDINGS);
     expect(JSON.parse(values.get(APP_KEYBINDINGS_STORAGE_KEY)!)).toEqual(DEFAULT_APP_KEYBINDINGS);
   });
 

@@ -9,10 +9,13 @@ import {
 import {
   compileResolvedKeybindingRule,
   compileResolvedKeybindingsConfig,
-  DEFAULT_KEYBINDINGS,
   mergeWithDefaultKeybindings,
 } from "@ryco/shared/keybindings";
 import * as Schema from "effect/Schema";
+import {
+  APP_DEFAULT_KEYBINDINGS,
+  APP_DEFAULT_RESOLVED_KEYBINDINGS,
+} from "./appKeybindingDefaults.ts";
 
 export const DEFAULT_APP_KEYBINDINGS: AppKeybindings = { rules: [], disabledCommands: [] };
 
@@ -27,25 +30,32 @@ export function validateAppKeybindings(input: unknown): AppKeybindings {
   return preferences;
 }
 
-export function resolveAppKeybindings(preferences: AppKeybindings = DEFAULT_APP_KEYBINDINGS) {
+export function resolveAppKeybindings(
+  preferences: AppKeybindings = DEFAULT_APP_KEYBINDINGS,
+  defaults: ResolvedKeybindingsConfig = APP_DEFAULT_RESOLVED_KEYBINDINGS,
+) {
   return mergeWithDefaultKeybindings(
+    defaults,
     compileResolvedKeybindingsConfig(preferences.rules),
     preferences.disabledCommands,
   );
 }
 
 /** Whole-command comparison retains alternate/contextual overrides while letting defaults evolve. */
-function actualOverrides(rules: readonly KeybindingRule[]): readonly KeybindingRule[] {
+function actualOverrides(
+  rules: readonly KeybindingRule[],
+  defaults: readonly KeybindingRule[],
+): readonly KeybindingRule[] {
   const unchanged = new Set(
     rules
       .map((rule) => rule.command)
       .filter((command) => {
-        const defaults = DEFAULT_KEYBINDINGS.filter((rule) => rule.command === command);
-        if (defaults.length === 0) return false;
+        const commandDefaults = defaults.filter((rule) => rule.command === command);
+        if (commandDefaults.length === 0) return false;
         const custom = rules.filter((rule) => rule.command === command);
         return (
           JSON.stringify(compileResolvedKeybindingsConfig(custom)) ===
-          JSON.stringify(compileResolvedKeybindingsConfig(defaults))
+          JSON.stringify(compileResolvedKeybindingsConfig(commandDefaults))
         );
       }),
   );
@@ -53,14 +63,17 @@ function actualOverrides(rules: readonly KeybindingRule[]): readonly KeybindingR
 }
 
 /** Persist a complete editor snapshot, including commands the user deliberately unbound. */
-export function appKeybindingsFromRules(rules: readonly KeybindingRule[]): AppKeybindings {
+export function appKeybindingsFromRules(
+  rules: readonly KeybindingRule[],
+  defaults: readonly KeybindingRule[] = APP_DEFAULT_KEYBINDINGS,
+): AppKeybindings {
   const decoded = Schema.decodeUnknownSync(KeybindingsConfig)(rules);
   // Compilation drops invalid rules, so reject them before comparing against defaults.
   validateAppKeybindings({ rules: decoded, disabledCommands: [] });
   const commands = new Set(decoded.map((rule) => rule.command));
   return validateAppKeybindings({
-    rules: actualOverrides(decoded),
-    disabledCommands: [...new Set(DEFAULT_KEYBINDINGS.map((rule) => rule.command))].filter(
+    rules: actualOverrides(decoded, defaults),
+    disabledCommands: [...new Set(defaults.map((rule) => rule.command))].filter(
       (command) => !commands.has(command),
     ),
   });
@@ -120,7 +133,9 @@ export function importAppKeybindings(
   ]);
   return validateAppKeybindings({
     rules: [
-      ...actualOverrides(imported.rules).filter((rule) => !owned.has(rule.command)),
+      ...actualOverrides(imported.rules, APP_DEFAULT_KEYBINDINGS).filter(
+        (rule) => !owned.has(rule.command),
+      ),
       ...current.rules,
     ],
     disabledCommands: current.disabledCommands,

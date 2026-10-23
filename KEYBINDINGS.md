@@ -122,7 +122,7 @@ Invalid imports are rejected without changing local preferences. The same shared
 - `commandPalette.toggle`: open or close the global command palette
 - `chat.new`: create a new chat thread preserving the active thread's branch/worktree state
 - `chat.newLocal`: create a new chat thread for the active project in a new environment (local/worktree determined by app settings (default `local`))
-- `chat.newWithoutProject`: start a chat without a project, in its own Ryco-managed folder (see [docs/chats.md](docs/chats.md)). It has no default key; bind one, for example `{ "key": "mod+alt+n", "command": "chat.newWithoutProject", "when": "!terminalFocus" }`. It does nothing when the node does not offer chats, and the key goes to the focused control instead.
+- `chat.newWithoutProject`: start a chat without a project, in its own Ryco-managed folder (see [docs/chats.md](docs/chats.md)). It defaults to `mod+alt+n` outside the terminal. The default lives in the app, not on the node, so older apps have no key for it. It does nothing when the node does not offer chats, and the key goes to the focused control instead.
 - `composer.stash`: stash prompt text and images, or open the stash picker when the composer is empty
 - `editor.openFavorite`: open current project/worktree in the last-used editor
 - `modelPicker.toggle`: open or close the model picker
