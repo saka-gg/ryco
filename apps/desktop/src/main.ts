@@ -183,6 +183,7 @@ import {
   type RendererCrashRecovery,
   type RendererRecoveryAttempt,
 } from "./rendererCrashRecovery.ts";
+import { watchUpdateDownload, type WatchedUpdateDownload } from "./updateDownloadWatchdog.ts";
 import {
   createDesktopWindowStateStore,
   DESKTOP_WINDOW_MIN_SIZE,
@@ -2218,6 +2219,8 @@ let macCodeSignatureKindCache: MacCodeSignatureKind | null = null;
 // The running check and download, so a remote install can wait for their outcome.
 let updateCheckTask: Promise<boolean> | null = null;
 let updateDownloadTask: Promise<{ accepted: boolean; completed: boolean }> | null = null;
+// The running download's stall watchdog; `download-progress` keeps it armed.
+let updateDownloadWatch: WatchedUpdateDownload<unknown> | null = null;
 // One per live backend generation (normally one); each hears every updater state.
 const backendUpdatePipes = new Set<DesktopBackendPipe>();
 // Retained so its click handler survives GC, and closed once the countdown ends.
@@ -3034,9 +3037,22 @@ async function downloadAvailableUpdateOrJoin(): Promise<void> {
 async function runUpdateDownload(): Promise<{ accepted: boolean; completed: boolean }> {
   const autoUpdater = requireAutoUpdater();
   console.info("[desktop-updater] Downloading update...");
+  const cancellation = new (loadElectronUpdater().CancellationToken)();
+  const watch = watchUpdateDownload({
+    download: autoUpdater.downloadUpdate(cancellation),
+    cancel: () => {
+      cancellation.cancel();
+      // A differential download checks its token only when the next chunk
+      // arrives, and electron-updater hands every later downloadUpdate() the
+      // pending download. Failing the updater session's stalled requests lets
+      // it settle, so a retry starts a fresh download.
+      void autoUpdater.netSession.closeAllConnections().catch(() => undefined);
+    },
+  });
+  updateDownloadWatch = watch;
 
   try {
-    await autoUpdater.downloadUpdate();
+    await watch.result;
     return { accepted: true, completed: true };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -3045,6 +3061,7 @@ async function runUpdateDownload(): Promise<{ accepted: boolean; completed: bool
     console.error(`[desktop-updater] Failed to download update: ${message}`);
     return { accepted: true, completed: false };
   } finally {
+    if (updateDownloadWatch === watch) updateDownloadWatch = null;
     updateDownloadInFlight = false;
   }
 }
@@ -3357,6 +3374,7 @@ async function configureAutoUpdater(): Promise<void> {
     console.error(`[desktop-updater] Updater error: ${message}`);
   });
   autoUpdater.on("download-progress", (progress) => {
+    updateDownloadWatch?.noteProgress();
     const percent = Math.floor(progress.percent);
     if (
       shouldBroadcastDownloadProgress(updateState, progress.percent) ||

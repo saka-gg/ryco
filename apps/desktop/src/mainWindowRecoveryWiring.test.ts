@@ -67,4 +67,15 @@ describe("main.ts window recovery wiring", () => {
     expect(flush).toBeGreaterThanOrEqual(0);
     expect(flush).toBeLessThan(relaunch.lastIndexOf("app.exit("));
   });
+
+  it("feeds update download progress to the stall watchdog", async () => {
+    const main = await readMain();
+    const download = topLevelFunction(main, "runUpdateDownload");
+    expect(download).toContain("watchUpdateDownload({");
+    expect(download).toContain("autoUpdater.downloadUpdate(cancellation)");
+    // A stall must end the stalled request too, or a retry gets the same download back.
+    expect(download).toContain("autoUpdater.netSession.closeAllConnections()");
+    const progress = main.indexOf('autoUpdater.on("download-progress"');
+    expect(main.slice(progress, progress + 200)).toContain("updateDownloadWatch?.noteProgress();");
+  });
 });
