@@ -86,21 +86,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
-  public readonly applyFlagSettingsCalls: Array<Record<string, unknown>> = [];
-  public readonly applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
   public closeCalls = 0;
   public mcpStatuses: ReadonlyArray<{ readonly name: string; readonly status: string }> = [];
   /** While set, setPermissionMode parks on it before recording the call. */
   public permissionModeGate: Promise<void> | undefined;
   private readonly permissionModeWaiters: Array<() => void> = [];
-
-  constructor(supportsAutomaticCompaction = false) {
-    if (supportsAutomaticCompaction) {
-      this.applyFlagSettings = async (settings) => {
-        this.applyFlagSettingsCalls.push(settings);
-      };
-    }
-  }
 
   emit(message: SDKMessage): void {
     if (this.done) {
@@ -216,10 +206,9 @@ function makeHarness(config?: {
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
   readonly agentControl?: AgentControlProviderBridge;
-  readonly supportsAutomaticCompaction?: boolean;
   readonly runtimeEventQueueCapacity?: number;
 }) {
-  const query = new FakeClaudeQuery(config?.supportsAutomaticCompaction);
+  const query = new FakeClaudeQuery();
   let createInput:
     | {
         readonly prompt: AsyncIterable<SDKUserMessage>;
@@ -481,21 +470,6 @@ async function readFirstPromptMessage(
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 
-function emitClaudeUsage(
-  query: FakeClaudeQuery,
-  input: { readonly id: string; readonly usedTokens: number },
-): void {
-  query.emit({
-    type: "system",
-    subtype: "task_progress",
-    task_id: `task-${input.id}`,
-    description: "Working",
-    usage: { total_tokens: input.usedTokens },
-    session_id: `sdk-session-${input.id}`,
-    uuid: `usage-${input.id}`,
-  } as unknown as SDKMessage);
-}
-
 function emitClaudeSuccessfulResult(
   query: FakeClaudeQuery,
   input: { readonly id: string; readonly usedTokens: number; readonly contextWindow?: number },
@@ -532,7 +506,9 @@ function makeAgentControlBridge() {
   const bindTurnAuthority = vi.fn(({ sessionId, turnId }) =>
     Effect.succeed({ sessionId, threadId: THREAD_ID, turnId, boundAt: new Date().toISOString() }),
   );
-  const retireTurnAuthority = vi.fn(() => Effect.void);
+  const retireTurnAuthority = vi.fn(
+    (_input: Parameters<AgentControlProviderBridge["retireTurnAuthority"]>[0]) => Effect.void,
+  );
   const bridge: AgentControlProviderBridge = {
     issueLease: () =>
       Effect.succeed(
@@ -3363,204 +3339,6 @@ describe("ClaudeAdapterLive", () => {
           },
         });
       }
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
-
-  it.effect(
-    "enables automatic compaction once at the threshold and preserves the canonical boundary lifecycle",
-    () => {
-      const harness = makeHarness({ supportsAutomaticCompaction: true });
-      return Effect.gen(function* () {
-        const adapter = yield* ClaudeAdapter;
-        yield* adapter.startSession({
-          runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-auto-compact"),
-          threadId: THREAD_ID,
-          provider: ProviderDriverKind.make("claudeAgent"),
-          runtimeMode: "full-access",
-          resumeCursor: {
-            threadId: THREAD_ID,
-            resume: "11111111-1111-4111-8111-111111111111",
-            turnCount: 2,
-          },
-        });
-
-        const firstCompletionFiber = yield* adapter.streamEvents.pipe(
-          Stream.filter((event) => event.type === "turn.completed"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
-
-        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "first", attachments: [] });
-        emitClaudeUsage(harness.query, { id: "compact-first", usedTokens: 160_000 });
-        emitClaudeSuccessfulResult(harness.query, {
-          id: "compact-first",
-          usedTokens: 160_000,
-          contextWindow: 200_000,
-        });
-        yield* Fiber.join(firstCompletionFiber);
-        yield* Effect.yieldNow;
-
-        const secondCompletionFiber = yield* adapter.streamEvents.pipe(
-          Stream.filter((event) => event.type === "turn.completed"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
-        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "second", attachments: [] });
-        emitClaudeUsage(harness.query, { id: "compact-second", usedTokens: 175_000 });
-        emitClaudeSuccessfulResult(harness.query, {
-          id: "compact-second",
-          usedTokens: 175_000,
-          contextWindow: 200_000,
-        });
-
-        yield* Fiber.join(secondCompletionFiber);
-        yield* Effect.yieldNow;
-        assert.deepEqual(harness.query.applyFlagSettingsCalls, [
-          {
-            autoCompactEnabled: true,
-            autoCompactWindow: 160_000,
-          },
-        ]);
-
-        const boundaryFiber = yield* adapter.streamEvents.pipe(
-          Stream.filter((event) => event.type === "thread.state.changed"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
-        harness.query.emit({
-          type: "system",
-          subtype: "status",
-          status: "compacting",
-          uuid: "compact-status",
-          session_id: "sdk-session-compact",
-        } as unknown as SDKMessage);
-        harness.query.emit({
-          type: "system",
-          subtype: "compact_boundary",
-          compact_metadata: {
-            trigger: "auto",
-            pre_tokens: 175_000,
-            post_tokens: 42_000,
-          },
-          uuid: "compact-boundary",
-          session_id: "sdk-session-compact",
-        } as unknown as SDKMessage);
-
-        const boundary = yield* Fiber.join(boundaryFiber);
-        assert.equal(boundary._tag, "Some");
-        if (boundary._tag === "Some") {
-          assert.equal(boundary.value.type, "thread.state.changed");
-          if (boundary.value.type === "thread.state.changed") {
-            assert.equal(boundary.value.payload.state, "compacted");
-          }
-        }
-      }).pipe(
-        Effect.provideService(Random.Random, makeDeterministicRandomService()),
-        Effect.provide(harness.layer),
-      );
-    },
-  );
-
-  it.effect(
-    "does not arm compaction for an interrupted turn and retries on a later success",
-    () => {
-      const harness = makeHarness({ supportsAutomaticCompaction: true });
-      return Effect.gen(function* () {
-        const adapter = yield* ClaudeAdapter;
-        yield* adapter.startSession({
-          runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-auto-compact-interrupted"),
-          threadId: THREAD_ID,
-          provider: ProviderDriverKind.make("claudeAgent"),
-          runtimeMode: "full-access",
-        });
-
-        const interruptedCompletionFiber = yield* adapter.streamEvents.pipe(
-          Stream.filter((event) => event.type === "turn.completed"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
-        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "interrupt", attachments: [] });
-        emitClaudeUsage(harness.query, { id: "compact-interrupted", usedTokens: 170_000 });
-        harness.query.emit({
-          type: "result",
-          subtype: "error_during_execution",
-          is_error: false,
-          duration_ms: 10,
-          duration_api_ms: 8,
-          num_turns: 1,
-          stop_reason: null,
-          errors: ["Interrupted by user"],
-          session_id: "sdk-session-compact-interrupted",
-          usage: { total_tokens: 170_000 },
-          modelUsage: {
-            "claude-opus-4-6": { contextWindow: 200_000, maxOutputTokens: 64_000 },
-          },
-        } as unknown as SDKMessage);
-        yield* Fiber.join(interruptedCompletionFiber);
-        yield* Effect.yieldNow;
-        assert.lengthOf(harness.query.applyFlagSettingsCalls, 0);
-
-        const resumedCompletionFiber = yield* adapter.streamEvents.pipe(
-          Stream.filter((event) => event.type === "turn.completed"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
-        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "resume", attachments: [] });
-        emitClaudeUsage(harness.query, { id: "compact-resumed", usedTokens: 170_000 });
-        emitClaudeSuccessfulResult(harness.query, {
-          id: "compact-resumed",
-          usedTokens: 170_000,
-          contextWindow: 200_000,
-        });
-
-        yield* Fiber.join(resumedCompletionFiber);
-        yield* Effect.yieldNow;
-        assert.lengthOf(harness.query.applyFlagSettingsCalls, 1);
-      }).pipe(
-        Effect.provideService(Random.Random, makeDeterministicRandomService()),
-        Effect.provide(harness.layer),
-      );
-    },
-  );
-
-  it.effect("degrades safely when the SDK cannot enable automatic compaction", () => {
-    const harness = makeHarness({ supportsAutomaticCompaction: false });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      const warningFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.type === "runtime.warning"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
-      yield* adapter.startSession({
-        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-auto-compact-unsupported"),
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        runtimeMode: "full-access",
-      });
-      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "fill context", attachments: [] });
-      emitClaudeUsage(harness.query, { id: "compact-unsupported", usedTokens: 170_000 });
-      emitClaudeSuccessfulResult(harness.query, {
-        id: "compact-unsupported",
-        usedTokens: 170_000,
-        contextWindow: 200_000,
-      });
-
-      const warning = yield* Fiber.join(warningFiber);
-      assert.equal(warning._tag, "Some");
-      if (warning._tag === "Some") {
-        assert.equal(warning.value.type, "runtime.warning");
-        if (warning.value.type === "runtime.warning") {
-          assert.equal(
-            warning.value.payload.message,
-            "Automatic context compaction is unavailable for this session. Start a new session if the context window fills.",
-          );
-        }
-      }
-      assert.deepEqual(harness.query.applyFlagSettingsCalls, []);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -7908,13 +7686,17 @@ function compactBoundaryFrame(compactMetadata: Record<string, unknown>): SDKMess
   } as unknown as SDKMessage;
 }
 
-function systemStatusFrame(status: "requesting" | "compacting" | null): SDKMessage {
+function systemStatusFrame(
+  status: "requesting" | "compacting" | null,
+  extra: Record<string, unknown> = {},
+): SDKMessage {
   return {
     type: "system",
     subtype: "status",
     status,
     uuid: `status-${String(status)}`,
     session_id: GAUGE_SDK_SESSION,
+    ...extra,
   } as unknown as SDKMessage;
 }
 
@@ -8014,6 +7796,24 @@ function rootToolStartFrame(index: number, toolUseId: string): SDKMessage {
   } as unknown as SDKMessage;
 }
 
+/** Reads the SDK user messages the adapter offered, in order, through one iterator. */
+const makePromptReader = (harness: ReturnType<typeof makeHarness>) => {
+  let iterator: AsyncIterator<SDKUserMessage> | undefined;
+  return Effect.promise(async () => {
+    iterator ??= harness.getLastCreateQueryInput()?.prompt[Symbol.asyncIterator]();
+    const next = await iterator!.next();
+    assert.isFalse(next.done);
+    return next.value as SDKUserMessage;
+  });
+};
+
+const promptText = (message: SDKUserMessage): string | undefined => {
+  const content = message.message.content;
+  if (typeof content === "string") return content;
+  const first = content[0];
+  return first && first.type === "text" ? first.text : undefined;
+};
+
 const isTurnTerminal = (event: ProviderRuntimeEvent) =>
   event.type === "turn.completed" || event.type === "turn.aborted";
 
@@ -8039,6 +7839,415 @@ function lastUsageBefore(events: ReadonlyArray<ProviderRuntimeEvent>, index: num
   const usage = events.slice(0, index).findLast(isUsageEvent);
   return usage?.type === "thread.token-usage.updated" ? usage.payload.usage : undefined;
 }
+
+describe("ClaudeAdapterLive automatic compaction", () => {
+  const UNAVAILABLE_WARNING =
+    "Automatic context compaction is unavailable for this session. Start a new session if the context window fills.";
+
+  /** The init frame of a CLI that lists `/compact` among its slash commands. */
+  const compactingInitFrame = () =>
+    ({ ...systemInitFrame(), slash_commands: ["compact"] }) as unknown as SDKMessage;
+
+  const startCompactionSession = (adapter: ClaudeAdapterShape, runtimeSessionId: string) =>
+    adapter.startSession({
+      runtimeSessionId: RuntimeSessionId.make(runtimeSessionId),
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+
+  /**
+   * Sends one prompt turn and its frames up to its result: by default 168,012 of a 200k window
+   * (84%), or `cacheReadTokens + 8,012`.
+   */
+  const emitFullTurn = (
+    adapter: ClaudeAdapterShape,
+    harness: ReturnType<typeof makeHarness>,
+    input: {
+      readonly prompt: string;
+      readonly init?: SDKMessage;
+      readonly result?: Record<string, unknown>;
+      readonly cacheReadTokens?: number;
+    },
+  ) =>
+    Effect.gen(function* () {
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: input.prompt,
+        attachments: [],
+      });
+      harness.query.emit(input.init ?? compactingInitFrame());
+      harness.query.emit(
+        rootAssistantFrame(
+          `assistant-${input.prompt}`,
+          {
+            input_tokens: 12,
+            cache_read_input_tokens: input.cacheReadTokens ?? 160_000,
+            cache_creation_input_tokens: 8_000,
+            output_tokens: 1,
+          },
+          [{ type: "text", text: `Reply to ${input.prompt}` }],
+        ),
+      );
+      harness.query.emit(
+        resultFrame({
+          usage: { input_tokens: 12, cache_read_input_tokens: 160_000, output_tokens: 900 },
+          contextWindow: 200_000,
+          user_message_uuids: [turn.turnId],
+          ...input.result,
+        }),
+      );
+      return turn;
+    });
+
+  /** `emitFullTurn` for a turn that closes at its own result (no compaction follows). */
+  const runFullTurn = (
+    adapter: ClaudeAdapterShape,
+    harness: ReturnType<typeof makeHarness>,
+    log: Effect.Success<ReturnType<typeof makeRuntimeEventLog>>,
+    input: Parameters<typeof emitFullTurn>[2],
+  ) =>
+    Effect.gen(function* () {
+      const turn = yield* emitFullTurn(adapter, harness, input);
+      yield* log.waitFor((event) => isTurnTerminal(event) && event.turnId === turn.turnId);
+      return turn;
+    });
+
+  /** Reads the next offered prompt and checks it is the policy's `/compact`; returns its uuid. */
+  const readCompactionPrompt = (readPrompt: Effect.Effect<SDKUserMessage>) =>
+    Effect.gen(function* () {
+      const prompt = yield* readPrompt;
+      assert.equal(promptText(prompt), "/compact");
+      assert.isString(prompt.uuid);
+      return prompt.uuid!;
+    });
+
+  /** Waits until every frame emitted so far was handled. */
+  const settleFrames = (
+    harness: ReturnType<typeof makeHarness>,
+    log: Effect.Success<ReturnType<typeof makeRuntimeEventLog>>,
+    id: string,
+  ) =>
+    Effect.gen(function* () {
+      harness.query.emit(sentinelFrame(id));
+      yield* log.waitFor(isSentinel(id));
+    });
+
+  const warnings = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+    events.flatMap((event) => (event.type === "runtime.warning" ? [event.payload.message] : []));
+
+  const startedTurnIds = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+    events.flatMap((event) => (event.type === "turn.started" ? [event.turnId] : []));
+
+  const terminalState = (event: ProviderRuntimeEvent) =>
+    event.type === "turn.completed" ? event.payload.state : event.type;
+
+  it.effect("compacts inside the turn at the threshold and closes the turn after it", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-boundary");
+
+      const fill = yield* emitFullTurn(adapter, harness, { prompt: "fill" });
+      assert.equal(promptText(yield* readPrompt), "fill");
+      const compactUuid = yield* readCompactionPrompt(readPrompt);
+      yield* settleFrames(harness, log, "after-fill-result");
+
+      // The thread stays busy in the turn the user started: no turn of its own, no idle gap.
+      assert.isFalse(log.events.some(isTurnTerminal));
+      const [compacting] = yield* adapter.listSessions();
+      assert.equal(compacting?.status, "running");
+      assert.equal(compacting?.activeTurnId, fill.turnId);
+
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012, post_tokens: 40_000 }),
+      );
+      harness.query.emit(resultFrame({ result: "", user_message_uuids: [compactUuid] }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      assert.equal(completed.turnId, fill.turnId);
+      assert.equal(terminalState(completed), "completed");
+      assert.deepEqual(startedTurnIds(log.events), [fill.turnId]);
+      const compacted = log.events.find(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      assert.equal(compacted?.turnId, fill.turnId);
+      const usage = lastUsageBefore(log.events, log.events.indexOf(completed));
+      assert.equal(usage?.usedTokens, 40_000);
+      assert.deepEqual(warnings(log.events), []);
+      assert.isUndefined((yield* adapter.listSessions())[0]?.activeTurnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("warns once when its /compact ends without a compaction boundary", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-no-boundary");
+
+      const fill = yield* emitFullTurn(adapter, harness, { prompt: "fill" });
+      yield* readPrompt;
+      const compactUuid = yield* readCompactionPrompt(readPrompt);
+      // What Claude Code answers a /compact that compacted nothing: a successful result.
+      harness.query.emit(resultFrame({ result: "", user_message_uuids: [compactUuid] }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(completed.turnId, fill.turnId);
+      assert.equal(terminalState(completed), "completed");
+
+      // Still over the threshold, but the policy does not try again in this session.
+      const next = yield* runFullTurn(adapter, harness, log, { prompt: "next" });
+      yield* log.drain;
+
+      assert.deepEqual(warnings(log.events), [UNAVAILABLE_WARNING]);
+      assert.deepEqual(startedTurnIds(log.events), [fill.turnId, next.turnId]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("closes the turn as completed when its /compact fails", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-failed");
+
+      const fill = yield* emitFullTurn(adapter, harness, { prompt: "fill" });
+      yield* readPrompt;
+      const compactUuid = yield* readCompactionPrompt(readPrompt);
+      harness.query.emit(
+        resultFrame({
+          subtype: "error_during_execution",
+          errors: ["API Error: 529 overloaded"],
+          user_message_uuids: [compactUuid],
+        }),
+      );
+      const completed = yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      assert.equal(completed.turnId, fill.turnId);
+      assert.equal(terminalState(completed), "completed");
+      assert.isFalse(log.events.some((event) => event.type === "runtime.error"));
+      assert.deepEqual(warnings(log.events), [UNAVAILABLE_WARNING]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("waits for its own /compact result, not another result", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-foreign-result");
+
+      const fill = yield* emitFullTurn(adapter, harness, { prompt: "fill" });
+      yield* readPrompt;
+      const compactUuid = yield* readCompactionPrompt(readPrompt);
+      // A background notification's CLI turn ends meanwhile.
+      harness.query.emit(resultFrame({ origin: { kind: "task-notification" } }));
+      harness.query.emit(resultFrame({ user_message_uuids: ["someone-else"] }));
+      yield* settleFrames(harness, log, "after-foreign-results");
+      assert.isFalse(log.events.some(isTurnTerminal));
+
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012, post_tokens: 40_000 }),
+      );
+      harness.query.emit(resultFrame({ result: "", user_message_uuids: [compactUuid] }));
+      const completed = yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      assert.equal(completed.turnId, fill.turnId);
+      assert.equal(terminalState(completed), "completed");
+      assert.deepEqual(warnings(log.events), []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("refuses steers during compaction, and Stop ends it without a warning", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-stopped");
+
+      const fill = yield* emitFullTurn(adapter, harness, { prompt: "fill" });
+      yield* readPrompt;
+      const compactUuid = yield* readCompactionPrompt(readPrompt);
+      yield* settleFrames(harness, log, "after-fill-result");
+
+      const steer = yield* Effect.flip(
+        adapter.steerTurn!({
+          threadId: THREAD_ID,
+          expectedTurnId: fill.turnId,
+          messageId: MessageId.make("message-during-compaction"),
+          input: "also check the tests",
+        }),
+      );
+      assert.equal(steer._tag === "ProviderTurnNotSteerableError" && steer.reason, "busy");
+
+      harness.query.emit(systemStatusFrame("compacting"));
+      yield* adapter.interruptTurn(THREAD_ID, fill.turnId);
+      // What Claude Code reports for a /compact that Stop aborted: a failed compaction status,
+      // then a successful result.
+      harness.query.emit(
+        systemStatusFrame(null, {
+          compact_result: "failed",
+          compact_error: "API Error: Request was aborted.",
+        }),
+      );
+      harness.query.emit(
+        resultFrame({ result: "", local_command: "compact", user_message_uuids: [compactUuid] }),
+      );
+      const completed = yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      assert.equal(completed.turnId, fill.turnId);
+      assert.equal(terminalState(completed), "interrupted");
+      assert.deepEqual(warnings(log.events), []);
+
+      // Still over the threshold: the stopped request waits for the low watermark, then rearms.
+      yield* runFullTurn(adapter, harness, log, { prompt: "still-full" });
+      yield* runFullTurn(adapter, harness, log, { prompt: "dropped", cacheReadTokens: 120_000 });
+      yield* emitFullTurn(adapter, harness, { prompt: "full-again" });
+      assert.equal(promptText(yield* readPrompt), "still-full");
+      assert.equal(promptText(yield* readPrompt), "dropped");
+      assert.equal(promptText(yield* readPrompt), "full-again");
+      yield* readCompactionPrompt(readPrompt);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("finishes a compacting turn locally when Stop gets no result within the grace", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-stop-grace");
+
+      const fill = yield* emitFullTurn(adapter, harness, { prompt: "fill" });
+      yield* readPrompt;
+      yield* readCompactionPrompt(readPrompt);
+      yield* settleFrames(harness, log, "after-fill-result");
+
+      yield* adapter.interruptTurn(THREAD_ID, fill.turnId);
+      yield* yieldTimes(10);
+      yield* TestClock.adjust("5 seconds");
+      const completed = yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      assert.equal(completed.turnId, fill.turnId);
+      assert.equal(terminalState(completed), "interrupted");
+      assert.deepEqual(warnings(log.events), []);
+      assert.isUndefined((yield* adapter.listSessions())[0]?.activeTurnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("binds no Agent Control authority to the compaction", () => {
+    const state = makeAgentControlBridge();
+    const harness = makeHarness({ agentControl: state.bridge });
+    harness.query.mcpStatuses = [{ name: "ryco", status: "connected" }];
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-agent-control");
+
+      const fill = yield* emitFullTurn(adapter, harness, { prompt: "fill" });
+      yield* readPrompt;
+      const compactUuid = yield* readCompactionPrompt(readPrompt);
+      yield* settleFrames(harness, log, "after-fill-result");
+
+      // The user's work ended: its authority is retired before Claude compacts.
+      assert.deepEqual(
+        state.retireTurnAuthority.mock.calls.map(([input]) => input.turnId),
+        [fill.turnId],
+      );
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012, post_tokens: 40_000 }),
+      );
+      harness.query.emit(resultFrame({ result: "", user_message_uuids: [compactUuid] }));
+      yield* log.waitFor(isTurnTerminal);
+
+      assert.deepEqual(
+        state.bindTurnAuthority.mock.calls.map(([input]) => input.turnId),
+        [fill.turnId],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("requests compaction only after a completed turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-interrupted");
+
+      yield* runFullTurn(adapter, harness, log, {
+        prompt: "interrupted",
+        result: {
+          subtype: "error_during_execution",
+          errors: ["Interrupted by user"],
+        },
+      });
+      yield* emitFullTurn(adapter, harness, { prompt: "completed" });
+
+      assert.equal(promptText(yield* readPrompt), "interrupted");
+      assert.equal(promptText(yield* readPrompt), "completed");
+      yield* readCompactionPrompt(readPrompt);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("warns instead of compacting when the CLI does not list /compact", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startCompactionSession(adapter, "auto-compact-unadvertised");
+
+      yield* runFullTurn(adapter, harness, log, { prompt: "fill", init: systemInitFrame() });
+      yield* log.drain;
+
+      assert.deepEqual(warnings(log.events), [UNAVAILABLE_WARNING]);
+      assert.lengthOf(
+        log.events.filter((event) => event.type === "turn.started"),
+        1,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
 
 describe("ClaudeAdapterLive context meter across compaction", () => {
   const startGaugeSession = (adapter: ClaudeAdapterShape, runtimeSessionId: string) =>
@@ -9169,24 +9378,6 @@ describe("ClaudeAdapterLive steering", () => {
       contextWindow: 200_000,
       ...extra,
     });
-
-  /** Reads the SDK user messages the adapter offered, in order, through one iterator. */
-  const makePromptReader = (harness: ReturnType<typeof makeHarness>) => {
-    let iterator: AsyncIterator<SDKUserMessage> | undefined;
-    return Effect.promise(async () => {
-      iterator ??= harness.getLastCreateQueryInput()?.prompt[Symbol.asyncIterator]();
-      const next = await iterator!.next();
-      assert.isFalse(next.done);
-      return next.value as SDKUserMessage;
-    });
-  };
-
-  const promptText = (message: SDKUserMessage): string | undefined => {
-    const content = message.message.content;
-    if (typeof content === "string") return content;
-    const first = content[0];
-    return first && first.type === "text" ? first.text : undefined;
-  };
 
   /** Starts a session and one prompt turn on a CLI with the given init capabilities. */
   const startPromptTurn = (

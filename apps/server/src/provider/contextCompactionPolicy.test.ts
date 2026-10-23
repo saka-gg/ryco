@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  concludeContextCompactionRequest,
   disableContextCompaction,
   initialContextCompactionPolicyState,
   markContextCompactionStarted,
   observeContextCompaction,
+  recordContextCompactionRequest,
   settleContextCompaction,
 } from "./contextCompactionPolicy.ts";
 
 describe("context compaction policy", () => {
-  it("triggers at the high watermark with a conservative window", () => {
+  it("triggers at the high watermark", () => {
     const state = initialContextCompactionPolicyState(7);
 
     expect(
@@ -25,7 +27,6 @@ describe("context compaction policy", () => {
       }),
     ).toMatchObject({
       trigger: true,
-      windowTokens: 160_000,
       state: { phase: "requested", armed: false },
     });
   });
@@ -84,5 +85,84 @@ describe("context compaction policy", () => {
         usage: { usedTokens: 190_000, maxTokens: 200_000 },
       }),
     ).toEqual({ state: disabled, trigger: false });
+  });
+
+  const requested = (generation: number) =>
+    observeContextCompaction(initialContextCompactionPolicyState(generation), {
+      generation,
+      usage: { usedTokens: 170_000, maxTokens: 200_000 },
+    }).state;
+
+  it("binds only a triggered request of the current generation", () => {
+    expect(recordContextCompactionRequest(requested(2), 2, "compact-1")).toMatchObject({
+      phase: "requested",
+      requestId: "compact-1",
+    });
+    const idle = initialContextCompactionPolicyState(2);
+    expect(recordContextCompactionRequest(idle, 2, "compact-1")).toBe(idle);
+    const current = requested(2);
+    expect(recordContextCompactionRequest(current, 1, "compact-1")).toBe(current);
+  });
+
+  it("concludes a request its boundary settled without a warning", () => {
+    const settled = settleContextCompaction(
+      markContextCompactionStarted(recordContextCompactionRequest(requested(4), 4, "c"), 4),
+      4,
+    );
+
+    expect(
+      concludeContextCompactionRequest(settled, { generation: 4, requestId: "c", aborted: false }),
+    ).toEqual({
+      state: { generation: 4, phase: "idle", armed: false },
+      unavailable: false,
+    });
+  });
+
+  it("disables compaction when the request's result arrives without a boundary", () => {
+    const pending = recordContextCompactionRequest(requested(6), 6, "c");
+    const unavailable = { state: { generation: 6, phase: "disabled", armed: false } };
+
+    expect(
+      concludeContextCompactionRequest(pending, { generation: 6, requestId: "c", aborted: false }),
+    ).toEqual({ ...unavailable, unavailable: true });
+    expect(
+      concludeContextCompactionRequest(markContextCompactionStarted(pending, 6), {
+        generation: 6,
+        requestId: "c",
+        aborted: false,
+      }),
+    ).toEqual({ ...unavailable, unavailable: true });
+  });
+
+  it("settles a stopped request quietly and leaves rearming to the low watermark", () => {
+    const compacting = markContextCompactionStarted(
+      recordContextCompactionRequest(requested(8), 8, "c"),
+      8,
+    );
+
+    expect(
+      concludeContextCompactionRequest(compacting, {
+        generation: 8,
+        requestId: "c",
+        aborted: true,
+      }),
+    ).toEqual({
+      state: { generation: 8, phase: "idle", armed: false },
+      unavailable: false,
+    });
+  });
+
+  it("ignores results for another request or generation", () => {
+    const pending = recordContextCompactionRequest(requested(9), 9, "c");
+
+    for (const input of [
+      { generation: 9, requestId: "other", aborted: false },
+      { generation: 8, requestId: "c", aborted: false },
+    ]) {
+      expect(concludeContextCompactionRequest(pending, input)).toEqual({
+        state: pending,
+        unavailable: false,
+      });
+    }
   });
 });
