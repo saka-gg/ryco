@@ -9,7 +9,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { ComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
-import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../keybindings";
+import {
+  hasOpenDialogShortcutTarget,
+  isDialogShortcutTarget,
+  resolveShortcutCommand,
+  shouldIgnoreGlobalNavigationShortcut,
+} from "../keybindings";
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -30,6 +35,18 @@ const CommandPaletteDialog = preloadableLazy(() =>
  */
 export function preloadCommandPaletteDialog(): Promise<void> {
   return CommandPaletteDialog.preload();
+}
+
+/**
+ * Quick open follows the global navigation rules, except that it also opens
+ * while typing in the chat composer, as thread search does.
+ */
+function shouldIgnoreWorkspaceSearchShortcut(event: globalThis.KeyboardEvent): boolean {
+  const fromComposer =
+    event.target instanceof Element &&
+    event.target.closest('[data-chat-composer-form="true"]') !== null;
+  if (!fromComposer) return shouldIgnoreGlobalNavigationShortcut(event);
+  return isDialogShortcutTarget(event.target) || hasOpenDialogShortcutTarget();
 }
 
 function LazyCommandPaletteDialogMount() {
@@ -109,6 +126,37 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [keybindings, navigate, setOpen, terminalOpen, toggleOpen]);
+
+  // Capture phase: the open palette stops its keys from bubbling, and these
+  // keys also switch what it shows.
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      const store = useCommandPaletteStore.getState();
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          terminalFocus: isTerminalFocused(),
+          terminalOpen,
+        },
+      });
+      if (command === "commandPalette.toggle") {
+        // From a workspace search back to the command list; every other
+        // toggle is left to the listener above.
+        if (!store.open || store.workspaceSearchMode === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        store.toggleOpen();
+        return;
+      }
+      if (command !== "workspace.quickOpen" || getPresentationTier() === "phone") return;
+      if (!store.open && shouldIgnoreWorkspaceSearchShortcut(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      store.openWorkspaceSearch("files");
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [keybindings, terminalOpen]);
 
   useEffect(() => {
     return () => {

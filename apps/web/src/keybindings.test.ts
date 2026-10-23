@@ -6,7 +6,10 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
+import {
+  APP_DEFAULT_RESOLVED_KEYBINDINGS,
+  resolveAppKeybindings,
+} from "@ryco/client-runtime/state/settings";
 import {
   compileResolvedKeybindingsConfig,
   NODE_DEFAULT_RESOLVED_KEYBINDINGS,
@@ -794,6 +797,38 @@ describe("resolveShortcutCommand", () => {
     assert.strictEqual(
       shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
       "⇧⌘\\",
+    );
+  });
+
+  it("opens quick open on mod+p and the Files panel on mod+shift+e by default", () => {
+    const resolve = (
+      overrides: Partial<ShortcutEventLike>,
+      keybindings = APP_DEFAULT_RESOLVED_KEYBINDINGS,
+      context = {},
+    ) => resolveShortcutCommand(event(overrides), keybindings, { platform: "MacIntel", context });
+    assert.strictEqual(resolve({ key: "p", code: "KeyP", metaKey: true }), "workspace.quickOpen");
+    assert.strictEqual(
+      resolve({ key: "E", code: "KeyE", metaKey: true, shiftKey: true }),
+      "workspace.files",
+    );
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "workspace.files", "MacIntel"),
+      "⇧⌘E",
+    );
+    // Terminal input keeps the key.
+    assert.isNull(
+      resolve({ key: "p", code: "KeyP", metaKey: true }, APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        terminalFocus: true,
+      }),
+    );
+    // A user's own mod+p rule for the Files panel still wins.
+    const filesOnModP = resolveAppKeybindings({
+      rules: [{ key: "mod+p", command: "workspace.files", when: "!terminalFocus" }],
+      disabledCommands: [],
+    });
+    assert.strictEqual(
+      resolve({ key: "p", code: "KeyP", metaKey: true }, filesOnModP),
+      "workspace.files",
     );
   });
 

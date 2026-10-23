@@ -43,6 +43,7 @@ import {
   CircleAlertIcon,
   Columns2Icon,
   CornerLeftUpIcon,
+  FileSearchIcon,
   FolderGit2Icon,
   FolderIcon,
   FolderTreeIcon,
@@ -143,6 +144,7 @@ import {
 } from "./CommandPalette.logic";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteResults } from "./CommandPaletteResults";
+import { WorkspaceSearchDialog } from "./workspaceSearch/WorkspaceSearchDialog";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
@@ -424,7 +426,11 @@ function unavailableDescription(
 }
 
 export function CommandPaletteDialog() {
-  const open = useCommandPaletteStore((store) => store.open);
+  // A workspace search (quick open) takes the command list's place while the
+  // store names one.
+  const showsCommands = useCommandPaletteStore(
+    (store) => store.open && store.workspaceSearchMode === null,
+  );
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const createPullRequestRequested = useCreatePullRequestDialogStore(
     (store) => store.request !== null,
@@ -454,7 +460,7 @@ export function CommandPaletteDialog() {
 
   return (
     <>
-      {open ? <OpenCommandPaletteDialog /> : null}
+      {showsCommands ? <OpenCommandPaletteDialog /> : <WorkspaceSearchDialog />}
       {createPullRequestRequested && createPullRequestHostReady ? (
         <LazyCreatePullRequestDialogHost />
       ) : null}
@@ -492,6 +498,7 @@ function OpenCommandPaletteDialog() {
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const openIntent = useCommandPaletteStore((store) => store.openIntent);
   const clearOpenIntent = useCommandPaletteStore((store) => store.clearOpenIntent);
+  const openWorkspaceSearch = useCommandPaletteStore((store) => store.openWorkspaceSearch);
   const composerHandleRef = useComposerHandleContext();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -1478,6 +1485,21 @@ function OpenCommandPaletteDialog() {
       },
     },
   );
+
+  if (presentationTier !== "phone") {
+    actionItems.push({
+      kind: "action",
+      value: "action:quick-open",
+      searchTerms: ["go to file", "quick open", "open file", "find file", "files"],
+      title: "Go to file",
+      icon: <FileSearchIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "workspace.quickOpen",
+      keepOpen: true,
+      run: async () => {
+        openWorkspaceSearch("files");
+      },
+    });
+  }
 
   if (presentationTier !== "phone" && splitThreadItems.length > 0) {
     actionItems.push({
