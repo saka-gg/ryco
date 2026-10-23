@@ -38,6 +38,7 @@ import { refreshMobileThreadPrioritiesNow } from "../../threadPriorityRefreshRun
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { ThreadAlertSettings } from "./ThreadAlertSettings";
 import { useSavedEnvironments } from "../connection/useConnectionController";
 import {
   autoSettleRuleModelNote,
@@ -234,6 +235,8 @@ export function SettingsInboxRouteScreen() {
         className="flex-1 bg-screen"
         contentContainerStyle={{ paddingTop: 4, paddingBottom: 40 }}
       >
+        <ThreadAlertSettings />
+
         {ruleModel.nodes.length > 1 ? (
           <SettingsSection title="Auto-settle by node">
             {ruleModel.nodes.map((node, index) => (

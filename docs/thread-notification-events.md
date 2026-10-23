@@ -18,7 +18,11 @@ connection supervisor. Every client runs one feed and owns only delivery:
   taskbar badge for the renderer. While its window is in front it answers
   `window-focused` instead, since an embedded page can hold the document's focus, and
   the renderer alerts in the app.
-- The native app schedules local notifications while it runs.
+- The native app posts local notifications while it runs, once alerts are turned on in
+  its settings: one per thread, unless that thread is on screen while the app is in front,
+  with the system sound when that is on. Opening one opens the thread. iOS suspends the
+  app soon after it leaves the screen, so alerts arrive while it is open; delivery after
+  that needs remote push.
 
 ## Integration
 
@@ -65,7 +69,6 @@ appears in a reconnect snapshot stays silent, and one still buffered when the co
 dropped can be too. Only connected environments alert. A hosted browser tab that has
 been hidden for a while releases the connections no open view holds and takes fresh
 snapshots when it returns, so while it is hidden it alerts only for the nodes it keeps
-connected. Delivery preferences, visible thread suppression, durable notification history,
-and Live Activities remain adapter work.
+connected. Remote push, durable notification history, and Live Activities are not built.
 The opaque generation token is local runtime metadata and must not be serialized into a
 push payload. Titles are user data; platform adapters own lock-screen privacy preferences.

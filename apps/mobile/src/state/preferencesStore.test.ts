@@ -119,6 +119,27 @@ it("migrates model-only favorites unchanged and reloads multiple effort presets"
   expect(getPreferencesSnapshot().favorites).toEqual(favorites);
 });
 
+describe("thread alert preferences", () => {
+  it("are off until set and read back after a restart", async () => {
+    expect(getPreferencesSnapshot().threadAlerts).toBeUndefined();
+    updatePreferences({ threadAlerts: true, threadAlertSound: false });
+    await flush();
+
+    resetPreferencesStoreForTests();
+    hydratePreferences();
+    await flush();
+    expect(getPreferencesSnapshot()).toMatchObject({ threadAlerts: true, threadAlertSound: false });
+  });
+
+  it("drop stored values that are not booleans", () => {
+    for (const stored of ["yes", 1, null, {}]) {
+      expect(
+        sanitizePreferences({ threadAlerts: stored as never, threadAlertSound: stored as never }),
+      ).toEqual({});
+    }
+  });
+});
+
 describe("keeping recent conversations on this device", () => {
   it("is on until the user turns it off, before and after preferences load", async () => {
     expect(getPreferencesSnapshot().rememberThreadContent).toBeUndefined();
