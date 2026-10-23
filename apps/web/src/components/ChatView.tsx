@@ -5638,6 +5638,8 @@ export default function ChatView(props: ChatViewProps) {
                 },
               }
             : {}),
+          // A model switch background tasks hold back fails this send with the readable refusal.
+          keepBackgroundWork: true,
           createdAt: messageCreatedAt,
         });
         // Optimistically open the plan sidebar when implementing (not refining).

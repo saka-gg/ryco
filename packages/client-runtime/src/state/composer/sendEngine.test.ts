@@ -18,6 +18,12 @@ import { createModelSelection } from "@ryco/shared/model";
 import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { describe, expect, it } from "vite-plus/test";
 
+import {
+  ModelSwitchBackgroundWorkError,
+  describeModelSwitchBlockedByBackgroundWork,
+  isModelSwitchBackgroundWorkError,
+  readModelSwitchBlockedByBackgroundWork,
+} from "./backgroundWorkModelSwitch.ts";
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
 import {
   buildSendTurnBootstrap,
@@ -550,5 +556,167 @@ describe("send engine — input limit", () => {
     const format = (text: string) => `Ultrathink:\n${text}`;
     expect(outgoingPromptOverflow({ prompt }, sent.length)).toBe(0);
     expect(outgoingPromptOverflow({ prompt, format }, sent.length)).toBe("Ultrathink:\n".length);
+  });
+});
+
+describe("send engine — model switch blocked by background work", () => {
+  const target = createModelSelection(ProviderInstanceId.make("claudeAgent"), "claude-sonnet");
+  const blocked = () =>
+    new OrchestrationDispatchCommandError({
+      message: "This thread still has background tasks running.",
+      modelSwitchBlockedByBackgroundWork: { taskIds: ["task-agent", "task-watch"] },
+    });
+
+  /** A switching send whose first turn start the node refuses for its background tasks. */
+  function blockedHarness(options: {
+    readonly confirm?: (blocked: { readonly taskIds: readonly string[] }) => Promise<boolean>;
+  }) {
+    const harness = makeDispatchHarness({
+      isFirstMessage: false,
+      modelSelection: target,
+      endLocalDispatch: () => {
+        harness.calls.push("endLocalDispatch");
+      },
+      onBeforeTurnStart: () => {
+        harness.calls.push("onBeforeTurnStart");
+      },
+      ...(options.confirm
+        ? {
+            confirmStopBackgroundWork: async (block) => {
+              harness.calls.push(`confirm:${block.taskIds.join(",")}`);
+              return options.confirm!(block);
+            },
+          }
+        : {}),
+    });
+    const dispatch = harness.input.api.orchestration.dispatchCommand;
+    let turnStarts = 0;
+    const api = {
+      orchestration: {
+        dispatchCommand: async (command: Parameters<typeof dispatch>[0]) => {
+          await dispatch(command);
+          if (command.type === "thread.turn.start" && (turnStarts += 1) === 1) throw blocked();
+          return { sequence: 1 };
+        },
+        stopBackgroundTask: async (input: { threadId: string; taskId: string }) => {
+          harness.calls.push(`stop:${input.threadId}:${input.taskId}`);
+          return {};
+        },
+      },
+    } as unknown as EnvironmentApi;
+    const turnStartCommands = () =>
+      harness.commands.filter((command) => command.type === "thread.turn.start");
+    return { harness, input: { ...harness.input, api }, turnStartCommands };
+  }
+
+  it("sends the same command again, restamped and marked to stop background work", async () => {
+    const { harness, input, turnStartCommands } = blockedHarness({ confirm: async () => true });
+    await commitSendTurnDispatch(input);
+
+    // Nothing is stopped before the node accepts the switch: the switch itself ends the
+    // tasks, and a retry refused for another reason must leave them running.
+    expect(harness.calls).toEqual([
+      "persist",
+      "beginLocalDispatch",
+      "onBeforeTurnStart",
+      "dispatch:thread.turn.start",
+      "endLocalDispatch",
+      "confirm:task-agent,task-watch",
+      "beginLocalDispatch",
+      "onBeforeTurnStart",
+      "dispatch:thread.turn.start",
+    ]);
+    const [first, second] = turnStartCommands();
+    expect(turnStartCommands()).toHaveLength(2);
+    // The node refuses only a turn start that asks it to: older clients cannot handle that.
+    expect(first).toMatchObject({ keepBackgroundWork: true });
+    expect(first).not.toHaveProperty("stopBackgroundWork");
+    expect(first?.createdAt).toBe(input.createdAt);
+    // Same command identity: the node recorded nothing for the refused attempt. The time
+    // spent deciding is not work, so the turn starts when the user confirmed.
+    const { keepBackgroundWork: _keep, ...firstUnmarked } = first as Record<string, unknown>;
+    expect(second).toEqual({
+      ...firstUnmarked,
+      stopBackgroundWork: true,
+      createdAt: expect.any(String),
+    });
+    expect(Date.parse(second!.createdAt as string)).toBeGreaterThan(Date.parse(input.createdAt));
+    expect(second?.commandId).toBe("composer-send:thread-1:message-1");
+  });
+
+  it("keeps the send unsent on cancel: no stop, no second command, no committed target", async () => {
+    const { harness, input, turnStartCommands } = blockedHarness({ confirm: async () => false });
+
+    const cancelled = await commitSendTurnDispatch(input).catch((error: unknown) => error);
+    expect(cancelled).toBeInstanceOf(ModelSwitchBackgroundWorkError);
+    expect(isModelSwitchBackgroundWorkError(cancelled)).toBe(true);
+    expect((cancelled as Error).message).toContain("Your message and the selected model are kept");
+    expect(harness.calls.filter((call) => call.startsWith("stop:"))).toEqual([]);
+    expect(turnStartCommands()).toHaveLength(1);
+    // The staged target only ever travels on the refused turn start, never a thread update.
+    expect(harness.commands.filter((command) => command.type !== "thread.turn.start")).toEqual([]);
+    expect(harness.persisted.every((settings) => !("modelSelection" in settings))).toBe(true);
+  });
+
+  it("sends nothing when the connection changed during the choice", async () => {
+    const { harness, input, turnStartCommands } = blockedHarness({ confirm: async () => true });
+    const changed = await commitSendTurnDispatch({
+      ...input,
+      assertMutationReady: () => {
+        throw new Error("connection replaced");
+      },
+    }).catch((error: unknown) => error);
+
+    expect(changed).toBeInstanceOf(ModelSwitchBackgroundWorkError);
+    expect((changed as Error).message).toContain("Nothing was stopped or sent");
+    expect(harness.calls.filter((call) => call.startsWith("stop:"))).toEqual([]);
+    expect(turnStartCommands()).toHaveLength(1);
+  });
+
+  it("surfaces the refusal as is without a confirmation", async () => {
+    const { harness, input, turnStartCommands } = blockedHarness({});
+    const refused = await commitSendTurnDispatch(input).catch((error: unknown) => error);
+    expect(refused).toMatchObject({
+      modelSwitchBlockedByBackgroundWork: { taskIds: ["task-agent", "task-watch"] },
+    });
+    // A queue holds such a send for an explicit retry instead of dropping it.
+    expect(isModelSwitchBackgroundWorkError(refused)).toBe(true);
+    expect(turnStartCommands()).toHaveLength(1);
+    expect(harness.calls.filter((call) => call.startsWith("stop:"))).toEqual([]);
+  });
+
+  it("recognises the refusal by tag and key, never by message", () => {
+    expect(readModelSwitchBlockedByBackgroundWork(blocked())).toEqual({
+      taskIds: ["task-agent", "task-watch"],
+    });
+    // Decoded off the wire without the class (relay transports): still the same answer.
+    expect(
+      readModelSwitchBlockedByBackgroundWork({
+        _tag: "OrchestrationDispatchCommandError",
+        message: "x",
+        modelSwitchBlockedByBackgroundWork: { taskIds: ["task-agent"] },
+      }),
+    ).toEqual({ taskIds: ["task-agent"] });
+    expect(
+      readModelSwitchBlockedByBackgroundWork(
+        new OrchestrationDispatchCommandError({ message: "background tasks running" }),
+      ),
+    ).toBeNull();
+    expect(
+      readModelSwitchBlockedByBackgroundWork({
+        modelSwitchBlockedByBackgroundWork: { taskIds: [] },
+      }),
+    ).toBeNull();
+    expect(readModelSwitchBlockedByBackgroundWork(null)).toBeNull();
+    expect(isModelSwitchBackgroundWorkError(new Error("relay dropped"))).toBe(false);
+  });
+
+  it("describes one task and several tasks", () => {
+    expect(describeModelSwitchBlockedByBackgroundWork({ taskIds: ["a"] })).toContain(
+      "A background task is still running",
+    );
+    expect(describeModelSwitchBlockedByBackgroundWork({ taskIds: ["a", "b"] })).toContain(
+      "2 background tasks are still running",
+    );
   });
 });

@@ -66,6 +66,7 @@ import { makeProviderMcpRegistry } from "../mcp/ProviderMcpRegistry.ts";
 import { Open, resolveAvailableEditors } from "../open.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../orchestration/Services/ThreadDeletionReactor.ts";
+import { OrchestrationModelSwitchBlockedError } from "../orchestration/Errors.ts";
 import { ContextHandoffInspection } from "../orchestration/Services/ContextHandoffInspection.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { StatisticsQuery } from "../statistics/StatisticsQuery.ts";
@@ -623,23 +624,36 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
 
     const appendSetupScriptActivity = makeAppendSetupScriptActivity(orchestrationEngine.dispatch);
 
+    // A model switch refused by live background work carries its tasks over the wire, so the
+    // client can offer to stop them and send the same command again.
+    const isModelSwitchBlocked = Schema.is(OrchestrationModelSwitchBlockedError);
+    const modelSwitchBlockedDispatchError = (error: OrchestrationModelSwitchBlockedError) =>
+      new OrchestrationDispatchCommandError({
+        message: error.message,
+        modelSwitchBlockedByBackgroundWork: { taskIds: error.taskIds },
+      });
+
     const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
       Schema.is(OrchestrationDispatchCommandError)(cause)
         ? cause
-        : new OrchestrationDispatchCommandError({
-            message: cause instanceof Error ? cause.message : fallbackMessage,
-            cause,
-          });
+        : isModelSwitchBlocked(cause)
+          ? modelSwitchBlockedDispatchError(cause)
+          : new OrchestrationDispatchCommandError({
+              message: cause instanceof Error ? cause.message : fallbackMessage,
+              cause,
+            });
 
     const toBootstrapDispatchCommandCauseError = (cause: Cause.Cause<unknown>) => {
       const error = Cause.squash(cause);
       return Schema.is(OrchestrationDispatchCommandError)(error)
         ? error
-        : new OrchestrationDispatchCommandError({
-            message:
-              error instanceof Error ? error.message : "Failed to bootstrap thread turn start.",
-            cause,
-          });
+        : isModelSwitchBlocked(error)
+          ? modelSwitchBlockedDispatchError(error)
+          : new OrchestrationDispatchCommandError({
+              message:
+                error instanceof Error ? error.message : "Failed to bootstrap thread turn start.",
+              cause,
+            });
     };
 
     const dispatchBootstrapTurnStart = (

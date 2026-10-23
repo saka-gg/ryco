@@ -2,6 +2,7 @@
 export type { ComposerAttachment } from "../../platform/index.ts";
 export * from "./approvalRedirect.ts";
 export * from "./attachmentUpload.ts";
+export * from "./backgroundWorkModelSwitch.ts";
 export * from "./chatDrafts.ts";
 export * from "./draftPersistence.ts";
 export * from "./draftSplitStorage.ts";

@@ -1,5 +1,6 @@
 import type {
   ClaudeCacheReviewPresentation,
+  CommitSendTurnDispatchInput,
   SubscribedClaudeReviewState,
 } from "@ryco/client-runtime/state/composer";
 import type {
@@ -38,6 +39,8 @@ import { isDraftComposerFileAttachment } from "../../lib/composerFiles";
 export interface ExecuteSendTurnInput {
   readonly api: EnvironmentApi;
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
+  /** The "Stop tasks and switch" choice when background tasks hold back a model switch. */
+  readonly confirmStopBackgroundWork?: CommitSendTurnDispatchInput["confirmStopBackgroundWork"];
   /**
    * What the live thread subscription holds for the Claude resume review, read
    * from the store when the review runs. A send it clears skips the
@@ -162,6 +165,9 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
 
     await commitSendTurnDispatch({
       ...(input.claudeCacheReview ? { claudeCacheReview: input.claudeCacheReview } : {}),
+      ...(input.confirmStopBackgroundWork
+        ? { confirmStopBackgroundWork: input.confirmStopBackgroundWork }
+        : {}),
       ...(input.readSubscribedClaudeReviewState
         ? { readSubscribedClaudeReviewState: input.readSubscribedClaudeReviewState }
         : {}),

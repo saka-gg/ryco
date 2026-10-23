@@ -102,6 +102,7 @@ import {
 } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import {
   OrchestrationCommandInvariantError,
+  OrchestrationModelSwitchBlockedError,
   OrchestrationListenerCallbackError,
 } from "./orchestration/Errors.ts";
 import { ChatFolders, type ChatFoldersShape } from "./project/chatFolders.ts";
@@ -7168,6 +7169,95 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(sessionStopCommand.threadId, threadId);
       }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "carries a model switch's blocking background tasks to the client and its stop choice back",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread-handoff-background");
+        const dispatchedCommands: Array<OrchestrationCommand> = [];
+        yield* buildAppUnderTest({
+          layers: {
+            orchestrationEngine: {
+              dispatch: (command) => {
+                dispatchedCommands.push(command);
+                return command.type === "thread.turn.start" &&
+                  command.keepBackgroundWork === true &&
+                  command.stopBackgroundWork !== true
+                  ? Effect.fail(
+                      new OrchestrationModelSwitchBlockedError({
+                        threadId,
+                        taskIds: ["task-agent", "task-watch"],
+                      }),
+                    )
+                  : Effect.succeed({ sequence: dispatchedCommands.length });
+              },
+            },
+          },
+        });
+
+        const turnStart = {
+          type: "thread.turn.start",
+          commandId: CommandId.make("composer-send:handoff"),
+          threadId,
+          message: {
+            messageId: MessageId.make("handoff-message"),
+            role: "user",
+            text: "Continue with Claude",
+            attachments: [],
+          },
+          modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "fixture" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          keepBackgroundWork: true,
+          createdAt: new Date().toISOString(),
+        } as const;
+        const { keepBackgroundWork: _keep, ...unmarked } = turnStart;
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const [refused, accepted] = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.all([
+              Effect.flip(client[ORCHESTRATION_WS_METHODS.dispatchCommand](turnStart)),
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                ...unmarked,
+                stopBackgroundWork: true,
+              }),
+            ]),
+          ),
+        );
+
+        // The tasks travel in their own key; the message stays readable without the choice.
+        assert.deepInclude(refused, {
+          _tag: "OrchestrationDispatchCommandError",
+          modelSwitchBlockedByBackgroundWork: { taskIds: ["task-agent", "task-watch"] },
+        });
+        assertInclude(refused.message, "background tasks running");
+        assert.equal(accepted.sequence, 2);
+        assert.deepEqual(
+          dispatchedCommands.map((command) =>
+            command.type === "thread.turn.start"
+              ? {
+                  commandId: command.commandId,
+                  keepBackgroundWork: command.keepBackgroundWork,
+                  stopBackgroundWork: command.stopBackgroundWork,
+                }
+              : null,
+          ),
+          [
+            {
+              commandId: turnStart.commandId,
+              keepBackgroundWork: true,
+              stopBackgroundWork: undefined,
+            },
+            {
+              commandId: turnStart.commandId,
+              keepBackgroundWork: undefined,
+              stopBackgroundWork: true,
+            },
+          ],
+        );
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("checks session status before archiving removes the thread from active lookups", () =>

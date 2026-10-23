@@ -1,5 +1,8 @@
 import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { isClaudeResumeReviewError } from "@ryco/client-runtime/state/composer";
+import {
+  isClaudeResumeReviewError,
+  isModelSwitchBackgroundWorkError,
+} from "@ryco/client-runtime/state/composer";
 import {
   appendAcknowledgedCauseKeys,
   createInterruptQueueHold,
@@ -53,6 +56,8 @@ const OUTBOX_STORAGE_KEY = "ryco.threadOutbox.v1";
 const HOLDS_STORAGE_KEY = "ryco.threadOutboxHolds.v1";
 /** A queued send whose turn has not started after this long holds the queue. */
 const ACK_TIMEOUT_MS = 90_000;
+const MODEL_SWITCH_HELD_MESSAGE =
+  "Background tasks are still running in this thread, so the model was not switched.";
 const MAX_STEPS_PER_THREAD = 8;
 const MAX_DISPATCHED_PER_THREAD = 16;
 const MAX_SNAPSHOTS = 64;
@@ -748,6 +753,16 @@ async function sendHead(
       pendingDispatchByThreadKey.set(key, hookSnapshot ?? startSnapshot);
     }
   } catch (error) {
+    // Background tasks held the model switch back and nothing more was sent (the user
+    // cancelled, the connection changed during the choice, or the node's refusal itself): the
+    // node recorded nothing, so the message waits for an explicit retry, never dropped.
+    if (isModelSwitchBackgroundWorkError(error)) {
+      enqueueThreadOutboxMessage({
+        ...head,
+        resumeReviewError: error instanceof Error ? error.message : MODEL_SWITCH_HELD_MESSAGE,
+      });
+      return;
+    }
     if (hookSnapshot) {
       addDispatched(key, head.messageId);
       setBounded(failedSnapshots, head.messageId, hookSnapshot, MAX_SNAPSHOTS);

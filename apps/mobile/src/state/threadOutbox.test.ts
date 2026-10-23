@@ -1,7 +1,11 @@
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
-import { ClaudeResumeReviewError } from "@ryco/client-runtime/state/composer";
+import {
+  ClaudeResumeReviewError,
+  ModelSwitchBackgroundWorkError,
+} from "@ryco/client-runtime/state/composer";
 import { useStore } from "@ryco/client-runtime/state/threads";
 import type { QueueSendHooks, QueueThreadView } from "@ryco/client-runtime/state/message-queue";
+import { OrchestrationDispatchCommandError } from "@ryco/contracts";
 import type {
   EnvironmentId,
   MessageId,
@@ -713,6 +717,52 @@ it("retains and pauses reviewed sends with attachments until an explicit retry",
   await drainThreadOutbox(deps(IDLE, async () => {}));
   expect(listThreadOutboxMessages()).toHaveLength(0);
 });
+
+it.each([
+  [
+    "cancelled",
+    () => new ModelSwitchBackgroundWorkError("Send cancelled. The background tasks keep running."),
+    "cancelled",
+  ],
+  [
+    "refused",
+    () =>
+      new OrchestrationDispatchCommandError({
+        message: "This thread still has background tasks running.",
+        modelSwitchBlockedByBackgroundWork: { taskIds: ["task-shell"] },
+      }),
+    "background tasks",
+  ],
+] as const)(
+  "holds a queued model switch background tasks kept back (%s) until an explicit retry",
+  async (_case, error, reason) => {
+    const original = queued("switch", "2026-10-22T00:00:00.000Z");
+    enqueueThreadOutboxMessage(original);
+    enqueueThreadOutboxMessage(queued("later", "2026-10-22T00:01:00.000Z"));
+    const sendQueuedMessage = vi.fn(
+      async (_message: QueuedThreadMessage, hooks: QueueSendHooks) => {
+        hooks.onBeforeTurnStart();
+        throw error();
+      },
+    );
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    const held = () => listThreadOutboxMessages().find((message) => message.messageId === "switch");
+    // Kept, not dropped: the node recorded nothing for it.
+    expect(listThreadOutboxMessages()).toHaveLength(2);
+    expect(held()?.resumeReviewError).toContain(reason);
+    // Held: neither it nor the messages behind it go out on their own.
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+    retryThreadOutboxReview(original.messageId);
+    const delivered = vi.fn(async () => {});
+    await drainThreadOutbox(deps(IDLE, delivered));
+    expect(delivered).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "switch" }),
+      expect.anything(),
+    );
+    expect(held()).toBeUndefined();
+  },
+);
 
 describe("threadOutbox usage-limit holds", () => {
   const RESET_MS = Date.parse("2026-07-24T15:00:00.000Z");

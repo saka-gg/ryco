@@ -81,7 +81,7 @@ export function ThreadQueuedMessages(props: {
                 <Text className="text-xs text-foreground-muted">{message.resumeReviewError}</Text>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Review queued Claude message"
+                  accessibilityLabel="Review and retry queued message"
                   onPress={() => props.onRetryReview?.(message.messageId)}
                 >
                   <Text className="text-sm font-ryco-bold text-foreground">Review and retry</Text>

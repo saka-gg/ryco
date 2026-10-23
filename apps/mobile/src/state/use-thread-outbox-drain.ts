@@ -67,6 +67,12 @@ export async function sendQueuedThreadMessage(
           review,
         ),
     },
+    // Asked like the Claude resume review: a cancelled choice holds the message for an
+    // explicit retry instead of dropping it (see the outbox's sendHead).
+    confirmStopBackgroundWork: async (blocked) =>
+      (await import("../features/threads/stopBackgroundWork")).mobileConfirmStopBackgroundWork(
+        blocked,
+      ),
     // The drain retains the queued thread's detail subscription, so the Claude
     // resume review can judge the subscribed state and skip the window read.
     readSubscribedClaudeReviewState: () =>

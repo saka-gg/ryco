@@ -18,6 +18,7 @@ import {
   ThreadId,
   TurnId,
   WorktreeId,
+  type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -37,7 +38,10 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import * as SqlClient from "effect/sql/SqlClient";
-import { OrchestrationCommandAdmissionError } from "../Errors.ts";
+import {
+  OrchestrationCommandAdmissionError,
+  OrchestrationModelSwitchBlockedError,
+} from "../Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { buildDelegationReturnCommand } from "../../agentControl/completionReturnMessages.ts";
@@ -93,7 +97,8 @@ async function createOrchestrationSystem(databasePath?: string) {
     ),
     OrchestrationProjectionSnapshotQueryLive,
   ).pipe(
-    Layer.provide(ThreadBackgroundLiveness.layer),
+    // The same registry the engine reads (layers are memoized), so tests can feed it.
+    Layer.provideMerge(ThreadBackgroundLiveness.layer),
     Layer.provide(MockProjectAvatarStoreLive),
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
@@ -109,6 +114,9 @@ async function createOrchestrationSystem(databasePath?: string) {
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
   return {
     engine,
+    liveness: await runtime.runPromise(
+      Effect.service(ThreadBackgroundLiveness.ThreadBackgroundLivenessService),
+    ),
     sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readShell: () => runtime.runPromise(snapshotQuery.getShellSnapshot()),
@@ -2819,12 +2827,16 @@ type DelegationReturnCommand = Extract<OrchestrationCommand, { type: "thread.tur
 
 // Engine commands only (no provider reactors): a parent with two completed turns,
 // each bound to its own user message through projection_turns.pending_message_id.
-async function seedDelegationParent(databasePath?: string) {
+async function seedDelegationParent(
+  databasePath?: string,
+  options: { readonly driver?: "codex" | "claudeAgent" } = {},
+) {
+  const driver = options.driver ?? "codex";
   const system = await createOrchestrationSystem(databasePath);
   try {
     const projectId = ProjectId.make("delegation-project");
     const threadId = DELEGATION_PARENT_ID;
-    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" };
+    const modelSelection = { instanceId: ProviderInstanceId.make(driver), model: "fixture" };
     await system.run(
       system.engine.dispatch({
         type: "project.create",
@@ -2857,8 +2869,8 @@ async function seedDelegationParent(databasePath?: string) {
       const session = {
         threadId,
         status: "running" as const,
-        providerName: "codex",
-        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerName: driver,
+        providerInstanceId: ProviderInstanceId.make(driver),
         runtimeSessionId: RuntimeSessionId.make("runtime-1"),
         runtimeMode: "full-access" as const,
         activeTurnId: turnId,
@@ -3116,6 +3128,219 @@ describe("delegated return fence across restarts", () => {
       });
       expect(next.delegationReturnGuard?.latestUserMessageId).toBe("delegation-result:child-1");
       await expect(system.run(system.engine.dispatch(next))).resolves.toBeDefined();
+    } finally {
+      await system.dispose();
+    }
+  });
+});
+
+describe("model switches past native background work", () => {
+  // The delegation parent: two settled Codex turns on a ready runtime. Sent as the composer
+  // sends it: asking the node to refuse a switch that would end background tasks.
+  const handoffTo = (
+    overrides: Partial<Extract<OrchestrationCommand, { type: "thread.turn.start" }>> = {},
+  ): Extract<OrchestrationCommand, { type: "thread.turn.start" }> => ({
+    type: "thread.turn.start",
+    commandId: CommandId.make("composer-send:handoff"),
+    threadId: DELEGATION_PARENT_ID,
+    message: {
+      messageId: MessageId.make("handoff-message"),
+      role: "user",
+      text: "Continue with Claude",
+      attachments: [],
+    },
+    modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "fixture" },
+    runtimeMode: "full-access",
+    interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+    keepBackgroundWork: true,
+    createdAt: delegationAt(20),
+    ...overrides,
+  });
+  // As ingestion records it: tagged with the runtime that reported it (the seeded session's).
+  const startBackgroundTask = (
+    system: DelegationSystem,
+    taskId: string,
+    runtimeSessionId = "runtime-1",
+  ) =>
+    system.liveness.recordTaskLiveness({
+      threadId: DELEGATION_PARENT_ID,
+      taskId,
+      taskType: "local_agent",
+      status: "running",
+      kind: "started",
+      runtimeSessionId,
+    });
+  const handoffActivities = async (system: DelegationSystem) =>
+    (await system.readModel()).threads
+      .find((thread) => thread.id === DELEGATION_PARENT_ID)!
+      .activities.filter((activity) => activity.kind === "context-handoff");
+
+  it("refuses the handoff with the live tasks and keeps the same command retryable", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      startBackgroundTask(system, "task-watch");
+      const refused = await system.run(Effect.flip(system.engine.dispatch(handoffTo())));
+      expect(refused).toBeInstanceOf(OrchestrationModelSwitchBlockedError);
+      expect(refused).toMatchObject({
+        threadId: DELEGATION_PARENT_ID,
+        taskIds: ["task-agent", "task-watch"],
+      });
+      expect(await handoffActivities(system)).toEqual([]);
+
+      // No rejected receipt: once the tasks are gone the same command id hands off.
+      for (const taskId of ["task-agent", "task-watch"]) {
+        system.liveness.recordTaskLiveness({
+          threadId: DELEGATION_PARENT_ID,
+          taskId,
+          taskType: "local_agent",
+          status: "completed",
+          kind: "completed",
+          runtimeSessionId: "runtime-1",
+        });
+      }
+      await system.run(system.engine.dispatch(handoffTo()));
+      expect(await handoffActivities(system)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("hands off when the user chose to stop the tasks", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      await system.run(Effect.flip(system.engine.dispatch(handoffTo())));
+      await system.run(system.engine.dispatch(handoffTo({ stopBackgroundWork: true })));
+      expect(await handoffActivities(system)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("hands off as before for a sender that does not ask to keep the tasks", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      // An older client cannot handle the refusal (its outbox would drop the message), so its
+      // turn start switches as it always did.
+      await system.run(system.engine.dispatch(handoffTo({ keepBackgroundWork: undefined })));
+      expect(await handoffActivities(system)).toHaveLength(1);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("leaves turns without a handoff, and threads without a live runtime, alone", async () => {
+    const system = await seedDelegationParent();
+    try {
+      startBackgroundTask(system, "task-agent");
+      // Another model on the thread's own instance: Codex switches inside the running
+      // session, so the turn replaces no runtime and the tasks do not block it.
+      await system.run(
+        system.engine.dispatch(
+          handoffTo({
+            commandId: CommandId.make("composer-send:same-model"),
+            message: {
+              messageId: MessageId.make("same-model-message"),
+              role: "user",
+              text: "Keep going",
+              attachments: [],
+            },
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture-2" },
+          }),
+        ),
+      );
+      expect(await handoffActivities(system)).toEqual([]);
+    } finally {
+      await system.dispose();
+    }
+
+    const stopped = await seedDelegationParent();
+    try {
+      startBackgroundTask(stopped, "task-agent");
+      // A stopped runtime has nothing left for the handoff to end.
+      await stopped.run(
+        stopped.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("session-stopped"),
+          threadId: DELEGATION_PARENT_ID,
+          session: {
+            threadId: DELEGATION_PARENT_ID,
+            status: "stopped",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: delegationAt(15),
+          },
+          createdAt: delegationAt(15),
+        }),
+      );
+      await stopped.run(stopped.engine.dispatch(handoffTo()));
+      expect(await handoffActivities(stopped)).toHaveLength(1);
+    } finally {
+      await stopped.dispose();
+    }
+  });
+  it("refuses a model or option change that restarts a Claude session", async () => {
+    const system = await seedDelegationParent(undefined, { driver: "claudeAgent" });
+    try {
+      startBackgroundTask(system, "task-shell");
+      const claude = ProviderInstanceId.make("claudeAgent");
+      const turn = (id: string, modelSelection: ModelSelection, stopBackgroundWork?: true) =>
+        handoffTo({
+          commandId: CommandId.make(`composer-send:${id}`),
+          message: {
+            messageId: MessageId.make(`${id}-message`),
+            role: "user",
+            text: "Keep going",
+            attachments: [],
+          },
+          modelSelection,
+          ...(stopBackgroundWork ? { stopBackgroundWork } : {}),
+        });
+      // The Claude driver restarts its session for any other model or options, which ends
+      // the runtime's background work as surely as a handoff would.
+      for (const [id, modelSelection] of [
+        ["other-model", { instanceId: claude, model: "fixture-2" }],
+        [
+          "other-options",
+          { instanceId: claude, model: "fixture", options: [{ id: "effort", value: "low" }] },
+        ],
+      ] as const) {
+        const refused = await system.run(
+          Effect.flip(system.engine.dispatch(turn(id, modelSelection))),
+        );
+        expect(refused).toBeInstanceOf(OrchestrationModelSwitchBlockedError);
+        expect(refused).toMatchObject({ taskIds: ["task-shell"] });
+      }
+      expect(await handoffActivities(system)).toEqual([]);
+      // The thread's own selection restarts nothing.
+      await system.run(
+        system.engine.dispatch(turn("same", { instanceId: claude, model: "fixture" })),
+      );
+      // The user chose to stop the tasks: the change goes through.
+      await system.run(
+        system.engine.dispatch(
+          turn("other-model", { instanceId: claude, model: "fixture-2" }, true),
+        ),
+      );
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("does not count the tasks of a runtime the thread no longer runs", async () => {
+    const system = await seedDelegationParent();
+    try {
+      // Reported by a runtime the thread has since replaced: they died with it, even though
+      // its late terminal events are dropped as stale and never clear them.
+      startBackgroundTask(system, "task-agent", "runtime-replaced");
+      await system.run(system.engine.dispatch(handoffTo()));
+      expect(await handoffActivities(system)).toHaveLength(1);
     } finally {
       await system.dispose();
     }

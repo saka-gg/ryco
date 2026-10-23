@@ -1,6 +1,7 @@
 import { sidebarUndo } from "../../state/sidebarUndo";
 import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
+import { mobileConfirmStopBackgroundWork } from "./stopBackgroundWork";
 import { prewarmThreadProviderSession } from "./threadSessionPrewarm";
 import { runOutboxDrain } from "../../state/use-thread-outbox-drain";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
@@ -1637,6 +1638,7 @@ export function ThreadDetailScreen(props: {
               providerDriver: threadProviderDriver,
               sourceProviderDriver: currentThread.session?.provider ?? null,
               claudeCacheReview: mobileClaudeCacheReview,
+              confirmStopBackgroundWork: mobileConfirmStopBackgroundWork,
               // The retained detail subscription already holds what the Claude
               // resume review reads; a send it clears skips the window read.
               readSubscribedClaudeReviewState: () =>

@@ -12,6 +12,19 @@ checkpoint revert, or other active handoff. A busy-state race rejects the send w
 canonical provider selection; the composer keeps the message and staged target for a predictable
 retry. The frozen web phone provider flow does not offer handoffs.
 
+A thread can be idle while its provider runtime still runs native background tasks (subagents,
+background shells, watch loops). A handoff stops that runtime, and the tasks with it. So does a
+model or option change on a Claude instance, which restarts the Claude session. The server refuses
+either send before recording anything and names the live tasks in the refusal. The composer then
+offers **Stop tasks and switch**: it sends the same message again under the same command id, marked
+to proceed, and replacing the runtime ends the tasks. Nothing is stopped before the server accepts
+the switch. Cancel keeps the message and the staged target; on mobile a queued message waits for an
+explicit retry. The server refuses only sends that ask for it (`keepBackgroundWork`), and current
+clients mark every send. Sends from clients that predate the choice switch as before, because an
+older mobile outbox would drop a refused message. Only tasks of the thread's current runtime count,
+and background liveness is held in memory, so after a server restart no task blocks a switch.
+Runtime-mode and token-mode changes also restart the session but are not guarded yet.
+
 ## Runtime and context model
 
 Every version 1 target is a fresh provider-native runtime, including a return to a provider used

@@ -1,6 +1,7 @@
 import * as SqlClient from "effect/sql/SqlClient";
 import { acquireStoragePathUseLeaseHandle } from "../../storage/lifecycle.ts";
 import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
+import { modelSelectionChangeRestartsSession } from "../../provider/sessionModelRestart.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { stageComputerTurn, computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
@@ -1019,10 +1020,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         });
       }
       const previousModelSelection = threadModelSelections.get(threadId);
-      const shouldRestartForModelSelectionChange =
-        preferredProvider === "claudeAgent" &&
-        requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
+      const shouldRestartForModelSelectionChange = modelSelectionChangeRestartsSession({
+        driver: preferredProvider,
+        previous: previousModelSelection,
+        requested: requestedModelSelection,
+      });
 
       if (
         !options.computerCatalogChanged &&

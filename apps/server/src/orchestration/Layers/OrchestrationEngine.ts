@@ -58,7 +58,12 @@ import {
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
-import { deletedWorkspaceTurnBlocker, findThreadWorktree } from "../commandInvariants.ts";
+import {
+  deletedWorkspaceTurnBlocker,
+  findThreadWorktree,
+  requireNoBackgroundWorkForModelSwitch,
+} from "../commandInvariants.ts";
+import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
@@ -167,6 +172,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerEffectIntents = yield* ProviderEffectIntentRepository;
+  // Optional so engines built without runtime ingestion (tests, tools) skip the
+  // background-work model-switch check instead of requiring the registry.
+  const backgroundLiveness = Option.getOrUndefined(
+    yield* Effect.serviceOption(ThreadBackgroundLivenessService),
+  );
 
   const sidebarUndo = createSidebarUndoReceipts();
   let commandReadModel = createEmptyReadModel(new Date().toISOString());
@@ -423,6 +433,14 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             }));
 
           const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
+          if (backgroundLiveness !== undefined && envelope.command.type === "thread.turn.start") {
+            yield* requireNoBackgroundWorkForModelSwitch({
+              command: envelope.command,
+              events: eventBases,
+              thread: findThreadInArray(commandReadModel.threads, envelope.command.threadId),
+              liveTaskIds: backgroundLiveness.listLiveTaskIds,
+            });
+          }
           workspaceCommitFence.begin(eventBases);
           return yield* sql
             .withTransaction(

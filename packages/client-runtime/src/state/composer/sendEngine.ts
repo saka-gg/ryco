@@ -7,6 +7,7 @@ import {
 import type {
   ClaudeResumeGuard,
   ComputerTurnIntent,
+  ModelSwitchBlockedByBackgroundWork,
   LocalTaskDelegateInput,
   UsageLimitResumeGuard,
 } from "@ryco/contracts";
@@ -33,6 +34,7 @@ import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { createModelSelection } from "@ryco/shared/model";
 import { expandQuoteCitations } from "@ryco/shared/quoteCitations";
 import type { ComposerAttachment } from "../../platform/index.ts";
+import { startTurnPastBackgroundWork } from "./backgroundWorkModelSwitch.ts";
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
 import { buildFileReferenceBlock, type FileReference } from "./fileReference.ts";
 import {
@@ -338,6 +340,15 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 export interface CommitSendTurnDispatchInput {
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
   /**
+   * Asked when the node refuses this send's model switch while the thread's
+   * background tasks run: true sends again so the switch ends them, false
+   * cancels (see `startTurnPastBackgroundWork`). Absent, the refusal is the
+   * send's outcome.
+   */
+  readonly confirmStopBackgroundWork?: (
+    blocked: ModelSwitchBlockedByBackgroundWork,
+  ) => Promise<boolean>;
+  /**
    * The thread as the client's live subscription holds it (undefined when it is not live or
    * not loaded). The Claude resume review is assessed from it first: a send that needs no
    * review then skips the review's thread read.
@@ -381,16 +392,18 @@ export interface CommitSendTurnDispatchInput {
   readonly newCommandId: () => CommandId;
   readonly beginLocalDispatch: (options: { readonly preparingWorktree: boolean }) => void;
   /**
-   * Closes the local dispatch window while the Claude resume review holds the
-   * send, so the settled previous turn does not read as running behind the
-   * dialog. `beginLocalDispatch` reopens it right before the turn starts.
+   * Closes the local dispatch window while the Claude resume review or the
+   * "Stop tasks and switch" choice holds the send, so the settled previous turn
+   * does not read as running behind the dialog. `beginLocalDispatch` reopens it
+   * right before the turn starts.
    */
   readonly endLocalDispatch?: () => void;
   /**
    * Runs immediately before the final `thread.turn.start`: after the Claude
    * resume review (including any `/compact` turn and its wait), the settings
-   * writes and the readiness asserts. Not called when those throw, nor for a
-   * call that joins a pending send of the same message id.
+   * writes and the readiness asserts, and again before a turn start sent again
+   * past background work. Not called when those throw, nor for a call that
+   * joins a pending send of the same message id.
    */
   readonly onBeforeTurnStart?: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
@@ -470,7 +483,9 @@ async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput
   input.beginLocalDispatch({ preparingWorktree: Boolean(input.bootstrap?.prepareWorktree) });
   input.onBeforeTurnStart?.();
   const startTurn = (bootstrap: SendTurnBootstrap, commandId: CommandId) =>
-    dispatchTurnStart(input, reviewed?.guard, bootstrap, commandId);
+    startTurnPastBackgroundWork(input, (retry) =>
+      dispatchTurnStart(input, reviewed?.guard, bootstrap, commandId, retry),
+    );
   try {
     await startTurn(
       input.bootstrap,
@@ -496,6 +511,8 @@ function dispatchTurnStart(
   claudeResumeGuard: ClaudeResumeGuard | undefined,
   bootstrap: SendTurnBootstrap,
   commandId: CommandId,
+  /** A turn start sent again past background work (see `startTurnPastBackgroundWork`). */
+  retryPastBackgroundWork: { readonly createdAt: string } | undefined,
 ) {
   const threadReferences = extractThreadReferences(input.outgoingMessageText, input.threadId);
   const command: LocalTaskDelegateInput["command"] = {
@@ -522,7 +539,10 @@ function dispatchTurnStart(
       ? { sourceControlContexts: input.sourceControlContexts }
       : {}),
     ...(threadReferences.length > 0 ? { threadReferences } : {}),
-    createdAt: input.createdAt,
+    // Every caller handles the node's refusal (the choice, a held queue message, or a failed
+    // send that keeps the draft), so each turn start asks for it until the user chose to stop.
+    ...(retryPastBackgroundWork ? { stopBackgroundWork: true } : { keepBackgroundWork: true }),
+    createdAt: retryPastBackgroundWork?.createdAt ?? input.createdAt,
   };
   return input.localTask
     ? input.localTask.delegate(command)
