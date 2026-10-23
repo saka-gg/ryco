@@ -15,7 +15,11 @@ const PANEL_SHORTCUTS = [
 ] as const;
 
 const KEYBINDINGS: ResolvedKeybindingsConfig = [
-  ...PANEL_SHORTCUTS.map(({ command, key }) => ({
+  ...[
+    ...PANEL_SHORTCUTS,
+    { command: "thread.interrupt", key: "." },
+    { command: "thread.copyReference", key: "c" },
+  ].map(({ command, key }) => ({
     command,
     shortcut: { key, metaKey: false, ctrlKey: false, shiftKey: true, altKey: true, modKey: false },
   })),
@@ -52,7 +56,33 @@ function createInput(): UseChatGlobalShortcutsInput {
     onOpenTerminalPanel: vi.fn(),
     onOpenSimulatorPanel: vi.fn(),
     runProjectScript: vi.fn(),
+    interruptAvailable: true,
+    onInterruptTurn: vi.fn(),
+    copyReferenceTarget: { kind: "thread", value: "thread-shortcuts" },
+    onCopyReference: vi.fn(),
   };
+}
+
+/** Presses alt+shift+`key` in the focused composer-like field; returns whether it was consumed. */
+function pressInEditable(key: string, init: KeyboardEventInit = {}): boolean {
+  const editable = document.createElement("div");
+  editable.contentEditable = "true";
+  document.body.append(editable);
+  editable.focus();
+  try {
+    const event = new KeyboardEvent("keydown", {
+      key,
+      altKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    editable.dispatchEvent(event);
+    return event.defaultPrevented;
+  } finally {
+    editable.remove();
+  }
 }
 
 describe("useChatGlobalShortcuts", () => {
@@ -112,6 +142,52 @@ describe("useChatGlobalShortcuts", () => {
       expect(preloadWorkspacePanel).not.toHaveBeenCalled();
     } finally {
       await openHook.unmount();
+    }
+  });
+
+  it("stops the running turn while typing, once per press", async () => {
+    const input = createInput();
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+
+    try {
+      expect(pressInEditable(".")).toBe(true);
+      expect(pressInEditable(".", { repeat: true })).toBe(true);
+      expect(input.onInterruptTurn).toHaveBeenCalledOnce();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  it("leaves the stop key alone with nothing to stop", async () => {
+    const input = { ...createInput(), interruptAvailable: false };
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+
+    try {
+      expect(pressInEditable(".")).toBe(false);
+      expect(input.onInterruptTurn).not.toHaveBeenCalled();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  it("copies the thread's reference while typing, and leaves the key alone without one", async () => {
+    const input = createInput();
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+    try {
+      expect(pressInEditable("c")).toBe(true);
+      expect(pressInEditable("c", { repeat: true })).toBe(true);
+      expect(input.onCopyReference).toHaveBeenCalledExactlyOnceWith(input.copyReferenceTarget);
+    } finally {
+      await hook.unmount();
+    }
+
+    const draftInput = { ...createInput(), copyReferenceTarget: null };
+    const draftHook = await renderHook(() => useChatGlobalShortcuts(draftInput));
+    try {
+      expect(pressInEditable("c")).toBe(false);
+      expect(draftInput.onCopyReference).not.toHaveBeenCalled();
+    } finally {
+      await draftHook.unmount();
     }
   });
 });

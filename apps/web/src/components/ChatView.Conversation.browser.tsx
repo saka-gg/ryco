@@ -30,6 +30,7 @@ import {
   __setEnvironmentApiOverrideForTests,
 } from "../environmentApi";
 import { useUiStateStore } from "../uiStateStore";
+import { isMacPlatform } from "../lib/utils";
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import {
   setupChatViewBrowserSuite,
@@ -1132,6 +1133,50 @@ describe("ChatView Conversation (full app)", () => {
       );
     } finally {
       setLocalGitRefNameForTests(undefined);
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
+  it("stops the running turn and copies the thread ID from the keyboard while typing", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-stop-key" as MessageId,
+      targetText: "stop key target",
+      sessionStatus: "running",
+    });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    // Returns whether the app consumed the key.
+    const press = (target: EventTarget, key: string, shiftKey = false) => {
+      const useMetaForMod = isMacPlatform(navigator.platform);
+      const event = new KeyboardEvent("keydown", {
+        key,
+        metaKey: useMetaForMod,
+        ctrlKey: !useMetaForMod,
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    try {
+      const composer = await waitForComposerEditor();
+      const dispatch = recordingDispatch(snapshot);
+      composer.focus();
+      expect(press(composer, ".")).toBe(true);
+      await vi.waitFor(() =>
+        expect(dispatch.commands).toContainEqual(
+          expect.objectContaining({ type: "thread.turn.interrupt", threadId: THREAD_ID }),
+        ),
+      );
+
+      expect(press(composer, "C", true)).toBe(true);
+      await vi.waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(THREAD_ID));
+      await expect.element(page.getByText("Thread ID copied")).toBeVisible();
+    } finally {
+      writeText.mockRestore();
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();
     }

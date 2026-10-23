@@ -154,10 +154,13 @@ focused control.
   forward buttons and a trackpad swipe between pages do the same. While the browser panel has
   focus, a swipe (and on Windows and Linux, a mouse button) moves its page instead.
 - `thread.interrupt`: stop the running turn in the focused chat, like the stop button (`mod+.`
-  outside the terminal). It also works from the composer.
+  outside the terminal).
 - `thread.copyReference`: copy the thread's pull request link, or its thread ID when it has none
   (`mod+shift+c` outside the terminal). Browsers on Windows and Linux may keep Ctrl+Shift+C for
   their developer tools.
+
+Stop and copy also work while you type. With nothing to stop or copy (no running turn, or a draft),
+they leave the key alone.
 
 These defaults live in the app, not on the node, so older apps have no keys for them.
 
