@@ -1,7 +1,10 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import type { LegendListRef } from "@legendapp/list/react";
+import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 import { getWebPerfReporter, isWebPerfProfileEnabled, readWebPerfNow } from "./perfInstrumentation";
 
 export const TAB_SWITCH_MARK_PREFIX = "ryco:tab-switch:";
+export const TAB_SWITCH_REVEAL_MEASURE_PREFIX = "ryco:tab-switch-reveal:";
+export const TIMELINE_REVEAL_MARK_PREFIX = "ryco:timeline-reveal:";
 export const SIDEBAR_EXPAND_MARK_PREFIX = "ryco:sidebar-expand:";
 export const COMPONENT_RENDER_MARK_PREFIX = "ryco:render:";
 
@@ -18,6 +21,7 @@ export function makeTabSwitchMarkName(phase: TabSwitchPhase, key: string): strin
 export function markTabSwitchClick(key: string): void {
   if (!isWebPerfProfileEnabled() || typeof performance === "undefined") return;
   performance.mark(makeTabSwitchMarkName("click", key));
+  tabSwitchClicks.note(key);
 }
 
 export function markTabSwitchFirstPaint(key: string): void {
@@ -30,6 +34,160 @@ export function markTabSwitchFirstPaint(key: string): void {
   } catch {
     // No matching click mark — initial mount, ignore.
   }
+}
+
+export type TimelineRevealPhase = "mount" | "visible" | "rehidden";
+
+export function makeTimelineRevealMarkName(
+  phase: TimelineRevealPhase,
+  key: string,
+  sequence: number,
+): string {
+  if (!key) {
+    throw new Error("timeline-reveal mark name requires a non-empty key");
+  }
+  return `${TIMELINE_REVEAL_MARK_PREFIX}${phase}:${key}:${sequence}`;
+}
+
+/** Measure from a timeline mount to the first frame its transcript is visible. */
+export function makeTimelineRevealMeasureName(key: string, sequence: number): string {
+  if (!key) {
+    throw new Error("timeline-reveal measure name requires a non-empty key");
+  }
+  return `${TIMELINE_REVEAL_MARK_PREFIX}${key}:${sequence}`;
+}
+
+/** Measure from a session-tab click to the first frame its transcript is visible. */
+export function makeTabSwitchRevealMeasureName(key: string): string {
+  if (!key) {
+    throw new Error("tab-switch reveal measure name requires a non-empty key");
+  }
+  return `${TAB_SWITCH_REVEAL_MEASURE_PREFIX}${key}`;
+}
+
+export interface TabSwitchClick {
+  readonly key: string;
+}
+
+/**
+ * Which timeline mount a session-tab click belongs to: the next one. The mount of the clicked
+ * thread claims the click and a mount of any other thread drops it, so a click is measured at
+ * most once and never against a later open of the same thread that had no click.
+ */
+export interface TabSwitchClickLedger {
+  /** A click on `key`'s tab; replaces a click that no mount claimed yet. */
+  readonly note: (key: string) => void;
+  /** A timeline for `key` mounted: returns the pending click if it was on `key`'s tab. */
+  readonly claim: (key: string) => TabSwitchClick | null;
+  /**
+   * Hands back a claim whose mount ended before its reveal. StrictMode runs a mount's layout
+   * effect again right after its cleanup, so the click stays claimable until `defer` runs.
+   */
+  readonly release: (click: TabSwitchClick) => void;
+}
+
+export function createTabSwitchClickLedger(
+  defer: (callback: () => void) => void,
+): TabSwitchClickLedger {
+  let pending: TabSwitchClick | null = null;
+  return {
+    note: (key) => {
+      pending = { key };
+    },
+    claim: (key) => {
+      const click = pending;
+      pending = null;
+      return click !== null && click.key === key ? click : null;
+    },
+    release: (click) => {
+      if (pending !== null) return;
+      pending = click;
+      defer(() => {
+        if (pending === click) pending = null;
+      });
+    },
+  };
+}
+
+const tabSwitchClicks = createTabSwitchClickLedger((callback) => queueMicrotask(callback));
+
+let timelineRevealSequence = 0;
+let timelineRevealObserver: Promise<typeof import("./timelineRevealObserver")> | null = null;
+
+// The observer is profiling-only code, so it stays out of the app shell's static graph. A failed
+// load is forgotten so the next mount retries it.
+function loadTimelineRevealObserver(): Promise<typeof import("./timelineRevealObserver")> {
+  if (timelineRevealObserver === null) {
+    const loading = import("./timelineRevealObserver");
+    timelineRevealObserver = loading;
+    loading.catch(() => {
+      if (timelineRevealObserver === loading) timelineRevealObserver = null;
+    });
+  }
+  return timelineRevealObserver;
+}
+
+// Start loading as soon as this module evaluates with profiling on, so the observer is ready
+// before the first timeline mounts.
+if (isWebPerfProfileEnabled() && typeof window !== "undefined") {
+  void loadTimelineRevealObserver();
+}
+
+/**
+ * Opt-in (`VITE_RYCO_PERF_PROFILE=1`) reveal marks for a timeline's LegendList; see
+ * `observeTimelineReveal` in `timelineRevealObserver.ts`. `listMounted` is false while the timeline
+ * renders no list, so a list that mounts later starts its own observation.
+ */
+export function useTimelineRevealMark(
+  listRef: RefObject<LegendListRef | null>,
+  key: string,
+  listMounted: boolean,
+): void {
+  useLayoutEffect(() => {
+    if (
+      !listMounted ||
+      !key ||
+      !isWebPerfProfileEnabled() ||
+      typeof performance === "undefined" ||
+      typeof requestAnimationFrame !== "function"
+    ) {
+      return;
+    }
+    timelineRevealSequence += 1;
+    const sequence = timelineRevealSequence;
+    // Marked here, synchronously in the mount's layout effect; the rest observes from frames.
+    const mountName = makeTimelineRevealMarkName("mount", key, sequence);
+    performance.mark(mountName);
+    const mountedAt = readWebPerfNow();
+    const click = tabSwitchClicks.claim(key);
+    let disposed = false;
+    let revealed = false;
+    let stop: (() => void) | undefined;
+    loadTimelineRevealObserver().then(
+      ({ observeLegendListReveal }) => {
+        if (disposed) return;
+        stop = observeLegendListReveal({
+          listRef,
+          key,
+          sequence,
+          mountName,
+          mountedAt,
+          measureTabSwitchClick: click !== null,
+          onVisible: () => {
+            revealed = true;
+          },
+        });
+      },
+      () => {
+        // Profiling only: a failed chunk load leaves the mount mark without a reveal.
+      },
+    );
+    return () => {
+      disposed = true;
+      stop?.();
+      if (click !== null && !revealed) tabSwitchClicks.release(click);
+    };
+  }, [key, listMounted, listRef]);
 }
 
 export function makeSidebarExpandMarkName(phase: SidebarExpandPhase, key: string): string {
