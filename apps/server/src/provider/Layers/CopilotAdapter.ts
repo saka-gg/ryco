@@ -198,28 +198,9 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
     if (event.type === "assistant.turn_start") {
       const turnId = TurnId.make(event.data.turnId);
       session.activeTurnId = turnId;
-      session.turns.push({ id: turnId, items: [event] });
+      session.turnIds.push(turnId);
     } else if (event.type === "assistant.message") {
       session.activeMessageId = event.data.messageId;
-      session.turns.at(-1)?.items.push(event);
-    } else if (
-      event.type === "assistant.message_delta" ||
-      event.type === "assistant.reasoning" ||
-      event.type === "assistant.reasoning_delta" ||
-      event.type === "assistant.usage" ||
-      event.type === "tool.execution_start" ||
-      event.type === "tool.execution_complete" ||
-      event.type === "user_input.requested" ||
-      event.type === "user_input.completed"
-    ) {
-      session.turns.at(-1)?.items.push(event);
-    } else if (
-      event.type === "session.idle" ||
-      event.type === "abort" ||
-      event.type === "assistant.turn_end" ||
-      event.type === "session.error"
-    ) {
-      session.turns.at(-1)?.items.push(event);
     }
 
     if (event.type === "session.error") {

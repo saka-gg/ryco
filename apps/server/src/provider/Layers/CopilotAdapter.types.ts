@@ -30,10 +30,6 @@ import { RuntimeConnection } from "@github/copilot-sdk";
 import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { DeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import type {
-  ProviderThreadSnapshot,
-  ProviderThreadTurnSnapshot,
-} from "../Services/ProviderAdapter.ts";
-import type {
   AgentControlProviderBridge,
   AgentControlRuntimeLease,
 } from "../../agentControl/ProviderInjection.ts";
@@ -65,11 +61,6 @@ export interface PendingTurnStartRequest {
   readonly reject: (cause: Error) => void;
 }
 
-export interface MutableTurnSnapshot {
-  readonly id: TurnId;
-  readonly items: Array<unknown>;
-}
-
 export interface ActiveCopilotSession {
   readonly client: CopilotClient;
   session: CopilotSession;
@@ -89,7 +80,8 @@ export interface ActiveCopilotSession {
    */
   readonly htmlRenderToolCalls: Map<string, HtmlRenderToolPresentation>;
   readonly deviceToolBinding: DeviceToolBinding | null;
-  readonly turns: Array<MutableTurnSnapshot>;
+  /** Copilot turn ids (one per assistant round), never their events. */
+  readonly turnIds: Array<TurnId>;
   readonly renewSession: () => Promise<CopilotSession>;
   readonly attachSession: (session: CopilotSession) => void;
   unsubscribe: () => void;
@@ -194,19 +186,6 @@ export function normalizeUsage(
       : {}),
     ...(usedTokens > 0 ? { lastUsedTokens: usedTokens } : {}),
     ...(typeof event.data.duration === "number" ? { durationMs: event.data.duration } : {}),
-  };
-}
-
-export function buildThreadSnapshot(
-  threadId: ThreadId,
-  turns: ReadonlyArray<MutableTurnSnapshot>,
-): ProviderThreadSnapshot {
-  return {
-    threadId,
-    turns: turns.map<ProviderThreadTurnSnapshot>((turn) => ({
-      id: turn.id,
-      items: [...turn.items],
-    })),
   };
 }
 
