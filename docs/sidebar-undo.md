@@ -10,6 +10,15 @@ a newer action on the same thread replaces its older notice. A failed original a
 its notice. A failed Undo reports the error and keeps the authoritative state. There is no
 automatic retry of a mutation whose delivery might be uncertain.
 
+A bulk Settle or Snooze shows one notice for all its threads, which counts as one of the five.
+It changes at most 100 threads, sending four commands at a time. Threads whose node is not
+ready are skipped and reported; nothing is sent for them. The five seconds start once every
+command has finished. A notice still applying after 25 seconds closes without Undo, so Undo stays
+within the node's receipts. Undo restores every thread whose node is still on the same connection.
+A failed command, a newer action on one of the threads, or that thread's node reconnecting takes
+only that thread out of the notice. A partly failed Undo is reported once, with how many threads
+it could not restore. Move to Active and Unsnooze have no Undo, in bulk or for one thread.
+
 Undo restores the prior settlement override, settlement time, snooze deadline and time, and
 sorting timestamp. Existing manual positions, local pins, and priority rankings are preserved.
 Unpin restores the local pin using the existing sorter. Archive Undo also reopens the thread
