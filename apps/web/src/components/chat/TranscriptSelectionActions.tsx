@@ -9,6 +9,8 @@ import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "
 import { createPortal } from "react-dom";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { Button } from "../ui/button";
+import { resolveComposerEnter } from "./composerFollowUp";
+import { useSendShortcut } from "./useSendShortcut";
 
 interface CapturedSelection {
   quote: SelectionQuote;
@@ -51,6 +53,7 @@ interface Props {
 /** UI-only capture/placement. Drafts and sends belong to the existing client stores. */
 export function TranscriptSelectionActions(props: Props) {
   const paneFocused = usePaneFocus();
+  const sendShortcut = useSendShortcut();
   const [selection, setSelection] = useState<CapturedSelection | null>(null);
   const [draft, setDraft] = useState<{
     selection: CapturedSelection;
@@ -293,7 +296,10 @@ export function TranscriptSelectionActions(props: Props) {
               setDraft((current) => (current ? { ...current, prompt, cursor } : null))
             }
             onCommandKeyDown={(key, event) => {
-              if (key !== "Enter" || event.shiftKey || event.isComposing) return false;
+              if (key !== "Enter" || event.isComposing) return false;
+              // The Send shortcut setting decides whether Enter sends or adds a line.
+              const prompt = editor.current?.readSnapshot().value ?? draft.prompt;
+              if (!resolveComposerEnter({ event, sendShortcut, prompt })) return false;
               void submit("send");
               return true;
             }}

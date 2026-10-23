@@ -202,7 +202,7 @@ export function NewThreadWorkLocation({
   return (
     <p
       ref={sentenceRef}
-      className="flex max-w-208 flex-wrap items-center justify-center gap-x-0.5 gap-y-1 text-[13px] text-muted-foreground/70"
+      className="flex max-w-(--chat-composer-max-width) flex-wrap items-center justify-center gap-x-0.5 gap-y-1 text-[13px] text-muted-foreground/70"
       data-testid="new-thread-work-location"
     >
       <FlipItem id="lead">

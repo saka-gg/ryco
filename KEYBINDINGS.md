@@ -163,9 +163,12 @@ Currently available context keys:
 - `commandPaletteOpen` — the command palette is open
 - `composerFocus` — the message composer (main chat input) is focused
 
-Mod+Enter in the focused composer is reserved: while a turn runs it does the opposite of the
-follow-up setting. Do not bind `mod+enter` to commands that can fire while the composer is
-focused.
+Enter in the focused composer is reserved. The **Send shortcut** setting (Settings > General >
+Composer controls) decides when it sends: `enter` always, `mod+enter` for multiline prompts, or
+always `mod+enter`. `shift+enter` adds a new line. While a turn runs, `mod+enter` does the opposite
+of the follow-up setting when the Send shortcut is `enter`; with either `mod+enter` option,
+`mod+enter` is the plain send and `mod+shift+enter` does the opposite. Do not bind `mod+enter` or
+`mod+shift+enter` to commands that can fire while the composer is focused.
 
 The focused composer also keeps these keys, which are not configurable (see
 [docs/user/composer.md](docs/user/composer.md)):

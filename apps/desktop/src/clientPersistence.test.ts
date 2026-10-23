@@ -60,6 +60,8 @@ const clientSettings: ClientSettings = {
   diffIgnoreWhitespace: true,
   diffWordWrap: true,
   followUpBehavior: "queue",
+  sendShortcut: "enter",
+  chatWidth: "comfortable",
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",

@@ -436,6 +436,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
+  // Sized like the timeline column, which the Chat width setting widens without a viewport resize.
+  const timelineColumnProbeRef = useRef<HTMLDivElement | null>(null);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | null>(null);
@@ -533,7 +535,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       <>
         {TIMELINE_LIST_HEADER}
         {canLoadOlder || isLoadingOlder || loadOlderError ? (
-          <div className="mx-auto flex min-h-9 w-full max-w-3xl items-center justify-center px-3 pb-2 text-xs text-muted-foreground">
+          <div className="mx-auto flex min-h-9 w-full max-w-(--chat-timeline-max-width) items-center justify-center px-3 pb-2 text-xs text-muted-foreground">
             {isLoadingOlder ? (
               <span role="status">Loading earlier history…</span>
             ) : (
@@ -672,13 +674,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
 
+    const columnProbe = timelineColumnProbeRef.current;
     const measure = () => {
       const viewportWidth = timelineViewportElement.getBoundingClientRect().width;
-      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(viewportWidth);
+      // Without the probe, treat the column as full width so the strip stays inert.
+      const contentWidth = columnProbe?.getBoundingClientRect().width ?? viewportWidth;
+      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(
+        viewportWidth,
+        contentWidth,
+      );
       setMinimapHasPersistentGutter((current) =>
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
       );
-      setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth));
+      setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth, contentWidth));
       // A shorter viewport can turn a non-scrolling transcript into a
       // scrolling one (and back), so the pill has to be re-decided here too.
       evaluateIsAtEnd();
@@ -687,6 +695,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const frame = requestAnimationFrame(measure);
     const observer = new ResizeObserver(measure);
     observer.observe(timelineViewportElement);
+    if (columnProbe) observer.observe(columnProbe);
 
     return () => {
       cancelAnimationFrame(frame);
@@ -883,7 +892,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from the split timeline contexts, which propagate through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-hidden" data-timeline-root="true">
+      <div
+        className="mx-auto w-full min-w-0 max-w-(--chat-timeline-max-width) overflow-x-hidden"
+        data-timeline-root="true"
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -905,6 +917,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           <EnteringMessageIdCtx.Provider value={enteringMessageId}>
             <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
               <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+                <div
+                  ref={timelineColumnProbeRef}
+                  aria-hidden
+                  className="pointer-events-none invisible absolute inset-x-0 top-0 mx-auto h-0 max-w-(--chat-timeline-max-width)"
+                />
                 <LegendList<MessagesTimelineRow>
                   ref={listRef}
                   data={rows}

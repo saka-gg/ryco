@@ -760,6 +760,23 @@ body {
   padding-top: 0;
 }
 
+/* Chat column widths, from the Chat width setting (`data-chat-width`, written by the app shell).
+   The timeline column holds the messages; the composer column (composer, banners, toolbars, the
+   new-thread hero) overhangs it by 2rem on each side. Full fills the pane, where the overhang has
+   no room left, so both columns fill it. The frozen phone tier keeps the comfortable widths. */
+:root {
+  --chat-timeline-max-width: 48rem;
+  --chat-composer-max-width: calc(var(--chat-timeline-max-width) + 4rem);
+}
+
+:root[data-chat-width="wide"]:not([data-tier="phone"]) {
+  --chat-timeline-max-width: 72rem;
+}
+
+:root[data-chat-width="full"]:not([data-tier="phone"]) {
+  --chat-timeline-max-width: 100%;
+}
+
 pre,
 code {
   font-family: var(--font-family-mono);

@@ -20,6 +20,7 @@ import {
   useState,
 } from "react";
 
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useTheme } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
 import {
@@ -73,6 +74,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { ChatWidthSetting } from "./ChatWidthSetting";
 import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
 import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
@@ -98,6 +100,8 @@ export function AppearanceSettingsPanel({
   readonly surface?: "node" | "hub";
 } = {}) {
   const isHub = surface === "hub";
+  // The frozen phone tier keeps the comfortable chat width, so it does not offer the setting.
+  const isPhoneTier = usePresentationTier() === "phone";
   const { theme, setTheme, resolvedTheme, activeThemeId, setActiveTheme } = useTheme();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ThemeDefinition | null>(null);
@@ -634,6 +638,7 @@ export function AppearanceSettingsPanel({
             />
           </SettingsRow>
         )}
+        {isHub || isPhoneTier ? null : <ChatWidthSetting />}
         <SettingsRow
           title="Primary color"
           description="Theme palettes control buttons by default; enable a custom color to pin one app accent."

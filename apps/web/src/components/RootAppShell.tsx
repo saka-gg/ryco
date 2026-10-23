@@ -137,6 +137,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable || hostedCachedRunsOwner(authGateState.status, "messageQueueDrain") ? (
           <MessageQueueDrainBridge />
         ) : null}
+        <ChatWidthDocumentSync />
         <ContextMenuActionSheetHost />
         <SshPasswordPromptDialog />
         <WorkspaceReviewDialog />
@@ -156,6 +157,18 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
       </AnchoredToastProvider>
     </ToastProvider>
   );
+}
+
+/**
+ * Writes the Chat width setting to the root, where `index.css` maps it to the chat column
+ * widths. Its own component, so a change re-renders nothing else.
+ */
+function ChatWidthDocumentSync() {
+  const chatWidth = useSettings((settings) => settings.chatWidth);
+  useEffect(() => {
+    document.documentElement.dataset.chatWidth = chatWidth;
+  }, [chatWidth]);
+  return null;
 }
 
 const AutomationsDialog = preloadableLazy(() =>

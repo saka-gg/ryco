@@ -275,11 +275,18 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Send shortcut",
+    owner: "client",
+    description: "Send with Enter, or with Mod+Enter for multiline prompts or always.",
+    keywords: "enter return cmd command ctrl multiline new line submit composer",
+  },
+  {
+    section: "general",
     title: "Messages sent while a turn runs",
     owner: "client",
     description:
-      "Queue follow-ups or steer them into the running turn; Mod+Enter does the opposite.",
-    keywords: "steer queue follow-up enter",
+      "Queue follow-ups or steer them into the running turn, or do the opposite for one message.",
+    keywords: "steer queue follow-up enter mod",
   },
   {
     section: "general",
@@ -294,6 +301,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "client",
     description: "Hide the mode selector and send every turn in Build mode.",
     keywords: "composer",
+  },
+  {
+    section: "appearance",
+    title: "Chat width",
+    owner: "client",
+    description: "How wide messages and the composer grow on large screens.",
+    keywords: "comfortable wide full width column layout timeline monitor",
   },
   {
     section: "appearance",

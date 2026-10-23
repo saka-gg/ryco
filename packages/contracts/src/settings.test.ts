@@ -9,8 +9,10 @@ import {
   AiFocusRefreshIntervalMs,
   ClientSettingsPatch,
   ClientSettingsSchema,
+  DEFAULT_CHAT_WIDTH,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_FOLLOW_UP_BEHAVIOR,
+  DEFAULT_SEND_SHORTCUT,
   DEFAULT_SERVER_SETTINGS,
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
   SidebarAutoSettleAfterDays,
@@ -156,6 +158,38 @@ describe("ClientSettings.followUpBehavior", () => {
     expect(decodeClientSettingsPatch({ followUpBehavior: "steer" }).followUpBehavior).toBe("steer");
     expect(decodeClientSettings({ followUpBehavior: "steer" }).followUpBehavior).toBe("steer");
     expect(() => decodeClientSettingsPatch({ followUpBehavior: "interrupt" })).toThrow();
+  });
+});
+
+describe("ClientSettings.sendShortcut", () => {
+  it("keeps Enter sending for settings saved before the choice existed", () => {
+    expect(DEFAULT_SEND_SHORTCUT).toBe("enter");
+    expect(DEFAULT_CLIENT_SETTINGS.sendShortcut).toBe("enter");
+    expect(decodeClientSettings({ followUpBehavior: "steer" }).sendShortcut).toBe("enter");
+  });
+
+  it("accepts each shortcut and rejects unknown ones", () => {
+    for (const sendShortcut of ["enter", "mod-enter-multiline", "mod-enter"] as const) {
+      expect(decodeClientSettings({ sendShortcut }).sendShortcut).toBe(sendShortcut);
+      expect(decodeClientSettingsPatch({ sendShortcut }).sendShortcut).toBe(sendShortcut);
+    }
+    expect(() => decodeClientSettingsPatch({ sendShortcut: "shift-enter" })).toThrow();
+  });
+});
+
+describe("ClientSettings.chatWidth", () => {
+  it("keeps the comfortable width for settings saved before the choice existed", () => {
+    expect(DEFAULT_CHAT_WIDTH).toBe("comfortable");
+    expect(DEFAULT_CLIENT_SETTINGS.chatWidth).toBe("comfortable");
+    expect(decodeClientSettings({ diffWordWrap: true }).chatWidth).toBe("comfortable");
+  });
+
+  it("accepts each width and rejects unknown ones", () => {
+    for (const chatWidth of ["comfortable", "wide", "full"] as const) {
+      expect(decodeClientSettings({ chatWidth }).chatWidth).toBe(chatWidth);
+      expect(decodeClientSettingsPatch({ chatWidth }).chatWidth).toBe(chatWidth);
+    }
+    expect(() => decodeClientSettingsPatch({ chatWidth: "huge" })).toThrow();
   });
 });
 

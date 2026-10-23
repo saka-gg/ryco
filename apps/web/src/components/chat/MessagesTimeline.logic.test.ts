@@ -123,12 +123,20 @@ describe("timeline minimap", () => {
   });
 
   it("caps the collapsed hit strip to the safe content gutter", () => {
-    expect(resolveTimelineMinimapHasPersistentGutter(863)).toBe(false);
-    expect(resolveTimelineMinimapHasPersistentGutter(864)).toBe(true);
-    expect(resolveTimelineMinimapHitStripWidth(768)).toBe(0);
-    expect(resolveTimelineMinimapHitStripWidth(820)).toBe(14);
-    expect(resolveTimelineMinimapHitStripWidth(872)).toBe(40);
-    expect(resolveTimelineMinimapHitStripWidth(Number.NaN)).toBe(0);
+    // The comfortable column: 48rem at the default text size.
+    expect(resolveTimelineMinimapHasPersistentGutter(863, 768)).toBe(false);
+    expect(resolveTimelineMinimapHasPersistentGutter(864, 768)).toBe(true);
+    expect(resolveTimelineMinimapHitStripWidth(768, 768)).toBe(0);
+    expect(resolveTimelineMinimapHitStripWidth(820, 768)).toBe(14);
+    expect(resolveTimelineMinimapHitStripWidth(872, 768)).toBe(40);
+    expect(resolveTimelineMinimapHitStripWidth(Number.NaN, 768)).toBe(0);
+    expect(resolveTimelineMinimapHitStripWidth(872, Number.NaN)).toBe(0);
+    // A wider column leaves less gutter; a full-width one leaves none, so the strip is inert.
+    expect(resolveTimelineMinimapHasPersistentGutter(1_200, 1_152)).toBe(false);
+    expect(resolveTimelineMinimapHitStripWidth(1_200, 1_152)).toBe(12);
+    expect(resolveTimelineMinimapHasPersistentGutter(1_680, 1_152)).toBe(true);
+    expect(resolveTimelineMinimapHasPersistentGutter(1_680, 1_680)).toBe(false);
+    expect(resolveTimelineMinimapHitStripWidth(1_680, 1_680)).toBe(0);
     expect(resolveTimelineMinimapInteractiveWidth(14, false)).toBe(14);
     expect(resolveTimelineMinimapInteractiveWidth(14, true)).toBe("22rem");
   });
