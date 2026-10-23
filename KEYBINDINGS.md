@@ -144,7 +144,16 @@ focused control.
 
 <!-- Thread lifecycle commands -->
 
-<!-- Attention commands -->
+#### Attention
+
+- `thread.attention.next`: open the next thread that needs you (`mod+alt+a` outside the
+  terminal). Threads waiting for an approval, an answer or a plan decision come first, then results
+  you have not seen yet, failures before finished turns. Running threads are skipped, and a
+  sub-agent counts only while it waits for an approval or an answer. Repeated presses walk that
+  order and wrap around. It also works while you type in the composer.
+- `thread.attention.previous`: walk the same order backwards (no default key).
+
+This default lives in the app, not on the node, so older apps have no key for it.
 
 <!-- History and navigation commands -->
 
