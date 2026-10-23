@@ -72,13 +72,20 @@ describe("keybindingCategories", () => {
 
   it("lists the open thread's lifecycle commands under Threads, after jumping", () => {
     const lifecycle = (
-      ["thread.settle", "thread.snooze", "thread.archive", "thread.markUnread"] as const
+      [
+        "thread.settle",
+        "thread.snooze",
+        "thread.archive",
+        "thread.markUnread",
+        "thread.undo",
+      ] as const
     ).map((command) => getCommandMeta(command));
     expect(lifecycle.map(({ title }) => title)).toEqual([
       "Settle current thread or move it to Active",
       "Snooze or unsnooze current thread",
       "Archive current thread",
       "Mark current thread unread",
+      "Undo last thread action",
     ]);
     for (const meta of lifecycle) {
       expect(meta.category).toBe(KEYBINDING_CATEGORIES.thread);

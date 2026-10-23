@@ -53,12 +53,13 @@ describe("app default keybindings", () => {
     });
   });
 
-  it("gives the open thread's lifecycle commands client-only defaults", () => {
+  it("gives the open thread's lifecycle commands and their Undo client-only defaults", () => {
     const lifecycleRules = [
       { key: "mod+alt+shift+d", command: "thread.settle", when: "!terminalFocus" },
       { key: "mod+alt+shift+s", command: "thread.snooze", when: "!terminalFocus" },
       { key: "mod+alt+shift+a", command: "thread.archive", when: "!terminalFocus" },
       { key: "mod+alt+shift+u", command: "thread.markUnread", when: "!terminalFocus" },
+      { key: "mod+z", command: "thread.undo", when: "!terminalFocus" },
     ] as const;
     for (const rule of lifecycleRules) {
       expect(NODE_DEFAULT_KEYBINDINGS.some((nodeRule) => nodeRule.command === rule.command)).toBe(

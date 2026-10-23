@@ -11,6 +11,7 @@ import { type CurrentThreadLifecycle, useCommandPaletteStore } from "../../comma
 import { getClientSettings } from "../../hooks/useSettings";
 import { resolveShortcutCommand, type ShortcutMatchContext } from "../../keybindings";
 import { isComposerFocused } from "../../lib/composerFocus";
+import { sidebarUndo } from "../../sidebarUndo";
 import {
   dispatchThreadSettlement,
   dispatchThreadSnooze,
@@ -31,9 +32,12 @@ import {
 } from "../inboxSidebar/inboxSidebarModel";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
+  createThreadUndoShortcut,
+  resolveUndoShortcutOwner,
   runThreadLifecycleShortcut,
   shouldIgnoreThreadLifecycleShortcut,
   threadLifecycleActionForCommand,
+  UNDO_SHORTCUT_EDIT_EVENTS,
 } from "./threadLifecycleShortcuts.logic";
 
 export interface ThreadLifecycleShortcutsProps {
@@ -120,9 +124,10 @@ function readCurrentThreadLifecycle(
 
 /**
  * Settle, snooze, archive and mark unread for the open thread: their keyboard
- * shortcuts, and what the command palette offers. Only the sidebar has the
- * inbox's inputs, so it renders this once. It subscribes to nothing and
- * decides nothing until a shortcut or the palette asks.
+ * shortcuts, and what the command palette offers. Also the Undo shortcut for
+ * the newest Undo notice. Only the sidebar has the inbox's inputs, so it
+ * renders this once. It subscribes to nothing and decides nothing until a
+ * shortcut or the palette asks.
  */
 export function ThreadLifecycleShortcuts(props: ThreadLifecycleShortcutsProps) {
   // Read at call time, so the reader and the listener stay registered for the mount.
@@ -145,9 +150,30 @@ export function ThreadLifecycleShortcuts(props: ThreadLifecycleShortcutsProps) {
       event.preventDefault();
       event.stopPropagation();
     };
+    // Document capture: after the keybinding recorder, which stops the keys it
+    // records at the window, and before the composer's own undo.
+    const undoShortcut = createThreadUndoShortcut({
+      latestNoticeId: () => sidebarUndo.latest()?.id ?? null,
+      undo: (noticeId) => void sidebarUndo.undo(noticeId),
+      owner: (event) => {
+        const { keybindings, readShortcutContext } = latestProps.current;
+        return resolveUndoShortcutOwner(event, keybindings, {
+          ...readShortcutContext(),
+          composerFocus: isComposerFocused(),
+        });
+      },
+    });
     window.addEventListener("keydown", onWindowKeyDown);
+    document.addEventListener("keydown", undoShortcut.keydown, true);
+    for (const type of UNDO_SHORTCUT_EDIT_EVENTS) {
+      document.addEventListener(type, undoShortcut.edit, true);
+    }
     return () => {
       window.removeEventListener("keydown", onWindowKeyDown);
+      document.removeEventListener("keydown", undoShortcut.keydown, true);
+      for (const type of UNDO_SHORTCUT_EDIT_EVENTS) {
+        document.removeEventListener(type, undoShortcut.edit, true);
+      }
       if (useCommandPaletteStore.getState().readCurrentThreadLifecycle === read) {
         useCommandPaletteStore.setState({ readCurrentThreadLifecycle: null });
       }

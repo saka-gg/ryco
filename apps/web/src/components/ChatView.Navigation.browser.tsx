@@ -5,7 +5,6 @@ import {
   type MessageId,
   type OrchestrationReadModel,
   type ThreadId,
-  TurnId,
   WS_METHODS,
 } from "@ryco/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -20,7 +19,6 @@ import {
 } from "../environments/runtime";
 import { isMacPlatform } from "../lib/utils";
 import { useSettingsDialogStore } from "../settingsDialogStore";
-import { sidebarUndo } from "../sidebarUndo";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
@@ -30,6 +28,7 @@ import {
   CHAT_NEW_KEYBINDING,
   COMPOSER_STASH_KEYBINDING,
   DEFAULT_VIEWPORT,
+  LIFECYCLE_TURN_COMPLETED_AT,
   LOCAL_ENVIRONMENT_ID,
   NOW_ISO,
   PHONE_VIEWPORT,
@@ -48,6 +47,7 @@ import {
   createDraftFromChatNewLocalShortcut,
   createDraftFromChatNewShortcut,
   createDraftOnlySnapshot,
+  createLifecycleSnapshot,
   createMockEnvironmentApi,
   createProjectlessSnapshot,
   createSnapshotForTargetUser,
@@ -55,15 +55,18 @@ import {
   dispatchChatNewShortcut,
   dispatchInputKey,
   dispatchThreadPinToggleShortcut,
+  dispatchedCommandTypes,
   draftIdFromPath,
   draftThreadIdFor,
   enableChatNewLocalShortcut,
   enableChatNewShortcut,
+  enableThreadLifecycle,
   fixture,
   getCommandPaletteLegendEntries,
   materializePromotedDraftThreadViaDomainEvent,
   mountChatView,
   openCommandPaletteFromTrigger,
+  pressLifecycleChord,
   selectionSnapshot,
   serverThreadPath,
   startPromotedServerThreadViaDomainEvent,
@@ -79,94 +82,6 @@ import {
   waitForWsRequestsToSettle,
   wsRequests,
 } from "./ChatView.browser.helpers";
-
-// Recent, so the thread is not settled automatically by age.
-const LIFECYCLE_TURN_REQUESTED_AT = new Date(Date.now() - 120_000).toISOString();
-const LIFECYCLE_TURN_COMPLETED_AT = new Date(Date.now() - 60_000).toISOString();
-
-/** The bootstrap thread after a turn that finished, or one still running. */
-function createLifecycleSnapshot(options: { running?: boolean } = {}): OrchestrationReadModel {
-  const snapshot = createSnapshotForTargetUser({
-    targetMessageId: "msg-user-lifecycle-shortcuts" as MessageId,
-    targetText: "lifecycle shortcuts",
-  });
-  const thread = snapshot.threads[0]!;
-  const turnId = TurnId.make("turn-lifecycle-shortcuts");
-  const requestedAt = LIFECYCLE_TURN_REQUESTED_AT;
-  return {
-    ...snapshot,
-    threads: [
-      {
-        ...thread,
-        latestTurn: options.running
-          ? {
-              turnId,
-              state: "running",
-              requestedAt,
-              startedAt: requestedAt,
-              completedAt: null,
-              assistantMessageId: null,
-            }
-          : {
-              turnId,
-              state: "completed",
-              requestedAt,
-              startedAt: requestedAt,
-              completedAt: LIFECYCLE_TURN_COMPLETED_AT,
-              assistantMessageId: null,
-            },
-        session: {
-          ...thread.session!,
-          status: options.running ? "running" : "ready",
-          activeTurnId: options.running ? turnId : null,
-        },
-      },
-    ],
-  };
-}
-
-const enableThreadLifecycle: NonNullable<
-  Parameters<typeof mountChatView>[0]["configureFixture"]
-> = (nextFixture) => {
-  const capabilities = {
-    repositoryIdentity: true,
-    threadSettlement: true,
-    threadSnooze: true,
-    threadSidebarUndo: true,
-    threadPriorityRanking: false,
-  };
-  nextFixture.serverConfig = {
-    ...nextFixture.serverConfig,
-    environment: { ...nextFixture.serverConfig.environment, capabilities },
-  };
-  nextFixture.welcome = {
-    ...nextFixture.welcome,
-    environment: { ...nextFixture.welcome.environment, capabilities },
-  };
-};
-
-/** ⌥⇧⌘ (Ctrl+Alt+Shift off macOS) plus `letter`, from the focused element. */
-function pressLifecycleChord(letter: "A" | "D" | "S" | "U"): KeyboardEvent {
-  const useMetaForMod = isMacPlatform(navigator.platform);
-  const event = new KeyboardEvent("keydown", {
-    key: letter,
-    code: `Key${letter}`,
-    altKey: true,
-    shiftKey: true,
-    metaKey: useMetaForMod,
-    ctrlKey: !useMetaForMod,
-    bubbles: true,
-    cancelable: true,
-  });
-  (document.activeElement ?? window).dispatchEvent(event);
-  return event;
-}
-
-function dispatchedCommandTypes(): unknown[] {
-  return wsRequests
-    .filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand)
-    .map((request) => (request as { type?: unknown }).type);
-}
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
@@ -748,7 +663,6 @@ describe("ChatView Navigation (full app)", () => {
       expect(event.defaultPrevented).toBe(true);
       await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.settle"));
     } finally {
-      sidebarUndo.dispose();
       await mounted.cleanup();
     }
   });
@@ -788,7 +702,6 @@ describe("ChatView Navigation (full app)", () => {
       await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.snooze"));
       expect(useCommandPaletteStore.getState().open).toBe(false);
     } finally {
-      sidebarUndo.dispose();
       await mounted.cleanup();
     }
   });

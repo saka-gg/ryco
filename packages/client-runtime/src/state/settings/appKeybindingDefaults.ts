@@ -33,6 +33,7 @@ const THREAD_LIFECYCLE_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   { key: "mod+alt+shift+s", command: "thread.snooze", when: "!terminalFocus" },
   { key: "mod+alt+shift+a", command: "thread.archive", when: "!terminalFocus" },
   { key: "mod+alt+shift+u", command: "thread.markUnread", when: "!terminalFocus" },
+  { key: "mod+z", command: "thread.undo", when: "!terminalFocus" },
 ];
 
 // The next thread that needs attention.

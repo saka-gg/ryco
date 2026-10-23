@@ -3,10 +3,14 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import type { CurrentThreadLifecycle } from "../../commandPaletteStore";
 import { resolveShortcutCommand, type ShortcutEventLike } from "../../keybindings";
+import { isMacPlatform } from "../../lib/utils";
 import {
+  createThreadUndoShortcut,
+  resolveUndoShortcutOwner,
   runThreadLifecycleShortcut,
   shouldIgnoreThreadLifecycleShortcut,
   threadLifecycleActionForCommand,
+  type UndoShortcutOwner,
 } from "./threadLifecycleShortcuts.logic";
 
 function lifecycle(overrides: Partial<CurrentThreadLifecycle> = {}): CurrentThreadLifecycle {
@@ -163,5 +167,169 @@ describe("lifecycle default keys", () => {
         "Win32",
       ),
     ).toBeNull();
+  });
+});
+
+describe("the Undo shortcut", () => {
+  const useMetaForMod = isMacPlatform(navigator.platform);
+
+  function key(keyName: string, overrides: Record<string, unknown> = {}) {
+    return {
+      type: "keydown",
+      key: keyName,
+      code: keyName.length === 1 ? `Key${keyName.toUpperCase()}` : keyName,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      repeat: false,
+      isComposing: false,
+      defaultPrevented: false,
+      target: null,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  /** ⌘Z on macOS, Ctrl+Z elsewhere. */
+  function undoKey(overrides: Record<string, unknown> = {}) {
+    return key("z", { metaKey: useMetaForMod, ctrlKey: !useMetaForMod, ...overrides });
+  }
+
+  describe("resolveUndoShortcutOwner", () => {
+    const owner = (
+      event: ReturnType<typeof key>,
+      context: Parameters<typeof resolveUndoShortcutOwner>[2] = {},
+    ) => resolveUndoShortcutOwner(event, APP_DEFAULT_RESOLVED_KEYBINDINGS, context);
+
+    it("is null for any other key, during IME composition and in the terminal", () => {
+      expect(owner(key("x", { metaKey: useMetaForMod, ctrlKey: !useMetaForMod }))).toBeNull();
+      expect(owner(undoKey({ shiftKey: true }))).toBeNull();
+      expect(owner(undoKey({ isComposing: true }))).toBeNull();
+      expect(owner(undoKey(), { terminalFocus: true })).toBeNull();
+    });
+
+    it("leaves the key to a control that handled it and to the model picker", () => {
+      expect(owner(undoKey({ defaultPrevented: true }))).toBe("control");
+      expect(owner(undoKey(), { modelPickerOpen: true })).toBe("control");
+    });
+
+    it("takes the key outside any text field", () => {
+      expect(owner(undoKey())).toBe("none");
+    });
+  });
+
+  describe("createThreadUndoShortcut", () => {
+    type UndoShortcut = ReturnType<typeof createThreadUndoShortcut>;
+
+    function setup(initialNoticeId: number | null) {
+      let noticeId = initialNoticeId;
+      let pressedIn: UndoShortcutOwner = "composer";
+      const undo = vi.fn((id: number) => {
+        // Undo removes its notice; the one before it becomes the newest.
+        noticeId = id > 1 ? id - 1 : null;
+      });
+      const shortcut = createThreadUndoShortcut({
+        latestNoticeId: () => noticeId,
+        undo,
+        owner: (event) => (event.key === "z" && !event.isComposing ? pressedIn : null),
+      });
+      return {
+        shortcut,
+        undo,
+        notify: (id: number) => {
+          noticeId = id;
+        },
+        pressIn: (owner: UndoShortcutOwner) => {
+          pressedIn = owner;
+        },
+      };
+    }
+
+    it("undoes the newest notice outside text fields, and not without one", () => {
+      const { shortcut, undo, pressIn } = setup(3);
+      pressIn("none");
+      // Outside text fields the key needs no claim.
+      shortcut.keydown(key("a"));
+      const event = undoKey();
+      shortcut.keydown(event);
+      expect(undo).toHaveBeenCalledWith(3);
+      expect(event.preventDefault).toHaveBeenCalled();
+      expect(event.stopPropagation).toHaveBeenCalled();
+
+      const empty = setup(null);
+      empty.pressIn("none");
+      const unhandled = undoKey();
+      empty.shortcut.keydown(unhandled);
+      expect(empty.undo).not.toHaveBeenCalled();
+      expect(unhandled.preventDefault).not.toHaveBeenCalled();
+    });
+
+    it("leaves text fields, code editors and dialogs their own undo", () => {
+      const { shortcut, undo, pressIn } = setup(1);
+      pressIn("control");
+      const event = undoKey();
+      shortcut.keydown(event);
+      expect(undo).not.toHaveBeenCalled();
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    });
+
+    it("claims the composer for a new notice, also for a second Undo in a row", () => {
+      const { shortcut, undo, notify } = setup(null);
+      shortcut.keydown(key("a"));
+      notify(1);
+      notify(2);
+      shortcut.keydown(key("Meta", { metaKey: true }));
+      shortcut.keydown(undoKey());
+      expect(undo).toHaveBeenLastCalledWith(2);
+      shortcut.keydown(undoKey());
+      expect(undo).toHaveBeenLastCalledWith(1);
+    });
+
+    it("hands the composer its own undo after any other key, IME keydown or edit", () => {
+      const releases: ReadonlyArray<(shortcut: UndoShortcut) => void> = [
+        (shortcut) => shortcut.keydown(key("a")),
+        (shortcut) => shortcut.keydown(undoKey({ isComposing: true })),
+        (shortcut) => shortcut.edit(),
+      ];
+      for (const release of releases) {
+        const { shortcut, undo, notify } = setup(1);
+        release(shortcut);
+        const event = undoKey();
+        shortcut.keydown(event);
+        expect(undo).not.toHaveBeenCalled();
+        expect(event.preventDefault).not.toHaveBeenCalled();
+
+        // A newer notice claims it again.
+        notify(2);
+        shortcut.keydown(undoKey());
+        expect(undo).toHaveBeenCalledWith(2);
+      }
+    });
+
+    it("undoes once while the key is held, and swallows only that key's repeats", () => {
+      const { shortcut, undo, pressIn } = setup(2);
+      pressIn("none");
+      shortcut.keydown(undoKey());
+      const repeat = undoKey({ repeat: true });
+      shortcut.keydown(repeat);
+      // A modifier pressed mid-hold leaves the key held.
+      shortcut.keydown(key("Shift", { shiftKey: true }));
+      const laterRepeat = undoKey({ repeat: true });
+      shortcut.keydown(laterRepeat);
+      expect(undo).toHaveBeenCalledOnce();
+      expect(repeat.preventDefault).toHaveBeenCalled();
+      expect(laterRepeat.preventDefault).toHaveBeenCalled();
+
+      const otherRepeat = key("a", { repeat: true });
+      shortcut.keydown(otherRepeat);
+      expect(otherRepeat.preventDefault).not.toHaveBeenCalled();
+
+      shortcut.keydown(key("a"));
+      const repeatAfterOtherKey = undoKey({ repeat: true });
+      shortcut.keydown(repeatAfterOtherKey);
+      expect(repeatAfterOtherKey.preventDefault).not.toHaveBeenCalled();
+    });
   });
 });

@@ -64,6 +64,7 @@ export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [
   "thread.snooze",
   "thread.archive",
   "thread.markUnread",
+  "thread.undo",
 ] as const;
 
 // The next thread that needs attention.

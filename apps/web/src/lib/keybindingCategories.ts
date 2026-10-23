@@ -95,6 +95,7 @@ const THREAD_LIFECYCLE_COMMAND_META = {
   "thread.snooze": { title: "Snooze or unsnooze current thread", sortWeight: 21 },
   "thread.archive": { title: "Archive current thread", sortWeight: 22 },
   "thread.markUnread": { title: "Mark current thread unread", sortWeight: 23 },
+  "thread.undo": { title: "Undo last thread action", sortWeight: 24 },
 } satisfies StaticCommandMetaGroup;
 
 // The next thread that needs attention (Threads, sort weights from 30).
