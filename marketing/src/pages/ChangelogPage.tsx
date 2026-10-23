@@ -6,9 +6,9 @@ import { RycoMark, RycoWordmark } from "@/assets/RycoLogo";
 import { CHANGELOG_RELEASES, type ChangelogRelease } from "@/data/changelog";
 import { SITE } from "@/data/content";
 import { cn } from "@/lib/cn";
-import { MagneticButton } from "@/versions/v4/MagneticButton";
-import { ACCENT, focusRing } from "@/versions/v4/theme";
-import { useDownload, type DownloadInfo } from "@/versions/v4/useDownload";
+import { Button } from "@/site/ui/Button";
+import { focusRing } from "@/site/theme";
+import { useDownload, type DownloadInfo } from "@/site/useDownload";
 
 function ChangelogNav({ dl }: { dl: DownloadInfo }) {
   return (
@@ -22,7 +22,7 @@ function ChangelogNav({ dl }: { dl: DownloadInfo }) {
             focusRing,
           )}
         >
-          <RycoMark className="size-7 transition-transform duration-300 group-hover:rotate-[8deg]" />
+          <RycoMark className="h-[18px] text-ink transition-transform duration-300 group-hover:rotate-[8deg]" />
         </Link>
 
         <nav
@@ -80,17 +80,16 @@ function ChangelogNav({ dl }: { dl: DownloadInfo }) {
           >
             <GitHubIcon className="size-[18px]" />
           </a>
-          <MagneticButton
+          <Button
             href={dl.href}
             external={!dl.isDirect}
             size="sm"
             magnetic={false}
-            className="rounded-full"
+            icon={<Download />}
             ariaLabel={dl.osLabel ? `Download Ryco for ${dl.osLabel}` : "Download Ryco"}
           >
-            <Download className="size-4" />
-            <span>Download</span>
-          </MagneticButton>
+            Download
+          </Button>
         </div>
       </div>
     </header>
@@ -105,34 +104,31 @@ function ReleaseEntry({ release, latest }: { release: ChangelogRelease; latest: 
     >
       <div className="grid gap-8 lg:grid-cols-[minmax(10rem,0.7fr)_minmax(0,2fr)] lg:gap-16">
         <div className="lg:sticky lg:top-28 lg:self-start">
-          <p
-            className="font-['JetBrains_Mono'] text-sm font-medium tabular-nums"
-            style={{ color: ACCENT }}
-          >
+          <p className="font-mono text-sm font-medium tabular-nums text-accent">
             v{release.version}
           </p>
           <time
             dateTime={release.dateTime}
-            className="mt-2 block font-['JetBrains_Mono'] text-xs uppercase tracking-[0.14em] text-white/45"
+            className="mt-2 block font-mono text-xs uppercase tracking-[0.14em] text-white/45"
           >
             {release.date}
           </time>
           {latest && (
-            <span className="mt-5 inline-flex rounded-full border border-[#c6ff3a]/25 bg-[#c6ff3a]/[0.07] px-3 py-1.5 font-['JetBrains_Mono'] text-[10px] font-medium uppercase tracking-[0.15em] text-[#d9ff78]">
+            <span className="mt-5 inline-flex rounded-full border border-accent/30 bg-accent/[0.08] px-3 py-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-accent">
               Latest release
             </span>
           )}
         </div>
 
         <div>
-          <h2 className="max-w-3xl font-['Space_Grotesk'] text-3xl font-semibold leading-tight tracking-[-0.025em] text-white sm:text-4xl">
+          <h2 className="max-w-3xl font-display text-3xl font-semibold leading-tight tracking-[-0.025em] text-white sm:text-4xl">
             {release.summary}
           </h2>
 
           <div className="mt-10 grid gap-x-10 gap-y-9 sm:grid-cols-2">
             {release.highlights.map((highlight) => (
               <div key={highlight.title} className="group">
-                <h3 className="font-['Space_Grotesk'] text-lg font-semibold text-white transition-colors group-hover:text-[#d9ff78]">
+                <h3 className="font-display text-lg font-semibold text-white transition-colors group-hover:text-accent">
                   {highlight.title}
                 </h3>
                 <p className="mt-2 text-[15px] leading-relaxed text-white/58">
@@ -181,18 +177,18 @@ export default function ChangelogPage() {
   }, []);
 
   return (
-    <div className="relative min-h-screen bg-[#0a0b0d] text-white antialiased">
+    <div className="relative min-h-screen bg-canvas text-white antialiased">
       <ChangelogNav dl={dl} />
 
       <main className="pt-28 sm:pt-32">
         <section aria-labelledby="release-history" className="mx-auto max-w-6xl px-5 pb-28 sm:px-8">
           <div className="mb-4 max-w-2xl">
-            <p className="font-['JetBrains_Mono'] text-xs font-medium uppercase tracking-[0.2em] text-[#d9ff78]">
+            <p className="font-mono text-xs font-medium uppercase tracking-[0.2em] text-accent">
               Release history
             </p>
             <h1
               id="release-history"
-              className="mt-5 font-['Space_Grotesk'] text-4xl font-semibold tracking-[-0.03em] text-white sm:text-5xl"
+              className="mt-5 font-display text-4xl font-semibold tracking-[-0.03em] text-white sm:text-5xl"
             >
               From the first public build to today.
             </h1>
@@ -208,16 +204,16 @@ export default function ChangelogPage() {
         <section className="mx-auto max-w-6xl px-5 pb-28 sm:px-8">
           <div className="grid gap-8 rounded-3xl border border-white/12 bg-white/[0.025] px-6 py-10 sm:px-10 lg:grid-cols-[1fr_auto] lg:items-center">
             <div>
-              <h2 className="font-['Space_Grotesk'] text-3xl font-semibold tracking-[-0.025em] text-white">
+              <h2 className="font-display text-3xl font-semibold tracking-[-0.025em] text-white">
                 Ready to try the latest build?
               </h2>
               <p className="mt-3 max-w-xl text-white/58">
                 Download Ryco, bring your coding agents, and keep every project on your machine.
               </p>
             </div>
-            <MagneticButton href={dl.href} external={!dl.isDirect} variant="primary">
-              <Download className="size-[18px]" /> Download Ryco
-            </MagneticButton>
+            <Button href={dl.href} external={!dl.isDirect} icon={<Download />}>
+              Download Ryco
+            </Button>
           </div>
         </section>
       </main>
@@ -225,7 +221,7 @@ export default function ChangelogPage() {
       <footer className="border-t border-white/10 pb-12 pt-10">
         <div className="mx-auto flex max-w-6xl flex-col gap-8 px-5 sm:px-8 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-2.5">
-            <RycoMark className="size-7" />
+            <RycoMark className="h-[18px] text-ink" />
             <RycoWordmark className="h-[18px] text-white" />
           </div>
           <nav
