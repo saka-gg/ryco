@@ -39,6 +39,25 @@ vi.mock("@legendapp/list/react", async () => {
   return { LegendList };
 });
 
+// Node resolves client-runtime's zustand to a second React copy (the browser
+// build dedupes it), so the thread store's `useStore` cannot render under
+// `renderToStaticMarkup` here. The leaf only swaps in the store's live text for
+// a streaming message; these cases render the text they pass.
+vi.mock("./StreamedMessageMarkdown", async () => {
+  const { default: ChatMarkdown } = await import("../ChatMarkdown");
+  return {
+    useStreamedMessageText: (_routeThreadKey: string, _streamingMessageId: unknown, text: string) =>
+      text,
+    StreamedMessageMarkdown: ({
+      routeThreadKey: _routeThreadKey,
+      streamingMessageId: _streamingMessageId,
+      ...props
+    }: { routeThreadKey: string; streamingMessageId: unknown } & Parameters<
+      typeof ChatMarkdown
+    >[0]) => <ChatMarkdown {...props} />,
+  };
+});
+
 function matchMedia() {
   return {
     matches: false,

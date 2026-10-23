@@ -35,7 +35,7 @@ vi.mock("../store", () => ({
   useStore: (selector: (state: unknown) => unknown) => selector({}),
 }));
 vi.mock("../storeSelectors", () => ({
-  createThreadSelectorByRef: () => () => undefined,
+  createThreadStructureSelectorByRef: () => () => undefined,
   createProjectSelectorByRef: () => () => ({
     id: ids.projectId,
     environmentId: ids.environmentId,

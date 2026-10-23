@@ -237,6 +237,39 @@ function plainDataEqual(left: unknown, right: unknown): boolean {
   );
 }
 
+/**
+ * `next`, with each object field that holds the same plain data as `previous`'s
+ * taking `previous`'s object. The shell stream re-reads a thread's row after
+ * every event of the thread, streamed text included, and maps it into new
+ * nested objects (model selection, session, latest turn, ...). Kept identities
+ * make such an upsert, which usually moves only `updatedAt`, change nothing a
+ * selector compares by reference (`createThreadStructureSelectorByRef`,
+ * `createThreadSummaryStructureSelectorByRef`).
+ */
+function reuseUnchangedObjectFields<T extends object>(
+  previous: T | ArchivedThreadStub | undefined,
+  next: T,
+): T {
+  if (previous === undefined || isArchivedThreadStub(previous)) return next;
+  const previousRecord = previous as Record<string, unknown>;
+  const nextRecord = next as Record<string, unknown>;
+  let result: Record<string, unknown> | undefined;
+  for (const key of Object.keys(nextRecord)) {
+    const value = nextRecord[key];
+    const previousValue = previousRecord[key];
+    if (
+      value !== previousValue &&
+      typeof value === "object" &&
+      value !== null &&
+      plainDataEqual(previousValue, value)
+    ) {
+      result ??= { ...nextRecord };
+      result[key] = previousValue;
+    }
+  }
+  return (result as T | undefined) ?? next;
+}
+
 function modelSelectionsEqual(
   left: ThreadShell["modelSelection"] | undefined,
   right: ThreadShell["modelSelection"] | undefined,
@@ -1346,13 +1379,14 @@ function writeThreadShellState(
   );
 
   if (!threadShellsEqual(previousShell, nextThread.shell)) {
-    retireDerivedThread(previousShell, nextThread.shell);
+    const storedShell = reuseUnchangedObjectFields(previousShell, nextThread.shell);
+    retireDerivedThread(previousShell, storedShell);
     nextState = {
       ...nextState,
       threadShellById: writeRecordEntry(
         nextState.threadShellById,
-        nextThread.shell.id,
-        nextThread.shell,
+        storedShell.id,
+        storedShell,
         owned,
       ),
     };
@@ -1386,18 +1420,14 @@ function writeThreadShellState(
     };
   }
 
-  if (
-    !sidebarThreadSummariesEqual(
-      state.sidebarThreadSummaryById[nextThread.shell.id],
-      nextThread.summary,
-    )
-  ) {
+  const previousSummary = state.sidebarThreadSummaryById[nextThread.shell.id];
+  if (!sidebarThreadSummariesEqual(previousSummary, nextThread.summary)) {
     nextState = {
       ...nextState,
       sidebarThreadSummaryById: writeRecordEntry(
         nextState.sidebarThreadSummaryById,
         nextThread.shell.id,
-        nextThread.summary,
+        reuseUnchangedObjectFields(previousSummary, nextThread.summary),
         owned,
       ),
     };

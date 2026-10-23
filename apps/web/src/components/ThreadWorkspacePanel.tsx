@@ -97,7 +97,7 @@ import { useStore } from "../store";
 import { useTimelineRevealStore } from "../timelineRevealStore";
 import {
   createProjectSelectorByRef,
-  createThreadSelectorByRef,
+  createThreadStructureSelectorByRef,
   createWorktreeSelector,
 } from "../storeSelectors";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
@@ -391,7 +391,9 @@ function useWorkspaceProjectContext() {
     }
     return scopeThreadRef(draftSession.environmentId, draftSession.threadId);
   }, [draftSession, routeThreadRef]);
-  const serverThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
+  const serverThread = useStore(
+    useMemo(() => createThreadStructureSelectorByRef(threadRef), [threadRef]),
+  );
   const draftThread = useComposerDraftStore((store) =>
     threadRef ? store.getDraftThreadByRef(threadRef) : null,
   );
@@ -988,7 +990,7 @@ export default function ThreadWorkspacePanel(props: {
     [routeThreadRef, workspaceDraftSession],
   );
   const activeThread = useStore(
-    useMemo(() => createThreadSelectorByRef(workspaceThreadRef), [workspaceThreadRef]),
+    useMemo(() => createThreadStructureSelectorByRef(workspaceThreadRef), [workspaceThreadRef]),
   );
   const agentSessionLive =
     derivePhase(activeThread?.session ?? null) !== "disconnected" &&
