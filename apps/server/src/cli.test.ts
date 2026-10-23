@@ -1584,6 +1584,21 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
     }),
   );
 
+  it.effect("registers `ryco db` with its backup, list and restore subcommands", () =>
+    Effect.gen(function* () {
+      const help = (yield* captureStdout(runCli(["db", "--help"]))).lines.join("\n");
+      assert.include(help, "ryco db");
+      for (const subcommand of ["backup", "list", "restore"]) {
+        assert.match(help, new RegExp(`^\\s+${subcommand}\\b`, "m"), help);
+      }
+      const restoreHelp = (yield* captureStdout(runCli(["db", "restore", "--help"]))).lines.join(
+        "\n",
+      );
+      assert.include(restoreHelp, "--into");
+      assert.include(restoreHelp, "--full-check");
+    }),
+  );
+
   it.effect("rejects dev-url on project commands", () =>
     Effect.gen(function* () {
       const workspaceRoot = mkdtempSync(

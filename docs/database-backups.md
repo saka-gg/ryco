@@ -2,7 +2,9 @@
 
 Ryco keeps its history in one SQLite database, `<stateDir>/state.sqlite` (`~/.ryco/userdata` by
 default, `~/.ryco/dev` for development servers). Before an upgrade changes that database, Ryco
-writes a restorable copy of it next to it, in `<stateDir>/backups`.
+writes a restorable copy of it next to it, in `<stateDir>/backups`. You can also back it up
+yourself at any time with `ryco db backup`, see the backups with `ryco db list`, and restore one
+into a new data directory with `ryco db restore` (see [Commands](#commands)).
 
 ## When a backup is written
 
@@ -94,6 +96,7 @@ Backups are named after the schema they hold and the upgrade they precede, in UT
 state-v093-before-v095-20261023T151230123Z.sqlite.zst   compressed
 state-v093-before-v095-20261023T151230123Z.sqlite       plain (not compressed yet)
 state-v093-before-v095-20261023T151230123Z-unverified.sqlite
+state-v093-manual-20261023T151230123Z.sqlite.zst        ryco db backup
 ```
 
 `v000` means a database without a migration ledger. A `-2` before `.sqlite` appears when two
@@ -107,35 +110,115 @@ keeps failing part-way backs up again on every restart that finds the database c
 not push out the copy from before the schema change. Unverified backups and files that do not
 follow this naming are never removed. The Storage settings list the folder as "Database backups".
 
-## Restoring a backup by hand
+## Commands
+
+None of these commands migrates or writes the database in use, so they are safe while Ryco runs.
+`ryco db backup` reads it through a read-only connection (under Bun, when no other process has the
+database open, through a normal connection that only reads, because Bun's SQLite cannot open a
+WAL database read-only then); the other two never open it. Each takes `--base-dir <dir>` (like
+`RYCO_HOME`) and `--dev-url <url>` to pick the data directory, and `--json` to print one compact
+JSON document instead of text. A command that cannot go ahead prints one line starting with
+`Error:` and exits with status 1.
+
+### `ryco db backup`
+
+Writes `state-v<schema>-manual-<time>.sqlite.zst` to `<stateDir>/backups`:
+
+1. `VACUUM INTO` a new file, from a read-only connection. That is one read transaction: it never
+   takes the write lock, so a running server keeps writing, and the copy is a consistent snapshot
+   of the moment it started. The copy is also compacted (free pages are dropped).
+2. `PRAGMA quick_check` on the copy, its migration ledger (the schema in its name), and a size
+   check (page count times page size). A copy that fails means the database itself is damaged;
+   no backup is written.
+3. zstd level 1 with a frame checksum (gzip level 1 where the runtime has no zstd), flushed to
+   disk, then given its final name. The plain copy is removed. Older manual backups beyond the
+   newest three are removed; pre-upgrade backups are left alone. The backup is complete once it
+   has its final name: if a clean-up step after that fails, the command still succeeds and
+   prints a warning.
+
+It needs free space of twice the database size (database plus WAL) in `<stateDir>/backups`, and
+fails, naming both numbers, when there is less. Progress goes to stderr; the result (path,
+schema, sizes, timings) to stdout.
+
+What it costs is measured [below](#what-ryco-db-backup-costs).
+
+### `ryco db list`
+
+Lists the backups in `<stateDir>/backups`, newest first: when each was taken (local time), its
+kind (`before upgrade 92 → 93`, `before repairs`, or `manual`), size, state (compressed, not
+compressed yet, or failed its integrity check) and full path. A backup whose schema is newer
+than this build supports is marked `needs a newer Ryco build`. It only reads the directory.
+
+### `ryco db restore <file> --into <dir>`
+
+Restores a backup into a new data directory and checks it first. It never writes the data
+directory in use.
+
+- `<file>` can be a `.sqlite.zst`, `.sqlite.gz` or plain `.sqlite` backup. The format is read from
+  the file's first bytes, so a renamed file still works. The database in use (by any path,
+  including a hard link) and a file with a write-ahead log next to it (a database in use) are
+  refused; back that one up with `ryco db backup` first.
+- `<dir>` must be new or empty, and must not be, contain or lie inside the data directory in use
+  (paths are compared after resolving symlinks). There must be free space for the restored
+  database: a plain backup's size, or the size a compressed backup's SQLite header states, read
+  from its first decompressed bytes. Nothing is created before these checks pass.
+- The backup is decompressed (the zstd and gzip checksums are verified while it streams) into a
+  temporary file in `<dir>/userdata`, checked with `PRAGMA quick_check` (`--full-check` runs
+  `PRAGMA integrity_check`, much slower on large databases), and must have a migration ledger.
+  Only then does it become `<dir>/userdata/state.sqlite`. Any failure removes the temporary file
+  and the directories the command created.
+- It warns, and restores anyway, when the backup's schema is newer than this build supports, or
+  when its ledger names migrations differently from this build (another branch wrote it). Open it
+  with a build that supports it.
+
+Then start Ryco on it: `ryco serve --base-dir <dir>` (or `RYCO_HOME=<dir>`). The restored
+directory has no settings, secrets or Hub identity, so pair your devices with it again.
 
 A backup holds the database only. It does not include settings, secrets, the Hub identity,
-attachments, task files or logs, nor anything written after the backup was taken. Always restore
-into a separate data directory and keep the upgraded database as it is.
+attachments, task files or logs, nor anything written after the backup was taken. To make the
+restored database your main one, quit Ryco (the desktop app, `ryco service stop`, or any
+`ryco serve`), move `<stateDir>/state.sqlite`, `state.sqlite-wal` and `state.sqlite-shm` aside (do
+not delete them), and copy `<dir>/userdata/state.sqlite` in as `state.sqlite`. Ryco does not do
+this swap for you yet.
 
-1. Quit Ryco (the desktop app, `ryco service stop`, or any `ryco serve`).
-2. Pick a backup in `<stateDir>/backups` and decompress it into a new data directory:
+### What `ryco db backup` costs
 
-   ```sh
-   mkdir -p ~/ryco-restore/userdata
-   zstd -d ~/.ryco/userdata/backups/state-v093-before-v095-20261023T151230123Z.sqlite.zst \
-     -o ~/ryco-restore/userdata/state.sqlite
-   ```
+Measured on an Apple M5 Max (APFS, internal NVMe, a machine shared with other work) with a
+synthetic 4.5 GB database:
 
-   `zstd` comes with `brew install zstd` on macOS. A `.sqlite.gz` backup decompresses with
-   `gunzip -c <file> > ~/ryco-restore/userdata/state.sqlite`, and a plain `.sqlite` backup is
-   copied as it is.
+| Step                                          | Time                                                      |
+| --------------------------------------------- | --------------------------------------------------------- |
+| `VACUUM INTO` the copy (4.34 GB)              | 6.7-7.4 s from a warm cache; 44 s for the first, cold run |
+| `quick_check` of the copy                     | 2.0-2.5 s                                                 |
+| zstd compression, 4.34 GB → 640 MB (7.0x)     | 5.4-7.7 s                                                 |
+| Whole command                                 | 14-17 s warm (15-30 s beside a running server), 54 s cold |
+| `ryco db restore` (decompress, `quick_check`) | 12.6-14.2 s; 43.7 s with `--full-check`                   |
 
-3. Start a Ryco build that supports that schema on the restored directory:
-   `ryco serve --base-dir ~/ryco-restore` (or `RYCO_HOME=~/ryco-restore`). The restored directory
-   has no settings, secrets or Hub identity, so pair your devices with it again.
+With `ryco serve` running on the same database, a second process kept inserting a row every
+50 ms: its p99 insert time was 3.2-5.5 ms during the backup against 2.0-3.1 ms before it (worst
+single insert 19 ms), and the server's request p99 stayed at 4.2-8.4 ms (4.5-7.5 ms before),
+with no failed requests. A test runs the backup beside a writer with no busy timeout at all and
+checks that the writer never once finds the database locked.
 
-To make the restored database your main one, quit Ryco, move `<stateDir>/state.sqlite`,
-`state.sqlite-wal` and `state.sqlite-shm` aside (do not delete them), and copy the restored file in
-as `state.sqlite`.
+## Restoring a backup by hand
+
+Without the `ryco` command (an older CLI, say), decompress a backup into a new data directory
+yourself:
+
+```sh
+mkdir -p ~/ryco-restore/userdata
+zstd -d ~/.ryco/userdata/backups/state-v093-before-v095-20261023T151230123Z.sqlite.zst \
+  -o ~/ryco-restore/userdata/state.sqlite
+```
+
+`zstd` comes with `brew install zstd` on macOS. A `.sqlite.gz` backup decompresses with
+`gunzip -c <file> > ~/ryco-restore/userdata/state.sqlite`, and a plain `.sqlite` backup is copied
+as it is. Then start a Ryco build that supports that schema on it, as above.
 
 ## Schema newer than this build
 
 A build that finds a database written by a newer build refuses to open it, before any migration
-or repair runs, and says where the backups are. Use a build that supports that schema, or restore
-a backup taken before the upgrade into a separate data directory as above.
+or repair runs, and says where the backups are. Use a build that supports that schema, or find a
+backup taken before the upgrade with `ryco db list` (with the server's `--base-dir` or
+`--dev-url`, if it uses one) and restore it into a separate data directory with
+`ryco db restore <file> --into <new directory>`.
