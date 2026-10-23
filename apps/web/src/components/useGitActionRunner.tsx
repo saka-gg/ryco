@@ -46,7 +46,7 @@ import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useStore } from "~/store";
 import {
   createProjectSelectorByRef,
-  createThreadSelectorByRef,
+  createThreadStructureSelectorByRef,
   createWorktreeSelector,
 } from "~/storeSelectors";
 import {
@@ -145,7 +145,7 @@ export function useThreadBranchPersistence(
   draftId: DraftId | undefined,
 ) {
   const activeServerThreadSelector = useMemo(
-    () => createThreadSelectorByRef(activeThreadRef),
+    () => createThreadStructureSelectorByRef(activeThreadRef),
     [activeThreadRef],
   );
   const activeServerThread = useStore(activeServerThreadSelector);

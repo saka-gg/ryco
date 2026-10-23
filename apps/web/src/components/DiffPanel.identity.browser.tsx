@@ -212,7 +212,7 @@ vi.mock("../threadRoutes", () => ({
 }));
 
 vi.mock("../storeSelectors", () => ({
-  createThreadSelectorByRef: () => () => ({
+  createThreadStructureSelectorByRef: () => () => ({
     id: ThreadId.make("thread-1"),
     environmentId: EnvironmentId.make("environment-local"),
     projectId: ProjectId.make("project-1"),

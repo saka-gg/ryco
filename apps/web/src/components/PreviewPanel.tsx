@@ -45,7 +45,7 @@ import { useTheme } from "../hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
 import { useProjectListEntries, useProjectReadFile } from "~/rpc/useProjectPreview";
 import { selectProjectByRef, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
+import { createThreadStructureSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import type { TurnDiffSummary } from "../types";
@@ -281,7 +281,7 @@ export default function PreviewPanel({
     select: (search) => parsePreviewRouteSearch(search),
   });
   const serverThread = useStore(
-    useMemo(() => createThreadSelectorByRef(routeThreadRef), [routeThreadRef]),
+    useMemo(() => createThreadStructureSelectorByRef(routeThreadRef), [routeThreadRef]),
   );
   const draftThread = useComposerDraftStore((store) => {
     if (serverThread) return null;
