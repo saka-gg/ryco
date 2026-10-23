@@ -2039,6 +2039,8 @@ export const ChatComposer = memo(
       return false;
     };
 
+    // Slash input never steers, so it never redirects either.
+    const promptIsSlashCommand = prompt.trimStart().startsWith("/");
     const runningFollowUp = useMemo(() => {
       if (phase !== "running") return null;
       const steerUnavailableReason = getFollowUpSteerUnavailableReason({
@@ -2058,6 +2060,7 @@ export const ChatComposer = memo(
           activeTurnId,
           respondingRequestIds,
           steerAllowed: followUpSurfaceAllowsSteer && steerUnavailableReason === null,
+          isSlashCommand: promptIsSlashCommand,
           questionPending: pendingUserInputs.length > 0,
           redirectedTurnId: approvalRedirectedTurnId,
         }).kind,
@@ -2072,6 +2075,7 @@ export const ChatComposer = memo(
       pendingApprovals,
       pendingUserInputs.length,
       phase,
+      promptIsSlashCommand,
       respondingRequestIds,
       runtimeMode,
       selectedModelSelection,
@@ -2079,10 +2083,8 @@ export const ChatComposer = memo(
       tokenMode,
     ]);
     const runningFollowUpPlaceholder = runningFollowUp?.placeholder ?? null;
-    // Sending now declines the waiting approvals and steers the message into the turn. Slash
-    // input never steers, so it never redirects either.
-    const sendRedirectsApproval =
-      runningFollowUp?.redirectsApproval === true && !prompt.trimStart().startsWith("/");
+    // Sending now declines the waiting approvals and steers the message into the turn.
+    const sendRedirectsApproval = runningFollowUp?.redirectsApproval === true;
 
     // ------------------------------------------------------------------
     // Callbacks: images / file attachments / drag / paste

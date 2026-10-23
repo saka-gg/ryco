@@ -13,9 +13,10 @@ import { derivePendingApprovals, type PendingApproval } from "../session/session
  *
  * `resolveApprovalRedirect` is the one decision: the composer's placeholder and primary action
  * and the send itself all read it, so the composer never promises a redirect the send skips.
- * A redirect only happens when the message can steer; an approval already being answered, or
- * whose delivery is unknown, leaves the send to the follow-up setting. A decline that fails,
- * ends uncertain or is still in flight at the deadline stops the send, and the draft stays.
+ * A redirect only happens when the message can steer (a slash command never does); an approval
+ * already being answered, or whose delivery is unknown, leaves the send to the follow-up
+ * setting. A decline that fails, ends uncertain or is still in flight at the deadline stops the
+ * send, and the draft stays.
  */
 
 /** Placeholder of a composer whose send declines the waiting approvals and redirects the turn. */
@@ -66,13 +67,17 @@ export function resolveApprovalRedirect(input: {
    * connection and selection allow it.
    */
   readonly steerAllowed: boolean;
+  /** The message is a slash command: providers never steer one, so it queues. */
+  readonly isSlashCommand: boolean;
   /** A question waits too; the composer answers it instead. */
   readonly questionPending: boolean;
   /** The turn on which an earlier redirect declined approvals without sending its message. */
   readonly redirectedTurnId?: string | null;
 }): ApprovalRedirect {
   const runtimeSessionId = input.runtimeSessionId;
-  if (!input.steerAllowed || input.questionPending || !runtimeSessionId) return NO_REDIRECT;
+  if (!input.steerAllowed || input.isSlashCommand || input.questionPending || !runtimeSessionId) {
+    return NO_REDIRECT;
+  }
   const decline: PendingApproval[] = [];
   let answering = false;
   for (const approval of input.approvals) {

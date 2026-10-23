@@ -1404,6 +1404,7 @@ export function ThreadDetailScreen(props: {
         runtimeSessionId: currentThread.session?.runtimeSessionId,
         activeTurnId: currentThread.session?.activeTurnId,
         steerAllowed: threadBusy && connected && getSteerEligibility(message).allowed,
+        isSlashCommand: message.text.trimStart().startsWith("/"),
         questionPending: pendingUserInputs.length > 0,
         redirectedTurnId: approvalRedirectedTurnId,
       });
@@ -1698,6 +1699,8 @@ export function ThreadDetailScreen(props: {
         interactionMode: thread.interactionMode,
         tokenMode: thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
       }).allowed,
+      // The placeholder only shows while the composer is empty.
+      isSlashCommand: false,
       questionPending: pendingUserInputs.length > 0,
       redirectedTurnId: approvalRedirectedTurnId,
     }).kind === "decline";

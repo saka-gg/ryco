@@ -5081,6 +5081,7 @@ export default function ChatView(props: ChatViewProps) {
       // queue. The phone tier is frozen and always queues; slash input never steers.
       const invertFollowUp = options?.invertFollowUp === true;
       const activeTurnId = activeThread.session?.activeTurnId ?? null;
+      const isSlashCommand = trimmed.startsWith("/");
       // The decision the composer showed (`resolveApprovalRedirect`), from the send's snapshot.
       const approvalRedirect = resolveApprovalRedirect({
         approvals: approvalsAtSend,
@@ -5096,6 +5097,7 @@ export default function ChatView(props: ChatViewProps) {
             interactionMode: settingsSnapshot.interactionMode,
             tokenMode: settingsSnapshot.tokenMode,
           }).allowed,
+        isSlashCommand,
         questionPending: pendingUserInputs.length > 0,
         redirectedTurnId: approvalRedirectedTurns.get(activeThreadKey) ?? null,
       });
@@ -5106,7 +5108,7 @@ export default function ChatView(props: ChatViewProps) {
         followUpBehavior: approvalRedirect.kind === "none" ? settings.followUpBehavior : "steer",
         invert: invertFollowUp,
         surfaceAllowsSteer: presentationTier !== "phone",
-        isSlashCommand: trimmed.startsWith("/"),
+        isSlashCommand,
       });
       const redirect: ApprovalRedirect =
         followUpAction === "steer" ? approvalRedirect : { kind: "none" };

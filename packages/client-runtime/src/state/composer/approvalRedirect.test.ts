@@ -46,6 +46,7 @@ const LIVE = {
   runtimeSessionId: RUNTIME,
   activeTurnId: TURN,
   steerAllowed: true,
+  isSlashCommand: false,
   questionPending: false,
 } as const;
 
@@ -105,6 +106,20 @@ describe("resolveApprovalRedirect", () => {
     expect(resolveApprovalRedirect({ ...LIVE, approvals, questionPending: true })).toEqual({
       kind: "none",
     });
+  });
+
+  it("leaves approvals alone for a slash command, which queues instead of steering", () => {
+    expect(
+      resolveApprovalRedirect({ ...LIVE, approvals: [approval("a")], isSlashCommand: true }),
+    ).toEqual({ kind: "none" });
+    expect(
+      resolveApprovalRedirect({
+        ...LIVE,
+        approvals: [],
+        redirectedTurnId: TURN,
+        isSlashCommand: true,
+      }),
+    ).toEqual({ kind: "none" });
   });
 
   it("skips approvals the provider can no longer answer", () => {

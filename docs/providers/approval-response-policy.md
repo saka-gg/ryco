@@ -51,9 +51,10 @@ A message sent while approvals wait declines them and steers the turn
 mobile). `resolveApprovalRedirect` is the one decision: the composer's placeholder and
 primary action and the send all read it. It is the send path's last step, so local
 commands, queued-message edits and refused drafts never touch approvals, and it only
-runs when the message can steer. Approvals of an ended runtime are skipped, and while an
-approval is `submitting` or `uncertain` nothing is declined: the message follows the
-follow-up setting and the approvals stay.
+runs when the message can steer. A slash command never steers, so it queues and leaves
+the approvals on web and mobile alike. Approvals of an ended runtime are skipped, and
+while an approval is `submitting` or `uncertain` nothing is declined: the message follows
+the follow-up setting and the approvals stay.
 
 Responses and steers run on separate reactor lanes and adapters refuse a steer while an
 approval waits, so the client steers only after every decline left the pending list.
