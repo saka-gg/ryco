@@ -254,6 +254,30 @@ Always allow this session and Cancel turn are in the card's menu. When Claude sa
 Claude withholds that choice and Ryco leaves it out; an older client that still offers it gets a
 single approval.
 
+## Automatic Compaction
+
+When a turn you started finishes its work with the context window at least 80% full, Ryco compacts
+the conversation before the turn ends: it sends Claude Code's own `/compact`, and the turn ends
+when that command does. The thread keeps showing the turn as working until then, and no extra turn
+appears. Claude Code fixes the window it auto-compacts at when the session starts and ignores a
+change sent while it runs, so this explicit command is what makes compaction start at 80%. Ryco
+sends it only when Claude Code lists `/compact` among its slash commands; otherwise it shows the
+warning described below.
+
+A message sent meanwhile stays in the queue, even with Steer selected, and runs after compaction.
+Stop ends the compaction (and the turn) without a warning. If the `/compact` finishes without
+compacting, or fails, the turn still ends as completed, and Ryco warns that automatic compaction is
+unavailable and does not try again in that session; Claude Code's own auto-compaction near a full
+window still applies. After a compaction, or a stopped one, Ryco compacts again only once the
+context has dropped to 65% or below and climbed back to 80%.
+
+An opt-in probe checks this Claude Code behavior without inference (temporary home, fake API key,
+a local endpoint that rejects every request):
+
+```sh
+RYCO_CLAUDE_NATIVE_PROBE=1 bun run --cwd apps/server test -- src/provider/claudeCompactionCliProbe.test.ts
+```
+
 ## Steering A Running Turn
 
 A message you send while a Claude turn runs can steer that turn instead of waiting in the queue.

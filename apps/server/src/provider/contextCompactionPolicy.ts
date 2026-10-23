@@ -9,12 +9,19 @@ export interface ContextCompactionPolicyState {
   readonly generation: number;
   readonly phase: ContextCompactionPhase;
   readonly armed: boolean;
+  /** The prompt uuid of the native compaction a trigger sent, until that prompt's result. */
+  readonly requestId?: string;
 }
 
 export interface ContextCompactionDecision {
   readonly state: ContextCompactionPolicyState;
   readonly trigger: boolean;
-  readonly windowTokens?: number;
+}
+
+export interface ContextCompactionConclusion {
+  readonly state: ContextCompactionPolicyState;
+  /** The request ended without compacting: automatic compaction is unavailable. */
+  readonly unavailable: boolean;
 }
 
 export function initialContextCompactionPolicyState(
@@ -77,8 +84,44 @@ export function observeContextCompaction(
       armed: false,
     },
     trigger: true,
-    windowTokens: Math.max(1, Math.floor(maxTokens * CONTEXT_COMPACTION_TRIGGER_RATIO)),
   };
+}
+
+/** Binds a triggered request to the native compaction prompt sent for it. */
+export function recordContextCompactionRequest(
+  state: ContextCompactionPolicyState,
+  generation: number,
+  requestId: string,
+): ContextCompactionPolicyState {
+  if (generation !== state.generation || state.phase !== "requested") return state;
+  return { ...state, requestId };
+}
+
+/**
+ * Concludes a request at the result of its compaction prompt. Only a compaction boundary (or a
+ * successful compaction status) settles a request, so one still open at its result never
+ * compacted: Claude reports a refused `/compact` as a successful result. A stopped request (or
+ * one whose turn closed before its result) settles quietly; the rearm watermark keeps it from
+ * repeating.
+ */
+export function concludeContextCompactionRequest(
+  state: ContextCompactionPolicyState,
+  input: {
+    readonly generation: number;
+    readonly requestId: string;
+    readonly aborted: boolean;
+  },
+): ContextCompactionConclusion {
+  if (input.generation !== state.generation || state.requestId !== input.requestId) {
+    return { state, unavailable: false };
+  }
+  const { requestId: _requestId, ...concluded } = state;
+  if (concluded.phase !== "requested" && concluded.phase !== "compacting") {
+    return { state: concluded, unavailable: false };
+  }
+  return input.aborted
+    ? { state: { ...concluded, phase: "idle", armed: false }, unavailable: false }
+    : { state: { ...concluded, phase: "disabled", armed: false }, unavailable: true };
 }
 
 export function markContextCompactionStarted(

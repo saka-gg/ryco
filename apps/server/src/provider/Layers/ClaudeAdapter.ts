@@ -1,5 +1,9 @@
 import { claudeApprovalPresentation } from "../claudeApprovalPresentation.ts";
-import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
+import {
+  CLAUDE_NATIVE_COMPACTION_COMMAND,
+  claudeInitAdvertisesNativeCompaction,
+  isClaudeNativeCompaction,
+} from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
 import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
@@ -137,10 +141,12 @@ import { ServerConfig } from "../../config.ts";
 import { logOnceEvery } from "../../logOnceEvery.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import {
+  concludeContextCompactionRequest,
   disableContextCompaction,
   initialContextCompactionPolicyState,
   markContextCompactionStarted,
   observeContextCompaction,
+  recordContextCompactionRequest,
   settleContextCompaction,
   type ContextCompactionPolicyState,
 } from "../contextCompactionPolicy.ts";
@@ -203,6 +209,10 @@ const FOLDED_INTO_DISCARDED_STEER_REASON =
   "Claude Code merged this message into a cancelled steer's request, so no reply is shown. Send it again.";
 const STEER_TURN_ENDED_DETAIL =
   "The turn finished before this message could be steered. It stays queued and is sent next.";
+const STEER_TURN_COMPACTING_DETAIL =
+  "Claude is compacting the conversation. The message stays queued.";
+/** A compaction segment correlates by its own prompt uuid alone. */
+const NO_STEER_PROMPT_UUIDS: ReadonlySet<string> = new Set();
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -296,6 +306,11 @@ interface ClaudeTurnState {
   awaitingSteerContinuation:
     | { readonly since: string; readonly segmentStatus: ProviderRuntimeTurnStatus }
     | undefined;
+  /**
+   * The uuid of the `/compact` the compaction policy sent after this turn's own work completed.
+   * The turn stays open for that last segment and closes at its result.
+   */
+  compactionPromptUuid: string | undefined;
 }
 
 /** The only turn-state constructor: prompt and provider turns must share one shape. */
@@ -328,6 +343,7 @@ function makeClaudeTurnState(input: {
     interruptRequested: false,
     sealedSegmentCount: 0,
     awaitingSteerContinuation: undefined,
+    compactionPromptUuid: undefined,
   };
 }
 
@@ -510,7 +526,8 @@ interface ClaudeSessionContext {
   cumulativeUsageSpansCompaction: boolean;
   cacheModelSelection: ModelSelection | undefined;
   compactionPolicy: ContextCompactionPolicyState;
-  readonly supportsAutomaticCompaction: boolean;
+  /** The CLI's latest init frame lists `/compact`, which the compaction policy sends. */
+  supportsAutomaticCompaction: boolean;
   compactionUnavailableWarningEmitted: boolean;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
@@ -562,13 +579,6 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
-  /** Added in newer SDKs; optional keeps older native runtimes fail-safe. */
-  readonly applyFlagSettings?: (
-    settings: Partial<{
-      readonly autoCompactEnabled: boolean | null;
-      readonly autoCompactWindow: number | null;
-    }>,
-  ) => Promise<void>;
   readonly close: () => void;
   readonly mcpServerStatus?: () => Promise<
     ReadonlyArray<{ readonly name: string; readonly status: string }>
@@ -2636,55 +2646,132 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
   });
 
-  const maybeEnableAutomaticCompaction = Effect.fn("maybeEnableAutomaticCompaction")(function* (
+  /** Applies a compaction request's conclusion; one that ended without compacting warns once. */
+  const concludeAutomaticCompaction = Effect.fn("concludeAutomaticCompaction")(function* (
     context: ClaudeSessionContext,
-    usage: ThreadTokenUsageSnapshot,
+    requestId: string,
+    aborted: boolean,
   ) {
-    if (context.stopped || sessions.get(context.session.threadId) !== context) return;
-
-    const decision = observeContextCompaction(context.compactionPolicy, {
+    const conclusion = concludeContextCompactionRequest(context.compactionPolicy, {
       generation: context.generation,
-      usage,
+      requestId,
+      aborted,
     });
-    context.compactionPolicy = decision.state;
-    const windowTokens = decision.windowTokens;
-    if (!decision.trigger || windowTokens === undefined) return;
+    context.compactionPolicy = conclusion.state;
+    if (conclusion.unavailable) yield* emitCompactionUnavailableWarning(context);
+  });
 
-    const applyFlagSettings = context.query.applyFlagSettings;
-    if (!context.supportsAutomaticCompaction || !applyFlagSettings) {
-      context.compactionPolicy = disableContextCompaction(
-        context.compactionPolicy,
-        context.generation,
-      );
-      yield* emitCompactionUnavailableWarning(context);
-      return;
+  /**
+   * Compacts at the policy threshold before a completed prompt turn closes: Claude Code's own
+   * `/compact` runs as the turn's last segment, and the turn closes at that prompt's result
+   * (`closeCompactedTurn`). Claude Code fixes its auto-compact window when it starts: a live
+   * `applyFlagSettings({ autoCompactWindow })` leaves the window it compacts at unchanged
+   * (claudeCompactionCliProbe.test.ts), so only the explicit command compacts here.
+   *
+   * Inside the turn, not as a turn of its own: the thread stays busy until compaction ends, so a
+   * queued message waits for it instead of racing it, and the turn the user started stays the
+   * thread's latest (a delegated task still returns its result). Returns `compacting` when the
+   * turn now waits for its compaction, `unavailable` when it crossed the threshold with no way to
+   * compact (the caller warns once the turn closed).
+   */
+  const maybeCompactBeforeClosing = Effect.fn("maybeCompactBeforeClosing")(function* (
+    context: ClaudeSessionContext,
+    turnState: ClaudeTurnState,
+    result: SDKResultMessage,
+    usage: ThreadTokenUsageSnapshot | undefined,
+  ): Effect.fn.Return<"compacting" | "unavailable" | "none"> {
+    if (
+      usage === undefined ||
+      context.stopped ||
+      sessions.get(context.session.threadId) !== context ||
+      context.turnState !== turnState ||
+      turnState.completion !== undefined ||
+      turnState.interruptRequested ||
+      turnState.compactionPromptUuid !== undefined ||
+      // A background ("wake") turn has no prompt to correlate; the next prompt turn observes.
+      turnState.promptUuid === undefined ||
+      // Claude Code runs a queued send next; that turn's completion observes the context again.
+      (result.queued_turn_count ?? 0) > 0
+    ) {
+      return "none";
     }
 
     const generation = context.generation;
-    const applied = yield* Effect.tryPromise({
-      try: () =>
-        applyFlagSettings.call(context.query, {
-          autoCompactEnabled: true,
-          autoCompactWindow: windowTokens,
-        }),
-      catch: () => undefined,
-    }).pipe(
-      Effect.as(true),
-      Effect.timeout("3 seconds"),
-      Effect.catch(() => Effect.succeed(false)),
-    );
+    const decision = observeContextCompaction(context.compactionPolicy, { generation, usage });
+    context.compactionPolicy = decision.state;
+    if (!decision.trigger) return "none";
 
-    if (
-      context.stopped ||
-      context.generation !== generation ||
-      sessions.get(context.session.threadId) !== context
-    ) {
-      return;
-    }
-    if (!applied) {
+    if (!context.supportsAutomaticCompaction) {
       context.compactionPolicy = disableContextCompaction(context.compactionPolicy, generation);
-      yield* emitCompactionUnavailableWarning(context);
+      return "unavailable";
     }
+
+    const requestId = yield* Effect.sync(() => crypto.randomUUID());
+    const offered = yield* Queue.offer(context.promptQueue, {
+      type: "message",
+      message: {
+        ...buildUserMessage({
+          sdkContent: [{ type: "text", text: CLAUDE_NATIVE_COMPACTION_COMMAND }],
+        }),
+        uuid: requestId,
+      },
+    });
+    if (!offered) {
+      // The prompt queue is shut down: the session is ending, and nothing compacts.
+      context.compactionPolicy = disableContextCompaction(context.compactionPolicy, generation);
+      return "none";
+    }
+    turnState.compactionPromptUuid = requestId;
+    context.compactionPolicy = recordContextCompactionRequest(
+      context.compactionPolicy,
+      generation,
+      requestId,
+    );
+    // The turn's own work is over: seal it and publish its gauge, as between a steer's segments.
+    yield* sealTurnSegment(context, turnState, "completed", result);
+    yield* emitTokenUsageSnapshot(context, usage, turnState.turnId);
+    turnState.sealedSegmentCount += 1;
+    // Exact-turn Agent Control authority ends with the user's work, not with the compaction.
+    if (context.agentControl) yield* context.agentControl.retireTurn(turnState.turnId);
+    yield* Effect.logInfo("claude.compaction.requested", {
+      threadId: context.session.threadId,
+      turnId: turnState.turnId,
+      usedTokens: usage.usedTokens,
+      maxTokens: usage.maxTokens,
+    });
+    return "compacting";
+  });
+
+  /**
+   * Closes a turn at the result of its compaction segment. The turn's own work already completed,
+   * so it closes as completed unless Stop was requested; how the compaction ended only decides
+   * the policy's request (no boundary before this result: unavailable, unless Stop aborted it).
+   */
+  const closeCompactedTurn = Effect.fn("closeCompactedTurn")(function* (
+    context: ClaudeSessionContext,
+    turnState: ClaudeTurnState,
+    compactionPromptUuid: string,
+    result: SDKResultMessage,
+  ) {
+    const kind = classifyClaudeResultKind(result);
+    if (kind === "failure") {
+      yield* Effect.logWarning("claude.compaction.failed", {
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        subtype: result.subtype,
+        ...(result.subtype === "success" ? {} : { errors: result.errors }),
+      });
+    }
+    // Claude Code answers a `/compact` that Stop aborted with a successful result.
+    const stopped = turnState.interruptRequested;
+    yield* concludeAutomaticCompaction(context, compactionPromptUuid, kind === "abort" || stopped);
+    yield* completeTurn(
+      context,
+      stopped ? "interrupted" : "completed",
+      stopped ? claudeTurnCloseErrorMessage("stopped", result) : undefined,
+      result,
+      { expectedTurnState: turnState },
+    );
   });
 
   /** The context gauge a result (or a local close without one) publishes. */
@@ -2897,9 +2984,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     status: ProviderRuntimeTurnStatus,
     errorMessage: string | undefined,
     result: SDKResultMessage | undefined,
-    options: { readonly abortReason?: string } | undefined,
+    options:
+      | {
+          readonly abortReason?: string;
+          readonly resolvedUsage?: { readonly snapshot: ThreadTokenUsageSnapshot | undefined };
+        }
+      | undefined,
   ) {
-    const usageSnapshot = yield* resolveResultUsageSnapshot(context, result);
+    const usageSnapshot =
+      options?.resolvedUsage !== undefined
+        ? options.resolvedUsage.snapshot
+        : yield* resolveResultUsageSnapshot(context, result);
 
     yield* sealTurnSegment(context, turnState, status, result);
 
@@ -2969,8 +3064,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Release waiters before the tail effects: the turn is detached.
     Deferred.doneUnsafe(completion, Effect.void);
     if (context.agentControl) yield* context.agentControl.retireTurn(turnState.turnId);
-    if (status === "completed" && usageSnapshot) {
-      yield* maybeEnableAutomaticCompaction(context, usageSnapshot);
+    // Closed before its compaction's result (Stop, a lost stream): the request settles quietly.
+    // After `closeCompactedTurn` it is already concluded, so this is a no-op.
+    if (turnState.compactionPromptUuid !== undefined) {
+      yield* concludeAutomaticCompaction(context, turnState.compactionPromptUuid, true);
     }
   });
 
@@ -2988,6 +3085,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       readonly abortReason?: string;
       /** Only close this exact turn; a different (or no) open turn is left alone. */
       readonly expectedTurnState?: ClaudeTurnState;
+      /** The result's gauge, when the caller already resolved it (resolving consumes state). */
+      readonly resolvedUsage?: { readonly snapshot: ThreadTokenUsageSnapshot | undefined };
     },
   ) {
     // Must stay the first statement: the claim is only atomic before any yield.
@@ -3796,6 +3895,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const turnState = context.turnState;
     const echoedPromptUuids = claudeEchoedPromptUuids(message);
+    // A turn waiting for its compaction segment closes only at that prompt's result.
+    const compactionPromptUuid = turnState?.compactionPromptUuid;
+    if (turnState !== undefined && compactionPromptUuid !== undefined) {
+      if (
+        claudeResultBelongsToTurn({
+          echoed: echoedPromptUuids,
+          origin: message.origin,
+          promptUuid: compactionPromptUuid,
+          steerPromptUuids: NO_STEER_PROMPT_UUIDS,
+        })
+      ) {
+        return yield* closeCompactedTurn(context, turnState, compactionPromptUuid, message);
+      }
+      yield* Effect.logInfo("claude.turn.result-during-compaction", {
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        origin: message.origin?.kind,
+      });
+      return;
+    }
     // Resuming can produce a result for a background notification before the
     // queued user prompt runs. Prefer explicit correlation; older CLIs omit it.
     // A steered turn's later segments echo only their steer uuids.
@@ -3818,6 +3937,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const resultStatus = turnStatusFromResult(message);
     let close: ClaudeTurnClose = { status: resultStatus, cause: "result" };
+    let unsettledSteerCount = 0;
     if (turnState) {
       const decision = decideClaudeTurnResult({
         kind: classifyClaudeResultKind(message),
@@ -3831,6 +3951,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         turnState.settledSteerPromptUuids.add(uuid);
         context.discardedSteerPromptUuids.delete(uuid);
       }
+      unsettledSteerCount = decision.unsettled.length;
       if (decision.decision === "await-steer") {
         // The CLI promised another result: this segment ended (a "now" steer aborted it, or the
         // prompt finished first) and the steer runs next. Keep the Ryco turn open for it.
@@ -3922,6 +4043,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
     }
 
+    // A turn whose own work completed may compact before it closes.
+    if (
+      turnState !== undefined &&
+      close.status === "completed" &&
+      close.cause === "result" &&
+      unsettledSteerCount === 0
+    ) {
+      const usageSnapshot = yield* resolveResultUsageSnapshot(context, message);
+      const compaction = yield* maybeCompactBeforeClosing(
+        context,
+        turnState,
+        message,
+        usageSnapshot,
+      );
+      if (compaction === "compacting") return;
+      yield* completeTurn(context, close.status, errorMessage, message, {
+        resolvedUsage: { snapshot: usageSnapshot },
+      });
+      if (compaction === "unavailable") yield* emitCompactionUnavailableWarning(context);
+      return;
+    }
     yield* completeTurn(context, close.status, errorMessage, message);
   });
 
@@ -4242,6 +4384,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     switch (message.subtype) {
       case "init":
         context.cliCapabilities = parseClaudeCliCapabilities(message);
+        context.supportsAutomaticCompaction = claudeInitAdvertisesNativeCompaction(message);
         yield* offerRuntimeEventForContext(context, {
           ...base,
           type: "session.configured",
@@ -4257,11 +4400,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             context.generation,
           );
         } else if (message.compact_result === "failed") {
-          context.compactionPolicy = disableContextCompaction(
-            context.compactionPolicy,
-            context.generation,
-          );
-          yield* emitCompactionUnavailableWarning(context);
+          // The policy's own `/compact` concludes at its result, which knows whether Stop aborted
+          // it: Claude Code reports a stopped compaction as failed.
+          if (context.compactionPolicy.requestId === undefined) {
+            context.compactionPolicy = disableContextCompaction(
+              context.compactionPolicy,
+              context.generation,
+            );
+            yield* emitCompactionUnavailableWarning(context);
+          }
         } else if (message.compact_result === "success") {
           context.compactionPolicy = settleContextCompaction(
             context.compactionPolicy,
@@ -5999,7 +6146,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
 
     const generation = ++nextSessionGeneration;
-    const supportsAutomaticCompaction = typeof queryRuntime.applyFlagSettings === "function";
     const { resumeCursor: _resumeCursor, resumePolicy: _resumePolicy, ...startInput } = input;
     const context: ClaudeSessionContext = {
       generation,
@@ -6049,7 +6195,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       cumulativeUsageSpansCompaction: false,
       cacheModelSelection: modelSelection,
       compactionPolicy: initialContextCompactionPolicyState(generation),
-      supportsAutomaticCompaction,
+      supportsAutomaticCompaction: false,
       compactionUnavailableWarningEmitted: false,
       lastAssistantUuid: resumeState?.resumeSessionAt,
       lastThreadStartedId: undefined,
@@ -6398,6 +6544,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           "Claude is waiting for an approval or answer. The message stays queued.",
         );
       }
+      // A steer would stop the compaction the policy sent; the message runs after it instead.
+      if (turnState.compactionPromptUuid !== undefined) {
+        return yield* refuse("busy", STEER_TURN_COMPACTING_DETAIL);
+      }
       if (!context.cliCapabilities?.has(CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT)) {
         return yield* refuse(
           "unsupported",
@@ -6422,7 +6572,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         { fileSystem, attachmentsDir: serverConfig.attachmentsDir, boundInstanceId },
       );
       const steerUuid = yield* Effect.sync(() => crypto.randomUUID());
-      // Re-check identity after the attachment reads: the turn or the context may have changed.
+      // Re-check identity after the attachment reads: the turn or the context may have changed,
+      // and the turn's result may have started its compaction.
       const registered = yield* context.turnLock.withPermits(1)(
         Effect.gen(function* () {
           if (
@@ -6432,18 +6583,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             turnState.interruptRequested ||
             turnState.completion !== undefined
           ) {
-            return false;
+            return "turn-ended" as const;
           }
+          if (turnState.compactionPromptUuid !== undefined) return "compacting" as const;
           turnState.steerPromptUuids.add(steerUuid);
           const offered = yield* Queue.offer(context.promptQueue, {
             type: "message",
             message: { ...message, uuid: steerUuid, priority: "now" },
           });
           if (!offered) turnState.steerPromptUuids.delete(steerUuid);
-          return offered;
+          return offered ? ("registered" as const) : ("turn-ended" as const);
         }),
       );
-      if (!registered) {
+      if (registered === "compacting") {
+        return yield* refuse("busy", STEER_TURN_COMPACTING_DETAIL);
+      }
+      if (registered === "turn-ended") {
         return yield* refuse("turn-ended", STEER_TURN_ENDED_DETAIL);
       }
       yield* Effect.logInfo("claude.turn.steered", {
@@ -6576,11 +6731,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }),
         );
       }
-      // The CLI may never report a result for a provider turn it was not asked to run. Give it
-      // a grace period, then finish the turn locally. Forked: Stop must never block the reactor.
+      // The CLI may never report a result for a provider turn it was not asked to run, or for a
+      // compaction segment it stopped. Give it a grace period, then finish the turn locally.
+      // Forked: Stop must never block the reactor.
+      const compacting = target?.compactionPromptUuid !== undefined;
       if (
         target !== undefined &&
-        target.openedBy !== "prompt" &&
+        (target.openedBy !== "prompt" || compacting) &&
         (turnId === undefined || target.turnId === turnId)
       ) {
         yield* Effect.sleep(Duration.millis(CLAUDE_PROVIDER_TURN_STOP_GRACE_MS)).pipe(
@@ -6598,8 +6755,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 threadId: context.session.threadId,
                 turnId: target.turnId,
                 openedBy: target.openedBy,
+                compacting,
               }).pipe(
-                Effect.andThen(completeTurn(context, "interrupted", PROVIDER_TURN_STOP_REASON)),
+                Effect.andThen(
+                  completeTurn(
+                    context,
+                    "interrupted",
+                    compacting ? "Interrupted by user." : PROVIDER_TURN_STOP_REASON,
+                  ),
+                ),
               );
             }),
           ),
