@@ -17,6 +17,7 @@ export interface ShortcutEventLike extends ShortcutModifierStateLike {
   type?: string;
   code?: string;
   key: string;
+  getModifierState?(key: string): boolean;
 }
 
 const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
@@ -37,6 +38,7 @@ const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
 
 const LETTER_EVENT_CODE = /^Key([A-Z])$/;
 const PLAIN_LETTER_KEY = /^[a-z]$/i;
+const PLAIN_LETTER_OR_DIGIT_KEY = /^[a-z0-9]$/i;
 
 export function normalizeShortcutEventKey(key: string): string {
   const normalized = key.toLowerCase();
@@ -50,16 +52,36 @@ export function normalizeShortcutEventKey(key: string): string {
  * `alt+<letter>` binding. Fall back to the physical key only while Alt is held
  * and the layout did not already produce a plain letter, so every layout that
  * does report letters (Windows/Linux Ctrl+Alt, non-QWERTY) keeps its own key.
+ * Windows reports AltGr as Ctrl+Alt, and AltGr types letters such as Polish
+ * "ą" on the A key, so outside macOS the fallback never applies with Ctrl held.
  */
-function resolveAltTransformedLetter(event: ShortcutEventLike): string | null {
+function resolveAltTransformedLetter(
+  event: ShortcutEventLike,
+  useMetaForMod: boolean,
+): string | null {
   if (!event.altKey || !event.code || PLAIN_LETTER_KEY.test(event.key)) return null;
+  if (event.ctrlKey && !useMetaForMod) return null;
   const match = LETTER_EVENT_CODE.exec(event.code);
   return match?.[1] ? match[1].toLowerCase() : null;
 }
 
-function resolveShortcutEventKeys(event: ShortcutEventLike): Set<string> {
+/**
+ * A character typed with AltGr (German AltGr+8 is "[") is text, not a
+ * shortcut, wherever the browser reports AltGr. macOS has no AltGr; Option
+ * belongs to ⌘⌥ chords there.
+ */
+function isAltGraphCharacter(event: ShortcutEventLike, useMetaForMod: boolean): boolean {
+  return (
+    !useMetaForMod &&
+    event.getModifierState?.("AltGraph") === true &&
+    event.key.length === 1 &&
+    !PLAIN_LETTER_OR_DIGIT_KEY.test(event.key)
+  );
+}
+
+function resolveShortcutEventKeys(event: ShortcutEventLike, useMetaForMod: boolean): Set<string> {
   const keys = new Set([normalizeShortcutEventKey(event.key)]);
-  const altLetter = resolveAltTransformedLetter(event);
+  const altLetter = resolveAltTransformedLetter(event, useMetaForMod);
   if (altLetter) keys.add(altLetter);
   const aliases = event.code ? EVENT_CODE_KEY_ALIASES[event.code] : undefined;
   if (!aliases) return keys;
@@ -92,5 +114,6 @@ export function matchesKeybindingShortcut(
   useMetaForMod: boolean,
 ): boolean {
   if (!matchesKeybindingModifiers(event, shortcut, useMetaForMod)) return false;
-  return resolveShortcutEventKeys(event).has(shortcut.key);
+  if (isAltGraphCharacter(event, useMetaForMod)) return false;
+  return resolveShortcutEventKeys(event, useMetaForMod).has(shortcut.key);
 }

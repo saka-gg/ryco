@@ -153,6 +153,11 @@ Option+N is a dead key and Option+P types `π`. In that case the binding matches
 letter key, so a `mod+alt+n` binding works as ⌘⌥N. Layouts that still report the plain letter while Alt is
 held match by that letter.
 
+On Windows and Linux, AltGr types characters on many layouts (Polish AltGr+A types `ą`, German
+AltGr+8 types `[`), and Windows reports it as Ctrl+Alt. Those keys keep typing: the physical letter
+does not stand in while Ctrl is held, and a character typed with AltGr never matches a binding
+when the browser reports AltGr.
+
 ### `when` Conditions
 
 Currently available context keys:

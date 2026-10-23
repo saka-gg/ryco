@@ -836,6 +836,39 @@ describe("resolveShortcutCommand", () => {
     // Without Alt the physical key never stands in for the produced character.
     assert.isNull(resolve({ key: "Dead", code: "KeyN", metaKey: true }));
   });
+
+  it("leaves characters typed with AltGr to the focused control outside macOS", () => {
+    const keybindings = compileResolvedKeybindingsConfig([
+      { key: "mod+alt+a", command: "chat.newWithoutProject" },
+      { key: "mod+alt+[", command: "pane.focusPrevious" },
+    ]);
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "Win32") =>
+      resolveShortcutCommand(event(overrides), keybindings, { platform });
+    const altGraph = { getModifierState: (key: string) => key === "AltGraph" };
+    // Windows reports AltGr as Ctrl+Alt; Polish AltGr+A types "ą" with or without "AltGraph".
+    assert.isNull(resolve({ key: "ą", code: "KeyA", ctrlKey: true, altKey: true }));
+    assert.isNull(resolve({ key: "ą", code: "KeyA", ctrlKey: true, altKey: true, ...altGraph }));
+    // German AltGr+8 types "[".
+    assert.isNull(resolve({ key: "[", code: "Digit8", ctrlKey: true, altKey: true, ...altGraph }));
+    // Ctrl+Alt chords that type no AltGr character still match.
+    assert.strictEqual(
+      resolve({ key: "a", code: "KeyA", ctrlKey: true, altKey: true }),
+      "chat.newWithoutProject",
+    );
+    assert.strictEqual(
+      resolve({ key: "a", code: "KeyA", ctrlKey: true, altKey: true, ...altGraph }),
+      "chat.newWithoutProject",
+    );
+    assert.strictEqual(
+      resolve({ key: "[", code: "BracketLeft", ctrlKey: true, altKey: true }),
+      "pane.focusPrevious",
+    );
+    // macOS has no AltGr: ⌘⌥A still matches through the physical key.
+    assert.strictEqual(
+      resolve({ key: "å", code: "KeyA", metaKey: true, altKey: true, ...altGraph }, "MacIntel"),
+      "chat.newWithoutProject",
+    );
+  });
 });
 
 describe("formatShortcutLabel", () => {
