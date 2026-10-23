@@ -164,7 +164,10 @@ describe("ThreadDeletionReactor recreation fence", () => {
             Layer.provide(
               Layer.succeed(OrchestrationEngineService, {
                 streamDomainEvents: Stream.fromPubSub(events),
-                subscribeDomainEvents: PubSub.subscribe(events),
+                subscribeDomainEvents: Effect.map(
+                  PubSub.subscribe(events),
+                  Stream.fromSubscription,
+                ),
               } as unknown as OrchestrationEngineShape),
             ),
             Layer.provide(projectionLayer()),
@@ -245,7 +248,10 @@ describe("ThreadDeletionReactor trash versus permanent deletion", () => {
             Layer.provide(
               Layer.succeed(OrchestrationEngineService, {
                 streamDomainEvents: Stream.fromPubSub(events),
-                subscribeDomainEvents: PubSub.subscribe(events),
+                subscribeDomainEvents: Effect.map(
+                  PubSub.subscribe(events),
+                  Stream.fromSubscription,
+                ),
               } as unknown as OrchestrationEngineShape),
             ),
             Layer.provide(projectionLayer()),
@@ -369,7 +375,10 @@ describe("ThreadDeletionReactor chat projects", () => {
             Layer.provide(
               Layer.succeed(OrchestrationEngineService, {
                 streamDomainEvents: Stream.fromPubSub(events),
-                subscribeDomainEvents: PubSub.subscribe(events),
+                subscribeDomainEvents: Effect.map(
+                  PubSub.subscribe(events),
+                  Stream.fromSubscription,
+                ),
                 dispatch: (command: OrchestrationCommand) =>
                   Effect.sync(() => {
                     dispatched.push(command);

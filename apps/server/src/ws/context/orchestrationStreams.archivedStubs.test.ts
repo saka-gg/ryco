@@ -110,7 +110,7 @@ const makeHelpers = (options: {
             hasMore: after.length > limit,
           };
         }),
-      subscribeDomainEvents: PubSub.subscribe(live),
+      subscribeDomainEvents: Effect.map(PubSub.subscribe(live), Stream.fromSubscription),
     } as unknown as OrchestrationEngineShape;
     const projectionSnapshotQuery = {
       getThreadShellById: (threadId: ThreadId) =>

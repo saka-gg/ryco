@@ -28,6 +28,8 @@ export const SERVER_TIMING_TEST_FILES = [
   "src/httpShutdown.test.ts",
   // 16 in-process lock handoffs finish within 50 ms each.
   "src/hubIdentity/LocalHubIdentityState.test.ts",
+  // About 4,600 real dispatches past a stalled subscriber must finish within 10 s.
+  "src/orchestration/Layers/OrchestrationEngine.eventBus.test.ts",
   // Paging a large thread history finishes within 2 s.
   "src/orchestration/Layers/ProjectionSnapshotQuery.test.ts",
   // A prewarmed send reaches the provider within half of a 300 ms fake start.
