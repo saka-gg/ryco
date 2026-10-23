@@ -153,7 +153,8 @@ focused control.
 
 The first four work while you type, but not in the terminal, a menu or a dialog. When the thread
 cannot take the action, for example while it is working or its machine is offline, a toast says
-why. Without an open thread the key goes to the focused control.
+why. Without an open thread the key goes to the focused control. The command palette offers the
+same four actions for the open thread, with the same reason when one cannot run.
 
 `thread.undo` acts only while an Undo notice is shown. In the composer it does so until you press
 another key or edit text after the notice appeared; then the key is the composer's own undo again.

@@ -44,6 +44,8 @@ interface CommandPaletteStore {
    * read when needed, so a snooze that just ran out never reads as snoozed.
    */
   readCurrentThreadLifecycle: (() => CurrentThreadLifecycle | null) | null;
+  /** Set by the sidebar while it offers the Tasks page. */
+  tasksAvailable: boolean;
   setOpen: (open: boolean) => void;
   toggleOpen: () => void;
   openAddProject: () => void;
@@ -59,6 +61,7 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
   open: false,
   openIntent: null,
   readCurrentThreadLifecycle: null,
+  tasksAvailable: false,
   setOpen: (open) => set({ open, ...(open ? {} : { openIntent: null }) }),
   toggleOpen: () =>
     set((state) => ({ open: !state.open, ...(state.open ? { openIntent: null } : {}) })),

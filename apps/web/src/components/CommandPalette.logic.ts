@@ -4,9 +4,10 @@ import {
   type FilesystemBrowseEntry,
   type OrchestrationThreadMessageSearchResult,
 } from "@ryco/contracts";
+import type { ThreadLifecycleAction } from "@ryco/client-runtime/state/threads";
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { type ReactNode } from "react";
-import type { ThreadSnoozeOption } from "../commandPaletteStore";
+import type { CurrentThreadLifecycle, ThreadSnoozeOption } from "../commandPaletteStore";
 import { sortThreads } from "../lib/threadSort";
 import type { SettingsSectionId } from "../settingsDialogStore";
 import { formatRelativeTimeLabel } from "../timestampFormat";
@@ -308,6 +309,108 @@ export function buildSnoozeUntilGroups(input: {
       })),
     },
   ];
+}
+
+export interface CurrentThreadLifecycleIcons {
+  readonly settle: ReactNode;
+  readonly moveToActive: ReactNode;
+  readonly snooze: ReactNode;
+  readonly snoozeAddon: ReactNode;
+  readonly archive: ReactNode;
+  readonly markUnread: ReactNode;
+}
+
+/**
+ * Settle, snooze, archive and mark unread for the open thread, disabled with
+ * the Inbox's reason when they cannot run. Settle and snooze toggle like the
+ * Inbox row's buttons. `snoozeUntil` is the view of snooze times, null while
+ * the thread is snoozed.
+ */
+export function buildCurrentThreadLifecycleActions(input: {
+  lifecycle: CurrentThreadLifecycle;
+  icons: CurrentThreadLifecycleIcons;
+}): {
+  items: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
+  snoozeUntil: CommandPaletteView | null;
+} {
+  const { lifecycle, icons } = input;
+  const unavailable = (action: ThreadLifecycleAction) => {
+    const reason = lifecycle.disabledReasons[action];
+    return reason === null ? {} : { description: reason, disabled: true };
+  };
+  const snoozeUntil: CommandPaletteView | null = lifecycle.snoozed
+    ? null
+    : {
+        addonIcon: icons.snoozeAddon,
+        groups: buildSnoozeUntilGroups({
+          options: lifecycle.snoozeOptions(),
+          icon: icons.snooze,
+          snooze: lifecycle.snooze,
+        }),
+      };
+  const snoozeSearchTerms = ["snooze", "unsnooze", "later", "remind", "wake", "current thread"];
+  const items: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [
+    {
+      kind: "action",
+      value: "action:current-thread-settle",
+      searchTerms: ["settle", "done", "move to active", "unsettle", "active", "current thread"],
+      title: lifecycle.settled ? "Move current thread to Active" : "Settle current thread",
+      icon: lifecycle.settled ? icons.moveToActive : icons.settle,
+      shortcutCommand: "thread.settle",
+      ...unavailable("settle"),
+      run: async () => {
+        lifecycle.setSettled(!lifecycle.settled);
+      },
+    },
+    snoozeUntil === null
+      ? {
+          kind: "action",
+          value: "action:current-thread-snooze",
+          searchTerms: snoozeSearchTerms,
+          title: "Unsnooze current thread",
+          icon: icons.snooze,
+          shortcutCommand: "thread.snooze",
+          ...unavailable("snooze"),
+          run: async () => {
+            lifecycle.snooze(null);
+          },
+        }
+      : {
+          kind: "submenu",
+          value: "action:current-thread-snooze",
+          searchTerms: snoozeSearchTerms,
+          title: "Snooze current thread…",
+          icon: icons.snooze,
+          shortcutCommand: "thread.snooze",
+          ...unavailable("snooze"),
+          ...snoozeUntil,
+        },
+    {
+      kind: "action",
+      value: "action:current-thread-archive",
+      searchTerms: ["archive", "hide", "current thread"],
+      title: "Archive current thread",
+      icon: icons.archive,
+      shortcutCommand: "thread.archive",
+      ...unavailable("archive"),
+      run: async () => {
+        lifecycle.archive();
+      },
+    },
+    {
+      kind: "action",
+      value: "action:current-thread-mark-unread",
+      searchTerms: ["mark unread", "unread", "unseen", "current thread"],
+      title: "Mark current thread unread",
+      icon: icons.markUnread,
+      shortcutCommand: "thread.markUnread",
+      ...unavailable("markUnread"),
+      run: async () => {
+        lifecycle.markUnread();
+      },
+    },
+  ];
+  return { items, snoozeUntil };
 }
 
 export function filterCommandPaletteGroups(input: {

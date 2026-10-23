@@ -34,14 +34,17 @@ import { prefetchFilesystemBrowse, useFilesystemBrowse } from "~/rpc/useProject"
 import { useServerConfig } from "~/rpc/serverState";
 import { useSourceControlRepositorySearch } from "~/rpc/useSourceControl";
 import {
+  ArchiveIcon,
   ArrowDownIcon,
   ArrowLeftIcon,
   ArrowUpIcon,
   BarChart3Icon,
   CalendarClockIcon,
+  CheckIcon,
   GitPullRequestCreateIcon,
   GitPullRequestIcon,
   CircleAlertIcon,
+  CircleDotIcon,
   Columns2Icon,
   CornerLeftUpIcon,
   FolderGit2Icon,
@@ -58,6 +61,7 @@ import {
   PinOffIcon,
   Settings2Icon,
   SettingsIcon,
+  SquareCheckBigIcon,
   SquarePenIcon,
 } from "lucide-react";
 import {
@@ -127,11 +131,11 @@ import { useUiStateStore } from "../uiStateStore";
 import {
   ADDON_ICON_CLASS,
   buildBrowseGroups,
+  buildCurrentThreadLifecycleActions,
   buildMessageSearchItems,
   buildProjectActionItems,
   buildRootGroups,
   buildSettingsSearchItems,
-  buildSnoozeUntilGroups,
   buildThreadActionItems,
   type CommandPaletteMessageSearchResult,
   type CommandPaletteActionItem,
@@ -502,6 +506,12 @@ function OpenCommandPaletteDialog() {
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const openIntent = useCommandPaletteStore((store) => store.openIntent);
   const clearOpenIntent = useCommandPaletteStore((store) => store.clearOpenIntent);
+  // Read once per open. Only the desktop sidebar registers the reader, so the
+  // frozen phone tier gets no lifecycle actions.
+  const [currentThreadLifecycle] = useState(
+    () => useCommandPaletteStore.getState().readCurrentThreadLifecycle?.() ?? null,
+  );
+  const tasksAvailable = useCommandPaletteStore((store) => store.tasksAvailable);
   const composerHandleRef = useComposerHandleContext();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -1455,28 +1465,34 @@ function OpenCommandPaletteDialog() {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [openIntent]);
 
+  const currentThreadActions = currentThreadLifecycle
+    ? buildCurrentThreadLifecycleActions({
+        lifecycle: currentThreadLifecycle,
+        // Checked against the bundle budget: some icons, such as the Inbox menu's
+        // ClockIcon, regroup the shell's icon chunks into one more file.
+        icons: {
+          settle: <CheckIcon className={ITEM_ICON_CLASS} />,
+          moveToActive: <InboxIcon className={ITEM_ICON_CLASS} />,
+          snooze: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+          snoozeAddon: <CalendarClockIcon className={ADDON_ICON_CLASS} />,
+          archive: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+          markUnread: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+        },
+      })
+    : null;
   useLayoutEffect(() => {
     if (openIntent?.kind !== "snooze-thread") {
       return;
     }
     clearOpenIntent();
-    // Read again: the thread may have changed while the palette loaded.
-    const lifecycle = useCommandPaletteStore.getState().readCurrentThreadLifecycle?.() ?? null;
-    const reason = lifecycle?.disabledReasons.snooze ?? null;
-    if (lifecycle === null || lifecycle.snoozed || reason !== null) {
+    const reason = currentThreadLifecycle?.disabledReasons.snooze ?? null;
+    const snoozeUntil = currentThreadActions?.snoozeUntil ?? null;
+    if (snoozeUntil === null || reason !== null) {
       setOpen(false);
       if (reason !== null) toastManager.add(stackedThreadToast({ type: "info", title: reason }));
       return;
     }
-    pushPaletteView({
-      // An icon the palette already loads: a new one would regroup the shell's icon chunks.
-      addonIcon: <CalendarClockIcon className={ADDON_ICON_CLASS} />,
-      groups: buildSnoozeUntilGroups({
-        options: lifecycle.snoozeOptions(),
-        icon: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
-        snooze: lifecycle.snooze,
-      }),
-    });
+    pushPaletteView(snoozeUntil);
     // Runs once per intent; the view captures the times from now.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [openIntent]);
@@ -1553,6 +1569,9 @@ function OpenCommandPaletteDialog() {
       });
     },
   });
+  if (currentThreadActions) {
+    actionItems.push(...currentThreadActions.items);
+  }
 
   if (chatTarget) {
     actionItems.push({
@@ -1680,6 +1699,23 @@ function OpenCommandPaletteDialog() {
         await navigate({ to: "/statistics" });
       },
     });
+    if (tasksAvailable) {
+      actionItems.push({
+        kind: "action",
+        value: "action:tasks",
+        searchTerms: ["tasks", "to-do", "todo", "task list"],
+        title: "Open tasks",
+        // Not the sidebar's ListTodoIcon: imported here, it regroups the shell's
+        // icon chunks into one more file.
+        icon: <SquareCheckBigIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          setOpen(false);
+          // The page's path, not buildTasksPageLocation: that module would become
+          // a chunk of its own, shared with the sidebar.
+          await navigate({ to: "/tasks", search: {} });
+        },
+      });
+    }
     actionItems.push({
       kind: "action",
       value: "action:pull-requests",

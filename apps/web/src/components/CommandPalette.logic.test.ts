@@ -7,10 +7,12 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@ryco/contracts";
+import type { CurrentThreadLifecycle } from "../commandPaletteStore";
 import type { Thread } from "../types";
 import {
   buildBrowseGroups,
   buildBrowseItemValue,
+  buildCurrentThreadLifecycleActions,
   buildMessageSearchItems,
   buildSettingsSearchItems,
   buildSnoozeUntilGroups,
@@ -20,6 +22,7 @@ import {
   SETTINGS_SEARCH_RESULT_LIMIT,
   type CommandPaletteActionItem,
   type CommandPaletteGroup,
+  type CommandPaletteSubmenuItem,
 } from "./CommandPalette.logic";
 import { SETTINGS_SECTION_TITLES, type SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
@@ -280,6 +283,143 @@ describe("buildSnoozeUntilGroups", () => {
     if (tomorrow?.kind !== "action") throw new Error("expected action item");
     await tomorrow.run();
     expect(snooze).toHaveBeenCalledWith("2026-03-05T08:00:00.000Z");
+  });
+});
+
+describe("buildCurrentThreadLifecycleActions", () => {
+  const icons = {
+    settle: "settle-icon",
+    moveToActive: "move-to-active-icon",
+    snooze: "snooze-icon",
+    snoozeAddon: "snooze-addon-icon",
+    archive: "archive-icon",
+    markUnread: "mark-unread-icon",
+  };
+
+  function makeLifecycle(overrides: Partial<CurrentThreadLifecycle> = {}): CurrentThreadLifecycle {
+    return {
+      title: "Fix the relay",
+      settled: false,
+      snoozed: false,
+      disabledReasons: { settle: null, snooze: null, archive: null, markUnread: null },
+      snoozeOptions: () => [
+        {
+          id: "tomorrow",
+          label: "Tomorrow morning",
+          snoozedUntil: "2026-03-05T08:00:00.000Z",
+          timeLabel: "Thu 09:00",
+        },
+      ],
+      setSettled: vi.fn(),
+      snooze: vi.fn(),
+      archive: vi.fn(),
+      markUnread: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  function itemByValue(
+    items: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>,
+    value: string,
+  ) {
+    const item = items.find((candidate) => candidate.value === value);
+    if (!item) throw new Error(`expected ${value}`);
+    return item;
+  }
+
+  it("offers each action with its shortcut and runs it on the open thread", async () => {
+    const lifecycle = makeLifecycle();
+    const { items, snoozeUntil } = buildCurrentThreadLifecycleActions({ lifecycle, icons });
+
+    expect(
+      items.map((item) => [item.kind, item.title, item.icon, item.shortcutCommand, item.disabled]),
+    ).toEqual([
+      ["action", "Settle current thread", "settle-icon", "thread.settle", undefined],
+      ["submenu", "Snooze current thread…", "snooze-icon", "thread.snooze", undefined],
+      ["action", "Archive current thread", "archive-icon", "thread.archive", undefined],
+      ["action", "Mark current thread unread", "mark-unread-icon", "thread.markUnread", undefined],
+    ]);
+    for (const item of items) {
+      if (item.kind === "action") await item.run();
+    }
+    expect(lifecycle.setSettled).toHaveBeenCalledWith(true);
+    expect(lifecycle.archive).toHaveBeenCalledOnce();
+    expect(lifecycle.markUnread).toHaveBeenCalledOnce();
+
+    // The submenu is the view of snooze times.
+    const snoozeItem = itemByValue(items, "action:current-thread-snooze");
+    if (snoozeItem.kind !== "submenu") throw new Error("expected submenu item");
+    expect(snoozeItem.addonIcon).toBe("snooze-addon-icon");
+    expect(snoozeItem.groups).toBe(snoozeUntil?.groups);
+    const tomorrow = snoozeUntil?.groups[0]?.items[0];
+    expect([tomorrow?.title, tomorrow?.description]).toEqual(["Tomorrow morning", "Thu 09:00"]);
+    if (tomorrow?.kind !== "action") throw new Error("expected action item");
+    await tomorrow.run();
+    expect(lifecycle.snooze).toHaveBeenCalledWith("2026-03-05T08:00:00.000Z");
+  });
+
+  it("moves a settled thread back to Active and wakes a snoozed one", async () => {
+    const lifecycle = makeLifecycle({ settled: true, snoozed: true });
+    const { items, snoozeUntil } = buildCurrentThreadLifecycleActions({ lifecycle, icons });
+
+    const settle = itemByValue(items, "action:current-thread-settle");
+    expect([settle.title, settle.icon]).toEqual([
+      "Move current thread to Active",
+      "move-to-active-icon",
+    ]);
+    const unsnooze = itemByValue(items, "action:current-thread-snooze");
+    expect([unsnooze.kind, unsnooze.title, unsnooze.shortcutCommand]).toEqual([
+      "action",
+      "Unsnooze current thread",
+      "thread.snooze",
+    ]);
+    expect(snoozeUntil).toBeNull();
+
+    if (settle.kind !== "action" || unsnooze.kind !== "action") {
+      throw new Error("expected action items");
+    }
+    await settle.run();
+    await unsnooze.run();
+    expect(lifecycle.setSettled).toHaveBeenCalledWith(false);
+    expect(lifecycle.snooze).toHaveBeenCalledWith(null);
+  });
+
+  it("disables an action that cannot run and says why", () => {
+    const { items } = buildCurrentThreadLifecycleActions({
+      lifecycle: makeLifecycle({
+        disabledReasons: {
+          settle: "Wait for the running work to finish.",
+          snooze: "Wait for the running work to finish.",
+          archive: null,
+          markUnread: "Nothing to mark unread yet.",
+        },
+      }),
+      icons,
+    });
+
+    expect(items.map((item) => [item.title, item.disabled, item.description])).toEqual([
+      ["Settle current thread", true, "Wait for the running work to finish."],
+      ["Snooze current thread…", true, "Wait for the running work to finish."],
+      ["Archive current thread", undefined, undefined],
+      ["Mark current thread unread", true, "Nothing to mark unread yet."],
+    ]);
+  });
+
+  it("is found by what each action does", () => {
+    const { items } = buildCurrentThreadLifecycleActions({ lifecycle: makeLifecycle(), icons });
+    const titlesFor = (query: string) =>
+      filterCommandPaletteGroups({
+        activeGroups: [{ value: "actions", label: "Actions", items }],
+        query,
+        isInSubmenu: false,
+        projectSearchItems: [],
+        threadSearchItems: [],
+      }).flatMap((group) => group.items.map((item) => item.title));
+
+    expect(titlesFor("settle")).toEqual(["Settle current thread"]);
+    expect(titlesFor("snooze")).toEqual(["Snooze current thread…"]);
+    expect(titlesFor("archive")).toEqual(["Archive current thread"]);
+    expect(titlesFor("unread")).toEqual(["Mark current thread unread"]);
   });
 });
 

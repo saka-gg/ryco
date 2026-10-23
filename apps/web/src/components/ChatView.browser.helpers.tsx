@@ -2473,6 +2473,19 @@ async function mountChatView(options: {
   };
 }
 
+/** The open lifecycle thread on a node that accepts every command, so actions leave an Undo notice. */
+function mountLifecycleThread(options: { running?: boolean } = {}): Promise<MountedChatView> {
+  return mountChatView({
+    viewport: DEFAULT_VIEWPORT,
+    snapshot: createLifecycleSnapshot(options),
+    configureFixture: enableThreadLifecycle,
+    resolveRpc: (body) =>
+      body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+        ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+        : undefined,
+  });
+}
+
 // --- Phone work-surface fixtures (delivery step 8) ---
 
 const WORK_SURFACE_TURN_ID = "turn-work-surface-1" as TurnId;
@@ -2977,6 +2990,7 @@ export {
   getCommandPaletteLegendEntries,
   dispatchInputKey,
   mountChatView,
+  mountLifecycleThread,
   createSnapshotWithWorkSurfaceCheckpoint,
   resolveWorkSurfaceRpc,
   queryPhoneSurfacePopup,

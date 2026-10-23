@@ -1,4 +1,3 @@
-import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -7,12 +6,8 @@ import { hasOpenDialogShortcutTarget } from "../keybindings";
 import { isMacPlatform } from "../lib/utils";
 import { useUiStateStore } from "../uiStateStore";
 import {
-  DEFAULT_VIEWPORT,
-  createLifecycleSnapshot,
   dispatchedCommandTypes,
-  enableThreadLifecycle,
-  fixture,
-  mountChatView,
+  mountLifecycleThread,
   pressComposerKey,
   pressComposerUndo,
   pressLifecycleChord,
@@ -45,19 +40,6 @@ function pressUndoKey(target: Element): KeyboardEvent {
 async function settleOpenThread(): Promise<void> {
   pressLifecycleChord("D");
   await expect.element(page.getByText("Thread settled", { exact: true })).toBeInTheDocument();
-}
-
-/** The open thread after a finished turn, on a node that accepts every command. */
-function mountLifecycleThread() {
-  return mountChatView({
-    viewport: DEFAULT_VIEWPORT,
-    snapshot: createLifecycleSnapshot(),
-    configureFixture: enableThreadLifecycle,
-    resolveRpc: (body) =>
-      body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-        ? { sequence: fixture.snapshot.snapshotSequence + 1 }
-        : undefined,
-  });
 }
 
 describe("ChatView thread Undo shortcut (full app)", () => {
