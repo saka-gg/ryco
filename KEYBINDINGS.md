@@ -23,6 +23,11 @@ successfully saved bindings. Corrupt or unreadable documents are retained and su
 **Retry loading** retries the read; **Replace local bindings with defaults** explicitly
 replaces the local document. Ordinary edits cannot overwrite an unreadable document.
 
+Every Ryco version in a browser profile or desktop installation shares this document, so it is
+read one entry at a time. Entries this version cannot use, such as shortcuts for commands added
+by a newer version, are ignored here and written back unchanged when you save. Rebinding or
+unbinding a command here replaces its unusable entries; **Restore defaults** removes them all.
+
 ## Import existing node bindings
 
 There is no automatic adoption of a node's bindings. Existing files remain available at

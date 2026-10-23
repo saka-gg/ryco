@@ -118,15 +118,19 @@ describe("app-owned keybindings", () => {
     );
   });
 
-  it("preserves malformed local data rather than silently replacing it during hydration", async () => {
-    const { kv, values } = persistence();
-    values.set(APP_KEYBINDINGS_STORAGE_KEY, "{broken");
-    const app = createAppKeybindingsStore(kv);
-    await expect(app.hydrate()).rejects.toThrow();
-    await expect(app.update(() => custom)).rejects.toThrow();
-    expect(app.getSnapshot().hydrated).toBe(false);
-    expect(kv.setItem).not.toHaveBeenCalled();
-  });
+  it.each(["{broken", JSON.stringify({ rules: "x", disabledCommands: [] }), "null"])(
+    "preserves malformed local data rather than silently replacing it during hydration: %s",
+    async (malformed) => {
+      const { kv, values } = persistence();
+      values.set(APP_KEYBINDINGS_STORAGE_KEY, malformed);
+      const app = createAppKeybindingsStore(kv);
+      await expect(app.hydrate()).rejects.toThrow();
+      expect(app.getSnapshot().error).not.toBeNull();
+      await expect(app.update(() => custom)).rejects.toThrow();
+      expect(app.getSnapshot().hydrated).toBe(false);
+      expect(kv.setItem).not.toHaveBeenCalled();
+    },
+  );
 
   it("imports explicitly, preserving local overrides and deliberate unbindings; reset restores defaults", async () => {
     const { kv } = persistence();
@@ -237,5 +241,110 @@ describe("app-owned keybindings", () => {
     await first.update(() => custom);
     await second.reload();
     expect(second.getSnapshot().preferences).toEqual(custom);
+  });
+});
+
+describe("documents saved by a newer version", () => {
+  const futureRule = { key: "mod+shift+t", command: "view.futureCommand", extra: 1 };
+  const newer = {
+    version: 2,
+    rules: [{ key: "mod+x", command: "terminal.toggle" }, futureRule],
+    disabledCommands: ["future.command", "chat.newLocal"],
+  };
+  const storedDocument = (values: Map<string, string>) =>
+    JSON.parse(values.get(APP_KEYBINDINGS_STORAGE_KEY)!);
+  async function hydrated(document: unknown) {
+    const { kv, values } = persistence();
+    values.set(APP_KEYBINDINGS_STORAGE_KEY, JSON.stringify(document));
+    const app = createAppKeybindingsStore(kv);
+    await app.hydrate();
+    return { app, values };
+  }
+
+  it("keeps the shortcuts this version knows working and ignores the rest", async () => {
+    const { app } = await hydrated(newer);
+    const { preferences, bindings, error } = app.getSnapshot();
+    expect(error).toBeNull();
+    expect(preferences).toEqual({
+      rules: [{ key: "mod+x", command: "terminal.toggle" }],
+      disabledCommands: ["chat.newLocal"],
+    });
+    expect(
+      bindings
+        .filter((rule) => rule.command === "terminal.toggle")
+        .map((rule) => rule.shortcut.key),
+    ).toEqual(["x"]);
+    const commands = bindings.map((rule): string => rule.command);
+    expect(commands).not.toContain("chat.newLocal");
+    expect(commands).not.toContain("view.futureCommand");
+  });
+
+  it("writes entries it cannot use back unchanged when saving", async () => {
+    const { app, values } = await hydrated(newer);
+    await app.update((current) => ({
+      ...current,
+      disabledCommands: [...current.disabledCommands, "chat.new"],
+    }));
+    expect(storedDocument(values)).toEqual({
+      version: 2,
+      rules: [futureRule, { key: "mod+x", command: "terminal.toggle" }],
+      disabledCommands: ["chat.newLocal", "chat.new", "future.command"],
+    });
+  });
+
+  it("drops a rule it cannot compile once the user edits that command", async () => {
+    const chord = { key: "mod+k mod+s", command: "chat.new" };
+    const { app, values } = await hydrated({
+      rules: [chord, { key: "mod+shift+o", command: "chat.new" }],
+      disabledCommands: [],
+    });
+    expect(app.getSnapshot().preferences.rules).toEqual([
+      { key: "mod+shift+o", command: "chat.new" },
+    ]);
+    // The editor saves its whole snapshot and may spell untouched shortcuts differently.
+    await app.update(() =>
+      appKeybindingsFromRules([
+        ...APP_DEFAULT_KEYBINDINGS.filter(
+          (rule) => rule.command !== "chat.new" && rule.command !== "terminal.toggle",
+        ),
+        { key: "mod+x", command: "terminal.toggle" },
+        { key: "shift+mod+o", command: "chat.new" },
+      ]),
+    );
+    expect(storedDocument(values).rules).toEqual([
+      chord,
+      { key: "mod+x", command: "terminal.toggle" },
+      { key: "shift+mod+o", command: "chat.new" },
+    ]);
+    await app.update((current) => ({
+      ...current,
+      rules: [
+        ...current.rules.filter((rule) => rule.command !== "chat.new"),
+        { key: "mod+y", command: "chat.new" },
+      ],
+    }));
+    expect(storedDocument(values).rules).toEqual([
+      { key: "mod+x", command: "terminal.toggle" },
+      { key: "mod+y", command: "chat.new" },
+    ]);
+  });
+
+  it("gives up retained rules first when the user's own rules fill the document", async () => {
+    const { app, values } = await hydrated(newer);
+    const scope = { environmentId: "node", projectId: "project" };
+    const own = Array.from({ length: 256 }, (_, index) => ({
+      key: "mod+x",
+      command: scopedScriptCommand(scope, `script-${index}`),
+    }));
+    await app.update(() => ({ rules: own, disabledCommands: [] }));
+    expect(storedDocument(values).rules).toEqual(own);
+  });
+
+  it("restore defaults removes them", async () => {
+    const { app, values } = await hydrated(newer);
+    await app.reset();
+    expect(storedDocument(values)).toEqual(DEFAULT_APP_KEYBINDINGS);
+    await app.update(() => custom);
+    expect(storedDocument(values)).toEqual(custom);
   });
 });

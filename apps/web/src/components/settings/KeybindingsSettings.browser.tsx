@@ -206,6 +206,46 @@ describe("local app keybindings", () => {
       .element(page.getByRole("button", { name: "Restore defaults", exact: true }))
       .toBeEnabled();
   });
+  it("keeps working with shortcuts saved by a newer version and saves them back", async () => {
+    await mount();
+    const futureRule = { key: "mod+shift+t", command: "view.futureCommand", extra: 1 };
+    localStorage.setItem(
+      APP_KEYBINDINGS_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        rules: [{ key: "mod+x", command: "terminal.toggle" }, futureRule],
+        disabledCommands: ["future.command", "chat.newLocal"],
+      }),
+    );
+    window.dispatchEvent(new StorageEvent("storage", { key: APP_KEYBINDINGS_STORAGE_KEY }));
+    const shortcutKey = (command: string) =>
+      getAppKeybindings().find((rule) => rule.command === command)?.shortcut.key;
+    await expect.poll(() => shortcutKey("terminal.toggle")).toBe("x");
+    expect(getAppKeybindings().some((rule) => rule.command === "chat.newLocal")).toBe(false);
+    expect(
+      page.getByText("Local keybindings need attention", { exact: true }).elements(),
+    ).toHaveLength(0);
+    await expect
+      .element(page.getByRole("button", { name: "Restore defaults", exact: true }))
+      .toBeEnabled();
+    await page.getByRole("button", { name: "Edit shortcut for diff.toggle", exact: true }).click();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "y",
+        code: "KeyY",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await expect.poll(() => shortcutKey("diff.toggle")).toBe("y");
+    const stored = JSON.parse(localStorage.getItem(APP_KEYBINDINGS_STORAGE_KEY)!);
+    expect(stored.version).toBe(2);
+    expect(stored.rules).toContainEqual(futureRule);
+    expect(stored.disabledCommands).toEqual(
+      expect.arrayContaining(["future.command", "chat.newLocal"]),
+    );
+  });
   it("supports deliberately disabling a shortcut and preserves it through reset/reimport", async () => {
     await replaceAppKeybindings([]);
     await mount();
