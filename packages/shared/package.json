@@ -436,6 +436,14 @@
       "types": "./src/threadMentions.ts",
       "import": "./src/threadMentions.ts"
     },
+    "./quoteCitations": {
+      "types": "./src/quoteCitations.ts",
+      "import": "./src/quoteCitations.ts"
+    },
+    "./textQuoteSelector": {
+      "types": "./src/textQuoteSelector.ts",
+      "import": "./src/textQuoteSelector.ts"
+    },
     "./automationSchedule": {
       "types": "./src/automationSchedule.ts",
       "import": "./src/automationSchedule.ts"

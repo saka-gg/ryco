@@ -1,20 +1,37 @@
 import type { MessageId, ScopedThreadRef } from "@ryco/contracts";
+import {
+  assertQuotableText,
+  QUOTE_CITATION_MAX_TEXT_LENGTH,
+  serializeQuoteCitation,
+  type QuoteCitation,
+} from "@ryco/shared/quoteCitations";
 
-/** A captured excerpt, not a live reference to a changing transcript or DOM range. */
+/**
+ * Adds a quote to a prompt as its draft token, after the text already there,
+ * with a space after it so typing goes on behind the chip. The send expands
+ * the token into the quote and its comment (`composeOutgoingPrompt`).
+ */
+export function appendQuoteCitation(prompt: string, citation: QuoteCitation): string {
+  const separator = prompt.length === 0 || /\s$/u.test(prompt) ? "" : " ";
+  return `${prompt}${separator}${serializeQuoteCitation(citation)} `;
+}
+
+/**
+ * A captured excerpt as plain text, for inputs that cannot show a quote chip
+ * (Side's question). Older messages carry quotes in this form too.
+ */
 export interface SelectionQuote {
   readonly source: ScopedThreadRef;
   readonly messageId: MessageId;
   readonly text: string;
 }
 
-export const MAX_SELECTION_QUOTE_LENGTH = 4_000;
+/** The one selection limit: a chip and Side's quoted lines take the same selections. */
+export const MAX_SELECTION_QUOTE_LENGTH = QUOTE_CITATION_MAX_TEXT_LENGTH;
 
+/** Throws a RangeError, worded for the user, when the quote is out of bounds. */
 export function validateSelectionQuote(quote: SelectionQuote): void {
-  if (!quote.text.trim() || quote.text.length > MAX_SELECTION_QUOTE_LENGTH) {
-    throw new Error(
-      `Select between 1 and ${MAX_SELECTION_QUOTE_LENGTH.toLocaleString("en-US")} characters.`,
-    );
-  }
+  assertQuotableText(quote.text);
 }
 
 const QUOTE_HEADER_PREFIX = "Quoted assistant text (";

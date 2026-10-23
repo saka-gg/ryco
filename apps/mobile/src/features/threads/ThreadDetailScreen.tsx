@@ -83,6 +83,7 @@ import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas
 import { DEFAULT_AGENT_TOKEN_MODE, type ModelSelection } from "@ryco/contracts/orchestration";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+  composeOutgoingPrompt,
   deriveChatFileUploadSendBlock,
 } from "@ryco/client-runtime/state/composer";
 
@@ -1059,7 +1060,8 @@ export function ThreadDetailScreen(props: {
       steerAttemptsRef.current = new Map(steerAttemptsRef.current).set(message.messageId, attempt);
       setSteerAttempts((current) => new Map(current).set(message.messageId, attempt));
       // Outside the try: React Compiler cannot lower a `||` inside a try/catch.
-      const steerText = message.text.trim() || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
+      const steerText =
+        composeOutgoingPrompt({ prompt: message.text }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
       try {
         const attachments = await buildQueuedThreadMessageAttachments(message);
         const requestedAt = new Date().toISOString();

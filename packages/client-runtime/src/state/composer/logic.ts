@@ -1,4 +1,6 @@
-import { splitPromptIntoComposerSegments } from "./editorMentions.ts";
+import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
+
+import { splitPromptIntoComposerSegments, type ComposerPromptSegment } from "./editorMentions.ts";
 import { serializeComposerMentionPath } from "./mentionSyntax.ts";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./terminalContext.ts";
 
@@ -18,13 +20,7 @@ export interface ComposerTrigger {
   directAttach?: boolean;
 }
 
-const isInlineTokenSegment = (
-  segment:
-    | { type: "text"; text: string }
-    | { type: "mention" }
-    | { type: "skill" }
-    | { type: "terminal-context" },
-): boolean => segment.type !== "text";
+const isInlineTokenSegment = (segment: ComposerPromptSegment): boolean => segment.type !== "text";
 
 function clampCursor(text: string, cursor: number): number {
   if (!Number.isFinite(cursor)) return text.length;
@@ -141,6 +137,15 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
       expandedCursor += 1;
       continue;
     }
+    if (segment.type === "quote") {
+      const expandedLength = segment.source.length;
+      if (remaining <= 1) {
+        return expandedCursor + (remaining === 0 ? 0 : expandedLength);
+      }
+      remaining -= 1;
+      expandedCursor += expandedLength;
+      continue;
+    }
 
     const segmentLength = segment.text.length;
     if (remaining <= segmentLength) {
@@ -153,13 +158,7 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
   return expandedCursor;
 }
 
-function collapsedSegmentLength(
-  segment:
-    | { type: "text"; text: string }
-    | { type: "mention" }
-    | { type: "skill" }
-    | { type: "terminal-context" },
-): number {
+function collapsedSegmentLength(segment: ComposerPromptSegment): number {
   if (segment.type === "text") {
     return segment.text.length;
   }
@@ -167,12 +166,7 @@ function collapsedSegmentLength(
 }
 
 function clampCollapsedComposerCursorForSegments(
-  segments: ReadonlyArray<
-    | { type: "text"; text: string }
-    | { type: "mention" }
-    | { type: "skill" }
-    | { type: "terminal-context" }
-  >,
+  segments: ReadonlyArray<ComposerPromptSegment>,
   cursorInput: number,
 ): number {
   const collapsedLength = segments.reduce(
@@ -232,6 +226,18 @@ export function collapseExpandedComposerCursor(text: string, cursorInput: number
         return collapsedCursor + remaining;
       }
       remaining -= 1;
+      collapsedCursor += 1;
+      continue;
+    }
+    if (segment.type === "quote") {
+      const expandedLength = segment.source.length;
+      if (remaining === 0) {
+        return collapsedCursor;
+      }
+      if (remaining <= expandedLength) {
+        return collapsedCursor + 1;
+      }
+      remaining -= expandedLength;
       collapsedCursor += 1;
       continue;
     }
@@ -343,10 +349,15 @@ export type ThreadGoalSlashCommand =
   | { readonly action: "show" | "pause" | "resume" | "clear" }
   | { readonly action: "set"; readonly objective: string };
 
+/**
+ * What a `/goal` prompt asks for, or null when it is not one. A goal's
+ * objective is stored and shown as plain text: quote chips in it become
+ * `[Quote N]` and quoted lines, and its length is counted in that form.
+ */
 export function parseThreadGoalSlashCommand(text: string): ThreadGoalSlashCommand | null {
   const match = /^\/goal(?:\s+([\s\S]*))?$/i.exec(text.trim());
   if (!match) return null;
-  const objective = match[1]?.trim() ?? "";
+  const objective = quoteCitationsToPlainText(match[1]?.trim() ?? "");
   if (!objective) return { action: "show" };
   switch (objective.toLowerCase()) {
     case "pause":

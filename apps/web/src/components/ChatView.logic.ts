@@ -18,6 +18,7 @@ import {
   isPendingChatDraft,
 } from "../composerDraftStore";
 import { NEW_CHAT_DRAFT_TITLE } from "./sidebar/sidebarChats.logic";
+import { quoteCitationsToInlineText } from "@ryco/shared/quoteCitations";
 import { threadHasConversation } from "@ryco/shared/threadFork";
 import { DateTime, Schema } from "effect";
 import { selectThreadByRef, useStore } from "../store";
@@ -236,7 +237,8 @@ export function buildChatSendTitleSeed(input: {
   firstTerminalContextLabel: string | null;
   firstFileReferenceTitle?: string | null;
 }): string {
-  const normalizedPrompt = input.trimmedPrompt.trim();
+  // A quote chip names the thread by its quoted preview, not by its token.
+  const normalizedPrompt = quoteCitationsToInlineText(input.trimmedPrompt).trim();
   if (normalizedPrompt.length > 0) {
     return normalizedPrompt;
   }

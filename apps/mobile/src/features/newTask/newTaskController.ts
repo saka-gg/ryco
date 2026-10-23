@@ -4,6 +4,7 @@ import {
   type WorkspaceExecutionTargetResolution,
   type WorkspacePhysicalProjectVariant,
 } from "@ryco/client-runtime/state/workspace";
+import { composeOutgoingPrompt } from "@ryco/client-runtime/state/composer";
 import type { Project, SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
 import type {
   CommandId,
@@ -417,7 +418,8 @@ export async function runNewTaskAttempt(
         message: {
           messageId: next.ids.messageId,
           role: "user",
-          text: next.prompt.trim(),
+          // The shared composition: a pasted quote token goes out expanded.
+          text: composeOutgoingPrompt({ prompt: next.prompt }),
           attachments: next.attachments,
         },
         modelSelection: next.modelSelection,

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderInstanceId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, MessageId } from "@ryco/contracts/base-schemas";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { createSideChatStore, parseSideQuestionCommand, type SideChatApi } from "./index.ts";
 
 const selection = {
@@ -42,6 +44,19 @@ describe("ephemeral side conversations", () => {
     expect(parseSideQuestionCommand("/btw")).toBe("");
     expect(parseSideQuestionCommand("/btwhatever x")).toBeNull();
     expect(parseSideQuestionCommand("explain /btw")).toBeNull();
+  });
+  it("asks a quote chip's quote and comment as text, which Side's question field shows", () => {
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "你好，世界", prefix: "", suffix: "", start: 0, end: 5 },
+        comment: "Which world?",
+      }),
+    );
+    expect(parseSideQuestionCommand(`/btw what does this mean? ${token} `)).toBe(
+      "what does this mean? [Quote 1]\n\n[Quote 1]\n> 你好，世界\nComment:\n  Which world?",
+    );
   });
   it("isolates concurrent threads and retains only completed successful side history", async () => {
     const { store, next, api, ask, chat } = setup();

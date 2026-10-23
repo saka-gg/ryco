@@ -1,13 +1,14 @@
 import { ThreadId, type ScopedProjectRef } from "@ryco/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { appendSelectionQuote, type SelectionQuote } from "@ryco/client-runtime/state/composer";
+import { appendQuoteCitation } from "@ryco/client-runtime/state/composer";
+import type { QuoteCitation } from "@ryco/shared/quoteCitations";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { useMessageQueueStore } from "../messageQueueStore";
 import type { NewThreadOptions } from "../hooks/useHandleNewThread";
 import type { SendTurnComposerSnapshot, SendTurnSettings } from "../hooks/executeChatSendTurn";
 
 export interface SelectionChatRequest {
-  quote: SelectionQuote;
+  citation: QuoteCitation;
   prompt: string;
   envMode: "local" | "worktree";
   intent: "send" | "compose";
@@ -39,7 +40,8 @@ export async function startSelectionChat(
   if (input.envMode === "worktree" && (!input.canUseWorktree || !input.branch)) {
     throw new Error("Select a checked-out branch before creating a worktree.");
   }
-  const prompt = appendSelectionQuote(input.prompt, input.quote);
+  // The question, then the quote's chip; the send expands it like any quote.
+  const prompt = appendQuoteCitation(input.prompt, input.citation);
   // Saves the source before leaving. Destination dispatch uses its own autosave barrier.
   if (!(await input.prepare()))
     throw new Error("Save the pending file changes before opening the new chat.");

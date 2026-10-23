@@ -16,6 +16,7 @@ import {
   use,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -121,6 +122,11 @@ import { useLongPress } from "~/hooks/useLongPress";
 import { usePresentationTier } from "~/hooks/usePresentationTier";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
+import { QuoteCitationChip } from "./QuoteCitationChip";
+import { QuoteCitationContext } from "./quoteCitationContext";
+import { useQuoteSourceHighlight } from "./useQuoteSourceHighlight";
+import { usePendingQuoteHighlight } from "./usePendingQuoteHighlight";
+import type { NumberedQuoteCitation } from "@ryco/shared/quoteCitations";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   deriveDisplayedUserMessageContext,
@@ -128,6 +134,7 @@ import {
   type ParsedTerminalContextEntry,
 } from "~/lib/terminalContext";
 import { FileReferenceChip } from "./FileReferenceChip";
+import { deriveDisplayedUserMessageForTier } from "~/lib/userMessageDisplay";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ryco/contracts/settings";
@@ -433,11 +440,17 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
-  const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
+  const minimapItems = useMemo(
+    () => deriveTimelineMinimapItems(rows, isPhoneTier ? "phone" : "desktop"),
+    [isPhoneTier, rows],
+  );
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
+  useQuoteSourceHighlight(routeThreadKey, timelineViewportElement);
+  // The frozen phone tier gets nothing new: no marks for a draft's quotes.
+  usePendingQuoteHighlight(routeThreadKey, isPhoneTier ? null : timelineViewportElement);
   // Sized like the timeline column, which the Chat width setting widens without a viewport resize.
   const timelineColumnProbeRef = useRef<HTMLDivElement | null>(null);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
@@ -1393,11 +1406,16 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         row.message.role === "user" &&
         (() => {
           const userImages = row.message.attachments ?? [];
-          const displayedUserMessage = deriveDisplayedUserMessageContext(row.message.text);
+          const displayedUserMessage = deriveDisplayedUserMessageForTier(
+            row.message.text,
+            isPhoneTier ? "phone" : "desktop",
+          );
           const terminalContexts = displayedUserMessage.contexts;
           const fileReferences = displayedUserMessage.fileReferences;
           const hasUserMessageBody =
-            displayedUserMessage.visibleText.trim().length > 0 || terminalContexts.length > 0;
+            displayedUserMessage.visibleText.trim().length > 0 ||
+            terminalContexts.length > 0 ||
+            displayedUserMessage.quotes.length > 0;
           const canRevertAgentWork = typeof row.revertTurnCount === "number";
           return (
             <div className="flex justify-end">
@@ -1429,14 +1447,30 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     </div>
                   ) : null}
                   {hasUserMessageBody && (
-                    <UserMessageBody
-                      cwd={ctx.markdownCwd}
-                      environmentId={ctx.activeThreadEnvironmentId}
-                      text={displayedUserMessage.visibleText}
-                      terminalContexts={terminalContexts}
-                      skills={ctx.skills}
-                      searchHighlight={messageSearchHighlight}
-                    />
+                    <QuoteCitationContext
+                      value={
+                        isPhoneTier
+                          ? null
+                          : {
+                              quotes: displayedUserMessage.quotes,
+                              currentThreadKey: ctx.routeThreadKey,
+                            }
+                      }
+                    >
+                      <UserMessageQuotes
+                        text={displayedUserMessage.visibleText}
+                        quotes={displayedUserMessage.quotes}
+                      >
+                        <UserMessageBody
+                          cwd={ctx.markdownCwd}
+                          environmentId={ctx.activeThreadEnvironmentId}
+                          text={displayedUserMessage.visibleText}
+                          terminalContexts={terminalContexts}
+                          skills={ctx.skills}
+                          searchHighlight={messageSearchHighlight}
+                        />
+                      </UserMessageQuotes>
+                    </QuoteCitationContext>
                   )}
                 </div>
                 <div className="mt-1 flex items-center justify-end gap-2">
@@ -2449,6 +2483,63 @@ const UserMessageTerminalContextInlineLabel = memo(
     return <TerminalContextInlineChip label={props.context.header} tooltipText={tooltipText} />;
   },
 );
+
+type UserMessageQuotesProps = {
+  text: string;
+  quotes: ReadonlyArray<NumberedQuoteCitation>;
+  children: ReactNode;
+};
+
+function UserMessageQuotes(props: UserMessageQuotesProps) {
+  return props.quotes.length === 0 ? props.children : <UserMessageWithQuotes {...props} />;
+}
+
+function sameNumbers(left: ReadonlyArray<number>, right: ReadonlyArray<number>): boolean {
+  return left.length === right.length && left.every((number, index) => number === right[index]);
+}
+
+/**
+ * Each quote whose `[Quote N]` marker did not render as a chip (missing from
+ * the text, or read as Markdown syntax such as a link) leads the message
+ * instead, so no quote goes unseen.
+ */
+function UserMessageWithQuotes(props: UserMessageQuotesProps) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // A first guess from the text; the chips that rendered settle it before paint.
+  const [unplacedNumbers, setUnplacedNumbers] = useState<ReadonlyArray<number>>(() =>
+    props.quotes
+      .filter((quote) => !props.text.includes(`[Quote ${quote.number}]`))
+      .map((quote) => quote.number),
+  );
+  // The quotes are derived from the message text, so they change with it.
+  const { quotes } = props;
+  useLayoutEffect(() => {
+    const placed = new Set<string>();
+    for (const chip of bodyRef.current?.querySelectorAll<HTMLElement>("[data-quote-number]") ??
+      []) {
+      if (chip.dataset.quoteNumber) placed.add(chip.dataset.quoteNumber);
+    }
+    const next = quotes
+      .map((quote) => quote.number)
+      .filter((number) => !placed.has(String(number)));
+    setUnplacedNumbers((previous) => (sameNumbers(previous, next) ? previous : next));
+  }, [quotes]);
+  const unplaced = props.quotes.filter((quote) => unplacedNumbers.includes(quote.number));
+  return (
+    <>
+      {unplaced.length > 0 ? (
+        <div className="mb-1 flex flex-wrap gap-1">
+          {unplaced.map((quote) => (
+            <QuoteCitationChip key={quote.number} citation={quote.citation} />
+          ))}
+        </div>
+      ) : null}
+      <div ref={bodyRef} className="contents">
+        {props.children}
+      </div>
+    </>
+  );
+}
 
 const UserMessageBody = memo(function UserMessageBody(props: {
   cwd: string | undefined;

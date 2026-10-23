@@ -90,8 +90,14 @@ import {
   type ChatAttachment,
   type ChatMessage,
 } from "@ryco/client-runtime/state/threads";
+import { appendTerminalContextsToPrompt } from "@ryco/client-runtime/state/composer";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
+import {
+  createQuoteCitation,
+  expandQuoteCitations,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
 import type { TurnHtmlRender } from "./threadActivityFold";
 
 const environmentId = EnvironmentId.make("env-1");
@@ -201,6 +207,54 @@ describe("ThreadMessage attachment rows", () => {
           `Sent ${sentLabel}`,
       ),
     ).toHaveLength(1);
+  });
+
+  it("shows a sent message's quotes as readable quoted lines and copies the text as sent", () => {
+    const citation = createQuoteCitation({
+      source: { environmentId, threadId },
+      messageId: MessageId.make("assistant-1"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      comment: "Explain this",
+    });
+    const text = expandQuoteCitations(`Why ${serializeQuoteCitation(citation)}?`);
+    const tree = renderMessage([], { text });
+
+    const body = collectElements(
+      tree,
+      (element) =>
+        element.type === "AppText" &&
+        (element.props as { selectable?: boolean }).selectable === true,
+    );
+    expect(body.map((element) => (element.props as { children?: unknown }).children)).toEqual([
+      "Why [Quote 1]?\n\n[Quote 1]\n> The passage.\nComment:\n  Explain this",
+    ]);
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy[0]?.props).toMatchObject({ text });
+  });
+
+  it("reads a sent message's quotes when terminal context follows them", () => {
+    const citation = createQuoteCitation({
+      source: { environmentId, threadId },
+      messageId: MessageId.make("assistant-1"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+    });
+    // The send order: quotes expand first, terminal context is appended after.
+    const text = appendTerminalContextsToPrompt(
+      expandQuoteCitations(`Explain ${serializeQuoteCitation(citation)}`),
+      [{ terminalId: "t-1", terminalLabel: "Terminal 1", lineStart: 1, lineEnd: 1, text: "ok" }],
+    );
+    const tree = renderMessage([], { text });
+
+    const [body] = collectElements(
+      tree,
+      (element) =>
+        element.type === "AppText" &&
+        (element.props as { selectable?: boolean }).selectable === true,
+    ).map((element) => String((element.props as { children?: unknown }).children));
+    // The terminal context shows as a chip of its own, not in the body.
+    expect(body).toBe("Explain [Quote 1]\n\n[Quote 1]\n> The passage.");
+    expect(body).not.toContain("assistant_quotes");
+    expect(body).not.toContain("ryco-quote:");
   });
 
   it("does not add user-message controls to assistant messages", () => {

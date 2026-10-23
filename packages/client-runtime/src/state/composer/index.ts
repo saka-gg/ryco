@@ -22,6 +22,7 @@ export * from "./promptContext.ts";
 export * from "./promptStash.ts";
 export * from "./sendEngine.ts";
 export * from "./terminalContext.ts";
+export * from "./userMessageQuotes.ts";
 export * from "./threadMentions.ts";
 export * from "./selectionQuote.ts";
 export * from "./modelFavorites.ts";

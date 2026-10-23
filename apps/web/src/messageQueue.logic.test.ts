@@ -1,3 +1,5 @@
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -70,6 +72,19 @@ describe("summarizeQueuedMessage", () => {
     expect(summarizeQueuedMessage(makeMessage("a", { trimmedPrompt: "Fix the bug" }))).toBe(
       "Fix the bug",
     );
+  });
+
+  it("shows a quote chip as its quoted preview", () => {
+    const token = serializeQuoteCitation(
+      createQuoteCitation({
+        source: { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") },
+        messageId: MessageId.make("message"),
+        selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      }),
+    );
+    expect(
+      summarizeQueuedMessage(makeMessage("a", { trimmedPrompt: `Explain ${token} please` })),
+    ).toBe("Explain “The passage.” please");
   });
 
   it("truncates long prompts", () => {

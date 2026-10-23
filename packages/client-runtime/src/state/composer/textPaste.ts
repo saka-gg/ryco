@@ -1,4 +1,5 @@
 import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@ryco/contracts/orchestration";
+import { collectQuoteCitationTokens, expandQuoteCitations } from "@ryco/shared/quoteCitations";
 
 /**
  * A text paste this large becomes a `text/plain` attachment instead of prompt text. Checked as
@@ -54,8 +55,17 @@ export function isPasteAsTextShortcut(event: PasteShortcutKeyEvent, macPlatform:
 }
 
 /**
+ * How long `text` is as sent: a quote chip counts as the quote and comment it expands to
+ * (`expandQuoteCitations`), not as its token, which percent-encoding makes up to nine times
+ * longer. Paste checks measure the prompt, its selection and the paste this way.
+ */
+export function sentPromptTextLength(text: string): number {
+  return expandQuoteCitations(text).length;
+}
+
+/**
  * Whether the prompt would outgrow what one message may carry once the paste replaces the
- * selection. Lengths are the prompt's own text, so a chip counts as the token it sends.
+ * selection. Lengths are as sent (`sentPromptTextLength`), so a quote chip counts as its quote.
  */
 export function wouldTextPasteExceedInputLimit(input: {
   readonly promptLength: number;
@@ -77,10 +87,25 @@ function reachesAttachmentThreshold(text: string): boolean {
   return new TextEncoder().encode(text).byteLength >= PASTED_TEXT_ATTACHMENT_THRESHOLD;
 }
 
+/** `text` without its quote tokens, or null when nothing but whitespace is left. */
+function textAroundQuoteTokens(text: string): string | null {
+  const tokens = collectQuoteCitationTokens(text);
+  if (tokens.length === 0) return text;
+  let rest = "";
+  let cursor = 0;
+  for (const token of tokens) {
+    rest += text.slice(cursor, token.start);
+    cursor = token.end;
+  }
+  rest += text.slice(cursor);
+  return rest.trim().length > 0 ? rest : null;
+}
+
 /**
  * Where a text paste goes. It stays inline when the composer cannot take an attachment, or when
  * the user pasted with the paste-as-text shortcut; otherwise it folds into an attachment once it
- * reaches the threshold or would push the prompt past the input limit.
+ * reaches the threshold or would push the prompt past the input limit. Quote chips stay chips:
+ * the threshold measures the text around them, and a paste of chips alone never folds.
  */
 export function resolvePastedTextDisposition(input: {
   readonly text: string;
@@ -89,7 +114,9 @@ export function resolvePastedTextDisposition(input: {
   readonly wouldExceedInputLimit: boolean;
 }): PastedTextDisposition {
   if (input.pasteAsText || !input.canAttach || input.text.length === 0) return "inline";
-  return input.wouldExceedInputLimit || reachesAttachmentThreshold(input.text)
+  const foldable = textAroundQuoteTokens(input.text);
+  if (foldable === null) return "inline";
+  return input.wouldExceedInputLimit || reachesAttachmentThreshold(foldable)
     ? "attachment"
     : "inline";
 }

@@ -1,4 +1,5 @@
 import { describeQueueHold, type QueueHold } from "@ryco/client-runtime/state/message-queue";
+import { quoteCitationsToInlineText } from "@ryco/shared/quoteCitations";
 import {
   hasRetiredProjectMemory,
   REMOVED_PROJECT_MEMORY_MESSAGE,
@@ -11,7 +12,8 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import type { QueuedThreadMessage } from "../../state/threadOutboxModel";
 
 function summary(message: QueuedThreadMessage): string {
-  const text = message.text.trim();
+  // A quote reads as its quoted preview, not as its token.
+  const text = quoteCitationsToInlineText(message.text).trim();
   if (text.length > 0) return text.length > 90 ? `${text.slice(0, 89)}…` : text;
   if (message.attachments.length === 1) return "1 image";
   if (message.attachments.length > 1) return `${message.attachments.length} images`;

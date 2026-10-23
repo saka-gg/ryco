@@ -57,6 +57,8 @@ export interface ComposerPromptShellProps {
   editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
   /** Whose prompt the editor holds; its undo history never crosses to another. */
   historyScope: string;
+  /** The thread on screen, where a quote chip shows its passage; null for a draft. */
+  threadKey: string | null;
   /** Thread mentions in the prompt are named from this environment's threads. */
   environmentId: EnvironmentId;
 
@@ -165,6 +167,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
   const {
     editorRef,
     historyScope,
+    threadKey,
     environmentId,
     isComposerCollapsedMobile,
     hasComposerHeader,
@@ -352,6 +355,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
           <ComposerPromptEditor
             ref={editorRef}
             historyScope={historyScope}
+            threadKey={threadKey}
             environmentId={environmentId}
             collapsed={isComposerCollapsedMobile}
             value={

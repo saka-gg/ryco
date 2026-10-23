@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { useTimelineRevealStore } from "./timelineRevealStore";
 
 describe("timeline reveal requests", () => {
-  afterEach(() => useTimelineRevealStore.setState({ requestsByThreadKey: {} }));
+  afterEach(() =>
+    useTimelineRevealStore.setState({ requestsByThreadKey: {}, settledByThreadKey: {} }),
+  );
 
   it("gives every request its own id, so the same message can be shown again", () => {
     const { reveal } = useTimelineRevealStore.getState();
@@ -24,15 +26,35 @@ describe("timeline reveal requests", () => {
     const stale = useTimelineRevealStore.getState().requestsByThreadKey["env:thread-1"]!;
     reveal("env:thread-1", MessageId.make("m2"));
 
-    settle("env:thread-1", stale.requestId);
+    settle("env:thread-1", stale.requestId, "missing");
     expect(useTimelineRevealStore.getState().requestsByThreadKey["env:thread-1"]?.messageId).toBe(
       "m2",
     );
+    expect(useTimelineRevealStore.getState().settledByThreadKey["env:thread-1"]).toBeUndefined();
 
     const current = useTimelineRevealStore.getState().requestsByThreadKey["env:thread-1"]!;
-    settle("env:thread-1", current.requestId);
+    settle("env:thread-1", current.requestId, "shown");
     expect(Object.keys(useTimelineRevealStore.getState().requestsByThreadKey)).toEqual([
       "env:thread-2",
     ]);
+  });
+
+  it("keeps how each thread's last request ended, for whoever waits on it", () => {
+    const { reveal, settle } = useTimelineRevealStore.getState();
+    reveal("env:thread-1", MessageId.make("m1"));
+    const failed = useTimelineRevealStore.getState().requestsByThreadKey["env:thread-1"]!;
+    settle("env:thread-1", failed.requestId, "failed");
+    expect(useTimelineRevealStore.getState().settledByThreadKey["env:thread-1"]).toEqual({
+      requestId: failed.requestId,
+      settlement: "failed",
+    });
+
+    reveal("env:thread-1", MessageId.make("m1"));
+    const missing = useTimelineRevealStore.getState().requestsByThreadKey["env:thread-1"]!;
+    settle("env:thread-1", missing.requestId, "missing");
+    expect(useTimelineRevealStore.getState().settledByThreadKey["env:thread-1"]).toEqual({
+      requestId: missing.requestId,
+      settlement: "missing",
+    });
   });
 });

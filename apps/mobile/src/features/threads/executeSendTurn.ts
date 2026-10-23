@@ -18,6 +18,7 @@ import {
   buildSendTurnDispatchAttachment,
   buildSendTurnUploadTokenDispatchAttachment,
   commitSendTurnDispatch,
+  composeOutgoingPrompt,
   isFileUploadTokenUsable,
   resolveThreadCreateModelSelection,
 } from "@ryco/client-runtime/state/composer";
@@ -93,7 +94,9 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
   const imagesSnapshot = [...input.composer.images];
   const messageId = newMessageId();
   const createdAt = new Date().toISOString();
-  const outgoingMessageText = promptSnapshot.trim() || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
+  // The shared composition: quote tokens go out expanded, as on web.
+  const outgoingMessageText =
+    composeOutgoingPrompt({ prompt: promptSnapshot }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
 
   try {
     // Attachment-neutral send path: encode each RN uri/bytes to the outgoing

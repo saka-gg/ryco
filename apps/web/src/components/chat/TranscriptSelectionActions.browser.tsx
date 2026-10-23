@@ -1,5 +1,6 @@
 import "../../index.css";
-import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { createQuoteCitation } from "@ryco/shared/quoteCitations";
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 import { useRef } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -13,6 +14,12 @@ import { FINE_POINTER_MEDIA_QUERY } from "./useSendShortcut";
 
 const source = { environmentId: EnvironmentId.make("local"), threadId: ThreadId.make("source") };
 const text = "Keep the draft until the turn is accepted.";
+// The whole message selected: no context around it, offsets from its start.
+const citation = createQuoteCitation({
+  source,
+  messageId: MessageId.make("assistant"),
+  selector: { exact: text, prefix: "", suffix: "", start: 0, end: text.length },
+});
 const current = vi.fn();
 const side = vi.fn();
 const create = vi.fn(async () => {});
@@ -73,10 +80,10 @@ describe("TranscriptSelectionActions", () => {
       .element(page.getByRole("button", { name: "Add to chat", exact: true }))
       .toHaveFocus();
     await userEvent.keyboard("{Enter}");
-    expect(current).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+    expect(current).toHaveBeenCalledWith(citation);
     await select();
     await userEvent.keyboard("{Tab}{Enter}");
-    expect(side).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+    expect(side).toHaveBeenCalledWith(citation);
     const range = document.createRange();
     range.setStart(
       document.querySelector('[data-selection-message-id="assistant"]')!.firstChild!,
@@ -90,6 +97,22 @@ describe("TranscriptSelectionActions", () => {
     window.getSelection()!.removeAllRanges();
     window.getSelection()!.addRange(range);
     expect(readTranscriptSelection(document.body, source)).toBeNull();
+  });
+  it("quotes a partial selection with the context around it, for finding it again", async () => {
+    mounted = await render(<Harness />);
+    const node = document.querySelector('[data-selection-message-id="assistant"]')!.firstChild!;
+    const range = document.createRange();
+    range.setStart(node, 5);
+    range.setEnd(node, 15);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    expect(readTranscriptSelection(document.body, source)?.citation.selector).toEqual({
+      exact: "the draft",
+      prefix: "Keep ",
+      suffix: " until the turn is accepted.",
+      start: 5,
+      end: 14,
+    });
   });
   it("keeps keyboard actions open when a scroll arrives before toolbar focus", async () => {
     mounted = await render(<Harness />);
@@ -105,13 +128,13 @@ describe("TranscriptSelectionActions", () => {
         .element(page.getByRole("button", { name: "Add to chat", exact: true }))
         .toHaveFocus();
       await userEvent.keyboard("{Enter}");
-      expect(current).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+      expect(current).toHaveBeenCalledWith(citation);
       await select({ waitForPointerToolbar: true });
       await expect
         .element(page.getByRole("button", { name: "Add to chat", exact: true }))
         .toHaveFocus();
       await userEvent.keyboard("{Tab}{Enter}");
-      expect(side).toHaveBeenCalledWith({ source, messageId: "assistant", text });
+      expect(side).toHaveBeenCalledWith(citation);
       expect(create).not.toHaveBeenCalled();
       await select({ waitForPointerToolbar: true });
       await userEvent.keyboard("{Escape}");
@@ -193,7 +216,7 @@ describe("TranscriptSelectionActions", () => {
       expect.objectContaining({
         prompt: "",
         intent: "compose",
-        quote: { source, messageId: "assistant", text },
+        citation,
       }),
     );
     finish();

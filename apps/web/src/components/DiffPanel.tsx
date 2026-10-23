@@ -40,6 +40,7 @@ import {
   useState,
 } from "react";
 import { openInPreferredEditor } from "../editorPreferences";
+import { cssHighlightRegistry } from "~/lib/cssHighlights";
 import { useGitStatus } from "~/lib/gitStatusState";
 import { useCheckpointDiff } from "~/rpc/useProvider";
 import { cn } from "~/lib/utils";
@@ -181,14 +182,6 @@ const DIFF_SEARCH_HIGHLIGHT_NAME = "ryco-diff-search-match";
 const DIFF_SEARCH_DEBOUNCE_MS = 150;
 const DIFF_SEARCH_HIGHLIGHT_REFRESH_DELAY_MS = 80;
 const DIFF_SEARCH_HIGHLIGHT_VIEWPORT_MARGIN_PX = 1600;
-
-function isCSSHighlightSupported(): boolean {
-  return (
-    typeof CSS !== "undefined" &&
-    typeof (CSS as unknown as { highlights?: unknown }).highlights !== "undefined" &&
-    typeof globalThis.Highlight !== "undefined"
-  );
-}
 
 function isNearViewport(
   element: Element,
@@ -844,8 +837,8 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   );
 
   useEffect(() => {
-    if (!isCSSHighlightSupported()) return;
-    const cssHighlights = (CSS as unknown as { highlights: Map<string, Highlight> }).highlights;
+    const cssHighlights = cssHighlightRegistry();
+    if (!cssHighlights) return;
     const root = patchViewportRef.current;
     if (!root || !normalizedDiffSearchQuery || diffSearchMatches.length === 0) {
       cssHighlights.delete(DIFF_SEARCH_HIGHLIGHT_NAME);

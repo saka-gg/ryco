@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { applyClaudePromptEffortPrefix } from "@ryco/shared/model";
+import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 
 import {
   buildPromptHistoryEntries,
@@ -87,6 +88,25 @@ describe("recallablePrompt", () => {
     );
     expect(recallablePrompt(quoted.trim())).toBe("Explain the selection");
     expect(recallablePrompt(appendSelectionQuote("", quote).trim())).toBe("");
+  });
+
+  it("brings quote chips back as the draft tokens the send expanded", () => {
+    const citation = createQuoteCitation({
+      source: quote.source,
+      messageId: MessageId.make("message"),
+      selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+      comment: "Why?",
+    });
+    const draft = `Explain ${serializeQuoteCitation(citation)} please`;
+    const sent = composeOutgoingPrompt({
+      prompt: draft,
+      terminalContexts: [terminalContext("Terminal 1", 2, 3)],
+    });
+    expect(sent).toContain("<assistant_quotes>");
+    expect(recallablePrompt(sent)).toBe(draft);
+    expect(recallablePrompt(applyClaudePromptEffortPrefix(sent, "ultrathink"))).toBe(
+      `Ultrathink:\n${draft}`,
+    );
   });
 
   it("keeps text that only looks like a quote header", () => {

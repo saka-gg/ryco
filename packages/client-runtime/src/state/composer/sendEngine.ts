@@ -28,8 +28,10 @@ import {
   type ThreadId,
 } from "@ryco/contracts/base-schemas";
 import { DEFAULT_MODEL } from "@ryco/contracts/model";
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@ryco/contracts/orchestration";
 import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { createModelSelection } from "@ryco/shared/model";
+import { expandQuoteCitations } from "@ryco/shared/quoteCitations";
 import type { ComposerAttachment } from "../../platform/index.ts";
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
 import { buildFileReferenceBlock, type FileReference } from "./fileReference.ts";
@@ -203,22 +205,42 @@ export interface OutgoingPromptInput {
 }
 
 /**
- * The text a prompt is sent as: the user's text, then the `<file_context>`
+ * The text a prompt is sent as: the user's text with its quote tokens
+ * expanded into the `<assistant_quotes>` block, then the `<file_context>`
  * block, then the `<terminal_context>` block, which stays last. It travels in
  * the ordinary text payload so every provider, the queue and send retries see
  * the same context; `extractTrailingPromptContexts` reads it back. Inline
  * terminal placeholders are resolved in the user's own text only: a file
- * excerpt keeps a U+FFFC it contains.
+ * excerpt or a quote keeps a U+FFFC it contains. Every send composes here,
+ * once: web, desktop and mobile alike.
  */
 export function composeOutgoingPrompt(input: OutgoingPromptInput): string {
   const terminalContexts = input.terminalContexts ?? [];
   return [
-    materializeInlineTerminalContextPrompt(input.prompt, terminalContexts).trim(),
+    expandQuoteCitations(
+      materializeInlineTerminalContextPrompt(input.prompt, terminalContexts).trim(),
+    ),
     buildFileReferenceBlock(input.fileReferences ?? []),
     buildTerminalContextBlock(terminalContexts),
   ]
     .filter((part) => part.length > 0)
     .join("\n\n");
+}
+
+/**
+ * How many characters the prompt runs over what one turn may carry, as it is
+ * dispatched: composed, then formatted for the provider (an effort prefix);
+ * 0 within the limit. A quote chip counts as the quote and comment it sends.
+ */
+export function outgoingPromptOverflow(
+  input: OutgoingPromptInput & {
+    /** The provider's formatting of the composed text, as the send applies it. */
+    readonly format?: ((text: string) => string) | undefined;
+  },
+  limit: number = PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+): number {
+  const composed = composeOutgoingPrompt(input);
+  return Math.max(0, (input.format ? input.format(composed) : composed).length - limit);
 }
 
 /**

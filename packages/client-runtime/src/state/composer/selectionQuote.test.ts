@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { EnvironmentId, MessageId, ProjectId, ThreadId } from "@ryco/contracts";
 import {
+  collectQuoteCitationTokens,
+  createQuoteCitation,
+  QUOTE_CITATION_MAX_TEXT_LENGTH,
+  serializeQuoteCitation,
+} from "@ryco/shared/quoteCitations";
+import {
+  appendQuoteCitation,
   appendSelectionQuote,
   MAX_SELECTION_QUOTE_LENGTH,
   stripSelectionQuotes,
@@ -13,6 +20,26 @@ const quote = {
   messageId: MessageId.make("message"),
   text: '  code();\n\n> nested "quote"',
 };
+
+describe("quote citations in a prompt", () => {
+  const citation = createQuoteCitation({
+    source,
+    messageId: MessageId.make("message"),
+    selector: { exact: "The passage.", prefix: "", suffix: "", start: 0, end: 12 },
+  });
+  const token = serializeQuoteCitation(citation);
+
+  it("appends the draft token after the text, apart from it, with room to type on", () => {
+    expect(appendQuoteCitation("", citation)).toBe(`${token} `);
+    expect(appendQuoteCitation("Explain", citation)).toBe(`Explain ${token} `);
+    expect(appendQuoteCitation("Explain\n", citation)).toBe(`Explain\n${token} `);
+    const twice = appendQuoteCitation(appendQuoteCitation("Compare", citation), citation);
+    expect(collectQuoteCitationTokens(twice).map((match) => match.citation)).toStrictEqual([
+      citation,
+      citation,
+    ]);
+  });
+});
 
 describe("selection quotes", () => {
   it("preserves existing text, whitespace and quote boundaries, with scoped attribution", () => {
@@ -39,6 +66,21 @@ describe("selection quotes", () => {
     expect(() =>
       appendSelectionQuote("draft", { ...quote, text: "x".repeat(MAX_SELECTION_QUOTE_LENGTH) }),
     ).not.toThrow();
+  });
+  it("takes the same selections as a quote chip, so Add to Side never refuses one", () => {
+    expect(MAX_SELECTION_QUOTE_LENGTH).toBe(QUOTE_CITATION_MAX_TEXT_LENGTH);
+    const longest = "x".repeat(QUOTE_CITATION_MAX_TEXT_LENGTH);
+    expect(() =>
+      createQuoteCitation({
+        source,
+        messageId: MessageId.make("message"),
+        selector: { exact: longest, prefix: "", suffix: "", start: 0, end: longest.length },
+      }),
+    ).not.toThrow();
+    expect(() => appendSelectionQuote("", { ...quote, text: longest })).not.toThrow();
+    expect(() => appendSelectionQuote("", { ...quote, text: `${longest}x` })).toThrow(
+      "Select between 1 and 4,000 characters.",
+    );
   });
   it("keeps detached drafts and the original project draft through persistence and promotion", async () => {
     const data = new Map<string, string>();
