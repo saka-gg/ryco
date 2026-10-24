@@ -25,6 +25,15 @@ import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 import * as Statement from "effect/sql/Statement";
 
 import { BUSY_RETRY_BUDGET_MS, busyRetryDelayMs, isRetryableSqliteBusy } from "./sqliteBusy.ts";
+import {
+  WRITER_BACKSTOP_FRAMES,
+  checkpointWorkerUnavailableReason,
+  makeWalCheckpointer,
+  type SqliteCheckpointWorkerOptions,
+  type SqliteCheckpointWorkerStats,
+  type WalFrames,
+  type WalReaderReleased,
+} from "./SqliteCheckpointWorker.ts";
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
 
@@ -33,9 +42,11 @@ export const TypeId: TypeId = "~local/sqlite-node/SqliteClient";
 export type TypeId = "~local/sqlite-node/SqliteClient";
 
 /** The sqlite SQL client, which can also write its database out as one image. */
-export interface SqliteClient extends Client.SqlClient {
+export interface SqliteClient extends Client.SqlClient, WalReaderReleased {
   /** The main database, serialized the way `sqlite3_serialize` writes it. */
   readonly export: Effect.Effect<Uint8Array, SqlError>;
+  /** The checkpoint worker's counters, when this connection uses one. */
+  readonly walCheckpointStats: () => SqliteCheckpointWorkerStats | undefined;
 }
 
 /**
@@ -72,6 +83,11 @@ export interface SqliteClientConfig {
    * the file's contents. Requires {@link supportsDatabaseImages}.
    */
   readonly image?: Uint8Array | undefined;
+  /**
+   * Runs WAL checkpoints on a worker thread (SqliteCheckpointWorker.ts), where
+   * the runtime supports it; an object sets test hooks. Off by default.
+   */
+  readonly walCheckpointWorker?: boolean | SqliteCheckpointWorkerOptions | undefined;
 }
 
 export interface SqliteMemoryClientConfig extends Omit<
@@ -111,6 +127,79 @@ const wallClockSleep = (ms: number): Effect.Effect<void> =>
     return Effect.sync(() => clearTimeout(timer));
   });
 
+const readWalFrames = (statement: StatementSync): WalFrames | undefined => {
+  try {
+    const row = statement.get() as { readonly log?: unknown; readonly checkpointed?: unknown };
+    const { log, checkpointed } = row;
+    if (!Number.isSafeInteger(log) || !Number.isSafeInteger(checkpointed)) return undefined;
+    return { log: log as number, checkpointed: checkpointed as number };
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * The connection's checkpoint worker (SqliteCheckpointWorker.ts), if enabled
+ * and supported. Its finalizer must run before the one that closes `db`, so
+ * build it after that one: the worker stops before the writer closes, and the
+ * writer, the last connection, still checkpoints and removes the WAL.
+ */
+const makeConnectionCheckpointer = Effect.fnUntraced(function* (
+  db: DatabaseSync,
+  options: SqliteClientConfig,
+) {
+  const setting = options.walCheckpointWorker;
+  if (setting === undefined || setting === false) return undefined;
+  const workerOptions = setting === true ? {} : setting;
+  const sqliteVersion = String(
+    (db.prepare("SELECT sqlite_version() AS version").get() as { version: unknown }).version,
+  );
+  const unavailable = checkpointWorkerUnavailableReason({
+    filename: options.filename,
+    readonly: options.readonly ?? false,
+    image: options.image !== undefined,
+    hasIsTransaction: typeof db.isTransaction === "boolean",
+    sqliteVersion: workerOptions.sqliteVersion ?? sqliteVersion,
+    platform: process.platform,
+    electron: process.versions.electron !== undefined,
+    anyPlatform: workerOptions.anyPlatform ?? false,
+  });
+  if (unavailable !== undefined) {
+    // Expected on macOS and older runtimes: the connection checkpoints itself, as before.
+    yield* Effect.logDebug("SQLite checkpoint worker not used", { reason: unavailable });
+    return undefined;
+  }
+  const scope = yield* Effect.scope;
+  const runFork = Effect.runForkWith(yield* Effect.context<never>());
+  const noop = db.prepare("PRAGMA wal_checkpoint(NOOP)");
+  db.exec(`PRAGMA wal_autocheckpoint = ${WRITER_BACKSTOP_FRAMES};`);
+  const checkpointer = makeWalCheckpointer({
+    filename: options.filename,
+    probe: () => readWalFrames(noop),
+    isTransaction: () => db.isTransaction,
+    setAutocheckpoint: (frames) => db.exec(`PRAGMA wal_autocheckpoint = ${frames};`),
+    onStarted: (starts) => {
+      // Once per connection: shows that checkpoints really left the main thread.
+      if (starts === 1)
+        runFork(Effect.logInfo("SQLite checkpoint worker started", { sqliteVersion }));
+    },
+    onFallback: (reason) => {
+      runFork(
+        Effect.logWarning(
+          "SQLite checkpoint worker unavailable; checkpoints run on the main connection",
+          { reason },
+        ),
+      );
+    },
+    options: workerOptions,
+  });
+  yield* Scope.addFinalizer(
+    scope,
+    Effect.promise(() => checkpointer.close()),
+  );
+  return checkpointer;
+});
+
 const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
   openDatabase: () => DatabaseSync,
@@ -132,6 +221,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
       Effect.sync(() => db.close()),
     );
     if (options.image !== undefined) databaseImages(db).deserialize(options.image);
+    const checkpointer = yield* makeConnectionCheckpointer(db, options);
 
     const statementReaderCache = new WeakMap<StatementSync, boolean>();
     const hasRows = (statement: StatementSync): boolean => {
@@ -170,6 +260,8 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
      * asynchronously (see sqliteBusy.ts) so the event loop keeps running while
      * another process holds the write lock; a failed busy attempt changes no
      * state, so re-running the statement is safe, also inside a transaction.
+     * Every attempt, failed ones included (an `OR FAIL` statement may still
+     * have committed rows), lets the checkpointer look at the WAL.
      */
     const execute = <A>(attempt: () => A, message: string): Effect.Effect<A, SqlError> => {
       let startedAt: number | undefined;
@@ -187,6 +279,8 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
               reason: classifySqliteError(cause, { message, operation: "execute" }),
             }),
           );
+        } finally {
+          checkpointer?.afterStatement();
         }
       });
       return loop;
@@ -262,11 +356,11 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
           }),
         }),
     });
-    return { connection, serialize };
+    return { connection, serialize, checkpointer };
   });
 
   const semaphore = yield* Semaphore.make(1);
-  const { connection, serialize } = yield* makeConnection;
+  const { connection, serialize, checkpointer } = yield* makeConnection;
 
   const acquirer = semaphore.withPermits(1)(Effect.succeed(connection));
   const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
@@ -288,8 +382,12 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
     ],
     transformRows,
   });
-  // Under the connection's permit, so no statement or transaction is mid-flight.
-  return Object.assign(client, { export: semaphore.withPermits(1)(serialize) });
+  return Object.assign(client, {
+    // Under the connection's permit, so no statement or transaction is mid-flight.
+    export: semaphore.withPermits(1)(serialize),
+    walCheckpointStats: () => checkpointer?.stats(),
+    walReaderReleased: () => checkpointer?.readerReleased(),
+  });
 });
 
 const make = (
