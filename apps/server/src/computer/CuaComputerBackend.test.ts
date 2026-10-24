@@ -1950,11 +1950,14 @@ describe("Cua native boundary", () => {
   it("reports a failed listener separately from permissions and recovers after it starts", async () => {
     const f = fixture({ hostPlatform: "darwin" });
     f.setInputMonitor(true, false);
-    expect(await f.backend.availability()).toMatchObject({
+    const unavailable = await f.backend.availability();
+    expect(unavailable).toMatchObject({
       kind: "backend-unavailable",
       message: expect.stringContaining("Escape and human-input listener"),
     });
     expect(f.backend.health()).toMatchObject({ status: "unavailable", captureAvailable: true });
+    // The message names this app, never the one the runtime was adapted from.
+    expect(JSON.stringify([unavailable, f.backend.health()])).not.toContain("Synara");
     expect(await f.backend.provision()).not.toContain("permissions are ready");
     f.setInputMonitor(true, true);
     expect(await f.backend.provision()).toContain("permissions are ready");

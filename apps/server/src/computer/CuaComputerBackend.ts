@@ -811,8 +811,8 @@ export class CuaComputerBackend implements ComputerBackend {
         permission.input_monitoring === true &&
         permission.input_monitor_ready === false;
       const monitorMessage =
-        "Computer control is paused because the Escape and human-input listener could not start. " +
-        "Reopen Synara, then check Computer settings again.";
+        "Computer control is paused until the Escape and human-input listener is ready. " +
+        "Ryco reconnects it automatically; check Computer settings if it remains unavailable.";
       this.setHealth({
         ...this.currentHealth,
         status: this.captureFailed || monitorUnavailable ? "unavailable" : "connected",

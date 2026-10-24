@@ -1,10 +1,11 @@
 import { join } from "node:path";
 import {
   AGENT_CONTROL_CAPABILITIES,
+  ComputerConsentReply,
   ThreadId,
   type ComputerUseBridgeConfig,
 } from "@ryco/contracts";
-import { Effect, Option } from "effect";
+import { Effect, Option, Schema } from "effect";
 import { ComputerManager } from "../../computer/ComputerManager.ts";
 import { CuaComputerBackend } from "../../computer/CuaComputerBackend.ts";
 import {
@@ -16,6 +17,12 @@ import {
 import { makeAgentGatewayComputerTools } from "../../computer/tools/computerTools.ts";
 import { makeAgentGatewayComputerBrowserTools } from "../../computer/tools/computerBrowserTools.ts";
 import { GatewayToolError, type ToolContext } from "../../computer/tools/toolRuntime.ts";
+import {
+  ComputerApprovalExpiredError,
+  ComputerApprovalPendingError,
+  ComputerApprovalQueueFullError,
+  ComputerApprovalUnavailableError,
+} from "../../computer/ComputerApprovalGate.ts";
 import type { AgentControlMcpTools, AgentControlMcpToolResult } from "./tools.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlSessionRegistryShape } from "../Services/AgentControlSessionRegistry.ts";
@@ -165,7 +172,7 @@ export function withComputerBetaTools(
       signal,
     );
     await Effect.runPromise(context.assertCallerTurnActive());
-    return response.approved === true;
+    return readComputerConsentReply(response);
   };
   const resolveForegroundAuthorization = async (context: ToolContext) => ({
     userRequestedVisibleUse: active.get(context.callerThreadId)?.plan.foregroundAuthorized === true,
@@ -323,4 +330,33 @@ export function withComputerBetaTools(
       await manager.dispose();
     },
   };
+}
+
+/**
+ * The server's reading of the desktop's consent reply. Only a reply that decodes
+ * and says `accept` with `approved: true` approves. Decline and Stop are the
+ * user's answer for the turn (`approval_denied`); every other outcome refuses
+ * just this call with a typed, retryable-or-not error. The desktop and this
+ * backend always ship together, so there is no older reply shape to accept.
+ */
+export function readComputerConsentReply(response: unknown): boolean {
+  const decoded = Schema.decodeUnknownOption(ComputerConsentReply)(response);
+  if (Option.isNone(decoded) || decoded.value.approved !== (decoded.value.outcome === "accept"))
+    throw new ComputerApprovalUnavailableError();
+  const reply = decoded.value;
+  switch (reply.outcome) {
+    case "accept":
+      return true;
+    case "pending":
+      throw new ComputerApprovalPendingError();
+    case "expired":
+      throw new ComputerApprovalExpiredError(reply.retryable);
+    case "unavailable":
+      throw new ComputerApprovalUnavailableError(reply.retryable);
+    case "busy":
+      throw new ComputerApprovalQueueFullError("global", reply.retryable);
+    case "decline":
+    case "stopped":
+      return false;
+  }
 }
