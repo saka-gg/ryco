@@ -67,6 +67,8 @@ import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { DatabaseMaintenanceLive } from "./persistence/Layers/DatabaseMaintenance.ts";
 import { EventLogCompactionLive } from "./persistence/Layers/EventLogCompaction.ts";
+import { DatabaseOwnerLeaseLive } from "./persistence/databaseOwnerLock.ts";
+import { prefetchProcessIdentity } from "./processLock/processIdentity.ts";
 import { ServerLifecycleEventsLive } from "./serverLifecycleEvents.ts";
 import { AnalyticsServiceLayerLive } from "./telemetry/Layers/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -731,6 +733,9 @@ export const makeServerLayer = Layer.unwrap(
     const config = yield* ServerConfig;
 
     fixPath({ inheritedFromDesktop: config.mode === "desktop" });
+    // The database owner lock records this boot's id, an exec on macOS: start
+    // the lookup now, so it overlaps the layers built before the lock.
+    prefetchProcessIdentity();
 
     // Built after `HttpRouter.serve` (see below), so the startup fiber only
     // logs readiness, publishes `ready` and opens the browser once request
@@ -854,6 +859,10 @@ export const makeServerLayer = Layer.unwrap(
       Layer.provideMerge(WorkspaceAccessPolicyLive),
       Layer.provideMerge(HttpServerLive),
       Layer.provideMerge(StartupStallMonitorLive),
+      // One server per database: owned before the port binds and the database
+      // opens, released after both closed; built after observability so a wait
+      // or a refusal reaches the server log.
+      Layer.provideMerge(trackStartupLayer("persistence.owner-lock", DatabaseOwnerLeaseLive)),
       Layer.provide(ObservabilityLive),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provideMerge(VcsProcess.layer),

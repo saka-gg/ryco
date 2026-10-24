@@ -17,6 +17,9 @@
  * move the test to TestClock, then take the file off the list.
  */
 export const SERVER_TIMING_TEST_FILES = [
+  // Three real server processes start on one base directory; the second exits
+  // after its 0.5 s owner-lock wait.
+  "integration/databaseOwnerLock.integration.test.ts",
   // Failed discovery retries finish within 1 s.
   "src/agentControl/externalSecurity.test.ts",
   // Measurements answer within 3-6.5 s, and a stopped browser's cleanup is
@@ -34,6 +37,9 @@ export const SERVER_TIMING_TEST_FILES = [
   "src/orchestration/Layers/ProviderCommandReactor.test.ts",
   // Event-loop gaps stay under 250 ms while sqlite waits for a write lock.
   "src/persistence/Layers/Sqlite.test.ts",
+  // Owner-lock waits end within their 0.3-5 s budgets, and maintenance is refused
+  // well before its wait.
+  "src/persistence/databaseOwnerLock.test.ts",
   // Event-loop gaps and main-connection latency stay under a heavy read's time.
   "src/persistence/SqliteReadClient.test.ts",
   // A hanging folder probe is cut off within 1 s.
