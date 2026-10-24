@@ -34,6 +34,8 @@ export function threadLifecycleActionForCommand(
  * Lifecycle chords never edit text, so like split-view chords they also run
  * while typing. Held keys, IME composition, dialogs (the palette included) and
  * open menus keep them, and so does a key a focused control already handled.
+ * It looks for open dialogs and menus in the page, so ask only for a key that
+ * resolved to a lifecycle command.
  */
 export function shouldIgnoreThreadLifecycleShortcut(
   event: ShortcutEventLike & {
@@ -139,14 +141,16 @@ export function createThreadUndoShortcut(deps: {
       // A modifier pressed mid-hold leaves the held key repeating.
       if (isBareModifierKeyEvent(event)) return;
       heldCode = null;
+      // Without a notice there is nothing to undo and no claim to release, so
+      // most keystrokes stop here without reading who owns the key.
+      const noticeId = deps.latestNoticeId();
+      if (noticeId === null) return;
       const owner = deps.owner(event);
       if (owner === null) {
-        release();
+        releasedThroughId = Math.max(releasedThroughId, noticeId);
         return;
       }
-      if (owner === "control") return;
-      const noticeId = deps.latestNoticeId();
-      if (noticeId === null || (owner === "composer" && noticeId <= releasedThroughId)) return;
+      if (owner === "control" || (owner === "composer" && noticeId <= releasedThroughId)) return;
       heldCode = event.code;
       event.preventDefault();
       event.stopPropagation();

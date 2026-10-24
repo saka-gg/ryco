@@ -20,9 +20,11 @@ command) also undoes the newest notice. A new notice claims the key in the compo
 press another key or edit text there, including a paste, cut or drop from a menu; after that the
 key is the composer's own undo again. Other text fields, code editors, dialogs, the model picker
 and the terminal always keep their own undo. Without a notice the key is left alone, so native
-undo and the desktop Edit menu work as before. Holding the key undoes once. Native uses a
-short-lived notice with a labeled Undo button and a screen-reader announcement. Native exposes Undo where its existing surfaces
-expose the actions; it does not add a pinning surface. The frozen web phone presentation is unchanged.
+undo and the desktop Edit menu work as before. Holding the key undoes once.
+
+Native uses a short-lived notice with a labeled Undo button and a screen-reader announcement.
+Native exposes Undo where its existing surfaces expose the actions; it does not add a pinning
+surface. The frozen web phone presentation is unchanged.
 
 ## Safety and compatibility
 

@@ -7,6 +7,7 @@ import { useChatPanesStore } from "../chatPanesStore";
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
 import { useSidebarFoldStore } from "./sidebar/sidebarFold";
+import { useSettingsSearchRevealStore } from "./settings/settingsSearchReveal";
 
 // Production CSS is part of the behavior under test because row height depends on it.
 import "../index.css";
@@ -2839,6 +2840,9 @@ export function setupChatViewBrowserSuite() {
     useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
     // A notice left by an earlier test would take this test's Undo key.
     sidebarUndo.dispose();
+    // A reveal the palette asked for, left untaken by an earlier test, would
+    // scroll the next settings page.
+    useSettingsSearchRevealStore.setState({ request: null });
     useSidebarFoldStore.getState().reset();
     useStore.setState({
       activeEnvironmentId: null,

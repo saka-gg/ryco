@@ -148,7 +148,6 @@ focused control.
 - `thread.snooze`: pick a time to snooze the open thread until in the command palette, or wake a snoozed one (default `mod+alt+shift+s`)
 - `thread.archive`: archive the open thread, asking first when "Confirm before archiving" is on (default `mod+alt+shift+a`)
 - `thread.markUnread`: mark the open thread unread; it stays unread until you leave it (default `mod+alt+shift+u`)
-
 - `thread.undo`: undo the newest settle, snooze, archive or unpin from its Undo notice (default `mod+z`)
 
 The first four work while you type, but not in the terminal, a menu or a dialog. When the thread

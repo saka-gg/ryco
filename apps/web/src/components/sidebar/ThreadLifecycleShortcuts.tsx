@@ -139,14 +139,16 @@ export function ThreadLifecycleShortcuts(props: ThreadLifecycleShortcutsProps) {
     const read = () => readCurrentThreadLifecycle(latestProps.current);
     useCommandPaletteStore.setState({ readCurrentThreadLifecycle: read });
     const onWindowKeyDown = (event: KeyboardEvent) => {
-      if (shouldIgnoreThreadLifecycleShortcut(event)) return;
+      if (event.defaultPrevented || event.repeat) return;
       const { keybindings, readShortcutContext } = latestProps.current;
       const action = threadLifecycleActionForCommand(
         resolveShortcutCommand(event, keybindings, {
           context: { ...readShortcutContext(), composerFocus: isComposerFocused() },
         }),
       );
-      if (action === null || !runThreadLifecycleShortcut(action, read(), SHORTCUT_UI)) return;
+      // The page is searched for dialogs and menus only for a lifecycle chord.
+      if (action === null || shouldIgnoreThreadLifecycleShortcut(event)) return;
+      if (!runThreadLifecycleShortcut(action, read(), SHORTCUT_UI)) return;
       event.preventDefault();
       event.stopPropagation();
     };

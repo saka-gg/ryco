@@ -266,6 +266,20 @@ describe("the Undo shortcut", () => {
       expect(unhandled.preventDefault).not.toHaveBeenCalled();
     });
 
+    it("reads nothing about a key while no notice is shown", () => {
+      const owner = vi.fn((): UndoShortcutOwner | null => "none");
+      const shortcut = createThreadUndoShortcut({
+        latestNoticeId: () => null,
+        undo: vi.fn(),
+        owner,
+      });
+      shortcut.keydown(key("a"));
+      const event = undoKey();
+      shortcut.keydown(event);
+      expect(owner).not.toHaveBeenCalled();
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    });
+
     it("leaves text fields, code editors and dialogs their own undo", () => {
       const { shortcut, undo, pressIn } = setup(1);
       pressIn("control");

@@ -280,6 +280,21 @@ function mutationBlocker(
 }
 
 /**
+ * Why an awake thread cannot be snoozed: the node must take settlement and
+ * Snooze, then the thread must be snoozable by `canSnoozeThread`'s rule. One
+ * rule for the entry's `canSnooze` and its lifecycle availability.
+ */
+function awakeSnoozeBlocker(
+  environment: ThreadInboxEnvironment,
+  mutation: ThreadInboxMutationBlocker | null,
+  eligibility: ThreadSettlementBlocker | null,
+): ThreadSnoozeBlocker | null {
+  return (
+    mutation ?? capabilityBlocker(environment, environment.threadSnoozeSupported) ?? eligibility
+  );
+}
+
+/**
  * The settlement policy's capability input, decided here only. A node's own
  * `false` turns settlement off; an environment not heard from yet still
  * classifies by what its node recorded (manual settlement, the automatic
@@ -603,10 +618,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       pinned,
       current: input.currentThreadKey === key,
       isDraft: false,
-      canSnooze:
-        blocker === null &&
-        environment.threadSnoozeSupported === true &&
-        snoozeEligibility.canSnooze,
+      canSnooze: awakeSnoozeBlocker(environment, blocker, snoozeEligibility.blocker) === null,
       focus: null,
     });
   }
@@ -751,9 +763,7 @@ export function resolveThreadLifecycleAvailability(
       ...availability(
         snoozedUntil !== null
           ? capabilityBlocker(environment, environment.threadSnoozeSupported)
-          : (entry.mutationBlocker ??
-              capabilityBlocker(environment, environment.threadSnoozeSupported) ??
-              lifecycle.snoozeBlocker),
+          : awakeSnoozeBlocker(environment, entry.mutationBlocker, lifecycle.snoozeBlocker),
       ),
       snoozedUntil,
     },

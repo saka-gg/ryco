@@ -1465,21 +1465,27 @@ function OpenCommandPaletteDialog() {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [openIntent]);
 
-  const currentThreadActions = currentThreadLifecycle
-    ? buildCurrentThreadLifecycleActions({
-        lifecycle: currentThreadLifecycle,
-        // Checked against the bundle budget: some icons, such as the Inbox menu's
-        // ClockIcon, regroup the shell's icon chunks into one more file.
-        icons: {
-          settle: <CheckIcon className={ITEM_ICON_CLASS} />,
-          moveToActive: <InboxIcon className={ITEM_ICON_CLASS} />,
-          snooze: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
-          snoozeAddon: <CalendarClockIcon className={ADDON_ICON_CLASS} />,
-          archive: <ArchiveIcon className={ITEM_ICON_CLASS} />,
-          markUnread: <CircleDotIcon className={ITEM_ICON_CLASS} />,
-        },
-      })
-    : null;
+  // Built once per open, like the state it shows: the snooze times count from
+  // when the palette opened, in the submenu and the snooze shortcut's view alike.
+  const currentThreadActions = useMemo(
+    () =>
+      currentThreadLifecycle
+        ? buildCurrentThreadLifecycleActions({
+            lifecycle: currentThreadLifecycle,
+            // Checked against the bundle budget: some icons, such as the Inbox
+            // menu's ClockIcon, regroup the shell's icon chunks into one more file.
+            icons: {
+              settle: <CheckIcon className={ITEM_ICON_CLASS} />,
+              moveToActive: <InboxIcon className={ITEM_ICON_CLASS} />,
+              snooze: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+              snoozeAddon: <CalendarClockIcon className={ADDON_ICON_CLASS} />,
+              archive: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+              markUnread: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+            },
+          })
+        : null,
+    [currentThreadLifecycle],
+  );
   useLayoutEffect(() => {
     if (openIntent?.kind !== "snooze-thread") {
       return;
