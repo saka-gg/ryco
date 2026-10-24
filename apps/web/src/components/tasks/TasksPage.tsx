@@ -35,6 +35,7 @@ import { useComposerDraftStore } from "~/composerDraftStore";
 import { isHostedHubMode } from "~/env";
 import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
 import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
+import { useLocalDayNow } from "~/hooks/useLocalDayNow";
 import { prefetchWorktreeSend } from "~/hooks/worktreeSendPrefetch";
 import { preloadRouteChunk } from "~/lib/routeChunkPreload";
 import { useHostedRpcCapability } from "~/hostedHub/capabilities";
@@ -332,26 +333,6 @@ function sameProjectOptions(
       );
     })
   );
-}
-
-/** Local "now", renewed after every local midnight so due labels move with the calendar. */
-function useLocalDayNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const midnight = new Date(now);
-    midnight.setHours(24, 0, 0, 0);
-    const timer = setTimeout(() => setNow(Date.now()), midnight.getTime() - Date.now() + 1_000);
-    // A machine waking from sleep past midnight catches up on focus.
-    const onFocus = () => {
-      if (Date.now() >= midnight.getTime()) setNow(Date.now());
-    };
-    window.addEventListener("focus", onFocus);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [now]);
-  return now;
 }
 
 /** A task's unsent draft in a project, as `useTaskDraftKeys` lists it. */

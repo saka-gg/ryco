@@ -342,4 +342,5 @@ running session. See
 - Only the first send, a fork of a chat and **Turn into project…** can create a chat, and only
   **Turn into project…** can move its folder or change its kind. Clients cannot do this through
   ordinary project updates.
-- Usage statistics and daily recaps list a chat under its title, like a project.
+- Usage statistics and daily recaps list a chat under its title, like a project. A daily recap's
+  busiest projects leave chats out, though their agent time still counts.

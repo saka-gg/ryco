@@ -2,8 +2,10 @@ import { Clock, Context, DateTime, Effect, Layer, Option, Schema, Struct } from 
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 import {
+  DAILY_RECAP_TOP_PROJECTS,
   DailyRecapReadError,
   DailyRecapThread,
+  ProjectId,
   type DailyRecapRequest,
   type DailyRecapSnapshot,
 } from "@ryco/contracts";
@@ -71,6 +73,12 @@ const OutcomeRequest = Schema.Struct({
   state: Schema.Literals(["completed", "error"]),
   limit: Schema.Number,
 });
+const ProjectActivityRow = Schema.Struct({
+  projectId: ProjectId,
+  projectTitle: Schema.String,
+  turns: Schema.Number,
+  agentMs: Schema.Number,
+});
 const ThreadRow = Schema.Struct({ ...DailyRecapThread.fields, totalThreads: Schema.Number });
 const AttentionRow = Schema.Struct({
   ...ThreadRow.fields,
@@ -106,24 +114,51 @@ export const DailyRecapQueryLive = Layer.effect(
       // A fork's inherited turns are its source's work, already recapped on the source's
       // day. A residual filter: the completed_at index still bounds the scan.
       const ownTurn = sql`NOT ${inheritedTurnRowSql(sql, "turns")}`;
+      // Finished outcomes only: an interrupted turn that resumes keeps its earlier completed_at.
+      const counted = sql`turns.state IN ('completed', 'error', 'interrupted')`;
+      // Run time inside the day: a turn started before midnight counts from midnight, and a
+      // turn without a recorded start adds none (max() of a NULL is NULL, which SUM skips).
+      const agentMs = (from: string) => sql`ROUND(COALESCE(SUM(MAX(0,
+        julianday(turns.completed_at) - MAX(julianday(turns.started_at), julianday(${from}))
+      )), 0) * 86400000)`;
       const counts = SqlSchema.findAll({
         Request: Window,
         Result: Schema.Struct({
           completedTurns: Schema.Number,
           failedTurns: Schema.Number,
           interruptedTurns: Schema.Number,
+          agentMs: Schema.Number,
         }),
         execute: ({ from, to }) => sql`
         SELECT
           COALESCE(SUM(turns.state = 'completed'), 0) AS "completedTurns",
           COALESCE(SUM(turns.state = 'error'), 0) AS "failedTurns",
-          COALESCE(SUM(turns.state = 'interrupted'), 0) AS "interruptedTurns"
+          COALESCE(SUM(turns.state = 'interrupted'), 0) AS "interruptedTurns",
+          ${agentMs(from)} AS "agentMs"
         FROM projection_turns turns
         JOIN projection_threads threads ON threads.thread_id = turns.thread_id
         JOIN projection_projects projects ON projects.project_id = threads.project_id
-        WHERE turns.completed_at >= ${from} AND turns.completed_at < ${to}
+        WHERE turns.completed_at >= ${from} AND turns.completed_at < ${to} AND ${counted}
           AND threads.deleted_at IS NULL AND projects.deleted_at IS NULL
           AND ${terminalOutcome} AND ${ownTurn}
+      `,
+      });
+      const projects = SqlSchema.findAll({
+        Request: Window,
+        Result: ProjectActivityRow,
+        execute: ({ from, to }) => sql`
+        SELECT projects.project_id AS "projectId", projects.title AS "projectTitle",
+          COUNT(*) AS "turns", ${agentMs(from)} AS "agentMs"
+        FROM projection_turns turns
+        JOIN projection_threads threads ON threads.thread_id = turns.thread_id
+        JOIN projection_projects projects ON projects.project_id = threads.project_id
+        WHERE turns.completed_at >= ${from} AND turns.completed_at < ${to} AND ${counted}
+          AND threads.deleted_at IS NULL AND projects.deleted_at IS NULL
+          AND projects.kind <> 'chat'
+          AND ${terminalOutcome} AND ${ownTurn}
+        GROUP BY projects.project_id
+        ORDER BY "turns" DESC, "agentMs" DESC, projects.title ASC, projects.project_id ASC
+        LIMIT ${DAILY_RECAP_TOP_PROJECTS}
       `,
       });
       const outcomes = SqlSchema.findAll({
@@ -176,7 +211,7 @@ export const DailyRecapQueryLive = Layer.effect(
       `,
       });
 
-      return { sql, counts, outcomes, attention };
+      return { sql, counts, projects, outcomes, attention };
     };
     const onMain = queriesOn(main);
     const onReader = reader === main ? onMain : queriesOn(reader);
@@ -186,22 +221,26 @@ export const DailyRecapQueryLive = Layer.effect(
         Effect.gen(function* () {
           const window = yield* dailyRecapWindow(input);
           const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 20)));
-          const { sql, counts, outcomes, attention } = Option.isSome(
+          const { sql, counts, projects, outcomes, attention } = Option.isSome(
             yield* Effect.serviceOption(main.transactionService),
           )
             ? onMain
             : onReader;
           const result = yield* Effect.gen(function* () {
             const countRows = yield* counts(window);
+            const projectRows = yield* projects(window);
             const completed = yield* outcomes({ ...window, state: "completed", limit });
             const failed = yield* outcomes({ ...window, state: "error", limit });
             const attentionRows = yield* attention(limit);
+            const { agentMs, ...dayCounts } = countRows[0] ?? {
+              completedTurns: 0,
+              failedTurns: 0,
+              interruptedTurns: 0,
+              agentMs: 0,
+            };
             return {
-              counts: countRows[0] ?? {
-                completedTurns: 0,
-                failedTurns: 0,
-                interruptedTurns: 0,
-              },
+              counts: dayCounts,
+              activity: { agentMs, projects: projectRows },
               completed: section(completed),
               failed: section(failed),
               needsAttention: section(

@@ -176,7 +176,8 @@ no connection of its own. The pages that act on one machine (Settings, Tasks, St
 machine of the last opened thread, and Settings can switch it in place. While open, Settings and
 Tasks keep the machine they show connected, and opened with no machine chosen yet, as after a
 reload, they offer the machines to choose from. Older addresses that named a machine on such a page
-open the page itself on that machine.
+open the page itself on that machine. Statistics' Today and Usage views are the exception: they
+combine the machines this client is already connected to and connect no other.
 
 Every client sorts a machine's threads into Active and Settled with that machine's own settlement
 capability, resolved the same way everywhere: what the machine reported to this client (live, or its
