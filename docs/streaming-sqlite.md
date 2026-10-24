@@ -259,9 +259,10 @@ This protects future downgrades between binaries containing that check; it canno
 make already-shipped older binaries reject schema 60/61 or prevent their reads.
 Triggers would not prevent old reads and would add another write protocol, so
 none are introduced. Do not open this migrated database with an older binary.
-For rollback, restore the backup Ryco wrote before the upgrade (in `<stateDir>/backups`,
-see [database-backups.md](database-backups.md)) **into a separate data directory**,
-keeping the upgraded database intact; the backup does not include later events. Ryco
+For rollback, restore the backup Ryco wrote before the upgrade (in `<stateDir>/backups`;
+`ryco db list` shows them, see [database-backups.md](database-backups.md)) **into a separate
+data directory** with `ryco db restore <file> --into <new directory>`, keeping the upgraded
+database intact; the backup does not include later events. Ryco
 skips that backup, with a warning in the server log, when free disk space is below
 twice the database size, or when a database over 2 GiB sits on a filesystem without
 copy-on-write clones.
