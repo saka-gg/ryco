@@ -14,7 +14,40 @@ type CommandHandler = () => boolean | void;
 
 const handlers = new Map<HardwareKeyboardCommand, Set<CommandHandler>>();
 const registrationListeners = new Set<() => void>();
-let registrationVersion = 0;
+// Replaced, never mutated, when the set of registered commands changes, so it
+// is a stable `useSyncExternalStore` snapshot in between.
+let registeredCommands: ReadonlySet<HardwareKeyboardCommand> = new Set();
+
+function publishRegistrations(): void {
+  const commands = [...handlers.keys()];
+  if (
+    commands.length === registeredCommands.size &&
+    commands.every((command) => registeredCommands.has(command))
+  ) {
+    return;
+  }
+  registeredCommands = new Set(commands);
+  registrationListeners.forEach((listener) => listener());
+}
+
+/**
+ * Adds a handler for a command and returns its removal. The most recently
+ * registered handler gets the first chance to consume the command.
+ */
+export function registerHardwareKeyboardCommand(
+  command: HardwareKeyboardCommand,
+  handler: CommandHandler,
+): () => void {
+  const commandHandlers = handlers.get(command) ?? new Set<CommandHandler>();
+  commandHandlers.add(handler);
+  handlers.set(command, commandHandlers);
+  publishRegistrations();
+  return () => {
+    commandHandlers.delete(handler);
+    if (commandHandlers.size === 0) handlers.delete(command);
+    publishRegistrations();
+  };
+}
 
 /**
  * Registers a context-specific hardware-keyboard action. The most recently mounted handler gets
@@ -24,27 +57,12 @@ export function useHardwareKeyboardCommand(
   command: HardwareKeyboardCommand,
   handler: CommandHandler,
 ): void {
-  useEffect(() => {
-    const commandHandlers = handlers.get(command) ?? new Set<CommandHandler>();
-    commandHandlers.add(handler);
-    handlers.set(command, commandHandlers);
-    registrationVersion += 1;
-    registrationListeners.forEach((listener) => listener());
-    return () => {
-      commandHandlers.delete(handler);
-      if (commandHandlers.size === 0) handlers.delete(command);
-      registrationVersion += 1;
-      registrationListeners.forEach((listener) => listener());
-    };
-  }, [command, handler]);
+  useEffect(() => registerHardwareKeyboardCommand(command, handler), [command, handler]);
 }
 
+/** The commands with at least one handler; the same set until a registration changes. */
 export function getRegisteredHardwareKeyboardCommands(): ReadonlySet<HardwareKeyboardCommand> {
-  return new Set(handlers.keys());
-}
-
-export function getHardwareKeyboardCommandRegistrationVersion(): number {
-  return registrationVersion;
+  return registeredCommands;
 }
 
 export function subscribeToHardwareKeyboardCommandRegistrations(listener: () => void): () => void {

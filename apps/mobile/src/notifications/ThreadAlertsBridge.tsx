@@ -11,6 +11,9 @@ import { readVisibleThread } from "./visibleThread";
 
 type ThreadAlertsModule = typeof import("./threadAlerts");
 
+// At module scope: the React Compiler cannot compile a component that calls import() itself.
+const loadThreadAlerts = (): Promise<ThreadAlertsModule> => import("./threadAlerts");
+
 /**
  * Loads thread alerts once they have ever been turned on, which keeps
  * expo-notifications off the launch path of everyone else, then keeps them for
@@ -26,7 +29,7 @@ export function ThreadAlertsBridge() {
   useEffect(() => {
     if (!enabled || alertsModule !== null) return;
     let active = true;
-    void import("./threadAlerts")
+    void loadThreadAlerts()
       .then((loaded) => {
         if (active) setAlertsModule(loaded);
       })
