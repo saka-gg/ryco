@@ -138,7 +138,8 @@ describe("CrownSectionDetail interactions", () => {
       // With Stop beside it, the row still takes 30px, its divider included.
       const scoutRow = container.querySelector('[data-agent-id="agent-scout"]')!.parentElement!;
       expect(scoutRow.getBoundingClientRect().height).toBe(30);
-      // Stop only takes pointer events once its row is hovered.
+      // Stop takes pointer events once its row is hovered (always, on a device
+      // that can't hover), so the same steps reach it on any runner.
       await page.getByRole("button", { name: "Open Scout transcript. Running." }).hover();
       await page.getByRole("button", { name: "Stop Scout" }).click();
       expect(stop).toHaveBeenLastCalledWith({

@@ -563,7 +563,8 @@ describe("AgentsPanel", () => {
       "batch-unflagged",
     ]);
     expect(stopLabels()).toEqual(["Stop Map the parser", "Stop Trace the client"]);
-    // Stop only takes pointer events once its row is hovered.
+    // Stop takes pointer events once its row is hovered (always, on a device
+    // that can't hover), so the same steps reach it on any runner.
     await page.getByRole("button", { name: /^Open Trace the client/ }).hover();
     await page.getByRole("button", { name: "Stop Trace the client" }).click();
     expect(action.stop).toHaveBeenCalledExactlyOnceWith({

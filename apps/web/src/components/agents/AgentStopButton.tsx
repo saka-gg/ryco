@@ -45,7 +45,10 @@ export function AgentStopButton({
  * opening row is a button). The wrapper is there for every row, so a row never
  * remounts when it becomes stoppable, and it takes the row's height, so a list
  * divider on it adds none. On hover or focus, Stop takes the place of the row's
- * time and status, and on touch it stays in view.
+ * time and status. On touch, or any other device that can't hover, it stays in
+ * view: it takes no pointer events while hidden, so a hover it never gets would
+ * leave it out of reach. The time hides under the same conditions that show
+ * Stop, so the row always shows one of the two.
  */
 function AgentStopRow({
   agent,
@@ -64,14 +67,17 @@ function AgentStopRow({
       className={cn(
         "group/agent-row relative",
         AGENT_ROW_HEIGHT_CLASS[density],
-        stoppable &&
+        stoppable && [
           // The opening row keeps its hover tint while the pointer is on Stop.
-          "[&:hover>button[data-agent-row]]:bg-accent/35 [&_[data-agent-row-aside]]:transition-opacity [&:focus-within_[data-agent-row-aside]]:opacity-0 [&:hover_[data-agent-row-aside]]:opacity-0 pointer-coarse:[&_[data-agent-row-aside]]:opacity-0",
+          "hover:[&>button[data-agent-row]]:bg-accent/35 [&_[data-agent-row-aside]]:transition-opacity",
+          // `hover:` and `group-hover:` only apply on devices that can hover.
+          "hover:[&_[data-agent-row-aside]]:opacity-0 focus-within:[&_[data-agent-row-aside]]:opacity-0 pointer-coarse:[&_[data-agent-row-aside]]:opacity-0 [@media(hover:none)]:[&_[data-agent-row-aside]]:opacity-0",
+        ],
       )}
     >
       {row}
       {stoppable ? (
-        <span className="pointer-events-none absolute top-1/2 right-1.5 flex -translate-y-1/2 opacity-0 transition-opacity group-focus-within/agent-row:pointer-events-auto group-focus-within/agent-row:opacity-100 group-hover/agent-row:pointer-events-auto group-hover/agent-row:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100">
+        <span className="pointer-events-none absolute top-1/2 right-1.5 flex -translate-y-1/2 opacity-0 transition-opacity group-hover/agent-row:pointer-events-auto group-hover/agent-row:opacity-100 group-focus-within/agent-row:pointer-events-auto group-focus-within/agent-row:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
           <AgentStopButton agent={agent} action={action} variant="icon" />
         </span>
       ) : null}

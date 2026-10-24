@@ -76,33 +76,51 @@ describe("AgentStopButton", () => {
     const action = stopAction();
     const onOpenAgent = vi.fn();
     mounted = await render(
-      <Roster
-        agents={[
-          live,
-          makeRuntimeAgent("done", {
-            status: "completed",
-            runtimeSessionId: "rt-1",
-            canStop: true,
-            completedAt: "2026-08-10T10:01:00.000Z",
-          }),
-          makeRuntimeAgent("earlier-runtime", { runtimeSessionId: "rt-0", canStop: true }),
-          makeRuntimeAgent("not-flagged", { runtimeSessionId: "rt-1" }),
-        ]}
-        action={action}
-        onOpenAgent={onOpenAgent}
-      />,
+      <>
+        <Roster
+          agents={[
+            live,
+            makeRuntimeAgent("done", {
+              status: "completed",
+              runtimeSessionId: "rt-1",
+              canStop: true,
+              completedAt: "2026-08-10T10:01:00.000Z",
+            }),
+            makeRuntimeAgent("earlier-runtime", { runtimeSessionId: "rt-0", canStop: true }),
+            makeRuntimeAgent("not-flagged", { runtimeSessionId: "rt-1" }),
+          ]}
+          action={action}
+          onOpenAgent={onOpenAgent}
+        />
+        <div data-testid="away" className="h-10" />
+      </>,
     );
 
     expect(stopButtons()).toHaveLength(1);
     expect(document.querySelectorAll("[data-agent-row]")).toHaveLength(4);
-    // Stop takes the place of the row's time only while the row is hovered.
-    const slotOpacity = () => getComputedStyle(stopButtons()[0]!.parentElement!).opacity;
+    const slot = () => getComputedStyle(stopButtons()[0]!.parentElement!);
     const asideOpacity = () =>
       getComputedStyle(document.querySelector("[data-agent-row-aside]")!).opacity;
-    expect(slotOpacity()).toBe("0");
-    await page.getByRole("button", { name: "Open Task for live transcript. Running." }).hover();
+    // The hover reveal is `(hover: hover)`-gated CSS (Tailwind v4), and Linux
+    // headless reports `hover: none` once an earlier file in the shared
+    // browser cycles touch emulation (see test/browserPointer.ts). Each state
+    // is checked where the runner is in it.
+    if (window.matchMedia("(hover: hover)").matches) {
+      // Stop takes the place of the row's time only while the row is hovered,
+      // and takes no clicks meant for the row until then.
+      await page.getByTestId("away").hover();
+      await vi.waitFor(() => {
+        expect(slot().opacity).toBe("0");
+        expect(slot().pointerEvents).toBe("none");
+        expect(asideOpacity()).toBe("1");
+      });
+      await page.getByRole("button", { name: "Open Task for live transcript. Running." }).hover();
+    }
+    // Hovered, or always on a device that can't hover, Stop is in the time's
+    // place; there a hover never comes, so it must stay in reach.
     await vi.waitFor(() => {
-      expect(slotOpacity()).toBe("1");
+      expect(slot().opacity).toBe("1");
+      expect(slot().pointerEvents).toBe("auto");
       expect(asideOpacity()).toBe("0");
     });
 
