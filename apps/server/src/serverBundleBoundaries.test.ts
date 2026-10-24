@@ -184,6 +184,13 @@ describe("server boot import boundaries", () => {
         /^apps\/server\/src\/sourceControl\/(?:GitHubCli|GitLabCli|BitbucketApi|AzureDevOpsCli|gitHubPullRequests|gitLabMergeRequests|bitbucketPullRequests|azureDevOpsPullRequests)\.ts$/u,
       ),
     ).toEqual([]);
+    // The OTEL variable resolver and the OTLP exporters load only when an export is configured,
+    // and the `ryco trace summary` implementation only when that command runs.
+    expect(
+      reached(
+        /^apps\/server\/src\/(?:observability\/(?:OtelEnvironmentResolver|OtlpExporters)|cliTrace\/(?:traceRun|traceSummary))\.ts$/u,
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -269,6 +276,14 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded when the external Agent Control integration first starts.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);
+      // Loaded only when an OTLP export is configured (with Effect's exporters and protobuf
+      // encoder), or when `ryco trace summary` runs.
+      expect(source).not.toMatch(/^\/\/#region src\/observability\/OtlpExporters\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region .*\/effect\/dist\/observability\/Otlp\w+\.js$/mu);
+      expect(source).not.toMatch(
+        /^\/\/#region .*\/effect\/dist\/observability\/internal\/\w+\.js$/mu,
+      );
+      expect(source).not.toMatch(/^\/\/#region src\/cliTrace\/traceSummary\.ts$/mu);
     }
   });
 });

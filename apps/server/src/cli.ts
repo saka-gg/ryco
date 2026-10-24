@@ -107,6 +107,11 @@ import {
   type SetupOperations,
 } from "./cliSetup/setupFlow.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
+import { makeTraceCommand } from "./cliTrace/traceCommand.ts";
+import {
+  OtelEnvironmentConfig,
+  resolveServerOtlpExports,
+} from "./observability/OtelEnvironment.ts";
 import packageJson from "../package.json" with { type: "json" };
 import type { CliRemoteError } from "./cliRemote/remotes.ts";
 import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
@@ -320,6 +325,11 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  otlpLogsUrl: Config.String("RYCO_OTLP_LOGS_URL").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  otel: OtelEnvironmentConfig,
   otlpExportIntervalMs: Config.Int("RYCO_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
   browserTracesEnabled: Config.Boolean("RYCO_BROWSER_TRACES").pipe(Config.withDefault(false)),
   otlpServiceName: Config.String("RYCO_OTLP_SERVICE_NAME").pipe(Config.withDefault("ryco-server")),
@@ -777,6 +787,20 @@ export const resolveServerConfig = (
       ),
     });
 
+    const otlp = yield* resolveServerOtlpExports(env.otel, {
+      traces: {
+        rycoEnvUrl: env.otlpTracesUrl,
+        bootstrapUrl: bootstrap?.otlpTracesUrl,
+        settingsUrl: persistedObservabilitySettings.otlpTracesUrl,
+      },
+      metrics: {
+        rycoEnvUrl: env.otlpMetricsUrl,
+        bootstrapUrl: bootstrap?.otlpMetricsUrl,
+        settingsUrl: persistedObservabilitySettings.otlpMetricsUrl,
+      },
+      logs: { rycoEnvUrl: env.otlpLogsUrl },
+    });
+
     const config: ServerConfigShape = {
       logLevel,
       traceMinLevel: env.traceMinLevel,
@@ -784,14 +808,14 @@ export const resolveServerConfig = (
       traceBatchWindowMs: env.traceBatchWindowMs,
       traceMaxBytes: env.traceMaxBytes,
       traceMaxFiles: env.traceMaxFiles,
-      otlpTracesUrl:
-        env.otlpTracesUrl ??
-        bootstrap?.otlpTracesUrl ??
-        persistedObservabilitySettings.otlpTracesUrl,
-      otlpMetricsUrl:
-        env.otlpMetricsUrl ??
-        bootstrap?.otlpMetricsUrl ??
-        persistedObservabilitySettings.otlpMetricsUrl,
+      otlpTracesUrl: otlp.traces.url,
+      otlpMetricsUrl: otlp.metrics.url,
+      ...(otlp.logs.url !== undefined ? { otlpLogsUrl: otlp.logs.url } : {}),
+      ...(otlp.exports !== undefined ? { otlpExports: otlp.exports } : {}),
+      ...(otlp.resourceAttributes !== undefined
+        ? { otlpResourceAttributes: otlp.resourceAttributes }
+        : {}),
+      ...(otlp.warnings.length > 0 ? { observabilityWarnings: otlp.warnings } : {}),
       otlpExportIntervalMs: env.otlpExportIntervalMs,
       ...(env.browserTracesEnabled ? { browserTracesEnabled: true } : {}),
       otlpServiceName: env.otlpServiceName,
@@ -4239,5 +4263,13 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     configCommand,
     serviceCommand,
     remoteCommand,
+    makeTraceCommand({
+      locationFlags: sharedServerLocationFlags,
+      jsonFlag,
+      emitJson,
+      durationSchema: DurationFromString,
+      resolveConfig: resolveCliAuthConfig,
+      quietly,
+    }),
   ]),
 );
