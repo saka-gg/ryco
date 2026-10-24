@@ -1,4 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+import { randomUUID } from "node:crypto";
 import { cuaSpaceInventory } from "./cuaSpaceInventory.ts";
 import {
   parseCuaActionDiagnostics,
@@ -55,6 +56,7 @@ import {
   type ComputerBrowserCall,
   type ComputerBrowserCallResult,
   type ComputerCaptureRequest,
+  type ComputerClipboardPayload,
   type ComputerFrameListener,
   type ComputerMenuBackendTarget,
   type ComputerShieldTarget,
@@ -66,6 +68,7 @@ import {
   desktopOperationSignal,
   assertDesktopOperationActive,
   desktopDeliveryMode,
+  withoutDesktopCancellation,
 } from "./DesktopOperationQueue.ts";
 import { StillFramePublisher, resolveStillIntervalMs } from "./stillFramePublisher.ts";
 import { isModelDesktopObservationActive } from "./modelDesktopObservation.ts";
@@ -291,6 +294,9 @@ function cuaKey(value: string): string {
   };
   return aliases[key] ?? key;
 }
+
+/** First native revision whose `clipboard_write` can snapshot and restore every clipboard representation. */
+const CUA_CLIPBOARD_PRESERVATION_REVISION = 40;
 
 /** The Cua backend. Cua owns native actions; Synara owns admission,
  * session authority, explicit delivery policy and the provider result. */
@@ -2225,6 +2231,52 @@ export class CuaComputerBackend implements ComputerBackend {
   async writeClipboard(value: string) {
     assertComputerClipboardWriteFits(value);
     await this.call("clipboard_write", { text: value }, true);
+  }
+  async prepareClipboardPaste(payload: ComputerClipboardPayload): Promise<() => Promise<boolean>> {
+    // A host probe can be answered before the driver has started. This read
+    // requires its validated handshake, without touching clipboard contents.
+    if (this.driverNativeRevision === undefined)
+      await this.call("get_screen_size", {}, false, false);
+    if (
+      (this.hostPlatform ?? process.platform) !== "darwin" ||
+      (this.driverNativeRevision ?? 0) < CUA_CLIPBOARD_PRESERVATION_REVISION
+    )
+      throw new CuaActionError(
+        "This native driver cannot preserve the clipboard for paste; no clipboard content was changed.",
+        "not-dispatched",
+        "clipboard_preservation_unavailable",
+      );
+    if ("text" in payload) assertComputerClipboardWriteFits(payload.text);
+    const content =
+      "text" in payload
+        ? { text: payload.text }
+        : "imagePath" in payload
+          ? { image_path: payload.imagePath }
+          : { file_path: payload.filePath };
+    // Known before dispatch so a lost write acknowledgement cannot lose the
+    // only handle to the saved clipboard. The token never reaches the model.
+    const token = randomUUID();
+    const restore = async () => {
+      const restored = await this.call("clipboard_write", { restore_token: token }, true);
+      return restored.structuredContent?.clipboard_restored === true;
+    };
+    try {
+      const result = await this.call(
+        "clipboard_write",
+        { ...content, preserve: true, preserve_token: token },
+        true,
+      );
+      if (result.structuredContent?.restore_token !== token)
+        throw new CuaActionError(
+          "The native clipboard write returned no matching restoration receipt. Do not repeat the paste.",
+          "dispatched-unknown",
+          "clipboard_restore_receipt_missing",
+        );
+    } catch (error) {
+      await withoutDesktopCancellation(() => restore().catch(() => false));
+      throw error;
+    }
+    return restore;
   }
   async launchApp(
     app: string,

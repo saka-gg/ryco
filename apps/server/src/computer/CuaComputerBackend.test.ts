@@ -3765,6 +3765,89 @@ describe("Cua native boundary", () => {
 });
 
 describe("Cua hardening", () => {
+  it.each([
+    { label: "an older driver", options: { nativeRevision: 39 } },
+    { label: "a Linux host", options: { hostPlatform: "linux", nativeRevision: 40 } },
+  ])(
+    "refuses clipboard preservation on $label before changing the clipboard",
+    async ({ options }) => {
+      const f = fixture(options);
+      try {
+        await expect(f.backend.prepareClipboardPaste({ text: "payload" })).rejects.toMatchObject({
+          effect: "not-dispatched",
+          code: "clipboard_preservation_unavailable",
+        });
+        expect(f.calls.filter((call) => call.name === "clipboard_write")).toHaveLength(0);
+      } finally {
+        await f.backend.dispose();
+      }
+    },
+  );
+
+  it.each(["acknowledged", "lost", "human-copy"] as const)(
+    "keeps an opaque restoration handle for a %s clipboard write",
+    async (outcome) => {
+      const f = fixture({ nativeRevision: 40 });
+      let savedToken: unknown;
+      f.onTool("clipboard_write", (args) => {
+        if (args.preserve === true) {
+          savedToken = args.preserve_token;
+          if (outcome === "lost")
+            throw new CuaTransportError("write reply lost", "dispatched-unknown");
+          return { structuredContent: { restore_token: savedToken } };
+        }
+        expect(args).toEqual({ restore_token: savedToken });
+        return { structuredContent: { clipboard_restored: outcome !== "human-copy" } };
+      });
+      try {
+        const pending = f.backend.prepareClipboardPaste({ imagePath: "/workspace/image.png" });
+        if (outcome === "lost")
+          await expect(pending).rejects.toMatchObject({ effect: "dispatched-unknown" });
+        else {
+          const restore = await pending;
+          await expect(restore()).resolves.toBe(outcome !== "human-copy");
+        }
+        expect(savedToken).toEqual(expect.any(String));
+        const writes = f.calls.filter((call) => call.name === "clipboard_write");
+        expect(writes).toHaveLength(2);
+        expect(writes[0]?.args).toMatchObject({
+          image_path: "/workspace/image.png",
+          preserve: true,
+        });
+        expect(writes[1]?.args).toEqual({ restore_token: savedToken });
+      } finally {
+        await f.backend.dispose();
+      }
+    },
+  );
+
+  it("restores and reports uncertainty when the write returns no matching receipt", async () => {
+    const f = fixture({ nativeRevision: 40 });
+    let savedToken: unknown;
+    f.onTool("clipboard_write", (args) => {
+      if (args.preserve === true) {
+        savedToken = args.preserve_token;
+        return { structuredContent: { restore_token: "someone-else" } };
+      }
+      return { structuredContent: { clipboard_restored: true } };
+    });
+    try {
+      await expect(
+        f.backend.prepareClipboardPaste({ filePath: "/workspace/a.pdf" }),
+      ).rejects.toMatchObject({
+        effect: "dispatched-unknown",
+        code: "clipboard_restore_receipt_missing",
+      });
+      const writes = f.calls.filter((call) => call.name === "clipboard_write");
+      expect(writes.map((call) => call.args)).toEqual([
+        { file_path: "/workspace/a.pdf", preserve: true, preserve_token: savedToken },
+        { restore_token: savedToken },
+      ]);
+    } finally {
+      await f.backend.dispose();
+    }
+  });
+
   it("reports a stable build signature on the backend and its availability", async () => {
     const f = fixture();
     expect(f.backend.buildSignature()).toBe("unknown");
