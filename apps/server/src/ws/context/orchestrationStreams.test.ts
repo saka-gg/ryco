@@ -28,10 +28,8 @@ import { TestClock } from "effect/testing";
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import {
-  EventLogCompactionLive,
-  ONLINE_COMPACTION_PASS_OPTIONS,
-} from "../../persistence/Layers/EventLogCompaction.ts";
+import { EventLogCompactionLive } from "../../persistence/Layers/EventLogCompaction.ts";
+import { ONLINE_COMPACTION_PASS_OPTIONS } from "../../persistence/Layers/EventLogCompactionDeferred.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { EventLogCompaction } from "../../persistence/Services/EventLogCompaction.ts";

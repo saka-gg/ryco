@@ -24,23 +24,42 @@ type RuntimeSqliteLayerConfig = {
    * choose `auto_vacuum` first. Node's client sets no pragmas at open and ignores it.
    */
   readonly disableWAL?: boolean;
+  /**
+   * How long a statement waits for another connection's lock before it fails with SQLITE_BUSY:
+   * Bun's blocking busy timeout, Node's asynchronous retry budget. 0 fails at once. Defaults to
+   * each client's own (5 s).
+   */
+  readonly busyTimeoutMs?: number;
 };
 
 type Loader = {
-  layer: (config: RuntimeSqliteLayerConfig) => Layer.Layer<SqlClient.SqlClient, SqlError>;
+  layer: (
+    config: Omit<RuntimeSqliteLayerConfig, "busyTimeoutMs"> & {
+      readonly busyTimeout?: number;
+      readonly busyRetryBudgetMs?: number;
+    },
+  ) => Layer.Layer<SqlClient.SqlClient, SqlError>;
 };
 const defaultSqliteClientLoaders = {
   bun: () => import("@effect/sql-sqlite-bun/SqliteClient"),
   node: () => import("../NodeSqliteClient.ts"),
 } satisfies Record<string, () => Promise<Loader>>;
 
+/** A SQLite client of the running runtime (`bun:sqlite` on Bun, `node:sqlite` on Node), no setup. */
 export const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
   config: RuntimeSqliteLayerConfig,
 ) {
   const runtime = process.versions.bun !== undefined ? "bun" : "node";
   const loader = defaultSqliteClientLoaders[runtime];
   const clientModule = yield* Effect.promise<Loader>(loader);
-  return clientModule.layer(config);
+  const { busyTimeoutMs, ...rest } = config;
+  return clientModule.layer(
+    busyTimeoutMs === undefined
+      ? rest
+      : runtime === "bun"
+        ? { ...rest, busyTimeout: busyTimeoutMs }
+        : { ...rest, busyRetryBudgetMs: busyTimeoutMs },
+  );
 }, Layer.unwrap);
 
 /**

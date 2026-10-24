@@ -85,6 +85,7 @@ import {
   writeNodeConfig,
 } from "./cliSetup/nodeConfig.ts";
 import { applyNodeSettings, installServiceForNode } from "./cliSetup/nodeSetup.ts";
+import { makeDoctorCommand } from "./doctor/doctorCommand.ts";
 import {
   formatNodeConfig,
   lookupConfigKey,
@@ -4244,6 +4245,14 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     serviceCommand,
     remoteCommand,
     makeDbCommand({
+      locationFlags: sharedServerLocationFlags,
+      jsonFlag,
+      emitJson,
+      resolveConfig: resolveCliAuthConfig,
+      quietly,
+      adminCommandLogLevel,
+    }),
+    makeDoctorCommand({
       locationFlags: sharedServerLocationFlags,
       jsonFlag,
       emitJson,

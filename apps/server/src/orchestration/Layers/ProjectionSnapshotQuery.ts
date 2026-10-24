@@ -72,7 +72,7 @@ import { ProjectionThreadSession } from "../../persistence/Services/ProjectionTh
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { decodePersistedRepositoryIdentity } from "../../project/repositoryIdentityPersistence.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
-import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { readClientFor, SqliteReadClient } from "../../persistence/SqliteReadClient.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";

@@ -74,6 +74,23 @@ describe("StorageSnapshot database report", () => {
     expect(Schema.decodeUnknownSync(PreviousSnapshot)({ ...snapshot, database })).toEqual(snapshot);
   });
 
+  it("carries the doctor suggestion and accepts a report from a node without one", () => {
+    const decode = Schema.decodeUnknownSync(DatabaseStorageReport);
+    const suggested = {
+      ...database,
+      doctor: { recommended: true, command: "ryco doctor --apply" },
+    };
+    expect(decode(Schema.encodeSync(DatabaseStorageReport)(suggested))).toEqual(suggested);
+    expect(decode({ ...database, doctor: { recommended: false, command: null } }).doctor).toEqual({
+      recommended: false,
+      command: null,
+    });
+    expect("doctor" in decode(database)).toBe(false);
+    const { doctor: _omitted, ...fields } = DatabaseStorageReport.fields;
+    const PreviousReport = Schema.Struct(fields);
+    expect(Schema.decodeUnknownSync(PreviousReport)(suggested)).toEqual(database);
+  });
+
   it("rejects sizes that are not whole non-negative numbers and unknown modes", () => {
     const decode = Schema.decodeUnknownSync(DatabaseStorageReport);
     expect(() => decode({ ...database, freePages: -1 })).toThrow();
