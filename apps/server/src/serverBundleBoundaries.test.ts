@@ -189,6 +189,11 @@ describe("server boot import boundaries", () => {
     expect(
       reached(/^apps\/server\/src\/(?:persistence\/databaseBackups|cliDb\/dbRun)\.ts$/u),
     ).toEqual([]);
+    // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
+    // with the first Diagnostics snapshot.
+    expect(
+      reached(/^apps\/server\/src\/observability\/(?:HeapSnapshot|EventLoopStallHistory)\.ts$/u),
+    ).toEqual([]);
   });
 });
 
@@ -277,6 +282,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded when the external Agent Control integration first starts.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);
+      // Loaded with the first SIGUSR2 and the first Diagnostics snapshot.
+      expect(source).not.toMatch(/^\/\/#region src\/observability\/HeapSnapshot\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/observability\/EventLoopStallHistory\.ts$/mu);
     }
   });
 });
