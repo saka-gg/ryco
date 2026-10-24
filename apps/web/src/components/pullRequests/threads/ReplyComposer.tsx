@@ -14,7 +14,9 @@ export { SUBMIT_SHORTCUT_LABEL };
  * The body of a reply or line comment: an auto-growing field and a row of
  * actions ending in the primary one (⌘↵). Esc cancels. Errors stay inline
  * next to the actions so the draft is never lost. While it sends, the field
- * is read-only rather than disabled, so it keeps focus (and the caret).
+ * is read-only rather than disabled, so it keeps focus (and the caret). A
+ * field holding text is marked `data-unsent-comment`, so closing the
+ * workspace tab around it from the keyboard is refused.
  */
 export function CommentField({
   textareaRef,
@@ -54,7 +56,7 @@ export function CommentField({
     }
   };
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col" data-unsent-comment={props.value.trim() ? "" : undefined}>
       <textarea
         ref={textareaRef}
         aria-label={props.ariaLabel}

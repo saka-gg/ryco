@@ -3,6 +3,8 @@ import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import { useDeviceRuntime } from "../device/useDeviceRuntime";
 import { useCallback, useEffect, useMemo, type ReactElement } from "react";
 
+import { useAppKeybindings } from "../../appKeybindings";
+import type { ClosedViewOwner } from "../../closedViews";
 import { DraftId } from "../../composerDraftStore";
 import { useDraftSession } from "../../composerDraftSelectors";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
@@ -31,6 +33,7 @@ import { RightPanelSheet } from "../RightPanelSheet";
 import { LazyPhoneWorkSurfaceSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { SidebarInset } from "../ui/sidebar";
+import { useViewShortcuts } from "./useViewShortcuts";
 import { cn } from "~/lib/utils";
 
 export function DraftChatThreadRouteView({
@@ -138,6 +141,12 @@ export function DraftChatThreadRouteView({
     },
     [draftId, navigate],
   );
+  // Not on the frozen phone tier: no view shortcuts, and its closed tabs are not remembered.
+  const closedViewOwner = useMemo<ClosedViewOwner | null>(
+    () => (presentationTier !== "phone" ? { kind: "draft", draftId } : null),
+    [draftId, presentationTier],
+  );
+  const keybindings = useAppKeybindings();
   const {
     openedPanelModes,
     openedAgentKeys,
@@ -147,6 +156,9 @@ export function DraftChatThreadRouteView({
     closeRightPanel,
     toggleRightPanel,
     closePanelTab,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
     shouldRenderRightPanelContent,
     shouldRenderPhoneRightPanelContent,
   } = useRightPanelTabs({
@@ -156,6 +168,14 @@ export function DraftChatThreadRouteView({
     activeAgentKey,
     defaultLastMode: "files",
     navigateSearch: navigateDraftSearch,
+    closedViewOwner,
+  });
+  useViewShortcuts({
+    owner: closedViewOwner,
+    keybindings,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
   });
 
   useEffect(() => {
