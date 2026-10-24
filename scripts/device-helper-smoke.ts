@@ -16,6 +16,7 @@ import {
   execFile,
   execFileSync,
   spawn,
+  type ChildProcess,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { createServer, type Server, type Socket } from "node:net";
@@ -33,6 +34,7 @@ import {
   readDeviceHelperSourceRevision,
 } from "@ryco/shared/deviceHelperCache";
 
+import { parseHelperProbe } from "../apps/server/src/device/helperCapabilities.ts";
 import { sandboxedHelperCommand } from "../apps/server/src/device/helperSandbox.ts";
 import {
   parseSmokeOptions,
@@ -93,14 +95,20 @@ function listDevices(env: NodeJS.ProcessEnv): SimctlDevice[] {
   );
 }
 
-/** Runs a command with inherited stdio without blocking signal delivery. */
+/**
+ * Runs a command with inherited stdio without blocking signal delivery.
+ * `onSpawn` hands the child to the caller, whose cleanup must kill it: a
+ * signal that ends this process does not end the child.
+ */
 function runInherited(
   command: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
+  onSpawn: (child: ChildProcess) => void,
 ): Promise<void> {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(command, [...args], { env, stdio: "inherit" });
+    onSpawn(child);
     child.once("error", rejectRun);
     child.once("exit", (code, signal) => {
       if (code === 0) resolveRun();
@@ -283,6 +291,41 @@ function naluTypes(payload: Uint8Array): number[] {
   return types;
 }
 
+/** Probe fields that only feed the log, not the verdict; null when not JSON. */
+function readProbeDiagnostics(raw: string): {
+  readonly deviceCount: number | undefined;
+  readonly coreSimulatorVersion: string | undefined;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as {
+    deviceCount?: unknown;
+    toolchain?: { coreSimulatorVersion?: unknown };
+  };
+  return {
+    deviceCount: typeof record.deviceCount === "number" ? record.deviceCount : undefined,
+    coreSimulatorVersion:
+      typeof record.toolchain?.coreSimulatorVersion === "string"
+        ? record.toolchain.coreSimulatorVersion
+        : undefined,
+  };
+}
+
+function describeCapability(
+  capability: ReturnType<typeof parseHelperProbe>["capabilities"][number],
+): string {
+  if (capability.ok) return "ok";
+  const detail = capability.detail ?? "unavailable";
+  return capability.missingSymbol === undefined
+    ? detail
+    : `missing ${capability.missingSymbol} (${detail})`;
+}
+
 async function main(): Promise<void> {
   if (process.platform !== "darwin") fail("the device helper is macOS only");
   const parsedOptions = parseSmokeOptions(process.argv.slice(2));
@@ -343,21 +386,26 @@ async function main(): Promise<void> {
   if (process.env.DEVICE_HELPER_PROBE_JSON) {
     writeFileSync(process.env.DEVICE_HELPER_PROBE_JSON, `${probeRaw}\n`);
   }
-  const probe = JSON.parse(probeRaw) as {
-    readonly ok: boolean;
-    readonly deviceCount?: number;
-    readonly error?: string;
-    readonly capabilities?: Record<string, unknown>;
-  };
-  for (const [name, status] of Object.entries(probe.capabilities ?? {})) {
-    info(`capability ${name}: ${status === "ok" ? "ok" : JSON.stringify(status)}`);
+  const diagnostics = readProbeDiagnostics(probeRaw);
+  if (diagnostics === null) fail("helper preflight returned unreadable output", probeRaw);
+  // The server's parser, so the smoke and the pane read the probe the same
+  // way. The verdict is deliberately stricter: the pane shows a helper with
+  // one broken capability as degraded but usable, a qualification run fails.
+  const probe = parseHelperProbe(probeRaw);
+  for (const capability of probe.capabilities) {
+    info(`capability ${capability.id}: ${describeCapability(capability)}`);
   }
-  const broken = Object.entries(probe.capabilities ?? {})
-    .filter(([, status]) => status !== "ok")
-    .map(([name]) => name);
-  assert(broken.length === 0, `helper capabilities unavailable: ${broken.join(", ")}`);
+  const broken = probe.capabilities.filter((capability) => !capability.ok);
+  assert(
+    broken.length === 0,
+    `helper capabilities unavailable: ${broken.map((capability) => capability.id).join(", ")}`,
+  );
   assert(probe.ok, `helper preflight failed: ${probe.error ?? "unknown error"}`);
-  info(`CoreSimulator reachable, ${probe.deviceCount ?? "?"} devices`);
+  info(
+    `CoreSimulator ${diagnostics.coreSimulatorVersion ?? "(version not reported)"} reachable, ${
+      diagnostics.deviceCount ?? "?"
+    } devices`,
+  );
   if (options.probeOnly) {
     console.log("\n[device-smoke] PASS (probe only; no simulator was booted)");
     return;
@@ -374,10 +422,32 @@ async function main(): Promise<void> {
   );
 
   let bootedBySmoke = false;
+  // Set just before `simctl boot`. If the boot then fails, the device may
+  // still be coming up on this run's behalf (simctl killed mid-boot by the
+  // Ctrl-C that reaches the whole process group), so cleanup checks it.
+  let bootRequested = false;
+  let bootstatus: ChildProcess | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
   let client: HelperClient | undefined;
   const collector = new FrameCollector();
   const cleanupPaths: string[] = [];
+
+  // Whether the selected device is this run's to shut down.
+  const ownsDevice = (): boolean => {
+    if (bootedBySmoke) return true;
+    if (!bootRequested) return false;
+    // The boot failed or was cut short. The device was shut down when it was
+    // selected, so anything but Shutdown now is this run's boot.
+    let state: string | undefined;
+    try {
+      state = listDevices(toolchainEnv).find((candidate) => candidate.udid === device.udid)?.state;
+    } catch {
+      state = undefined;
+    }
+    if (state === "Shutdown") return false;
+    info(`${device.udid} is ${state ?? "in an unknown state"} after an interrupted boot`);
+    return true;
+  };
 
   // Synchronous and idempotent, so the `finally` and a signal handler can both
   // call it. Only ever shuts down the simulator this run booted.
@@ -388,23 +458,32 @@ async function main(): Promise<void> {
     collector.close();
     child?.stdin.end();
     child?.kill();
+    // A signal ends this process, not its children; a stray bootstatus would
+    // keep waiting on (or reporting) the device after it is shut down.
+    if (bootstatus && bootstatus.exitCode === null && bootstatus.signalCode === null) {
+      bootstatus.kill();
+    }
     for (const cleanupPath of cleanupPaths) rmSync(cleanupPath, { recursive: true, force: true });
-    if (bootedBySmoke) {
-      info(`shutting down ${device.udid}, which this smoke run booted`);
-      try {
-        execFileSync("xcrun", ["simctl", "shutdown", device.udid], {
-          env: toolchainEnv,
-          stdio: "inherit",
-        });
-      } catch (error) {
-        console.error("[device-smoke] warning: owned simulator shutdown failed", error);
-      }
+    if (!ownsDevice()) return;
+    info(`shutting down ${device.udid}, which this smoke run booted`);
+    try {
+      execFileSync("xcrun", ["simctl", "shutdown", device.udid], {
+        env: toolchainEnv,
+        stdio: "inherit",
+      });
+    } catch (error) {
+      console.error(
+        `[device-smoke] warning: could not shut down ${device.udid}, which this run booted; run 'xcrun simctl shutdown ${device.udid}'`,
+        error,
+      );
     }
   };
   // A tool timeout or Ctrl-C would otherwise end the process with the
   // simulator still running. Registered before the synchronous boot: a signal
-  // that arrives during it is delivered once it returns, by which time
-  // `bootedBySmoke` says whether the boot was ours.
+  // that only this process gets (a timeout's SIGTERM) waits until the boot
+  // returns, by which time `bootedBySmoke` is accurate. A terminal Ctrl-C also
+  // reaches simctl, which can die mid-boot; `bootRequested` covers that case,
+  // in the `finally` that the failed boot unwinds through.
   const onSignal = (signal: NodeJS.Signals): void => {
     console.error(`[device-smoke] ${signal} received; cleaning up`);
     cleanUp();
@@ -418,15 +497,34 @@ async function main(): Promise<void> {
   try {
     if (!wasBooted) {
       step("Booting the simulator");
-      execFileSync("xcrun", ["simctl", "boot", device.udid], {
-        env: toolchainEnv,
-        stdio: "inherit",
-      });
+      bootRequested = true;
+      try {
+        execFileSync("xcrun", ["simctl", "boot", device.udid], {
+          env: toolchainEnv,
+          encoding: "utf8",
+          // stderr is captured (and shown in the failure) to tell a device
+          // someone else booted meanwhile, which is not ours to shut down.
+          stdio: ["ignore", "inherit", "pipe"],
+        });
+      } catch (error) {
+        const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+        if (/current state: Booted/iu.test(stderr)) bootRequested = false;
+        throw error;
+      }
       bootedBySmoke = true;
       info(`booted ${device.udid}; it is shut down when this run ends`);
       // Asynchronous so a signal during a slow first boot is handled now, not
-      // after the device finishes booting.
-      await runInherited("xcrun", ["simctl", "bootstatus", device.udid, "-b"], toolchainEnv);
+      // after the device finishes booting. No `-b`: the device is already
+      // booted, and a bootstatus that outlived the shutdown must not boot it
+      // again.
+      await runInherited(
+        "xcrun",
+        ["simctl", "bootstatus", device.udid],
+        toolchainEnv,
+        (spawned) => {
+          bootstatus = spawned;
+        },
+      );
       await sleep(3_000);
     }
 
@@ -446,6 +544,16 @@ async function main(): Promise<void> {
     const attached = await client.call("attach", { udid: device.udid });
     assert(Number(attached.pixelWidth) > 0, "attach returned an invalid display");
     info(`${attached.name} ${attached.pixelWidth}x${attached.pixelHeight}`);
+    // attach is where the HID client is really created; report its reason
+    // here rather than as the first swipe's bare error.
+    const attachedCapabilities = (attached.capabilities ?? {}) as Record<string, unknown>;
+    const degraded = (attached.degraded ?? {}) as Record<string, unknown>;
+    assert(
+      attachedCapabilities.input === true,
+      `attach reported input unavailable: ${
+        typeof degraded.hid === "string" ? degraded.hid : "no reason given"
+      }`,
+    );
 
     step(`Streaming at least ${requiredFrames} frames`);
     const socketDir = mkdtempSync(join(tmpdir(), "ryco-device-smoke-"));

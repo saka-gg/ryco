@@ -33,27 +33,55 @@ export type SmokeResult<T> =
 
 const PREFERRED_DEVICES = ["iPhone 17 Pro", "iPhone 16 Pro", "iPhone 15 Pro", "iPhone"];
 
+const VALUE_FLAGS = new Set(["--cache-dir", "--udid"]);
+const SWITCH_FLAGS = new Set(["--probe-only", "--allow-booted"]);
+
+/**
+ * Strict on purpose: an argument this parser does not understand fails the
+ * run. Ignoring it would turn a typo or `--udid=<udid>` style it did not
+ * accept into the developer default, which drives whatever simulator is
+ * already booted. Both `--flag value` and `--flag=value` are accepted.
+ */
 export function parseSmokeOptions(argv: readonly string[]): SmokeResult<SmokeOptions> {
   const values = new Map<string, string>();
-  for (const flag of ["--cache-dir", "--udid"]) {
-    const index = argv.indexOf(flag);
-    if (index < 0) continue;
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--") || value.trim().length === 0) {
-      return { ok: false, error: `${flag} needs a value` };
+  const switches = new Set<string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    const equals = argument.startsWith("--") ? argument.indexOf("=") : -1;
+    const flag = equals > 0 ? argument.slice(0, equals) : argument;
+    if (VALUE_FLAGS.has(flag)) {
+      let value: string | undefined;
+      if (equals > 0) {
+        value = argument.slice(equals + 1);
+      } else {
+        index += 1;
+        value = argv[index];
+      }
+      if (value === undefined || value.startsWith("--") || value.trim().length === 0) {
+        return { ok: false, error: `${flag} needs a value` };
+      }
+      if (values.has(flag)) return { ok: false, error: `${flag} was given more than once` };
+      values.set(flag, value);
+    } else if (SWITCH_FLAGS.has(flag)) {
+      if (equals > 0) return { ok: false, error: `${flag} takes no value` };
+      switches.add(flag);
+    } else {
+      return {
+        ok: false,
+        error: `unknown argument '${argument}' (expected --probe-only, --cache-dir <dir>, --udid <udid>, --allow-booted)`,
+      };
     }
-    values.set(flag, value);
   }
   const cacheDir = values.get("--cache-dir");
   const udid = values.get("--udid");
-  const allowBooted = argv.includes("--allow-booted");
+  const allowBooted = switches.has("--allow-booted");
   if (allowBooted && udid === undefined) {
     return { ok: false, error: "--allow-booted only applies together with --udid" };
   }
   return {
     ok: true,
     value: {
-      probeOnly: argv.includes("--probe-only"),
+      probeOnly: switches.has("--probe-only"),
       cacheRoot: cacheDir === undefined ? undefined : resolve(cacheDir),
       udid,
       allowBooted,

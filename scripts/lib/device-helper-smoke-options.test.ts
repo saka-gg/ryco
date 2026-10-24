@@ -63,6 +63,48 @@ describe("parseSmokeOptions", () => {
     });
   });
 
+  it("accepts --flag=value as well as --flag value", () => {
+    const parsed = parseSmokeOptions(["--udid=UDID-1", "--cache-dir=/tmp/helper-cache"]);
+    assert.deepStrictEqual(parsed, {
+      ok: true,
+      value: {
+        probeOnly: false,
+        cacheRoot: "/tmp/helper-cache",
+        udid: "UDID-1",
+        allowBooted: false,
+      },
+    });
+    assert.deepStrictEqual(parseSmokeOptions(["--udid="]), {
+      ok: false,
+      error: "--udid needs a value",
+    });
+  });
+
+  it("fails on an argument it does not understand instead of ignoring it", () => {
+    // Ignoring a typo would fall back to the developer default, which drives
+    // whatever simulator is already booted.
+    for (const argv of [["--uuid", "UDID-1"], ["UDID-1"], ["--probe"], ["--probe-only=yes"]]) {
+      const parsed = parseSmokeOptions(argv);
+      assert.isFalse(parsed.ok, argv.join(" "));
+    }
+    assert.deepStrictEqual(parseSmokeOptions(["--uuid", "UDID-1"]), {
+      ok: false,
+      error:
+        "unknown argument '--uuid' (expected --probe-only, --cache-dir <dir>, --udid <udid>, --allow-booted)",
+    });
+    assert.deepStrictEqual(parseSmokeOptions(["--probe-only=yes"]), {
+      ok: false,
+      error: "--probe-only takes no value",
+    });
+  });
+
+  it("rejects a value flag given twice", () => {
+    assert.deepStrictEqual(parseSmokeOptions(["--udid", "A", "--udid=B"]), {
+      ok: false,
+      error: "--udid was given more than once",
+    });
+  });
+
   it("rejects --allow-booted without --udid", () => {
     // Reusing "whatever is booted" is the developer default already; the flag
     // only loosens the agent-safe --udid path.

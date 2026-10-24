@@ -92,8 +92,10 @@ button and keyboard events and delivers Indigo touches unreliably, while the
 host-side send still succeeds. Input there goes through the guest's `dtuhidd`
 service, which this helper does not speak yet. Rather than ack input that never
 arrives, the helper reports it as unavailable: `--probe` fails the `hid`
-capability with the reason, and `attach` answers `capabilities.input: false`
-with `degraded.hid` set. Streaming, screenshots and `describe-ui` keep working.
+capability with the reason, `attach` answers `capabilities.input: false` with
+`degraded.hid` set, and every input call fails with "HID input is unavailable
+for this simulator: <reason>". Streaming, screenshots and `describe-ui` keep
+working.
 
 The gate is the host's CoreSimulator version (`CoreSimulatorVersion.h`, also
 reported as `toolchain.coreSimulatorVersion` by `--probe`), not the selected
@@ -170,10 +172,15 @@ the call.
 boots or reuses a simulator, streams ≥30 frames asserting keyframe and Annex B
 NAL structure, injects a tap, dumps the accessibility tree, verifies PNG magic on
 a screenshot, and shuts down only a simulator it booted itself. It does so on
-failure too, and on SIGINT/SIGTERM; only SIGKILL can leave that simulator
-running.
+failure too, and on SIGINT/SIGTERM, including a Ctrl-C that kills `simctl boot`
+mid-boot; only SIGKILL can leave that simulator running. The probe verdict uses
+the server's parser (`parseHelperProbe`) but is stricter than the pane: any
+broken capability fails the run, so on CoreSimulator 1155.4+ it stops at "helper
+capabilities unavailable: hid" until the helper speaks `dtuhidd`.
 
-Flags (after `bun scripts/device-helper-smoke.ts`):
+Flags (after `bun scripts/device-helper-smoke.ts`; `--flag value` and
+`--flag=value` both work, and any other argument fails the run rather than
+being ignored):
 
 - `--probe-only` builds and preflights the helper and never boots a simulator
   (`bun run test:device:probe`).
