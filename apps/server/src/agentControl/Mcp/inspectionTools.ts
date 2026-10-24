@@ -16,6 +16,7 @@ import type {
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
+import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   allThreadsVisible,
   failTool,
@@ -124,6 +125,8 @@ const descriptors = INSPECTION_TOOL_DESCRIPTORS;
 export function withInspectionTools(
   base: AgentControlMcpTools,
   deps: AgentControlMcpToolDeps & {
+    /** Wakes `ryco_wait_threads` when a waited thread settles. */
+    domainEvents: Pick<OrchestrationEngineShape, "subscribeDomainEvents">;
     terminals?: TerminalManagerShape;
     diffs?: CheckpointDiffQueryShape;
     files?: WorkspaceFileSystemShape;
@@ -184,6 +187,7 @@ export function withInspectionTools(
               deps.projections,
               input,
               deps.policy.requireEnabled(`mcp:${name}`).pipe(Effect.as(allThreadsVisible)),
+              { domainEvents: deps.domainEvents },
             );
           }
           const input = yield* Schema.decodeUnknownEffect(AgentControlInspectThreadInput)(args);
