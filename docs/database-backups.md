@@ -18,8 +18,11 @@ when:
 - a numbered migration is pending, or
 - a compatibility repair runs for the first time on this database. Repairs carry schema changes
   that cannot ship as numbered migrations; each one is recorded in `ryco_compatibility_repairs`
-  once it has run. Databases written by builds before this one have no such records, so the
-  first start of this build takes one backup even without a pending migration.
+  once it has run. Databases written by builds before this one ran every repair but have no such
+  records. For a database without any record (and no pending migration), Ryco reads its schema
+  instead: a repair whose effect is already there would write nothing but its record, so the
+  first start of this build records it without a backup. Only a repair whose effect is missing
+  takes one.
 
 New, empty databases are not backed up, and neither is a database whose schema is newer than
 the running build (that build refuses to open it; see below).

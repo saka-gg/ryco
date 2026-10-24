@@ -29,7 +29,11 @@ import * as SqlClient from "effect/sql/SqlClient";
  * the latest applied one and parallel branches may claim the same id. The backfill runs only when
  * the columns are created.
  */
-const COLUMNS = ["first_user_message_id", "latest_user_message_id", "latest_completed_turn_at"];
+export const COLUMNS = [
+  "first_user_message_id",
+  "latest_user_message_id",
+  "latest_completed_turn_at",
+];
 
 /** `inheritedTurnRowSql` with the `:inherited:` segment (11 characters) inlined. */
 const INHERITED_TURN = `(turns.assistant_message_id IS NOT NULL
@@ -75,7 +79,7 @@ const updateLatestCompleted = (thread: string) => `
   WHERE thread_id = ${thread};`;
 
 /** name -> CREATE statement. */
-const TRIGGERS: ReadonlyArray<readonly [string, string]> = [
+export const TRIGGERS: ReadonlyArray<readonly [string, string]> = [
   [
     "projection_threads_summary_insert",
     `CREATE TRIGGER projection_threads_summary_insert AFTER INSERT ON projection_threads
@@ -150,7 +154,7 @@ const TRIGGERS: ReadonlyArray<readonly [string, string]> = [
   ],
 ];
 
-const REQUIRED_TABLES = [
+export const REQUIRED_TABLES = [
   "projection_threads",
   "projection_thread_messages",
   "projection_turns",

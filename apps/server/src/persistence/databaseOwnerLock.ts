@@ -173,6 +173,11 @@ export const DatabaseOwnerLockEnvironment = Context.Reference<DatabaseOwnerLockE
 export const SERVER_HOLDER_WAIT_MS = 10_000;
 /** How long a server waits for a CLI migration, restore or doctor run to finish. */
 export const MAINTENANCE_HOLDER_WAIT_MS = 10 * 60_000;
+/**
+ * How long a lock record that is being written (created, not filled in yet) is read again before
+ * its unknown writer counts as the holder.
+ */
+export const BEING_WRITTEN_WAIT_MS = 1_000;
 /** A lock file is at most this large; anything bigger is not one. */
 const LOCK_FILE_MAX_BYTES = 2_048;
 
@@ -624,6 +629,27 @@ export const probeDatabaseOwner = (
     }
   });
 
+/**
+ * {@link probeDatabaseOwner}, except that a lock record still being written is read again for up
+ * to {@link BEING_WRITTEN_WAIT_MS}, as taking ownership does: its writer may yet turn out to be a
+ * known owner, or give the lock up.
+ */
+export const probeDatabaseOwnerSettled = (
+  dbPath: string,
+): Effect.Effect<DatabaseOwnership, DatabaseOwnerLockError> =>
+  Effect.gen(function* () {
+    const startedMs = yield* Clock.currentTimeMillis;
+    for (;;) {
+      const probed = yield* Effect.result(probeDatabaseOwner(dbPath));
+      if (probed._tag === "Success") return probed.success;
+      const elapsedMs = (yield* Clock.currentTimeMillis) - startedMs;
+      if (probed.failure.reason !== "being-written" || elapsedMs >= BEING_WRITTEN_WAIT_MS) {
+        return yield* Effect.fail(probed.failure);
+      }
+      yield* Effect.sleep(Math.min(pollDelayMs(elapsedMs), BEING_WRITTEN_WAIT_MS - elapsedMs));
+    }
+  });
+
 // ---------------------------------------------------------------------------
 // Acquisition
 // ---------------------------------------------------------------------------
@@ -815,13 +841,13 @@ const acquireOwnership = (
         request.kind === "maintenance"
           ? holder !== null && holder.kind === "server"
             ? 0
-            : Math.max(request.waitForMaintenanceMs, holder === null ? 1_000 : 0)
+            : Math.max(request.waitForMaintenanceMs, holder === null ? BEING_WRITTEN_WAIT_MS : 0)
           : holder !== null && holder.kind === "maintenance"
             ? request.waitForServerMs === "forever"
               ? "forever"
               : Math.max(request.waitForServerMs, MAINTENANCE_HOLDER_WAIT_MS)
             : holder === null && request.waitForServerMs !== "forever"
-              ? Math.max(request.waitForServerMs, 1_000)
+              ? Math.max(request.waitForServerMs, BEING_WRITTEN_WAIT_MS)
               : request.waitForServerMs;
       if (allowedMs !== "forever" && elapsedMs >= allowedMs) {
         return yield* Effect.fail(owned(holder === null ? "being-written" : "held", holder));

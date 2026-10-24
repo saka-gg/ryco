@@ -9,8 +9,10 @@
  *   before.
  * - Any other process first reads what an upgrade would change: pending
  *   numbered migrations, or compatibility repairs this database has never
- *   recorded (`inspectMigrationLedger`, `isUpgradePending`; nothing runs).
- *   Nothing to do: it skips the ledger pass and the repairs.
+ *   recorded; on a database without any record (last run by a release from
+ *   before them), only those whose effect is missing (`inspectMigrationLedger`,
+ *   `isUpgradePending`; nothing runs). Nothing to do: it skips the ledger pass
+ *   and the repairs.
  * - Something to do and nobody owns the database: it takes maintenance
  *   ownership for the migration, so a server starting meanwhile waits for it.
  * - Something to do and a live process owns the database: it waits up to 30 s
@@ -34,7 +36,7 @@ import {
   DatabaseUpgradeBlockedError,
   describeDatabaseOwner,
   isDatabaseOwnerLockDisabled,
-  probeDatabaseOwner,
+  probeDatabaseOwnerSettled,
 } from "./databaseOwnerLock.ts";
 import {
   failIfSchemaTooNew,
@@ -67,7 +69,7 @@ export const inspectSchemaUpgrade = (dbPath: string) =>
     return { ledger, needed: isUpgradePending(ledger) } satisfies SchemaUpgrade;
   });
 
-/** At most three repair keys; a database from before repairs were recorded lists all of them. */
+/** At most three repair keys, then how many more. */
 const describeRepairs = (keys: ReadonlyArray<string>) =>
   keys.length <= 3 ? keys.join(", ") : `${keys.slice(0, 3).join(", ")} and ${keys.length - 3} more`;
 
@@ -141,7 +143,8 @@ export const migrateUnderOwnershipPolicy = <A, E, R>(
       return;
     }
 
-    const probed = yield* probeDatabaseOwner(dbPath).pipe(
+    // A lock being written is read again for a moment: its writer may give it up.
+    const probed = yield* probeDatabaseOwnerSettled(dbPath).pipe(
       Effect.map((ownership) =>
         ownership.state === "owned"
           ? { owner: ownership.owner, ownerError: undefined, free: false }
@@ -184,23 +187,23 @@ export const migrateUnderOwnershipPolicy = <A, E, R>(
       ownerError = taken.owner === null ? taken.message : undefined;
     }
 
-    yield* waitForOwnerUpgrade({ dbPath, owner, ownerError, upgrade });
+    yield* waitForOwnerUpgrade({ dbPath, owner, ownerError });
   });
 
 /**
  * An owner running this binary's schema code finishes the upgrade itself
  * (it holds the database while it migrates): wait for that. Any other owner
- * never will, so refuse at once.
+ * never will, so refuse, unless the database no longer needs the upgrade: this
+ * process may have waited for maintenance ownership before it got here, and
+ * whoever held the database meanwhile may have done it.
  */
 const waitForOwnerUpgrade = (input: {
   readonly dbPath: string;
   readonly owner: DatabaseOwner | null;
   readonly ownerError: string | undefined;
-  readonly upgrade: SchemaUpgrade;
 }) =>
   Effect.gen(function* () {
     const { owner } = input;
-    let upgrade = input.upgrade;
     if (owner !== null && !owner.legacy && owner.schemaDigest === migrationSchemaDigest) {
       yield* Effect.logInfo(
         `Waiting for ${describeDatabaseOwner(owner)} to finish upgrading the database`,
@@ -208,10 +211,11 @@ const waitForOwnerUpgrade = (input: {
       const startedMs = yield* Clock.currentTimeMillis;
       while ((yield* Clock.currentTimeMillis) - startedMs < SAME_SCHEMA_OWNER_UPGRADE_WAIT_MS) {
         yield* Effect.sleep(UPGRADE_POLL_MS);
-        upgrade = yield* inspectSchemaUpgrade(input.dbPath);
-        if (!upgrade.needed) return;
+        if (!(yield* inspectSchemaUpgrade(input.dbPath)).needed) return;
       }
     }
+    const upgrade = yield* inspectSchemaUpgrade(input.dbPath);
+    if (!upgrade.needed) return;
     return yield* Effect.fail(
       new DatabaseUpgradeBlockedError({
         owner,

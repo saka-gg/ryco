@@ -60,7 +60,9 @@ A process that does not own the database first reads what it would change: pendi
 migrations, and compatibility repairs this database has never recorded. Every migration pass
 records the repairs it ran in `ryco_compatibility_repairs` (see
 [database-backups.md](database-backups.md)), so this is a read of the ledger and those records;
-no migration or repair runs. Then:
+no migration or repair runs. A database without any record (see
+[Servers from before the lock](#servers-from-before-the-lock)) is also read for each repair's
+effect. Then:
 
 - **Nothing to change**: it skips the migrations and repairs and carries on.
 - **Changes, nobody owns the database**: it takes maintenance ownership for the migration (waiting
@@ -121,15 +123,21 @@ or nothing listens on its port), so a busy server keeps it. This is best effort 
 (an older server whose runtime file was removed is not seen), and it will be removed two releases
 after the lock shipped.
 
-Those servers also record no compatibility repairs. Until a server of this version has started on
-the database once, every repair counts as pending, so a new CLI next to an older running server
-refuses to migrate ("needs to repair the database schema (…)") even when nothing else changed.
-Restarting the server on the new version records the repairs and ends this.
+Those servers also record no compatibility repairs, although they run every one at each start. On
+a database without any repair record and without a pending migration, Ryco reads each repair's
+effect instead (columns, tables, indexes and triggers in the SQLite catalog, and the completion
+markers of the repairs that backfill data): a repair whose effect is there is not pending, so a new
+CLI next to an older running server opens that database normally, and the first start of a server
+of this version records the repairs without taking a backup. A repair whose effect is missing is
+pending as before: the CLI refuses ("needs to repair the database schema (…)") and the server backs
+up before it runs the repair. Once a database has any record, the records alone decide.
 
 ## For code
 
 - `probeDatabaseOwner(dbPath)`: `free`, or `owned` by `{ pid, kind, startedAt, launcher, ... }`.
   Fails with `DatabaseOwnerLockError` when the lock cannot be judged; treat that as owned.
+  `probeDatabaseOwnerSettled(dbPath)`, which the migration rule uses, first reads a lock that is
+  still being written again for up to 1 s, as taking ownership does.
 - `acquireDatabaseServer(dbPath, { launcher })` and `acquireDatabaseMaintenance(dbPath, purpose,
   { waitMs })`: scoped; released when the scope closes, also on failure and interruption. They fail
   with `DatabaseOwnedError` (`reason` and the `owner`).
@@ -138,5 +146,7 @@ Restarting the server on the new version records the repairs and ends this.
   the backup and the migration pass.
 - `inspectMigrationLedger()` and `isUpgradePending(ledger)` (`Migrations.ts`): whether a migration
   pass would change the database (pending migrations, `repairsPending`), read-only. The rule and
-  the pre-upgrade backup both decide with it. `migrationSchemaDigest` (migrations and repair keys)
-  tells an owner running the same schema code apart.
+  the pre-upgrade backup both decide with it. On a database without repair records, the repair
+  checks in `compatibilityRepairChecks.ts` (loaded only then) move the repairs whose effect is
+  present to `repairsRecognised`. `migrationSchemaDigest` (migrations and repair keys) tells an
+  owner running the same schema code apart.

@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,12 +14,15 @@ import * as SqlClient from "effect/sql/SqlClient";
 import {
   defaultBootId,
   defaultBootTime,
+  defaultProcessProbe,
   defaultProcessStartTime,
 } from "../processLock/processIdentity.ts";
+import { isAcceptingConnections } from "../serverRuntimeState.ts";
 import { databaseBackupsDirectory } from "./databaseBackupPolicy.ts";
 import {
   acquireDatabaseServer,
   DatabaseOwnerLease,
+  DatabaseOwnerLockEnvironment,
   databaseOwnerLockPath,
   type DatabaseUpgradeBlockedError,
 } from "./databaseOwnerLock.ts";
@@ -78,21 +82,32 @@ const backupFiles = (dbPath: string) => {
   return NodeFS.existsSync(directory) ? NodeFS.readdirSync(directory).toSorted() : [];
 };
 
-/**
- * A database this binary migrated, then changed back as a binary without the repair `key` left
- * it: the repair's column is gone and its record too.
- */
-const forgetRepair = (dbPath: string, key: string, sql: string) => {
+/** Run `statements` on the database file, as another process would. */
+const execFile = (dbPath: string, ...statements: ReadonlyArray<string>) => {
   const db = new DatabaseSync(dbPath);
   try {
-    db.exec(sql);
-    db.prepare("DELETE FROM ryco_compatibility_repairs WHERE repair_key = ?").run(
-      compatibilityRepairMarker(key),
-    );
+    for (const statement of statements) db.exec(statement);
   } finally {
     db.close();
   }
 };
+
+const deleteRecord = (key: string) =>
+  `DELETE FROM ryco_compatibility_repairs WHERE repair_key = '${compatibilityRepairMarker(key)}'`;
+
+/**
+ * A database this binary migrated, then changed back as a binary without the repair `key` left
+ * it: the repair's column is gone and its record too.
+ */
+const forgetRepair = (dbPath: string, key: string, sql: string) =>
+  execFile(dbPath, sql, deleteRecord(key));
+
+/** As a release from before repair records left a database: every repair ran, none is recorded. */
+const forgetRepairRecords = (dbPath: string) =>
+  execFile(
+    dbPath,
+    "DELETE FROM ryco_compatibility_repairs WHERE repair_key LIKE 'schema-repair:%'",
+  );
 
 /** A real live process that stands in for a running server (or another CLI). */
 const spawnIdleProcess = Effect.acquireRelease(
@@ -105,30 +120,68 @@ const spawnIdleProcess = Effect.acquireRelease(
 );
 
 /** Write the lock that a live owner `pid` would write, with its real boot and start time. */
+const writeLiveOwnerFile = async (
+  dbPath: string,
+  pid: number,
+  overrides: Record<string, unknown> = {},
+) => {
+  const lockPath = databaseOwnerLockPath(dbPath);
+  NodeFS.writeFileSync(lockPath, "", { mode: 0o600 });
+  const ino = NodeFS.lstatSync(lockPath).ino;
+  const record = {
+    version: 1,
+    token: "live-owner",
+    pid,
+    kind: "server",
+    purpose: "serve",
+    launcher: "desktop",
+    appVersion: "0.1.0",
+    startedAt: new Date().toISOString(),
+    bootTime: defaultBootTime(),
+    bootId: (await defaultBootId()) ?? null,
+    startTime: (await defaultProcessStartTime(pid)) ?? null,
+    ino,
+    schemaSupported: SUPPORTED_MIGRATION_ID - 1,
+    schemaDigest: "0000000000000000",
+    ...overrides,
+  };
+  NodeFS.writeFileSync(lockPath, `${JSON.stringify(record)}\n`);
+  return NodeFS.readFileSync(lockPath, "utf8");
+};
+
 const writeLiveOwner = (dbPath: string, pid: number, overrides: Record<string, unknown> = {}) =>
-  Effect.promise(async () => {
-    const lockPath = databaseOwnerLockPath(dbPath);
-    NodeFS.writeFileSync(lockPath, "", { mode: 0o600 });
-    const ino = NodeFS.lstatSync(lockPath).ino;
-    const record = {
-      version: 1,
-      token: "live-owner",
-      pid,
-      kind: "server",
-      purpose: "serve",
-      launcher: "desktop",
-      appVersion: "0.1.0",
-      startedAt: new Date().toISOString(),
-      bootTime: defaultBootTime(),
-      bootId: (await defaultBootId()) ?? null,
-      startTime: (await defaultProcessStartTime(pid)) ?? null,
-      ino,
-      schemaSupported: SUPPORTED_MIGRATION_ID - 1,
-      schemaDigest: "0000000000000000",
-      ...overrides,
-    };
-    NodeFS.writeFileSync(lockPath, `${JSON.stringify(record)}\n`);
-    return NodeFS.readFileSync(lockPath, "utf8");
+  Effect.promise(() => writeLiveOwnerFile(dbPath, pid, overrides));
+
+/**
+ * A running server from before the owner lock: no lock file, but a live pid in
+ * `server-runtime.json` and something listening on its port. Gone when the scope closes.
+ */
+const startLegacyServer = (dbPath: string) =>
+  Effect.gen(function* () {
+    const server = yield* spawnIdleProcess;
+    const listening = yield* Effect.acquireRelease(
+      Effect.promise(
+        () =>
+          new Promise<NodeNet.Server>((resolve) => {
+            const socket = NodeNet.createServer();
+            socket.listen(0, "127.0.0.1", () => resolve(socket));
+          }),
+      ),
+      (socket) =>
+        Effect.promise(() => new Promise<void>((resolve) => socket.close(() => resolve()))),
+    );
+    const port = (listening.address() as NodeNet.AddressInfo).port;
+    NodeFS.writeFileSync(
+      NodePath.join(NodePath.dirname(dbPath), "server-runtime.json"),
+      JSON.stringify({
+        version: 1,
+        pid: server.pid,
+        host: "127.0.0.1",
+        port,
+        origin: `http://127.0.0.1:${port}`,
+        startedAt: new Date().toISOString(),
+      }),
+    );
   });
 
 /** Build the persistence layer a CLI command builds, and touch the database once. */
@@ -139,6 +192,14 @@ const openAsCli = (dbPath: string) =>
   }).pipe(
     Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
     Effect.exit,
+  );
+
+/** Build the persistence layer as the server holding the database's lease does. */
+const openAsServer = (dbPath: string) =>
+  openAsCli(dbPath).pipe(
+    Effect.provide(
+      Layer.effect(DatabaseOwnerLease, acquireDatabaseServer(dbPath, { launcher: "serve" })),
+    ),
   );
 
 const blockedError = <A, E>(exit: Exit.Exit<A, E>): DatabaseUpgradeBlockedError => {
@@ -199,31 +260,90 @@ describe("migrations under database ownership", () => {
     }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
   });
 
+  it.live("opens a database from before repair records next to an older running server", () => {
+    const dbPath = makeDbPath();
+    return Effect.gen(function* () {
+      // Kept current by a release without repair records: every repair ran, none is recorded.
+      yield* createDatabase(dbPath);
+      const repairs = inspectFile(dbPath).repairs.filter(({ repair_key }) =>
+        String(repair_key).startsWith("schema-repair:"),
+      );
+      forgetRepairRecords(dbPath);
+      yield* startLegacyServer(dbPath);
+      const before = inspectFile(dbPath);
+
+      assert.isTrue(Exit.isSuccess(yield* openAsCli(dbPath)));
+      // Nothing to upgrade: no repair ran, nothing was recorded or backed up.
+      assert.deepEqual(inspectFile(dbPath), before);
+      assert.deepEqual(backupFiles(dbPath), []);
+
+      // A database with any record keeps the records as the rule: the others are pending.
+      execFile(
+        dbPath,
+        `INSERT INTO ryco_compatibility_repairs (repair_key) VALUES ('${compatibilityRepairMarker("thread-forks")}')`,
+      );
+      const error = blockedError(yield* openAsCli(dbPath));
+      assert.isTrue(error.owner?.legacy);
+      assert.lengthOf(error.repairs, repairs.length - 1);
+      assert.notInclude(error.repairs, "thread-forks");
+      assert.include(error.message, "an older Ryco server");
+      assert.deepEqual(backupFiles(dbPath), []);
+    }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
+  });
+
   it.live(
-    "refuses next to a live server while a database from before repair records has none",
+    "still repairs a database from before repair records that lacks a repair's effect",
     () => {
       const dbPath = makeDbPath();
       return Effect.gen(function* () {
-        // A database a build without repair records kept current: every repair ran, none is
-        // recorded. Only a pass can tell, and only the owner may run one.
         yield* createDatabase(dbPath);
-        const db = new DatabaseSync(dbPath);
-        db.exec("DELETE FROM ryco_compatibility_repairs WHERE repair_key LIKE 'schema-repair:%'");
-        db.close();
-        const server = yield* spawnIdleProcess;
-        yield* writeLiveOwner(dbPath, server.pid!, { schemaSupported: SUPPORTED_MIGRATION_ID });
+        const repairs = inspectFile(dbPath).repairs;
+        forgetRepairRecords(dbPath);
+        execFile(dbPath, "ALTER TABLE projection_worktrees DROP COLUMN title");
 
-        const error = blockedError(yield* openAsCli(dbPath));
-        assert.equal(error.from, SUPPORTED_MIGRATION_ID);
-        assert.isAbove(error.repairs.length, 20);
-        assert.match(
-          error.message,
-          /repair the database schema \([a-z-]+, [a-z-]+, [a-z-]+ and \d+ more\)/,
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* startLegacyServer(dbPath);
+            const before = inspectFile(dbPath);
+            const error = blockedError(yield* openAsCli(dbPath));
+            assert.deepEqual(error.repairs, ["projection-worktree-title"]);
+            assert.include(error.message, "repair the database schema (projection-worktree-title)");
+            assert.deepEqual(inspectFile(dbPath), before);
+            assert.deepEqual(backupFiles(dbPath), []);
+          }),
         );
-        assert.deepEqual(backupFiles(dbPath), []);
-      }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
+
+        // The updated server backs up before it repairs, and records every repair.
+        assert.isTrue(Exit.isSuccess(yield* openAsServer(dbPath)));
+        assert.lengthOf(backupFiles(dbPath), 1);
+        assert.deepEqual(inspectFile(dbPath).repairs, repairs);
+        const check = new DatabaseSync(dbPath, { readOnly: true });
+        const columns = check.prepare("PRAGMA table_info(projection_worktrees)").all() as Array<{
+          name: string;
+        }>;
+        check.close();
+        assert.isTrue(columns.some((column) => column.name === "title"));
+      }).pipe(Effect.ensuring(removeHome(dbPath)));
     },
   );
+
+  it.live("records the repairs of a database from before repair records without a backup", () => {
+    const dbPath = makeDbPath();
+    return Effect.gen(function* () {
+      yield* createDatabase(dbPath);
+      const repairs = inspectFile(dbPath).repairs;
+      forgetRepairRecords(dbPath);
+      const before = inspectFile(dbPath);
+
+      // The first start of a server of this release: nothing but the records changes.
+      assert.isTrue(Exit.isSuccess(yield* openAsServer(dbPath)));
+      assert.deepEqual(backupFiles(dbPath), []);
+      const after = inspectFile(dbPath);
+      assert.deepEqual(after.repairs, repairs);
+      assert.deepEqual(after.schema, before.schema);
+      assert.equal(after.ledger, before.ledger);
+    }).pipe(Effect.ensuring(removeHome(dbPath)));
+  });
 
   it.live("refuses a newer schema next to a live server, naming the backups", () => {
     const dbPath = makeDbPath();
@@ -428,6 +548,77 @@ describe("migrations under database ownership", () => {
       yield* createDatabase(dbPath);
       assert.isTrue(Exit.isSuccess(yield* Fiber.join(cli)));
       assert.deepEqual(backupFiles(dbPath), []);
+    }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
+  });
+
+  it.live("reads a lock that is being written again before it counts as owned", () => {
+    const dbPath = makeDbPath();
+    const lockPath = databaseOwnerLockPath(dbPath);
+    return Effect.gen(function* () {
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
+
+      // Created by another process that never writes its record: owned by someone unknown, but
+      // only once that has lasted as long as taking ownership would wait.
+      NodeFS.writeFileSync(lockPath, "", { mode: 0o600 });
+      const startedAt = Date.now();
+      const error = blockedError(yield* openAsCli(dbPath));
+      assert.isAtLeast(Date.now() - startedAt, 900);
+      assert.isNull(error.owner);
+      assert.include(error.message, "cannot tell whether a Ryco server is using it");
+      assert.equal(inspectFile(dbPath).ledger, SUPPORTED_MIGRATION_ID - 1);
+
+      // That process gives the database up (it found an older server, say): this one migrates.
+      NodeFS.writeFileSync(lockPath, "", { mode: 0o600 });
+      const cli = yield* Effect.forkChild(openAsCli(dbPath));
+      yield* Effect.sleep(300);
+      NodeFS.rmSync(lockPath);
+      assert.isTrue(Exit.isSuccess(yield* Fiber.join(cli)));
+      assert.equal(inspectFile(dbPath).ledger, SUPPORTED_MIGRATION_ID);
+    }).pipe(Effect.ensuring(removeHome(dbPath)));
+  });
+
+  it.live("reads the database again before it refuses, after trying to take it", () => {
+    const dbPath = makeDbPath();
+    return Effect.gen(function* () {
+      yield* createDatabase(dbPath);
+      // One repair this binary runs was never recorded here (another record is): an upgrade.
+      execFile(dbPath, deleteRecord("thread-forks"));
+      const server = yield* spawnIdleProcess;
+      let tookOver = false;
+      const environment = {
+        pid: process.pid,
+        now: Date.now,
+        isListening: isAcceptingConnections,
+        probe: {
+          ...defaultProcessProbe,
+          // Looked up first when this process tries to take the database, which it found free:
+          // meanwhile a server of other schema code took it and upgraded it.
+          bootId: async () => {
+            if (!tookOver) {
+              tookOver = true;
+              await writeLiveOwnerFile(dbPath, server.pid!);
+              execFile(
+                dbPath,
+                `INSERT INTO ryco_compatibility_repairs (repair_key) VALUES ('${compatibilityRepairMarker("thread-forks")}')`,
+              );
+            }
+            return defaultBootId();
+          },
+        },
+      };
+      let migratedHere = false;
+      const exit = yield* migrateUnderOwnershipPolicy(dbPath, () =>
+        Effect.sync(() => {
+          migratedHere = true;
+        }),
+      ).pipe(
+        Effect.provideService(DatabaseOwnerLockEnvironment, environment),
+        Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
+        Effect.exit,
+      );
+      assert.isTrue(tookOver);
+      assert.isTrue(Exit.isSuccess(exit), String(exit));
+      assert.isFalse(migratedHere);
     }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
   });
 
