@@ -1,13 +1,16 @@
 /** Fresh-file production event-store/projection fixture; run with Node (server runtime).
  * node apps/server/scripts/measure-streaming-sqlite.ts [bytes=200000] [messages=1] [profile=buffered]
  * node apps/server/scripts/measure-streaming-sqlite.ts [updates=2000] [cadenceMs=20] tools
+ * node apps/server/scripts/measure-streaming-sqlite.ts [updates=2000] [cadenceMs=20] tools-gated
  * Profiles model persisted batch sizes; provider/network/timer waiting is excluded.
  * Reports WAL growth, not physical disk writes or whole-application savings.
  *
  * `streaming-turn` is `streaming` inside a running turn, with each event's time 1 ms after the
  * previous one as in production. `tools` models one OpenCode bash call: a pending update, then
  * `updates` running updates `cadenceMs` apart whose activity time is the tool's start, then the
- * completion. The other write profiles keep one constant event time, so a write that only moves
+ * completion. `tools-gated` is the same stream through OpenCode's tool-update gate
+ * (`ToolUpdateGate`, clock = update index × cadence): only the updates it admits are persisted.
+ * The other write profiles keep one constant event time, so a write that only moves
  * `updated_at` is a no-op there: quote `streaming-turn`/`tools` for per-event row writes.
  * `rowWrites` comes from TEMP-trigger counters inside the timed loops; set
  * RYCO_SQLITE_FIXTURE_ROW_WRITES=0 for timings without them (compare-streaming-sqlite.ts does).
@@ -57,12 +60,19 @@ import { installRowWriteProbe } from "./sqliteRowWriteProbe.ts";
 
 const profile = process.argv[4] ?? "buffered";
 if (
-  !["buffered", "streaming", "streaming-turn", "timer", "stress", "reads", "tools"].includes(
-    profile,
-  )
+  ![
+    "buffered",
+    "streaming",
+    "streaming-turn",
+    "timer",
+    "stress",
+    "reads",
+    "tools",
+    "tools-gated",
+  ].includes(profile)
 )
   throw new Error("Unknown profile");
-const isTools = profile === "tools";
+const isTools = profile === "tools" || profile === "tools-gated";
 // `tools`: provider updates and their cadence (ms) instead of bytes and messages.
 const bytes = Number(process.argv[2] ?? (isTools ? 2000 : 200000));
 const messages = Number(process.argv[3] ?? (isTools ? 20 : 1));
@@ -245,6 +255,11 @@ const program = Effect.gen(function* () {
     const { runtimeEventToActivities } = yield* Effect.promise(
       () => import("../src/orchestration/Layers/ProviderRuntimeIngestion.ts"),
     );
+    // Loaded only here: the module does not exist at older baselines (see the header).
+    const gate =
+      profile === "tools-gated"
+        ? yield* Effect.promise(() => import("../src/provider/toolUpdateGate.ts"))
+        : undefined;
     const updates = bytes;
     const cadenceMs = messages;
     const callId = "fixture-call";
@@ -305,8 +320,27 @@ const program = Effect.gen(function* () {
         isoAt(endMs),
       ),
     );
+    let admittedEvents = events;
+    if (gate) {
+      // The view OpenCodeAdapter derives from a bash part without a title (title = tool name, no
+      // detail), with updates arriving `cadenceMs` apart.
+      const toolUpdates = new gate.ToolUpdateGate();
+      admittedEvents = events.filter((event, index) => {
+        const { state } = (event.payload as { data: { state: Record<string, unknown> } }).data;
+        const terminal = event.type === "item.completed";
+        const visibleKey = terminal
+          ? undefined
+          : gate.toolUpdateVisibleKey({
+              status: String(state.status),
+              title: "bash",
+              input: state.input,
+              turnId,
+            });
+        return toolUpdates.admit(callId, { terminal, visibleKey }, index * cadenceMs);
+      });
+    }
     const start = performance.now();
-    for (const event of events) {
+    for (const event of admittedEvents) {
       const [activity] = runtimeEventToActivities(event);
       if (activity === undefined) throw new Error(`No activity for ${event.type}`);
       // decider: an activity append occurs at the activity's own time.
@@ -325,7 +359,7 @@ const program = Effect.gen(function* () {
       SELECT updated_at AS "updatedAt" FROM projection_threads WHERE thread_id = ${threadId}
     `;
     const activityRows = activityCount?.count ?? 0;
-    if (activityRows !== updates + 2 || thread?.updatedAt !== isoAt(endMs))
+    if (activityRows !== admittedEvents.length || thread?.updatedAt !== isoAt(endMs))
       throw new Error("Tool activity projection mismatch");
     console.log(
       JSON.stringify({
@@ -334,6 +368,8 @@ const program = Effect.gen(function* () {
         profile,
         providerUpdates: updates,
         cadenceMs,
+        // Lifecycle events included, unlike `providerUpdates` (running updates only).
+        admittedEvents: admittedEvents.length,
         persistedEvents,
         walBytes,
         walBytesPerEvent: Math.round(walBytes / persistedEvents),

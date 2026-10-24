@@ -45,7 +45,7 @@ that no longer contains them; rebuilding uses the retained event log.
 ```sh
 bun install --frozen-lockfile # Bun 1.4.0
 node apps/server/scripts/compare-streaming-sqlite.ts
-# Individual run; profiles: buffered, streaming, streaming-turn, timer, stress, reads, tools
+# Individual run; profiles: buffered, streaming, streaming-turn, timer, stress, reads, tools, tools-gated
 node apps/server/scripts/measure-streaming-sqlite.ts 200000 1 buffered
 # Exact base server sources, same fixture/runtime/dependencies, no checkout needed
 RYCO_SQLITE_FIXTURE_REF=1b53113f4a91f8aefc0d42db6791940fad3b4418 node --import ./apps/server/scripts/streaming-sqlite-revision.ts apps/server/scripts/measure-streaming-sqlite.ts 200000 1 buffered
@@ -199,6 +199,39 @@ drop overstates the production saving; they print `rowWrites` to show it. Timing
 The `rowWrites` counters are TEMP triggers that run inside the timed loops;
 `RYCO_SQLITE_FIXTURE_ROW_WRITES=0` times without them, and `compare-streaming-sqlite.ts` sets it so
 its samples stay comparable with the table above.
+
+### OpenCode tool-update gate
+
+Narrow writes make each tool update cheaper; the OpenCode adapter also stops emitting most of them.
+A running (or pending) tool part becomes a runtime event only when what clients show for it
+changed: its status, title, detail, input, child agent or turn. Otherwise it is emitted at most
+once per 5 s heartbeat, which only keeps provider liveness fresh (a turn is flagged as unresponsive
+after 15 minutes of silence). Completed and failed parts are always emitted. The rule lives in
+`apps/server/src/provider/toolUpdateGate.ts`; it hashes each running tool's visible state and keeps
+at most 1,024 hashes per session. Streamed output in `metadata` and the pending `raw` input text are
+not part of the visible state: the projection drops them and no client reads them. One visible
+effect is accepted: a child agent's "updated" time (OpenCode subtasks) can lag by up to 5 s while
+one of its tools streams. The native event log still records every raw SSE event.
+
+```sh
+node apps/server/scripts/measure-streaming-sqlite.ts 2000 20 tools-gated
+node apps/server/scripts/measure-streaming-sqlite.ts 20000 20 tools-gated
+```
+
+`tools-gated` is the `tools` stream through the gate, with updates arriving 20 ms apart. Base
+`5353f2ece` through the source overlay, three alternating samples, counts identical in every
+sample:
+
+| Bash call, updates 20 ms apart    |        Base | Narrow writes | Narrow writes and gate |
+| --------------------------------- | ----------: | ------------: | ---------------------: |
+| 2,000 updates (40 s): events      |       2,002 |         2,002 |                     10 |
+| 2,000 updates (40 s): WAL bytes   | 172,014,152 |   122,537,072 |                605,672 |
+| 20,000 updates (400 s): events    |     not run |       not run |                     82 |
+| 20,000 updates (400 s): WAL bytes |     not run |       not run |              4,305,432 |
+
+The 10 gated events are the pending update, the first running update, 7 heartbeats and the
+completion. At 20,000 updates the heartbeat bounds the count: 79 heartbeats instead of 19,999
+repeats. This is a modeled stream: real OpenCode chunking varies with the command's output.
 
 ## Restart and downgrade limits
 
