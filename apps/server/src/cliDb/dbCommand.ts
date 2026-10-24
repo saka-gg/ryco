@@ -6,26 +6,16 @@
  * See docs/database-backups.md.
  *
  * cli.ts passes in its location flags, `--json` flag and config resolution, so this module owns
- * the command and cli.ts only registers it.
+ * the command and cli.ts only registers it. It holds only the flags and subcommands; what each
+ * subcommand does (dbRun.ts, and with it databaseBackups.ts) loads with `import()` when it runs,
+ * which keeps it off the server's boot path (serverBundleBoundaries.test.ts).
  *
  * @module cliDb/dbCommand
  */
-import { Console, Effect, type LogLevel, Option, Path, References } from "effect";
+import { Effect, type LogLevel, type Option, References } from "effect";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 
-import { deriveServerPaths, type ServerConfigShape } from "../config.ts";
-import { expandHomePath } from "../os-jank.ts";
-import {
-  createManualBackup,
-  describeDatabaseBackups,
-  formatBytes,
-  restoreDatabaseBackup,
-  type ListedDatabaseBackup,
-  type ManualBackupResult,
-  type ManualBackupStep,
-  type RestoreResult,
-} from "../persistence/databaseBackups.ts";
-import { makeRuntimeSqliteLayer } from "../persistence/Layers/Sqlite.ts";
+import type { ServerConfigShape } from "../config.ts";
 
 interface DbLocationFlags {
   readonly baseDir: Option.Option<string>;
@@ -57,108 +47,8 @@ export interface DbCommandDeps<E, R> {
   ) => LogLevel.LogLevel;
 }
 
-const stepText: Record<ManualBackupStep, string> = {
-  copy: "Copying the database (VACUUM INTO)...",
-  check: "Checking the copy (quick_check)...",
-  compress: "Compressing the copy...",
-};
-
-const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
-
-const pad = (value: number) => String(value).padStart(2, "0");
-/** Local time, to the second. */
-const formatLocalTime = (epochMs: number) => {
-  const date = new Date(epochMs);
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
-    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-  );
-};
-
-const formatManualBackup = (result: ManualBackupResult) =>
-  [
-    `Backed up the database (schema ${result.schema}) to ${result.path}`,
-    `${formatBytes(result.databaseBytes)} database, ${formatBytes(result.copyBytes)} compacted, ` +
-      `${formatBytes(result.bytes)} compressed (${result.codec}). Copy ${seconds(result.copyMs)}, ` +
-      `check ${seconds(result.checkMs)}, compression ${seconds(result.compressMs)}; ` +
-      `${seconds(result.ms)} in total.`,
-    ...(result.pruned.length > 0
-      ? [`Removed older manual backups: ${result.pruned.join(", ")}`]
-      : []),
-    ...result.warnings.map((warning) => `Warning: ${warning}`),
-  ].join("\n");
-
-const describeKind = (backup: ListedDatabaseBackup) =>
-  backup.kind === "manual"
-    ? `manual, schema ${backup.from}`
-    : backup.to === backup.from
-      ? `before repairs, schema ${backup.from}`
-      : `before upgrade ${backup.from} → ${backup.to}`;
-
-const describeState = (backup: ListedDatabaseBackup) =>
-  backup.state === "finalized"
-    ? `compressed (${backup.codec})`
-    : backup.state === "raw"
-      ? "not compressed yet"
-      : "failed its integrity check";
-
-const formatBackupList = (listing: {
-  readonly directory: string;
-  readonly supportedSchema: number;
-  readonly backups: ReadonlyArray<ListedDatabaseBackup>;
-}) => {
-  if (listing.backups.length === 0) return `No database backups in ${listing.directory}.`;
-  const rows = listing.backups.map((backup) => ({
-    backup,
-    columns: [
-      formatLocalTime(backup.createdAt),
-      describeKind(backup),
-      formatBytes(backup.bytes),
-      describeState(backup),
-    ],
-  }));
-  const widths = [0, 1, 2].map((index) =>
-    Math.max(...rows.map((row) => row.columns[index]!.length)),
-  );
-  return [
-    `Database backups in ${listing.directory} (this build opens schema ${listing.supportedSchema} and older):`,
-    "",
-    ...rows.flatMap(({ backup, columns }) => [
-      `  ${columns.map((column, index) => (index < 3 ? column.padEnd(widths[index]!) : column)).join("  ")}` +
-        (backup.opensWithThisBuild ? "" : "  needs a newer Ryco build"),
-      `    ${backup.path}`,
-    ]),
-    "",
-    "Restore one into a new directory with: ryco db restore <file> --into <new directory>",
-  ].join("\n");
-};
-
-const backupJson = (backup: ListedDatabaseBackup) => ({
-  name: backup.name,
-  path: backup.path,
-  kind: backup.kind,
-  from: backup.from,
-  to: backup.to,
-  createdAt: new Date(backup.createdAt).toISOString(),
-  bytes: backup.bytes,
-  state: backup.state,
-  codec: backup.codec,
-  opensWithThisBuild: backup.opensWithThisBuild,
-});
-
-const formatRestore = (result: RestoreResult, live: { readonly stateDir: string }) =>
-  [
-    `Restored the database (schema ${result.schema}, ${result.check} ok) to ${result.path} ` +
-      `(${formatBytes(result.bytes)}, ${seconds(result.ms)}).`,
-    ...result.warnings.map((warning) => `Warning: ${warning}`),
-    "",
-    "Next steps:",
-    `  Start Ryco on it: ryco serve --base-dir ${result.baseDir}  (or RYCO_HOME=${result.baseDir})`,
-    "  It has no settings, secrets or Hub identity, so pair your devices with it again.",
-    `  To make it your main database instead: quit Ryco, move ${live.stateDir}/state.sqlite,`,
-    "  state.sqlite-wal and state.sqlite-shm aside (do not delete them), and copy the restored",
-    "  file in as state.sqlite.",
-  ].join("\n");
+/** The subcommands' implementation, loaded only when one of them runs. */
+const loadDbRun = Effect.promise(() => import("./dbRun.ts"));
 
 export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
   /** Resolves the data directory, then runs `run` at the admin commands' log level. */
@@ -189,15 +79,9 @@ export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
     ),
     Command.withHandler((flags) =>
       runDb(flags, (config) =>
-        Effect.gen(function* () {
-          const result = yield* createManualBackup({
-            dbPath: config.dbPath,
-            openSqlite: makeRuntimeSqliteLayer,
-            // Progress on stderr, so stdout stays the result.
-            onStep: flags.json ? undefined : (step) => Console.error(stepText[step]),
-          });
-          yield* Console.log(flags.json ? deps.emitJson(result) : formatManualBackup(result));
-        }),
+        Effect.flatMap(loadDbRun, ({ runDbBackup }) =>
+          runDbBackup({ config, json: flags.json, emitJson: deps.emitJson }),
+        ),
       ),
     ),
   );
@@ -211,14 +95,9 @@ export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
     ),
     Command.withHandler((flags) =>
       runDb(flags, (config) =>
-        Effect.gen(function* () {
-          const listing = yield* describeDatabaseBackups(config.dbPath);
-          yield* Console.log(
-            flags.json
-              ? deps.emitJson({ ...listing, backups: listing.backups.map(backupJson) })
-              : formatBackupList(listing),
-          );
-        }),
+        Effect.flatMap(loadDbRun, ({ runDbList }) =>
+          runDbList({ config, json: flags.json, emitJson: deps.emitJson }),
+        ),
       ),
     ),
   );
@@ -246,23 +125,16 @@ export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
     ),
     Command.withHandler((flags) =>
       runDb(flags, (config) =>
-        Effect.gen(function* () {
-          const path = yield* Path.Path;
-          const intoBaseDir = path.resolve(yield* expandHomePath(flags.into.trim()));
-          const target = yield* deriveServerPaths(intoBaseDir, undefined);
-          const result = yield* restoreDatabaseBackup({
-            file: path.resolve(yield* expandHomePath(flags.file.trim())),
-            target: { baseDir: intoBaseDir, dbPath: target.dbPath },
-            live: { baseDir: config.baseDir, stateDir: config.stateDir, dbPath: config.dbPath },
-            openSqlite: makeRuntimeSqliteLayer,
+        Effect.flatMap(loadDbRun, ({ runDbRestore }) =>
+          runDbRestore({
+            config,
+            json: flags.json,
+            emitJson: deps.emitJson,
+            file: flags.file,
+            into: flags.into,
             fullCheck: flags.fullCheck,
-          });
-          yield* Console.log(
-            flags.json
-              ? deps.emitJson(result)
-              : formatRestore(result, { stateDir: config.stateDir }),
-          );
-        }),
+          }),
+        ),
       ),
     ),
   );
