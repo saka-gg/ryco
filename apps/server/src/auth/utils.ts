@@ -1,30 +1,97 @@
 import type { AuthClientMetadata, AuthClientMetadataDeviceType } from "@ryco/contracts";
+import { Duration } from "effect";
 import type * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Crypto from "node:crypto";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 const SESSION_COOKIE_NAME = "ryco_session";
 const LEGACY_SESSION_COOKIE_NAME = "t3_session";
 
-export function resolveSessionCookieName(input: {
+/**
+ * How long a browser session of a dev server lasts when its home is not the shared ~/.ryco: a
+ * worktree's own home, or one set with --home-dir/RYCO_HOME (otherwise 30 days).
+ * Browsers send every `localhost` cookie to every port, so each paired worktree home adds one
+ * cookie (about 300 bytes) to every local request; about 50 of them exceed Node's 16 KiB header
+ * limit and every local server answers 431. A short life keeps that pile small, and each dev
+ * server prints a fresh pairing link when it starts.
+ */
+export const DEV_HOME_SESSION_COOKIE_MAX_AGE = Duration.days(7);
+
+/**
+ * Which servers share one session cookie name. Cookies are scoped by host, not port, so every
+ * server on `localhost` sees the others' cookies: a name must belong to one signing key (one
+ * state directory), or pairing one server signs the browser out of another.
+ */
+export interface SessionCookieScope {
   readonly mode: "web" | "desktop";
   readonly port: number;
-}): string {
-  if (input.mode !== "desktop") {
-    return SESSION_COOKIE_NAME;
-  }
-
-  return `${SESSION_COOKIE_NAME}_${input.port}`;
+  /**
+   * Set for a dev server (one with a dev URL): its state directory, which holds the key its
+   * sessions are signed with, and whether that is the shared default home (~/.ryco).
+   */
+  readonly dev?: { readonly stateDir: string; readonly defaultHome: boolean } | undefined;
 }
 
-export function resolveLegacySessionCookieNames(input: {
+export function resolveSessionCookieScope(config: {
   readonly mode: "web" | "desktop";
   readonly port: number;
-}): readonly string[] {
-  if (input.mode !== "desktop") {
-    return [LEGACY_SESSION_COOKIE_NAME];
+  readonly devUrl: URL | undefined;
+  readonly baseDir: string;
+  readonly stateDir: string;
+}): SessionCookieScope {
+  if (config.devUrl === undefined) {
+    return { mode: config.mode, port: config.port };
   }
+  return {
+    mode: config.mode,
+    port: config.port,
+    dev: {
+      stateDir: config.stateDir,
+      defaultHome: NodePath.resolve(config.baseDir) === NodePath.join(NodeOS.homedir(), ".ryco"),
+    },
+  };
+}
 
-  return [`${LEGACY_SESSION_COOKIE_NAME}_${input.port}`];
+/**
+ * Desktop names its cookie by port, as before. A web dev server names it after its state
+ * directory (stable while its port shifts, and shared only by servers that share its signing
+ * key), so dev servers of several worktrees stay signed in side by side. Plain web servers keep
+ * `ryco_session`.
+ */
+export function resolveSessionCookieName(scope: SessionCookieScope): string {
+  if (scope.mode === "desktop") {
+    return `${SESSION_COOKIE_NAME}_${scope.port}`;
+  }
+  if (scope.dev !== undefined) {
+    const key = Crypto.createHash("sha256").update(scope.dev.stateDir).digest("hex").slice(0, 8);
+    return `${SESSION_COOKIE_NAME}_dev_${key}`;
+  }
+  return SESSION_COOKIE_NAME;
+}
+
+/**
+ * Names still accepted when the current one is absent. The shared default dev home keeps the
+ * cookie every dev server used before they were named per home, so nobody pairs it again.
+ * Another dev home never accepts it: that cookie belongs to a different signing key.
+ */
+export function resolveLegacySessionCookieNames(scope: SessionCookieScope): readonly string[] {
+  if (scope.mode === "desktop") {
+    return [`${LEGACY_SESSION_COOKIE_NAME}_${scope.port}`];
+  }
+  if (scope.dev !== undefined) {
+    return scope.dev.defaultHome ? [SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME] : [];
+  }
+  return [LEGACY_SESSION_COOKIE_NAME];
+}
+
+/** The longest a browser session cookie may live, or `undefined` for the usual session TTL. */
+export function resolveSessionCookieMaxAge(
+  scope: SessionCookieScope,
+): Duration.Duration | undefined {
+  return scope.mode === "web" && scope.dev !== undefined && !scope.dev.defaultHome
+    ? DEV_HOME_SESSION_COOKIE_MAX_AGE
+    : undefined;
 }
 
 export function base64UrlEncode(input: string | Uint8Array): string {
