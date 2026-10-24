@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as path from "node:path";
 import * as os from "node:os";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -20,10 +20,19 @@ import {
   ThreadId,
   ProviderInstanceId,
   RuntimeSessionId,
+  TurnId,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
 
+import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
+import {
+  assertTurnIdsOnly,
+  drainRuntimeEvents,
+  makeRetentionProbe,
+} from "../testUtils/adapterRetention.ts";
+import { makeAcpAdapter } from "./AcpAdapter.ts";
 import { makeGrokAdapter } from "./GrokAdapter.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
@@ -547,6 +556,65 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* Deferred.await(contentDelta);
 
       yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("retention: keeps no prompts, image attachments or results of completed turns", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-retention-thread");
+      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
+      const probe = makeRetentionProbe();
+      const grokSettings = decodeGrokSettings({ binaryPath: wrapperPath });
+      // The ACP adapter behind Grok, with each prompt array it sends tracked.
+      const adapter = yield* makeAcpAdapter({
+        provider: ProviderDriverKind.make("grok"),
+        normalizeModel: resolveGrokAcpBaseModelId,
+        xaiExtensions: true,
+        makeRuntime: (input) =>
+          Effect.map(makeGrokAcpRuntime({ ...input, grokSettings }), (runtime) => ({
+            ...runtime,
+            prompt: (payload) => {
+              probe.track(payload.prompt);
+              return runtime.prompt(payload);
+            },
+          })),
+      }).pipe(Effect.orDie);
+      const { attachmentsDir } = yield* ServerConfig;
+      yield* drainRuntimeEvents(adapter.streamEvents);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-retention"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turnIds: Array<TurnId> = [];
+      for (const n of [1, 2]) {
+        const attachment = {
+          type: "image" as const,
+          id: `grok-retention-image-${n}-12345678-1234-1234-1234-123456789abc`,
+          name: `screenshot-${n}.png`,
+          mimeType: "image/png",
+          sizeBytes: 4,
+        };
+        const attachmentPath = path.join(attachmentsDir, attachmentRelativePath(attachment)!);
+        yield* Effect.promise(async () => {
+          await mkdir(path.dirname(attachmentPath), { recursive: true });
+          await writeFile(attachmentPath, Uint8Array.from([1, 2, 3, 4]));
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId,
+          input: `screenshot ${n}`,
+          attachments: [attachment],
+        });
+        turnIds.push(turn.turnId);
+      }
+
+      assert.equal(probe.tracked, 2);
+      assert.equal(yield* Effect.promise(probe.reachable), 0);
+      assertTurnIdsOnly(yield* adapter.readThread(threadId), turnIds);
       yield* adapter.stopSession(threadId);
     }),
   );
