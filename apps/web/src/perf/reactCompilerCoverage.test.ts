@@ -37,6 +37,10 @@ const HOT_COMPONENTS: ReadonlyArray<{ readonly file: string; readonly functions:
   },
   { file: "../components/inboxSidebar/InboxThreadRow.tsx", functions: ["InboxThreadRow"] },
   {
+    file: "../components/inboxSidebar/InboxSettleFinished.tsx",
+    functions: ["InboxSettleFinished"],
+  },
+  {
     file: "../components/inboxSidebar/useInboxRowSelection.ts",
     functions: ["useInboxRowSelection"],
   },

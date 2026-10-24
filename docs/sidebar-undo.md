@@ -19,6 +19,16 @@ A failed command, a newer action on one of the threads, or that thread's node re
 only that thread out of the notice. A partly failed Undo is reported once, with how many threads
 it could not restore. Move to Active and Unsnooze have no Undo, in bulk or for one thread.
 
+In the Inbox, Cmd-click (Ctrl-click off Mac) adds or removes a row and Shift-click selects the
+displayed range, as in the project sidebar. The context or ... menu of a selected row offers
+Settle, Move to Active, Snooze, Unsnooze, Mark unread and Delete for every selected row that
+allows it, with the count in each item. Rows the list stops showing leave the selection. The
+Recent header's Settle finished button, shown on hover or focus, settles every finished thread
+there whose result you have seen, oldest first, folded delegated threads included; unseen
+results stay. Bulk Settle and Snooze, Settle finished included, use the notice above; Delete
+keeps its confirmation. The frozen web phone presentation offers neither selection nor Settle
+finished.
+
 Undo restores the prior settlement override, settlement time, snooze deadline and time, and
 sorting timestamp. Existing manual positions, local pins, and priority rankings are preserved.
 Unpin restores the local pin using the existing sorter. Archive Undo also reopens the thread

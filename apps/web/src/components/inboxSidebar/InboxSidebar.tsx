@@ -23,6 +23,7 @@ import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
+import { InboxSettleFinished } from "./InboxSettleFinished";
 import {
   buildInboxSidebarModel,
   createInboxSidebarModelSharing,
@@ -72,7 +73,8 @@ export function InboxSidebar(props: InboxSidebarProps) {
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
-  // The web phone tier is frozen (AGENTS.md): no delegated folding or row selection there.
+  // The web phone tier is frozen (AGENTS.md): no delegated folding, row selection
+  // or Settle finished there.
   const isPhone = usePresentationTier() === "phone";
   const nestDelegated = !isPhone;
   const [expandedHostKeys, setExpandedHostKeys] = useState<ReadonlySet<string>>(() => new Set());
@@ -314,7 +316,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         </span>
                       </button>
                     ) : (
-                      <div className="flex items-center gap-2 px-2.5 py-1.5">
+                      <div className="group/inbox-section flex items-center gap-2 px-2.5 py-1.5">
                         <h2
                           id={`inbox-section-${section.key}`}
                           className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/65"
@@ -324,6 +326,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         <span className="text-[10px] tabular-nums text-muted-foreground/45">
                           {section.rows.length}
                         </span>
+                        {section.key === "recent" && !isPhone ? (
+                          <InboxSettleFinished
+                            activeThreadKey={props.activeThreadKey}
+                            rows={section.rows}
+                          />
+                        ) : null}
                       </div>
                     )}
                     {expanded ? (

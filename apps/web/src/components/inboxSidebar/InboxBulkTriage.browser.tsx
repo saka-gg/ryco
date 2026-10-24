@@ -9,6 +9,7 @@ import { render } from "vitest-browser-react";
 
 import { isMacPlatform } from "../../lib/utils";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
+import { useUiStateStore } from "../../uiStateStore";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 import type { InboxSidebarEnvironment } from "./inboxSidebarModel";
@@ -150,6 +151,7 @@ afterEach(async () => {
   await mounted?.unmount();
   mounted = null;
   useThreadSelectionStore.getState().clearSelection();
+  useUiStateStore.setState({ threadLastVisitedAtById: {} });
   const filters = useInboxFilterStore.getState();
   filters.setDraft("");
   filters.setStatus("all");
@@ -282,5 +284,64 @@ describe("Inbox row selection", () => {
     useInboxFilterStore.getState().setDraft("Task r1");
     await vi.waitFor(() => expect(document.body.textContent).not.toContain("Task r2"));
     expect([...useThreadSelectionStore.getState().selectedThreadKeys]).toEqual([keyOf("r1")]);
+  });
+});
+
+describe("Inbox Settle finished", () => {
+  const visit = (...ids: string[]) => {
+    const { markThreadVisited } = useUiStateStore.getState();
+    for (const id of ids) markThreadVisited(keyOf(id));
+  };
+  const settleFinished = () => page.getByRole("button", { name: /^Settle \d+ finished thread/ });
+  const header = (section: string) =>
+    page.getByRole("heading", { name: section, exact: true }).element().parentElement!;
+
+  it("is absent while every Recent row is unseen or on a machine that is not ready", async () => {
+    visit("pinned", "n1");
+    await mountInbox();
+    await expect.element(title("r1")).toBeInTheDocument();
+    expect(settleFinished().query()).toBeNull();
+  });
+
+  it("settles the seen finished rows of Recent, oldest first", async () => {
+    // u1 is unseen, Bravo (n1) takes no changes now, and Pinned is not Recent.
+    visit("pinned", "r1", "r2", "n1", "r3");
+    await mountInbox({ threads: [...THREADS, thread("u1", 1)] });
+    await expect.element(settleFinished()).toHaveAccessibleName("Settle 3 finished threads");
+    expect(settleFinished().all()).toHaveLength(1);
+    expect(settleFinished().element().closest("section")?.querySelector("h2")?.textContent).toBe(
+      "Recent",
+    );
+    expect(header("Recent").offsetHeight).toBe(header("Pinned").offsetHeight);
+
+    let finish: (result: null) => void = () => undefined;
+    lifecycle.settlementBatch.mockImplementationOnce(
+      () => new Promise<null>((resolve) => (finish = resolve)),
+    );
+    await settleFinished().click();
+    expect(lifecycle.settlementBatch).toHaveBeenCalledExactlyOnceWith(
+      [ref("r3"), ref("r2"), ref("r1")],
+      true,
+    );
+    await expect.element(settleFinished()).toBeDisabled();
+    finish(null);
+    await expect.element(settleFinished()).toBeEnabled();
+  });
+
+  it("settles the finished children folded under a Recent host with it", async () => {
+    const host = thread("host", 7);
+    const child = thread("child", 1, {
+      lineage: { parentThreadId: host.id, rootThreadId: host.id, relationship: "delegated" },
+    });
+    visit("host", "child");
+    await mountInbox({ threads: [host, child] });
+    await expect.element(settleFinished()).toHaveAccessibleName("Settle 2 finished threads");
+    expect(document.body.textContent).not.toContain("Task child");
+
+    await settleFinished().click();
+    expect(lifecycle.settlementBatch).toHaveBeenCalledExactlyOnceWith(
+      [ref("child"), ref("host")],
+      true,
+    );
   });
 });
