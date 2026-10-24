@@ -317,6 +317,18 @@ export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null
   return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
 }
 
+/**
+ * What a click on a thread row does to the selection: Cmd-click (Ctrl-click
+ * off Mac) toggles the row, Shift-click selects a range. Null opens the row.
+ */
+export function resolveThreadSelectionClick(
+  event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey">,
+  isMac: boolean,
+): "toggle" | "range" | null {
+  if (isMac ? event.metaKey : event.ctrlKey) return "toggle";
+  return event.shiftKey ? "range" : null;
+}
+
 // A double-click dispatches two `click` events before `dblclick`: the first has
 // `detail === 1`, the second `detail === 2`. The second click must not run the
 // row's single-click navigation, otherwise double-click-to-rename would also
