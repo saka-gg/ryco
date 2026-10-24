@@ -18,6 +18,8 @@ build/
 release/
 release-mock/
 .ryco
+# A linked worktree's dev home (scripts/dev-runner.ts)
+/.ryco-dev/
 .playwright-mcp
 .idea/
 apps/web/.playwright

@@ -34,6 +34,7 @@
     "HOST",
     "PORT",
     "VITE_WS_URL",
+    "VITE_HTTP_URL",
     "VITE_DEV_SERVER_URL",
     "RYCO_LOG_WS_EVENTS",
     "RYCO_MODE",
@@ -55,7 +56,17 @@
     "RYCO_OTLP_EXPORT_INTERVAL_MS",
     "RYCO_OTLP_SERVICE_NAME"
   ],
-  "globalPassThroughEnv": ["PATHEXT"],
+  // Strict env mode hands a task only the variables listed here or in globalEnv.
+  // Besides PATHEXT, these are runtime settings that scripts/dev-runner.ts
+  // passes to the dev server and that no build reads, so they stay out of every
+  // task hash. The dev runner's tests check that every variable it sets is listed.
+  "globalPassThroughEnv": [
+    "PATHEXT",
+    "RYCO_HOST",
+    "RYCO_AUTO_BOOTSTRAP_PROJECT_FROM_CWD",
+    "RYCO_DEV_RUNNER_ROOT",
+    "RYCO_DEV_RUNNER_ENV"
+  ],
   // Bound the local cache, which git worktrees share and which otherwise only
   // grows. Turbo evicts in the background when a run starts. Age counts from
   // when an entry was written (a hit does not renew it), so at worst a
