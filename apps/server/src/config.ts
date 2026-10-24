@@ -20,6 +20,11 @@ import { canonicalizeHubOrigin, normalizeHubNodeName } from "@ryco/shared/nodeId
 import type { OtlpSignal, OtlpSignalExport } from "./observability/OtelEnvironment.ts";
 
 export const DEFAULT_PORT = 3773;
+/**
+ * A headless server holds the machine awake while its agents work unless told not to
+ * (`--no-keep-awake-while-working`). Desktop mode never does: Desktop main owns that hold.
+ */
+export const DEFAULT_KEEP_AWAKE_WHILE_WORKING = true;
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
 export type RuntimeMode = typeof RuntimeMode.Type;
@@ -311,6 +316,12 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly tailscaleServePort: number;
   /** Hold an OS sleep assertion for the life of this process (`--prevent-sleep`). */
   readonly preventSleep?: boolean;
+  /**
+   * Hold an OS idle-sleep assertion while agents work, on AC power
+   * (`--keep-awake-while-working`). The CLI resolves the default; unset means off, so a config
+   * built by hand never spawns anything.
+   */
+  readonly keepAwakeWhileWorking?: boolean;
   readonly hubConnector?: HubConnectorConfig;
   /**
    * Kept beside `hubConnector` rather than inside it: `resolveHubConnectorConfig`

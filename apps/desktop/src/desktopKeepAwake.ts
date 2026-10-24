@@ -4,13 +4,14 @@ import type { DesktopKeepAwakeMode, DesktopKeepAwakeState } from "@ryco/contract
  * Keep a desktop-hosted node from idle-sleeping while other devices rely on it,
  * or while agents work on its own backend.
  *
- * The server's own sleep inhibitor only runs for `ryco serve` with
- * `--prevent-sleep`; the desktop launches its backend without node.json, so a
- * desktop that other devices reach through the Hub, the network, or Tailscale
- * used to idle-sleep and drop its relay, and a local-only desktop slept in the
- * middle of a turn. Main owns this instead because the preference must apply
- * live, without a relaunch. The backend reports agent work over the private
- * desktop pipe (`agent-work` frames, see {@link BackendAgentWorkTracker}).
+ * The server's own lifetime hold only runs with `--prevent-sleep`, and its
+ * agent-work hold never runs in desktop mode; the desktop launches its backend
+ * without node.json, so a desktop that other devices reach through the Hub, the
+ * network, or Tailscale used to idle-sleep and drop its relay, and a local-only
+ * desktop slept in the middle of a turn. Main owns this instead because the
+ * preference must apply live, without a relaunch. The backend reports agent
+ * work over the private desktop pipe (`agent-work` frames, see
+ * {@link BackendAgentWorkTracker}).
  *
  * Plugged-in only: a laptop on battery sleeps as the operator expects, and the
  * hold is reacquired as soon as it is back on AC power. The assertion keeps the

@@ -7,10 +7,14 @@ import type {
 } from "@ryco/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
-import { Effect, Layer, PubSub, SubscriptionRef } from "effect";
+import { Effect, Layer, PubSub, Stream, SubscriptionRef } from "effect";
 import { TestClock } from "effect/testing";
 
-import { DesktopAgentWorkFramesLive, makeAgentWorkHoldLayer } from "./agentWorkHold.ts";
+import {
+  agentWorkHoldConsumers,
+  DesktopAgentWorkFramesLive,
+  makeAgentWorkHoldLayer,
+} from "./agentWorkHold.ts";
 import {
   attachDesktopLifecycleChannel,
   detachDesktopLifecycleChannelForTests,
@@ -97,8 +101,37 @@ describe("DesktopAgentWorkFramesLive", () => {
 });
 
 describe("makeAgentWorkHoldLayer", () => {
-  it("builds nothing outside desktop mode", () => {
+  it("builds nothing for a headless node that does not hold the machine awake while working", () => {
     assert.strictEqual(makeAgentWorkHoldLayer({ mode: "web" }), Layer.empty);
+    assert.strictEqual(
+      makeAgentWorkHoldLayer({ mode: "web", keepAwakeWhileWorking: false }),
+      Layer.empty,
+    );
+    // --prevent-sleep already holds it for the whole run.
+    assert.strictEqual(
+      makeAgentWorkHoldLayer({ mode: "web", preventSleep: true, keepAwakeWhileWorking: true }),
+      Layer.empty,
+    );
+  });
+
+  it("holds a headless node awake itself, and leaves a desktop backend's hold to Desktop", () => {
+    assert.deepStrictEqual(agentWorkHoldConsumers({ mode: "web", keepAwakeWhileWorking: true }), {
+      desktopFrames: false,
+      headlessHold: true,
+    });
+    assert.deepStrictEqual(
+      agentWorkHoldConsumers({ mode: "web", preventSleep: false, keepAwakeWhileWorking: true }),
+      { desktopFrames: false, headlessHold: true },
+    );
+    // Headless flags never start the headless hold in desktop mode.
+    assert.deepStrictEqual(
+      agentWorkHoldConsumers({ mode: "desktop", preventSleep: false, keepAwakeWhileWorking: true }),
+      { desktopFrames: true, headlessHold: false },
+    );
+    assert.deepStrictEqual(agentWorkHoldConsumers({ mode: "desktop" }), {
+      desktopFrames: true,
+      headlessHold: false,
+    });
   });
 
   it.effect("reports a chain of turns as one hold: one rise and one fall of keepAwake", () =>
@@ -109,7 +142,7 @@ describe("makeAgentWorkHoldLayer", () => {
         const bus = yield* PubSub.bounded<OrchestrationEvent>(64);
         const engine = {
           getReadModel: () => Effect.sync(() => ({ threads })),
-          subscribeDomainEvents: PubSub.subscribe(bus),
+          subscribeDomainEvents: Effect.map(PubSub.subscribe(bus), Stream.fromSubscription),
         } as unknown as OrchestrationEngineShape;
         yield* Layer.build(
           makeAgentWorkHoldLayer({ mode: "desktop" }).pipe(

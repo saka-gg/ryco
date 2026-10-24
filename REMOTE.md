@@ -150,6 +150,15 @@ its log; use `ryco auth pairing create` to pair devices. On Linux, run
 
 `ryco serve --prevent-sleep` holds the same sleep assertion for a foreground server.
 
+Without `--prevent-sleep`, a `ryco serve` (and a service installed with `--no-prevent-sleep`) still
+keeps the machine from idle-sleeping while its agents work: during a turn or background work, and
+for 2 minutes after it ends. It holds only on AC power and lets the display sleep; on macOS a closed
+lid or an explicit sleep still sleeps the machine. Turn it off with `--no-keep-awake-while-working`,
+`RYCO_KEEP_AWAKE_WHILE_WORKING=false` or `ryco config set keep-awake-while-working false`. On Linux
+it takes the same `systemd-inhibit` lock as `--prevent-sleep`, which also holds off an explicit
+suspend while agents work (a closed lid still suspends with logind's defaults); without
+`systemd-inhibit` the server logs one line and carries on.
+
 ### Node settings
 
 The node's settings live in `~/.ryco/userdata/node.json`. `ryco setup` and `ryco service install`
