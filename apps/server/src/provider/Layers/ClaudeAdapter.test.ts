@@ -7736,6 +7736,130 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+  it.effect("stops one subagent while the turn that launched it keeps running", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const started = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("subagent-runtime"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "Explore the repo",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "explore-task",
+        description: "Map the repo",
+        task_type: "local_agent",
+        subagent_type: "Explore",
+        tool_use_id: "toolu_explore",
+        session_id: "sdk",
+        uuid: "explore-started",
+      } as unknown as SDKMessage);
+      const startedEvent = Array.from(yield* Fiber.join(started))[0];
+      assert.equal(startedEvent?.type, "task.started");
+      if (startedEvent?.type === "task.started") {
+        assert.isTrue(startedEvent.payload.canStop);
+        // Agent tasks get no background attempt, so clients send attempt 0.
+        assert.isUndefined(startedEvent.payload.attempt);
+      }
+
+      const stale = yield* adapter.stopBackgroundTask!(THREAD_ID, "explore-task", {
+        runtimeSessionId: RuntimeSessionId.make("earlier-runtime"),
+        attempt: 0,
+      }).pipe(Effect.exit);
+      assert.equal(stale._tag, "Failure");
+      assert.lengthOf(harness.query.stopTaskCalls, 0);
+
+      yield* adapter.stopBackgroundTask!(THREAD_ID, "explore-task", {
+        runtimeSessionId: RuntimeSessionId.make("subagent-runtime"),
+        attempt: 0,
+      });
+      assert.deepEqual(harness.query.stopTaskCalls, ["explore-task"]);
+      assert.lengthOf(harness.query.interruptCalls, 0);
+
+      const completed = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "explore-task",
+        status: "stopped",
+        session_id: "sdk",
+        uuid: "explore-stopped",
+      } as unknown as SDKMessage);
+      const completedEvent = Array.from(yield* Fiber.join(completed))[0];
+      assert.equal(completedEvent?.type, "task.completed");
+      if (completedEvent?.type === "task.completed") {
+        assert.equal(completedEvent.payload.status, "stopped");
+      }
+      const [session] = yield* adapter.listSessions();
+      assert.equal(session?.activeTurnId, turn.turnId);
+      assert.lengthOf(harness.query.interruptCalls, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+  it.effect("offers stop on a workflow coordinator but not on its member slots", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const progress = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.progress"),
+        Stream.takeUntil(
+          (event) => (event.payload as { taskId?: string }).taskId === "wf-stop:wf:0",
+        ),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("workflow-runtime"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Run the review", attachments: [] });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "wf-stop",
+        description: "Review workflow",
+        workflow_progress: [
+          { type: "workflow_phase", index: 0, title: "Review" },
+          { type: "workflow_agent", index: 0, state: "running", label: "reviewer", phaseIndex: 0 },
+        ],
+        session_id: "sdk",
+        uuid: "wf-stop-tick",
+      } as unknown as SDKMessage);
+      const canStopByTask = Object.fromEntries(
+        Array.from(yield* Fiber.join(progress), (event) => [
+          (event.payload as { taskId: string }).taskId,
+          (event.payload as { canStop?: boolean }).canStop,
+        ]),
+      );
+      assert.deepEqual(canStopByTask, { "wf-stop": true, "wf-stop:wf:0": false });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
   it.effect(
     "persists main-loop cache evidence without duplicate freshness or subagent pollution",
     () => {

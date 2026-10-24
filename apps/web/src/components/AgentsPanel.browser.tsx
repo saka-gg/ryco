@@ -1,12 +1,15 @@
 import "../index.css";
 
-import { EventId } from "@ryco/contracts";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
+import { EnvironmentId, EventId, ThreadId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 import { deriveAgentPanelModel, deriveThreadSubagents } from "../threadWorkspaceViewModel";
 import { makeRuntimeAgent } from "./agents/agentRosterTestFixtures";
+import { agentStopRequests } from "./agents/agentStopRequests";
 import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { AgentsPanel } from "./AgentsPanel";
 
@@ -16,12 +19,31 @@ function rowIds(): string[] {
   );
 }
 
+function stopAction(): SubagentStopAction {
+  return {
+    threadRef: scopeThreadRef(EnvironmentId.make("env_agents_panel"), ThreadId.make("thread-1")),
+    runtimeSessionId: "rt-1",
+    unavailableReason: null,
+    stop: vi.fn(() => Promise.resolve()),
+  };
+}
+
+function stopLabels(): string[] {
+  return [...document.querySelectorAll<HTMLButtonElement>("button[aria-label^='Stop']")].map(
+    (button) => button.getAttribute("aria-label") ?? "",
+  );
+}
+
+/** Fields that make a row stoppable under {@link stopAction}. */
+const STOPPABLE = { runtimeSessionId: "rt-1", canStop: true } as const;
+
 describe("AgentsPanel", () => {
   let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
   afterEach(async () => {
     await mounted?.unmount().catch(() => {});
     mounted = null;
+    agentStopRequests.clear();
     document.body.innerHTML = "";
   });
 
@@ -463,5 +485,144 @@ describe("AgentsPanel", () => {
     } finally {
       scrollIntoView.mockRestore();
     }
+  });
+
+  it("offers Stop on live direct spawns in every section, never on workflow rows", async () => {
+    const action = stopAction();
+    const onOpenAgent = vi.fn();
+    const settled = { status: "completed" as const, completedAt: "2026-08-10T10:00:30.000Z" };
+    const reviewed = makeRuntimeAgent("wf-review", {
+      ...STOPPABLE,
+      kind: "workflow",
+      title: "Review the change",
+      workflowName: "Review the change",
+      phases: [{ index: 0, title: "Review" }],
+    });
+    const model = deriveAgentPanelModel({
+      agents: [
+        reviewed,
+        makeRuntimeAgent("wf-review:wf:0", {
+          ...STOPPABLE,
+          kind: "workflow_agent",
+          title: "review:reader",
+          parentAgentId: reviewed.id,
+          agentIndex: 0,
+          phaseIndex: 0,
+          phaseTitle: "Review",
+        }),
+        makeRuntimeAgent("wf-bare", {
+          ...STOPPABLE,
+          kind: "workflow",
+          title: "Bare workflow",
+          workflowName: "Bare workflow",
+        }),
+        makeRuntimeAgent("solo", { ...STOPPABLE, title: "Map the parser", spawnTurnId: "t1" }),
+        makeRuntimeAgent("batch-live", {
+          ...STOPPABLE,
+          title: "Trace the client",
+          spawnTurnId: "t2",
+          firstSeenAt: "2026-08-10T10:01:00.000Z",
+        }),
+        makeRuntimeAgent("batch-done", {
+          ...STOPPABLE,
+          ...settled,
+          title: "Trace the server",
+          spawnTurnId: "t2",
+          firstSeenAt: "2026-08-10T10:01:01.000Z",
+        }),
+        makeRuntimeAgent("batch-earlier", {
+          canStop: true,
+          runtimeSessionId: "rt-0",
+          title: "Trace the relay",
+          spawnTurnId: "t2",
+          firstSeenAt: "2026-08-10T10:01:02.000Z",
+        }),
+        makeRuntimeAgent("batch-unflagged", {
+          runtimeSessionId: "rt-1",
+          title: "Trace the hub",
+          spawnTurnId: "t2",
+          firstSeenAt: "2026-08-10T10:01:03.000Z",
+        }),
+      ],
+    });
+    const panel = (stopAgent: SubagentStopAction | null) => (
+      <div className="h-[620px] w-[440px]">
+        <AgentsPanel model={model} onOpenAgent={onOpenAgent} stopAgent={stopAgent} />
+      </div>
+    );
+
+    mounted = await render(panel(action));
+
+    expect(rowIds()).toEqual([
+      "wf-bare",
+      "wf-review:wf:0",
+      "solo",
+      "batch-live",
+      "batch-done",
+      "batch-earlier",
+      "batch-unflagged",
+    ]);
+    expect(stopLabels()).toEqual(["Stop Map the parser", "Stop Trace the client"]);
+    // Stop takes pointer events once its row is hovered (always, on a device
+    // that can't hover), so the same steps reach it on any runner.
+    await page.getByRole("button", { name: /^Open Trace the client/ }).hover();
+    await page.getByRole("button", { name: "Stop Trace the client" }).click();
+    expect(action.stop).toHaveBeenCalledExactlyOnceWith({
+      taskId: "batch-live",
+      runtimeSessionId: "rt-1",
+      attempt: 0,
+    });
+    expect(onOpenAgent).not.toHaveBeenCalled();
+
+    // Without a stop action the rows are the roster's own, with nothing beside them.
+    await mounted.rerender(panel(null));
+    expect(stopLabels()).toEqual([]);
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-agent-row]")];
+    expect(rows).toHaveLength(7);
+    expect(rows.some((row) => row.parentElement?.classList.contains("group/agent-row"))).toBe(
+      false,
+    );
+  });
+
+  it("offers a labeled Stop in a live agent's detail header", async () => {
+    const action = stopAction();
+    const agent = makeRuntimeAgent("solo", { ...STOPPABLE, title: "Map the parser" });
+    const detail = (shown: typeof agent, stopAgent: SubagentStopAction | null) => (
+      <div className="h-[420px] w-[440px]">
+        <AgentsPanel
+          model={deriveAgentPanelModel({ agents: [shown] })}
+          selectedAgentId={shown.id}
+          stopAgent={stopAgent}
+        />
+      </div>
+    );
+
+    const headerHeight = () =>
+      document.querySelector("[data-agent-detail] header")!.getBoundingClientRect().height;
+
+    mounted = await render(detail(agent, action));
+
+    const stop = page.getByRole("button", { name: "Stop Map the parser" });
+    await expect.element(stop).toHaveTextContent("Stop");
+    expect(stop.element().closest("[data-agent-detail] header")).not.toBeNull();
+    const heightWithStop = headerHeight();
+    await stop.click();
+    expect(action.stop).toHaveBeenCalledExactlyOnceWith({
+      taskId: "solo",
+      runtimeSessionId: "rt-1",
+      attempt: 0,
+    });
+
+    await mounted.rerender(
+      detail({ ...agent, status: "interrupted", completedAt: "2026-08-10T10:00:30.000Z" }, action),
+    );
+    await expect.element(page.getByText("Interrupted", { exact: true })).toBeVisible();
+    expect(stopLabels()).toEqual([]);
+    // The header keeps its height when Stop goes away.
+    expect(headerHeight()).toBe(heightWithStop);
+
+    await mounted.rerender(detail(agent, null));
+    await expect.element(page.getByText("Running", { exact: true })).toBeVisible();
+    expect(stopLabels()).toEqual([]);
   });
 });

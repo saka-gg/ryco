@@ -12,14 +12,25 @@
  * - Rows lead with the agent's functional label (Claude's `verify:implementor`)
  *   and say what it is doing now; model, usage and timestamps live in the
  *   agent's detail view, not on every row.
+ * - A live native subagent offers Stop on its row (on hover or focus) and in
+ *   its detail header; it ends that one task, never the turn.
  *
  * Rows, status dots and roster identity are shared with the crown's Subagents
  * detail (./agents/agentRoster); this file owns the workflow, phase and
  * script sections and the agent detail view.
  */
+import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { ArrowLeftIcon, BotIcon, BracesIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { readEnvironmentApi } from "../environmentApi";
 import { landingFlashClass, scrollRowIntoView, useLandingFlash } from "../hooks/useLandingFlash";
@@ -40,6 +51,7 @@ import {
 } from "../threadWorkspaceViewModel";
 import { cn } from "~/lib/utils";
 import { AgentActivityTimeline } from "./AgentActivityTimeline";
+import { AgentStopButton, makeAgentStopDecorator } from "./agents/AgentStopButton";
 import {
   AGENT_STATUS_VISUALS,
   AgentElapsed,
@@ -447,10 +459,12 @@ function DirectSpawnGroupSection({
 function AgentDetailView({
   selected,
   transcript,
+  stopAgent,
   onBack,
 }: {
   selected: RuntimeSubagent;
   transcript: ThreadSubagentView | undefined;
+  stopAgent: SubagentStopAction | null;
   onBack: () => void;
 }) {
   const { label, role } = useAgentRowIdentity(selected);
@@ -473,6 +487,9 @@ function AgentDetailView({
           <span className="shrink-0 text-xs text-muted-foreground">
             {AGENT_STATUS_VISUALS[selected.status].label}
           </span>
+          {stopAgent ? (
+            <AgentStopButton agent={selected} action={stopAgent} variant="labeled" />
+          ) : null}
         </div>
         {label !== selected.title.trim() ? (
           <p className="break-words text-xs leading-relaxed text-muted-foreground">
@@ -541,6 +558,7 @@ export function AgentsPanel({
   onBack,
   focusWorkflowId = null,
   onFocusWorkflowHandled,
+  stopAgent = null,
 }: {
   subagents?: ReadonlyArray<ThreadSubagentView>;
   selectedAgentId?: string | null;
@@ -556,6 +574,8 @@ export function AgentsPanel({
    */
   focusWorkflowId?: string | null;
   onFocusWorkflowHandled?: () => void;
+  /** Stop for the thread's native agents; without it rows and details offer none. */
+  stopAgent?: SubagentStopAction | null;
 }) {
   const [localSelection, setLocalSelection] = useState<string | null>(null);
   useEffect(() => setLocalSelection(null), [threadId]);
@@ -583,6 +603,8 @@ export function AgentsPanel({
     [triggerFlash],
   );
 
+  const decorateRow = useMemo(() => makeAgentStopDecorator(stopAgent), [stopAgent]);
+
   const selection = selectedAgentId ?? localSelection;
   const selected = selection
     ? agentPanelRoster(model).find(
@@ -600,6 +622,7 @@ export function AgentsPanel({
           (agent) =>
             canonicalSubagentIdentityKey(agent.key) === canonicalSubagentIdentityKey(selected.id),
         )}
+        stopAgent={stopAgent}
         onBack={() => {
           setLocalSelection(null);
           onBack?.();
@@ -674,7 +697,11 @@ export function AgentsPanel({
   }
 
   return (
-    <AgentRosterProvider model={model} onOpenAgent={onOpenAgent ?? setLocalSelection}>
+    <AgentRosterProvider
+      model={model}
+      onOpenAgent={onOpenAgent ?? setLocalSelection}
+      decorateRow={decorateRow}
+    >
       {content}
     </AgentRosterProvider>
   );

@@ -2,7 +2,9 @@ import "../../../../index.css";
 // The feature stylesheet loads with its page or dialog chunk in the app.
 import "../../overview.css";
 
-import { EnvironmentId, WorktreeId } from "@ryco/contracts";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
+import { EnvironmentId, ThreadId, WorktreeId } from "@ryco/contracts";
 import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -14,6 +16,8 @@ import type { CrownOverviewProps, CrownSectionDetailProps, CrownShipBinding } fr
 import { CrownOverview } from "../CrownOverview";
 import { CrownSectionDetail } from "./CrownSectionDetail";
 import {
+  auditWorkflowAgents,
+  crownDirectAgents,
   crownLayoutFixture,
   crownPullRequestFixture,
   makeAgentPanelModel,
@@ -21,6 +25,7 @@ import {
   makeWorkflowMember,
 } from "../crownTestFixtures";
 import { makeRuntimeAgent } from "../../../agents/agentRosterTestFixtures";
+import { agentStopRequests } from "../../../agents/agentStopRequests";
 
 const hosts: HTMLElement[] = [];
 
@@ -50,6 +55,12 @@ function guardLinkClicks() {
   return { state, dispose: () => window.removeEventListener("click", guard) };
 }
 
+function stopLabels(): string[] {
+  return [...document.querySelectorAll<HTMLButtonElement>("button[aria-label^='Stop']")].map(
+    (button) => button.getAttribute("aria-label") ?? "",
+  );
+}
+
 function BranchControlStub(): ReactNode {
   return <button type="button" className="flex h-9 w-full items-center px-3" aria-label="Branch" />;
 }
@@ -57,6 +68,7 @@ function BranchControlStub(): ReactNode {
 describe("CrownSectionDetail interactions", () => {
   afterEach(() => {
     for (const host of hosts.splice(0)) host.remove();
+    agentStopRequests.clear();
   });
 
   it("opens the review from the Changes detail", async () => {
@@ -87,6 +99,72 @@ describe("CrownSectionDetail interactions", () => {
     await page.getByRole("button", { name: "Show all 4 agents of Audit in Agents" }).click();
     expect(onOpenAgentsWorkflow.mock.calls).toEqual([["wf-audit"], ["wf-audit"]]);
     expect(onOpenAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers Stop on live direct agents in the Subagents detail, never on workflow members", async () => {
+    const stop = vi.fn<SubagentStopAction["stop"]>(() => Promise.resolve());
+    // One thread per variant: a stop the node took stays pending for every
+    // control of that agent, so a second surface on the same thread shows it.
+    const stopAgentFor = (variant: string): SubagentStopAction => ({
+      threadRef: scopeThreadRef(
+        EnvironmentId.make("environment-local"),
+        ThreadId.make(`thread-${variant}`),
+      ),
+      runtimeSessionId: "rt-1",
+      unavailableReason: null,
+      stop,
+    });
+    const onOpenAgent = vi.fn();
+    // Every row carries the current runtime's stop flag, as an older server
+    // also sends it on workflow members (the running "review:card" here).
+    const agentPanelModel = makeAgentPanelModel(
+      [...auditWorkflowAgents(), ...crownDirectAgents()].map((agent) =>
+        Object.assign(agent, { runtimeSessionId: "rt-1", canStop: true }),
+      ),
+    );
+
+    for (const variant of ["card", "flyout"] as const) {
+      const { container, unmount } = await mountDetail({
+        section: "agents",
+        variant,
+        isGitRepo: true,
+        layout: crownLayoutFixture({
+          agentPanelModel,
+          onOpenAgent,
+          stopAgent: stopAgentFor(variant),
+        }),
+      });
+      expect(stopLabels()).toEqual(["Stop Scout"]);
+      // With Stop beside it, the row still takes 30px, its divider included.
+      const scoutRow = container.querySelector('[data-agent-id="agent-scout"]')!.parentElement!;
+      expect(scoutRow.getBoundingClientRect().height).toBe(30);
+      // Stop takes pointer events once its row is hovered (always, on a device
+      // that can't hover), so the same steps reach it on any runner.
+      await page.getByRole("button", { name: "Open Scout transcript. Running." }).hover();
+      await page.getByRole("button", { name: "Stop Scout" }).click();
+      expect(stop).toHaveBeenLastCalledWith({
+        taskId: "agent-scout",
+        runtimeSessionId: "rt-1",
+        attempt: 0,
+      });
+      await unmount();
+    }
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(onOpenAgent).not.toHaveBeenCalled();
+
+    // Without a stop action the rows are the roster's own, with nothing beside them.
+    const { container } = await mountDetail({
+      section: "agents",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({ agentPanelModel, onOpenAgent }),
+    });
+    expect(stopLabels()).toEqual([]);
+    const rows = [...container.querySelectorAll<HTMLElement>("[data-agent-row]")];
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((row) => row.parentElement?.classList.contains("group/agent-row"))).toBe(
+      false,
+    );
   });
 
   it("fits the workflow card into the flyout with fixed 30px member rows", async () => {

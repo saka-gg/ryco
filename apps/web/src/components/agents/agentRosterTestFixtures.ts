@@ -34,6 +34,8 @@ export function makeRuntimeAgent(
     workflowName: null,
     phases: [],
     runHandles: null,
+    runtimeSessionId: null,
+    canStop: false,
     recentActivity: [],
     firstSeenAt,
     spawnTurnId: null,

@@ -2157,7 +2157,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(context.backgroundedTaskIds.has(event.payload.taskId)
             ? { isBackgrounded: true }
             : {}),
-          canStop: context.query.stopTask !== undefined,
+          // An emitter can deny stop for synthesized rows, never grant it.
+          canStop: event.payload.canStop !== false && context.query.stopTask !== undefined,
         },
       } as ProviderRuntimeEvent;
     }
@@ -4205,6 +4206,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(entry.phaseIndex !== undefined ? { phaseIndex: entry.phaseIndex } : {}),
           ...(entry.phaseTitle ? { phaseTitle: entry.phaseTitle } : {}),
           ...(entry.attempt !== undefined ? { attempt: entry.attempt } : {}),
+          // A member slot is never a live SDK task, so stopTask on it is a no-op.
+          canStop: false,
           timelineBypass: true,
         },
       });
