@@ -35,6 +35,11 @@ export const NodeConfig = Schema.Struct({
     }),
   ),
   preventSleep: Schema.optional(Schema.Boolean),
+  /**
+   * Hold the machine awake while agents work (on AC power). Unset means the default, on. Like any
+   * new key, an older `ryco serve` refuses a file that has it.
+   */
+  keepAwakeWhileWorking: Schema.optional(Schema.Boolean),
   restrictToWorkspace: Schema.optional(Schema.Boolean),
 });
 export type NodeConfig = typeof NodeConfig.Type;
@@ -106,6 +111,8 @@ export function nodeConfigAsServeArgs(config: NodeConfig): string[] {
     if (config.hub.e2eePolicy !== undefined) args.push("--hub-e2ee-policy", config.hub.e2eePolicy);
   }
   if (config.preventSleep) args.push("--prevent-sleep");
+  // On by default, so only turning it off needs a flag.
+  if (config.keepAwakeWhileWorking === false) args.push("--no-keep-awake-while-working");
   if (config.restrictToWorkspace) args.push("--restrict-to-cwd");
   if (config.workspace !== undefined) args.push(config.workspace);
   return args;

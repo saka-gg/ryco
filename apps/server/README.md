@@ -110,6 +110,11 @@ Common options:
 - `--tailscale-serve`: expose this backend over HTTPS on the Tailnet through Tailscale Serve
 - `--hub`: reach this node through the hosted Hub relay (`--hub-origin` selects another Hub)
 - `--prevent-sleep`: keep the machine from idle-sleeping while the server runs
+- `--no-keep-awake-while-working`: let the machine idle-sleep while agents work. By default a
+  server keeps it awake while a turn or background work runs and for 2 minutes after, on AC power
+  only; the display may still sleep (`RYCO_KEEP_AWAKE_WHILE_WORKING`,
+  `ryco config set keep-awake-while-working false`). `--prevent-sleep` holds it for the whole run
+  instead, and Ryco Desktop manages this itself.
 - `--log-websocket-events`: emit server-side WebSocket traffic logs for debugging
 
 ### Memory

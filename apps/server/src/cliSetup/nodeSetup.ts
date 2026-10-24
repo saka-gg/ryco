@@ -28,6 +28,7 @@ export interface NodeSettingsPatch {
   readonly hubAllowFileSecretStore?: boolean | undefined;
   readonly hubE2eePolicy?: NonNullable<NodeConfig["hub"]>["e2eePolicy"] | undefined;
   readonly preventSleep?: boolean | undefined;
+  readonly keepAwakeWhileWorking?: boolean | undefined;
   readonly restrictToWorkspace?: boolean | undefined;
 }
 
@@ -61,6 +62,7 @@ export function applyNodeSettings(config: NodeConfig, patch: NodeSettingsPatch):
     tailscaleServePort: patch.tailscaleServePort ?? config.tailscaleServePort,
     hub,
     preventSleep: patch.preventSleep ?? config.preventSleep,
+    keepAwakeWhileWorking: patch.keepAwakeWhileWorking ?? config.keepAwakeWhileWorking,
     restrictToWorkspace: patch.restrictToWorkspace ?? config.restrictToWorkspace,
   });
 }
