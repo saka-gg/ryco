@@ -238,6 +238,75 @@ describe("EscapeKillSwitchMonitor", () => {
     monitor.dispose();
   });
 
+  it.each([false, true])(
+    "recovers a silent listener readiness stall after rearm=%s without trusting its late output",
+    async (rearm) => {
+      vi.useFakeTimers();
+      const onEscape = vi.fn();
+      const { monitor, helpers } = makeMonitor({ onEscape });
+      let activation = monitor.activate();
+      const stalled = helpers[0]!;
+      if (rearm) {
+        stalled.stdout.write('{"type":"ready"}\n');
+        await activation;
+        monitor.setArmed(false);
+        activation = monitor.activate();
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      await activation;
+      expect(monitor.state.ready).toBe(false);
+      expect(stalled.kill).toHaveBeenCalledWith("SIGTERM");
+      stalled.stdout.write('{"type":"ready"}\n{"type":"escape"}\n');
+      expect(onEscape).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(helpers).toHaveLength(2);
+      expect(helpers[1]!.stdinCommands).toEqual(["arm\n"]);
+      expect(monitor.state.ready).toBe(false);
+      helpers[1]!.stdout.write('{"type":"ready"}\n{"type":"escape"}\n');
+      expect(monitor.state.ready).toBe(true);
+      expect(onEscape).toHaveBeenCalledOnce();
+      monitor.dispose();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(helpers).toHaveLength(2);
+    },
+  );
+
+  it("does not restart the readiness deadline on an ordinary activation", async () => {
+    vi.useFakeTimers();
+    const { monitor, helpers } = makeMonitor();
+    void monitor.activate();
+    await vi.advanceTimersByTimeAsync(6_000);
+    // Already armed: another action's activation must not extend the deadline.
+    void monitor.activate();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(helpers[0]!.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(monitor.state).toEqual({ ready: false, error: "input_monitor_unavailable" });
+    monitor.dispose();
+  });
+
+  it.each([
+    ["ready", '{"type":"ready"}\n', { ready: true }],
+    [
+      "a native tap failure",
+      '{"type":"error","code":"event_tap_disabled","message":"Tap disabled."}\n',
+      { ready: false, error: "event_tap_disabled" },
+    ],
+  ] as const)(
+    "leaves a listener that reported %s to its own recovery",
+    async (_label, line, state) => {
+      vi.useFakeTimers();
+      const { monitor, helpers } = makeMonitor();
+      const activation = monitor.activate();
+      helpers[0]!.stdout.write(line);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await activation;
+      expect(monitor.state).toEqual(state);
+      expect(helpers[0]!.kill).not.toHaveBeenCalled();
+      expect(helpers).toHaveLength(1);
+      monitor.dispose();
+    },
+  );
+
   it("does not spawn twice when activation overtakes the restart timer", async () => {
     vi.useFakeTimers();
     const { monitor, helpers } = makeMonitor();
