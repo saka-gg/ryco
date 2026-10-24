@@ -37,10 +37,19 @@ const FOCUS_AFTER_UNFOLD_MS = 160;
 
 interface OmnifieldToken {
   readonly key: string;
-  readonly kind: "machine" | "status";
+  readonly kind: "machine" | "project" | "status";
   readonly label: string;
   readonly online: boolean;
 }
+
+/** Tokens keep this order whichever was added first, leaving ones included. */
+const TOKEN_ORDER: Record<OmnifieldToken["kind"], number> = { machine: 0, project: 1, status: 2 };
+
+const TOKEN_TONE: Record<OmnifieldToken["kind"], string> = {
+  machine: "bg-sky-500/12 text-sky-700 dark:bg-sky-400/14 dark:text-sky-300",
+  project: "bg-violet-500/12 text-violet-700 dark:bg-violet-400/14 dark:text-violet-300",
+  status: "bg-amber-500/14 text-amber-700 dark:bg-amber-400/13 dark:text-amber-300",
+};
 
 export interface SidebarOmnifieldProps {
   readonly mode: SidebarMode;
@@ -61,6 +70,8 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
   const setInboxDraft = useInboxFilterStore((store) => store.setDraft);
   const environmentId = useInboxFilterStore((store) => store.environmentId);
   const setEnvironmentId = useInboxFilterStore((store) => store.setEnvironmentId);
+  const project = useInboxFilterStore((store) => store.project);
+  const setProject = useInboxFilterStore((store) => store.setProject);
   const status = useInboxFilterStore((store) => store.status);
   const setStatus = useInboxFilterStore((store) => store.setStatus);
   const matchCount = useInboxFilterStore((store) => store.matchCount);
@@ -145,12 +156,20 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
         online: machine?.online ?? false,
       });
     }
+    if (project) {
+      next.push({
+        key: `project:${project.logicalKey}`,
+        kind: "project",
+        label: project.label,
+        online: false,
+      });
+    }
     if (status !== "all") {
       const label = INBOX_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status;
       next.push({ key: `status:${status}`, kind: "status", label, online: false });
     }
     return next;
-  }, [environmentId, machines, mode, status]);
+  }, [environmentId, machines, mode, project, status]);
   const leavingTokens = useLeavingTokens(tokens, !prefersReducedMotion);
   const filterCount = tokens.length;
 
@@ -208,6 +227,7 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
 
   const removeToken = (token: OmnifieldToken) => {
     if (token.kind === "machine") setEnvironmentId(null);
+    else if (token.kind === "project") setProject(null);
     else setStatus("all");
     setArmed(false);
   };
@@ -333,9 +353,7 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
           </button>
           <span className="sidebar-omnifield-tokens flex min-w-0 max-w-[calc(100%-40px)] shrink gap-[3px] overflow-hidden">
             {[...tokens, ...leavingTokens.list]
-              .toSorted((left, right) =>
-                left.kind === right.kind ? 0 : left.kind === "machine" ? -1 : 1,
-              )
+              .toSorted((left, right) => TOKEN_ORDER[left.kind] - TOKEN_ORDER[right.kind])
               .map((token) => {
                 const leaving = !tokens.includes(token);
                 return (
@@ -351,15 +369,16 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
                     onAnimationEnd={leaving ? () => leavingTokens.done(token) : undefined}
                     className={cn(
                       "sidebar-omnifield-token inline-flex h-5 min-w-0 shrink items-center gap-1 overflow-hidden whitespace-nowrap rounded-[6px] px-1.5 text-[10.5px] outline-none",
-                      token.kind === "machine"
-                        ? "bg-sky-500/12 text-sky-700 dark:bg-sky-400/14 dark:text-sky-300"
-                        : "bg-amber-500/14 text-amber-700 dark:bg-amber-400/13 dark:text-amber-300",
+                      // A status label is short and has no ellipsis: the named
+                      // tokens shrink instead, so it is never cut mid-word.
+                      token.kind === "status" && "shrink-0",
+                      TOKEN_TONE[token.kind],
                     )}
                   >
                     {token.kind === "machine" ? <MachineDot online={token.online} /> : null}
                     <span
                       className={
-                        token.kind === "machine" ? "sidebar-omnifield-token-label" : undefined
+                        token.kind === "status" ? undefined : "sidebar-omnifield-token-label"
                       }
                     >
                       {token.label}

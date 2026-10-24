@@ -21,7 +21,7 @@ import {
 } from "react";
 
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { useTheme } from "../../hooks/useTheme";
+import { COLOR_MODE_OPTIONS, useTheme } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
 import {
   APPEARANCE_PREFERENCES_STORAGE_KEY,
@@ -79,12 +79,6 @@ import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
 import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
 import { ThemeEditor } from "./ThemeEditor";
-
-const VARIANT_OPTIONS = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-] as const;
 
 export function AppearanceSettingsPanel({
   surface = "node",
@@ -305,7 +299,7 @@ export function AppearanceSettingsPanel({
     <SettingsPageContainer>
       <SettingsSection title="Color mode" bare>
         <div className="grid grid-cols-3 gap-3" role="group" aria-label="Color mode">
-          {VARIANT_OPTIONS.map((option) => (
+          {COLOR_MODE_OPTIONS.map((option) => (
             <button
               key={option.value}
               type="button"

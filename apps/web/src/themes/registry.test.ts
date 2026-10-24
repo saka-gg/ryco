@@ -14,6 +14,7 @@ import {
   getActiveThemeId,
   getAllThemes,
   getCustomThemes,
+  getThemeListSnapshot,
   isBuiltInThemeId,
   isValidColorValue,
   isValidTheme,
@@ -456,6 +457,19 @@ describe("custom theme storage", () => {
     const all = getAllThemes();
     expect(all[0]?.id).toBe(DEFAULT_THEME_ID);
     expect(all.at(-1)?.id).toBe("alpha");
+  });
+
+  it("getThemeListSnapshot keeps one array until the custom themes change", () => {
+    const initial = getThemeListSnapshot();
+    expect(initial).toEqual(getAllThemes());
+    expect(getThemeListSnapshot()).toBe(initial);
+
+    const custom: ThemeDefinition = { id: "alpha", name: "Alpha", builtIn: false };
+    addCustomTheme(custom);
+    const withCustom = getThemeListSnapshot();
+    expect(withCustom).not.toBe(initial);
+    expect(withCustom.at(-1)).toEqual(custom);
+    expect(getThemeListSnapshot()).toBe(withCustom);
   });
 
   it("generateCustomThemeId avoids collisions and prefixes built-in ids", () => {

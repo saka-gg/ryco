@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { flashSettingsTarget } from "./settingsLayout";
+
 export function useSettingsSubsections(section: string, searching: boolean, target: string | null) {
   const [root, contentRef] = useState<HTMLDivElement | null>(null);
   const [sections, setSections] = useState<
@@ -53,6 +55,7 @@ export function useSettingsSubsections(section: string, searching: boolean, targ
           match.scrollIntoView({ block: "center" });
           match.tabIndex = -1;
           match.focus({ preventScroll: true });
+          flashSettingsTarget(match);
         }
       }
       track();

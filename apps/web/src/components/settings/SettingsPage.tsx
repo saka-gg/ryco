@@ -75,6 +75,7 @@ import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ArchivedThreadsPanel, GeneralSettingsPanel, useSettingsRestore } from "./SettingsPanels";
+import { KEYBINDING_SEARCH_ENTRIES } from "./keybindingSearchEntries";
 import { SETTINGS_SEARCH_INDEX, type SettingsSearchEntry } from "./settingsSearchIndex";
 import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
 import { SettingsCard, SettingsEmpty } from "./settingsLayout";
@@ -627,6 +628,9 @@ function CompactSectionPicker({
   );
 }
 
+// Shortcuts list after the settings themselves, so a word like "new" shows settings first.
+const SEARCH_ENTRIES = [...SETTINGS_SEARCH_INDEX, ...KEYBINDING_SEARCH_ENTRIES];
+
 function SearchResults({
   query,
   results,
@@ -829,7 +833,7 @@ export function SettingsPage() {
   const searchResults =
     normalizedQuery.length === 0
       ? []
-      : SETTINGS_SEARCH_INDEX.filter(
+      : SEARCH_ENTRIES.filter(
           (entry) =>
             reachable.has(`${entry.owner}:${entry.section}`) &&
             (!entry.localOnboardingOnly || isLocalOnboardingClient()) &&
