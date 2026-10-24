@@ -369,8 +369,10 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       aria-current={props.active ? "page" : undefined}
       aria-description={selected ? "Selected" : undefined}
       className={cn(
-        "relative grid w-full min-w-0 grid-cols-[1.375rem_minmax(0,1fr)_auto] rounded-lg px-2 text-left outline-hidden ring-ring select-none focus-visible:ring-2",
+        "relative grid w-full min-w-0 grid-cols-[1.375rem_minmax(0,1fr)_auto] rounded-lg px-2 text-left outline-hidden ring-ring focus-visible:ring-2",
         resting ? "items-center py-1" : "py-1.5",
+        // Shift-click selects rows, not text (the phone tier selects no rows).
+        props.selection && "select-none",
         // The project sidebar's selection tints, its open-and-selected one included.
         selected
           ? props.active

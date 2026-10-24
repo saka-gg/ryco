@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
+import { syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { isMacPlatform } from "../../lib/utils";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
+import { useTierOverrideStore } from "../../tierOverrideStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
@@ -284,6 +286,27 @@ describe("Inbox row selection", () => {
     useInboxFilterStore.getState().setDraft("Task r1");
     await vi.waitFor(() => expect(document.body.textContent).not.toContain("Task r2"));
     expect([...useThreadSelectionStore.getState().selectedThreadKeys]).toEqual([keyOf("r1")]);
+  });
+});
+
+describe("Inbox on the frozen phone tier", () => {
+  let stopTierSync: (() => void) | null = null;
+  afterEach(() => {
+    stopTierSync?.();
+    stopTierSync = null;
+    useTierOverrideStore.setState({ override: null });
+  });
+
+  it("opens rows as before and offers neither selection nor Settle finished", async () => {
+    useTierOverrideStore.setState({ override: "phone" });
+    stopTierSync = syncDocumentPresentationTier();
+    useUiStateStore.getState().markThreadVisited(keyOf("r1"));
+    const { onOpenThread } = await mountInbox();
+    await title("r1").click({ modifiers: [TOGGLE_KEY] });
+    expect(onOpenThread).toHaveBeenCalledExactlyOnceWith(ref("r1"));
+    expect(useThreadSelectionStore.getState().selectedThreadKeys.size).toBe(0);
+    expect(getComputedStyle(rowButton("r1")).userSelect).not.toBe("none");
+    expect(page.getByRole("button", { name: /^Settle \d+ finished thread/ }).query()).toBeNull();
   });
 });
 
