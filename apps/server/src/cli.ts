@@ -108,7 +108,10 @@ import {
 } from "./cliSetup/setupFlow.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
 import { makeTraceCommand } from "./cliTrace/traceCommand.ts";
-import { OtelEnvironmentConfig, resolveOtlpExports } from "./observability/OtelEnvironment.ts";
+import {
+  OtelEnvironmentConfig,
+  resolveServerOtlpExports,
+} from "./observability/OtelEnvironment.ts";
 import packageJson from "../package.json" with { type: "json" };
 import type { CliRemoteError } from "./cliRemote/remotes.ts";
 import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
@@ -784,7 +787,7 @@ export const resolveServerConfig = (
       ),
     });
 
-    const otlp = resolveOtlpExports(env.otel, {
+    const otlp = yield* resolveServerOtlpExports(env.otel, {
       traces: {
         rycoEnvUrl: env.otlpTracesUrl,
         bootstrapUrl: bootstrap?.otlpTracesUrl,

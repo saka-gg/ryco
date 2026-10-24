@@ -5,15 +5,17 @@ import { OtlpResource } from "effect/observability";
 import {
   OtelEnvironmentConfig,
   otlpExportHeaderNames,
-  otlpExporterOptions,
-  parseOtelKeyValueList,
-  otlpExporterContext,
-  resolveOtelEnvironment,
-  resolveOtlpExports,
-  resolveOtlpSignal,
+  resolveServerOtlpExports,
   type OtlpSignalSources,
   type RawOtelEnvironment,
 } from "./OtelEnvironment.ts";
+import {
+  parseOtelKeyValueList,
+  resolveOtelEnvironment,
+  resolveOtlpExports,
+  resolveOtlpSignal,
+} from "./OtelEnvironmentResolver.ts";
+import { otlpExporterContext, otlpExporterOptions } from "./OtlpExporters.ts";
 
 const readRaw = (env: Record<string, string>): RawOtelEnvironment =>
   Effect.runSync(
@@ -294,6 +296,45 @@ describe("resolveOtlpExports", () => {
       warnings: [],
     });
   });
+});
+
+describe("resolveServerOtlpExports", () => {
+  const sourcesFor = (
+    sources: Partial<Record<"traces" | "metrics" | "logs", OtlpSignalSources>> = {},
+  ) => ({
+    traces: sources.traces ?? {},
+    metrics: sources.metrics ?? {},
+    logs: sources.logs ?? {},
+  });
+  const cases: ReadonlyArray<{
+    readonly env: Record<string, string>;
+    readonly sources?: Partial<Record<"traces" | "metrics" | "logs", OtlpSignalSources>>;
+  }> = [
+    // Nothing set: answered without loading the resolver.
+    { env: {} },
+    { env: {}, sources: { traces: { settingsUrl: "http://settings/v1/traces" } } },
+    { env: {}, sources: { logs: { rycoEnvUrl: "http://logs/v1/logs" } } },
+    { env: { OTEL_SDK_DISABLED: "" } },
+    { env: { OTEL_LOGS_EXPORTER: "none" } },
+    { env: { OTEL_SDK_DISABLED: "maybe" } },
+    { env: { OTEL_RESOURCE_ATTRIBUTES: "a=%zz" } },
+    {
+      env: { OTEL_SDK_DISABLED: "true" },
+      sources: { metrics: { bootstrapUrl: "http://desktop/v1/metrics" } },
+    },
+    { env: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" } },
+  ];
+
+  it.effect("answers exactly as resolveOtlpExports does", () =>
+    Effect.gen(function* () {
+      for (const { env, sources } of cases) {
+        const raw = readRaw(env);
+        expect(yield* resolveServerOtlpExports(raw, sourcesFor(sources))).toEqual(
+          resolveOtlpExports(raw, sourcesFor(sources)),
+        );
+      }
+    }),
+  );
 });
 
 describe("OTLP exporter construction", () => {

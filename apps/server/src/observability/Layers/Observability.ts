@@ -1,7 +1,6 @@
 import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 import { Config, Effect, Layer, References, Tracer } from "effect";
 import { Headers } from "effect/http";
-import { OtlpExporter, OtlpMetrics, OtlpTracer } from "effect/observability";
 
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { makeDiagnosticsService } from "../../diagnostics/Layers/Diagnostics.ts";
@@ -15,12 +14,7 @@ import {
 } from "../LocalFileTracer.ts";
 import { LocalDiagnosticsMetricsLive } from "../Services/LocalDiagnosticsMetrics.ts";
 import { BrowserTraceCollector } from "../Services/BrowserTraceCollector.ts";
-import {
-  OTLP_SIGNALS,
-  otlpExporterContext,
-  otlpExporterOptions,
-  otlpRedactedHeaderNames,
-} from "../OtelEnvironment.ts";
+import { loadOtlpExporters, OTLP_SIGNALS, otlpRedactedHeaderNames } from "../OtelEnvironment.ts";
 import { makeTraceSink, type TraceSink } from "../TraceSink.ts";
 
 /**
@@ -105,13 +99,11 @@ export const ObservabilityLive = Layer.unwrap(
           close: sink.close,
           health: sink.health,
         } satisfies TraceSink;
+        // The OTLP exporters load only when a signal is exported (see OtelEnvironment.ts).
         const delegate =
           config.otlpTracesUrl === undefined
             ? undefined
-            : yield* OtlpTracer.make({
-                url: config.otlpTracesUrl,
-                ...otlpExporterOptions(config, "traces"),
-              }).pipe(Effect.provide(otlpExporterContext(config, "traces")));
+            : yield* (yield* loadOtlpExporters).makeOtlpTracer(config, config.otlpTracesUrl);
 
         const tracer = yield* makeLocalFileTracer({
           filePath: config.serverTracePath,
@@ -137,15 +129,17 @@ export const ObservabilityLive = Layer.unwrap(
           }),
         );
       }),
-    ).pipe(Layer.provide([OtlpExporter.layerFlusher, redactedHeaderNamesLayer]));
+    ).pipe(Layer.provide(redactedHeaderNamesLayer));
 
+    const otlpMetricsUrl = config.otlpMetricsUrl;
     const metricsLayer =
-      config.otlpMetricsUrl === undefined
+      otlpMetricsUrl === undefined
         ? Layer.empty
-        : OtlpMetrics.layer({
-            url: config.otlpMetricsUrl,
-            ...otlpExporterOptions(config, "metrics"),
-          }).pipe(Layer.provide(otlpExporterContext(config, "metrics")));
+        : Layer.unwrap(
+            Effect.map(loadOtlpExporters, (exporters) =>
+              exporters.otlpMetricsLayer(config, otlpMetricsUrl),
+            ),
+          );
 
     // After the server logger exists, so these lines reach the server log and an OTLP log export.
     const startupLogLayer = Layer.effectDiscard(logObservabilityStartup(config)).pipe(

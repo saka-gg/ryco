@@ -546,7 +546,10 @@ It provides:
 - Effect trace-level and timing refs
 
 How each signal is exported is resolved once at startup in
-`apps/server/src/observability/OtelEnvironment.ts`.
+`apps/server/src/observability/OtelEnvironmentResolver.ts`, and the exporters are built in
+`apps/server/src/observability/OtlpExporters.ts`. Both load only when something is configured
+(an OTEL variable, or a Ryco OTLP URL for the resolver; an exported signal for the exporters), so
+a server that exports nothing does not load Effect's OTLP exporters at startup.
 
 ### Env Vars
 

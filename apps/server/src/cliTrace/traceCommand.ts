@@ -5,30 +5,28 @@
  * database and no persistence layer, so it answers while the server is stalled or stopped.
  *
  * cli.ts passes in its location flags, `--json` flag and helpers, and config resolution, so this
- * module owns the command and cli.ts only registers it.
+ * module owns the command and cli.ts only registers it. Only the command and its flags are here;
+ * the summary (`traceRun.ts`) loads when the command runs.
  *
  * @module cliTrace/traceCommand
  */
-import { Clock, Console, Data, Duration, Effect, FileSystem, Option, Path, Schema } from "effect";
-import type { LogLevel } from "effect";
-import { Command, Flag, GlobalFlag } from "effect/cli";
+import { Effect, Schema } from "effect";
+import type { Duration, LogLevel, Option } from "effect";
+import { Command, Flag } from "effect/cli";
 
 import type { ServerConfigShape } from "../config.ts";
-import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
-import { rotatedTraceFilePaths } from "../observability/TraceRecord.ts";
-import {
-  formatTraceSummary,
-  makeTraceSpanSummary,
-  readTraceFileLines,
-  traceSummaryJson,
-} from "./traceSummary.ts";
 
-/** Backups read next to an explicit `--file`: the writer's default `RYCO_TRACE_MAX_FILES`. */
-const EXPLICIT_FILE_MAX_BACKUPS = 10;
-
-interface TraceLocationFlags {
+export interface TraceLocationFlags {
   readonly baseDir: Option.Option<string>;
   readonly devUrl: Option.Option<URL>;
+}
+
+/** The parsed flags of `ryco trace summary`. */
+export interface TraceSummaryFlags extends TraceLocationFlags {
+  readonly json: boolean;
+  readonly since: Option.Option<Duration.Duration>;
+  readonly limit: number;
+  readonly file: Option.Option<string>;
 }
 
 export interface TraceCommandDeps<E, R> {
@@ -57,49 +55,7 @@ export interface TraceCommandDeps<E, R> {
   ) => Effect.Effect<A, E2, R2>;
 }
 
-export class TraceSummaryError extends Data.TaggedError("TraceSummaryError")<{
-  readonly message: string;
-  readonly cause?: unknown;
-}> {}
-
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0));
-
-/** The trace file to read and how many rotated backups sit next to it. */
-const resolveTraceFiles = <E, R>(
-  deps: TraceCommandDeps<E, R>,
-  flags: TraceLocationFlags & { readonly file: Option.Option<string> },
-) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    if (Option.isSome(flags.file)) {
-      const file = flags.file.value.trim();
-      if (file.length === 0) {
-        return yield* new TraceSummaryError({ message: "--file needs a path." });
-      }
-      const traceFilePath = path.resolve(yield* expandHomePath(file));
-      return { traceFilePath, maxBackups: EXPLICIT_FILE_MAX_BACKUPS, explicit: true };
-    }
-    // Config resolution creates the data directory's folders; a mistyped `--base-dir` must not
-    // leave a fresh state tree behind just to report that it holds no spans.
-    if (Option.isSome(flags.baseDir)) {
-      const baseDir = yield* resolveBaseDir(flags.baseDir.value);
-      const exists = yield* fs.exists(baseDir).pipe(Effect.orElseSucceed(() => false));
-      if (!exists) {
-        return yield* new TraceSummaryError({ message: `No Ryco data directory at ${baseDir}.` });
-      }
-    }
-    const logLevel = yield* GlobalFlag.LogLevel;
-    const config = yield* deps.resolveConfig(
-      { baseDir: flags.baseDir, devUrl: flags.devUrl },
-      logLevel,
-    );
-    return {
-      traceFilePath: config.serverTracePath,
-      maxBackups: config.traceMaxFiles,
-      explicit: false,
-    };
-  });
 
 const makeTraceSummaryCommand = <E, R>(deps: TraceCommandDeps<E, R>) =>
   Command.make("summary", {
@@ -131,38 +87,10 @@ const makeTraceSummaryCommand = <E, R>(deps: TraceCommandDeps<E, R>) =>
       deps.quietly(
         flags.json,
         Effect.gen(function* () {
-          const files = yield* resolveTraceFiles(deps, flags);
-          const sinceMs = Option.isSome(flags.since)
-            ? (yield* Clock.currentTimeMillis) - Duration.toMillis(flags.since.value)
-            : undefined;
-          const summarizer = makeTraceSpanSummary({ sinceMs });
-          const { filesRead, filesUnreadable } = yield* Effect.tryPromise({
-            try: () =>
-              readTraceFileLines({
-                paths: rotatedTraceFilePaths(files.traceFilePath, files.maxBackups),
-                sinceMs,
-                followSymlinks: files.explicit,
-                onLine: summarizer.addLine,
-              }),
-            catch: (cause) =>
-              new TraceSummaryError({
-                message: `Could not read the trace files: ${
-                  cause instanceof Error ? cause.message : String(cause)
-                }`,
-                cause,
-              }),
-          });
-          const report = {
-            traceFilePath: files.traceFilePath,
-            filesRead,
-            filesUnreadable,
-            sinceMs,
-            limit: flags.limit,
-            summary: summarizer.finish(),
-          };
-          yield* Console.log(
-            flags.json ? deps.emitJson(traceSummaryJson(report)) : formatTraceSummary(report),
-          );
+          // The summary itself loads only when this command runs, which keeps it off the server's
+          // boot path (serverBundleBoundaries.test.ts).
+          const { runTraceSummary } = yield* Effect.promise(() => import("./traceRun.ts"));
+          return yield* runTraceSummary(deps, flags);
         }),
       ),
     ),

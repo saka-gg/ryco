@@ -1,9 +1,8 @@
 import { AsyncRotatingFileSink } from "@ryco/shared/logging";
 import { Effect, Logger, References, Layer, type LogLevel, type Scope } from "effect";
-import { OtlpExporter, OtlpLogger } from "effect/observability";
 
 import { ServerConfig } from "./config.ts";
-import { otlpExporterContext, otlpExporterOptions } from "./observability/OtelEnvironment.ts";
+import { loadOtlpExporters } from "./observability/OtelEnvironment.ts";
 
 /** Same rotation as the desktop shell's own log files. */
 export const SERVER_LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
@@ -120,17 +119,10 @@ export const ServerLoggerLive = Effect.gen(function* () {
   if (config.mode === "desktop") {
     loggers.push(yield* makeServerLogFileLogger({ filePath: config.serverLogPath }));
   }
+  // The OTLP exporters load only when a signal is exported (see OtelEnvironment.ts).
   if (config.otlpLogsUrl !== undefined) {
-    loggers.push(
-      yield* OtlpLogger.make({
-        url: config.otlpLogsUrl,
-        ...otlpExporterOptions(config, "logs"),
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(otlpExporterContext(config, "logs"), OtlpExporter.layerFlusher),
-        ),
-      ),
-    );
+    const exporters = yield* loadOtlpExporters;
+    loggers.push(yield* exporters.makeOtlpLogger(config, config.otlpLogsUrl));
   }
   const loggerLayer = Logger.layer(loggers, {
     mergeWithExisting: false,
