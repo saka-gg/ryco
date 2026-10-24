@@ -39,10 +39,6 @@ import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
 import { useInboxOrderHold } from "./useInboxOrderHold";
 
-type InboxOrderHoldLogic = typeof import("./inboxOrderHold");
-// Outside the component: the React Compiler cannot lower `import()`.
-const loadInboxOrderHold = (): Promise<InboxOrderHoldLogic> => import("./inboxOrderHold");
-
 export interface InboxSidebarProps {
   readonly threadActions?: InboxThreadActions | undefined;
   readonly projects: ReadonlyArray<Project>;
@@ -177,19 +173,11 @@ export function InboxSidebar(props: InboxSidebarProps) {
   // what the list shows starts a new hold.
   const [holdElement, setHoldElement] = useState<HTMLElement | null>(null);
   const orderHold = useInboxOrderHold(holdElement);
-  // The hold's logic loads on the first hold, outside the shell's bundle;
-  // until it arrives the list keeps its live order.
-  const [holdLogic, setHoldLogic] = useState<InboxOrderHoldLogic | null>(null);
-  useEffect(() => {
-    if (orderHold.holding && holdLogic === null) {
-      void loadInboxOrderHold().then(setHoldLogic, () => undefined);
-    }
-  }, [holdLogic, orderHold.holding]);
-  const holding = orderHold.holding && holdLogic !== null;
+  const holdLogic = orderHold.hold;
   const holdKey = JSON.stringify([query, environmentId, nestDelegated, props.aiFocusEnabled]);
   const [heldOrder, setHeldOrder] = useState<InboxOrderSnapshot | null>(null);
-  if (holding ? heldOrder?.holdKey !== holdKey : heldOrder !== null) {
-    setHeldOrder(holding ? holdLogic.captureInboxOrder(liveModel, holdKey) : null);
+  if (holdLogic ? heldOrder?.holdKey !== holdKey : heldOrder !== null) {
+    setHeldOrder(holdLogic ? holdLogic.captureInboxOrder(liveModel, holdKey) : null);
   }
   const model = useMemo(
     () =>

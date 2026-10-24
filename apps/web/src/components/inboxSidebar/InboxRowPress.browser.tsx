@@ -16,9 +16,9 @@ import {
   setCoarsePointerEmulation,
 } from "../../../test/browserPointer";
 import { useInboxFilterStore } from "./inboxFilterStore";
-// The inbox loads its order hold on the first hold; loaded up front, each hold
-// below takes effect as soon as the pointer arrives.
-import "./inboxOrderHold";
+// The inbox loads its order hold once it mounts; loaded up front, it is ready
+// before each test below points at a row.
+import "./inboxOrderHoldRuntime";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 import type { InboxSidebarEnvironment } from "./inboxSidebarModel";
 
