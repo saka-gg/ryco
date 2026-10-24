@@ -93,6 +93,19 @@ describe("keybindingCategories", () => {
     }
   });
 
+  it("maps back and forward to Navigation, and interrupt and copy to Threads", () => {
+    expect(getCommandMeta("navigation.back")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.navigation,
+      title: "Go back",
+    });
+    expect(getCommandMeta("navigation.forward").category).toBe(KEYBINDING_CATEGORIES.navigation);
+    expect(getCommandMeta("thread.interrupt")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.thread,
+      title: "Interrupt turn",
+    });
+    expect(getCommandMeta("thread.copyReference").category).toBe(KEYBINDING_CATEGORIES.thread);
+  });
+
   it("maps split-view commands to the Split view category", () => {
     expect(getCommandMeta("pane.split")).toMatchObject({
       category: KEYBINDING_CATEGORIES.pane,

@@ -19,6 +19,14 @@ import {
 import { getDocumentWindowTranslucencyScope } from "../themes/windowTranslucency";
 
 type Theme = "light" | "dark" | "system";
+
+/** The color modes Settings and the command palette offer, in their order. */
+export const COLOR_MODE_OPTIONS = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+] as const satisfies ReadonlyArray<{ readonly value: Theme; readonly label: string }>;
+
 type ThemeSnapshot = {
   theme: Theme;
   systemDark: boolean;

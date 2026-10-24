@@ -591,10 +591,11 @@ export function settingsSectionListed(
 export function filterSettingsSearchEntries(
   query: string,
   scope: SettingsSearchScope,
+  entries: ReadonlyArray<SettingsSearchEntry> = SETTINGS_SEARCH_INDEX,
 ): SettingsSearchEntry[] {
   const normalizedQuery = query.trim().toLowerCase();
   if (normalizedQuery.length === 0) return [];
-  return SETTINGS_SEARCH_INDEX.filter(
+  return entries.filter(
     (entry) =>
       settingsSectionListed(scope, entry.owner, entry.section) &&
       (!entry.localOnboardingOnly || scope.localOnboarding) &&

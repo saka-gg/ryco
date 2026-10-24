@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
+import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
   forgetEnvironmentServerConfig,
   getReportedThreadCapabilitiesSnapshot,
@@ -503,6 +504,28 @@ describe("buildInboxSidebarSections", () => {
     expect(active.flatMap((section) => section.rows.map((row) => row.threadId))).toEqual([
       "working match",
     ]);
+  });
+
+  it("keeps only the filtered projects, on whichever machine they live", () => {
+    const other = ProjectId.make("project-other");
+    const titles = buildInboxSidebarSections({
+      projects: [project(ENV_A), project(ENV_B), { ...project(ENV_A), id: other, name: "Hub" }],
+      worktrees: [],
+      threads: [
+        thread("here"),
+        thread("there", { environmentId: ENV_B }),
+        thread("hub", { projectId: other }),
+      ],
+      environments: [environment(ENV_A), environment(ENV_B)],
+      filters: {
+        ...ALL_FILTERS,
+        projectKeys: [
+          scopedProjectKey({ environmentId: ENV_A, projectId: PROJECT_A }),
+          scopedProjectKey({ environmentId: ENV_B, projectId: PROJECT_A }),
+        ],
+      },
+    }).flatMap((section) => section.rows.map((row) => row.title));
+    expect(titles.toSorted()).toEqual(["here", "there"]);
   });
 
   it("orders Recent by creation or finished responses, ignoring live updates and prompts", () => {
@@ -1277,6 +1300,14 @@ describe("glyph row facts", () => {
     expect(hosted.every((row) => row.showMachine)).toBe(true);
   });
 
+  it("lets every row narrow to its machine once threads span machines, the primary one too", () => {
+    const local = thread("local");
+    const remote = thread("remote", { environmentId: ENV_B });
+    expect(rows({ threads: [local] }).map((row) => row.spansMachines)).toEqual([false]);
+    const mixed = rows({ threads: [local, remote], primaryEnvironmentId: ENV_A });
+    expect(mixed.every((row) => row.spansMachines)).toBe(true);
+  });
+
   it("names the project only once the inbox spans projects", () => {
     expect(rows({ threads: [thread("one"), thread("two")] }).some((row) => row.showProject)).toBe(
       false,
@@ -1629,6 +1660,19 @@ describe("delegated thread folding", () => {
     expect(section(flat, "recent")?.rows.every((row) => row.delegatedChildren.length === 0)).toBe(
       true,
     );
+  });
+
+  it("keeps folding under a project filter", () => {
+    const threads = [thread("parent"), thread("child", { lineage: delegatedFrom("parent") })];
+    const filtered = build({
+      threads,
+      filters: {
+        ...ALL_FILTERS,
+        projectKeys: [scopedProjectKey({ environmentId: ENV_A, projectId: PROJECT_A })],
+      },
+    });
+    expect(ids(section(filtered, "recent")?.rows)).toEqual(["parent"]);
+    expect(ids(section(filtered, "recent")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
   });
 
   it("filters a status by the host's section, children included", () => {

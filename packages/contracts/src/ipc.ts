@@ -769,6 +769,10 @@ export type DesktopThreadExportResult = { readonly status: "saved" | "cancelled"
 /** The desktop menu action of Edit > Paste as Text; the app answers it with `pasteAsText`. */
 export const DESKTOP_PASTE_AS_TEXT_MENU_ACTION = "paste-as-text";
 
+/** The desktop menu actions of a window's trackpad swipes; the app steps its own history for them. */
+export const DESKTOP_NAVIGATE_BACK_MENU_ACTION = "navigate-back";
+export const DESKTOP_NAVIGATE_FORWARD_MENU_ACTION = "navigate-forward";
+
 export interface DesktopBridge {
   saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
   quitShortcut?: {

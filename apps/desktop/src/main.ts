@@ -1,6 +1,7 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
+import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
 import {
@@ -35,6 +36,7 @@ import {
   session,
   shell,
   webContents,
+  WebContentsView,
 } from "electron";
 import type { MenuItemConstructorOptions, OpenDialogOptions } from "electron";
 import {
@@ -4860,6 +4862,23 @@ function createWindow(): BrowserWindow {
   window.on("closed", () => {
     quitGuard.reset();
     quitShortcutGuards.delete(quitGuard);
+  });
+
+  // A trackpad swipe between pages (macOS) moves the focused page shown in this window: the
+  // browser panel's, or else the app's. Mouse buttons stay with the page (swipeNavigation).
+  window.on("swipe", (_event, direction) => {
+    const focused = webContents.getFocusedWebContents();
+    navigateWindow({
+      navigation: swipeNavigation(direction),
+      focusedPage:
+        window.contentView.children.find(
+          (view): view is WebContentsView =>
+            view instanceof WebContentsView && view.webContents === focused,
+        )?.webContents ?? null,
+      sendToApp: (action) => {
+        if (!window.webContents.isDestroyed()) window.webContents.send(MENU_ACTION_CHANNEL, action);
+      },
+    });
   });
 
   window.webContents.on("context-menu", (event, params) => {

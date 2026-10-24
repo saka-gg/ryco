@@ -181,6 +181,7 @@ import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useReducedMotionEffective } from "../hooks/useAppearancePreference";
 import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { usePresentationTier } from "../hooks/usePresentationTier";
 import type { PresentationTier } from "../lib/presentationTier";
@@ -308,10 +309,13 @@ import {
   applicableUsageLimit,
   deriveThreadSnoozeEligibility,
   isMaterializableCheckpointSummary,
+  resolveThreadReferenceCopyTarget,
+  resolveThreadWorkspacePullRequestLink,
   threadForkBoundaryQuote,
   selectEnvironmentShellLive,
   selectThreadDetailLoaded,
   selectThreadLiveDetailLoaded,
+  type ThreadReferenceCopyTarget,
 } from "@ryco/client-runtime/state/threads";
 import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
 import {
@@ -4101,6 +4105,57 @@ export default function ChatView(props: ChatViewProps) {
     setProjectExplorerOpen(true);
   }, []);
 
+  // Until the thread's own view takes over after the hand-off, the draft's
+  // keeps offering Stop, not a busy send button.
+  const composerWorktreeSetupRunning =
+    worktreeSetupRunning ||
+    (worktreeLaunch?.phase === "handed-off" && isSendBusy && !isServerThread);
+  // The stop and copy keys; the frozen phone tier gains neither (AGENTS.md).
+  const threadKeysAllowed = presentationTier !== "phone";
+  const copyReferenceThreadId =
+    threadKeysAllowed && isServerThread ? (activeThread?.id ?? null) : null;
+  const copyReferencePullRequestUrl = activeThreadSummary
+    ? resolveThreadWorkspacePullRequestLink(activeThreadSummary, activeWorktreeSummary)?.url
+    : null;
+  // Built from plain values, so a streaming render keeps the key listener.
+  const copyReferenceTarget = useMemo(
+    () =>
+      copyReferenceThreadId
+        ? resolveThreadReferenceCopyTarget({
+            threadId: copyReferenceThreadId,
+            pullRequestUrl: copyReferencePullRequestUrl,
+          })
+        : null,
+    [copyReferenceThreadId, copyReferencePullRequestUrl],
+  );
+  const { copyToClipboard: copyThreadReference } = useCopyToClipboard<ThreadReferenceCopyTarget>({
+    // Nothing reads `isCopied`; without its reset timer only the first copy re-renders ChatView.
+    timeout: 0,
+    onCopy: (target) => {
+      toastManager.add({
+        type: "success",
+        title: target.kind === "pull-request" ? "Pull request link copied" : "Thread ID copied",
+        description: target.value,
+      });
+    },
+    onError: (error, target) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title:
+            target.kind === "pull-request"
+              ? "Failed to copy pull request link"
+              : "Failed to copy thread ID",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    },
+  });
+  const onCopyReference = useCallback(
+    (target: ThreadReferenceCopyTarget) => copyThreadReference(target.value, target),
+    [copyThreadReference],
+  );
+
   useChatGlobalShortcuts({
     activeThreadId,
     keybindings,
@@ -4120,6 +4175,10 @@ export default function ChatView(props: ChatViewProps) {
     onOpenTerminalPanel,
     onOpenSimulatorPanel,
     runProjectScript,
+    interruptAvailable: threadKeysAllowed && (phase === "running" || composerWorktreeSetupRunning),
+    onInterruptTurn: worktreeSetupRunning ? cancelWorktreeSetup : onInterrupt,
+    copyReferenceTarget,
+    onCopyReference,
   });
 
   const conversationRevertSupported = useEnvironmentServerConfigSelector(
@@ -6909,12 +6968,7 @@ export default function ChatView(props: ChatViewProps) {
                   sendsQueueUntilReady={sendsQueueUntilReady}
                   mutationUnavailableReason={mutationUnavailableReason}
                   isPreparingWorktree={isPreparingWorktree}
-                  isWorktreeSetupRunning={
-                    // Until the thread's own view takes over after the hand-off,
-                    // the draft's keeps offering Stop, not a busy send button.
-                    worktreeSetupRunning ||
-                    (worktreeLaunch?.phase === "handed-off" && isSendBusy && !isServerThread)
-                  }
+                  isWorktreeSetupRunning={composerWorktreeSetupRunning}
                   environmentUnavailable={activeEnvironmentUnavailableState}
                   activePendingApproval={activePendingApproval}
                   pendingApprovals={pendingApprovals}

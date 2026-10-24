@@ -103,7 +103,12 @@ const THREAD_ATTENTION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
 
 // Back and forward (Navigation), and the thread commands that ship with them (Threads, sort
 // weights from 40).
-const NAVIGATION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+const NAVIGATION_COMMAND_META = {
+  "navigation.back": { title: "Go back", sortWeight: 1 },
+  "navigation.forward": { title: "Go forward", sortWeight: 2 },
+  "thread.interrupt": { title: "Interrupt turn", sortWeight: 40 },
+  "thread.copyReference": { title: "Copy pull request link or thread ID", sortWeight: 41 },
+} satisfies StaticCommandMetaGroup;
 
 // Close and reopen views and tabs.
 const VIEW_COMMAND_META = {} satisfies StaticCommandMetaGroup;
@@ -129,6 +134,11 @@ function categoryForCommand(command: KeybindingCommand): KeybindingCategory {
   return Object.hasOwn(KEYBINDING_CATEGORIES, root)
     ? KEYBINDING_CATEGORIES[root as keyof typeof KEYBINDING_CATEGORIES]
     : KEYBINDING_CATEGORIES.script;
+}
+
+/** The id of a command's row in the Keybindings panel, which settings search results reveal. */
+export function keybindingRowId(command: KeybindingCommand): string {
+  return `keybinding-${command}`;
 }
 
 export function getCommandMeta(

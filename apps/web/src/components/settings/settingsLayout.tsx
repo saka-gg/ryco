@@ -32,6 +32,14 @@ export const SETTINGS_CONTROL_WIDTH = {
   lg: "w-full sm:w-64",
 } as const;
 
+/** Briefly highlights a row that styles `data-[flash=true]:`, such as a keybinding row. */
+export function flashSettingsTarget(element: HTMLElement) {
+  element.dataset.flash = "true";
+  window.setTimeout(() => {
+    delete element.dataset.flash;
+  }, 1100);
+}
+
 /** Re-render while visible; refresh once after returning from the background. */
 export function useRelativeTimeTick(intervalMs = 1_000) {
   const [nowMs, setNowMs] = useState(() => Date.now());

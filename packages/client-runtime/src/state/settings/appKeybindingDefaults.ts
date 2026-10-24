@@ -40,7 +40,12 @@ const THREAD_LIFECYCLE_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
 const THREAD_ATTENTION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [];
 
 // Back and forward, and the thread commands that ship with them.
-const NAVIGATION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [];
+const NAVIGATION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
+  { key: "mod+[", command: "navigation.back", when: "!terminalFocus" },
+  { key: "mod+]", command: "navigation.forward", when: "!terminalFocus" },
+  { key: "mod+.", command: "thread.interrupt", when: "!terminalFocus" },
+  { key: "mod+shift+c", command: "thread.copyReference", when: "!terminalFocus" },
+];
 
 // Close and reopen views and tabs.
 const VIEW_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [];

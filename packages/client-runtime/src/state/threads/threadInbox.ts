@@ -352,6 +352,26 @@ export function resolveThreadWorkspacePullRequestLink(
   );
 }
 
+/** What copying a thread's reference puts on the clipboard. */
+export interface ThreadReferenceCopyTarget {
+  readonly kind: "pull-request" | "thread";
+  readonly value: string;
+}
+
+/**
+ * A thread's pull request link when it is known (the URL of the link
+ * `resolveThreadWorkspacePullRequestLink` picks, which is never a dismissed
+ * one), else its ID.
+ */
+export function resolveThreadReferenceCopyTarget(input: {
+  readonly threadId: ThreadId;
+  readonly pullRequestUrl: string | null | undefined;
+}): ThreadReferenceCopyTarget {
+  return input.pullRequestUrl
+    ? { kind: "pull-request", value: input.pullRequestUrl }
+    : { kind: "thread", value: input.threadId };
+}
+
 function settlementInput(input: {
   readonly thread: SidebarThreadSummary;
   readonly worktree: SidebarWorktreeSummary | null;

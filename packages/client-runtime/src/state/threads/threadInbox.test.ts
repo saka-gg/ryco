@@ -17,6 +17,8 @@ import {
   buildThreadInbox,
   deriveThreadSnoozeEligibility,
   resolveThreadLifecycleAvailability,
+  resolveThreadReferenceCopyTarget,
+  resolveThreadWorkspacePullRequestLink,
   scopedInboxWorktreeKey,
   type BuildThreadInboxInput,
   type ThreadInboxDraftSummary,
@@ -1102,5 +1104,50 @@ describe("thread lifecycle availability", () => {
         expect(resolveThreadLifecycleAvailability(entry).snooze.enabled).toBe(entry.canSnooze);
       }
     }
+  });
+});
+
+describe("resolveThreadReferenceCopyTarget", () => {
+  const threadId = ThreadId.make("thread-reference");
+  const url = "https://github.com/acme/app/pull/42";
+
+  it("copies the pull request link when it is known, else the thread ID", () => {
+    expect(resolveThreadReferenceCopyTarget({ threadId, pullRequestUrl: url })).toEqual({
+      kind: "pull-request",
+      value: url,
+    });
+    for (const pullRequestUrl of [null, undefined, ""]) {
+      expect(resolveThreadReferenceCopyTarget({ threadId, pullRequestUrl })).toEqual({
+        kind: "thread",
+        value: threadId,
+      });
+    }
+  });
+
+  it("falls back to the thread ID when the thread's pull request was dismissed", () => {
+    const link = (dismissedAt: string | null) => ({
+      number: 42,
+      title: "Inbox",
+      url,
+      state: "open" as const,
+      isDraft: false,
+      terminalAt: null,
+      headRefName: "feature",
+      baseRefName: "main",
+      source: "created" as const,
+      linkedAt: "2026-07-31T01:00:00.000Z",
+      dismissedAt,
+    });
+    const thread = makeThread(environmentA, threadId, { worktreeId });
+    const copyTarget = (dismissedAt: string | null) =>
+      resolveThreadReferenceCopyTarget({
+        threadId,
+        pullRequestUrl: resolveThreadWorkspacePullRequestLink(
+          thread,
+          makeWorktree(environmentA, { pullRequests: [link(dismissedAt)] }),
+        )?.url,
+      });
+    expect(copyTarget(null)).toEqual({ kind: "pull-request", value: url });
+    expect(copyTarget("2026-07-31T02:00:00.000Z")).toEqual({ kind: "thread", value: threadId });
   });
 });

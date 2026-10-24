@@ -1,14 +1,17 @@
 import "../../index.css";
 import { EnvironmentId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { resetAppKeybindings, getAppKeybindings } from "../../appKeybindings";
 import { replaceAppKeybindings } from "../../appKeybindingsEditing";
 import { APP_KEYBINDINGS_STORAGE_KEY } from "@ryco/client-runtime/state/settings";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { SettingsTargetProvider } from "../../settingsTarget";
+import { keybindingRowId } from "../../lib/keybindingCategories";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
+import type { SettingsSearchTarget } from "./settingsSearchReveal";
+import { useSettingsSubsections } from "./useSettingsSubsections";
 
 let screen: Awaited<ReturnType<typeof render>> | null = null;
 const target = {
@@ -40,6 +43,15 @@ const mount = async () => {
     </AppAtomRegistryProvider>,
   );
 };
+/** The panel inside the settings page's scroller, which reveals a search result's target. */
+function SearchTargetHarness({ searchTarget }: { searchTarget: SettingsSearchTarget }) {
+  const { contentRef } = useSettingsSubsections("keybindings", false, searchTarget);
+  return (
+    <div ref={contentRef} data-testid="settings-scroller" style={{ height: 600, overflow: "auto" }}>
+      <KeybindingsSettingsPanel />
+    </div>
+  );
+}
 beforeEach(async () => {
   await resetAppKeybindings();
   await page.viewport(1100, 900);
@@ -122,6 +134,26 @@ describe("local app keybindings", () => {
     expect(JSON.parse(localStorage.getItem(APP_KEYBINDINGS_STORAGE_KEY)!)).toEqual({
       rules: [],
       disabledCommands: [],
+    });
+  });
+  it("scrolls to and highlights the row a settings search result names", async () => {
+    screen = await render(
+      <AppAtomRegistryProvider>
+        <SettingsTargetProvider value={target}>
+          <SearchTargetHarness searchTarget={{ targetId: keybindingRowId("navigation.back") }} />
+        </SettingsTargetProvider>
+      </AppAtomRegistryProvider>,
+    );
+    const scroller = page.getByTestId("settings-scroller").element();
+    await vi.waitFor(() => {
+      const row = document.activeElement as HTMLElement | null;
+      expect(row?.dataset.keybindingCommand).toBe("navigation.back");
+      expect(row?.dataset.flash).toBe("true");
+      const { top, bottom } = scroller.getBoundingClientRect();
+      const rowBox = row!.getBoundingClientRect();
+      expect(scroller.scrollTop).toBeGreaterThan(0);
+      expect(rowBox.top).toBeGreaterThanOrEqual(top);
+      expect(rowBox.bottom).toBeLessThanOrEqual(bottom);
     });
   });
   it("shows the app-owned persistence and reviewed import controls", async () => {

@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { scopedProjectKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type {
   Project,
   SidebarThreadOrStub,
@@ -12,9 +12,11 @@ import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } f
 
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
+import { useProjectGroupingSettings } from "../../hooks/useProjectGroupingSettings";
 import { useIdleLazyComponentReady } from "../../lib/idleLazyComponent";
 import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib/perf/motion";
 import { preloadableLazy } from "../../lib/preloadableLazy";
+import { deriveLogicalProjectKeyFromSettings } from "../../logicalProject";
 import { dispatchThreadSettlementBatch } from "../../threadLifecycleCommands";
 import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
 import { handleSidebarListScroll } from "../sidebar/sidebarFold";
@@ -87,9 +89,27 @@ export function InboxSidebar(props: InboxSidebarProps) {
   // Edited by the sidebar header's Omnifield; a token still being typed narrows nothing.
   const draft = useInboxFilterStore((store) => store.draft);
   const environmentId = useInboxFilterStore((store) => store.environmentId);
+  const project = useInboxFilterStore((store) => store.project);
   const status = useInboxFilterStore((store) => store.status);
   const publishCounts = useInboxFilterStore((store) => store.publishCounts);
   const query = useMemo(() => omnifieldListQuery(draft), [draft]);
+  const projectGroupingSettings = useProjectGroupingSettings();
+  // The filter names a logical project: its members on every machine match.
+  const projectKeys = useMemo(
+    () =>
+      project
+        ? props.projects
+            .filter(
+              (candidate) =>
+                deriveLogicalProjectKeyFromSettings(candidate, projectGroupingSettings) ===
+                project.logicalKey,
+            )
+            .map((candidate) =>
+              scopedProjectKey({ environmentId: candidate.environmentId, projectId: candidate.id }),
+            )
+        : null,
+    [project, projectGroupingSettings, props.projects],
+  );
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
@@ -117,7 +137,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
           worktrees: props.worktrees,
           threads: props.threads,
           environments: props.environments,
-          filters: { query, environmentId, status },
+          filters: { query, environmentId, projectKeys, status },
           deliveryUnknownThreadKeys: props.deliveryUnknownThreadKeys,
           localQueuedThreadKeys: props.localQueuedThreadKeys,
           activeThreadKey: props.activeThreadKey,
@@ -133,6 +153,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
       environmentId,
       modelSharing,
       nestDelegated,
+      projectKeys,
       props.primaryEnvironmentId,
       props.activeThreadKey,
       props.aiFocusEnabled,
@@ -178,7 +199,8 @@ export function InboxSidebar(props: InboxSidebarProps) {
     }
     publishCounts(total, status === "all" ? counts : null);
   }, [publishCounts, sections, status]);
-  const hasFilters = query.trim().length > 0 || environmentId !== null || status !== "all";
+  const hasFilters =
+    query.trim().length > 0 || environmentId !== null || project !== null || status !== "all";
   const hasNoProjects = props.projects.length === 0;
   const isExpanded = (key: string) =>
     (key !== "settled" && key !== "snoozed") ||

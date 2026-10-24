@@ -25,6 +25,7 @@ import {
 import { PANE_DRAG_TYPE } from "../../chatPanes.logic";
 import { readPaneDragSource } from "../../chatPanesStore";
 import { useTerminalStateStore } from "../../terminalStateStore";
+import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 vi.mock("../../sidebarUndo", () => ({
@@ -901,6 +902,103 @@ describe("Inbox sidebar delegated threads", () => {
         .toHaveAttribute("aria-expanded", "true");
       await expect.element(page.getByRole("heading", { name: "Needs input" })).toBeInTheDocument();
       expect(rowTitles()).toEqual(["Coordinator task", "Worker task"]);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+});
+
+describe("Inbox row filters", () => {
+  afterEach(() => {
+    useInboxFilterStore.setState({ environmentId: null, project: null });
+    document.body.innerHTML = "";
+  });
+
+  it("narrows the Inbox to a row's project on every machine, and back", async () => {
+    const otherEnvironmentId = EnvironmentId.make("environment-filter-other");
+    const hubProjectId = ProjectId.make("project-filter-hub");
+    const repositoryIdentity = {
+      canonicalKey: "github.com/example/ryco",
+      locator: {
+        source: "git-remote",
+        remoteName: "origin",
+        remoteUrl: "https://github.com/example/ryco.git",
+      },
+    } as const;
+    const project = (environmentId: EnvironmentId, id: ProjectId, name: string) => ({
+      id,
+      environmentId,
+      name,
+      cwd: `/repo/${name.toLowerCase()}`,
+      defaultModelSelection: null,
+      scripts: [],
+      ...(name === "Ryco" ? { repositoryIdentity } : {}),
+    });
+    const filterThread = (
+      title: string,
+      environmentId: EnvironmentId,
+      projectId: ProjectId,
+    ): SidebarThreadSummary => ({
+      id: ThreadId.make(title),
+      environmentId,
+      projectId,
+      title,
+      interactionMode: "default",
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: null,
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    });
+    const mounted = await render(
+      <InboxSidebar
+        projects={[
+          project(ENVIRONMENT_ID, PROJECT_ID, "Ryco"),
+          project(otherEnvironmentId, PROJECT_ID, "Ryco"),
+          project(ENVIRONMENT_ID, hubProjectId, "Hub"),
+        ]}
+        worktrees={[]}
+        environments={[]}
+        threads={[
+          filterThread("Ryco here", ENVIRONMENT_ID, PROJECT_ID),
+          filterThread("Ryco there", otherEnvironmentId, PROJECT_ID),
+          filterThread("Hub task", ENVIRONMENT_ID, hubProjectId),
+        ]}
+        deliveryUnknownThreadKeys={new Set()}
+        localQueuedThreadKeys={new Set()}
+        activeThreadKey={null}
+        aiFocusEnabled={false}
+        autoSettleAfterDays={null}
+        pinnedThreadKeys={new Set()}
+        onOpenThread={vi.fn()}
+      />,
+    );
+    try {
+      const rowTitles = () =>
+        [...document.querySelectorAll('[data-testid="inbox-thread-row"] .inbox-row-title')]
+          .map((title) => title.textContent?.trim())
+          .toSorted();
+      expect(rowTitles()).toEqual(["Hub task", "Ryco here", "Ryco there"]);
+
+      await page.getByRole("button", { name: "Thread actions for Ryco here" }).click();
+      await page.getByRole("menuitem", { name: "Filter by Ryco", exact: true }).click();
+      await vi.waitFor(() => expect(rowTitles()).toEqual(["Ryco here", "Ryco there"]));
+      expect(useInboxFilterStore.getState().project?.label).toBe("Ryco");
+
+      // The other machine's member of the project reads as the same filter.
+      await page.getByRole("button", { name: "Thread actions for Ryco there" }).click();
+      // The first row's menu may still be closing.
+      await page
+        .getByRole("menu", { name: "Thread actions for Ryco there" })
+        .getByRole("menuitem", { name: "Show all projects", exact: true })
+        .click();
+      await vi.waitFor(() => expect(rowTitles()).toEqual(["Hub task", "Ryco here", "Ryco there"]));
+      expect(useInboxFilterStore.getState().project).toBeNull();
     } finally {
       await mounted.unmount();
     }

@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { BarChart3Icon, PanelLeftOpenIcon, SettingsIcon } from "lucide-react";
 import { WS_METHODS } from "@ryco/contracts";
-import { Link } from "@tanstack/react-router";
+import { Link, useRouter } from "@tanstack/react-router";
 import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 
 import ThreadSidebar from "./Sidebar";
@@ -23,6 +23,7 @@ import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { SettingsRouteBridge } from "./SettingsRouteBridge";
 import { PrimaryShellPaintMarker } from "../perf/PrimaryShellPaintMarker";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
+import { installDesktopHistoryNavigation } from "../lib/navigationHistory";
 
 const THREAD_SIDEBAR_WIDTH_STORAGE_KEY = "chat_thread_sidebar_width";
 const THREAD_SIDEBAR_OPEN_STORAGE_KEY = "chat_thread_sidebar_open";
@@ -74,11 +75,12 @@ export function SettingsSurfaceMount() {
 /**
  * Shell-wide global effects shared by every application shell tier: the
  * shortcut-modifier keydown/keyup/blur sync and the desktop-bridge
- * open-settings and paste-as-text menu actions. Mounted once by the active shell (desktop
- * sidebar layout or the phone shell) — never by both.
+ * open-settings, paste-as-text and back/forward menu actions. Mounted once by the active shell
+ * (desktop sidebar layout or the phone shell) — never by both.
  */
 export function useAppShellGlobalEffects(): void {
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
+  const router = useRouter();
 
   useEffect(() => {
     const onWindowKeyDown = (event: KeyboardEvent) => {
@@ -120,6 +122,11 @@ export function useAppShellGlobalEffects(): void {
   }, [openSettings]);
 
   useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
+
+  useEffect(
+    () => installDesktopHistoryNavigation(router.history, window.desktopBridge, window),
+    [router],
+  );
 }
 
 /**
