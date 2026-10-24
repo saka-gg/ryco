@@ -87,6 +87,8 @@ function resolveSpecifier(specifier: string, importer: string): string | null {
 interface ParsedImports {
   /** Specifiers of value imports and re-exports (type-only ones are erased). */
   readonly valueSpecifiers: ReadonlyArray<string>;
+  /** Resolved targets of `import("…")` calls with a string literal. */
+  readonly dynamicImports: ReadonlyArray<string>;
 }
 
 const parseCache = new Map<string, ParsedImports>();
@@ -94,7 +96,8 @@ const parseCache = new Map<string, ParsedImports>();
 function parseImports(file: string): ParsedImports {
   const cached = parseCache.get(file);
   if (cached) return cached;
-  const { module, errors } = parseSync(file, readFileSync(file, "utf8"));
+  const source = readFileSync(file, "utf8");
+  const { module, errors } = parseSync(file, source);
   if (errors.length > 0) throw new Error(`Failed to parse ${file}`);
   const specifiers = new Set<string>();
   for (const declaration of module.staticImports) {
@@ -107,7 +110,12 @@ function parseImports(file: string): ParsedImports {
       if (entry.moduleRequest && !entry.isType) specifiers.add(entry.moduleRequest.value);
     }
   }
-  const parsed = { valueSpecifiers: [...specifiers] };
+  const dynamicImports = module.dynamicImports.flatMap(({ moduleRequest }) => {
+    const literal = /^(["'])(.*)\1$/u.exec(source.slice(moduleRequest.start, moduleRequest.end));
+    const resolved = literal ? resolveSpecifier(literal[2]!, file) : null;
+    return resolved ? [resolved] : [];
+  });
+  const parsed = { valueSpecifiers: [...specifiers], dynamicImports };
   parseCache.set(file, parsed);
   return parsed;
 }
@@ -222,6 +230,16 @@ describe("standard build static import graph", () => {
         /^apps\/web\/src\/components\/PreviewFileNavigationGuard\.tsx$/u,
       ]),
     ).toEqual([]);
+  });
+
+  it("loads the translucent window's overlay cutout on demand", () => {
+    // Only the macOS desktop's translucent window installs it.
+    expect(forbiddenChains("main.tsx", [/^apps\/web\/src\/lib\/glassOverlayCutout\.ts$/u])).toEqual(
+      [],
+    );
+    expect(parseImports(path.join(srcRoot, "main.tsx")).dynamicImports.map(display)).toContain(
+      "apps/web/src/lib/glassOverlayCutout.ts",
+    );
   });
 
   it("keeps the change request host capability table out of the boot graph", () => {
