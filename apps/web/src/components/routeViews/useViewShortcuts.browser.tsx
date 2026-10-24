@@ -38,7 +38,11 @@ import {
 } from "../../rightPanelRouteSearch";
 import { selectEnvironmentState, useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
-import { buildOpenFilesSearch, buildOpenReviewSearch } from "../../workspaceRouteSearch";
+import {
+  buildOpenFilesSearch,
+  buildOpenReviewSearch,
+  buildOpenTerminalSearch,
+} from "../../workspaceRouteSearch";
 import { CommentField } from "../pullRequests/threads/ReplyComposer";
 import { RightPanelSheet } from "../RightPanelSheet";
 import { toastManager } from "../ui/toast";
@@ -110,7 +114,14 @@ function ThreadRouteProbe() {
   });
   const panel = (
     <div data-slot="workspace-tabpanel">
-      {rightPanelMode === "review" ? <ReviewSurface /> : <p>{rightPanelMode ?? "Launcher"}</p>}
+      {rightPanelMode === "review" ? (
+        <ReviewSurface />
+      ) : rightPanelMode === "terminal" ? (
+        // What a terminal tab focuses: xterm's input.
+        <textarea className="xterm-helper-textarea" aria-label="Terminal input" />
+      ) : (
+        <p>{rightPanelMode ?? "Launcher"}</p>
+      )}
     </div>
   );
   return (
@@ -146,12 +157,16 @@ async function mount(thread: ScopedThreadRef = a) {
     }),
   });
   await render(<RouterProvider router={router} />);
-  const show = async (mode: "files" | "review") => {
+  const show = async (mode: "files" | "review" | "terminal") => {
+    const open = {
+      files: buildOpenFilesSearch,
+      review: buildOpenReviewSearch,
+      terminal: buildOpenTerminalSearch,
+    }[mode];
     await router.navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(thread),
-      search: (previous) =>
-        mode === "files" ? buildOpenFilesSearch(previous) : buildOpenReviewSearch(previous),
+      search: (previous) => open(previous),
     });
     await expect.poll(shown).toBe(mode);
   };
@@ -223,6 +238,34 @@ it("closes the active tab, then the panel on its launcher, then leaves the key a
   await expect.poll(shown).toBe("closed");
   // Nothing left to close: the window's Close command gets the key.
   expect(press("w").defaultPrevented).toBe(false);
+});
+
+it("closes and reopens from a terminal tab, but leaves the drawer's terminal its keys", async () => {
+  const { show } = await mount();
+  await show("files");
+  await show("review");
+  press("w");
+  await expect.poll(shown).toBe("files");
+  await show("terminal");
+  const terminal = () => page.getByRole("textbox", { name: "Terminal input" }).element();
+
+  // A terminal tab takes focus when it opens; the keys still reach the panel.
+  (terminal() as HTMLElement).focus();
+  expect(press("t", { shift: true, from: terminal() }).defaultPrevented).toBe(true);
+  await expect.poll(shown).toBe("review");
+  await show("terminal");
+  (terminal() as HTMLElement).focus();
+  expect(press("w", { from: terminal() }).defaultPrevented).toBe(true);
+  await expect.poll(shown).toBe("files");
+
+  const drawer = document.createElement("textarea");
+  drawer.className = "xterm-helper-textarea";
+  document.body.append(drawer);
+  drawer.focus();
+  expect(press("w", { from: drawer }).defaultPrevented).toBe(false);
+  expect(press("t", { shift: true, from: drawer }).defaultPrevented).toBe(false);
+  drawer.remove();
+  expect(shown()).toBe("files");
 });
 
 it("closes the focused split pane once the panel is closed", async () => {

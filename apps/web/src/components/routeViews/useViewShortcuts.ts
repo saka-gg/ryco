@@ -60,6 +60,18 @@ function hasUnsentWorkspaceDraft(): boolean {
   );
 }
 
+/**
+ * `terminalFocus` for these keys. A terminal shown as a workspace panel tab is
+ * a tab like the others, so the view keys close and reopen it too; otherwise
+ * the key would reach the window's Close command. The drawer's terminal keeps
+ * its own `mod+w` rule.
+ */
+function isViewTerminalFocused(): boolean {
+  return (
+    isTerminalFocused() && document.activeElement?.closest(WORKSPACE_TABPANEL_SELECTOR) == null
+  );
+}
+
 /** Whether the terminal drawer of the route's thread (or draft) is open, for `when` clauses. */
 function isRouteTerminalOpen(owner: ClosedViewOwner): boolean {
   let ref: ScopedThreadRef | null = owner.kind === "thread" ? owner.ref : null;
@@ -156,7 +168,7 @@ function handleViewShortcut(
   // dialog scan below off every other key press.
   const command = resolveShortcutCommand(event, input.keybindings, {
     context: {
-      terminalFocus: isTerminalFocused(),
+      terminalFocus: isViewTerminalFocused(),
       terminalOpen: isRouteTerminalOpen(owner),
       modelPickerOpen: getModelPickerOpen(),
       commandPaletteOpen: false,
