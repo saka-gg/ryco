@@ -509,6 +509,40 @@ describe("EventLogCompaction", () => {
     assert.isFalse(isPrunableReceiptCommandId("0f8fad5b-d9cb-469f-a165-70867728950e"));
   });
 
+  compactionTest(
+    "caps main-connection windows unless the pass is exclusive, whatever its horizon",
+    () =>
+      Effect.gen(function* () {
+        const compaction = yield* EventLogCompaction;
+        const thread = "thread-compaction-windows";
+        const task = taskProgressActivityId(thread, "task-1");
+        for (let index = 0; index < 1_200; index += 1) {
+          yield* appendActivity({ threadId: thread, id: task, kind: "task.progress" });
+        }
+        const windows = (exclusive: boolean) =>
+          Effect.gen(function* () {
+            let calls = 0;
+            const result = yield* compaction.runPass({
+              ...TEST_PASS,
+              horizon: "head",
+              exclusive,
+              selectionPageSequences: 2_000,
+              mode: "dry-run",
+              persistState: false,
+              onProgress: () =>
+                Effect.sync(() => {
+                  calls += 1;
+                }),
+            });
+            assert.equal(result.deletedEvents, 1_199);
+            return calls;
+          });
+        // The test database selects on its main connection (no read worker).
+        assert.equal(yield* windows(false), 3);
+        assert.equal(yield* windows(true), 1);
+      }),
+  );
+
   compactionTest("reads windows, receipt pages and the horizon by the rowid alone", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

@@ -93,7 +93,8 @@ export const ONLINE_COMPACTION_PASS_OPTIONS: EventLogCompactionPassOptions = {
 
 /**
  * The largest selection window when selection runs on the main connection (no read worker):
- * there it blocks the event loop, so `runPass` caps `selectionPageSequences` at this.
+ * there it blocks the event loop, so `runPass` caps `selectionPageSequences` at this unless the
+ * pass is `exclusive`.
  */
 const MAIN_CONNECTION_SELECTION_PAGE_SEQUENCES = 500;
 
@@ -292,7 +293,7 @@ export const makeEventLogCompaction = Effect.gen(function* () {
           const carry: LatestStateCarry = new Map();
           const pageSequences = Math.max(
             1,
-            selectionOnMain
+            selectionOnMain && options.exclusive !== true
               ? Math.min(options.selectionPageSequences, MAIN_CONNECTION_SELECTION_PAGE_SEQUENCES)
               : options.selectionPageSequences,
           );

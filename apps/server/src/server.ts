@@ -67,6 +67,7 @@ import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { DatabaseMaintenanceLive } from "./persistence/Layers/DatabaseMaintenance.ts";
 import { EventLogCompactionLive } from "./persistence/Layers/EventLogCompaction.ts";
+import { DoctorSuggestionLogLive } from "./persistence/databaseStorageReport.ts";
 import { DatabaseOwnerLeaseLive } from "./persistence/databaseOwnerLock.ts";
 import { prefetchProcessIdentity } from "./processLock/processIdentity.ts";
 import { ServerLifecycleEventsLive } from "./serverLifecycleEvents.ts";
@@ -609,11 +610,12 @@ const RuntimeServicesLive = Layer.mergeAll(
   // layers never build it.
   DatabaseMaintenanceLive,
   WorktreeNotesServiceLive,
-  // Compaction state for the database report (the same memoized layer the upkeep uses).
-  StorageServiceLive.pipe(
-    Layer.provide(ProviderProtectedPathsLive),
-    Layer.provide(EventLogCompactionLive),
-  ),
+  // Compaction state for the database report (the same memoized layer the upkeep uses), and the
+  // once-per-boot log line suggesting `ryco doctor` when the database could shrink a lot.
+  Layer.mergeAll(
+    StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
+    DoctorSuggestionLogLive,
+  ).pipe(Layer.provide(EventLogCompactionLive)),
   SessionImportLive,
   // Chat forks: recovery of unfinished forks once commands are admitted. The ledger is provided
   // beneath the services (below), so startup's orphan-chat sweep sees the chats forks still need.

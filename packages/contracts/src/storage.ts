@@ -79,6 +79,17 @@ export const DatabaseStorageReport = Schema.Struct({
   compaction: DatabaseCompactionReport,
   /** Free pages plus the compaction estimate. */
   reclaimableBytes: NonNegativeInt,
+  /**
+   * Whether an offline `ryco doctor --apply` would shrink the file a lot (automatic shrinking off
+   * and much reclaimable space), and the command to run it; null for development databases.
+   * Absent from nodes that predate it.
+   */
+  doctor: Schema.optionalKey(
+    Schema.Struct({
+      recommended: Schema.Boolean,
+      command: Schema.NullOr(Schema.String),
+    }),
+  ),
 });
 export type DatabaseStorageReport = typeof DatabaseStorageReport.Type;
 

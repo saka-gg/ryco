@@ -231,3 +231,49 @@ it("says when a database cannot shrink and compaction is off", async () => {
     .element(mounted.getByText(/An estimate of superseded history follows the first/))
     .toBeVisible();
 });
+
+it("suggests the offline doctor with its command only when the node recommends it", async () => {
+  const database = {
+    fileBytes: 6 * 1024 ** 3,
+    walBytes: 0,
+    pageSize: 4096,
+    pageCount: (6 * 1024 ** 3) / 4096,
+    freePages: (512 * 1024 ** 2) / 4096,
+    autoVacuum: "none",
+    compaction: {
+      enabled: true,
+      headSequence: 1000,
+      compactedThroughSequence: 900,
+      caughtUp: true,
+      lastPassCompletedAt: "2026-10-23T12:00:00.000Z",
+      removedEvents: 1200,
+      removedBytes: 2 * 1024 ** 3,
+      estimatedCompactableBytes: 0,
+    },
+    reclaimableBytes: 2.5 * 1024 ** 3,
+  };
+  fixtures.scan.mockResolvedValue({
+    ...scanned,
+    database: { ...database, doctor: { recommended: false, command: "ryco doctor --apply" } },
+  });
+  mounted = await render(<StorageSettings />);
+  await mounted.getByRole("button", { name: "Scan storage" }).click();
+  await expect.element(mounted.getByText(/created before automatic shrinking/)).toBeVisible();
+  expect(mounted.container.textContent).not.toContain("Shrink the database file");
+
+  fixtures.scan.mockResolvedValue({
+    ...scanned,
+    database: {
+      ...database,
+      doctor: { recommended: true, command: "npx ryco-cli@0.1.36 doctor --apply" },
+    },
+  });
+  await mounted.getByRole("button", { name: "Rescan" }).click();
+  await expect.element(mounted.getByText("Shrink the database file")).toBeVisible();
+  await expect
+    .element(mounted.getByTestId("database-doctor-command"))
+    .toHaveTextContent("npx ryco-cli@0.1.36 doctor --apply");
+  await expect.element(mounted.getByText(/About 2\.5 GiB could be returned/)).toBeVisible();
+  await expect.element(mounted.getByText(/Quit the Ryco app first/)).toBeVisible();
+  await expect.element(mounted.getByRole("button", { name: "Copy" })).toBeVisible();
+});
