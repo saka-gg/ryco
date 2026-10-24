@@ -19,6 +19,23 @@ export function formatInteger(value: number): string {
   return Math.round(value).toLocaleString("en-US");
 }
 
+const usd = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** US dollars, e.g. "$12.40". */
+export function formatUsd(value: number): string {
+  return usd.format(value);
+}
+
+/** An estimated cost, or "Unavailable" when nothing had a price. */
+export function formatCost(value: number | null): string {
+  return value === null ? "Unavailable" : usd.format(value);
+}
+
 /** Human duration from milliseconds: "30s", "45m", "2h 15m". */
 export function formatDuration(ms: number): string {
   if (ms <= 0) {

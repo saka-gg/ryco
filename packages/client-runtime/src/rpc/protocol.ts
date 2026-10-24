@@ -203,7 +203,8 @@ export function isAwaitingAdmission(error: unknown): error is RpcRequestRefusedE
   return error instanceof RpcRequestRefusedError && error.admission !== "forbidden";
 }
 
-function hasErrorTag(error: unknown, tag: string): boolean {
+/** Whether `error` is the typed error `tag` (a decoded RPC error keeps its `_tag`). */
+export function hasErrorTag(error: unknown, tag: string): boolean {
   return typeof error === "object" && error !== null && "_tag" in error && error._tag === tag;
 }
 

@@ -391,7 +391,11 @@ export interface WsRpcClient {
     readonly subscribeLocalTaskChanges: RpcStreamMethod<
       typeof WS_METHODS.serverSubscribeLocalTaskChanges
     >;
-    readonly getDailyRecap: RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>;
+    /** Aborting `signal` withdraws the request. */
+    readonly getDailyRecap: (
+      input: RpcInput<typeof WS_METHODS.serverGetDailyRecap>,
+      options?: { readonly signal?: AbortSignal | undefined },
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>>;
     readonly prewarmProviderSession: RpcUnaryMethod<typeof WS_METHODS.providerPrewarmSession>;
     readonly readProjectProviderCommands: RpcUnaryMethod<
       typeof WS_METHODS.providerReadProjectCommands
@@ -964,8 +968,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           listener,
           { ...options, tag: WS_METHODS.serverSubscribeLocalTaskChanges },
         ),
-      getDailyRecap: (input) =>
-        transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input)),
+      getDailyRecap: (input, options) =>
+        transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input), options),
       prewarmProviderSession: (input) =>
         transport.request((client) => client[WS_METHODS.providerPrewarmSession](input)),
       readProjectProviderCommands: (input) =>

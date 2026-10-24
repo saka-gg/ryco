@@ -12,13 +12,19 @@ const RANGE_DAYS: Readonly<Record<UsageSummaryRange, number | null>> = {
   all: null,
 };
 
-function calendarDateInZone(timestampMs: number, timeZone: string): UsageCalendarDate {
+/** The calendar date (`YYYY-MM-DD`) that `timestampMs` falls on in `timeZone`. */
+export function calendarDateInZone(timestampMs: number, timeZone: string): UsageCalendarDate {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(timestampMs)) as UsageCalendarDate;
+}
+
+/** This device's IANA time zone for a request, or UTC when the platform reports none. */
+export function currentTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 export function usageRequestForRange(
