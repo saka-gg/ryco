@@ -273,3 +273,49 @@ it("checks the operation again after a mutation bracket", async () => {
   await expect(driver.execute(context, "ryco")).rejects.toThrow("Computer use was stopped.");
   expect(transport.send).not.toHaveBeenCalled();
 });
+
+it("never lets the bracket's end replace the action's result or error", async () => {
+  const tab = { id: "1", url: "https://example.com/", title: "Test" };
+  let failNavigate = false;
+  const end = vi.fn(() => {
+    throw new Error("end failed");
+  });
+  const transport: BrowserTransport = {
+    tabs: vi.fn(async () => [tab]),
+    open: vi.fn(),
+    show: vi.fn(),
+    close: vi.fn(async () => {}),
+    stop: vi.fn(),
+    send: vi.fn(async (_tab, method) => {
+      if (method === "Page.navigate" && failNavigate) throw new Error("navigation failed");
+      return { frameId: "frame" };
+    }),
+    beginAgentMutation: vi.fn(async () => end),
+  };
+  const context: ComputerOperationContext = {
+    request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args: {} },
+    signal: new AbortController().signal,
+    check: vi.fn(),
+    authorizeApp: vi.fn(),
+    authorizeForeground: vi.fn(),
+    claim: vi.fn(),
+    activity: vi.fn(),
+  };
+  const driver = new BrowserComputerDriver(new Map([["ryco", transport]]));
+  const run = (args: Record<string, unknown>) =>
+    driver.execute(
+      { ...context, request: { ...context.request, args: { tab: "1", ...args } } },
+      "ryco",
+    );
+
+  await expect(run({ action: "navigate", url: tab.url })).resolves.toEqual({
+    content: [{ type: "text", text: JSON.stringify({ frameId: "frame" }) }],
+  });
+  failNavigate = true;
+  await expect(run({ action: "navigate", url: tab.url })).rejects.toThrow("navigation failed");
+  // It also runs after a close removed the tab.
+  await expect(run({ action: "close" })).resolves.toEqual({
+    content: [{ type: "text", text: JSON.stringify({ closed: true }) }],
+  });
+  expect(end).toHaveBeenCalledTimes(3);
+});

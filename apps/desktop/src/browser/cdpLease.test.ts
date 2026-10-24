@@ -249,6 +249,82 @@ describe("CdpLease", () => {
     expect(methods()).toEqual(["Hung.step"]);
   });
 
+  it("fails a ready run that never settles, so a session another holder keeps is not stuck behind it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { debugger: api, lease, methods } = setup();
+    const hung = deferred();
+    let runs = 0;
+    api.respond = (method) => (method === "Hung.step" && runs === 1 ? hung.promise : {});
+    lease.onReady(async (send) => {
+      runs++;
+      await send("Hung.step");
+      await send("After.step");
+    });
+    lease.acquire("picker");
+    lease.acquire("agent");
+    const first = lease.send("Page.reload");
+    const timedOut = expect(first).rejects.toThrow("Browser command timed out.");
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(runs).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await timedOut;
+    // The agent gives up, but the picker keeps the session: the next call runs the steps again.
+    lease.release("agent");
+    expect(lease.isAttached()).toBe(true);
+    expect(lease.acquire("agent")).toBe(true);
+    await lease.send("Page.reload");
+    expect(methods()).toEqual(["Hung.step", "Hung.step", "After.step", "Page.reload"]);
+    // The abandoned run never sends again, even once its command answers.
+    hung.resolve({});
+    await flush();
+    expect(methods()).toEqual(["Hung.step", "Hung.step", "After.step", "Page.reload"]);
+    expect(api.attach).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("snapshots the ready steps when a run starts", async () => {
+    const { lease, methods } = setup();
+    lease.acquire("agent");
+    // Added after acquire but before the first command: runs on this attachment.
+    lease.onReady(async (send) => {
+      await send("Early.step");
+    });
+    await lease.send("Page.reload");
+    // Added after the run succeeded: waits for the next attachment.
+    lease.onReady(async (send) => {
+      await send("Late.step");
+    });
+    await lease.send("Page.reload");
+    expect(methods()).toEqual(["Early.step", "Page.reload", "Page.reload"]);
+    lease.release("agent");
+    lease.acquire("agent");
+    await lease.send("Page.reload");
+    expect(methods().slice(3)).toEqual(["Early.step", "Late.step", "Page.reload"]);
+  });
+
+  it("attaches again when the session ended without a detach event reaching it", async () => {
+    const { debugger: api, lease, methods } = setup();
+    const detached = vi.fn();
+    lease.onDetach(detached);
+    lease.onReady(async (send) => {
+      await send("Ready.step");
+    });
+    lease.acquire("agent");
+    lease.acquire("picker");
+    await lease.send("Page.reload");
+    // The session goes away silently (no "detach" event).
+    api.emitOnSelfDetach = false;
+    api.detach();
+    expect(lease.isAttached()).toBe(true);
+    expect(lease.acquire("agent")).toBe(true);
+    expect(detached).toHaveBeenCalledTimes(1);
+    expect(detached).toHaveBeenCalledWith("target closed");
+    expect(lease.holds("picker")).toBe(false);
+    expect(api.attach).toHaveBeenCalledTimes(2);
+    await lease.send("Page.reload");
+    expect(methods()).toEqual(["Ready.step", "Page.reload", "Ready.step", "Page.reload"]);
+  });
+
   it("never touches the debugger of destroyed contents", () => {
     const { contents, debugger: api, lease } = setup();
     const detached = vi.fn();

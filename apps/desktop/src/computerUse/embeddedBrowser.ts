@@ -85,7 +85,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   }
   /**
    * Creates a page for `entry`: its hidden host window, its view with the isolated profile, its
-   * debugger session and every per-page listener. Every unit creates its per-page objects here.
+   * debugger session and every per-page listener. Every unit creates its per-page objects here, and
+   * every per-page listener that touches the tab returns early unless this page is still current.
    */
   private createPage(entry: TabEntry, existingId?: string): { id: string; page: LivePage } {
     const host = new BrowserWindow({
@@ -117,22 +118,29 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       send("Emulation.setFocusEmulationEnabled", { enabled: true }).then(() => undefined),
     );
     const page: LivePage = { view, host, cdp };
-    // Only this page's own teardown reaches destroy(): a tab that has another page by now stays.
+    // Only the tab's current page may change the tab. Electron destroys contents asynchronously, so
+    // a page that was torn down (closed, or replaced when the tab gets a new page) can still emit
+    // events; every listener below that touches the tab starts with this check.
+    const current = () => entry.live === page;
+    const publish = () => {
+      if (current()) this.publish();
+    };
     host.once("closed", () => {
-      if (entry.live === page) this.destroy(id, "host");
+      if (current()) this.destroy(id, "host");
     });
     wc.once("destroyed", () => {
-      if (entry.live === page) this.destroy(id, "guest");
+      if (current()) this.destroy(id, "guest");
     });
     host.contentView.addChildView(view);
     this.fitHost(page);
     host.on("resize", () => {
-      if (entry.presentation === "panel") return;
+      if (!current() || entry.presentation === "panel") return;
       this.fitHost(page);
     });
     host.on("close", (event) => {
       // Closing a detached preview returns it to the browser's tab strip.
       event.preventDefault();
+      if (!current()) return;
       this.signIn.cancel(id);
       host.hide();
       entry.presentation = "background";
@@ -140,11 +148,12 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     });
     this.signIn.install(id, wc, () => this.foreground(id));
     wc.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
+      if (!current()) return;
       if (mainFrame && !inPlace) this.signIn.cancel(id);
       if (mainFrame && /^https?:/u.test(url)) entry.requestedUrl = url;
     });
     wc.on("before-input-event", (event, input) => {
-      if (input.type !== "keyDown") return;
+      if (!current() || input.type !== "keyDown") return;
       const commandKey = process.platform === "darwin" ? input.meta : input.control;
       if (commandKey && !input.alt && input.key.toLowerCase() === "l") {
         event.preventDefault();
@@ -157,6 +166,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         this.destroy(id);
       }
     });
+    // Navigation validation guards every page, current or not; it changes nothing on the tab.
     const validateNavigation = (event: Electron.Event, navigation: string) => {
       try {
         browserUrl(navigation);
@@ -167,20 +177,22 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     wc.on("will-navigate", validateNavigation);
     wc.on("will-redirect", validateNavigation);
     wc.on("did-start-loading", () => {
+      if (!current()) return;
       entry.error = null;
       this.publish();
     });
-    wc.on("did-stop-loading", () => this.publish());
-    wc.on("did-navigate", () => this.publish());
-    wc.on("did-navigate-in-page", () => this.publish());
-    wc.on("page-title-updated", () => this.publish());
+    wc.on("did-stop-loading", publish);
+    wc.on("did-navigate", publish);
+    wc.on("did-navigate-in-page", publish);
+    wc.on("page-title-updated", publish);
     wc.on("did-fail-load", (_event, code, description, _url, mainFrame) => {
-      if (mainFrame && code !== -3) {
+      if (current() && mainFrame && code !== -3) {
         entry.error = description;
         this.publish();
       }
     });
     wc.on("render-process-gone", () => {
+      if (!current()) return;
       this.signIn.fail(id);
       entry.error = "This page stopped responding. Reload to recover.";
       this.publish();

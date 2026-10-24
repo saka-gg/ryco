@@ -24,6 +24,8 @@ export interface BrowserTransport {
    * Called after claim and activity and before the first command of a BROWSER_MUTATING_ACTIONS action
    * on `tab`; the returned function runs when the action settles (success or failure). The Ryco
    * browser ends a user's element pick here and refuses new picks until it runs (browser-picker).
+   * The returned function must tolerate a tab that is gone by then (it also runs after a `close`);
+   * the driver ignores its errors, so they never replace the action's result or error.
    */
   beginAgentMutation?(tab: string, signal: AbortSignal): Promise<() => void>;
 }
@@ -215,7 +217,11 @@ export class BrowserComputerDriver {
       }
       return await this.act(context, browser, transport, tab, target, action);
     } finally {
-      endMutation?.();
+      try {
+        endMutation?.();
+      } catch {
+        // The bracket's end only lifts the transport's own restrictions; the action's outcome stands.
+      }
     }
   }
 

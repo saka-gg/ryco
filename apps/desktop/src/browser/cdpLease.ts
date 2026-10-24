@@ -21,14 +21,22 @@ interface Attachment {
 }
 
 const NOT_ATTACHED = "Browser debugger is not attached.";
+const TIMED_OUT = "Browser command timed out.";
+/**
+ * A ready run that has not settled by then fails like a failed run (the agent's 15 s guard), so a
+ * hung step cannot hold an attachment that another holder keeps open.
+ */
+const READY_TIMEOUT_MS = 15_000;
 
 /**
  * One shared `webContents.debugger` session per page, held by named holders.
  *
  * - The first `acquire` attaches ("1.3"); the last `release` detaches. Nothing else attaches or
- *   detaches this page's debugger.
+ *   detaches this page's debugger. A session that ended without a "detach" event reaching the lease
+ *   is noticed by the next `acquire`, which attaches again.
  * - Ready steps run once per attachment, in registration order, before the first command any holder
- *   sends on it, whoever attached. A failed run rejects its callers and is retried by the next call.
+ *   sends on it, whoever attached. A failed run, or one that has not settled after 15 s, rejects its
+ *   callers and is retried by the next call.
  * - Domain ownership (browser-groundwork spec 4.6): a unit enables, disables, sets or clears only the
  *   domains it owns and never relies on another unit's enable.
  * - Never touches the debugger once the contents are destroyed (Electron's wrapper throws).
@@ -52,8 +60,10 @@ export class CdpLease {
   /** Opens the session when nobody holds it. True when `holder` did not hold it before. Throws "Browser tab closed." after dispose or destruction. */
   acquire(holder: CdpHolder): boolean {
     if (this.disposed || this.contents.isDestroyed()) throw new Error("Browser tab closed.");
+    const api = this.contents.debugger;
+    // Self-healing: a session that ended without its "detach" event reaching the lease ends here.
+    if (this.attachment && !api.isAttached()) this.end("target closed", false);
     if (!this.attachment) {
-      const api = this.contents.debugger;
       if (!api.isAttached()) api.attach("1.3");
       this.attachment = { ready: null };
     }
@@ -77,7 +87,13 @@ export class CdpLease {
     return this.attachment !== null;
   }
 
-  /** Registers a ready step; returns its unregister function. A step added while an attachment is ready runs from the next attachment on. */
+  /**
+   * Registers a ready step; returns its unregister function. A run takes a snapshot of the registered
+   * steps when it starts: at the first `ready()`/`send()` on an attachment, and again at the first
+   * call after a failed or timed-out run. So a step added before that point runs on the current
+   * attachment; one added while a run is pending, or after a run succeeded, first runs on the next
+   * attachment.
+   */
   onReady(step: ReadyStep): () => void {
     if (this.disposed) return () => undefined;
     const entry = { step };
@@ -103,7 +119,7 @@ export class CdpLease {
     return Promise.race([
       command,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("Browser command timed out.")), timeoutMs);
+        timer = setTimeout(() => reject(new Error(TIMED_OUT)), timeoutMs);
       }),
     ]).finally(() => clearTimeout(timer));
   }
@@ -161,17 +177,29 @@ export class CdpLease {
 
   private readyFor(attachment: Attachment): Promise<void> {
     if (attachment.ready) return attachment.ready;
-    const steps = [...this.readySteps];
-    // Bound to this attachment: a step that outlives its session never reaches the next one.
+    const steps = Array.from(this.readySteps);
+    let abandoned = false;
+    // Bound to this run on this attachment: a step that outlives its session, or its timed-out run,
+    // never sends again (and never reaches the next session).
     const send: CdpSend = (method, params = {}) =>
-      attachment !== this.attachment || this.contents.isDestroyed()
+      abandoned || attachment !== this.attachment || this.contents.isDestroyed()
         ? Promise.reject(new Error(NOT_ATTACHED))
         : this.contents.debugger.sendCommand(method, params);
-    const ready = (async () => {
-      for (const { step } of steps) await step(send);
-    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ready = Promise.race([
+      (async () => {
+        for (const { step } of steps) await step(send);
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          abandoned = true;
+          reject(new Error(TIMED_OUT));
+        }, READY_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
     attachment.ready = ready;
-    // A failed run rejects its callers; the next caller on this attachment runs the steps again.
+    // A failed or timed-out run rejects its callers; the next caller on this attachment runs the
+    // steps again.
     ready.catch(() => {
       if (attachment.ready === ready) attachment.ready = null;
     });

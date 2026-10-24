@@ -1,9 +1,11 @@
 import type { BrowserWindow } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import type { CdpLease } from "../browser/cdpLease.ts";
 
 vi.mock("electron", async () => (await import("./embeddedBrowser.fixtures.ts")).fakeElectronModule);
 import {
   fakeElectronState,
+  fakeEvent,
   fakeOwnerWindow,
   fakeSession,
   fakeTab,
@@ -20,10 +22,24 @@ function newBrowser(): EmbeddedComputerBrowser {
 const signal = () => new AbortController().signal;
 /** Lets queued microtasks (the fake's command responses) run. */
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+interface PageInternals {
+  readonly cdp: CdpLease;
+}
+interface EntryInternals {
+  live: PageInternals | null;
+  agentBusy: number;
+}
+/** The browser's private tab state and page lifecycle, which the sibling units build on. */
+function internals(browser: EmbeddedComputerBrowser) {
+  return browser as unknown as {
+    entries: Map<string, EntryInternals>;
+    createPage(entry: EntryInternals, existingId?: string): { id: string; page: PageInternals };
+    teardownPage(id: string, page: PageInternals): void;
+  };
+}
 /** Agent calls in flight on a tab (private; read by browser-picker and browser-tab-budget). */
 function agentBusy(browser: EmbeddedComputerBrowser, tab: string): number | undefined {
-  return (browser as unknown as { entries: Map<string, { agentBusy: number }> }).entries.get(tab)
-    ?.agentBusy;
+  return internals(browser).entries.get(tab)?.agentBusy;
 }
 
 beforeEach(resetFakeElectron);
@@ -174,6 +190,50 @@ describe("agent CDP", () => {
       expect(vi.getTimerCount()).toBe(0);
     },
   );
+
+  it("starts a fresh session when the old one ended without a detach event", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { debugger: api } = fakeTab(tab.id).contents;
+    await browser.send(tab.id, "Page.reload", {}, signal());
+    api.emitOnSelfDetach = false;
+    api.detach();
+    await expect(browser.send(tab.id, "Runtime.evaluate", {}, signal())).resolves.toEqual({});
+    expect(api.attach).toHaveBeenCalledTimes(2);
+    expect(api.commands.map(({ method }) => method)).toEqual([
+      "Emulation.setFocusEmulationEnabled",
+      "Page.reload",
+      "Emulation.setFocusEmulationEnabled",
+      "Runtime.evaluate",
+    ]);
+  });
+
+  it("does not keep failing agent commands behind a hung ready step while another holder keeps the session", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { debugger: api } = fakeTab(tab.id).contents;
+    let focusCalls = 0;
+    api.respond = (method) =>
+      method === "Emulation.setFocusEmulationEnabled" && ++focusCalls === 1
+        ? new Promise(() => {})
+        : {};
+    const { cdp } = internals(browser).entries.get(tab.id)!.live!;
+    cdp.acquire("picker"); // A user's element pick (browser-picker).
+    const first = browser.send(tab.id, "Page.reload", {}, signal());
+    const timedOut = expect(first).rejects.toThrow("Browser command timed out.");
+    await vi.advanceTimersByTimeAsync(15_000);
+    await timedOut;
+    expect(cdp.holds("picker")).toBe(true);
+    await expect(browser.send(tab.id, "Page.reload", {}, signal())).resolves.toEqual({});
+    expect(api.attach).toHaveBeenCalledTimes(1);
+    expect(api.commands.map(({ method }) => method)).toEqual([
+      "Emulation.setFocusEmulationEnabled",
+      "Emulation.setFocusEmulationEnabled",
+      "Page.reload",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it("refuses an aborted signal before touching the debugger", async () => {
     const browser = newBrowser();
@@ -389,3 +449,58 @@ it.each(["close", "dispose"] as const)(
     expect(contents.debugger.listenerCount("detach")).toBe(0);
   },
 );
+
+it("ignores the late events of a page the tab no longer shows", async () => {
+  const browser = newBrowser();
+  const tab = await browser.open("https://example.com/", false, signal(), "project");
+  const old = fakeTab(tab.id);
+  // What browser-tab-budget's suspend() and revive() do: tear the page down, then give the tab a
+  // new page under the same id.
+  const inner = internals(browser);
+  const entry = inner.entries.get(tab.id)!;
+  const page = entry.live!;
+  entry.live = null;
+  inner.teardownPage(tab.id, page);
+  entry.live = inner.createPage(entry, tab.id).page;
+  const fresh = fakeElectronState.views.at(-1)!.webContents;
+  expect(fresh).not.toBe(old.contents);
+  const published = vi.fn();
+  browser.onState(published);
+  // Electron destroys contents asynchronously, so the old page can still emit events.
+  const stale = old.contents;
+  stale.emit("did-start-navigation", fakeEvent(), "https://stale.example/", false, true);
+  stale.emit("did-start-loading");
+  stale.emit("did-fail-load", fakeEvent(), -105, "Stale failure", "https://stale.example/", true);
+  stale.emit("render-process-gone", fakeEvent(), { reason: "crashed" });
+  stale.emit("page-title-updated", fakeEvent(), "Stale");
+  stale.emit("did-stop-loading");
+  stale.emit("before-input-event", fakeEvent(), {
+    type: "keyDown",
+    key: "w",
+    meta: true,
+    control: true,
+    alt: false,
+  });
+  old.host.emit("close", fakeEvent());
+  old.host.emit("resize");
+  old.host.emit("closed");
+  stale.emit("destroyed");
+  expect(published).not.toHaveBeenCalled();
+  expect(browser.state().tabs).toEqual([
+    expect.objectContaining({
+      id: tab.id,
+      url: "https://example.com/",
+      error: null,
+      presentation: "background",
+    }),
+  ]);
+  // The tab's current page still reaches it.
+  fresh.emit("did-fail-load", fakeEvent(), -105, "Fresh failure", "https://example.com/", true);
+  expect(published).toHaveBeenCalledTimes(1);
+  expect(browser.state().tabs[0]?.error).toBe("Fresh failure");
+  await browser.send(tab.id, "Page.reload", {}, signal());
+  expect(fresh.debugger.commands.map(({ method }) => method)).toEqual([
+    "Emulation.setFocusEmulationEnabled",
+    "Page.reload",
+  ]);
+});
