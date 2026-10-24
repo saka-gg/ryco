@@ -87,6 +87,15 @@ export async function dispatchThreadSnooze(
 
 const threadCount = (count: number) => (count === 1 ? "1 thread" : `${count} threads`);
 
+/** Says that a bulk action left `count` threads alone: their machine takes no changes now. */
+export function presentSkippedThreads(count: number): void {
+  toastManager.add({
+    type: "warning",
+    title: `Skipped ${threadCount(count)}`,
+    description: `${count === 1 ? "Its" : "Their"} machine is not ready. Try again when it reconnects.`,
+  });
+}
+
 /** A bulk notice's copy; `count` is what its Undo still restores. */
 const bulkNoticeCopy =
   (action: "settle" | "snooze", applyingVerb: string, doneVerb: string): SidebarUndoDescribe =>
@@ -141,13 +150,7 @@ async function dispatchThreadBatch(
       }),
     );
   }
-  if (skipped.length > 0) {
-    toastManager.add({
-      type: "warning",
-      title: `Skipped ${threadCount(skipped.length)}`,
-      description: `${skipped.length === 1 ? "Its" : "Their"} machine is not ready. Try again when it reconnects.`,
-    });
-  }
+  if (skipped.length > 0) presentSkippedThreads(skipped.length);
   // The notice counts only what its Undo restores; say why the rest is missing.
   if (withoutUndo > 0 && applied.length > withoutUndo) {
     toastManager.add({

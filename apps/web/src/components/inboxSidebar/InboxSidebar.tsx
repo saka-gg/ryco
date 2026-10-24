@@ -32,6 +32,7 @@ import {
 } from "./inboxSidebarModel";
 import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
+import { useInboxRowSelection } from "./useInboxRowSelection";
 
 export interface InboxSidebarProps {
   readonly threadActions?: InboxThreadActions | undefined;
@@ -48,6 +49,10 @@ export interface InboxSidebarProps {
   /** Rows on other machines are labelled; this one is implicit. */
   readonly primaryEnvironmentId?: EnvironmentId | null | undefined;
   readonly onOpenThread: (threadRef: ScopedThreadRef) => void;
+  /** Deletes a selection of rows after one confirmation; omit to offer no bulk Delete. */
+  readonly onDeleteThreads?:
+    | ((targets: readonly ScopedThreadRef[]) => Promise<boolean>)
+    | undefined;
   /** Offered from the empty state when no project exists yet; omit when adding is unavailable. */
   readonly onAddProject?: (() => void) | undefined;
   /**
@@ -67,8 +72,9 @@ export function InboxSidebar(props: InboxSidebarProps) {
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
-  // The web phone tier is frozen (AGENTS.md): no delegated folding there.
-  const nestDelegated = usePresentationTier() !== "phone";
+  // The web phone tier is frozen (AGENTS.md): no delegated folding or row selection there.
+  const isPhone = usePresentationTier() === "phone";
+  const nestDelegated = !isPhone;
   const [expandedHostKeys, setExpandedHostKeys] = useState<ReadonlySet<string>>(() => new Set());
   const toggleHost = useCallback((hostKey: string) => {
     setExpandedHostKeys((previous) => {
@@ -164,10 +170,17 @@ export function InboxSidebar(props: InboxSidebarProps) {
     row.delegatedChildren.some(
       (child) => child.key === props.activeThreadKey || child.state === "needs-input",
     );
-  const visibleRowKeys = (row: InboxSidebarRow) =>
+  const visibleRows = (row: InboxSidebarRow) =>
     isHostExpanded(row) && row.delegatedChildren.length > 0
-      ? [row.key, ...row.delegatedChildren.map((child) => child.key)]
-      : [row.key];
+      ? [row, ...row.delegatedChildren]
+      : [row];
+  const visibleRowKeys = (row: InboxSidebarRow) => visibleRows(row).map((visible) => visible.key);
+  const selection = useInboxRowSelection({
+    displayedRows: sections.flatMap((section) =>
+      isExpanded(section.key) ? section.rows.flatMap(visibleRows) : [],
+    ),
+    onDeleteThreads: props.onDeleteThreads,
+  });
   const orderSignature = sections
     .map((section) =>
       isExpanded(section.key)
@@ -206,6 +219,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
       previewHandle={previewHandle}
       onOpenRow={openRow}
       row={row}
+      selection={isPhone ? undefined : selection}
     />
   );
 
