@@ -10,7 +10,7 @@ import {
   getChangeRequestHostCapabilities,
   type ChangeRequestHostCapabilities,
   type ChangeRequestIdleRefresh,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 import {
   deriveChangeRequestNextAction,
   indexReviewThreads,
@@ -81,8 +81,9 @@ export interface PullRequestsModel {
   readonly cwd: string | null;
   readonly provider: SourceControlProviderInfo | null;
   /**
-   * What the host implements (`@ryco/shared/sourceControl`). Every control
-   * whose capability is false is hidden; reads it cannot serve are not made.
+   * What the host implements (`@ryco/shared/changeRequestHostCapabilities`).
+   * Every control whose capability is false is hidden; reads it cannot serve
+   * are not made.
    */
   readonly capabilities: ChangeRequestHostCapabilities;
   readonly list: PullRequestsListModel;

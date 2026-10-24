@@ -32,7 +32,7 @@ import { openAutomationsDialog } from "./automationsDialogStore";
 import { useAutomationProposalSync } from "./data/useAutomationProposalSync";
 import { useAgentControlSyncEnvironmentIds } from "../agent-control/agentControlSyncGate";
 import { useConnectedEnvironmentIds } from "./data/useConnectedEnvironmentIds";
-import { missedRunsNoticeView, type MissedRunsNoticeView } from "./missedRunsNotice.logic";
+import type { MissedRunsNoticeView, missedRunsNoticeView } from "./missedRunsNotice.logic";
 
 const NOTICED_STORAGE_KEY = "ryco:missed-automation-runs:v1";
 /** Runs remembered as noticed; the oldest are let go well after their notice window. */
@@ -70,9 +70,55 @@ function markNoticed(environmentId: EnvironmentId, runs: readonly MissedAutomati
   }
 }
 
-/** Test-only: nothing noticed yet. */
+type NoticeWords = typeof missedRunsNoticeView;
+let loadedNoticeWords: NoticeWords | null = null;
+let noticeWordsLoad: Promise<NoticeWords | null> | null = null;
+
+/**
+ * Loads the notice's words, once for every device's notice. They share the
+ * Automations dialog's schedule vocabulary, which the shell does not otherwise
+ * need. A failed load is forgotten, so the next call tries again.
+ */
+function loadNoticeWords(): Promise<NoticeWords | null> {
+  noticeWordsLoad ??= import("./missedRunsNotice.logic").then(
+    (module) => {
+      loadedNoticeWords = module.missedRunsNoticeView;
+      return loadedNoticeWords;
+    },
+    (error: unknown) => {
+      noticeWordsLoad = null;
+      console.warn("Missed automation runs notice failed to load.", error);
+      return null;
+    },
+  );
+  return noticeWordsLoad;
+}
+
+/**
+ * The notice's words once a device has missed runs (null until they load).
+ * After a failed load, the next change to the runs tries again; runs left
+ * unnoticed are told on the next launch either way.
+ */
+function useNoticeWords(runs: readonly MissedAutomationRun[]): NoticeWords | null {
+  const [words, setWords] = useState(() => loadedNoticeWords);
+  useEffect(() => {
+    if (runs.length === 0 || words !== null) return;
+    let current = true;
+    void loadNoticeWords().then((loaded) => {
+      if (current && loaded) setWords(() => loaded);
+    });
+    return () => {
+      current = false;
+    };
+  }, [runs, words]);
+  return words;
+}
+
+/** Test-only: nothing noticed yet, and the notice's words not loaded. */
 export function resetNoticedMissedRunsForTests(): void {
   useNoticedStore.setState({ keys: [] });
+  loadedNoticeWords = null;
+  noticeWordsLoad = null;
 }
 
 const NO_PROPOSALS: readonly AgentControlProposal[] = [];
@@ -110,6 +156,7 @@ function MissedAutomationRunsNoticeForEnvironment({
     );
     return fresh.length > 0 ? fresh : NO_RUNS;
   }, [environmentId, mountedAtMs, noticed, proposals]);
+  const noticeWords = useNoticeWords(runs);
 
   /* The notice on screen and the runs it names; actions read the latest. */
   const toastRef = useRef<ToastId | null>(null);
@@ -124,8 +171,10 @@ function MissedAutomationRunsNoticeForEnvironment({
       toastRef.current = null;
       return;
     }
+    // Runs again once the words have loaded.
+    if (noticeWords === null) return;
     const connection = readEnvironmentConnection(environmentId);
-    const view = missedRunsNoticeView(runs, {
+    const view = noticeWords(runs, {
       deviceLabel: connection?.kind === "saved" ? connection.knownEnvironment.label : null,
       nowMs: Date.now(),
     });
@@ -182,7 +231,7 @@ function MissedAutomationRunsNoticeForEnvironment({
     });
     if (toastId === null) toastRef.current = toastManager.add(toast);
     else toastManager.update(toastId, toast);
-  }, [canDecide, environmentId, runs]);
+  }, [canDecide, environmentId, noticeWords, runs]);
 
   // A device that disconnects takes its notice along; it returns, unnoticed, with the device.
   useEffect(

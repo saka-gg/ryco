@@ -1,10 +1,12 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSync } from "vite-plus";
 import { describe, expect, it } from "vite-plus/test";
 
 import { CLIENT_MODE_SEAM_MODULES, standardSeamSibling } from "../clientModeSeams";
+import { BOOT_ROOT_MODULES } from "../viteBuild/codeSplitting";
 
 /**
  * Source-level guard for the standard build's static import graph.
@@ -82,12 +84,20 @@ function resolveSpecifier(specifier: string, importer: string): string | null {
   return seamSiblings.get(resolved) ?? resolved;
 }
 
-const importCache = new Map<string, ReadonlyArray<string>>();
+interface ParsedImports {
+  /** Specifiers of value imports and re-exports (type-only ones are erased). */
+  readonly valueSpecifiers: ReadonlyArray<string>;
+  /** Resolved targets of `import("…")` calls with a string literal. */
+  readonly dynamicImports: ReadonlyArray<string>;
+}
 
-function staticValueImports(file: string): ReadonlyArray<string> {
-  const cached = importCache.get(file);
+const parseCache = new Map<string, ParsedImports>();
+
+function parseImports(file: string): ParsedImports {
+  const cached = parseCache.get(file);
   if (cached) return cached;
-  const { module, errors } = parseSync(file, readFileSync(file, "utf8"));
+  const source = readFileSync(file, "utf8");
+  const { module, errors } = parseSync(file, source);
   if (errors.length > 0) throw new Error(`Failed to parse ${file}`);
   const specifiers = new Set<string>();
   for (const declaration of module.staticImports) {
@@ -100,8 +110,26 @@ function staticValueImports(file: string): ReadonlyArray<string> {
       if (entry.moduleRequest && !entry.isType) specifiers.add(entry.moduleRequest.value);
     }
   }
-  const imports = [...specifiers]
-    .map((specifier) => resolveSpecifier(specifier, file))
+  const dynamicImports = module.dynamicImports.flatMap(({ moduleRequest }) => {
+    // A single string literal; concatenations and templates are not followed.
+    const literal = /^(["'])([^"'\\]*)\1$/u.exec(
+      source.slice(moduleRequest.start, moduleRequest.end),
+    );
+    const resolved = literal ? resolveSpecifier(literal[2]!, file) : null;
+    return resolved ? [resolved] : [];
+  });
+  const parsed = { valueSpecifiers: [...specifiers], dynamicImports };
+  parseCache.set(file, parsed);
+  return parsed;
+}
+
+const importCache = new Map<string, ReadonlyArray<string>>();
+
+function staticValueImports(file: string): ReadonlyArray<string> {
+  const cached = importCache.get(file);
+  if (cached) return cached;
+  const imports = parseImports(file)
+    .valueSpecifiers.map((specifier) => resolveSpecifier(specifier, file))
     .filter((resolved): resolved is string => resolved !== null);
   importCache.set(file, imports);
   return imports;
@@ -137,6 +165,28 @@ function forbiddenChains(entryRelative: string, forbidden: readonly RegExp[]): s
     chains.push(chain.join(" -> "));
   }
   return chains;
+}
+
+/** The boot chunk's static graphs: the entry and the lazy roots grouped into it. */
+const BOOT_GRAPH_ENTRIES = [
+  "main.tsx",
+  ...BOOT_ROOT_MODULES.map((modulePath) => modulePath.replace(/^src\//u, "")),
+];
+
+const effectExports = (
+  JSON.parse(
+    readFileSync(createRequire(import.meta.url).resolve("effect/package.json"), "utf8"),
+  ) as { exports: Record<string, unknown> }
+).exports;
+
+/**
+ * Whether `specifier` names `effect`'s root or one of its directory entries
+ * (`effect/reactivity`): an index that re-exports every module beneath it.
+ */
+function isEffectBarrel(specifier: string): boolean {
+  if (specifier !== "effect" && !specifier.startsWith("effect/")) return false;
+  const target = exportTarget(effectExports[`.${specifier.slice("effect".length)}`]);
+  return target?.endsWith("/index.js") ?? false;
 }
 
 const HOSTED_RUNTIME: readonly RegExp[] = [
@@ -179,6 +229,44 @@ describe("standard build static import graph", () => {
     ).toEqual([]);
   });
 
+  it("loads the translucent window's overlay cutout on demand", () => {
+    // Only the macOS desktop's translucent window installs it.
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      expect(forbiddenChains(entry, [/^apps\/web\/src\/lib\/glassOverlayCutout\.ts$/u])).toEqual(
+        [],
+      );
+    }
+    expect(parseImports(path.join(srcRoot, "main.tsx")).dynamicImports.map(display)).toContain(
+      "apps/web/src/lib/glassOverlayCutout.ts",
+    );
+  });
+
+  it("keeps the change request host capability table out of the boot graph", () => {
+    // Only the pull requests surfaces read it; `sourceControl.ts`, which the
+    // git status stream reaches at boot, must not import it back.
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      expect(
+        forbiddenChains(entry, [/^packages\/shared\/src\/changeRequestHostCapabilities\.ts$/u]),
+      ).toEqual([]);
+    }
+  });
+
+  it("imports Effect modules by subpath in boot code", () => {
+    // The boot vendor chunk follows package barrels: one value import of
+    // `effect` or `effect/reactivity` from boot code brings every module
+    // beneath it that any lazy chunk uses into boot (Config, ConfigProvider).
+    const barrelImports = new Set<string>();
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      for (const file of staticGraph(path.join(srcRoot, entry)).keys()) {
+        if (file.startsWith("pkg:")) continue;
+        for (const specifier of parseImports(file).valueSpecifiers) {
+          if (isEffectBarrel(specifier)) barrelImports.add(`${display(file)}: ${specifier}`);
+        }
+      }
+    }
+    expect([...barrelImports]).toEqual([]);
+  });
+
   it("keeps the preview editor session out of the boot graph", () => {
     // The root navigation guard needs only the session registry.
     expect(
@@ -198,6 +286,24 @@ describe("standard build static import graph", () => {
         /^apps\/web\/src\/components\/JetBrainsIcons\.tsx$/u,
       ]),
     ).toEqual([]);
+  });
+
+  it("loads the missed-runs notice's words with the first notice", () => {
+    // They share the Automations dialog's schedule vocabulary, which the shell
+    // otherwise loads only with the dialog. This walk follows every re-export
+    // of the agent control barrel, so it cannot tell whether the badge reaches
+    // the schedule rows; the bundle budget's RootAppShell rules check that on
+    // the build.
+    expect(
+      forbiddenChains("components/RootAppShell.tsx", [
+        /^apps\/web\/src\/components\/automations\/(?:dialog\/|missedRunsNotice\.logic\.ts$)/u,
+      ]),
+    ).toEqual([]);
+    expect(
+      parseImports(
+        path.join(srcRoot, "components/automations/MissedAutomationRunsNotice.tsx"),
+      ).dynamicImports.map(display),
+    ).toContain("apps/web/src/components/automations/missedRunsNotice.logic.ts");
   });
 
   it("keeps the diff renderer out of the pull requests page until the Files tab", () => {

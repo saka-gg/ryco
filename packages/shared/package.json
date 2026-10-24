@@ -167,6 +167,10 @@
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"
     },
+    "./changeRequestHostCapabilities": {
+      "types": "./src/changeRequestHostCapabilities.ts",
+      "import": "./src/changeRequestHostCapabilities.ts"
+    },
     "./logging": {
       "types": "./src/logging.ts",
       "import": "./src/logging.ts"
