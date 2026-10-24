@@ -32,6 +32,10 @@ const HOT_COMPONENTS: ReadonlyArray<{ readonly file: string; readonly functions:
   },
   { file: "../components/inboxSidebar/InboxSidebar.tsx", functions: ["InboxSidebar"] },
   {
+    file: "../components/inboxSidebar/useInboxOrderHold.ts",
+    functions: ["useInboxOrderHold"],
+  },
+  {
     file: "../components/inboxSidebar/ConnectedInboxSidebar.tsx",
     functions: ["ConnectedInboxSidebar"],
   },

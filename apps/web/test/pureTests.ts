@@ -82,6 +82,8 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/hostedHub/ExternalIdentityWeb.logic.test.ts",
   "src/components/hostedHub/HostedConnectionControls.logic.test.ts",
   "src/components/hostedHub/HostedNodeDisplay.logic.test.ts",
+  "src/components/inboxSidebar/inboxAttention.test.ts",
+  "src/components/inboxSidebar/inboxOrderHold.test.ts",
   "src/components/inboxSidebar/inboxPullRequests.test.tsx",
   "src/components/inboxSidebar/inboxSidebarModel.test.ts",
   "src/components/overview/crown/crownAlertQueue.logic.test.ts",
