@@ -132,6 +132,7 @@ import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegis
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import { EventLoopMonitorLive } from "./observability/EventLoopMonitor.ts";
 import { HeapSnapshotLive } from "./observability/HeapSnapshotSignal.ts";
+import { makeAgentWorkHoldLayer } from "./agentWorkHold.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
@@ -852,6 +853,8 @@ export const makeServerLayer = Layer.unwrap(
       runtimeStateLayer,
       tailscaleServeLayer,
       SleepInhibitorLive,
+      // Agent work for sleep holds; in desktop mode Desktop main holds the machine awake from it.
+      makeAgentWorkHoldLayer(config),
     );
 
     // Shutdown runs these stages in reverse build order; the markers log how

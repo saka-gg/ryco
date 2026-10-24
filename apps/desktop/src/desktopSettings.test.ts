@@ -20,7 +20,7 @@ import {
   resolveDesktopHubConnectorLaunch,
   resolveDesktopTailscaleServeLaunch,
   setDesktopHubPreference,
-  setDesktopKeepAwakePreference,
+  setDesktopKeepAwakeMode,
   setDesktopServerExposurePreference,
   setDesktopTailscaleServePreference,
   setDesktopUpdateChannelPreference,
@@ -61,7 +61,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -81,7 +81,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -97,7 +97,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -117,7 +117,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
-          keepAwakeWhileReachable: true,
+          keepAwakeMode: "reachable-or-working",
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -134,7 +134,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "network-accessible",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -154,7 +154,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
-          keepAwakeWhileReachable: true,
+          keepAwakeMode: "reachable-or-working",
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -171,7 +171,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -191,7 +191,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 8443,
-          keepAwakeWhileReachable: true,
+          keepAwakeMode: "reachable-or-working",
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -208,7 +208,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -338,7 +338,7 @@ describe("desktopSettings", () => {
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
-          keepAwakeWhileReachable: true,
+          keepAwakeMode: "reachable-or-working",
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
@@ -355,7 +355,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "nightly",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -618,17 +618,57 @@ describe("desktopSettings", () => {
     expect(desktopHubLaunchNeedsRestart(standby, standby, false)).toBe(false);
   });
 
-  it("keeps a reachable node awake by default and persists an opt-out", () => {
-    expect(DEFAULT_DESKTOP_SETTINGS.keepAwakeWhileReachable).toBe(true);
+  it("keeps a reachable or working node awake by default and persists an opt-out", () => {
+    expect(DEFAULT_DESKTOP_SETTINGS.keepAwakeMode).toBe("reachable-or-working");
     const settingsPath = makeSettingsPath();
     // Settings written before the preference existed keep the default.
     fs.writeFileSync(settingsPath, JSON.stringify({ hubConnectorEnabled: true }));
-    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeWhileReachable).toBe(true);
+    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeMode).toBe("reachable-or-working");
 
-    const optedOut = setDesktopKeepAwakePreference(DEFAULT_DESKTOP_SETTINGS, false);
+    const optedOut = setDesktopKeepAwakeMode(DEFAULT_DESKTOP_SETTINGS, "off");
     writeDesktopSettings(settingsPath, optedOut);
-    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeWhileReachable).toBe(false);
-    expect(setDesktopKeepAwakePreference(optedOut, false)).toBe(optedOut);
+    expect(readDesktopSettings(settingsPath, "0.1.21").keepAwakeMode).toBe("off");
+    expect(setDesktopKeepAwakeMode(optedOut, "off")).toBe(optedOut);
+  });
+
+  it("migrates the legacy keep-awake boolean", () => {
+    const settingsPath = makeSettingsPath();
+    const read = (stored: Record<string, unknown>) => {
+      fs.writeFileSync(settingsPath, JSON.stringify(stored));
+      return readDesktopSettings(settingsPath, "0.1.36").keepAwakeMode;
+    };
+    // An explicit opt-out was a choice and stays one.
+    expect(read({ keepAwakeWhileReachable: false })).toBe("off");
+    // `true` was the default every write stored, not a choice: it gets today's default.
+    expect(read({ keepAwakeWhileReachable: true })).toBe("reachable-or-working");
+    expect(read({})).toBe("reachable-or-working");
+    // A stored mode wins over the legacy boolean written beside it.
+    expect(read({ keepAwakeMode: "reachable", keepAwakeWhileReachable: true })).toBe("reachable");
+    expect(read({ keepAwakeMode: "off", keepAwakeWhileReachable: false })).toBe("off");
+    // An unreadable mode falls back to the legacy rule instead of failing the whole file.
+    expect(read({ keepAwakeMode: "bogus", keepAwakeWhileReachable: false })).toBe("off");
+    expect(read({ keepAwakeMode: 7, hubConnectorEnabled: true })).toBe("reachable-or-working");
+  });
+
+  it("writes the legacy boolean beside the mode for a downgraded desktop", () => {
+    const settingsPath = makeSettingsPath();
+    const stored = (mode: "off" | "reachable" | "reachable-or-working") => {
+      writeDesktopSettings(settingsPath, setDesktopKeepAwakeMode(DEFAULT_DESKTOP_SETTINGS, mode));
+      return JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    };
+    expect(stored("off")).toMatchObject({ keepAwakeMode: "off", keepAwakeWhileReachable: false });
+    expect(stored("reachable")).toMatchObject({
+      keepAwakeMode: "reachable",
+      keepAwakeWhileReachable: true,
+    });
+    expect(stored("reachable-or-working")).toMatchObject({
+      keepAwakeMode: "reachable-or-working",
+      keepAwakeWhileReachable: true,
+    });
+    // Read back, the legacy field does not leak into the in-memory settings.
+    expect(readDesktopSettings(settingsPath, "0.1.36")).not.toHaveProperty(
+      "keepAwakeWhileReachable",
+    );
   });
 
   it("offers native account setup only where the hardware-backed helper ships", () => {
@@ -668,7 +708,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -697,7 +737,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
@@ -732,7 +772,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "latest",
       updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
@@ -760,7 +800,7 @@ describe("desktopSettings", () => {
       serverExposureMode: "local-only",
       tailscaleServeEnabled: true,
       tailscaleServePort: 443,
-      keepAwakeWhileReachable: true,
+      keepAwakeMode: "reachable-or-working",
       updateChannel: "latest",
       updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,

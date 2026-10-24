@@ -2,6 +2,7 @@ import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import * as FS from "node:fs";
 import * as Path from "node:path";
 import type {
+  DesktopKeepAwakeMode,
   DesktopQuitShortcutMode,
   DesktopServerExposureMode,
   DesktopUpdateChannel,
@@ -41,10 +42,12 @@ export interface DesktopSettings {
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
   /**
-   * Hold the machine awake while it is plugged in and other devices can reach
-   * it. On by default; it has no effect until the node is reachable.
+   * When to hold the machine awake while it is plugged in: never, while other
+   * devices can reach it, or also while agents work on this desktop's backend.
+   * The file also stores the legacy `keepAwakeWhileReachable` boolean beside it
+   * (see `writeDesktopSettings`); in memory this is the only field.
    */
-  readonly keepAwakeWhileReachable: boolean;
+  readonly keepAwakeMode: DesktopKeepAwakeMode;
   readonly updateChannel: DesktopUpdateChannel;
   readonly updateChannelConfiguredByUser: boolean;
   /**
@@ -57,6 +60,31 @@ export interface DesktopSettings {
 
 export const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 
+export const DESKTOP_KEEP_AWAKE_MODES = [
+  "off",
+  "reachable",
+  "reachable-or-working",
+] as const satisfies ReadonlyArray<DesktopKeepAwakeMode>;
+export const DEFAULT_DESKTOP_KEEP_AWAKE_MODE: DesktopKeepAwakeMode = "reachable-or-working";
+
+export function isDesktopKeepAwakeMode(value: unknown): value is DesktopKeepAwakeMode {
+  return (DESKTOP_KEEP_AWAKE_MODES as ReadonlyArray<unknown>).includes(value);
+}
+
+/**
+ * The stored mode, or the one a file written before modes existed implies. An explicit
+ * `keepAwakeWhileReachable: false` was a choice and stays off. A stored `true` was the default
+ * nearly every file holds (every write stored the whole object), not a choice, so it gets
+ * today's default. Anything unreadable falls back the same way instead of failing the whole file.
+ */
+export function resolveDesktopKeepAwakeMode(parsed: {
+  readonly keepAwakeMode?: unknown;
+  readonly keepAwakeWhileReachable?: unknown;
+}): DesktopKeepAwakeMode {
+  if (isDesktopKeepAwakeMode(parsed.keepAwakeMode)) return parsed.keepAwakeMode;
+  return parsed.keepAwakeWhileReachable === false ? "off" : DEFAULT_DESKTOP_KEEP_AWAKE_MODE;
+}
+
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   quitShortcutMode: "press-twice",
   serverExposureMode: "local-only",
@@ -67,7 +95,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   hubAllowFileSecretStore: false,
   tailscaleServeEnabled: false,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
-  keepAwakeWhileReachable: true,
+  keepAwakeMode: DEFAULT_DESKTOP_KEEP_AWAKE_MODE,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
   backendPort: null,
@@ -196,13 +224,11 @@ export function planDesktopTailscaleServeChange(input: {
   };
 }
 
-export function setDesktopKeepAwakePreference(
+export function setDesktopKeepAwakeMode(
   settings: DesktopSettings,
-  enabled: boolean,
+  mode: DesktopKeepAwakeMode,
 ): DesktopSettings {
-  return settings.keepAwakeWhileReachable === enabled
-    ? settings
-    : { ...settings, keepAwakeWhileReachable: enabled };
+  return settings.keepAwakeMode === mode ? settings : { ...settings, keepAwakeMode: mode };
 }
 
 export function normalizeTailscaleServePort(value: unknown): number {
@@ -392,6 +418,7 @@ export function readDesktopSettings(
       readonly serverExposureMode?: unknown;
       readonly tailscaleServeEnabled?: unknown;
       readonly tailscaleServePort?: unknown;
+      readonly keepAwakeMode?: unknown;
       readonly keepAwakeWhileReachable?: unknown;
       readonly updateChannel?: unknown;
       readonly updateChannelConfiguredByUser?: unknown;
@@ -431,8 +458,7 @@ export function readDesktopSettings(
         parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
       tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
       tailscaleServePort: normalizeTailscaleServePort(parsed.tailscaleServePort),
-      // Absent in settings written before the preference existed: keep the default.
-      keepAwakeWhileReachable: parsed.keepAwakeWhileReachable !== false,
+      keepAwakeMode: resolveDesktopKeepAwakeMode(parsed),
       updateChannel:
         updateChannelConfiguredByUser && parsedUpdateChannel !== null
           ? parsedUpdateChannel
@@ -471,7 +497,10 @@ export function writeDesktopSettings(settingsPath: string, settings: DesktopSett
   // owner-only — matching the 0700/0600 posture the identity state already uses,
   // rather than the world-readable default.
   FS.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  FS.writeFileSync(tempPath, `${JSON.stringify(settings, null, 2)}\n`, {
+  // The legacy boolean is written beside the mode, so a downgraded desktop (which reads only
+  // `keepAwakeWhileReachable !== false`) cannot turn on a hold the operator turned off.
+  const stored = { ...settings, keepAwakeWhileReachable: settings.keepAwakeMode !== "off" };
+  FS.writeFileSync(tempPath, `${JSON.stringify(stored, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });
