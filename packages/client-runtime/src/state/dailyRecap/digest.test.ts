@@ -65,10 +65,16 @@ const busyDay = recap(
   },
 );
 
-function usageDay(tokens: number, share = 0.8, costUsd: number | null = 12.4): DailyRecapUsageDay {
+function usageDay(
+  tokens: number,
+  share = 0.8,
+  costUsd: number | null = 12.4,
+  costPartial = false,
+): DailyRecapUsageDay {
   return {
     tokens,
     costUsd,
+    costPartial,
     topModel: tokens > 0 ? { provider: "claude", model: "opus", share } : null,
   };
 }
@@ -278,6 +284,13 @@ describe("the daily recap tiles", () => {
     expect(byId.get("yesterday")?.detail).toBe("3h 5m");
   });
 
+  it("gives a partly priced day's cost as a floor", () => {
+    const providerTokens = tiles({
+      usage: { today: usageDay(2_000_000, 0.8, 9.1, true), yesterday: usageDay(0) },
+    }).find((tile) => tile.id === "provider-tokens");
+    expect(providerTokens?.detail).toBe("Mostly Model opus · at least $9.10");
+  });
+
   it("tells failures alone on a day with nothing finished", () => {
     expect(tiles({ today: recap({ failedTurns: 2 }) })[0]).toEqual({
       id: "finished",
@@ -330,15 +343,19 @@ describe("summarizing a day of provider usage", () => {
     ).toEqual({
       tokens: 1_000,
       costUsd: 10,
+      costPartial: true,
       topModel: { provider: "claude", model: "opus", share: 0.7 },
     });
+    expect(summarizeUsageDay([bucket(today, "opus", 600, 1)], today).costPartial).toBe(false);
   });
 
   it("has no cost when nothing is priced and no model without tokens", () => {
     expect(summarizeUsageDay([bucket(today, "opus", 10)], today).costUsd).toBeNull();
+    expect(summarizeUsageDay([bucket(today, "opus", 10)], today).costPartial).toBe(false);
     expect(summarizeUsageDay([bucket(yesterday, "opus", 10)], today)).toEqual({
       tokens: 0,
       costUsd: null,
+      costPartial: false,
       topModel: null,
     });
   });

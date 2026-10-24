@@ -77,9 +77,10 @@ const usage: DailyRecapDigestInput["usage"] = {
   today: {
     tokens: 41_000_000,
     costUsd: 12.4,
+    costPartial: false,
     topModel: { provider: "claude", model: "claude-opus-5-5", share: 0.8 },
   },
-  yesterday: { tokens: 30_000_000, costUsd: null, topModel: null },
+  yesterday: { tokens: 30_000_000, costUsd: null, costPartial: false, topModel: null },
 };
 
 function snapshot(): DailyRecapSnapshot {
@@ -294,11 +295,34 @@ describe("Today recap", () => {
   it("says when no device is connected", async () => {
     await render(
       <Harness
-        {...props({ recap: { ...props().recap, today: null, yesterday: null, nodes: [] } })}
+        {...props({
+          recap: {
+            ...props().recap,
+            today: null,
+            yesterday: null,
+            nodes: [],
+            availableEnvironments: [],
+          },
+        })}
       />,
     );
 
     await expect.element(page.getByText("No devices are connected")).toBeInTheDocument();
+    await expect.element(page.getByLabelText("Recap environment")).not.toBeInTheDocument();
+  });
+
+  it("keeps the device choice when the chosen device is not connected", async () => {
+    await render(
+      <Harness
+        {...props({
+          search: parseStatisticsSearch({ view: "today", environmentIds: [LINUX] }),
+          recap: { ...props().recap, today: null, yesterday: null, nodes: [] },
+        })}
+      />,
+    );
+
+    await expect.element(page.getByText("The selected device isn’t connected")).toBeInTheDocument();
+    await expect.element(page.getByLabelText("Recap environment")).toBeInTheDocument();
   });
 
   it("lists eight chats until asked for all, and counts the ones left unlisted", async () => {

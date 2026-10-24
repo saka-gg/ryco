@@ -86,6 +86,30 @@ describe("chats waiting on the user", () => {
     expect(select(state, [nodeA])).toBe(1);
   });
 
+  it("leaves out the last-known chats of a node whose shell is not live", () => {
+    const select = createWaitingThreadCountSelector();
+    const waiting = summaries(thread("approval", { hasPendingApprovals: true }));
+    const live = appState({ [nodeA]: waiting, [nodeB]: waiting });
+    const state: AppState = {
+      ...live,
+      environmentStateById: {
+        // Painted from the shell cache before it connected.
+        [nodeA]: {
+          ...live.environmentStateById[nodeA],
+          bootstrapComplete: false,
+          hydratedFromCacheAt: Date.parse("2026-10-23T12:00:00.000Z"),
+        } as EnvironmentState,
+        // Demoted after its connection dropped.
+        [nodeB]: {
+          ...live.environmentStateById[nodeB],
+          hydratedFromCacheAt: Date.parse("2026-10-23T12:00:00.000Z"),
+        } as EnvironmentState,
+      },
+    };
+    expect(select(live, [nodeA, nodeB])).toBe(2);
+    expect(select(state, [nodeA, nodeB])).toBe(0);
+  });
+
   it("rescans a node only when its summaries changed", () => {
     let scans = 0;
     const counted = new Proxy(summaries(thread("approval", { hasPendingApprovals: true })), {

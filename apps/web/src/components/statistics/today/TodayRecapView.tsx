@@ -101,32 +101,52 @@ export function TodayRecapView(props: TodayRecapViewProps) {
   const { recap } = props;
   const notes = useMemo(() => nodeNotes(recap.nodes, recap.today), [recap.nodes, recap.today]);
 
-  if (recap.today === null) {
-    // While this app's own node is still connecting there is nothing to ask yet.
-    if (recap.loading || recap.connecting) return <StatSkeleton />;
-    if (recap.nodes.length === 0) {
-      return (
+  if (recap.today !== null) {
+    return <TodayRecapContent {...props} today={recap.today} notes={notes} />;
+  }
+  // While this app's own node is still connecting there is nothing to ask yet.
+  if (recap.loading || recap.connecting) return <StatSkeleton />;
+  // Connected devices the filter leaves out: the choice stays, so another one can be picked.
+  const filteredOut = recap.nodes.length === 0 && recap.availableEnvironments.length > 0;
+  return (
+    <div className="space-y-8">
+      {recap.availableEnvironments.length > 0 ? (
+        <EnvironmentSelect
+          search={props.search}
+          onSearchChange={props.onSearchChange}
+          environments={recap.availableEnvironments}
+          ariaLabel="Recap environment"
+        />
+      ) : null}
+      {recap.nodes.length === 0 ? (
         <StatePanel
           icon={DatabaseIcon}
-          title="No devices are connected"
-          description="Connect a device to see what happened on it today."
+          title={filteredOut ? "The selected device isn’t connected" : "No devices are connected"}
+          description={
+            filteredOut
+              ? "Choose a connected device to see what happened on it today."
+              : "Connect a device to see what happened on it today."
+          }
         />
-      );
-    }
-    return (
-      <StatePanel
-        icon={AlertCircleIcon}
-        title="Couldn’t load today’s recap"
-        description={notes.map((note) => note.text).join(" ")}
-        action={
-          <Button size="sm" variant="outline" onClick={props.onRefresh}>
-            <RefreshCwIcon /> Try again
-          </Button>
-        }
-      />
-    );
-  }
-  return <TodayRecapContent {...props} today={recap.today} notes={notes} />;
+      ) : (
+        <StatePanel
+          icon={AlertCircleIcon}
+          title="Couldn’t load today’s recap"
+          description={notes.map((note) => note.text).join(" ")}
+          action={
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={props.onRefresh}
+              disabled={recap.refreshing}
+            >
+              <RefreshCwIcon className={recap.refreshing ? "animate-spin" : undefined} /> Try again
+            </Button>
+          }
+        />
+      )}
+    </div>
+  );
 }
 
 function TodayRecapContent(

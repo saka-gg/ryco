@@ -60,6 +60,14 @@ describe("saved daily recap readiness", () => {
     expect(savedDailyRecapReadiness(runtime({ connectionState: "error" }))).toBe("offline");
   });
 
+  it("keeps a node that dropped offline while it tries to reconnect", () => {
+    expect(
+      savedDailyRecapReadiness(
+        runtime({ connectionState: "connecting", disconnectedAt: "2026-10-24T09:00:00.000Z" }),
+      ),
+    ).toBe("offline");
+  });
+
   it("reports a client pairing as refused, connected or not", () => {
     expect(savedDailyRecapReadiness(runtime({ role: "client" }))).toBe("forbidden");
     expect(

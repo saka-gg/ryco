@@ -52,6 +52,8 @@ export interface DailyRecapUsageDay {
   readonly tokens: number;
   /** Null when none of the day's tokens has a price. */
   readonly costUsd: number | null;
+  /** Some of the day's tokens have no price, so `costUsd` covers only the others. */
+  readonly costPartial: boolean;
   /** The model with the most tokens; null on a day without tokens. */
   readonly topModel: {
     readonly provider: UsageProviderKind;
@@ -83,11 +85,13 @@ export function summarizeUsageDay(
 ): DailyRecapUsageDay {
   let tokens = 0;
   let costUsd: number | null = null;
+  let unpriced = false;
   const models = new Map<string, { provider: UsageProviderKind; model: string; tokens: number }>();
   for (const bucket of buckets) {
     if (bucket.date !== date) continue;
     tokens += bucket.tokens.totalTokens;
     if (bucket.estimatedCostUsd !== undefined) costUsd = (costUsd ?? 0) + bucket.estimatedCostUsd;
+    if (bucket.unpricedTokenCount > 0) unpriced = true;
     const key = `${bucket.provider}\0${bucket.model}`;
     const model = models.get(key) ?? { provider: bucket.provider, model: bucket.model, tokens: 0 };
     model.tokens += bucket.tokens.totalTokens;
@@ -99,6 +103,7 @@ export function summarizeUsageDay(
   return {
     tokens,
     costUsd,
+    costPartial: costUsd !== null && unpriced,
     topModel:
       top === undefined || tokens === 0
         ? null
@@ -304,15 +309,21 @@ export function buildDailyRecapTiles(
   }
 
   if (usage !== null && usage.today.tokens > 0) {
-    const { topModel, costUsd } = usage.today;
+    const { topModel, costUsd, costPartial } = usage.today;
+    const model =
+      topModel === null ? null : `${modelLead(topModel)} ${format.model(topModel.model)}`;
+    // Part of the day has no price: its cost is a floor, not the day's spend.
+    const cost =
+      costUsd === null
+        ? null
+        : costPartial
+          ? `${model === null ? "At least" : "at least"} ${format.cost(costUsd)}`
+          : format.cost(costUsd);
     tiles.push({
       id: "provider-tokens",
       label: "Provider tokens",
       value: format.compact(usage.today.tokens),
-      detail: detailLine(
-        topModel === null ? null : `${modelLead(topModel)} ${format.model(topModel.model)}`,
-        costUsd === null ? null : format.cost(costUsd),
-      ),
+      detail: detailLine(model, cost),
     });
   }
 

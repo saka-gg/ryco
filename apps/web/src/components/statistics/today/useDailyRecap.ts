@@ -154,8 +154,9 @@ export interface DailyRecapNodeView {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   /**
-   * Its answer to the current request, or why it was not asked; undefined
-   * while that request is out or its session is still being set up.
+   * Its latest answer for the day, kept while it is asked again, or why it was
+   * not asked; undefined until its first answer of the day or while its
+   * session is still being set up.
    */
   readonly result: DailyRecapNodeResult | undefined;
   /**
@@ -163,7 +164,7 @@ export interface DailyRecapNodeView {
    * received for the day, else none. A node that refuses access shows none.
    */
   readonly recap: ReadyDailyRecap | undefined;
-  /** `recap` is that earlier one: the current answer is still out or failed. */
+  /** `recap` is that earlier one: the node has no answer today yet, or its latest is no recap. */
   readonly stale: boolean;
 }
 
@@ -174,10 +175,12 @@ export interface UseDailyRecapResult {
   readonly yesterday: MergedDailyRecap | null;
   readonly nodes: readonly DailyRecapNodeView[];
   readonly availableEnvironments: StatisticsEnvironments["availableEnvironments"];
-  /** Selected nodes whose current request has not answered yet. */
+  /** Selected nodes without an answer for the day yet. */
   readonly pendingEnvironmentIds: readonly EnvironmentId[];
   readonly connecting: StatisticsEnvironments["connecting"];
+  /** Some selected node has no answer for the day yet. */
   readonly loading: boolean;
+  /** Some node that already answered is being asked again. */
   readonly refreshing: boolean;
   /** Ask every selected node again for today and the day before. */
   readonly refresh: () => void;
@@ -343,35 +346,44 @@ export function useDailyRecap(input: {
     };
   }, [refreshToday]);
 
-  const nodes = useMemo(
-    () =>
-      selected.map((connection): DailyRecapNodeView => {
-        const { environmentId } = connection;
-        const label = connection.knownEnvironment.label;
-        const nodeReadiness = readiness.get(environmentId) ?? "pending";
-        const answer = todayAnswers.get(environmentId);
-        let result: DailyRecapNodeResult | undefined;
-        if (nodeReadiness === "ask") {
-          result = answer?.key === todayKeyOf(connection) ? answer.result : undefined;
-        } else if (nodeReadiness !== "pending") {
-          result = { environmentId, label, requestedAtMs: input.nowMs, status: nodeReadiness };
-        }
-        const recap =
-          result?.status === "ready"
-            ? result
-            : result?.status === "forbidden"
-              ? undefined
-              : dailyRecapCache.peek(environmentId, todayRequest);
-        return {
-          environmentId,
-          label,
-          result,
-          recap: recap && { ...recap, label },
-          stale: recap !== undefined && recap !== result,
-        };
-      }),
-    [input.nowMs, readiness, selected, todayAnswers, todayKeyOf, todayRequest],
-  );
+  const { nodes, refreshing } = useMemo(() => {
+    const entries = selected.map((connection) => {
+      const { environmentId } = connection;
+      const label = connection.knownEnvironment.label;
+      const nodeReadiness = readiness.get(environmentId) ?? "pending";
+      const answer = todayAnswers.get(environmentId);
+      let result: DailyRecapNodeResult | undefined;
+      if (nodeReadiness === "ask") {
+        // Asked again (a finished turn, the poll), a node keeps its last answer of the day
+        // meanwhile, so neither its numbers nor its footer note blink.
+        result = answer?.key.startsWith(`${dayKey}\0`) === true ? answer.result : undefined;
+      } else if (nodeReadiness !== "pending") {
+        result = { environmentId, label, requestedAtMs: input.nowMs, status: nodeReadiness };
+      }
+      const recap =
+        result?.status === "ready"
+          ? result
+          : result?.status === "forbidden"
+            ? undefined
+            : dailyRecapCache.peek(environmentId, todayRequest);
+      const view: DailyRecapNodeView = {
+        environmentId,
+        label,
+        result,
+        recap: recap && { ...recap, label },
+        stale: recap !== undefined && recap !== result,
+      };
+      return {
+        view,
+        reasking:
+          nodeReadiness === "ask" && result !== undefined && answer?.key !== todayKeyOf(connection),
+      };
+    });
+    return {
+      nodes: entries.map((entry) => entry.view),
+      refreshing: entries.some((entry) => entry.reasking),
+    };
+  }, [dayKey, input.nowMs, readiness, selected, todayAnswers, todayKeyOf, todayRequest]);
   const today = useMemo(() => mergeDailyRecaps(nodes.flatMap((node) => node.recap ?? [])), [nodes]);
   const yesterday = useMemo(() => {
     const yesterdayKey = yesterdayKeyOf();
@@ -391,7 +403,6 @@ export function useDailyRecap(input: {
     () => nodes.filter((node) => node.result === undefined).map((node) => node.environmentId),
     [nodes],
   );
-  const loading = pendingEnvironmentIds.length > 0;
   return {
     today,
     yesterday,
@@ -399,8 +410,8 @@ export function useDailyRecap(input: {
     availableEnvironments,
     pendingEnvironmentIds,
     connecting,
-    loading,
-    refreshing: loading && today !== null,
+    loading: pendingEnvironmentIds.length > 0,
+    refreshing,
     refresh,
   };
 }

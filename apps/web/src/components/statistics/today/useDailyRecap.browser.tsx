@@ -121,7 +121,12 @@ function setSavedRuntime(
 ): void {
   registry.runtimeById = {
     ...registry.runtimeById,
-    [environmentId]: { connectionState: "connected", role: "owner", ...patch },
+    [environmentId]: {
+      connectionState: "connected",
+      role: "owner",
+      disconnectedAt: null,
+      ...patch,
+    },
   };
   for (const listener of registry.runtimeListeners) listener();
 }
@@ -239,7 +244,12 @@ describe("useDailyRecap", () => {
 
     await hook.act(() => hook.result.current.refresh());
     await expect.poll(() => hook.result.current.refreshing).toBe(true);
-    expect(hook.result.current.nodes[0]?.stale).toBe(true);
+    // Asked again, it keeps its answer meanwhile.
+    expect(hook.result.current.nodes[0]).toMatchObject({
+      stale: false,
+      result: { status: "ready" },
+    });
+    expect(hook.result.current.loading).toBe(false);
     await hook.act(() => local.failAll());
     await expect.poll(() => hook.result.current.nodes[0]?.result?.status).toBe("failed");
     expect(hook.result.current.nodes[0]).toMatchObject({
@@ -248,6 +258,39 @@ describe("useDailyRecap", () => {
     });
     expect(hook.result.current.today?.counts.completedTurns).toBe(4);
     expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.refreshing).toBe(false);
+
+    // A failed node asked again keeps its status meanwhile, so its footer note holds still.
+    await hook.act(() => hook.result.current.refresh());
+    await expect.poll(() => hook.result.current.refreshing).toBe(true);
+    expect(hook.result.current.nodes[0]?.result?.status).toBe("failed");
+  });
+
+  it("does not spin Refresh for devices that are still connecting", async () => {
+    const local = node("local");
+    const box = node("box", "saved");
+    const studio = node("studio", "saved");
+    registry.connections = [local.value, box.value, studio.value];
+    // Dropped, and trying again on its backoff.
+    setSavedRuntime(box.environmentId, {
+      connectionState: "connecting",
+      disconnectedAt: "2026-10-24T11:00:00.000Z",
+    });
+    // Its first connection since the app started.
+    setSavedRuntime(studio.environmentId, { connectionState: "connecting" });
+    const hook = await renderHook(() => useDailyRecap({ nowMs: NOW_MS }));
+    await expect.poll(() => local.open).toBe(1);
+    await hook.act(() => local.answerAll(3));
+    await expect.poll(() => hook.result.current.today?.counts.completedTurns).toBe(3);
+
+    expect(box.open + studio.open).toBe(0);
+    expect(hook.result.current.nodes.map((entry) => entry.result?.status)).toEqual([
+      "ready",
+      "offline",
+      undefined,
+    ]);
+    expect(hook.result.current.pendingEnvironmentIds).toEqual([studio.environmentId]);
+    expect(hook.result.current.refreshing).toBe(false);
   });
 
   it("asks only a node that finished a turn again, at most every 20 seconds", async () => {
@@ -339,12 +382,14 @@ describe("useDailyRecap", () => {
   });
 
   it("joins the route's prefetch and never asks a node it would not ask", async () => {
+    // The prefetch asks for the day of the real clock: pin it to the day the view shows.
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW_MS });
     const local = node("local");
     const mini = node("mini", "saved");
     registry.connections = [local.value, mini.value];
     setSavedRuntime(mini.environmentId, { connectionState: "error" });
     prefetchDailyRecap();
-    expect(local.getDailyRecap).toHaveBeenCalledTimes(1);
+    expect(local.dates()).toEqual([TODAY]);
     expect(mini.getDailyRecap).not.toHaveBeenCalled();
     const hook = await renderHook(() => useDailyRecap({ nowMs: NOW_MS }));
     await hook.act(() => local.answerAll(2));

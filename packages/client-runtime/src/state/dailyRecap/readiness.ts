@@ -26,7 +26,9 @@ export function hostedDailyRecapReadiness(capability: HostedRpcCapability): Dail
 /**
  * A saved node, from its connection's runtime state; undefined before the
  * connection reports any. The recap is owner-only, so a `client` pairing is
- * refused.
+ * refused. Only its first connection is waited for: a node that dropped stays
+ * offline through its reconnect attempts, which a sleeping machine repeats on
+ * a backoff, instead of blinking between offline and pending on each one.
  */
 export function savedDailyRecapReadiness(
   runtime: SavedEnvironmentRuntimeState | undefined,
@@ -38,6 +40,8 @@ export function savedDailyRecapReadiness(
     case "disconnected":
     case "error":
       return "offline";
+    case "connecting":
+      return runtime.disconnectedAt === null ? "pending" : "offline";
     default:
       return "pending";
   }
