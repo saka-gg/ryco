@@ -1,6 +1,7 @@
 import {
   EventId,
   ProviderDriverKind,
+  RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
   RuntimeSessionId,
@@ -274,6 +275,41 @@ describe("runtimeEventToActivities tool streaming persistence", () => {
     expect(stdout).toContain("chars truncated");
     expect(stdout.trimEnd().endsWith("Capturing frame 1999/9028")).toBe(true);
     expect(cappedData.content[0]!.content.text).toContain("chars truncated");
+  });
+
+  // OpenCodeAdapter's ToolUpdateGate drops running updates that differ only in the output bash
+  // streams into `state.metadata`. That is lossless only while the persisted activity leaves the
+  // metadata out: if this fails, add what is now persisted to the gate's visible key
+  // (apps/server/src/provider/toolUpdateGate.ts).
+  it("persists nothing of a running OpenCode tool's streamed metadata", () => {
+    const runningBash = (lines: number) =>
+      ({
+        ...base,
+        provider: ProviderDriverKind.make("opencode"),
+        type: "item.updated",
+        eventId: EventId.make(`evt-opencode-bash-${lines}`),
+        turnId: TurnId.make("turn-1"),
+        itemId: RuntimeItemId.make("bash-call"),
+        payload: {
+          itemType: "command_execution",
+          status: "inProgress",
+          title: "bash",
+          data: {
+            tool: "bash",
+            state: {
+              status: "running",
+              input: { command: "bun run test", description: "Run tests" },
+              metadata: { output: "line\n".repeat(lines), description: "Run tests" },
+              time: { start: 1 },
+            },
+          },
+        },
+      }) satisfies ProviderRuntimeEvent;
+    const persisted = (lines: number) =>
+      runtimeEventToActivities(runningBash(lines)).map(({ id: _id, ...activity }) => activity);
+
+    expect(persisted(1)).toHaveLength(1);
+    expect(persisted(2_000)).toEqual(persisted(1));
   });
 });
 
