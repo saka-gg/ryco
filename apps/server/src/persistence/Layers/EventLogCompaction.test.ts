@@ -6,12 +6,13 @@ import {
   taskProgressActivityId,
   toolProgressActivityId,
 } from "@ryco/shared/latestStateActivities";
-import { Effect, Layer, Option } from "effect";
+import { Deferred, Effect, Fiber, Layer, Option } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 
 import { OrchestrationCommandReceiptRepository } from "../Services/OrchestrationCommandReceipts.ts";
 import {
+  EMPTY_COMPACTION_STATE,
   EventLogCompaction,
   type EventLogCompactionPassOptions,
 } from "../Services/EventLogCompaction.ts";
@@ -21,9 +22,12 @@ import {
   EventLogCompactionLive,
   firstEventFromQuery,
   isPrunableReceiptCommandId,
-  ONLINE_COMPACTION_PASS_OPTIONS,
   receiptPageQuery,
 } from "./EventLogCompaction.ts";
+import {
+  EventLogCompactionDeferredLive,
+  ONLINE_COMPACTION_PASS_OPTIONS,
+} from "./EventLogCompactionDeferred.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "./OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "./OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
@@ -578,5 +582,67 @@ describe("EventLogCompaction", () => {
         JSON.stringify(receiptPlan),
       );
     }),
+  );
+});
+
+/** The server's layer: the pass loads with `import()` on first use. */
+const DeferredTestLayer = Layer.mergeAll(
+  EventLogCompactionDeferredLive,
+  OrchestrationEventStoreLive,
+).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+
+describe("EventLogCompactionDeferredLive", () => {
+  it.effect("reads the state without a pass and runs passes one at a time on one instance", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const compaction = yield* EventLogCompaction;
+      assert.deepEqual(yield* compaction.readState("delete"), EMPTY_COMPACTION_STATE);
+
+      const thread = "thread-compaction-deferred";
+      const task = taskProgressActivityId(thread, "task-1");
+      const first = yield* appendActivity({ threadId: thread, id: task, kind: "task.progress" });
+      yield* appendActivity({ threadId: thread, id: task, kind: "task.progress" });
+      const last = yield* appendActivity({ threadId: thread, id: task, kind: "task.progress" });
+
+      // The first pass loads the implementation and stops inside its lock after one window.
+      const reported: Array<string> = [];
+      const firstReported = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const firstPass = yield* Effect.forkChild(
+        compaction.runPass({
+          ...TEST_PASS,
+          onProgress: () =>
+            Effect.sync(() => reported.push("first")).pipe(
+              Effect.andThen(Deferred.succeed(firstReported, undefined)),
+              Effect.andThen(Deferred.await(release)),
+            ),
+        }),
+      );
+      yield* Deferred.await(firstReported);
+      // A second caller gets the same instance, so it waits for that lock. (From the beginning,
+      // so a pass running beside the first one would report a window.)
+      const secondPass = yield* Effect.forkChild(
+        compaction.runPass({
+          ...TEST_PASS,
+          fromBeginning: true,
+          onProgress: () => Effect.sync(() => reported.push("second")),
+        }),
+      );
+      // Real time, not the test clock: room for a pass that did not wait to finish.
+      yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+      assert.deepEqual(reported, ["first"]);
+
+      yield* Deferred.succeed(release, undefined);
+      const firstResult = yield* Fiber.join(firstPass);
+      const secondResult = yield* Fiber.join(secondPass);
+      assert.equal(firstResult.deletedEvents, 2);
+      assert.equal(secondResult.deletedEvents, 0);
+      assert.deepEqual(reported, ["first", "second"]);
+      assert.deepEqual(yield* remainingSequences(first), [last]);
+
+      const state = yield* compaction.readState("delete");
+      assert.equal(state.compactedThroughSequence, last);
+      assert.equal(state.totals.deletedEvents, 2);
+    }).pipe(Effect.provide(DeferredTestLayer)),
   );
 });

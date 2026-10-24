@@ -15,10 +15,8 @@ import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../persistence/Layers/Sqlite.ts";
-import {
-  makeEventLogCompaction,
-  ONLINE_COMPACTION_PASS_OPTIONS,
-} from "../persistence/Layers/EventLogCompaction.ts";
+import { makeEventLogCompaction } from "../persistence/Layers/EventLogCompaction.ts";
+import { ONLINE_COMPACTION_PASS_OPTIONS } from "../persistence/Layers/EventLogCompactionDeferred.ts";
 import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import {
   selectStatisticsTokenActivities,

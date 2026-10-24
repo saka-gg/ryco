@@ -21,7 +21,6 @@ import {
 import { resolveStorageRetentionPolicy, retentionDue } from "@ryco/shared/storageRetention";
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
 import { databaseBackupsDirectory } from "../persistence/databaseBackupPolicy.ts";
-import { readDatabaseStorageReport } from "../persistence/databaseStorageReport.ts";
 import { EventLogCompaction } from "../persistence/Services/EventLogCompaction.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
 import {
@@ -1182,7 +1181,12 @@ export const StorageServiceLive = Layer.effect(
     >();
     const service = makeStorageService({
       recordCheckoutRemoval,
-      readDatabase: readDatabaseStorageReport().pipe(Effect.provideContext(databaseServices)),
+      // The report (and the doctor suggestion in it) loads when Storage settings first ask, which
+      // keeps it off the server's boot path (serverBundleBoundaries.test.ts).
+      readDatabase: Effect.promise(() => import("../persistence/databaseStorageReport.ts")).pipe(
+        Effect.flatMap((report) => report.readDatabaseStorageReport()),
+        Effect.provideContext(databaseServices),
+      ),
       providerProtection: Option.getOrElse(protection, () => ({ resolve: () => null })),
       sql: yield* SqlClient.SqlClient,
       config: yield* ServerConfig,

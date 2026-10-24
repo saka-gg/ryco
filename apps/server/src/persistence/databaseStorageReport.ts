@@ -11,14 +11,15 @@
  * the report never fails.
  *
  * `doctor` says whether an offline `ryco doctor --apply` is worth it (`doctorSuggestion.ts`);
- * {@link DoctorSuggestionLogLive} also logs that once per boot, for nodes nobody opens the
- * Storage settings of.
+ * {@link logDoctorSuggestionOnce} also logs that once per boot (`doctorSuggestionLog.ts`), for
+ * nodes nobody opens the Storage settings of. Both callers load this module on first use, so it
+ * stays off the server's boot path.
  *
  * @module databaseStorageReport
  */
 import type { DatabaseStorageReport } from "@ryco/contracts";
 import { readEnv } from "@ryco/shared/runtimeEnv";
-import { Cause, Effect, FileSystem, Layer } from "effect";
+import { Cause, Effect, FileSystem } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -31,7 +32,7 @@ import {
   type EventCompactionSetting,
   parseEventCompactionSetting,
 } from "./Layers/DatabaseMaintenance.ts";
-import { hasCompactionBacklog } from "./Layers/EventLogCompaction.ts";
+import { hasCompactionBacklog } from "./Layers/EventLogCompactionDeferred.ts";
 import {
   type CompactionState,
   EMPTY_COMPACTION_STATE,
@@ -156,12 +157,10 @@ export const readDatabaseStorageReport = (input?: {
     } satisfies DatabaseStorageReport;
   });
 
-/** When the boot log looks: after the first compaction pass (10 minutes), which sets the estimate. */
-export const DOCTOR_SUGGESTION_LOG_DELAY = "15 minutes";
-
 /**
- * Logs once per boot, at info, when `ryco doctor --apply` would shrink the database a lot: a
- * headless node's operator reads the service log, not the Storage settings.
+ * Logs, at info, when `ryco doctor --apply` would shrink the database a lot: a headless node's
+ * operator reads the service log, not the Storage settings. Run once per boot by
+ * `DoctorSuggestionLogLive` (`doctorSuggestionLog.ts`).
  */
 export const logDoctorSuggestionOnce = Effect.gen(function* () {
   const report = yield* readDatabaseStorageReport();
@@ -176,7 +175,3 @@ export const logDoctorSuggestionOnce = Effect.gen(function* () {
     },
   );
 });
-
-export const DoctorSuggestionLogLive = Layer.effectDiscard(
-  Effect.forkScoped(Effect.delay(logDoctorSuggestionOnce, DOCTOR_SUGGESTION_LOG_DELAY)),
-);

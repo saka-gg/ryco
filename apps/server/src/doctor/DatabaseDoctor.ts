@@ -43,11 +43,11 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { estimateCompactableBytes } from "../persistence/databaseStorageReport.ts";
 import type { DatabaseOwner } from "../persistence/databaseOwnerLock.ts";
+import { makeEventLogCompaction } from "../persistence/Layers/EventLogCompaction.ts";
 import {
   EVENT_COMPACTION_STATE_KEY,
-  makeEventLogCompaction,
   ONLINE_COMPACTION_PASS_OPTIONS,
-} from "../persistence/Layers/EventLogCompaction.ts";
+} from "../persistence/Layers/EventLogCompactionDeferred.ts";
 import { writeLifecycleMarker } from "../persistence/lifecycleMarkers.ts";
 import { describeRepairKeys } from "../persistence/Migrations.ts";
 import {

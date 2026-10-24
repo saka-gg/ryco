@@ -13,7 +13,7 @@ import { Context, Effect, Exit, Layer, Scope } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
-import { ORCHESTRATION_PROJECTOR_NAMES } from "../orchestration/Layers/ProjectionPipeline.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../orchestration/projectorNames.ts";
 import {
   autoVacuumModeOf,
   type AutoVacuumMode,

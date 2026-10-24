@@ -19,7 +19,7 @@ import {
   type DatabaseOwnership,
   probeDatabaseOwner,
 } from "../persistence/databaseOwnerLock.ts";
-import { EVENT_COMPACTION_STATE_KEY } from "../persistence/Layers/EventLogCompaction.ts";
+import { EVENT_COMPACTION_STATE_KEY } from "../persistence/Layers/EventLogCompactionDeferred.ts";
 import { compatibilityRepairMarker, SUPPORTED_MIGRATION_ID } from "../persistence/Migrations.ts";
 import {
   CompactionState,
