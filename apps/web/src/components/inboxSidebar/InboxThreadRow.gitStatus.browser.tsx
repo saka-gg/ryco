@@ -39,6 +39,7 @@ vi.mock("../../environments/runtime/service", () => ({
   suspendHostedEnvironment: vi.fn(),
   connectDesktopWorkspaceEnvironment: vi.fn(),
   connectDesktopSshEnvironment: vi.fn(),
+  readThreadNotificationSource: vi.fn(),
   disconnectSavedEnvironment: vi.fn(),
   disconnectPrimaryEnvironment: vi.fn(),
   ensureEnvironmentConnectionBootstrapped: vi.fn(),

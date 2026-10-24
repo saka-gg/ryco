@@ -1,4 +1,5 @@
 import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
+import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { describe, expect, it } from "vite-plus/test";
 import { createThreadNotificationProjector } from "./threadNotifications.ts";
 import type { SidebarThreadSummary } from "./types.ts";
@@ -45,7 +46,10 @@ function completed(patch: Partial<SidebarThreadSummary> = {}): SidebarThreadSumm
 function fixture(initial: SidebarThreadSummary = thread()) {
   const generation = {};
   let current: object | null = generation;
-  const projector = createThreadNotificationProjector({ readGeneration: () => current });
+  const projector = createThreadNotificationProjector({
+    readGeneration: () => current,
+    isSnoozed: isThreadSnoozed,
+  });
   projector.baseline({ environmentId, generation, sequence: 1, threads: [initial], nowMs });
   return {
     projector,

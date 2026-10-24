@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 describe("hosted inbox preference persistence", () => {
-  it("restores inbox choices after reload without persisting node metadata or secrets", async () => {
+  it("restores inbox and alert choices after reload without persisting node metadata or secrets", async () => {
     const { values } = installStorage();
     const persistence = await import("./clientPersistenceStorage");
     persistence.writeBrowserClientSettings({
@@ -28,6 +28,9 @@ describe("hosted inbox preference persistence", () => {
       sidebarAutoSettleAfterDays: 3,
       aiFocusEnabled: true,
       aiFocusRefreshIntervalMs: 0,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
       sidebarProjectGroupingOverrides: { "private-project-path": "separate" },
       dismissedProviderUpdateNotificationKeys: ["private-provider-notice"],
     });
@@ -47,6 +50,9 @@ describe("hosted inbox preference persistence", () => {
       sidebarAutoSettleAfterDays: 3,
       aiFocusEnabled: true,
       aiFocusRefreshIntervalMs: 0,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
     });
     vi.resetModules();
     const reloaded = await import("./clientPersistenceStorage");
@@ -54,6 +60,9 @@ describe("hosted inbox preference persistence", () => {
       sidebarAutoSettleAfterDays: 3,
       aiFocusEnabled: true,
       aiFocusRefreshIntervalMs: 0,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationSound: true,
+      threadNotificationToasts: false,
       sidebarProjectGroupingOverrides: {},
       dismissedProviderUpdateNotificationKeys: [],
     });

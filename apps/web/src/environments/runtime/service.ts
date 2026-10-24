@@ -80,7 +80,10 @@ import {
 } from "./catalog";
 import { createEnvironmentConnection, type EnvironmentConnection } from "./connection";
 import { useStore, selectEnvironmentState } from "~/store";
-import { createEnvironmentEventBatcher } from "@ryco/client-runtime/state/threads";
+import {
+  createEnvironmentEventBatcher,
+  type ThreadNotificationSource,
+} from "@ryco/client-runtime/state/threads";
 import {
   hasUnsentThreadWork,
   isThreadNonIdle,
@@ -1745,6 +1748,11 @@ export function readEnvironmentConnection(
   environmentId: EnvironmentId,
 ): EnvironmentConnection | null {
   return getEnvironmentSupervisor().read(environmentId);
+}
+
+/** The accepted shells of this app's connections, which the thread notification feed reads. */
+export function readThreadNotificationSource(): ThreadNotificationSource {
+  return getEnvironmentSupervisor();
 }
 
 export function requireEnvironmentConnection(environmentId: EnvironmentId): EnvironmentConnection {

@@ -99,6 +99,7 @@ export const MOBILE_PURE_TEST_FILES = [
   "src/native/scrollEdgeEffects.test.ts",
   "src/navigation/lazyScreen.test.ts",
   "src/navigation/mvpRouteConfig.test.ts",
+  "src/notifications/threadAlerts.logic.test.ts",
   "src/perf/mobileStartupImports.test.ts",
   "src/persistence/environmentSnapshotCodec.test.ts",
   "src/platform/e2eeRuntime.test.ts",

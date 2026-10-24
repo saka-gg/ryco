@@ -21,4 +21,5 @@ export * from "./threadFailure.ts";
 
 export * from "./sidebarUndo.ts";
 export * from "./threadNotifications.ts";
+export * from "./threadNotificationFeed.ts";
 export * from "./usageLimit.ts";

@@ -11,6 +11,7 @@ import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
+import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
 import { WindowCaptureSettings } from "./WindowCaptureSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
@@ -870,40 +871,8 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
-      {isElectron && (
-        <SettingsSection title="Notifications" owner="client">
-          <SettingsRow
-            title="Turn-complete notifications"
-            description="Show a desktop notification when an agent finishes a turn while the Ryco window is unfocused."
-            owner="client"
-            scope={deviceScopeLabel}
-            resetAction={
-              settings.notifyOnTurnCompleteWhenUnfocused !==
-              DEFAULT_UNIFIED_SETTINGS.notifyOnTurnCompleteWhenUnfocused ? (
-                <SettingResetButton
-                  label="turn-complete notifications"
-                  onClick={() =>
-                    updateSettings({
-                      notifyOnTurnCompleteWhenUnfocused:
-                        DEFAULT_UNIFIED_SETTINGS.notifyOnTurnCompleteWhenUnfocused,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                checked={settings.notifyOnTurnCompleteWhenUnfocused}
-                onCheckedChange={(checked) =>
-                  updateSettings({
-                    notifyOnTurnCompleteWhenUnfocused: Boolean(checked),
-                  })
-                }
-                aria-label="Notify when a turn completes while unfocused"
-              />
-            }
-          />
-        </SettingsSection>
+      {!isPhoneTier && editingScope !== "node" && (
+        <ThreadNotificationSettings scope={deviceScopeLabel} />
       )}
 
       {!isPhoneTier && editingScope !== "node" && (
