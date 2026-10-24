@@ -14,15 +14,22 @@
 // once more with the full, capped text when it closes.
 
 import {
-  EventId,
+  type EventId,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
   type ThreadId,
   TurnId,
 } from "@ryco/contracts";
+import {
+  LATEST_STATE_ACTIVITY_GROUPS,
+  reasoningActivityId,
+} from "@ryco/shared/latestStateActivities";
 
-export const REASONING_ACTIVITY_KIND = "reasoning";
-export const REASONING_LIVE_FLUSH_INTERVAL_MS = 900;
+export { reasoningActivityId };
+
+export const REASONING_ACTIVITY_KIND = LATEST_STATE_ACTIVITY_GROUPS.reasoning.kind;
+export const REASONING_LIVE_FLUSH_INTERVAL_MS =
+  LATEST_STATE_ACTIVITY_GROUPS.reasoning.writeIntervalMs;
 /** Live writes carry only the end of the text — enough for the preview line. */
 export const REASONING_LIVE_TAIL_CHARS = 600;
 /** Final text cap; stays under activityDataCap's 16k string threshold. */
@@ -61,14 +68,6 @@ export interface ReasoningDeltaInput {
 
 function turnKey(threadId: ThreadId, turnId: TurnId | null): string {
   return `${threadId}:${turnId ?? "none"}`;
-}
-
-export function reasoningActivityId(
-  threadId: ThreadId,
-  turnId: TurnId | null,
-  segmentKey: string,
-): EventId {
-  return EventId.make(`reasoning:${threadId}:${turnId ?? "none"}:${segmentKey}`);
 }
 
 function eventTurnId(event: ProviderRuntimeEvent): TurnId | null {

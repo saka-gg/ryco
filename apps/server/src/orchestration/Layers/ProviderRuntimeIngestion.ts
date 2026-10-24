@@ -52,6 +52,15 @@ import {
 } from "@ryco/shared/assistantStreaming";
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
+import {
+  LATEST_STATE_ACTIVITY_GROUPS,
+  type LatestStateActivityGroup,
+  claudeContextUsageActivityId,
+  subagentMessageActivityId,
+  taskProgressActivityId,
+  taskUsageActivityId,
+  toolProgressActivityId,
+} from "@ryco/shared/latestStateActivities";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
@@ -224,8 +233,11 @@ const LIVE_ASSISTANT_DELTA_FLUSH_THRESHOLD_CHARS = 4_096;
 // A subagent message and a task's progress are latest-state activities that
 // providers rewrite on every tick. They are persisted at most once per
 // interval; boundaries (completion, turn end, session exit) persist the rest.
-const SUBAGENT_MESSAGE_WRITE_INTERVAL_MS = 300;
-const TASK_PROGRESS_WRITE_INTERVAL_MS = 5_000;
+// The groups are shared with live coalescing and event-log compaction.
+const SUBAGENT_MESSAGE_WRITE_INTERVAL_MS =
+  LATEST_STATE_ACTIVITY_GROUPS["subagent-message"].writeIntervalMs;
+const TASK_PROGRESS_WRITE_INTERVAL_MS =
+  LATEST_STATE_ACTIVITY_GROUPS["task-progress"].writeIntervalMs;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = readEnv("RYCO_STRICT_PROVIDER_LIFECYCLE_GUARD") !== "0";
 const HISTORY_RECOVERY_TIMEOUT = Duration.seconds(25);
 const HISTORY_RECOVERY_TRACKED_THREADS = 1_000;
@@ -275,7 +287,10 @@ type RuntimeIngestionInput =
 type ActivityAppendCommand = Extract<OrchestrationCommand, { type: "thread.activity.append" }>;
 
 /** Which latest-state activity stream a coalesced write belongs to. */
-type CoalescedActivityGroup = "subagent-message" | "task-progress";
+type CoalescedActivityGroup = Extract<
+  LatestStateActivityGroup,
+  "subagent-message" | "task-progress"
+>;
 
 /**
  * Write state of one latest-state activity (one activity id). Offers newer than
@@ -468,14 +483,6 @@ function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): s
     : [];
 }
 
-function taskProgressActivityId(threadId: string, taskId: string): EventId {
-  return EventId.make(`task-progress:${threadId}:${taskId}`);
-}
-
-function taskUsageActivityId(threadId: string, taskId: string): EventId {
-  return EventId.make(`task-usage:${threadId}:${taskId}`);
-}
-
 /**
  * What a task.progress activity says besides its usage numbers. A change here
  * is persisted at once; a tick that only moves usage waits for the write interval.
@@ -496,16 +503,6 @@ export function taskProgressChangeKey(
     payload.status,
     payload.error,
   ]);
-}
-
-function subagentMessageActivityId(input: {
-  threadId: ThreadId;
-  providerThreadId: string;
-  providerItemId: string;
-}): EventId {
-  return EventId.make(
-    `agent-message:${input.threadId}:${input.providerThreadId}:${input.providerItemId}`,
-  );
 }
 
 function subagentMessageBufferKey(input: {
@@ -1068,7 +1065,7 @@ export function runtimeEventToActivities(
           // Same stable-id treatment as task.progress: a heartbeat is
           // "what is this agent doing right now", so one row per task
           // (thread-scoped for the same global-PK collision reason).
-          id: EventId.make(`tool-progress:${event.threadId}:${event.payload.taskId}`),
+          id: toolProgressActivityId(event.threadId, event.payload.taskId),
           createdAt: event.createdAt,
           tone: "info",
           kind: "tool.progress",
@@ -1224,7 +1221,7 @@ export function runtimeEventToActivities(
         {
           id:
             event.provider === "claudeAgent"
-              ? EventId.make(`claude-context-usage:${event.threadId}`)
+              ? claudeContextUsageActivityId(event.threadId)
               : event.eventId,
           createdAt: event.createdAt,
           tone: "info",
