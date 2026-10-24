@@ -7,7 +7,8 @@ bun run dev
 # Desktop development
 bun run dev:desktop
 
-# Desktop development on an isolated port set
+# In a linked git worktree, dev commands get their own state (<worktree>/.ryco-dev),
+# ports and a seeded copy of your dev projects automatically. To pick another port set:
 RYCO_DEV_INSTANCE=feature-xyz bun run dev:desktop
 
 # Production
