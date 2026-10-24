@@ -22,13 +22,17 @@ export const COMPUTER_APPROVAL_QUEUE_THREAD_LIMIT = 8;
 export class ComputerApprovalQueueFullError extends Error {
   readonly code = COMPUTER_APPROVAL_QUEUE_FULL_CODE;
   readonly effect = "not-dispatched";
-  readonly retryable = true;
-  constructor(scope: "thread" | "global") {
+  /** False once the desktop stopped asking for this turn. */
+  readonly retryable: boolean;
+  constructor(scope: "thread" | "global", retryable = true) {
     super(
-      scope === "thread"
-        ? "Too many computer approvals are waiting for this chat; try again once an earlier prompt settles."
-        : "Too many computer approvals are waiting.",
+      !retryable
+        ? "Other computer approvals kept the dialog from showing; no input was sent. Do not ask again in this turn; tell the user what needs approval."
+        : scope === "thread"
+          ? "Too many computer approvals are waiting for this chat; try again once an earlier prompt settles."
+          : "Too many computer approvals are waiting.",
     );
+    this.retryable = retryable;
     this.name = "ComputerApprovalQueueFullError";
   }
 }
@@ -74,11 +78,15 @@ export class ComputerApprovalPendingError extends Error {
 export class ComputerApprovalUnavailableError extends Error {
   readonly code = COMPUTER_APPROVAL_UNAVAILABLE_CODE;
   readonly effect = "not-dispatched";
-  readonly retryable = true;
-  constructor() {
+  /** False once the desktop stopped asking for this turn. */
+  readonly retryable: boolean;
+  constructor(retryable = true) {
     super(
-      "Ryco could not show the Computer approval dialog; no input was sent. Try again when the Ryco window is open.",
+      retryable
+        ? "Ryco could not show the Computer approval dialog; no input was sent. Try again when the Ryco window is open."
+        : "Ryco could not show the Computer approval dialog again; no input was sent. Do not ask again in this turn; tell the user to open the Ryco window.",
     );
+    this.retryable = retryable;
     this.name = "ComputerApprovalUnavailableError";
   }
 }

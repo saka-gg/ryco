@@ -21,7 +21,7 @@ import { registerComputerDesktopLifecycle } from "../computerDesktopLifecycle.ts
 import { macPrivacySettingsUrl, resolveMacAppBundle } from "../macAppBundle.ts";
 import { record, textArg } from "./native.ts";
 import {
-  COMPUTER_CONSENT_OPEN_LIMIT,
+  ComputerConsentSheets,
   ComputerTaskConsent,
   type ComputerConsentKind,
 } from "./taskConsent.ts";
@@ -75,7 +75,10 @@ export class DesktopComputerBeta {
   private error: string | null = null;
   private readonly removeLifecycle: () => void;
   private closed = false;
-  private pendingApprovals = 0;
+  /** Consent sheets go up one at a time, so each dialog's lifetime starts when it shows. */
+  private readonly consentSheets = new ComputerConsentSheets((kind, signal, onShown) =>
+    this.showConsent(kind, signal, onShown),
+  );
 
   constructor(options: {
     stateDir: string;
@@ -388,10 +391,7 @@ export class DesktopComputerBeta {
           threadId,
           turnId,
           controller,
-          consent: new ComputerTaskConsent(
-            (kind, signal) => this.showConsent(kind, signal),
-            controller.signal,
-          ),
+          consent: new ComputerTaskConsent(this.consentSheets.prompt, controller.signal),
         });
         this.send({ type: "target", threadId, turnId, targetId: "pending", label: "Computer" });
       }
@@ -458,31 +458,27 @@ export class DesktopComputerBeta {
   private async showConsent(
     kind: ComputerConsentKind,
     signal: AbortSignal,
-  ): Promise<"accept" | "decline" | "unavailable" | "busy"> {
-    if (this.pendingApprovals >= COMPUTER_CONSENT_OPEN_LIMIT) return "busy";
+    onShown: () => void,
+  ): Promise<"accept" | "decline" | "unavailable"> {
     const owner = this.getWindow();
     if (!owner || owner.isDestroyed()) return "unavailable";
     const clipboard = kind === "clipboard";
-    this.pendingApprovals += 1;
-    try {
-      const response = await dialog.showMessageBox(owner, {
-        type: "question",
-        title: clipboard ? "Allow clipboard access?" : "Allow Computer for this task?",
-        message: clipboard
-          ? "Allow this task to access your clipboard?"
-          : "Allow the agent to work in Mac apps and browsers for this task?",
-        detail:
-          "Use Stop in chat to end the task. Physical Escape interrupts the current action. Foreground use still requires your explicit request.",
-        buttons: ["Cancel", "Allow"],
-        defaultId: 0,
-        cancelId: 0,
-        noLink: true,
-        signal,
-      });
-      return response.response === 1 ? "accept" : "decline";
-    } finally {
-      this.pendingApprovals -= 1;
-    }
+    onShown();
+    const response = await dialog.showMessageBox(owner, {
+      type: "question",
+      title: clipboard ? "Allow clipboard access?" : "Allow Computer for this task?",
+      message: clipboard
+        ? "Allow this task to access your clipboard?"
+        : "Allow the agent to work in Mac apps and browsers for this task?",
+      detail:
+        "Use Stop in chat to end the task. Physical Escape interrupts the current action. Foreground use still requires your explicit request.",
+      buttons: ["Cancel", "Allow"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      signal,
+    });
+    return response.response === 1 ? "accept" : "decline";
   }
   async dispose(): Promise<void> {
     this.closed = true;

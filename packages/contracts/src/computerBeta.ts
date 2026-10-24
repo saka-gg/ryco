@@ -20,7 +20,10 @@ export const ComputerConsentReply = Schema.Struct({
     "busy",
     "stopped",
   ]),
-  /** False when asking again in this turn cannot help (decline, second expiry, stopped task). */
+  /**
+   * False when asking again in this turn cannot help: a decline, a stopped task, a second
+   * expiry, or the last of the few dialogs in a row that could not be shown.
+   */
   retryable: Schema.Boolean,
 });
 export type ComputerConsentReply = typeof ComputerConsentReply.Type;

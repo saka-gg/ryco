@@ -352,9 +352,9 @@ export function readComputerConsentReply(response: unknown): boolean {
     case "expired":
       throw new ComputerApprovalExpiredError(reply.retryable);
     case "unavailable":
-      throw new ComputerApprovalUnavailableError();
+      throw new ComputerApprovalUnavailableError(reply.retryable);
     case "busy":
-      throw new ComputerApprovalQueueFullError("global");
+      throw new ComputerApprovalQueueFullError("global", reply.retryable);
     case "decline":
     case "stopped":
       return false;

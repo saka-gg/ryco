@@ -84,6 +84,7 @@ import { CuaActionError } from "../CuaComputerBackend.ts";
 import {
   computerApprovalRefusalPayload,
   isComputerApprovalRefusal,
+  type ComputerApprovalRefusal,
 } from "../ComputerApprovalGate.ts";
 import { cuaCaptureReuseEnabled } from "../computerCallContext.ts";
 import { withModelDesktopObservation } from "../modelDesktopObservation.ts";
@@ -302,7 +303,8 @@ export function computerAuditErrorOutcome(error: unknown): {
   readonly diagnostics?: ComputerAuditEntry["diagnostics"];
   readonly layer?: ComputerAuditEntry["layer"];
 } {
-  if (isComputerApprovalRefusal(error)) return { effect: "not-dispatched", code: error.code };
+  // Ryco's admission refused the call before the desktop, like approval_denied.
+  if (isComputerApprovalRefusal(error)) return { effect: "refused", code: error.code };
   // A CuaActionError already carries the delivery taxonomy's verdict.
   if (error instanceof CuaActionError)
     return {
@@ -661,6 +663,11 @@ export function cuaActionErrorPayload(error: CuaActionError): {
     ...(error.waitSeconds !== undefined ? { wait_seconds: error.waitSeconds } : {}),
     ...(error.code === "computer_input_paused" ? { requery_hint: INPUT_PAUSE_REQUERY_HINT } : {}),
   };
+}
+
+/** The result both Computer tool families return when a consent request refused a call. */
+export function computerApprovalRefusalResult(error: ComputerApprovalRefusal): McpToolCallResult {
+  return { ...mcpToolResultJson(computerApprovalRefusalPayload(error)), isError: true };
 }
 
 function approvalUnavailableResult(name: string): McpToolCallResult {
@@ -1865,16 +1872,25 @@ export function makeAgentGatewayComputerTools(
                 signal: undefined,
               };
             }
-            if (
-              !(await options.authorizeAction(
+            let approved: boolean;
+            try {
+              approved = await options.authorizeAction(
                 name,
                 name === "computer_activate_window" || name === "computer_invoke_menu"
                   ? { ...args, delivery_mode: "foreground" }
                   : args,
                 context,
                 abortSignal,
-              ))
-            ) {
+              );
+            } catch (error) {
+              // A dialog that is still open, expired or could not be shown refuses
+              // this call like a denial does: nothing was sent and no setup card
+              // or permission probe applies.
+              if (!isComputerApprovalRefusal(error)) throw error;
+              audit(computerAuditErrorOutcome(error));
+              return { result: computerApprovalRefusalResult(error), signal: undefined };
+            }
+            if (!approved) {
               audit({ effect: "refused", code: "approval_denied" });
               return {
                 result: mcpToolResultError(
@@ -2110,18 +2126,16 @@ export function makeAgentGatewayComputerTools(
                   }),
                   isError: true,
                 }
-              : isComputerApprovalRefusal(error)
-                ? { ...mcpToolResultJson(computerApprovalRefusalPayload(error)), isError: true }
-                : error instanceof CuaActionError
-                  ? {
-                      ...mcpToolResultJson(cuaActionErrorPayload(error)),
-                      isError: true,
-                    }
-                  : error instanceof ComputerTargetError
-                    ? targetErrorResult(error)
-                    : error instanceof ComputerLeaseError
-                      ? leaseErrorResult(error)
-                      : mcpToolResultError(errorText(error));
+              : error instanceof CuaActionError
+                ? {
+                    ...mcpToolResultJson(cuaActionErrorPayload(error)),
+                    isError: true,
+                  }
+                : error instanceof ComputerTargetError
+                  ? targetErrorResult(error)
+                  : error instanceof ComputerLeaseError
+                    ? leaseErrorResult(error)
+                    : mcpToolResultError(errorText(error));
           // A missing OS grant is the only failure a user has to act on, so it
           // is the only one that raises a card. Everything else — a target that
           // moved, an undelivered keystroke, arguments the desktop refused — is

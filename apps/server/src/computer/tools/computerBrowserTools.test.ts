@@ -267,7 +267,7 @@ describe("computer_browser_* gateway tools", () => {
       });
       expect(backend.callsFor("browser.browser_type")).toHaveLength(0);
       expect(audit).toHaveBeenCalledWith(
-        expect.objectContaining({ effect: "not-dispatched", code: "approval_expired" }),
+        expect.objectContaining({ effect: "refused", code: "approval_expired" }),
       );
     } finally {
       await manager.dispose();

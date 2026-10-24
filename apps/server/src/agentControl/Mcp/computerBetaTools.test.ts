@@ -176,10 +176,18 @@ it.each([
     expect.objectContaining({ code, effect: "not-dispatched", retryable: true }),
   );
 });
-it("passes on that the turn's re-request also expired", () => {
-  expect(() =>
-    readComputerConsentReply({ approved: false, outcome: "expired", retryable: false }),
-  ).toThrow(expect.objectContaining({ code: "approval_expired", retryable: false }));
+it.each([
+  ["the turn's re-request also expired", "expired", "approval_expired"],
+  ["the dialog could not be shown again", "unavailable", "approval_unavailable"],
+  ["other dialogs kept it from showing again", "busy", "approval_queue_full"],
+] as const)("passes on that %s", (_label, outcome, code) => {
+  expect(() => readComputerConsentReply({ approved: false, outcome, retryable: false })).toThrow(
+    expect.objectContaining({
+      code,
+      retryable: false,
+      message: expect.stringContaining("Do not ask again in this turn"),
+    }),
+  );
 });
 it.each([
   ["a bare approval without an outcome", { approved: true }],
@@ -233,7 +241,7 @@ it("returns an open consent dialog to the agent as approval_pending without nati
     });
     expect(pressKey).not.toHaveBeenCalled();
     expect(audit).toHaveBeenCalledWith(
-      expect.objectContaining({ effect: "not-dispatched", code: "approval_pending" }),
+      expect.objectContaining({ effect: "refused", code: "approval_pending" }),
     );
   } finally {
     await runtime.dispose();

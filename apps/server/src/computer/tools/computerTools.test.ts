@@ -1580,6 +1580,7 @@ describe("agent gateway computer tools", () => {
         return true;
       });
       const audit = vi.spyOn(manager, "recordComputerAudit");
+      const probe = vi.spyOn(manager, "missingPermissions");
       const args = { window_id: "fake-calculator", key: "enter", include_screenshot: false };
       try {
         for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -1590,9 +1591,11 @@ describe("agent gateway computer tools", () => {
           });
         }
         expect(backend.callsFor("pressKey")).toHaveLength(0);
+        // Audited like approval_denied, and no setup probe or card for a dialog.
         expect(audit).toHaveBeenLastCalledWith(
-          expect.objectContaining({ effect: "not-dispatched", code }),
+          expect.objectContaining({ effect: "refused", code }),
         );
+        expect(probe).not.toHaveBeenCalled();
         expect((await call("computer_press_key", args)).isError).not.toBe(true);
         expect(backend.callsFor("pressKey")).toHaveLength(1);
       } finally {

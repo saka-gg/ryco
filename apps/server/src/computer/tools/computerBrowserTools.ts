@@ -36,10 +36,7 @@ import { COMPUTER_BROWSER_DRIVER_NAMES } from "@ryco/contracts";
 
 import { ComputerBackendError, type ComputerBrowserCallResult } from "../ComputerBackend.ts";
 import { CuaActionError } from "../CuaComputerBackend.ts";
-import {
-  computerApprovalRefusalPayload,
-  isComputerApprovalRefusal,
-} from "../ComputerApprovalGate.ts";
+import { isComputerApprovalRefusal } from "../ComputerApprovalGate.ts";
 import type { ComputerManager } from "../ComputerManager.ts";
 import { withModelDesktopObservation } from "../modelDesktopObservation.ts";
 import {
@@ -57,6 +54,7 @@ import {
 } from "./toolRuntime.ts";
 import {
   COMPUTER_CONTROL_CAPABILITY,
+  computerApprovalRefusalResult,
   computerApprovalRequiredError,
   computerAuditErrorOutcome,
   cuaActionErrorPayload,
@@ -680,15 +678,7 @@ export function makeAgentGatewayComputerBrowserTools(
             audit(computerAuditErrorOutcome(error));
           }
           const failure = isComputerApprovalRefusal(error)
-            ? {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(computerApprovalRefusalPayload(error)),
-                  },
-                ],
-                isError: true as const,
-              }
+            ? computerApprovalRefusalResult(error)
             : error instanceof CuaActionError
               ? {
                   content: [

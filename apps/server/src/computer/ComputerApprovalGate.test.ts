@@ -347,10 +347,22 @@ describe("Computer approval refusals", () => {
       true,
     ],
     [
+      "a dialog that could not be shown again",
+      () => new ComputerApprovalUnavailableError(false),
+      "approval_unavailable",
+      false,
+    ],
+    [
       "a full prompt queue",
       () => new ComputerApprovalQueueFullError("global"),
       "approval_queue_full",
       true,
+    ],
+    [
+      "a prompt queue that kept the dialog from showing again",
+      () => new ComputerApprovalQueueFullError("global", false),
+      "approval_queue_full",
+      false,
     ],
   ] as const)(
     "reports %s as a not-dispatched refusal with its code",
@@ -364,11 +376,15 @@ describe("Computer approval refusals", () => {
     },
   );
 
-  it("tells the agent to stop asking once the re-request expired too", () => {
+  it("tells the agent to stop asking once the desktop stopped asking", () => {
     expect(new ComputerApprovalExpiredError().message).toContain("Request approval again");
-    expect(new ComputerApprovalExpiredError(false).message).toContain(
-      "Do not ask again in this turn",
-    );
+    for (const error of [
+      new ComputerApprovalExpiredError(false),
+      new ComputerApprovalUnavailableError(false),
+      new ComputerApprovalQueueFullError("global", false),
+    ])
+      expect(error.message).toContain("Do not ask again in this turn");
+    expect(new ComputerApprovalUnavailableError().message).toContain("Try again");
   });
 
   it("does not treat other failures as approval refusals", () => {

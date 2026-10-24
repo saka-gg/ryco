@@ -4,9 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   COMPUTER_CONSENT_EXPIRY_MS,
+  COMPUTER_CONSENT_OPEN_LIMIT,
   COMPUTER_CONSENT_WAIT_MS,
+  ComputerConsentSheets,
   ComputerTaskConsent,
   type ComputerConsentKind,
+  type ComputerConsentPresenter,
   type ComputerConsentPrompt,
 } from "./taskConsent.ts";
 
@@ -23,28 +26,52 @@ const ACCEPT = { approved: true, outcome: "accept", retryable: false };
 const DECLINE = { approved: false, outcome: "decline", retryable: false };
 
 /**
- * A stand-in for the Electron sheet: it stays open until the test answers it,
- * and closes as a Cancel when its signal fires, as `showMessageBox` does.
+ * A stand-in for the Electron sheet: it is on screen at once, stays open until
+ * the test answers it, and closes as a Cancel when its signal fires, as
+ * `showMessageBox` does.
  */
+function scriptedDialogs() {
+  const dialogs: Dialog[] = [];
+  const show = (kind: ComputerConsentKind, signal: AbortSignal, onShown: () => void) =>
+    new Promise<Shown>((resolve) => {
+      onShown();
+      signal.addEventListener("abort", () => resolve("decline"), { once: true });
+      dialogs.push({ kind, signal, answer: resolve });
+    });
+  return { dialogs, show };
+}
+
+/** Every reply must be one the server's strict decoder accepts. */
+async function decoded(pending: Promise<ComputerConsentReply>) {
+  const reply = await pending;
+  expect(Schema.decodeUnknownSync(ComputerConsentReply)(reply)).toEqual(reply);
+  expect(reply.approved).toBe(reply.outcome === "accept");
+  return reply;
+}
+
 function fixture() {
   const controller = new AbortController();
-  const dialogs: Dialog[] = [];
-  const prompt = vi.fn<ComputerConsentPrompt>(
-    (kind, signal) =>
-      new Promise<Shown>((resolve) => {
-        signal.addEventListener("abort", () => resolve("decline"), { once: true });
-        dialogs.push({ kind, signal, answer: resolve });
-      }),
-  );
+  const { dialogs, show } = scriptedDialogs();
+  const prompt = vi.fn<ComputerConsentPrompt>(show);
   const consent = new ComputerTaskConsent(prompt, controller.signal);
-  /** Every reply must be one the server's strict decoder accepts. */
-  const request = async (kind: ComputerConsentKind = "task") => {
-    const reply = await consent.request(kind);
-    expect(Schema.decodeUnknownSync(ComputerConsentReply)(reply)).toEqual(reply);
-    expect(reply.approved).toBe(reply.outcome === "accept");
-    return reply;
-  };
+  const request = (kind: ComputerConsentKind = "task") => decoded(consent.request(kind));
   return { controller, dialogs, prompt, consent, request };
+}
+
+/** Several tasks sharing the real one-at-a-time sheet queue. */
+function sheetsFixture() {
+  const { dialogs, show } = scriptedDialogs();
+  const present = vi.fn<ComputerConsentPresenter>(show as unknown as ComputerConsentPresenter);
+  const sheets = new ComputerConsentSheets(present);
+  const task = () => {
+    const controller = new AbortController();
+    const consent = new ComputerTaskConsent(sheets.prompt, controller.signal);
+    return {
+      controller,
+      request: (kind: ComputerConsentKind = "task") => decoded(consent.request(kind)),
+    };
+  };
+  return { dialogs, present, sheets, task };
 }
 
 describe("ComputerTaskConsent", () => {
@@ -170,6 +197,57 @@ describe("ComputerTaskConsent", () => {
     expect(await accepted).toEqual(ACCEPT);
   });
 
+  it("stops asking after three dialogs in a row could not be shown", async () => {
+    const controller = new AbortController();
+    const prompt = vi.fn<ComputerConsentPrompt>(async () => "unavailable");
+    const consent = new ComputerTaskConsent(prompt, controller.signal);
+    const unavailable = (retryable: boolean) => ({
+      approved: false,
+      outcome: "unavailable",
+      retryable,
+    });
+    expect(await decoded(consent.request("task"))).toEqual(unavailable(true));
+    expect(await decoded(consent.request("task"))).toEqual(unavailable(true));
+    expect(await decoded(consent.request("task"))).toEqual(unavailable(false));
+    // The agent was told to stop; asking again does not even try.
+    expect(await decoded(consent.request("task"))).toEqual(unavailable(false));
+    expect(prompt).toHaveBeenCalledTimes(3);
+    // Clipboard consent keeps its own count.
+    expect(await decoded(consent.request("clipboard"))).toEqual(unavailable(true));
+    expect(prompt).toHaveBeenCalledTimes(4);
+  });
+
+  it("restarts the unshown count once a dialog reaches the user", async () => {
+    const { dialogs, prompt, request } = fixture();
+    for (const result of ["unavailable", "busy"] as const) {
+      const refused = request();
+      dialogs.at(-1)!.answer(result);
+      expect((await refused).retryable).toBe(true);
+    }
+    const shown = request();
+    await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_WAIT_MS);
+    expect(await shown).toEqual(PENDING);
+    dialogs.at(-1)!.answer("unavailable");
+    await vi.advanceTimersByTimeAsync(0);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const refused = request();
+      dialogs.at(-1)!.answer("busy");
+      expect(await refused).toEqual({ approved: false, outcome: "busy", retryable: true });
+    }
+    expect(prompt).toHaveBeenCalledTimes(5);
+  });
+
+  it("gives each concurrent clipboard dialog its own expiry verdict", async () => {
+    const { prompt, request } = fixture();
+    const first = request("clipboard");
+    const second = request("clipboard");
+    await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_WAIT_MS);
+    // The first expiry is the one the agent may still ask again after.
+    expect(await first).toEqual({ approved: false, outcome: "expired", retryable: true });
+    expect(await second).toEqual({ approved: false, outcome: "expired", retryable: false });
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
   it("treats a prompt that throws as unavailable", async () => {
     const controller = new AbortController();
     const prompt = vi
@@ -228,5 +306,106 @@ describe("ComputerTaskConsent", () => {
     expect(prompt).toHaveBeenCalledTimes(3);
     dialogs[2]!.answer("accept");
     expect(await routine).toEqual(ACCEPT);
+  });
+});
+
+describe("ComputerConsentSheets", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows one dialog at a time and starts a queued dialog's lifetime when it appears", async () => {
+    const { dialogs, present, task } = sheetsFixture();
+    const first = task();
+    const second = task();
+    const firstRequest = first.request();
+    const queued = second.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(present).toHaveBeenCalledTimes(1);
+
+    // The second task waits behind the first sheet without spending its five minutes.
+    await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_WAIT_MS);
+    expect(await firstRequest).toEqual(PENDING);
+    expect(await queued).toEqual(PENDING);
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    const answered = first.request();
+    dialogs[0]!.answer("accept");
+    expect(await answered).toEqual(ACCEPT);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(present).toHaveBeenCalledTimes(2);
+    expect(dialogs[1]!.signal.aborted).toBe(false);
+
+    // Its full lifetime runs from the moment it is on screen.
+    const waiting = second.request();
+    await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_EXPIRY_MS - 1_000);
+    expect(dialogs[1]!.signal.aborted).toBe(false);
+    expect(await waiting).toEqual(PENDING);
+    const late = second.request();
+    dialogs[1]!.answer("accept");
+    expect(await late).toEqual(ACCEPT);
+  });
+
+  it("reports a clipboard dialog that never reached the screen as busy, not expired", async () => {
+    const { dialogs, present, task } = sheetsFixture();
+    const holder = task();
+    const asker = task();
+    const held = holder.request();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const clipboard = asker.request("clipboard");
+      await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_WAIT_MS);
+      expect(await clipboard).toEqual({ approved: false, outcome: "busy", retryable: true });
+    }
+    expect(present).toHaveBeenCalledTimes(1);
+    dialogs[0]!.answer("decline");
+    await held;
+
+    // Neither unseen dialog used up the clipboard re-request.
+    for (const expected of [true, false]) {
+      const clipboard = asker.request("clipboard");
+      await vi.advanceTimersByTimeAsync(COMPUTER_CONSENT_WAIT_MS);
+      expect(await clipboard).toEqual({
+        approved: false,
+        outcome: "expired",
+        retryable: expected,
+      });
+    }
+    expect(present).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the queue order when a waiting dialog leaves early", async () => {
+    const { dialogs, present, task } = sheetsFixture();
+    const showing = task();
+    const leaving = task();
+    const last = task();
+    const shown = showing.request();
+    const left = leaving.request();
+    const behind = last.request();
+    await vi.advanceTimersByTimeAsync(0);
+    leaving.controller.abort();
+    expect(await left).toEqual({ approved: false, outcome: "stopped", retryable: false });
+    await vi.advanceTimersByTimeAsync(0);
+    // The first sheet is still on screen, so the third must keep waiting.
+    expect(present).toHaveBeenCalledTimes(1);
+    dialogs[0]!.answer("accept");
+    expect(await shown).toEqual(ACCEPT);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(present).toHaveBeenCalledTimes(2);
+    dialogs[1]!.answer("accept");
+    expect(await behind).toEqual(ACCEPT);
+  });
+
+  it("refuses a dialog beyond the open limit without queueing it", async () => {
+    const { present, task } = sheetsFixture();
+    const tasks = Array.from({ length: COMPUTER_CONSENT_OPEN_LIMIT }, () => task());
+    for (const each of tasks) void each.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await task().request()).toEqual({ approved: false, outcome: "busy", retryable: true });
+    expect(present).toHaveBeenCalledTimes(1);
+    for (const each of tasks) each.controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
   });
 });
