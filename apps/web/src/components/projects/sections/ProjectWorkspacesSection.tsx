@@ -405,6 +405,10 @@ function CleanupSuggestionSettings(props: { readonly member: SidebarProjectGroup
  * Cleanup suggestions and their timing stay here, with the other settings.
  */
 export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: ProjectSectionProps) {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on a ternary inside a logical test). Oxc can, but its render
+  // reads have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const router = useRouter();
   const { nav } = useProjectsPage();
   const ref = useMemo(() => scopeProjectRef(member.environmentId, member.id), [member]);

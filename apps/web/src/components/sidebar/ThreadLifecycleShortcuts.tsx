@@ -16,6 +16,9 @@ const COMMANDS: ThreadLifecycleCommands = {
   requestThreadArchive,
 };
 
+// At module scope: the React Compiler cannot compile a component that calls import() itself.
+const loadController = () => import("./threadLifecycleShortcutsController");
+
 /**
  * Settle, snooze, archive and mark unread for the open thread: their keyboard
  * shortcuts, and what the command palette offers. Also the Undo shortcut for
@@ -33,7 +36,7 @@ export function ThreadLifecycleShortcuts(props: ThreadLifecycleShortcutsProps) {
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | null = null;
-    void import("./threadLifecycleShortcutsController")
+    void loadController()
       .then(({ startThreadLifecycleShortcuts }) => {
         if (!disposed) stop = startThreadLifecycleShortcuts(() => latestProps.current, COMMANDS);
       })

@@ -269,6 +269,10 @@ export interface UseComposerImageAttachmentsResult {
 export function useComposerImageAttachments(
   params: UseComposerImageAttachmentsParams,
 ): UseComposerImageAttachmentsResult {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const {
     composerDraftTarget,
     environmentId,

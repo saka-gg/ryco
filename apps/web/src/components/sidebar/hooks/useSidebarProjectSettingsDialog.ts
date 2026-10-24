@@ -11,6 +11,10 @@ import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping"
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 
 export function useSidebarProjectSettingsDialog() {
+  // Uncompiled on purpose: Babel's React Compiler never compiled this function
+  // (it bails on value blocks inside try/catch). Oxc can, but its render reads
+  // have not been audited for purity yet. Remove after that audit.
+  "use no memo";
   const [projectSettingsTarget, setProjectSettingsTarget] =
     useState<SidebarProjectGroupMember | null>(null);
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
