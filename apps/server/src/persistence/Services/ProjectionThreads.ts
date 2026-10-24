@@ -134,6 +134,14 @@ export const SetProjectionThreadManualPositionInput = Schema.Struct({
 export type SetProjectionThreadManualPositionInput =
   typeof SetProjectionThreadManualPositionInput.Type;
 
+export const TouchProjectionThreadInput = Schema.Struct({
+  threadId: ThreadId,
+  updatedAt: IsoDateTime,
+  pendingApprovalDelta: Schema.Int,
+  pendingUserInputDelta: Schema.Int,
+});
+export type TouchProjectionThreadInput = typeof TouchProjectionThreadInput.Type;
+
 export const ProjectionTrashedThread = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -196,6 +204,18 @@ export interface ProjectionThreadRepositoryShape {
 
   readonly setManualPosition: (
     input: SetProjectionThreadManualPositionInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Sets one thread's `updated_at` and moves its pending counters by the deltas, never below 0,
+   * touching no other column. It is the narrow form of `getById` +
+   * `applyThreadShellSummaryTransition({ pendingApprovalDelta, pendingUserInputDelta })` +
+   * `upsert` with `updatedAt`, for the frequent events (activities, streamed replies) that change
+   * nothing else. A missing row stays missing. It writes nothing when the row already holds the
+   * result: an unchanged row rewrite still dirties the table page and every index it lists.
+   */
+  readonly touch: (
+    input: TouchProjectionThreadInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
