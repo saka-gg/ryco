@@ -3,6 +3,8 @@ import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import { useDeviceRuntime } from "../device/useDeviceRuntime";
 import { useCallback, useEffect, useMemo, type ReactElement } from "react";
 
+import { useAppKeybindings } from "../../appKeybindings";
+import { handOverClosedTabs, type ClosedViewOwner } from "../../closedViews";
 import { DraftId } from "../../composerDraftStore";
 import { useDraftSession } from "../../composerDraftSelectors";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
@@ -31,6 +33,7 @@ import { RightPanelSheet } from "../RightPanelSheet";
 import { LazyPhoneWorkSurfaceSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { SidebarInset } from "../ui/sidebar";
+import { useViewShortcuts } from "./useViewShortcuts";
 import { cn } from "~/lib/utils";
 
 export function DraftChatThreadRouteView({
@@ -138,6 +141,15 @@ export function DraftChatThreadRouteView({
     },
     [draftId, navigate],
   );
+  // Only while the draft and its panel are on screen (not once it forwards to
+  // its thread), and not on the frozen phone tier: otherwise no view
+  // shortcuts, and no closed tabs remembered.
+  const showsDraftPanel = draftSession !== null && canonicalThreadRef === null;
+  const closedViewOwner = useMemo<ClosedViewOwner | null>(
+    () => (showsDraftPanel && presentationTier !== "phone" ? { kind: "draft", draftId } : null),
+    [draftId, presentationTier, showsDraftPanel],
+  );
+  const keybindings = useAppKeybindings();
   const {
     openedPanelModes,
     openedAgentKeys,
@@ -147,6 +159,9 @@ export function DraftChatThreadRouteView({
     closeRightPanel,
     toggleRightPanel,
     closePanelTab,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
     shouldRenderRightPanelContent,
     shouldRenderPhoneRightPanelContent,
   } = useRightPanelTabs({
@@ -156,6 +171,14 @@ export function DraftChatThreadRouteView({
     activeAgentKey,
     defaultLastMode: "files",
     navigateSearch: navigateDraftSearch,
+    closedViewOwner,
+  });
+  useViewShortcuts({
+    owner: closedViewOwner,
+    keybindings,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
   });
 
   useEffect(() => {
@@ -166,12 +189,13 @@ export function DraftChatThreadRouteView({
       rightPanelThreadKey,
       `${canonicalThreadRef.environmentId}:${canonicalThreadRef.threadId}`,
     );
+    handOverClosedTabs({ kind: "draft", draftId }, { kind: "thread", ref: canonicalThreadRef });
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(canonicalThreadRef),
       replace: true,
     });
-  }, [canonicalThreadRef, navigate, rightPanelThreadKey]);
+  }, [canonicalThreadRef, draftId, navigate, rightPanelThreadKey]);
 
   useEffect(() => {
     if (draftSession || canonicalThreadRef) {

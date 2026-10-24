@@ -1,18 +1,25 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { rememberClosedView, type ClosedViewOwner } from "../closedViews";
 import type { RightPanelMode } from "../rightPanelRouteSearch";
 import {
   buildRightPanelTargetSearch,
+  closedRightPanelTarget,
   closeRightPanelTab,
+  isRightPanelTargetVisible,
   markRightPanelTabOpened,
   openedTabsFromRoute,
   rememberActiveAgentTab,
   rememberActiveRenderTab,
+  resolveActiveRightPanelClose,
   resolveOpenedTabs,
   resolveRightPanelReopenTarget,
   shouldMountRightPanelContent,
   visibleRightPanelTabs,
   type RightPanelRouteTabs,
+  type RightPanelTabRef,
+  type RightPanelTarget,
+  type RightPanelTabTarget,
 } from "../rightPanelTabs.logic";
 import { buildCloseWorkspacePanelSearch } from "../workspaceRouteSearch";
 
@@ -33,8 +40,17 @@ export function useRightPanelTabs(input: {
   /** Where the panel reopens before any tab was shown on this route. */
   readonly defaultLastMode: RightPanelMode;
   readonly navigateSearch: (update: RightPanelSearchUpdate) => void;
+  /** Who closed tabs are remembered for, so they can be reopened; null remembers none. */
+  readonly closedViewOwner: ClosedViewOwner | null;
 }) {
-  const { scopeKey, rightPanelMode, rightPanelOpen, activeAgentKey, navigateSearch } = input;
+  const {
+    scopeKey,
+    rightPanelMode,
+    rightPanelOpen,
+    activeAgentKey,
+    navigateSearch,
+    closedViewOwner,
+  } = input;
   const activeRenderKey = input.activeRenderKey ?? null;
   const route = useMemo<RightPanelRouteTabs>(
     () => ({ scopeKey, mode: rightPanelMode, activeAgentKey, activeRenderKey }),
@@ -59,10 +75,16 @@ export function useRightPanelTabs(input: {
     navigateSearch((previous) => buildCloseWorkspacePanelSearch(previous));
   }, [navigateSearch]);
 
+  const openPanelTarget = useCallback(
+    (target: RightPanelTarget) => {
+      navigateSearch((previous) => buildRightPanelTargetSearch(previous, target));
+    },
+    [navigateSearch],
+  );
+
   const openRightPanel = useCallback(() => {
-    const target = resolveRightPanelReopenTarget(state, route, lastOpenedRightPanelMode);
-    navigateSearch((previous) => buildRightPanelTargetSearch(previous, target));
-  }, [lastOpenedRightPanelMode, navigateSearch, route, state]);
+    openPanelTarget(resolveRightPanelReopenTarget(state, route, lastOpenedRightPanelMode));
+  }, [lastOpenedRightPanelMode, openPanelTarget, route, state]);
 
   const toggleRightPanel = useCallback(() => {
     if (rightPanelOpen) {
@@ -73,14 +95,29 @@ export function useRightPanelTabs(input: {
   }, [closeRightPanel, openRightPanel, rightPanelOpen]);
 
   const closePanelTab = useCallback(
-    (tab: { mode: RightPanelMode; agentKey?: string }) => {
+    (tab: RightPanelTabRef) => {
+      const closed = closedRightPanelTarget(visible, tab);
+      if (closedViewOwner && closed) {
+        rememberClosedView({ kind: "tab", owner: closedViewOwner, target: closed });
+      }
       const { target } = closeRightPanelTab(state, route, tab);
       setState((previous) => closeRightPanelTab(previous, route, tab).next);
-      if (target) {
-        navigateSearch((previous) => buildRightPanelTargetSearch(previous, target));
-      }
+      if (target) openPanelTarget(target);
     },
-    [navigateSearch, route, state],
+    [closedViewOwner, openPanelTarget, route, state, visible],
+  );
+
+  /** Closes the open panel's active tab, or the panel while it shows the launcher. */
+  const closeActiveView = useCallback((): boolean => {
+    const active = resolveActiveRightPanelClose({ open: rightPanelOpen, route });
+    if (active?.kind === "tab") closePanelTab(active.tab);
+    else if (active) closeRightPanel();
+    return active !== null;
+  }, [closePanelTab, closeRightPanel, rightPanelOpen, route]);
+
+  const isPanelTargetOpen = useCallback(
+    (target: RightPanelTabTarget) => rightPanelOpen && isRightPanelTargetVisible(visible, target),
+    [rightPanelOpen, visible],
   );
 
   useEffect(() => {
@@ -103,6 +140,9 @@ export function useRightPanelTabs(input: {
     closeRightPanel,
     toggleRightPanel,
     closePanelTab,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
     shouldRenderRightPanelContent: shouldMountRightPanelContent({
       open: rightPanelOpen,
       route,

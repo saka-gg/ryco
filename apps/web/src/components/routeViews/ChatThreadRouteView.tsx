@@ -1,5 +1,7 @@
+import { useAppKeybindings } from "../../appKeybindings";
 import { useChatPanesStore } from "../../chatPanesStore";
 import { paneContains } from "../../chatPanes.logic";
+import type { ClosedViewOwner } from "../../closedViews";
 import { ChatPanes, PaneThreadAvailability } from "../chat/ChatPanes";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
@@ -45,6 +47,7 @@ import { LazyRightPanel, RightPanelInlineSidebar } from "../ChatRightPanel";
 import { RightPanelSheet } from "../RightPanelSheet";
 import { LazyPhoneWorkSurfaceSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
+import { useViewShortcuts } from "./useViewShortcuts";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { cn } from "~/lib/utils";
 
@@ -188,6 +191,16 @@ export function ChatThreadRouteView({
     },
     [navigate, threadRef],
   );
+  // Only while the thread and its panel are on screen, and not on the frozen
+  // phone tier: otherwise no view shortcuts, and no closed tabs remembered.
+  const closedViewOwner = useMemo<ClosedViewOwner | null>(
+    () =>
+      threadRef && canRenderRouteThread && presentationTier !== "phone"
+        ? { kind: "thread", ref: threadRef }
+        : null,
+    [canRenderRouteThread, presentationTier, threadRef],
+  );
+  const keybindings = useAppKeybindings();
   const {
     openedPanelModes,
     openedAgentKeys,
@@ -198,6 +211,9 @@ export function ChatThreadRouteView({
     closeRightPanel,
     toggleRightPanel,
     closePanelTab,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
     shouldRenderRightPanelContent,
     shouldRenderPhoneRightPanelContent,
   } = useRightPanelTabs({
@@ -208,6 +224,14 @@ export function ChatThreadRouteView({
     activeRenderKey,
     defaultLastMode: "review",
     navigateSearch: navigateThreadSearch,
+    closedViewOwner,
+  });
+  useViewShortcuts({
+    owner: closedViewOwner,
+    keybindings,
+    closeActiveView,
+    isPanelTargetOpen,
+    openPanelTarget,
   });
 
   useEffect(() => {

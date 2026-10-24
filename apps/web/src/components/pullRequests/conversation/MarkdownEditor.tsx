@@ -98,7 +98,11 @@ export function MarkdownEditor(props: {
   };
 
   return (
-    <div className={cn(COMPOSER_BOX_CLASS, props.className)}>
+    // An edit not saved yet keeps the workspace tab from closing by keyboard.
+    <div
+      className={cn(COMPOSER_BOX_CLASS, props.className)}
+      data-unsent-draft={changed ? "" : undefined}
+    >
       <textarea
         ref={textareaRef}
         aria-label={props.label}
