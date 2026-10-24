@@ -167,7 +167,8 @@ const config: ExpoConfig = {
     enabled: false,
   },
   // Turns on babel-preset-expo's React Compiler pass. Which sources it compiles
-  // is scoped in babel.config.js, and widened only after on-device profiling.
+  // is scoped in babel.config.js (all of apps/mobile/src);
+  // src/perf/reactCompilerCoverage.test.ts keeps them compiling.
   experiments: {
     reactCompiler: true,
   },

@@ -62,6 +62,31 @@ function isEligible(environment: ThreadPriorityRefreshEnvironment): boolean {
   return environment.connected && environment.supported;
 }
 
+/**
+ * Whether two environment lists carry the same fields the coordinator decides
+ * on, in the same order. A caller that rebuilds the list on every socket status
+ * write uses it to call `environmentsChanged` only when something it reads
+ * changed, not on each retry-timer, error or online-flag update.
+ */
+export function sameThreadPriorityRefreshEnvironments(
+  left: ReadonlyArray<ThreadPriorityRefreshEnvironment>,
+  right: ReadonlyArray<ThreadPriorityRefreshEnvironment>,
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((environment, index) => {
+      const other = right[index]!;
+      return (
+        environment.environmentId === other.environmentId &&
+        environment.generation === other.generation &&
+        environment.connected === other.connected &&
+        environment.supported === other.supported &&
+        environment.lastSuccessfulCheckAtMs === other.lastSuccessfulCheckAtMs
+      );
+    })
+  );
+}
+
 function makeThreadPriorityRefreshCoordinator(
   dependencies: ThreadPriorityRefreshDependencies,
 ): ThreadPriorityRefreshCoordinator {
