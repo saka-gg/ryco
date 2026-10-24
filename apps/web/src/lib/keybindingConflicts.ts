@@ -10,9 +10,9 @@ export interface ConflictEntry {
 /**
  * Determine whether two `when` strings describe the *same* context.
  *
- * Matches the server's `hasSameShortcutContext` heuristic: a rule's
- * "context" is exactly its `when` string (treating `undefined` as the empty
- * context). Two rules collide only when their context strings are identical.
+ * A rule's "context" is exactly its `when` string (treating `undefined` as
+ * the empty context). Two rules collide only when their context strings are
+ * identical.
  *
  * This means `thread.jump.1` (when=undefined) and `modelPicker.jump.1`
  * (when="modelPickerOpen") are NOT considered conflicting — the runtime's

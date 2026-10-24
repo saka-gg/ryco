@@ -6,11 +6,8 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import {
-  compileResolvedKeybindingsConfig,
-  DEFAULT_RESOLVED_KEYBINDINGS,
-  mergeWithDefaultKeybindings,
-} from "@ryco/shared/keybindings";
+import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
+import { NODE_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
   hasNoShortcutModifiers,
@@ -767,7 +764,7 @@ describe("resolveShortcutCommand", () => {
 
   it("resolves the default split-view shortcuts from physical keys", () => {
     const resolve = (overrides: Partial<ShortcutEventLike>, context = {}) =>
-      resolveShortcutCommand(event(overrides), DEFAULT_RESOLVED_KEYBINDINGS, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform: "MacIntel",
         context,
       });
@@ -792,24 +789,18 @@ describe("resolveShortcutCommand", () => {
       null,
     );
     assert.strictEqual(
-      shortcutLabelForCommand(DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
       "⇧⌘\\",
     );
   });
 
   it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
-    // No default: a node sends every default to clients that may predate the command.
+    // The default is client-only: a node sends every default to clients that may predate the command.
     assert.isFalse(
-      DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
-    );
-    // `chat.newWithoutProject` has no default key; this is a user's binding.
-    const keybindings = mergeWithDefaultKeybindings(
-      compileResolvedKeybindingsConfig([
-        { key: "mod+alt+n", command: "chat.newWithoutProject", when: "!terminalFocus" },
-      ]),
+      NODE_DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
     );
     const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel") =>
-      resolveShortcutCommand(event(overrides), keybindings, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform,
         context: { terminalFocus: false },
       });
@@ -835,6 +826,27 @@ describe("resolveShortcutCommand", () => {
     );
     // Without Alt the physical key never stands in for the produced character.
     assert.isNull(resolve({ key: "Dead", code: "KeyN", metaKey: true }));
+  });
+
+  it("matches Ctrl+Alt defaults by their physical key outside a text field", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>) =>
+      resolveShortcutCommand(
+        event({ ctrlKey: true, altKey: true, ...overrides }),
+        APP_DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "Win32", context: { terminalFocus: false } },
+      );
+    const altGraph = { getModifierState: (key: string) => key === "AltGraph" };
+    // Windows reports Ctrl+Alt as AltGr. Outside a text field it types nothing, so
+    // US-International Ctrl+Alt+P ("ö") and Ctrl+Alt+N ("ñ") and Polish (Programmers)
+    // Ctrl+Alt+N ("ń") keep their shortcuts. Text fields are covered in dialog.browser.tsx.
+    assert.strictEqual(resolve({ key: "ö", code: "KeyP" }), "thread.pinToggle");
+    assert.strictEqual(resolve({ key: "ñ", code: "KeyN" }), "chat.newWithoutProject");
+    assert.strictEqual(resolve({ key: "ń", code: "KeyN", ...altGraph }), "chat.newWithoutProject");
+    // US-International Ctrl+Alt+[ reports "«" with AltGraph.
+    assert.strictEqual(
+      resolve({ key: "«", code: "BracketLeft", ...altGraph }),
+      "pane.focusPrevious",
+    );
   });
 });
 

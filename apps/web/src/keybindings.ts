@@ -12,12 +12,17 @@ import {
   matchesKeybindingModifiers,
   matchesKeybindingShortcut,
   normalizeShortcutEventKey,
-  type ShortcutEventLike,
+  type ShortcutEventLike as KeydownLike,
   type ShortcutModifierStateLike,
 } from "@ryco/shared/keybindingMatch";
 import { isMacPlatform } from "./lib/utils";
 
-export type { ShortcutEventLike, ShortcutModifierStateLike };
+export type { ShortcutModifierStateLike };
+
+/** A keydown and the element it reached, where AltGr may be typing text. */
+export interface ShortcutEventLike extends KeydownLike {
+  target?: EventTarget | null;
+}
 
 export interface ShortcutMatchContext {
   terminalFocus: boolean;
@@ -60,9 +65,10 @@ function matchesShortcutModifiers(
 function matchesShortcut(
   event: ShortcutEventLike,
   shortcut: KeybindingShortcut,
-  platform = navigator.platform,
+  platform: string,
+  editableTarget: boolean,
 ): boolean {
-  return matchesKeybindingShortcut(event, shortcut, isMacPlatform(platform));
+  return matchesKeybindingShortcut(event, shortcut, isMacPlatform(platform), { editableTarget });
 }
 
 export function isBareModifierKeyEvent(event: Pick<ShortcutEventLike, "key">): boolean {
@@ -76,7 +82,7 @@ export function matchesExactShortcut(
 ): boolean {
   if (event.type !== undefined && event.type !== "keydown") return false;
   if (isBareModifierKeyEvent(event)) return false;
-  return matchesShortcut(event, shortcut, platform);
+  return matchesShortcut(event, shortcut, platform, isEditableShortcutTarget(event.target));
 }
 
 export function matchesExactModShortcut(
@@ -358,12 +364,13 @@ export function resolveShortcutCommand(
 
   const platform = resolvePlatform(options);
   const context = resolveContext(options);
+  const editableTarget = isEditableShortcutTarget(event.target);
 
   for (let index = keybindings.length - 1; index >= 0; index -= 1) {
     const binding = keybindings[index];
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
-    if (!matchesShortcut(event, binding.shortcut, platform)) continue;
+    if (!matchesShortcut(event, binding.shortcut, platform, editableTarget)) continue;
     return binding.command;
   }
   return null;

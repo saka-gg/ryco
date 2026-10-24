@@ -1,7 +1,8 @@
 import {
   AppKeybindings,
   KeybindingCommand as KeybindingCommandSchema,
-  KeybindingsConfig,
+  KeybindingRule as KeybindingRuleSchema,
+  MAX_KEYBINDINGS_COUNT,
   type KeybindingCommand,
   type KeybindingRule,
   type ResolvedKeybindingsConfig,
@@ -9,10 +10,12 @@ import {
 import {
   compileResolvedKeybindingRule,
   compileResolvedKeybindingsConfig,
-  DEFAULT_KEYBINDINGS,
   mergeWithDefaultKeybindings,
 } from "@ryco/shared/keybindings";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
+import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "./appKeybindingDefaults.ts";
 
 export const DEFAULT_APP_KEYBINDINGS: AppKeybindings = { rules: [], disabledCommands: [] };
 
@@ -27,43 +30,15 @@ export function validateAppKeybindings(input: unknown): AppKeybindings {
   return preferences;
 }
 
-export function resolveAppKeybindings(preferences: AppKeybindings = DEFAULT_APP_KEYBINDINGS) {
+export function resolveAppKeybindings(
+  preferences: AppKeybindings = DEFAULT_APP_KEYBINDINGS,
+  defaults: ResolvedKeybindingsConfig = APP_DEFAULT_RESOLVED_KEYBINDINGS,
+) {
   return mergeWithDefaultKeybindings(
+    defaults,
     compileResolvedKeybindingsConfig(preferences.rules),
     preferences.disabledCommands,
   );
-}
-
-/** Whole-command comparison retains alternate/contextual overrides while letting defaults evolve. */
-function actualOverrides(rules: readonly KeybindingRule[]): readonly KeybindingRule[] {
-  const unchanged = new Set(
-    rules
-      .map((rule) => rule.command)
-      .filter((command) => {
-        const defaults = DEFAULT_KEYBINDINGS.filter((rule) => rule.command === command);
-        if (defaults.length === 0) return false;
-        const custom = rules.filter((rule) => rule.command === command);
-        return (
-          JSON.stringify(compileResolvedKeybindingsConfig(custom)) ===
-          JSON.stringify(compileResolvedKeybindingsConfig(defaults))
-        );
-      }),
-  );
-  return rules.filter((rule) => !unchanged.has(rule.command));
-}
-
-/** Persist a complete editor snapshot, including commands the user deliberately unbound. */
-export function appKeybindingsFromRules(rules: readonly KeybindingRule[]): AppKeybindings {
-  const decoded = Schema.decodeUnknownSync(KeybindingsConfig)(rules);
-  // Compilation drops invalid rules, so reject them before comparing against defaults.
-  validateAppKeybindings({ rules: decoded, disabledCommands: [] });
-  const commands = new Set(decoded.map((rule) => rule.command));
-  return validateAppKeybindings({
-    rules: actualOverrides(decoded),
-    disabledCommands: [...new Set(DEFAULT_KEYBINDINGS.map((rule) => rule.command))].filter(
-      (command) => !commands.has(command),
-    ),
-  });
 }
 
 export interface ScriptShortcutScope {
@@ -86,15 +61,6 @@ export function scopedScriptId(command: string, scope: ScriptShortcutScope): str
   return command.slice(prefix.length, -4);
 }
 
-/** Project-scoped script commands in different projects never participate in the same context. */
-export function keybindingCommandScopesOverlap(left: string, right: string): boolean {
-  const scope = (command: string) =>
-    command.startsWith("projectScript.") ? command.slice(0, command.lastIndexOf("/")) : null;
-  const l = scope(left);
-  const r = scope(right);
-  return l === null || r === null || l === r;
-}
-
 /** Filter before shortcut resolution so a foreign project's rule cannot shadow an app command. */
 export function keybindingsForProject(
   bindings: ResolvedKeybindingsConfig,
@@ -108,30 +74,120 @@ export function keybindingsForProject(
   });
 }
 
-/** Explicit import keeps all locally configured/disabled commands, including their contexts. */
-export function importAppKeybindings(
-  current: AppKeybindings,
-  incoming: readonly KeybindingRule[],
-): AppKeybindings {
-  const imported = validateAppKeybindings({ rules: incoming, disabledCommands: [] });
-  const owned = new Set([
-    ...current.rules.map((rule) => rule.command),
-    ...current.disabledCommands,
-  ]);
-  return validateAppKeybindings({
-    rules: [
-      ...actualOverrides(imported.rules).filter((rule) => !owned.has(rule.command)),
-      ...current.rules,
-    ],
-    disabledCommands: current.disabledCommands,
-  });
+export const APP_KEYBINDINGS_STORAGE_KEY = "ryco:app-keybindings:v1";
+
+type RetainedKeybindingRule = Readonly<Record<string, unknown>> & { readonly command: string };
+
+/**
+ * Saved entries this version cannot use: rules for unknown commands or with keys it cannot
+ * compile, unknown disabled commands and unknown document fields. They stay inactive here and are
+ * written back unchanged, so shortcuts saved by a newer Ryco survive edits made in this one.
+ */
+interface RetainedAppKeybindings {
+  readonly otherFields: Readonly<Record<string, unknown>>;
+  readonly rules: readonly RetainedKeybindingRule[];
+  readonly disabledCommands: readonly string[];
 }
 
-export const APP_KEYBINDINGS_STORAGE_KEY = "ryco:app-keybindings:v1";
+const NO_RETAINED_APP_KEYBINDINGS: RetainedAppKeybindings = {
+  otherFields: {},
+  rules: [],
+  disabledCommands: [],
+};
+
+const decodeKeybindingRule = Schema.decodeUnknownOption(KeybindingRuleSchema);
+const isKeybindingCommand = Schema.is(KeybindingCommandSchema);
+
+/**
+ * Decodes the saved document one entry at a time. Persisted data is otherwise decoded strictly,
+ * but this document is shared by every build that runs in the profile or installation: an
+ * outdated tab or a downgraded app must keep the shortcuts it knows when a newer one saved more.
+ * What it cannot use is retained, except entries without a command, which no version can use.
+ * A rule it can use is written back in its decoded form, so a field added to rules later would
+ * be lost here and needs its own handling. A document without both lists still fails, and
+ * writes stay strict through `validateAppKeybindings`.
+ */
+function decodePersistedAppKeybindings(input: unknown): {
+  readonly preferences: AppKeybindings;
+  readonly retained: RetainedAppKeybindings;
+} {
+  const document: Readonly<Record<string, unknown>> = Predicate.isObject(input) ? input : {};
+  const { rules, disabledCommands, ...otherFields } = document;
+  if (!Array.isArray(rules) || !Array.isArray(disabledCommands)) {
+    throw new Error("Saved keybindings are not a keybindings document.");
+  }
+  const preferences = {
+    rules: [] as KeybindingRule[],
+    disabledCommands: [] as KeybindingCommand[],
+  };
+  const retained = {
+    otherFields,
+    rules: [] as RetainedKeybindingRule[],
+    disabledCommands: [] as string[],
+  };
+  for (const entry of rules.slice(-MAX_KEYBINDINGS_COUNT)) {
+    // An entry without a command is corrupt: no version can use it.
+    if (!Predicate.isObject(entry) || typeof entry.command !== "string") continue;
+    const rule = Option.getOrUndefined(decodeKeybindingRule(entry));
+    if (rule && compileResolvedKeybindingRule(rule) && !rule.command.startsWith("script.")) {
+      preferences.rules.push(rule);
+    } else {
+      retained.rules.push(entry as RetainedKeybindingRule);
+    }
+  }
+  for (const command of new Set(disabledCommands.slice(0, MAX_KEYBINDINGS_COUNT))) {
+    if (isKeybindingCommand(command)) preferences.disabledCommands.push(command);
+    else if (typeof command === "string") retained.disabledCommands.push(command);
+  }
+  return { preferences, retained };
+}
+
+/**
+ * A retained rule goes once its command is edited here, so the latest intent wins. Retained
+ * entries make room first when the document is full.
+ */
+function retainedAfterEdit(
+  retained: RetainedAppKeybindings,
+  previous: AppKeybindings,
+  next: AppKeybindings,
+): RetainedAppKeybindings {
+  // Compiled, so the editor rewriting an untouched rule's key text is not an edit.
+  const commandSettings = (preferences: AppKeybindings, command: string) =>
+    JSON.stringify([
+      compileResolvedKeybindingsConfig(
+        preferences.rules.filter((rule) => rule.command === command),
+      ),
+      (preferences.disabledCommands as readonly string[]).includes(command),
+    ]);
+  const rules = retained.rules.filter(
+    (rule) => commandSettings(previous, rule.command) === commandSettings(next, rule.command),
+  );
+  return {
+    otherFields: retained.otherFields,
+    rules: rules.slice(Math.max(0, rules.length + next.rules.length - MAX_KEYBINDINGS_COUNT)),
+    disabledCommands: retained.disabledCommands.slice(
+      0,
+      Math.max(0, MAX_KEYBINDINGS_COUNT - next.disabledCommands.length),
+    ),
+  };
+}
+
+/** Own rules come last, so they win over retained ones in versions that can use both. */
+function serializeAppKeybindings(
+  preferences: AppKeybindings,
+  retained: RetainedAppKeybindings,
+): string {
+  return JSON.stringify({
+    ...retained.otherFields,
+    rules: [...retained.rules, ...preferences.rules],
+    disabledCommands: [...preferences.disabledCommands, ...retained.disabledCommands],
+  });
+}
 
 /** Ordered durable writes publish only after success. Hydration can never replace an edit. */
 export function createAppKeybindingsStore(storage: import("../../platform/index.ts").KVService) {
   let preferences = DEFAULT_APP_KEYBINDINGS;
+  let retained = NO_RETAINED_APP_KEYBINDINGS;
   // No shortcuts may execute until the installation/profile document has been read.
   let bindings: ResolvedKeybindingsConfig = [];
   let hydrated = false;
@@ -155,8 +211,10 @@ export function createAppKeybindingsStore(storage: import("../../platform/index.
     hydration = (async () => {
       try {
         const raw = await storage.getItem(APP_KEYBINDINGS_STORAGE_KEY);
-        preferences =
-          raw === null ? DEFAULT_APP_KEYBINDINGS : validateAppKeybindings(JSON.parse(raw));
+        ({ preferences, retained } =
+          raw === null
+            ? { preferences: DEFAULT_APP_KEYBINDINGS, retained: NO_RETAINED_APP_KEYBINDINGS }
+            : decodePersistedAppKeybindings(JSON.parse(raw)));
         bindings = resolveAppKeybindings(preferences);
         hydrated = true;
         error = null;
@@ -174,8 +232,10 @@ export function createAppKeybindingsStore(storage: import("../../platform/index.
     const write = writes.then(async () => {
       await hydrate();
       const next = validateAppKeybindings(change(preferences));
-      await storage.setItem(APP_KEYBINDINGS_STORAGE_KEY, JSON.stringify(next));
+      const kept = retainedAfterEdit(retained, preferences, next);
+      await storage.setItem(APP_KEYBINDINGS_STORAGE_KEY, serializeAppKeybindings(next, kept));
       preferences = next;
+      retained = kept;
       bindings = resolveAppKeybindings(next);
       error = null;
       publish();
@@ -197,12 +257,14 @@ export function createAppKeybindingsStore(storage: import("../../platform/index.
     },
     hydrate,
     update,
-    // Explicit recovery may replace unreadable/corrupt data; ordinary edits never do.
+    // Explicit recovery may replace unreadable/corrupt data; ordinary edits never do. It also
+    // drops retained entries.
     reset: () => {
       const write = writes.then(async () => {
         await hydration?.catch(() => undefined);
         await storage.setItem(APP_KEYBINDINGS_STORAGE_KEY, JSON.stringify(DEFAULT_APP_KEYBINDINGS));
         preferences = DEFAULT_APP_KEYBINDINGS;
+        retained = NO_RETAINED_APP_KEYBINDINGS;
         bindings = resolveAppKeybindings(preferences);
         hydrated = true;
         error = null;

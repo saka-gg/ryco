@@ -1,7 +1,16 @@
+import { STATIC_KEYBINDING_COMMANDS } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import { KEYBINDING_CATEGORIES, getCommandMeta } from "./keybindingCategories";
 
 describe("keybindingCategories", () => {
+  it("gives every static command a title and a category of its own", () => {
+    const missing = STATIC_KEYBINDING_COMMANDS.filter((command) => {
+      const meta = getCommandMeta(command);
+      return meta.title.startsWith("Run:") || meta.category === KEYBINDING_CATEGORIES.script;
+    });
+    expect(missing).toEqual([]);
+  });
+
   it("maps terminal commands to the Terminal category", () => {
     expect(getCommandMeta("terminal.toggle").category).toBe(KEYBINDING_CATEGORIES.terminal);
     expect(getCommandMeta("terminal.split").category).toBe(KEYBINDING_CATEGORIES.terminal);
@@ -79,6 +88,13 @@ describe("keybindingCategories", () => {
   it("maps script.<id>.run commands to the Project scripts category", () => {
     expect(getCommandMeta("script.test.run").category).toBe(KEYBINDING_CATEGORIES.script);
     expect(getCommandMeta("script.build.run").category).toBe(KEYBINDING_CATEGORIES.script);
+  });
+
+  it("maps project-scoped script commands to the Project scripts category", () => {
+    expect(getCommandMeta("projectScript.node-a/project-1/test.run", "Run tests")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.script,
+      title: "Run tests",
+    });
   });
 
   it("returns a friendly title for static commands", () => {
