@@ -3,7 +3,7 @@ import * as Path from "node:path";
 
 import {
   ClientSettingsSchema,
-  AppKeybindings,
+  MAX_KEYBINDINGS_COUNT,
   type ClientSettings,
   type PersistedSavedEnvironmentRecord,
 } from "@ryco/contracts";
@@ -228,7 +228,18 @@ export function readAppKeybindings(settingsPath: string): string | null {
     throw cause;
   }
 }
+
+/**
+ * The renderer validates the entries. Main checks only the document's shape and writes it
+ * unchanged, so entries a newer version saved are not rejected or stripped.
+ */
+const AppKeybindingsDocument = Schema.Struct({
+  rules: Schema.Array(Schema.Unknown).check(Schema.isMaxLength(MAX_KEYBINDINGS_COUNT)),
+  disabledCommands: Schema.Array(Schema.Unknown).check(Schema.isMaxLength(MAX_KEYBINDINGS_COUNT)),
+});
+
 export function writeAppKeybindings(settingsPath: string, document: string): void {
-  const parsed = Schema.decodeUnknownSync(AppKeybindings)(JSON.parse(document));
+  const parsed: unknown = JSON.parse(document);
+  Schema.decodeUnknownSync(AppKeybindingsDocument)(parsed);
   writeJsonFile(settingsPath, parsed);
 }

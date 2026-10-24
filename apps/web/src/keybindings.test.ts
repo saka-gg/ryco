@@ -6,10 +6,10 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
+import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
 import {
   compileResolvedKeybindingsConfig,
-  DEFAULT_RESOLVED_KEYBINDINGS,
-  mergeWithDefaultKeybindings,
+  NODE_DEFAULT_RESOLVED_KEYBINDINGS,
 } from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
@@ -767,7 +767,7 @@ describe("resolveShortcutCommand", () => {
 
   it("resolves the default split-view shortcuts from physical keys", () => {
     const resolve = (overrides: Partial<ShortcutEventLike>, context = {}) =>
-      resolveShortcutCommand(event(overrides), DEFAULT_RESOLVED_KEYBINDINGS, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform: "MacIntel",
         context,
       });
@@ -792,24 +792,18 @@ describe("resolveShortcutCommand", () => {
       null,
     );
     assert.strictEqual(
-      shortcutLabelForCommand(DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "pane.close", "MacIntel"),
       "⇧⌘\\",
     );
   });
 
   it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
-    // No default: a node sends every default to clients that may predate the command.
+    // The default is client-only: a node sends every default to clients that may predate the command.
     assert.isFalse(
-      DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
-    );
-    // `chat.newWithoutProject` has no default key; this is a user's binding.
-    const keybindings = mergeWithDefaultKeybindings(
-      compileResolvedKeybindingsConfig([
-        { key: "mod+alt+n", command: "chat.newWithoutProject", when: "!terminalFocus" },
-      ]),
+      NODE_DEFAULT_RESOLVED_KEYBINDINGS.some((rule) => rule.command === "chat.newWithoutProject"),
     );
     const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel") =>
-      resolveShortcutCommand(event(overrides), keybindings, {
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
         platform,
         context: { terminalFocus: false },
       });
@@ -835,6 +829,58 @@ describe("resolveShortcutCommand", () => {
     );
     // Without Alt the physical key never stands in for the produced character.
     assert.isNull(resolve({ key: "Dead", code: "KeyN", metaKey: true }));
+  });
+
+  it("leaves characters typed with AltGr to the focused control outside macOS", () => {
+    const keybindings = compileResolvedKeybindingsConfig([
+      { key: "mod+alt+a", command: "chat.newWithoutProject" },
+      { key: "mod+alt+[", command: "pane.focusPrevious" },
+      { key: "mod+alt+m", command: "pane.split" },
+    ]);
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "Win32") =>
+      resolveShortcutCommand(event(overrides), keybindings, { platform });
+    const altGraph = { getModifierState: (key: string) => key === "AltGraph" };
+    // Windows reports AltGr as Ctrl+Alt; Polish AltGr+A types "ą" with or without "AltGraph".
+    assert.isNull(resolve({ key: "ą", code: "KeyA", ctrlKey: true, altKey: true }));
+    assert.isNull(resolve({ key: "ą", code: "KeyA", ctrlKey: true, altKey: true, ...altGraph }));
+    // German AltGr+8 types "[".
+    assert.isNull(resolve({ key: "[", code: "Digit8", ctrlKey: true, altKey: true, ...altGraph }));
+    // Ctrl+Alt chords that type no AltGr character still match.
+    assert.strictEqual(
+      resolve({ key: "a", code: "KeyA", ctrlKey: true, altKey: true }),
+      "chat.newWithoutProject",
+    );
+    assert.strictEqual(
+      resolve({ key: "a", code: "KeyA", ctrlKey: true, altKey: true, ...altGraph }),
+      "chat.newWithoutProject",
+    );
+    assert.strictEqual(
+      resolve({ key: "[", code: "BracketLeft", ctrlKey: true, altKey: true }),
+      "pane.focusPrevious",
+    );
+    // A layout letter still matches by its physical key: German Ctrl+Alt+Ü is the [ key.
+    assert.strictEqual(
+      resolve({ key: "ü", code: "BracketLeft", ctrlKey: true, altKey: true, ...altGraph }),
+      "pane.focusPrevious",
+    );
+    // A non-Latin layout reports its own letter (Russian "ф" on the A key) and matches by the
+    // physical key, unless AltGr typed it.
+    assert.strictEqual(
+      resolve({ key: "ф", code: "KeyA", ctrlKey: true, altKey: true }),
+      "chat.newWithoutProject",
+    );
+    assert.isNull(resolve({ key: "ф", code: "KeyA", ctrlKey: true, altKey: true, ...altGraph }));
+    // German AltGr+M types "µ", which is no layout's own letter.
+    assert.isNull(resolve({ key: "µ", code: "KeyM", ctrlKey: true, altKey: true }));
+    assert.strictEqual(
+      resolve({ key: "m", code: "KeyM", ctrlKey: true, altKey: true }),
+      "pane.split",
+    );
+    // macOS has no AltGr: ⌘⌥A still matches through the physical key.
+    assert.strictEqual(
+      resolve({ key: "å", code: "KeyA", metaKey: true, altKey: true, ...altGraph }, "MacIntel"),
+      "chat.newWithoutProject",
+    );
   });
 });
 

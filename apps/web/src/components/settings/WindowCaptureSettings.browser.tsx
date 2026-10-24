@@ -8,7 +8,8 @@ import type {
   DesktopWindowCaptureShortcutResult,
   DesktopWindowCaptureState,
 } from "@ryco/contracts";
-import { replaceAppKeybindings, resetAppKeybindings } from "../../appKeybindings";
+import { resetAppKeybindings } from "../../appKeybindings";
+import { replaceAppKeybindings } from "../../appKeybindingsEditing";
 import { preloadWindowCaptureSettings, WindowCaptureSettings } from "./WindowCaptureSettings";
 
 const previous = window.desktopBridge;

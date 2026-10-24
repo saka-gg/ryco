@@ -17,11 +17,7 @@ import {
   type KeybindingShortcut,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import {
-  DEFAULT_KEYBINDINGS,
-  DEFAULT_RESOLVED_KEYBINDINGS,
-  parseKeybindingShortcut,
-} from "@ryco/shared/keybindings";
+import { parseKeybindingShortcut } from "@ryco/shared/keybindings";
 import { useShallow } from "zustand/react/shallow";
 
 import { cn, isMacPlatform } from "../../lib/utils";
@@ -44,15 +40,18 @@ import {
 } from "../../lib/shortcutCapture";
 import { Schema } from "effect";
 import { KeybindingsConfig, STATIC_KEYBINDING_COMMANDS } from "@ryco/contracts";
-import { scopedScriptCommand } from "@ryco/client-runtime/state/settings";
+import {
+  APP_DEFAULT_KEYBINDINGS,
+  APP_DEFAULT_RESOLVED_KEYBINDINGS,
+  scopedScriptCommand,
+} from "@ryco/client-runtime/state/settings";
 import {
   useAllAppKeybindings,
   useAppKeybindingsState,
   retryAppKeybindings,
-  replaceAppKeybindings,
   resetAppKeybindings,
-  importLegacyKeybindings,
 } from "../../appKeybindings";
+import { importLegacyKeybindings, replaceAppKeybindings } from "../../appKeybindingsEditing";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
@@ -84,7 +83,7 @@ interface CategoryGroup {
 
 const DEFAULT_RULE_KEY_BY_COMMAND = (() => {
   const map = new Map<KeybindingCommand, Set<string>>();
-  for (const rule of DEFAULT_KEYBINDINGS) {
+  for (const rule of APP_DEFAULT_KEYBINDINGS) {
     const key = `${rule.key}|${rule.when ?? ""}`;
     const set = map.get(rule.command) ?? new Set();
     set.add(key);
@@ -98,7 +97,7 @@ const DEFAULT_RULE_KEY_BY_COMMAND = (() => {
  * `pullRequests.open` ship without a key and would otherwise be unbindable here.
  */
 const DEFAULT_COMMANDS = new Set<KeybindingCommand>([
-  ...DEFAULT_KEYBINDINGS.map((r: KeybindingRule) => r.command),
+  ...APP_DEFAULT_KEYBINDINGS.map((r: KeybindingRule) => r.command),
   ...STATIC_KEYBINDING_COMMANDS,
 ]);
 
@@ -126,7 +125,7 @@ function stripDraftIds(draft: ReadonlyArray<DraftRule>): KeybindingRule[] {
 }
 
 function defaultRulesFor(command: KeybindingCommand): KeybindingRule[] {
-  return DEFAULT_KEYBINDINGS.filter((rule: KeybindingRule) => rule.command === command).map(
+  return APP_DEFAULT_KEYBINDINGS.filter((rule: KeybindingRule) => rule.command === command).map(
     (r: KeybindingRule) => Object.assign({}, r),
   );
 }
@@ -377,7 +376,7 @@ export function KeybindingsSettingsPanel() {
     setSaving(true);
     try {
       await resetAppKeybindings();
-      setDraft(snapshotToDraft(DEFAULT_RESOLVED_KEYBINDINGS));
+      setDraft(snapshotToDraft(APP_DEFAULT_RESOLVED_KEYBINDINGS));
     } catch (error: unknown) {
       toastManager.add(
         stackedThreadToast({

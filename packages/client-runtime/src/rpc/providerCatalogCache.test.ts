@@ -9,7 +9,7 @@ import {
   type ServerConfigStreamSnapshotEvent,
   type ServerProvider,
 } from "@ryco/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
+import { NODE_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import { Stream } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -73,7 +73,7 @@ const config = (providers: ReadonlyArray<ServerProvider>): ServerConfig => ({
   },
   cwd: "/repo",
   keybindingsConfigPath: "/repo/keybindings.json",
-  keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
+  keybindings: NODE_DEFAULT_RESOLVED_KEYBINDINGS,
   issues: [],
   providers,
   availableEditors: [],
