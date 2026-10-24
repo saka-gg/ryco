@@ -22,6 +22,7 @@ import {
   waitForCommandPaletteInput,
   waitForComposerEditor,
   waitForElement,
+  WIDE_FOOTER_VIEWPORT,
   wsRequests,
 } from "./ChatView.browser.helpers";
 
@@ -315,6 +316,67 @@ describe("ChatView workspace search", () => {
       );
     } finally {
       unsubscribe();
+      await mounted.cleanup();
+    }
+  });
+
+  it("brings back its search after opening a line", async () => {
+    // Wide enough for the Files panel to sit beside the chat: as the narrow
+    // layout's sheet it is a dialog, which global shortcuts wait for.
+    const mounted = await mountChatView({
+      viewport: WIDE_FOOTER_VIEWPORT,
+      snapshot: snapshot(),
+      resolveRpc: resolveWorkspaceSearchRpc,
+      configureFixture: withCapabilities({ projectContentSearch: true }),
+    });
+
+    try {
+      pressModKey(window, "F", true);
+      const input = await waitForFindInFilesInput();
+      const findInFiles = page.getByTestId("find-in-files");
+      await page.getByPlaceholder("Search in Project").fill("wide");
+      await expect
+        .element(findInFiles.getByRole("status"))
+        .toHaveTextContent("3 results in 2 files");
+      await dispatchInputKey(input, { key: "Enter" });
+      await vi.waitFor(() => {
+        expect(document.querySelector('[data-testid="find-in-files"]')).toBeNull();
+        expect(mounted.router.state.location.search).toMatchObject({ workspaceTab: "files" });
+      });
+
+      // The pick did not replace the query: the key reopens the same search,
+      // from wherever opening the line left focus.
+      expect(pressModKey(document.activeElement ?? window, "F", true).defaultPrevented).toBe(true);
+      const reopened = await waitForFindInFilesInput();
+      expect(reopened.value).toBe("wide");
+      await expect
+        .element(findInFiles.getByRole("status"))
+        .toHaveTextContent("3 results in 2 files");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("leaves both keys to other text fields", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshot(),
+      resolveRpc: resolveWorkspaceSearchRpc,
+      configureFixture: withCapabilities({ projectContentSearch: true }),
+    });
+    const field = document.createElement("input");
+    document.body.append(field);
+
+    try {
+      field.focus();
+      expect(pressModKey(field, "p").defaultPrevented).toBe(false);
+      expect(pressModKey(field, "F", true).defaultPrevented).toBe(false);
+      expect(useCommandPaletteStore.getState()).toMatchObject({
+        open: false,
+        workspaceSearchMode: null,
+      });
+    } finally {
+      field.remove();
       await mounted.cleanup();
     }
   });
