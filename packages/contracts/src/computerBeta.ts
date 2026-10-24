@@ -8,6 +8,22 @@ export const ComputerTurnIntent = Schema.Struct({
   generation: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
 });
 export type ComputerTurnIntent = typeof ComputerTurnIntent.Type;
+/** The desktop's answer to one Computer consent request over the private bridge. */
+export const ComputerConsentReply = Schema.Struct({
+  approved: Schema.Boolean,
+  outcome: Schema.Literals([
+    "accept",
+    "decline",
+    "pending",
+    "expired",
+    "unavailable",
+    "busy",
+    "stopped",
+  ]),
+  /** False when asking again in this turn cannot help (decline, second expiry, stopped task). */
+  retryable: Schema.Boolean,
+});
+export type ComputerConsentReply = typeof ComputerConsentReply.Type;
 export interface ComputerBetaPreferences {
   defaultEnabled: boolean;
   autoPreview: boolean;
