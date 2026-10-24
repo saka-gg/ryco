@@ -169,7 +169,25 @@ the call.
 `bun run test:device` (`scripts/device-helper-smoke.ts`) compiles the helper,
 boots or reuses a simulator, streams ≥30 frames asserting keyframe and Annex B
 NAL structure, injects a tap, dumps the accessibility tree, verifies PNG magic on
-a screenshot, and shuts down only a simulator it booted itself.
+a screenshot, and shuts down only a simulator it booted itself. It does so on
+failure too, and on SIGINT/SIGTERM; only SIGKILL can leave that simulator
+running.
+
+Flags (after `bun scripts/device-helper-smoke.ts`):
+
+- `--probe-only` builds and preflights the helper and never boots a simulator
+  (`bun run test:device:probe`).
+- `--cache-dir <dir>` builds into `<dir>/<cache key>` instead of
+  `~/Library/Caches/ryco/device-helper/<cache key>`.
+- `--udid <udid>` drives exactly that iOS simulator. It must be shut down: the
+  run boots it and shuts it down at the end. A booted simulator, or one that is
+  booting or shutting down, is refused.
+- `--allow-booted` (only with `--udid`) reuses that simulator when it is already
+  booted, and leaves it running.
+
+Without `--udid` the smoke prefers whatever simulator is already booted, which
+suits a developer's own machine. On a shared machine (or from an agent), always
+pass `--udid` with a simulator created for the run.
 
 `apps/server/src/device/helperBuildScript.test.ts` runs the real `build.sh`
 against fake Xcode 26 and Xcode 27 layouts with a stub `xcrun`, so the
