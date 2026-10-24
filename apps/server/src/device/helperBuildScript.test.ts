@@ -175,6 +175,43 @@ describe.skipIf(process.platform === "win32")("device helper build.sh", () => {
     expect(swiftSources).toEqual(sourceFiles(".swift"));
   });
 
+  // build.sh's preflight and the helper's dlopen loop are in two languages, so
+  // they cannot share one list; this keeps them from drifting apart. Each entry
+  // is normalized to "<base>:<path below it>".
+  it("checks the same SimulatorKit locations, in the same order, as the Swift loader", () => {
+    const script = readFileSync(BUILD_SCRIPT, "utf8");
+    const scriptBases: Record<string, string> = {
+      DEVELOPER_DIR_PATH: "developer",
+      CONTENTS_DIR: "contents",
+    };
+    const scriptCandidates = [
+      ...script.matchAll(
+        /"\$(DEVELOPER_DIR_PATH|CONTENTS_DIR)(\/[^"]*\/SimulatorKit\.framework)"/gu,
+      ),
+    ].map((match) => `${scriptBases[match[1]!]}:${match[2]}`);
+
+    const bridge = readFileSync(join(HELPER_SOURCES, "CoreSimulatorBridge.swift"), "utf8");
+    const body = /func simulatorKitCandidatePaths\([^)]*\) -> \[String\] \{([\s\S]*?)\n\}/u.exec(
+      bridge,
+    )?.[1];
+    expect(body).toBeDefined();
+    const swiftBases: Record<string, string> = {
+      developerDirectory: "developer",
+      contentsDirectory: "contents",
+    };
+    const swiftCandidates = [
+      ...body!.matchAll(
+        /(developerDirectory|contentsDirectory) \+ "(\/[^"]*\/SimulatorKit\.framework)\/SimulatorKit"/gu,
+      ),
+    ].map((match) => `${swiftBases[match[1]!]}:${match[2]}`);
+
+    expect(scriptCandidates).toEqual([
+      "developer:/Library/PrivateFrameworks/SimulatorKit.framework",
+      "contents:/SharedFrameworks/SimulatorKit.framework",
+    ]);
+    expect(swiftCandidates).toEqual(scriptCandidates);
+  });
+
   // The server runs `/bin/sh build.sh` (IosSimulatorBackend.compileHelper).
   // On macOS that is bash 3.2 in POSIX mode, which the SimulatorKit lookup
   // must stay compatible with.

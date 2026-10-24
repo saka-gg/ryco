@@ -74,8 +74,6 @@ struct PrivateFrameworkHandles {
   /// nil when SimulatorKit itself would not load. The probe reports that as one
   /// HID failure rather than listing every Indigo symbol as missing.
   let simulatorKit: UnsafeMutableRawPointer?
-  /// The SimulatorKit binary that loaded, nil when none did.
-  let simulatorKitPath: String?
 }
 
 /// dlopens CoreSimulator, SimulatorKit and the accessibility translator.
@@ -118,11 +116,12 @@ func loadPrivateFrameworks(
     "/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation"
   _ = dlopen(accessibility, RTLD_NOW)
 
-  // The HID bridge opens exactly the image loaded here, so an overridden
-  // DEVELOPER_DIR or a relocated framework cannot pull the two out of agreement.
+  // The one channel for the loaded path: the HID bridge opens exactly the
+  // image loaded here, so an overridden DEVELOPER_DIR or a relocated framework
+  // cannot pull the two out of agreement.
   RycoHIDBridge.simulatorKitPath = simulatorKitPath
 
-  return PrivateFrameworkHandles(simulatorKit: simulatorKit, simulatorKitPath: simulatorKitPath)
+  return PrivateFrameworkHandles(simulatorKit: simulatorKit)
 }
 
 /// The CoreSimulator device-set, and lookups over it.

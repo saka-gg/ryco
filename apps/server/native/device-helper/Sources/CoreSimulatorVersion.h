@@ -12,19 +12,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// The first CoreSimulator (Xcode 27) whose guests drop legacy Indigo input.
-extern NSString *const RycoFirstDTUHIDCoreSimulatorVersion;
-
 /// The loaded CoreSimulator's CFBundleVersion, or nil when it cannot be read.
 NSString *_Nullable RycoCoreSimulatorVersion(void);
 
-/// Whether this host's CoreSimulator drops Indigo input. Decided by version
-/// alone: the guest's `dtuhidd` is demand-launched, so whether it happens to be
-/// running says nothing. NO when the version cannot be read.
-BOOL RycoCoreSimulatorDropsIndigoInput(void);
-
 /// Why Indigo input is refused on this host, or nil when Indigo is usable.
-/// Goes away once the helper delivers input through `dtuhidd`.
+/// Decided by version alone: the guest's `dtuhidd` is demand-launched, so
+/// whether it happens to be running says nothing. nil when the version cannot
+/// be read. Goes away once the helper delivers input through `dtuhidd`.
 NSString *_Nullable RycoIndigoInputUnsupportedReason(void);
 
 NS_ASSUME_NONNULL_END

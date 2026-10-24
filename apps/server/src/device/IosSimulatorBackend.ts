@@ -447,10 +447,15 @@ export class IosSimulatorBackend implements DeviceBackend {
   /**
    * Run the built helper's per-capability preflight.
    *
-   * Cached for the process lifetime, keyed on the helper binary path: the
-   * answer only changes when the toolchain does, and a new toolchain produces a
-   * different cache key and therefore a different path. Returns null when no
-   * helper is built yet, since there is nothing to probe.
+   * Cached for the process lifetime, keyed on the helper binary path: a new
+   * selected Xcode or new helper sources produce a different cache key and
+   * therefore a different path. The one input it cannot see is the system-wide
+   * CoreSimulator, which the helper's `hid` answer depends on: installing a
+   * newer Xcode while the server runs upgrades it under the same path. Until
+   * the next restart the pane can then show input as available, while the
+   * helper refuses each input call and names the CoreSimulator version in the
+   * error, so nothing is acked and lost. Returns null when no helper is built
+   * yet, since there is nothing to probe.
    */
   private async probeHelperCapabilities(): Promise<HelperProbeResult | null> {
     const binaryPath = await this.cachedHelperPath();

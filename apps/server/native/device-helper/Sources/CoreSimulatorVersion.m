@@ -1,6 +1,7 @@
 #import "CoreSimulatorVersion.h"
 
-NSString *const RycoFirstDTUHIDCoreSimulatorVersion = @"1155.4";
+/// The first CoreSimulator (Xcode 27) whose guests drop legacy Indigo input.
+static NSString *const kRycoFirstDTUHIDCoreSimulatorVersion = @"1155.4";
 
 NSString *RycoCoreSimulatorVersion(void) {
   // The bundle is registered once CoreSimulator has been dlopen'd; the
@@ -22,12 +23,8 @@ static BOOL RycoVersionDropsIndigoInput(NSString *_Nullable version) {
     return NO;
   }
   // Numeric so 1155.10 sorts above 1155.4.
-  return [version compare:RycoFirstDTUHIDCoreSimulatorVersion options:NSNumericSearch] !=
+  return [version compare:kRycoFirstDTUHIDCoreSimulatorVersion options:NSNumericSearch] !=
          NSOrderedAscending;
-}
-
-BOOL RycoCoreSimulatorDropsIndigoInput(void) {
-  return RycoVersionDropsIndigoInput(RycoCoreSimulatorVersion());
 }
 
 NSString *RycoIndigoInputUnsupportedReason(void) {
@@ -35,9 +32,13 @@ NSString *RycoIndigoInputUnsupportedReason(void) {
   if (!RycoVersionDropsIndigoInput(version)) {
     return nil;
   }
+  // Names the CoreSimulator rather than the selected Xcode: an older selected
+  // Xcode still runs the newest installed CoreSimulator, and the server puts
+  // the selected Xcode in front of this text.
   return [NSString
-      stringWithFormat:@"Simulator input on CoreSimulator %@ (Xcode 27 or later) goes through the "
-                       @"guest's dtuhidd service, which this helper does not support yet; "
-                       @"streaming, screenshots and the accessibility tree still work",
+      stringWithFormat:@"Simulator input on this Mac's CoreSimulator %@ (installed by Xcode 27 or "
+                       @"later, whichever Xcode is selected) goes through the guest's dtuhidd "
+                       @"service, which this helper does not support yet; streaming, screenshots "
+                       @"and the accessibility tree still work",
                        version];
 }
