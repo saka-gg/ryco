@@ -258,8 +258,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     const bytes = serve.chunks.reduce((total, chunk) => total + statSync(chunk).size, 0);
     // 6.6 MB with effect and the platform packages bundled in, and with Computer use,
     // the Hub connector and the source-control clients behind import(). Raise it only
-    // for code that every boot needs.
-    expect(bytes).toBeLessThan(7_000_000);
+    // for code that every boot needs. 6.91 MB in October 2026; the database owner lock,
+    // event-loop stall monitor, WAL checkpoint worker and database maintenance that every
+    // server starts add about 0.14 MB (their backup, doctor, trace, OTLP and heap-snapshot
+    // code loads through import()).
+    expect(bytes).toBeLessThan(7_100_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
