@@ -46,6 +46,7 @@ vi.mock("../environments/runtime", () => ({
   resetSavedEnvironmentRuntimeStoreForTests: vi.fn(),
   resolveEnvironmentHttpUrl: vi.fn(),
   updateEnvironmentServerSettings: vi.fn(),
+  useSavedEnvironmentRuntimeStore: vi.fn(),
 }));
 
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";
