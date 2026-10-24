@@ -353,3 +353,69 @@ it.each(["local_bash", "shell", "monitor", "monitor_mcp"])(
     expect(liveness.getThreadBackgroundLiveness(task.threadId)).toBeNull();
   },
 );
+
+describe("onLiveThreadsChange", () => {
+  const task = (threadId: string, taskId: string, runtimeSessionId: string | null = "r1") => ({
+    threadId,
+    taskId,
+    taskType: "subagent",
+    runtimeSessionId,
+  });
+
+  it("fires when a thread gains its first live task or loses its last one, never on ticks", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const calls: string[] = [];
+    liveness.onLiveThreadsChange((threadId) => calls.push(threadId));
+
+    liveness.recordTaskLiveness({ ...task("t", "a"), status: undefined, kind: "started" });
+    expect(calls).toEqual(["t"]);
+    // Progress ticks and a second task on a thread that already works say nothing new.
+    liveness.recordTaskLiveness({ ...task("t", "a"), status: undefined, kind: "progress" });
+    liveness.recordTaskLiveness({ ...task("t", "a"), status: "running", kind: "updated" });
+    liveness.recordTaskLiveness({ ...task("t", "b"), status: undefined, kind: "started" });
+    expect(calls).toEqual(["t"]);
+    // Another thread starting work is a change.
+    liveness.recordTaskLiveness({ ...task("u", "c"), status: undefined, kind: "started" });
+    expect(calls).toEqual(["t", "u"]);
+
+    liveness.recordTaskLiveness({ ...task("t", "a"), status: "completed", kind: "completed" });
+    expect(calls).toEqual(["t", "u"]);
+    liveness.recordTaskLiveness({ ...task("t", "b"), status: "completed", kind: "completed" });
+    expect(calls).toEqual(["t", "u", "t"]);
+
+    liveness.clearThreadLiveness("u");
+    expect(calls).toEqual(["t", "u", "t", "u"]);
+    // Clearing a thread without live work changes nothing.
+    liveness.clearThreadLiveness("u");
+    expect(calls).toEqual(["t", "u", "t", "u"]);
+  });
+
+  it("fires when a replacement runtime's report takes over a working thread", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const calls: string[] = [];
+    liveness.onLiveThreadsChange((threadId) => calls.push(threadId));
+    liveness.recordTaskLiveness({ ...task("t", "a", "r1"), status: undefined, kind: "started" });
+    // The thread worked before and works after, but now for another runtime.
+    liveness.recordTaskLiveness({ ...task("t", "b", "r2"), status: undefined, kind: "started" });
+    expect(calls).toEqual(["t", "t"]);
+    expect(liveness.listLiveTaskIds("t", "r2")).toEqual(["b"]);
+  });
+
+  it("ignores a throwing listener and stops calling an unsubscribed one", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const calls: string[] = [];
+    const stopThrowing = liveness.onLiveThreadsChange(() => {
+      throw new Error("listener exploded");
+    });
+    const stop = liveness.onLiveThreadsChange((threadId) => calls.push(threadId));
+    liveness.recordTaskLiveness({ ...task("t", "a"), status: undefined, kind: "started" });
+    expect(liveness.getThreadBackgroundLiveness("t")).toBe("working");
+    expect(calls).toEqual(["t"]);
+
+    stop();
+    stopThrowing();
+    liveness.clearThreadLiveness("t");
+    expect(calls).toEqual(["t"]);
+    expect(liveness.getThreadBackgroundLiveness("t")).toBeNull();
+  });
+});
