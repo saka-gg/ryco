@@ -194,6 +194,13 @@ describe("server boot import boundaries", () => {
     expect(
       reached(/^apps\/server\/src\/observability\/(?:HeapSnapshot|EventLoopStallHistory)\.ts$/u),
     ).toEqual([]);
+    // The OTEL variable resolver and the OTLP exporters load only when an export is configured,
+    // and the `ryco trace summary` implementation only when that command runs.
+    expect(
+      reached(
+        /^apps\/server\/src\/(?:observability\/(?:OtelEnvironmentResolver|OtlpExporters)|cliTrace\/(?:traceRun|traceSummary))\.ts$/u,
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -285,6 +292,14 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded with the first SIGUSR2 and the first Diagnostics snapshot.
       expect(source).not.toMatch(/^\/\/#region src\/observability\/HeapSnapshot\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/observability\/EventLoopStallHistory\.ts$/mu);
+      // Loaded only when an OTLP export is configured (with Effect's exporters and protobuf
+      // encoder), or when `ryco trace summary` runs.
+      expect(source).not.toMatch(/^\/\/#region src\/observability\/OtlpExporters\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region .*\/effect\/dist\/observability\/Otlp\w+\.js$/mu);
+      expect(source).not.toMatch(
+        /^\/\/#region .*\/effect\/dist\/observability\/internal\/\w+\.js$/mu,
+      );
+      expect(source).not.toMatch(/^\/\/#region src\/cliTrace\/traceSummary\.ts$/mu);
     }
   });
 });

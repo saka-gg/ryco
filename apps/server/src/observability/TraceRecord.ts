@@ -274,6 +274,57 @@ function decodeValue(input: OtlpResource.AnyValue | null | undefined): unknown {
   return null;
 }
 
+/** How a trace record ended, as Diagnostics and `ryco trace summary` report it. */
+export type TraceRecordStatus = "success" | "failure" | "interrupted" | "error" | "unset";
+
+/** The status of an OTLP span's `status.code`, numeric or named. */
+export function otlpStatusCodeStatus(code: string | undefined): TraceRecordStatus {
+  if (!code) return "success";
+  if (code === "2" || code === "STATUS_CODE_ERROR") return "error";
+  if (code === "1" || code === "STATUS_CODE_OK") return "success";
+  if (code === "0" || code === "STATUS_CODE_UNSET") return "unset";
+  return "success";
+}
+
+/**
+ * The fields of a trace file line that decide its status. Structural, so a reader that parsed only
+ * these fields of a line (the CLI summary) gets the same answer as one holding a whole record.
+ */
+export interface TraceRecordStatusFields {
+  readonly type?: string | undefined;
+  readonly exit?: { readonly _tag?: string | undefined } | undefined;
+  readonly status?: { readonly code?: string | undefined } | undefined;
+}
+
+/**
+ * An effect span's exit tag decides its status; any other record (an OTLP span from a browser)
+ * uses its OTLP status code.
+ */
+export function traceRecordStatus(record: TraceRecordStatusFields): TraceRecordStatus {
+  if (record.type === "effect-span") {
+    const exit = record.exit;
+    if (!exit || exit._tag === "Success") return "success";
+    if (exit._tag === "Interrupted") return "interrupted";
+    return "failure";
+  }
+  return otlpStatusCodeStatus(record.status?.code);
+}
+
+/**
+ * The trace file and the backups its rotation keeps (`.1` is the newest backup), oldest first.
+ * `maxFiles` is the backup count the writer was given.
+ */
+export function rotatedTraceFilePaths(
+  traceFilePath: string,
+  maxFiles: number,
+): ReadonlyArray<string> {
+  const backups = Math.max(0, Math.floor(maxFiles));
+  return [
+    ...Array.from({ length: backups }, (_, index) => `${traceFilePath}.${backups - index}`),
+    traceFilePath,
+  ];
+}
+
 function normalizeSpanKind(input: number): OtlpTraceRecord["kind"] {
   return SPAN_KIND_MAP[input] || "internal";
 }

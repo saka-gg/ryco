@@ -53,10 +53,12 @@ import {
   Fiber,
   FileSystem,
   Layer,
+  Logger,
   ManagedRuntime,
   Option,
   Path,
   PubSub,
+  Redacted,
   Ref,
   Stream,
 } from "effect";
@@ -3162,6 +3164,116 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
+
+  const makeRecordingCollector = (status: number) =>
+    Effect.acquireRelease(
+      Effect.promise(
+        () =>
+          new Promise<{
+            readonly url: string;
+            readonly requests: Array<{
+              readonly headers: NodeHttp.IncomingHttpHeaders;
+              readonly body: string;
+            }>;
+            readonly close: () => Promise<void>;
+          }>((resolve, reject) => {
+            const requests: Array<{
+              readonly headers: NodeHttp.IncomingHttpHeaders;
+              readonly body: string;
+            }> = [];
+            const server = NodeHttp.createServer((request, response) => {
+              const chunks: Buffer[] = [];
+              request.on("data", (chunk: Buffer) => chunks.push(chunk));
+              request.on("end", () => {
+                requests.push({
+                  headers: request.headers,
+                  body: Buffer.concat(chunks).toString("utf8"),
+                });
+                response.statusCode = status;
+                response.end();
+              });
+            });
+            server.on("error", reject);
+            server.listen(0, "127.0.0.1", () => {
+              const address = server.address();
+              if (!address || typeof address === "string") {
+                reject(new Error("Expected TCP collector address"));
+                return;
+              }
+              resolve({
+                url: `http://127.0.0.1:${address.port}/v1/traces?api_key=query-secret`,
+                requests,
+                close: () => new Promise<void>((done) => server.close(() => done())),
+              });
+            });
+          }),
+      ),
+      ({ close }) => Effect.promise(close),
+    );
+
+  const otelTracesExport = {
+    protocol: "http/protobuf",
+    headers: Redacted.make({ "x-honeycomb-team": "header-secret" }),
+    endpointVariable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+  } as const;
+
+  it.effect("forwards OTEL trace headers with browser OTLP exports", () =>
+    Effect.gen(function* () {
+      const collector = yield* makeRecordingCollector(204);
+      const payload = yield* makeBrowserOtlpPayload("client.headers");
+      yield* buildAppUnderTest({
+        config: { otlpTracesUrl: collector.url, otlpExports: { traces: otelTracesExport } },
+        layers: { browserTraceCollector: { record: () => Effect.void } },
+      });
+
+      const response = yield* HttpClient.post("/api/observability/v1/traces", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "content-type": "application/json",
+        },
+        body: HttpBody.text(JSON.stringify(payload), "application/json"),
+      });
+
+      assert.equal(response.status, 204);
+      assert.equal(collector.requests.length, 1);
+      assert.equal(collector.requests[0]?.headers["x-honeycomb-team"], "header-secret");
+      // Browser spans are forwarded as the JSON they arrived as, whatever the protocol.
+      assert.equal(collector.requests[0]?.headers["content-type"], "application/json");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("logs a failed browser OTLP export without its headers or query values", () => {
+    const logged: Array<string> = [];
+    const captureLogs = Logger.layer([
+      Logger.make((options) => {
+        logged.push(JSON.stringify(options.message));
+      }),
+    ]);
+    return Effect.gen(function* () {
+      const collector = yield* makeRecordingCollector(500);
+      const payload = yield* makeBrowserOtlpPayload("client.failure");
+      yield* buildAppUnderTest({
+        config: { otlpTracesUrl: collector.url, otlpExports: { traces: otelTracesExport } },
+        layers: { browserTraceCollector: { record: () => Effect.void } },
+      });
+
+      const response = yield* HttpClient.post("/api/observability/v1/traces", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "content-type": "application/json",
+        },
+        body: HttpBody.text(JSON.stringify(payload), "application/json"),
+      });
+
+      assert.equal(response.status, 502);
+      const failure = logged.find((line) => line.includes("Failed to export browser OTLP traces"));
+      assert.isDefined(failure);
+      assert.include(failure, "StatusCodeError");
+      assert.include(failure, "500");
+      assert.notInclude(logged.join("\n"), "header-secret");
+      assert.notInclude(logged.join("\n"), "query-secret");
+    }).pipe(Effect.provide(Layer.mergeAll(NodeHttpServer.layerTest, captureLogs)));
+  });
 
   it.effect("responds to browser OTLP trace preflight requests with CORS headers", () =>
     Effect.gen(function* () {
