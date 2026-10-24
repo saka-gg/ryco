@@ -9,6 +9,12 @@ const RESPAWN_BASE_DELAY_MS = 1_000;
 const RESPAWN_MAX_DELAY_MS = 30_000;
 const LISTENER_START_TIMEOUT_MS = 10_000;
 const MAX_HELPER_STDERR_CHARS = 4_000;
+/** Helper failures the helper itself retries (tap reinstall, a fresh grant probe). */
+const SELF_RECOVERING_HELPER_ERRORS: ReadonlySet<string> = new Set([
+  "input-monitoring-required",
+  "event_tap_disabled",
+  "event_tap_unavailable",
+]);
 
 export type PhysicalComputerInput = Extract<AppSnapHelperMessage, { type: "physical-input" }>;
 export interface ComputerInputMonitorState {
@@ -108,7 +114,10 @@ export class EscapeKillSwitchMonitor {
     const changed = this.#armed !== armed;
     this.#armed = armed;
     if (armed && !this.#child) {
-      this.start();
+      // The first respawn after a failure follows demand at once. Once the
+      // helper keeps failing, activations wait out the backoff instead of
+      // respawning a helper that dies or stalls on every action.
+      if (!this.#restartTimer || this.#consecutiveFailures <= 1) this.start();
       return;
     }
     if (changed)
@@ -155,7 +164,7 @@ export class EscapeKillSwitchMonitor {
     lines.on("line", (line) => {
       if (this.#child !== child || this.#disposed) return;
       const message = parseAppSnapHelperMessage(line);
-      if (message) this.#handleMessage(message);
+      if (message) this.#handleMessage(message, child);
     });
 
     let stderr = "";
@@ -207,20 +216,28 @@ export class EscapeKillSwitchMonitor {
         this.#state.error !== "input_monitor_starting"
       )
         return;
-      this.#child = null;
-      this.#setState({ ready: false, error: "input_monitor_unavailable" });
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // Input remains fenced, and messages from this helper are ignored.
-      }
-      this.#reportError("The Escape monitor helper did not acknowledge readiness; restarting.");
-      this.#scheduleRestart();
+      this.#replaceHelper(
+        child,
+        "The Escape monitor helper did not acknowledge readiness; restarting.",
+      );
     }, LISTENER_START_TIMEOUT_MS);
     this.#readinessTimer.unref?.();
   }
 
-  #handleMessage(message: AppSnapHelperMessage): void {
+  /** Drops a live helper that cannot recover on its own and respawns it with backoff. */
+  #replaceHelper(child: ChildProcess.ChildProcess, message: string): void {
+    this.#child = null;
+    this.#setState({ ready: false, error: "input_monitor_unavailable" });
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Input remains fenced, and messages from this helper are ignored.
+    }
+    this.#reportError(message);
+    this.#scheduleRestart();
+  }
+
+  #handleMessage(message: AppSnapHelperMessage, child: ChildProcess.ChildProcess): void {
     switch (message.type) {
       case "ready":
         if (!this.#armed) return;
@@ -236,16 +253,19 @@ export class EscapeKillSwitchMonitor {
       case "escape-monitor-state":
         return;
       case "error":
-        this.#setState({
-          ready: false,
-          error: [
-            "input-monitoring-required",
-            "event_tap_disabled",
-            "event_tap_unavailable",
-          ].includes(message.code)
-            ? message.code
-            : "input_monitor_unavailable",
-        });
+        if (SELF_RECOVERING_HELPER_ERRORS.has(message.code)) {
+          this.#setState({ ready: false, error: message.code });
+          this.#reportError(message.message);
+          return;
+        }
+        // Nothing would bring an armed, still running helper back from any
+        // other failure, so it is replaced rather than left paused.
+        if (this.#armed) {
+          this.#replaceHelper(child, `${message.message} Restarting the Escape monitor helper.`);
+          return;
+        }
+        // Disarmed: the next arm restarts the readiness deadline.
+        this.#setState({ ready: false, error: "input_monitor_unavailable" });
         this.#reportError(message.message);
         return;
       default:
