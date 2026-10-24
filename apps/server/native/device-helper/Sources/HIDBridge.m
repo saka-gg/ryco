@@ -1,5 +1,7 @@
 #import "HIDBridge.h"
 
+#import "CoreSimulatorVersion.h"
+
 #import <CoreGraphics/CoreGraphics.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
@@ -205,6 +207,9 @@ static uint32_t RycoUsageForCharacter(unichar c, BOOL *outShift) {
 
 static const uint32_t kUsageLeftShift = 225;
 
+// Guarded by @synchronized on the class object; see +simulatorKitPath.
+static NSString *gSimulatorKitPath = nil;
+
 @implementation RycoHIDBridge {
   id _client;
   dispatch_queue_t _sendQueue;
@@ -229,13 +234,41 @@ static const uint32_t kUsageLeftShift = 225;
   }
 }
 
-- (BOOL)attachToDevice:(id)device error:(NSError **)error {
-  NSString *developerDir = NSProcessInfo.processInfo.environment[@"RYCO_DEVELOPER_DIR"];
-  if (developerDir.length == 0) {
-    developerDir = @"/Applications/Xcode.app/Contents/Developer";
++ (nullable NSString *)simulatorKitPath {
+  @synchronized([RycoHIDBridge class]) {
+    return gSimulatorKitPath;
   }
-  NSString *kitPath = [developerDir
-      stringByAppendingPathComponent:@"Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"];
+}
+
++ (void)setSimulatorKitPath:(nullable NSString *)simulatorKitPath {
+  @synchronized([RycoHIDBridge class]) {
+    gSimulatorKitPath = [simulatorKitPath copy];
+  }
+}
+
+- (BOOL)attachToDevice:(id)device error:(NSError **)error {
+  // Checked first: on CoreSimulator 1155.4+ every Indigo send below would
+  // "succeed" while the guest drops it.
+  NSString *refusal = RycoIndigoInputUnsupportedReason();
+  if (refusal != nil) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"dev.ryco.device-helper.hid"
+                                   code:5
+                               userInfo:@{NSLocalizedDescriptionKey: refusal}];
+    }
+    return NO;
+  }
+
+  NSString *kitPath = RycoHIDBridge.simulatorKitPath;
+  if (kitPath.length == 0) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"dev.ryco.device-helper.hid"
+                                   code:1
+                               userInfo:@{NSLocalizedDescriptionKey: @"SimulatorKit was not loaded"}];
+    }
+    return NO;
+  }
+  // Returns the image loadPrivateFrameworks already loaded.
   void *kit = dlopen(kitPath.fileSystemRepresentation, RTLD_NOW);
   if (kit == NULL) {
     if (error) {
