@@ -23,7 +23,7 @@ import {
   TurnId,
   type UserInputQuestion,
 } from "@ryco/contracts";
-import { Cause, Effect, Exit, Fiber, Queue, Ref, Scope, Semaphore, Stream } from "effect";
+import { Cause, Clock, Effect, Exit, Fiber, Queue, Ref, Scope, Semaphore, Stream } from "effect";
 import type {
   OpencodeClient,
   Part,
@@ -78,6 +78,7 @@ import {
 
 import { OpenCodeTaskLifecycle, type OpenCodeTaskTransition } from "../openCodeTaskLifecycle.ts";
 import { OpenCodePartIndex } from "../openCodePartIndex.ts";
+import { ToolUpdateGate, toolUpdateVisibleKey } from "../toolUpdateGate.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_RESUME_VERSION = 1;
@@ -130,6 +131,11 @@ interface OpenCodeSessionContext {
   lastPlanFingerprint: string | undefined;
   /** Dedup guard: `${attempt}:${message}` of the last emitted retry warning. */
   lastRetryKey: string | undefined;
+  /**
+   * Drops repeats of a tool part's visible state (bash streams its output into metadata the
+   * projection discards).
+   */
+  readonly toolUpdates: ToolUpdateGate;
   readonly promptSemaphore: Semaphore.Semaphore;
   pendingPrompt:
     | {
@@ -1599,9 +1605,9 @@ export function makeOpenCodeAdapter(
         }
 
         case "message.part.removed": {
-          context.parts.complete(
-            scopedOpenCodeId(event.properties.sessionID, event.properties.partID),
-          );
+          const partKey = scopedOpenCodeId(event.properties.sessionID, event.properties.partID);
+          context.parts.complete(partKey);
+          context.toolUpdates.forget(partKey);
           break;
         }
 
@@ -1699,7 +1705,27 @@ export function makeOpenCodeAdapter(
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
             const detail = detailFromToolPart(part);
             const childSubagent = context.subagentBySessionId.get(part.sessionID);
-            if (childSubagent && !context.tasks.hasSession(part.sessionID)) {
+            // A running part is re-sent per output chunk (bash), each time with the same
+            // persisted payload: emit it only when what clients show changed, or per heartbeat.
+            const terminal = part.state.status === "completed" || part.state.status === "error";
+            const admitted = context.toolUpdates.admit(
+              scopedOpenCodeId(part.sessionID, part.id),
+              {
+                terminal,
+                visibleKey: terminal
+                  ? undefined
+                  : toolUpdateVisibleKey({
+                      status: part.state.status,
+                      title,
+                      detail,
+                      input: part.state.input,
+                      agentId: childSubagent ? String(childSubagent.subagentId) : undefined,
+                      turnId,
+                    }),
+              },
+              yield* Clock.currentTimeMillis,
+            );
+            if (admitted && childSubagent && !context.tasks.hasSession(part.sessionID)) {
               yield* emitOpenCodeSubagentUpdated(context, {
                 subagent: childSubagent,
                 status: statusFromOpenCodeSubagentState("running"),
@@ -1708,6 +1734,8 @@ export function makeOpenCodeAdapter(
                 raw: event,
               });
             }
+            if (!childSubagent) appendTurnItem(context, turnId, part);
+            if (!admitted) break;
             const payload = {
               itemType,
               ...(childSubagent ? { agentId: String(childSubagent.subagentId) } : {}),
@@ -1739,7 +1767,6 @@ export function makeOpenCodeAdapter(
                     : "item.updated",
               payload,
             };
-            if (!childSubagent) appendTurnItem(context, turnId, part);
             yield* emitForContext(context, runtimeEvent);
           }
           break;
@@ -2358,6 +2385,7 @@ export function makeOpenCodeAdapter(
           activeVariant: undefined,
           lastPlanFingerprint: undefined,
           lastRetryKey: undefined,
+          toolUpdates: new ToolUpdateGate(),
           promptSemaphore: yield* Semaphore.make(1),
           pendingPrompt: undefined,
           promptGeneration: 0,
