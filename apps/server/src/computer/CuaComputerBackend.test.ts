@@ -71,7 +71,10 @@ function fixture(options?: {
   let typingInFlight = 0;
   let typingMaxInFlight = 0;
   let extraWindows: Array<Record<string, unknown>> = [];
-  let toolHandlers: Record<string, (args: Record<string, unknown>) => Record<string, unknown>> = {};
+  let toolHandlers: Record<
+    string,
+    (args: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+  > = {};
   let setValueSwallowed = false;
   let actionResult: Record<string, unknown> = {
     route: "synthetic_events",
@@ -217,7 +220,7 @@ function fixture(options?: {
     if (toolHandler)
       return {
         ok: true,
-        result: toolHandler(request.args ?? {}),
+        result: await toolHandler(request.args ?? {}),
         desktopEpoch: responseEpoch,
         hostPlatform: options?.hostPlatform ?? "darwin",
       };
@@ -259,7 +262,12 @@ function fixture(options?: {
     setBounds: (value: typeof bounds) => {
       bounds = value;
     },
-    onTool: (name: string, handler: (args: Record<string, unknown>) => Record<string, unknown>) => {
+    onTool: (
+      name: string,
+      handler: (
+        args: Record<string, unknown>,
+      ) => Record<string, unknown> | Promise<Record<string, unknown>>,
+    ) => {
       toolHandlers[name] = handler;
     },
     gateTypeText: (wait: Promise<void> | undefined) => {
@@ -3765,6 +3773,123 @@ describe("Cua native boundary", () => {
 });
 
 describe("Cua hardening", () => {
+  it.each([
+    { label: "an older driver", options: { nativeRevision: 39 } },
+    { label: "a Linux host", options: { hostPlatform: "linux", nativeRevision: 40 } },
+  ])(
+    "refuses clipboard preservation on $label before changing the clipboard",
+    async ({ options }) => {
+      const f = fixture(options);
+      try {
+        await expect(f.backend.prepareClipboardPaste({ text: "payload" })).rejects.toMatchObject({
+          effect: "not-dispatched",
+          code: "clipboard_preservation_unavailable",
+        });
+        expect(f.calls.filter((call) => call.name === "clipboard_write")).toHaveLength(0);
+      } finally {
+        await f.backend.dispose();
+      }
+    },
+  );
+
+  it.each(["acknowledged", "lost", "human-copy"] as const)(
+    "keeps an opaque restoration handle for a %s clipboard write",
+    async (outcome) => {
+      const f = fixture({ nativeRevision: 40 });
+      let savedToken: unknown;
+      f.onTool("clipboard_write", (args) => {
+        if (args.preserve === true) {
+          savedToken = args.preserve_token;
+          if (outcome === "lost")
+            throw new CuaTransportError("write reply lost", "dispatched-unknown");
+          return { structuredContent: { restore_token: savedToken } };
+        }
+        expect(args).toEqual({ restore_token: savedToken });
+        return { structuredContent: { clipboard_restored: outcome !== "human-copy" } };
+      });
+      try {
+        const pending = f.backend.prepareClipboardPaste({ imagePath: "/workspace/image.png" });
+        if (outcome === "lost")
+          await expect(pending).rejects.toMatchObject({ effect: "dispatched-unknown" });
+        else {
+          const restore = await pending;
+          await expect(restore()).resolves.toBe(outcome !== "human-copy");
+        }
+        expect(savedToken).toEqual(expect.any(String));
+        const writes = f.calls.filter((call) => call.name === "clipboard_write");
+        expect(writes).toHaveLength(2);
+        expect(writes[0]?.args).toMatchObject({
+          image_path: "/workspace/image.png",
+          preserve: true,
+        });
+        expect(writes[1]?.args).toEqual({ restore_token: savedToken });
+      } finally {
+        await f.backend.dispose();
+      }
+    },
+  );
+
+  it("keeps a performed restore when another reply adopts a newer desktop generation first", async () => {
+    const f = fixture({ nativeRevision: 40 });
+    let releaseRestore!: () => void;
+    const restoreReplied = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    f.onTool("clipboard_write", async (args) => {
+      if (args.preserve === true)
+        return { structuredContent: { restore_token: args.preserve_token } };
+      await restoreReplied;
+      return { structuredContent: { clipboard_restored: true } };
+    });
+    try {
+      const restore = await f.backend.prepareClipboardPaste({ text: "payload" });
+      const restoring = restore();
+      await vi.waitFor(() =>
+        expect(f.calls.filter((call) => call.name === "clipboard_write")).toHaveLength(2),
+      );
+      // A lock or Stop bumps the desktop generation, and a fresh observation
+      // adopts it while the restore is still in flight.
+      f.changeDesktop();
+      await withModelDesktopObservation(() =>
+        f.backend.captureScreenshot({ kind: "window", windowId: "cua:10:20" }),
+      );
+      releaseRestore();
+      await expect(restoring).resolves.toBe(true);
+      // The restore's older epoch neither rolls the generation back nor drops
+      // the grounding that observation established.
+      await expect(f.backend.click({ x: -275, y: 30 }, "cua:10:20")).resolves.toBeDefined();
+    } finally {
+      await f.backend.dispose();
+    }
+  });
+
+  it("restores and reports uncertainty when the write returns no matching receipt", async () => {
+    const f = fixture({ nativeRevision: 40 });
+    let savedToken: unknown;
+    f.onTool("clipboard_write", (args) => {
+      if (args.preserve === true) {
+        savedToken = args.preserve_token;
+        return { structuredContent: { restore_token: "someone-else" } };
+      }
+      return { structuredContent: { clipboard_restored: true } };
+    });
+    try {
+      await expect(
+        f.backend.prepareClipboardPaste({ filePath: "/workspace/a.pdf" }),
+      ).rejects.toMatchObject({
+        effect: "dispatched-unknown",
+        code: "clipboard_restore_receipt_missing",
+      });
+      const writes = f.calls.filter((call) => call.name === "clipboard_write");
+      expect(writes.map((call) => call.args)).toEqual([
+        { file_path: "/workspace/a.pdf", preserve: true, preserve_token: savedToken },
+        { restore_token: savedToken },
+      ]);
+    } finally {
+      await f.backend.dispose();
+    }
+  });
+
   it("reports a stable build signature on the backend and its availability", async () => {
     const f = fixture();
     expect(f.backend.buildSignature()).toBe("unknown");
