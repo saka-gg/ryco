@@ -11,6 +11,7 @@ import {
 } from "effect";
 
 import {
+  SourceControlProviderErrorReason,
   TrimmedNonEmptyString,
   type SourceControlChangeRequestMergeability,
   type SourceControlChangeRequestMergeStateStatus,
@@ -19,6 +20,12 @@ import {
 } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import {
+  classifyForgeFailure,
+  isForgeRateLimitText,
+  type ForgeFailureKind,
+} from "./forgeFailure.ts";
+import { forgeFailureFields, forgeFailureKindFromHttp } from "./forgeHttpRateLimit.ts";
 import {
   buildGlabApiInvocation,
   describeGitLabApiFailure,
@@ -38,6 +45,10 @@ export class GitLabCliError extends Schema.TaggedError<GitLabCliError>()("GitLab
   detail: Schema.String,
   /** HTTP status of a failed `glab api` call, when the request reached GitLab. */
   status: Schema.optional(Schema.Number),
+  /** Why GitLab refused, read from what glab or GitLab said (never the command line). */
+  failureKind: Schema.optional(SourceControlProviderErrorReason),
+  /** Epoch ms GitLab named for the retry, with failureKind "rate-limited". */
+  retryAt: Schema.optional(Schema.Number),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
@@ -192,47 +203,84 @@ function isVcsProcessSpawnError(error: unknown): boolean {
   );
 }
 
+const GLAB_SIGN_IN_PHRASES = [
+  "authentication failed",
+  "not logged in",
+  "glab auth login",
+  "invalid token",
+  "token is expired",
+  "token has expired",
+  "token was revoked",
+];
+
+/** The detail rule, unchanged: any "token" counts. */
+function mentionsGlabSignIn(lower: string): boolean {
+  return glabSaysSignInRequired(lower) || lower.includes("token");
+}
+
+/**
+ * Sign-in failures as glab or GitLab word them, for the typed kind. No bare
+ * "token": glab's error lines echo the request path, which holds project and
+ * branch names (`…/projects/group/token-service/…: 500 …`).
+ */
+function glabSaysSignInRequired(lower: string): boolean {
+  return GLAB_SIGN_IN_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
+function mentionsMissingMergeRequest(lower: string): boolean {
+  return (
+    lower.includes("merge request not found") ||
+    lower.includes("not found") ||
+    lower.includes("404")
+  );
+}
+
+/**
+ * Turns a failed `glab` call into a `GitLabCliError`. Detail strings match on
+ * the error message, as before; it holds the command line and cwd, so
+ * `failureKind` comes only from what glab or GitLab said (`forgeFailureText`).
+ */
 function normalizeGitLabCliError(operation: "execute" | "stdout", error: unknown): GitLabCliError {
   if (error instanceof Error) {
-    if (error.message.includes("Command not found: glab") || isVcsProcessSpawnError(error)) {
-      return new GitLabCliError({
+    const forge = classifyForgeFailure(error);
+    const { kindIf } = forge;
+    const fail = (detail: string, failureKind?: ForgeFailureKind) =>
+      new GitLabCliError({
         operation,
-        detail: "GitLab CLI (`glab`) is required but not available on PATH.",
+        detail,
+        ...forgeFailureFields({ failureKind }),
         cause: error,
       });
+
+    // Before the sign-in rule, which matches any "token" (a branch `fix/refresh-token`).
+    if (forge.rateLimited) {
+      return fail("GitLab is rate limiting requests. Ryco tries again shortly.", "rate-limited");
+    }
+
+    if (error.message.includes("Command not found: glab") || isVcsProcessSpawnError(error)) {
+      return fail(
+        "GitLab CLI (`glab`) is required but not available on PATH.",
+        forge.missingToolIf((text) => text.includes("command not found: glab")),
+      );
     }
 
     const lower = error.message.toLowerCase();
-    if (
-      lower.includes("authentication failed") ||
-      lower.includes("not logged in") ||
-      lower.includes("glab auth login") ||
-      lower.includes("token")
-    ) {
-      return new GitLabCliError({
-        operation,
-        detail: "GitLab CLI is not authenticated. Run `glab auth login` and retry.",
-        cause: error,
-      });
+    if (mentionsGlabSignIn(lower)) {
+      return fail(
+        "GitLab CLI is not authenticated. Run `glab auth login` and retry.",
+        kindIf("unauthenticated", glabSaysSignInRequired),
+      );
     }
 
-    if (
-      lower.includes("merge request not found") ||
-      lower.includes("not found") ||
-      lower.includes("404")
-    ) {
-      return new GitLabCliError({
-        operation,
-        detail: "Merge request not found. Check the MR number or URL and try again.",
-        cause: error,
-      });
+    if (mentionsMissingMergeRequest(lower)) {
+      return fail(
+        "Merge request not found. Check the MR number or URL and try again.",
+        // GitLab says "404 Not Found"; a bare "404" in its text can be an MR number.
+        kindIf("not-found", (text) => text.includes("not found")),
+      );
     }
 
-    return new GitLabCliError({
-      operation,
-      detail: `GitLab CLI command failed: ${error.message}`,
-      cause: error,
-    });
+    return fail(`GitLab CLI command failed: ${error.message}`);
   }
 
   return new GitLabCliError({
@@ -410,11 +458,15 @@ export const make = Effect.fn("makeGitLabCli")(function* () {
             });
           }
           const failure = parseGitLabApiFailure(output);
+          const failureKind =
+            forgeFailureKindFromHttp(failure.status) ??
+            (isForgeRateLimitText(failure.message) ? "rate-limited" : undefined);
           return Effect.fail(
             new GitLabCliError({
               operation: input.operation,
               detail: describeGitLabApiFailure(failure),
               ...(failure.status !== null ? { status: failure.status } : {}),
+              ...forgeFailureFields({ failureKind }),
             }),
           );
         }),

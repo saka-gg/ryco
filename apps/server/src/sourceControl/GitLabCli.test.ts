@@ -321,6 +321,105 @@ layer("GitLabCli.layer", (it) => {
       }).pipe(Effect.flip);
 
       assert.equal(error.message.includes("Merge request not found"), true);
+      assert.strictEqual(error.failureKind, "not-found");
+    }),
+  );
+
+  it.effect("types a rate limit even when a branch name says token", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessExitError({
+            operation: "GitLabCli.execute",
+            command: "glab mr list --source-branch fix/refresh-token --output json",
+            cwd: "/repo",
+            exitCode: 1,
+            detail:
+              "GET https://gitlab.com/api/v4/projects/1/merge_requests: 429 Too Many Requests",
+          }),
+        ),
+      );
+      const glab = yield* GitLabCli.GitLabCli;
+      const error = yield* glab
+        .execute({ cwd: "/repo", args: ["mr", "list", "--source-branch", "fix/refresh-token"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, "rate-limited");
+      assert.strictEqual(
+        error.detail,
+        "GitLab is rate limiting requests. Ryco tries again shortly.",
+      );
+    }),
+  );
+
+  it.effect("does not type a sign-in failure from the command line", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessExitError({
+            operation: "GitLabCli.execute",
+            command: "glab mr list --source-branch fix/refresh-token --output json",
+            cwd: "/repo",
+            exitCode: 1,
+            detail:
+              "GET https://gitlab.com/api/v4/projects/1/merge_requests: 500 Internal Server Error",
+          }),
+        ),
+      );
+      const glab = yield* GitLabCli.GitLabCli;
+      const error = yield* glab
+        .execute({ cwd: "/repo", args: ["mr", "list", "--source-branch", "fix/refresh-token"] })
+        .pipe(Effect.flip);
+      // The detail still matches the message (command line included), as before;
+      // moving the detail rules to glab's own text is a follow-up.
+      assert.strictEqual(
+        error.detail,
+        "GitLab CLI is not authenticated. Run `glab auth login` and retry.",
+      );
+      assert.strictEqual(error.failureKind, undefined);
+    }),
+  );
+
+  it.effect("does not type a sign-in failure from a project path glab echoes", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessExitError({
+            operation: "GitLabCli.execute",
+            command: "glab mr list --output json",
+            cwd: "/repo",
+            exitCode: 1,
+            detail:
+              "GET https://gitlab.com/api/v4/projects/group/token-service/merge_requests: 500 Internal Server Error",
+          }),
+        ),
+      );
+      const glab = yield* GitLabCli.GitLabCli;
+      const error = yield* glab.execute({ cwd: "/repo", args: ["mr", "list"] }).pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, undefined);
+    }),
+  );
+
+  it.effect("types a sign-in failure GitLab reports", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessExitError({
+            operation: "GitLabCli.execute",
+            command: "glab mr list --output json",
+            cwd: "/repo",
+            exitCode: 1,
+            detail:
+              "GET https://gitlab.com/api/v4/projects/group/app/merge_requests: 401 {error: invalid_token, error_description: Token is expired. You can either do re-authorization or token refresh.}",
+          }),
+        ),
+      );
+      const glab = yield* GitLabCli.GitLabCli;
+      const error = yield* glab.execute({ cwd: "/repo", args: ["mr", "list"] }).pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, "unauthenticated");
+      assert.strictEqual(
+        error.detail,
+        "GitLab CLI is not authenticated. Run `glab auth login` and retry.",
+      );
     }),
   );
 
@@ -555,6 +654,32 @@ layer("GitLabCli.layer", (it) => {
         error.detail,
         "GitLab API request failed (HTTP 409): SHA does not match HEAD of source branch: e82eb4a0",
       );
+      assert.strictEqual(error.failureKind, undefined);
+    }),
+  );
+
+  it.effect("api reads HTTP 429 as a rate limit", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(
+        Effect.succeed({
+          exitCode: ChildProcessSpawner.ExitCode(1),
+          stdout: '{"message":"429 Too Many Requests"}',
+          stderr: "glab: 429 Too Many Requests (HTTP 429)\n",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        }),
+      );
+      const glab = yield* GitLabCli.GitLabCli;
+      const error = yield* glab
+        .api({
+          cwd: "/repo",
+          operation: "listChangeRequests",
+          request: { method: "GET", endpoint: "projects/:fullpath/merge_requests" },
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.status, 429);
+      assert.strictEqual(error.failureKind, "rate-limited");
+      assert.strictEqual(error.detail, "GitLab is rate limiting requests (HTTP 429).");
     }),
   );
 });

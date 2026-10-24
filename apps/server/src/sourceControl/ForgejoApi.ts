@@ -1,7 +1,18 @@
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { Config, Context, Effect, FileSystem, Layer, Option, Result, Schema, Stream } from "effect";
+import {
+  Clock,
+  Config,
+  Context,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  Result,
+  Schema,
+  Stream,
+} from "effect";
 import {
   TrimmedNonEmptyString,
   type ChangeRequestActivity,
@@ -31,6 +42,7 @@ import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceCon
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 
 import { ForgejoApiError, forgejoErrorMessage, isForgejoApiError } from "./forgejoApiError.ts";
+import { forgeHttpFailureFields } from "./forgeHttpRateLimit.ts";
 import * as ForgejoIssues from "./forgejoIssues.ts";
 import { forgejoWorkInProgressTitle } from "./forgejoPullRequestMutations.ts";
 import * as ForgejoPullRequests from "./forgejoPullRequests.ts";
@@ -625,21 +637,26 @@ function responseError(
   operation: string,
   response: HttpClientResponse.HttpClientResponse,
 ): Effect.Effect<never, ForgejoApiError> {
-  return response.text.pipe(
-    Effect.catch(() => Effect.succeed("")),
-    Effect.flatMap((body) =>
-      Effect.fail(
-        new ForgejoApiError({
-          operation,
-          status: response.status,
-          detail:
-            forgejoErrorMessage(body).length > 0
-              ? `Forgejo returned HTTP ${response.status}: ${forgejoErrorMessage(body)}`
-              : `Forgejo returned HTTP ${response.status}.`,
-        }),
-      ),
-    ),
-  );
+  return Effect.gen(function* () {
+    const body = yield* response.text.pipe(Effect.catch(() => Effect.succeed("")));
+    const message = forgejoErrorMessage(body);
+    const failure = forgeHttpFailureFields(
+      response.status,
+      response.headers,
+      yield* Clock.currentTimeMillis,
+    );
+    return yield* new ForgejoApiError({
+      operation,
+      status: response.status,
+      detail:
+        failure.failureKind === "rate-limited"
+          ? `Forgejo is rate limiting requests (HTTP ${response.status}).`
+          : message.length > 0
+            ? `Forgejo returned HTTP ${response.status}: ${message}`
+            : `Forgejo returned HTTP ${response.status}.`,
+      ...failure,
+    });
+  });
 }
 
 export const make = Effect.fn("makeForgejoApi")(function* () {

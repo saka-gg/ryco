@@ -1,8 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, FileSystem, Option } from "effect";
+import { Clock, Effect, FileSystem, Option } from "effect";
 
 import * as ForgejoApi from "./ForgejoApi.ts";
+import * as ForgejoSourceControlProvider from "./ForgejoSourceControlProvider.ts";
 import {
   apiPath,
   makeForgejoApiTestLayer as makeLayer,
@@ -367,5 +368,56 @@ it.effect("getPullRequestDiff reads Forgejo diff text", () => {
     const diff = yield* forgejo.getPullRequestDiff({ cwd: "/repo", reference: "42" });
 
     assert.strictEqual(diff, "diff --git a/src/forgejo.ts b/src/forgejo.ts\n");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("types a 429 with Retry-After as a rate limit up to the provider error", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({ message: "rate limited" }, { status: 429, headers: { "Retry-After": "30" } }),
+  });
+
+  return Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const forgejo = yield* ForgejoApi.ForgejoApi;
+    const apiError = yield* forgejo
+      .listPullRequests({ cwd: "/repo", headSelector: "feature", state: "open" })
+      .pipe(Effect.flip);
+    assert.strictEqual(apiError.status, 429);
+    assert.strictEqual(apiError.failureKind, "rate-limited");
+    assert.strictEqual(apiError.retryAt, now + 30_000);
+    assert.strictEqual(apiError.detail, "Forgejo is rate limiting requests (HTTP 429).");
+
+    const provider = yield* ForgejoSourceControlProvider.make();
+    const error = yield* provider
+      .listChangeRequests({ cwd: "/repo", headSelector: "feature", state: "open" })
+      .pipe(Effect.flip);
+    assert.strictEqual(error._tag, "SourceControlProviderError");
+    assert.strictEqual(error.reason, "rate-limited");
+    assert.strictEqual(error.retryAt, now + 30_000);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("types a 404 as not found and a reverse proxy's 403 throttle as a rate limit", () => {
+  const { layer } = makeLayer({
+    response: (request) =>
+      request.url.endsWith("/pulls/404")
+        ? Response.json({ message: "The target couldn't be found." }, { status: 404 })
+        : new Response("Forbidden", { status: 403, headers: { "Retry-After": "120" } }),
+  });
+
+  return Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const provider = yield* ForgejoSourceControlProvider.make();
+    const notFound = yield* provider
+      .getChangeRequest({ cwd: "/repo", reference: "404" })
+      .pipe(Effect.flip);
+    assert.strictEqual(notFound.reason, "not-found");
+    assert.strictEqual(notFound.detail, "Forgejo returned HTTP 404: The target couldn't be found.");
+    const throttled = yield* provider
+      .getChangeRequest({ cwd: "/repo", reference: "7" })
+      .pipe(Effect.flip);
+    assert.strictEqual(throttled.reason, "rate-limited");
+    assert.strictEqual(throttled.retryAt, now + 120_000);
   }).pipe(Effect.provide(layer));
 });

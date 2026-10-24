@@ -213,6 +213,7 @@ Then restart Ryco and verify the connection in **Source Control settings**.
 - **Bitbucket not connecting** – Double-check your environment variables are set in the correct shell profile and the server was restarted
 - **Jira tab is empty** – Confirm a Jira token is saved, the project is linked to the right Jira project keys, and the token account can see those issues
 - **Forgejo not connecting** – If you use `fj`, run `fj auth list` and `fj -H codeberg.org whoami` on the server, then restart Ryco and rescan. If that works but Ryco still cannot authenticate, set `RYCO_FORGEJO_CLI_KEYS_FILE` to the `fj` `keys.json` path. If you use environment variables, confirm `RYCO_FORGEJO_BASE_URL` points at the instance root and the token has repository access.
+- **"Rate limit exceeded" or "is rate limiting requests"** – The forge refused requests for a while: GitHub's hourly API quota or a secondary limit, or an HTTP 429 from GitLab, Bitbucket, Forgejo or Azure DevOps. Ryco shows this only when the forge or its CLI said so, never because a pull request title, branch or folder name contains the words. Wait for the limit to reset; lists refresh on their own.
 - **Can't push to a remote** – Verify your Git remote URL matches the provider you've authenticated with (SSH vs HTTPS remotes may need different credentials)
 
 **Need more help?** Check your provider's CLI documentation:

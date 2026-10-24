@@ -198,6 +198,8 @@ export function describeGitLabApiFailure(failure: GitLabApiFailure): string {
       return `GitLab refused the request (HTTP 403): ${failure.message}. The token needs the \`api\` scope and enough project access.`;
     case 404:
       return `GitLab could not find it (HTTP 404): ${failure.message}.`;
+    case 429:
+      return "GitLab is rate limiting requests (HTTP 429).";
     default:
       return `GitLab API request failed (HTTP ${failure.status}): ${failure.message}`;
   }
