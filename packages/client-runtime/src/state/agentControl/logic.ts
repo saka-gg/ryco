@@ -207,6 +207,34 @@ export function selectRecentAgentControlProposals(
 }
 
 /**
+ * A run waiting for the user, as a device's Agent Control queue holds it: an
+ * automation run whose approval is still pending. It is the same run a
+ * checkout's snapshot says is "pending-approval" (`dueScheduleRuns`); the
+ * queue is what every project on the device shares, so counts across
+ * projects (the sidebar's badge) read it from here. It lives with the queue
+ * logic, not in `automationCentre.ts`: that module imports the schedule rows
+ * (`automationSchedules.ts`), which the web shell loads only with the
+ * Automations dialog.
+ */
+export function isWaitingAutomationRun(proposal: AgentControlProposal): boolean {
+  return proposal.status === "pending-user-approval" && proposal.plan.kind === "automationRun";
+}
+
+/** Runs waiting for approval in the given environments' queues. */
+export function waitingAutomationRunCount(
+  queues: Readonly<
+    Record<string, { readonly proposalsById: Readonly<Record<string, AgentControlProposal>> }>
+  >,
+  environmentIds: readonly string[],
+): number {
+  let count = 0;
+  for (const environmentId of environmentIds)
+    for (const proposal of Object.values(queues[environmentId]?.proposalsById ?? {}))
+      if (isWaitingAutomationRun(proposal)) count += 1;
+  return count;
+}
+
+/**
  * Live proposals raised from inside `threadId` — the thread-local card
  * shows the caller thread its own outstanding requests.
  */
