@@ -22,6 +22,7 @@ import {
 } from "../../../hooks/useThreadActions";
 import {
   isTrailingDoubleClick,
+  resolveThreadSelectionClick,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
   shouldConfirmSidebarThreadSelectionDelete,
@@ -139,21 +140,14 @@ export function useSidebarThreadActions(params: {
       threadRef: ScopedThreadRef,
       orderedProjectThreadKeys: readonly string[],
     ) => {
-      const isMac = isMacPlatform(navigator.platform);
-      const isModClick = isMac ? event.metaKey : event.ctrlKey;
-      const isShiftClick = event.shiftKey;
+      const selectionClick = resolveThreadSelectionClick(event, isMacPlatform(navigator.platform));
       const threadKey = scopedThreadKey(threadRef);
       const currentSelectionCount = useThreadSelectionStore.getState().selectedThreadKeys.size;
 
-      if (isModClick) {
+      if (selectionClick !== null) {
         event.preventDefault();
-        toggleThreadSelection(threadKey);
-        return;
-      }
-
-      if (isShiftClick) {
-        event.preventDefault();
-        rangeSelectTo(threadKey, orderedProjectThreadKeys);
+        if (selectionClick === "toggle") toggleThreadSelection(threadKey);
+        else rangeSelectTo(threadKey, orderedProjectThreadKeys);
         return;
       }
 

@@ -12,7 +12,10 @@ import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } f
 
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
+import { useIdleLazyComponentReady } from "../../lib/idleLazyComponent";
 import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib/perf/motion";
+import { preloadableLazy } from "../../lib/preloadableLazy";
+import { dispatchThreadSettlementBatch } from "../../threadLifecycleCommands";
 import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
 import { handleSidebarListScroll } from "../sidebar/sidebarFold";
 import { omnifieldListQuery } from "../sidebar/sidebarOmnifield.logic";
@@ -23,6 +26,7 @@ import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
+import type { InboxSettleFinishedProps } from "./InboxSettleFinished";
 import {
   buildInboxSidebarModel,
   createInboxSidebarModelSharing,
@@ -32,6 +36,24 @@ import {
 } from "./inboxSidebarModel";
 import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
+import { useInboxRowSelection } from "./useInboxRowSelection";
+
+// Settle finished is optional and shown on hover, so its code loads in an idle
+// slot after the shell instead of with it.
+const LazyInboxSettleFinished = preloadableLazy(() =>
+  import("./InboxSettleFinished").then((module) => module.InboxSettleFinished),
+);
+
+/** Loads Settle finished's chunk now; once it has, Recent shows it on its first render. */
+export const preloadInboxSettleFinished = LazyInboxSettleFinished.preload;
+
+const settleFinishedThreads = (targets: readonly ScopedThreadRef[]) =>
+  dispatchThreadSettlementBatch(targets, true);
+
+function DeferredInboxSettleFinished(props: Omit<InboxSettleFinishedProps, "onSettle">) {
+  const ready = useIdleLazyComponentReady(LazyInboxSettleFinished, "Settle finished");
+  return ready ? <LazyInboxSettleFinished {...props} onSettle={settleFinishedThreads} /> : null;
+}
 
 export interface InboxSidebarProps {
   readonly threadActions?: InboxThreadActions | undefined;
@@ -48,6 +70,10 @@ export interface InboxSidebarProps {
   /** Rows on other machines are labelled; this one is implicit. */
   readonly primaryEnvironmentId?: EnvironmentId | null | undefined;
   readonly onOpenThread: (threadRef: ScopedThreadRef) => void;
+  /** Deletes a selection of rows after one confirmation; omit to offer no bulk Delete. */
+  readonly onDeleteThreads?:
+    | ((targets: readonly ScopedThreadRef[]) => Promise<boolean>)
+    | undefined;
   /** Offered from the empty state when no project exists yet; omit when adding is unavailable. */
   readonly onAddProject?: (() => void) | undefined;
   /**
@@ -67,8 +93,10 @@ export function InboxSidebar(props: InboxSidebarProps) {
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
-  // The web phone tier is frozen (AGENTS.md): no delegated folding there.
-  const nestDelegated = usePresentationTier() !== "phone";
+  // The web phone tier is frozen (AGENTS.md): no delegated folding, row selection
+  // or Settle finished there.
+  const isPhone = usePresentationTier() === "phone";
+  const nestDelegated = !isPhone;
   const [expandedHostKeys, setExpandedHostKeys] = useState<ReadonlySet<string>>(() => new Set());
   const toggleHost = useCallback((hostKey: string) => {
     setExpandedHostKeys((previous) => {
@@ -164,10 +192,17 @@ export function InboxSidebar(props: InboxSidebarProps) {
     row.delegatedChildren.some(
       (child) => child.key === props.activeThreadKey || child.state === "needs-input",
     );
-  const visibleRowKeys = (row: InboxSidebarRow) =>
+  const visibleRows = (row: InboxSidebarRow) =>
     isHostExpanded(row) && row.delegatedChildren.length > 0
-      ? [row.key, ...row.delegatedChildren.map((child) => child.key)]
-      : [row.key];
+      ? [row, ...row.delegatedChildren]
+      : [row];
+  const visibleRowKeys = (row: InboxSidebarRow) => visibleRows(row).map((visible) => visible.key);
+  const selection = useInboxRowSelection({
+    displayedRows: sections.flatMap((section) =>
+      isExpanded(section.key) ? section.rows.flatMap(visibleRows) : [],
+    ),
+    onDeleteThreads: props.onDeleteThreads,
+  });
   const orderSignature = sections
     .map((section) =>
       isExpanded(section.key)
@@ -206,6 +241,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
       previewHandle={previewHandle}
       onOpenRow={openRow}
       row={row}
+      selection={isPhone ? undefined : selection}
     />
   );
 
@@ -300,7 +336,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         </span>
                       </button>
                     ) : (
-                      <div className="flex items-center gap-2 px-2.5 py-1.5">
+                      <div className="group/inbox-section flex items-center gap-2 px-2.5 py-1.5">
                         <h2
                           id={`inbox-section-${section.key}`}
                           className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/65"
@@ -310,6 +346,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         <span className="text-[10px] tabular-nums text-muted-foreground/45">
                           {section.rows.length}
                         </span>
+                        {section.key === "recent" && !isPhone ? (
+                          <DeferredInboxSettleFinished
+                            activeThreadKey={props.activeThreadKey}
+                            rows={section.rows}
+                          />
+                        ) : null}
                       </div>
                     )}
                     {expanded ? (

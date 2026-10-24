@@ -34,6 +34,9 @@ vi.mock("../../sidebarUndo", () => ({
         readEnvironmentApi(target.environmentId)!.orchestration.dispatchCommand(command as never),
       ),
   },
+  presentSidebarUndoNotices: vi.fn(),
+  readSidebarUndoLocalContext: () => null,
+  readSidebarUndoContext: () => null,
 }));
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-hover-card");

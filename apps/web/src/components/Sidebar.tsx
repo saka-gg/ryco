@@ -449,8 +449,13 @@ export default function Sidebar() {
   const projectGroupingSettings = useProjectGroupingSettings();
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread, handleNewChat } = useNewThreadHandler();
-  const { archiveThread, deleteThread, stopThreadSession, interruptThreadTurn } =
-    useThreadActions();
+  const {
+    archiveThread,
+    deleteThread,
+    confirmAndDeleteThreads,
+    stopThreadSession,
+    interruptThreadTurn,
+  } = useThreadActions();
   const { isMobile, open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const pinnedThreadKeys = useMemo(
     () =>
@@ -1282,8 +1287,7 @@ export default function Sidebar() {
   useEffect(() => {
     const onMouseDown = (event: globalThis.MouseEvent) => {
       if (selectedThreadCount === 0) return;
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (!shouldClearThreadSelectionOnMouseDown(target)) return;
+      if (!shouldClearThreadSelectionOnMouseDown(event.target)) return;
       clearSelection();
     };
 
@@ -1448,6 +1452,7 @@ export default function Sidebar() {
                   pinnedThreadKeys={pinnedThreadKeys}
                   primaryEnvironmentId={primaryEnvironmentId}
                   onOpenThread={navigateToThread}
+                  onDeleteThreads={confirmAndDeleteThreads}
                   projects={projects}
                   threads={sidebarThreads}
                   worktrees={sidebarWorktrees}

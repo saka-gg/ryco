@@ -146,6 +146,10 @@
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
     },
+    "./state/threads/sidebarUndoBatch": {
+      "types": "./src/state/threads/sidebarUndoBatch.ts",
+      "import": "./src/state/threads/sidebarUndoBatch.ts"
+    },
     "./state/threads/threadBodyResidency": {
       "types": "./src/state/threads/threadBodyResidency.ts",
       "import": "./src/state/threads/threadBodyResidency.ts"

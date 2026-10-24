@@ -1,4 +1,8 @@
-import type { ScopedThreadRef } from "@ryco/contracts";
+import type {
+  SidebarBatchCommand,
+  SidebarUndoBatchResult,
+} from "@ryco/client-runtime/state/threads/sidebarUndoBatch";
+import type { ScopedThreadRef, ThreadId } from "@ryco/contracts";
 
 import {
   canArchiveSidebarThread,
@@ -9,6 +13,7 @@ import { readEnvironmentApi } from "./environmentApi";
 import { newCommandId } from "./lib/utils";
 import { readLocalApi } from "./localApi";
 import { sidebarUndo } from "./sidebarUndo";
+import type { ThreadBatchAction } from "./threadLifecycleBatch";
 import type { SidebarThreadSummary } from "./types";
 
 // The lifecycle changes every surface makes (Inbox rows and menus, the project
@@ -18,6 +23,16 @@ import type { SidebarThreadSummary } from "./types";
 
 const errorDescription = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
+
+const settlementCommand = (threadId: ThreadId, settled: boolean) =>
+  settled
+    ? ({ type: "thread.settle", commandId: newCommandId(), threadId } as const)
+    : ({ type: "thread.unsettle", commandId: newCommandId(), threadId, reason: "user" } as const);
+
+const snoozeCommand = (threadId: ThreadId, snoozedUntil: string | null) =>
+  snoozedUntil
+    ? ({ type: "thread.snooze", commandId: newCommandId(), threadId, snoozedUntil } as const)
+    : ({ type: "thread.unsnooze", commandId: newCommandId(), threadId } as const);
 
 /** Settles a thread, or moves it back to Active. Resolves whether the node took it. */
 export async function dispatchThreadSettlement(
@@ -32,17 +47,9 @@ export async function dispatchThreadSettlement(
     });
     return false;
   }
-  const command = settled
-    ? ({ type: "thread.settle", commandId: newCommandId(), threadId: target.threadId } as const)
-    : ({
-        type: "thread.unsettle",
-        commandId: newCommandId(),
-        threadId: target.threadId,
-        reason: "user",
-      } as const);
   const failureTitle = settled ? "Could not settle thread" : "Could not move thread to Active";
   try {
-    await sidebarUndo.dispatch(target, command);
+    await sidebarUndo.dispatch(target, settlementCommand(target.threadId, settled));
     return true;
   } catch (error) {
     toastManager.add({
@@ -67,16 +74,8 @@ export async function dispatchThreadSnooze(
     });
     return;
   }
-  const command = snoozedUntil
-    ? ({
-        type: "thread.snooze",
-        commandId: newCommandId(),
-        threadId: target.threadId,
-        snoozedUntil,
-      } as const)
-    : ({ type: "thread.unsnooze", commandId: newCommandId(), threadId: target.threadId } as const);
   try {
-    await sidebarUndo.dispatch(target, command);
+    await sidebarUndo.dispatch(target, snoozeCommand(target.threadId, snoozedUntil));
   } catch (error) {
     toastManager.add({
       type: "error",
@@ -84,6 +83,59 @@ export async function dispatchThreadSnooze(
       description: errorDescription(error, "The request failed."),
     });
   }
+}
+
+/**
+ * Sends `command` to each thread with one Undo notice. The batch code and its
+ * copy (threadLifecycleBatch.ts) load with the first bulk action. Never rejects.
+ */
+async function dispatchThreadBatch(
+  targets: readonly ScopedThreadRef[],
+  action: ThreadBatchAction,
+  command: (threadId: ThreadId) => SidebarBatchCommand,
+): Promise<SidebarUndoBatchResult | null> {
+  try {
+    const batch = await import("./threadLifecycleBatch");
+    return await batch.dispatchThreadBatch(targets, action, command);
+  } catch (error) {
+    // Only loading the batch code can fail here.
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Could not update threads",
+        description: errorDescription(error, "The request failed."),
+      }),
+    );
+    return null;
+  }
+}
+
+/** Settles threads, or moves them back to Active, at most 100 at once. */
+export function dispatchThreadSettlementBatch(
+  targets: readonly ScopedThreadRef[],
+  settled: boolean,
+): Promise<SidebarUndoBatchResult | null> {
+  return dispatchThreadBatch(targets, settled ? "settle" : "unsettle", (threadId) =>
+    settlementCommand(threadId, settled),
+  );
+}
+
+/** Snoozes threads until `snoozedUntil`, or wakes them with null, at most 100 at once. */
+export function dispatchThreadSnoozeBatch(
+  targets: readonly ScopedThreadRef[],
+  snoozedUntil: string | null,
+): Promise<SidebarUndoBatchResult | null> {
+  return dispatchThreadBatch(targets, snoozedUntil ? "snooze" : "unsnooze", (threadId) =>
+    snoozeCommand(threadId, snoozedUntil),
+  );
+}
+
+/** Says that a bulk action left `count` threads alone: their machine takes no changes now. */
+export function presentSkippedThreads(count: number): void {
+  void import("./threadLifecycleBatch").then(
+    (batch) => batch.presentSkippedThreads(count),
+    (error: unknown) => console.warn("Could not report skipped threads.", error),
+  );
 }
 
 type ArchiveThread = (target: ScopedThreadRef) => Promise<void>;

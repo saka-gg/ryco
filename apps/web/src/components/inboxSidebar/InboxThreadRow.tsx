@@ -27,6 +27,7 @@ import {
   resolveChangeRequestPresentation,
 } from "../../sourceControlPresentation";
 import { dispatchThreadSettlement, dispatchThreadSnooze } from "../../threadLifecycleCommands";
+import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { DeviceIcon } from "../DeviceIcon";
@@ -73,8 +74,9 @@ import {
 } from "./inboxRowPresentation";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 import { InboxStatusGlyph } from "./InboxStatusGlyph";
-import { InboxThreadMenuItems } from "./InboxThreadMenu";
+import { InboxSelectionMenuItems, InboxThreadMenuItems } from "./InboxThreadMenu";
 import { useInboxRowPreviewIntent } from "./useInboxRowPreviewIntent";
+import type { InboxMenuSelection, InboxRowSelection } from "./useInboxRowSelection";
 import {
   INBOX_ROW_LEAVING_EVENT,
   readInboxMotionDurationMs,
@@ -147,6 +149,8 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly motionEnabled: boolean;
   readonly previewHandle: InboxPreviewHandle;
   readonly onOpenRow: (row: InboxSidebarRow) => void;
+  /** Absent where rows cannot be selected (the frozen phone tier). */
+  readonly selection?: InboxRowSelection | undefined;
 }) {
   const { row } = props;
   const isPhone = usePresentationTier() === "phone";
@@ -170,6 +174,10 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     [row.environmentId, row.threadId],
   );
   const [menuOpen, setMenuOpen] = useState(false);
+  const inSelection = useThreadSelectionStore((state) => state.selectedThreadKeys.has(row.key));
+  const selected = inSelection && props.selection !== undefined;
+  // Taken when a menu opens: clicks in the menu never read a selection that changed since.
+  const [menuSelection, setMenuSelection] = useState<InboxMenuSelection | null>(null);
   const [pending, setPending] = useState(false);
   const [settling, setSettling] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -320,9 +328,18 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   };
   const handleMenuOpenChange = (open: boolean) => {
     setMenuOpen(open);
-    if (open) props.previewHandle.close();
+    if (!open) return;
+    props.previewHandle.close();
+    setMenuSelection(props.selection?.menuSelection(row) ?? null);
   };
-  const menuItems = (
+  const menuLabel = menuSelection ? `${menuSelection.rows.length} selected threads` : undefined;
+  const menuItems = menuSelection ? (
+    <InboxSelectionMenuItems
+      selection={menuSelection}
+      snoozePresets={snoozePresets}
+      onRun={(request) => props.selection?.run(menuSelection, request)}
+    />
+  ) : (
     <InboxThreadMenuItems
       changeRequestShortName={changeRequestShortName}
       pending={pending}
@@ -350,13 +367,25 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       ref={setVisibilityNode}
       type="button"
       aria-current={props.active ? "page" : undefined}
+      aria-description={selected ? "Selected" : undefined}
       className={cn(
-        "relative grid w-full min-w-0 grid-cols-[1.375rem_minmax(0,1fr)_auto] rounded-lg px-2 text-left outline-hidden ring-ring focus-visible:ring-2 aria-[current=page]:bg-sidebar-accent",
+        "relative grid w-full min-w-0 grid-cols-[1.375rem_minmax(0,1fr)_auto] rounded-lg px-2 text-left outline-hidden ring-ring focus-visible:ring-2",
         resting ? "items-center py-1" : "py-1.5",
+        // Shift-click selects rows, not text (the phone tier selects no rows).
+        props.selection && "select-none",
+        // The project sidebar's selection tints, its open-and-selected one included.
+        selected
+          ? props.active
+            ? "bg-primary/22 dark:bg-primary/30"
+            : "bg-primary/15 dark:bg-primary/22"
+          : "aria-[current=page]:bg-sidebar-accent",
       )}
+      data-selected={selected ? "" : undefined}
       data-testid="inbox-thread-row"
       draggable={!isPhone}
-      onClick={() => props.onOpenRow(row)}
+      onClick={(event) => {
+        if (!props.selection?.click(row, event)) props.onOpenRow(row);
+      }}
       onPointerEnter={() => {
         workingTreeWanted.start();
         // The row navigates imperatively: warm the route and the thread's
@@ -503,6 +532,8 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             : "[contain-intrinsic-block-size:auto_3.25rem]",
         )}
         data-testid="inbox-thread-row-shell"
+        // Clicks here and in its menus keep the selection: the sidebar clears it on other clicks.
+        data-thread-selection-safe
         // INBOX_ROW_KEY_ATTRIBUTE: the list motion hook tracks rows by this key.
         data-inbox-row-key={row.key}
         data-settling={settling ? "" : undefined}
@@ -551,13 +582,22 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             >
               <MoreHorizontalIcon className="size-3.5" />
             </MenuTrigger>
-            <MenuPopup align="end" className="min-w-56">
+            <MenuPopup
+              align="end"
+              aria-label={menuLabel}
+              // A selection menu is named by its count, not by this row's trigger.
+              {...(menuLabel ? { "aria-labelledby": undefined } : {})}
+              className="min-w-56"
+              data-thread-selection-safe
+            >
               {menuItems}
             </MenuPopup>
           </Menu>
         </div>
       </ContextMenuTrigger>
-      <ContextMenuPopup className="min-w-56">{menuItems}</ContextMenuPopup>
+      <ContextMenuPopup aria-label={menuLabel} className="min-w-56" data-thread-selection-safe>
+        {menuItems}
+      </ContextMenuPopup>
     </ContextMenu>
   );
 });

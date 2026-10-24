@@ -46,6 +46,7 @@ import type { InboxPullRequest } from "./inboxPullRequests";
 import { formatInboxDayTime } from "./inboxRowPresentation";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 import type { InboxThreadActions } from "./InboxThreadRow";
+import type { InboxBulkRequest, InboxMenuSelection } from "./useInboxRowSelection";
 
 /**
  * Presentation for the shared thread action inventory: an icon and a group
@@ -118,6 +119,76 @@ export interface InboxSnoozePreset {
   readonly id: string;
   readonly label: string;
   readonly snoozedUntil: string;
+}
+
+function snoozePresetItems(
+  presets: ReadonlyArray<InboxSnoozePreset>,
+  onSnooze: (snoozedUntil: string) => void,
+): ReactNode[] {
+  return presets.map((preset) => (
+    <MenuItem key={preset.id} onClick={() => onSnooze(preset.snoozedUntil)}>
+      {preset.label}
+      <MenuShortcut className="tracking-normal">
+        {formatInboxDayTime(preset.snoozedUntil)}
+      </MenuShortcut>
+    </MenuItem>
+  ));
+}
+
+/**
+ * The menu of a multiple selection. Each count is the rows that action
+ * changes, at most 100; an action no selected row allows is disabled.
+ */
+export function InboxSelectionMenuItems(props: {
+  readonly selection: InboxMenuSelection;
+  readonly snoozePresets: ReadonlyArray<InboxSnoozePreset>;
+  readonly onRun: (request: InboxBulkRequest) => void;
+}) {
+  // It renders only in an open menu, fresh on each open, so memoizing it would
+  // only add code to the shell.
+  "use no memo";
+  const { rows, actions, deleteThreads } = props.selection;
+  const item = (
+    action: Exclude<InboxBulkRequest["action"], "snooze">,
+    Icon: LucideIcon,
+    label: string,
+  ) => (
+    <MenuItem
+      key={action}
+      variant={action === "delete" ? "destructive" : "default"}
+      disabled={actions[action].length === 0}
+      onClick={() => props.onRun({ action })}
+    >
+      <Icon aria-hidden />
+      {`${label} (${actions[action].length})`}
+    </MenuItem>
+  );
+  return [
+    item("settle", CheckIcon, "Settle"),
+    rows.some((row) => row.settled) ? item("unsettle", Undo2Icon, "Move to Active") : null,
+    <MenuSub key="snooze">
+      <MenuSubTrigger
+        className="[&>svg:first-child]:-mx-0.5 [&>svg]:opacity-80"
+        disabled={actions.snooze.length === 0}
+      >
+        <ClockIcon aria-hidden />
+        {`Snooze (${actions.snooze.length})`}
+      </MenuSubTrigger>
+      <MenuSubPopup className="min-w-52" data-thread-selection-safe>
+        {snoozePresetItems(props.snoozePresets, (snoozedUntil) =>
+          props.onRun({ action: "snooze", snoozedUntil }),
+        )}
+      </MenuSubPopup>
+    </MenuSub>,
+    rows.some((row) => row.snoozedUntil !== null)
+      ? item("unsnooze", AlarmClockOffIcon, "Unsnooze")
+      : null,
+    <MenuSeparator key="separator-unread" />,
+    item("markUnread", CircleDotIcon, "Mark unread"),
+    ...(deleteThreads
+      ? [<MenuSeparator key="separator-delete" />, item("delete", Trash2Icon, "Delete")]
+      : []),
+  ];
 }
 
 export function InboxThreadMenuItems(props: {
@@ -218,14 +289,7 @@ export function InboxThreadMenuItems(props: {
               Snooze
             </MenuSubTrigger>
             <MenuSubPopup className="min-w-52">
-              {props.snoozePresets.map((preset) => (
-                <MenuItem key={preset.id} onClick={() => props.onSnooze(preset.snoozedUntil)}>
-                  {preset.label}
-                  <MenuShortcut className="tracking-normal">
-                    {formatInboxDayTime(preset.snoozedUntil)}
-                  </MenuShortcut>
-                </MenuItem>
-              ))}
+              {snoozePresetItems(props.snoozePresets, props.onSnooze)}
             </MenuSubPopup>
           </MenuSub>
         ),
