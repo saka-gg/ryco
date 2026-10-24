@@ -39,6 +39,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -77,6 +78,7 @@ import {
   type ThreadSubagentView,
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
+import { useSubagentStopAction } from "./agents/useSubagentStopAction";
 import { ArtifactsPanel } from "./artifacts/ArtifactsPanel";
 import { HtmlRenderPanel } from "./chat/HtmlRenderPanel";
 import { usePaneFocus } from "./chat/PaneFocus";
@@ -460,6 +462,27 @@ function WorkspaceBrowserPanel() {
     <LazyBrowserPanel
       environmentId={threadRef?.environmentId ?? null}
       cwd={serverThread?.worktreePath ?? draftThread?.worktreePath ?? project?.cwd ?? null}
+    />
+  );
+}
+
+/**
+ * The Agents tab for one thread. Stop is gated here, so its connection and
+ * capability reads only run while the tab is shown.
+ */
+function WorkspaceAgentsPanel({
+  threadRef,
+  ...props
+}: Omit<ComponentProps<typeof AgentsPanel>, "environmentId" | "threadId" | "stopAgent"> & {
+  threadRef: ScopedThreadRef | null;
+}) {
+  const stopAgent = useSubagentStopAction(threadRef);
+  return (
+    <AgentsPanel
+      {...props}
+      environmentId={threadRef?.environmentId ?? null}
+      threadId={threadRef?.threadId ?? null}
+      stopAgent={stopAgent}
     />
   );
 }
@@ -1618,10 +1641,9 @@ export default function ThreadWorkspacePanel(props: {
           ) : activeMode === "agents" && !isPhoneSurface ? (
             // The Agents workspace stays off the frozen phone tier; a phone
             // route that lands here falls back to the launcher.
-            <AgentsPanel
+            <WorkspaceAgentsPanel
+              threadRef={workspaceThreadRef}
               model={agentPanelModel}
-              environmentId={workspaceThreadRef?.environmentId ?? null}
-              threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
               onOpenAgent={openRuntimeAgent}
               subagents={subagents}
               selectedAgentId={agentKey}

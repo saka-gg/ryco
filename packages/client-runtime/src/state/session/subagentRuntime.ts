@@ -100,6 +100,10 @@ export interface RuntimeSubagent {
   readonly workflowName: string | null;
   readonly phases: ReadonlyArray<SubagentWorkflowPhase>;
   readonly runHandles: SubagentRunHandles | null;
+  /** The provider runtime that reported this agent; a stop must target it. */
+  readonly runtimeSessionId: string | null;
+  /** The provider can stop this one task without ending the turn. */
+  readonly canStop: boolean;
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
   /** Earliest retained observation, used for deterministic roster order. */
   readonly firstSeenAt: string;
@@ -305,6 +309,8 @@ interface MutableAgent {
   workflowName: string | null;
   phases: ReadonlyArray<SubagentWorkflowPhase>;
   runHandles: SubagentRunHandles | null;
+  runtimeSessionId: string | null;
+  canStop: boolean;
   recentActivity: ReadonlyArray<SubagentActivityEntry>;
   firstSeenAt: string;
   spawnTurnId: string | null;
@@ -363,6 +369,9 @@ function getOrCreate(
     workflowName: asString(payload.workflowName) ?? null,
     phases: [],
     runHandles: null,
+    // Filled by fillMetadata, which every caller runs on the same payload.
+    runtimeSessionId: null,
+    canStop: false,
     recentActivity: [],
     firstSeenAt: at,
     spawnTurnId: null,
@@ -416,6 +425,10 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): bo
   }
   const outputFile = asString(payload.outputFile);
   if (outputFile) agent.outputFile = outputFile;
+  const runtimeSessionId = asString(payload.runtimeSessionId);
+  if (runtimeSessionId) agent.runtimeSessionId = runtimeSessionId;
+  // The latest explicit flag wins; rows that omit it keep the known value.
+  if (typeof payload.canStop === "boolean") agent.canStop = payload.canStop;
   if (Array.isArray(payload.phases)) {
     const phases: SubagentWorkflowPhase[] = [];
     for (const entry of payload.phases) {
@@ -875,6 +888,8 @@ function runtimeSubagentFromTranscript(
     workflowName: null,
     phases: [],
     runHandles: null,
+    runtimeSessionId: null,
+    canStop: false,
     recentActivity: subagent.entries.slice(-RECENT_ACTIVITY_LIMIT).map((entry) => ({
       at: entry.createdAt,
       summary: bounded(entry.detail ?? entry.output ?? entry.label),

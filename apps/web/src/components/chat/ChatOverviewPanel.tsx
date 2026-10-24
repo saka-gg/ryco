@@ -10,6 +10,7 @@ import GitActionsControl, {
   type GitActionPostPushEvent,
   type GitActionsControlAppearance,
 } from "../GitActionsControl";
+import { useSubagentStopAction } from "../agents/useSubagentStopAction";
 import { CrownOverview } from "../overview/crown/CrownOverview";
 import type { CrownOverviewProps } from "../overview/crown/crownTypes";
 import { useWorktreeNotes, type WorktreeNotesTarget } from "../overview/notes/useWorktreeNotes";
@@ -238,7 +239,7 @@ export function ChatOverviewPanel(props: ChatOverviewPanelElementProps) {
 /** What ChatView hands the on-demand overview panel. */
 export type ChatOverviewPanelWithControlsProps = DistributiveOmit<
   ChatOverviewPanelElementProps,
-  "sourceControlActions" | "branchControl" | "sourceControlSync" | "shipTarget"
+  "sourceControlActions" | "branchControl" | "sourceControlSync" | "shipTarget" | "stopAgent"
 > & {
   /** The thread's git controls, built here so ChatView stays free of them. */
   controls: OverviewPanelControlsInput;
@@ -247,9 +248,10 @@ export type ChatOverviewPanelWithControlsProps = DistributiveOmit<
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 /**
- * The overview panel with its git controls. ChatView loads this module on
- * demand (see `chatOverviewPanelModule`), so the overview, crown, plan sidebar
- * and git action controls stay out of the chat route's first-frame graph.
+ * The overview panel with its git controls and, in the crown, Stop for the
+ * thread's agents. ChatView loads this module on demand (see
+ * `chatOverviewPanelModule`), so the overview, crown, plan sidebar and git
+ * action controls stay out of the chat route's first-frame graph.
  */
 export function ChatOverviewPanelWithControls({
   controls,
@@ -258,6 +260,8 @@ export function ChatOverviewPanelWithControls({
   const { sourceControlActions, branchControl, sourceControlSync } =
     useOverviewPanelControls(controls);
   const { gitCwd, activeThreadRef, routeKind, draftId, onPostPush } = controls;
+  // The phone sheet lists no runtime agents, so it never gates Stop.
+  const stopAgent = useSubagentStopAction(props.presentation === "crown" ? activeThreadRef : null);
   return props.presentation === "crown" ? (
     <ChatOverviewPanel
       {...props}
@@ -270,6 +274,7 @@ export function ChatOverviewPanelWithControls({
         ...(routeKind === "draft" && draftId ? { draftId } : {}),
         onPostPush,
       }}
+      stopAgent={stopAgent}
     />
   ) : (
     <ChatOverviewPanel

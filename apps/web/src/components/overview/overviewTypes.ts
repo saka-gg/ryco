@@ -1,3 +1,4 @@
+import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
 import type {
   EnvironmentId,
   SourceControlChangeRequestMergeability,
@@ -171,6 +172,8 @@ export interface OverviewLayoutProps {
   onOpenAgent?: ((agentId: string) => void) | undefined;
   /** Opens the Agents tab focused on one workflow. */
   onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
+  /** Stop for the thread's native agents; without it the agent rows offer none. */
+  stopAgent?: SubagentStopAction | undefined;
   sourceControlActions?: ReactNode | undefined;
   branchControl?: ReactNode | undefined;
   environmentId: EnvironmentId;

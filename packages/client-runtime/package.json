@@ -154,6 +154,10 @@
       "types": "./src/state/session/index.ts",
       "import": "./src/state/session/index.ts"
     },
+    "./state/session/subagentStop": {
+      "types": "./src/state/session/subagentStop.ts",
+      "import": "./src/state/session/subagentStop.ts"
+    },
     "./state/user-input": {
       "types": "./src/state/user-input/index.ts",
       "import": "./src/state/user-input/index.ts"

@@ -1121,6 +1121,37 @@ describe("session-derived interruption", () => {
   });
 });
 
+describe("stop facts", () => {
+  const started = activity("task.started", {
+    taskId: "agent-1",
+    taskType: "local_agent",
+    runtimeSessionId: "rt-1",
+    canStop: true,
+  });
+
+  it("carries the reporting runtime and the provider's stop flag", () => {
+    expect(fold([started])[0]).toMatchObject({ runtimeSessionId: "rt-1", canStop: true });
+  });
+
+  it("takes a later runtime, and keeps the flag until a row sets it", () => {
+    const moved = fold([
+      started,
+      activity("task.progress", { taskId: "agent-1", runtimeSessionId: "rt-2" }),
+    ]);
+    expect(moved[0]).toMatchObject({ runtimeSessionId: "rt-2", canStop: true });
+    const revoked = fold([
+      started,
+      activity("task.progress", { taskId: "agent-1", canStop: false }),
+    ]);
+    expect(revoked[0]).toMatchObject({ runtimeSessionId: "rt-1", canStop: false });
+  });
+
+  it("is not stoppable when no row says so", () => {
+    const agents = fold([activity("task.started", { taskId: "agent-2", taskType: "local_agent" })]);
+    expect(agents[0]).toMatchObject({ runtimeSessionId: null, canStop: false });
+  });
+});
+
 describe("Codex collaboration transcript fallback", () => {
   it("renders persisted collab agents when no native task projection exists", () => {
     const rows = [
@@ -1159,6 +1190,8 @@ describe("Codex collaboration transcript fallback", () => {
       role: "Reviewer",
       status: "running",
       title: "You are a reviewer. Inspect the Agents workspace.",
+      runtimeSessionId: null,
+      canStop: false,
     });
   });
 
