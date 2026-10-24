@@ -142,6 +142,13 @@ export type GitStagedOnlyCommit = typeof GitStagedOnlyCommit.Type;
 
 export const GitRunStackedActionInput = Schema.Struct({
   actionId: TrimmedNonEmptyStringSchema,
+  /**
+   * The action keeps running on the node when this request's stream closes: the client
+   * attaches again with `git.resumeStackedAction` and stops it with `git.cancelStackedAction`.
+   * Only clients that can attach again send it, with a random UUID `actionId`. Servers without
+   * `capabilities.recoverableGitActions` drop this key and stop the action with its request.
+   */
+  recoverable: Schema.optional(Schema.Boolean),
   cwd: TrimmedNonEmptyStringSchema,
   action: GitStackedAction,
   worktreeId: Schema.optional(WorktreeId),
@@ -163,6 +170,24 @@ export const GitRunStackedActionInput = Schema.Struct({
   ),
 );
 export type GitRunStackedActionInput = typeof GitRunStackedActionInput.Type;
+
+/**
+ * Attaches to a recoverable action again: the exact input it was started with. It replays the
+ * action's current progress, then follows it to its end. It never starts an action.
+ */
+export const GitResumeStackedActionInput = GitRunStackedActionInput;
+export type GitResumeStackedActionInput = typeof GitResumeStackedActionInput.Type;
+
+export const GitCancelStackedActionInput = Schema.Struct({
+  actionId: TrimmedNonEmptyStringSchema,
+});
+export type GitCancelStackedActionInput = typeof GitCancelStackedActionInput.Type;
+
+/** `cancelled: false` when no running action of this client has the id. */
+export const GitCancelStackedActionResult = Schema.Struct({
+  cancelled: Schema.Boolean,
+});
+export type GitCancelStackedActionResult = typeof GitCancelStackedActionResult.Type;
 
 export const VcsListRefsInput = Schema.Struct({
   fetchOrigin: Schema.optional(Schema.Boolean),
@@ -448,6 +473,50 @@ export class GitStagedIndexChangedError extends Schema.TaggedError<GitStagedInde
 ) {
   override get message(): string {
     return this.detail;
+  }
+}
+
+/**
+ * Why a recoverable action ended without an outcome to report. `missing`: the node holds no
+ * record of it (it restarted, dropped an old record, or the start never arrived). The client
+ * reasons: `unsupported` (the node cannot attach again), `expired` (no usable connection in
+ * time) and `ended` (the account session ended).
+ */
+export const GitActionResultUnavailableReason = Schema.Literals([
+  "missing",
+  "unsupported",
+  "expired",
+  "ended",
+]);
+export type GitActionResultUnavailableReason = typeof GitActionResultUnavailableReason.Type;
+
+/** A recoverable action's outcome is unknown to this client. Nothing was run again. */
+export class GitActionResultUnavailableError extends Schema.TaggedError<GitActionResultUnavailableError>()(
+  "GitActionResultUnavailableError",
+  {
+    actionId: Schema.String,
+    reason: GitActionResultUnavailableReason,
+  },
+) {
+  override get message(): string {
+    return "Ryco couldn't get the result of this Git action. Check the repository status before trying again.";
+  }
+}
+
+/**
+ * A running recoverable action was stopped: by its client (`requested`), or because the
+ * pairing it ran under was revoked (`access-revoked`). Steps that finished stay done.
+ */
+export class GitActionStoppedError extends Schema.TaggedError<GitActionStoppedError>()(
+  "GitActionStoppedError",
+  {
+    actionId: Schema.String,
+    phase: Schema.NullOr(GitActionProgressPhase),
+    reason: Schema.Literals(["requested", "access-revoked"]),
+  },
+) {
+  override get message(): string {
+    return "The Git action was stopped. Steps that already finished stay done; check the repository status.";
   }
 }
 

@@ -223,6 +223,7 @@ export const makeServerAuth = Effect.gen(function* () {
     sessions.verify(token).pipe(
       Effect.map((session) => ({
         sessionId: session.sessionId,
+        chainId: session.chainId,
         subject: session.subject,
         method: session.method,
         role: session.role,
@@ -586,6 +587,7 @@ export const makeServerAuth = Effect.gen(function* () {
           return yield* sessions.verifyWebSocketToken(websocketToken).pipe(
             Effect.map((session) => ({
               sessionId: session.sessionId,
+              chainId: session.chainId,
               subject: session.subject,
               method: session.method,
               role: session.role,

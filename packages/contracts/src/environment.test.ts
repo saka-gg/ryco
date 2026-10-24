@@ -120,6 +120,17 @@ describe("ExecutionEnvironmentCapabilities.worktreeNotes", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.recoverableGitActions", () => {
+  it("stays absent for older nodes, which stop a Git action when its request closes", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.recoverableGitActions).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ recoverableGitActions: true })).capabilities
+        .recoverableGitActions,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ recoverableGitActions: "true" }))).toThrow();
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.stagedOnlyCommit", () => {
   it("stays absent for older nodes, which would commit every change", () => {
     expect(decodeDescriptor(descriptor({})).capabilities.stagedOnlyCommit).toBeUndefined();

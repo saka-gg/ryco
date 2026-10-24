@@ -28,6 +28,8 @@ export interface RpcPrincipal {
   readonly role: RpcPrincipalRole;
   readonly scopeId: string;
   readonly directSessionId?: AuthSessionId;
+  /** The direct session's pairing (rotation chain); every renewal of the pairing shares it. */
+  readonly directChainId?: AuthSessionId;
   readonly canManageLocalAccess: boolean;
   /** Relay channels only; see {@link RelayChannelAuthority}. */
   readonly relayAuthority?: () => RelayChannelAuthority;
@@ -45,6 +47,7 @@ export const directRpcPrincipal = (session: AuthenticatedSession): RpcPrincipal 
         role: session.role === "owner" ? "owner" : "viewer",
         scopeId: session.sessionId,
         directSessionId: session.sessionId,
+        directChainId: session.chainId,
         canManageLocalAccess: session.role === "owner",
       }
     : {
@@ -52,6 +55,7 @@ export const directRpcPrincipal = (session: AuthenticatedSession): RpcPrincipal 
         role: session.link.role,
         scopeId: session.sessionId,
         directSessionId: session.sessionId,
+        directChainId: session.chainId,
         canManageLocalAccess: false,
       };
 
@@ -66,3 +70,30 @@ export const relayRpcPrincipal = (
   canManageLocalAccess: false,
   relayAuthority,
 });
+
+/** The owner key of a direct pairing's work: see {@link rpcPrincipalOwnerKey}. */
+export const directPairingOwnerKey = (chainId: string): string => `direct:${chainId}`;
+
+/** The one owner of relay channels that identify no device: see {@link rpcPrincipalOwnerKey}. */
+export const RELAY_UNIDENTIFIED_OWNER_KEY = "relay-unidentified";
+
+/**
+ * Who owns work that outlives one connection, stable across reconnects: a direct client's
+ * pairing (its rotation chain, so a bearer renewal keeps the owner), a relay channel's
+ * authenticated device (by its identity key, whichever trust source vouched for it), or one
+ * bucket for relay channels that identify no device (hosted web). Never the channel or session
+ * id of a relay connection, which changes on every reconnect. Read per request: a relay
+ * channel's authority is set after its handshake. This is an owner, not an authorization:
+ * every request is still authorized on its own.
+ */
+export function rpcPrincipalOwnerKey(principal: RpcPrincipal): string {
+  if (principal.transport === "direct") {
+    return directPairingOwnerKey(
+      principal.directChainId ?? principal.directSessionId ?? principal.scopeId,
+    );
+  }
+  const authority = principal.relayAuthority?.() ?? { trustSource: "none" as const };
+  return authority.trustSource === "none"
+    ? RELAY_UNIDENTIFIED_OWNER_KEY
+    : `relay-device:${Buffer.from(authority.clientIdentityFingerprint).toString("hex")}`;
+}

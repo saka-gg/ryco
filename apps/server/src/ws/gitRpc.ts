@@ -4,17 +4,29 @@ import { realpath } from "node:fs/promises";
 import { Duration, Effect, Option, Queue, Stream } from "effect";
 import {
   type GitActionProgressEvent,
+  GitActionResultUnavailableError,
   type GitManagerServiceError,
+  type GitRunStackedActionInput,
+  type GitRunStackedActionResult,
   ProjectId,
   GitCommandError,
   WS_METHODS,
 } from "@ryco/contracts";
+
+import type { GitActionPublish } from "../git/GitActionRunner.ts";
 
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { selectConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
 import { resolveProjectWorktreesDir } from "../project/projectMetadataPaths.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
+
+/**
+ * The most a finished action's pull request link waits for orchestration. The link runs
+ * uninterruptibly, and a shutdown that already stopped orchestration would otherwise wait
+ * for it forever.
+ */
+const PULL_REQUEST_LINK_TIMEOUT = Duration.seconds(10);
 
 export const makeGitHandlers = (ctx: WsRpcContext) => {
   const {
@@ -39,7 +51,79 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
     config,
     serverSettings,
     workspaceAccessPolicy,
+    gitActionRunner,
+    gitActionOwner,
   } = ctx;
+
+  /** A pull request a worktree's action opened becomes the worktree's linked pull request. */
+  const linkWorktreePullRequest = (
+    input: GitRunStackedActionInput,
+    result: GitRunStackedActionResult,
+  ) =>
+    Effect.gen(function* () {
+      if (
+        input.worktreeId === undefined ||
+        result.pr.number === undefined ||
+        (result.pr.status !== "created" && result.pr.status !== "opened_existing")
+      ) {
+        return;
+      }
+      const existing = yield* projectionWorktrees
+        .getById({ worktreeId: input.worktreeId })
+        .pipe(
+          Effect.mapError((cause) =>
+            toGitManagerError(
+              WS_METHODS.gitRunStackedAction,
+              "Failed to load worktree for pull request link update.",
+              cause,
+            ),
+          ),
+        );
+      if (Option.isNone(existing)) return;
+      yield* dispatchWorktreeCommand(
+        {
+          type: "worktree.source-control-state.update",
+          commandId: serverCommandId("worktree-pr-link"),
+          worktreeId: input.worktreeId,
+          prNumber: result.pr.number,
+          prTitle: result.pr.title ?? existing.value.prTitle,
+          prState: "open",
+          prIsDraft: false,
+          issueState: existing.value.issueState ?? null,
+          updatedAt: new Date().toISOString(),
+        },
+        WS_METHODS.gitRunStackedAction,
+      );
+    });
+
+  /**
+   * Linked issues, the stacked action, then its bookkeeping. The action reported its result
+   * before the bookkeeping runs, so the bookkeeping never fails it (a failed or late pull
+   * request link is logged) and a Stop or a closed request arriving now no longer cuts it short.
+   */
+  const runStackedActionWork = (input: GitRunStackedActionInput, publish: GitActionPublish) =>
+    attachLinkedIssuesToPrAction(input).pipe(
+      Effect.flatMap((runInput) =>
+        gitWorkflow.runStackedAction(runInput, {
+          actionId: input.actionId,
+          progressReporter: { publish },
+        }),
+      ),
+      Effect.flatMap((result) =>
+        linkWorktreePullRequest(input, result).pipe(
+          Effect.timeoutOrElse({
+            duration: PULL_REQUEST_LINK_TIMEOUT,
+            orElse: () =>
+              Effect.logWarning("Pull request link update timed out", {
+                worktreeId: input.worktreeId,
+              }),
+          }),
+          Effect.ignoreCause({ log: true }),
+          Effect.andThen(refreshGitStatus(input.cwd)),
+          Effect.uninterruptible,
+        ),
+      ),
+    );
 
   return defineWsHandlers({
     [WS_METHODS.subscribeVcsStatus]: (input) =>
@@ -102,63 +186,54 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.gitRunStackedAction,
         ownerStream(
           WS_METHODS.gitRunStackedAction,
-          Stream.callback<GitActionProgressEvent, GitManagerServiceError>(
-            (queue) =>
-              attachLinkedIssuesToPrAction(input).pipe(
-                Effect.flatMap((runInput) =>
-                  gitWorkflow.runStackedAction(runInput, {
-                    actionId: input.actionId,
-                    progressReporter: {
-                      publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
-                    },
-                  }),
-                ),
-                Effect.matchCauseEffect({
-                  onFailure: (cause) => Queue.failCause(queue, cause),
-                  onSuccess: (result) =>
-                    Effect.gen(function* () {
-                      if (
-                        input.worktreeId !== undefined &&
-                        result.pr.number !== undefined &&
-                        (result.pr.status === "created" || result.pr.status === "opened_existing")
-                      ) {
-                        const existing = yield* projectionWorktrees
-                          .getById({
-                            worktreeId: input.worktreeId,
-                          })
-                          .pipe(
-                            Effect.mapError((cause) =>
-                              toGitManagerError(
-                                WS_METHODS.gitRunStackedAction,
-                                "Failed to load worktree for pull request link update.",
-                                cause,
-                              ),
-                            ),
-                          );
-                        if (Option.isSome(existing)) {
-                          yield* dispatchWorktreeCommand(
-                            {
-                              type: "worktree.source-control-state.update",
-                              commandId: serverCommandId("worktree-pr-link"),
-                              worktreeId: input.worktreeId,
-                              prNumber: result.pr.number,
-                              prTitle: result.pr.title ?? existing.value.prTitle,
-                              prState: "open",
-                              prIsDraft: false,
-                              issueState: existing.value.issueState ?? null,
-                              updatedAt: new Date().toISOString(),
-                            },
-                            WS_METHODS.gitRunStackedAction,
-                          );
-                        }
-                      }
-                      yield* refreshGitStatus(input.cwd);
-                      yield* Queue.end(queue).pipe(Effect.asVoid);
+          input.recoverable === true && gitActionRunner !== undefined
+            ? // Outlives this request: the client attaches again with git.resumeStackedAction.
+              gitActionRunner.start({
+                owner: gitActionOwner(),
+                command: input,
+                run: (publish) => runStackedActionWork(input, publish),
+              })
+            : // Request-owned, as older clients expect: closing the request stops the action.
+              Stream.callback<GitActionProgressEvent, GitManagerServiceError>(
+                (queue) =>
+                  runStackedActionWork(input, (event) =>
+                    Queue.offer(queue, event).pipe(Effect.asVoid),
+                  ).pipe(
+                    Effect.matchCauseEffect({
+                      onFailure: (cause) => Queue.failCause(queue, cause),
+                      onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
                     }),
-                }),
+                  ),
+                { bufferSize: 128, strategy: "suspend" },
               ),
-            { bufferSize: 128, strategy: "suspend" },
-          ),
+        ),
+        { "rpc.aggregate": "vcs" },
+      ),
+    [WS_METHODS.gitResumeStackedAction]: (input) =>
+      observeRpcStream(
+        WS_METHODS.gitResumeStackedAction,
+        ownerStream(
+          WS_METHODS.gitResumeStackedAction,
+          gitActionRunner === undefined
+            ? Stream.fail(
+                new GitActionResultUnavailableError({
+                  actionId: input.actionId,
+                  reason: "missing",
+                }),
+              )
+            : gitActionRunner.resume({ owner: gitActionOwner(), command: input }),
+        ),
+        { "rpc.aggregate": "vcs" },
+      ),
+    [WS_METHODS.gitCancelStackedAction]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.gitCancelStackedAction,
+        ownerEffect(
+          WS_METHODS.gitCancelStackedAction,
+          (gitActionRunner === undefined
+            ? Effect.succeed(false)
+            : gitActionRunner.cancel({ owner: gitActionOwner(), actionId: input.actionId })
+          ).pipe(Effect.map((cancelled) => ({ cancelled }))),
         ),
         { "rpc.aggregate": "vcs" },
       ),

@@ -39,6 +39,7 @@ import {
   WsHostedRpcGroup,
   WsRpcGroup,
   EditorId,
+  type GitActionProgressEvent,
 } from "@ryco/contracts";
 import { isUnknownUnionMember, type UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { assert, it } from "@effect/vitest";
@@ -120,6 +121,12 @@ import {
 import { StatisticsQuery, type StatisticsQueryShape } from "./statistics/StatisticsQuery.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
+import {
+  GitActionRunner,
+  GitActionRunnerLive,
+  type GitActionRunnerShape,
+} from "./git/GitActionRunner.ts";
+import { makeGitActionRunner } from "./git/gitActionRunnerCore.ts";
 import {
   ProjectionWorktreeRepository,
   type ProjectionWorktreeRepositoryShape,
@@ -564,6 +571,8 @@ const buildAppUnderTest = (options?: {
     chatFolders?: ChatFoldersShape;
     /** Absent by default, as in other route tests. */
     projectionProjectRepository?: ProjectionProjectRepositoryShape;
+    /** The node's runner by default, shared by every socket of the test server. */
+    gitActionRunner?: GitActionRunnerShape;
   };
 }) =>
   Effect.gen(function* () {
@@ -1059,6 +1068,12 @@ const buildAppUnderTest = (options?: {
       Layer.provideMerge(
         Layer.mock(WorkspaceLifecycle)({ ...options?.layers?.workspaceLifecycle }),
       ),
+      // Above the auth layer, so the runner sees session revocations.
+      Layer.provide(
+        options?.layers?.gitActionRunner
+          ? Layer.succeed(GitActionRunner, options.layers.gitActionRunner)
+          : GitActionRunnerLive,
+      ),
       Layer.provideMerge(makeAuthTestLayer()),
       Layer.provideMerge(LocalDiagnosticsMetricsLive),
       Layer.provideMerge(AdvertisedEndpointRegistryLive),
@@ -1273,9 +1288,12 @@ const getAuthenticatedBearerSessionToken = (credential = defaultDesktopBootstrap
   });
 
 const getAuthenticatedWebSocketToken = (credential = defaultDesktopBootstrapToken) =>
+  getAuthenticatedSessionCookieHeader(credential).pipe(Effect.flatMap(getWebSocketTokenForCookie));
+
+/** A websocket token of an existing browser session: several sockets of one client. */
+const getWebSocketTokenForCookie = (cookie: string) =>
   Effect.gen(function* () {
     const wsTokenUrl = yield* getHttpServerUrl("/api/auth/ws-token");
-    const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
     const response = yield* Effect.promise(() =>
       fetch(wsTokenUrl, {
         method: "POST",
@@ -1313,6 +1331,14 @@ const splitHeaderTokens = (value: string | null) =>
     .map((token) => token.trim())
     .filter((token) => token.length > 0)
     .toSorted();
+
+/** The `/ws` URL of a socket authenticated as the browser session `cookie`. */
+const getWsServerUrlForCookie = (cookie: string) =>
+  Effect.gen(function* () {
+    const next = new URL(yield* getWsServerUrl("/ws", { authenticated: false }));
+    next.searchParams.set("wsToken", yield* getWebSocketTokenForCookie(cookie));
+    return next.toString();
+  });
 
 const getWsServerUrl = (
   pathname = "",
@@ -5986,6 +6012,294 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         yield* Deferred.await(localRefreshStarted);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  /** A git manager whose push reports its start and phase, then waits for `release`. */
+  const makeHeldPushGitManager = Effect.gen(function* () {
+    const release = yield* Deferred.make<void>();
+    const interrupted = yield* Deferred.make<void>();
+    const localRefreshStarted = yield* Deferred.make<void>();
+    const state = { runs: 0 };
+    const gitManager: Partial<GitManagerShape> = {
+      invalidateLocalStatus: () => Effect.void,
+      invalidateRemoteStatus: () => Effect.void,
+      localStatus: () =>
+        Deferred.succeed(localRefreshStarted, undefined).pipe(
+          Effect.as({
+            isRepo: true,
+            hasPrimaryRemote: true,
+            isDefaultRef: false,
+            refName: "feature/demo",
+            hasWorkingTreeChanges: false,
+            workingTree: { files: [], insertions: 0, deletions: 0 },
+          }),
+        ),
+      remoteStatus: () =>
+        Effect.succeed({ hasUpstream: true, aheadCount: 0, behindCount: 0, pr: null }),
+      runStackedAction: (input, options) =>
+        Effect.gen(function* () {
+          state.runs += 1;
+          const base = { actionId: input.actionId, cwd: input.cwd, action: input.action };
+          const publish = (event: GitActionProgressEvent) =>
+            options?.progressReporter?.publish(event) ?? Effect.void;
+          yield* publish({ ...base, kind: "action_started", phases: ["push"] });
+          yield* publish({ ...base, kind: "phase_started", phase: "push", label: "Pushing..." });
+          yield* Deferred.await(release);
+          const result = {
+            action: input.action,
+            branch: { status: "skipped_not_requested" as const },
+            commit: { status: "skipped_not_requested" as const },
+            push: { status: "pushed" as const, branch: "feature/demo" },
+            pr: { status: "skipped_not_requested" as const },
+            toast: { title: "Pushed feature/demo", cta: { kind: "none" as const } },
+          };
+          yield* publish({ ...base, kind: "action_finished", result });
+          return result;
+        }).pipe(Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined))),
+    };
+    return { release, interrupted, localRefreshStarted, state, gitManager };
+  });
+
+  const recoverablePush = () => ({
+    actionId: crypto.randomUUID(),
+    cwd: "/tmp/repo",
+    action: "push" as const,
+    recoverable: true,
+  });
+
+  it.effect(
+    "keeps a recoverable git.runStackedAction running when its socket closes and re-attaches on a new socket",
+    () =>
+      Effect.gen(function* () {
+        const push = yield* makeHeldPushGitManager;
+        // The node's runner, told when the server lets go of a socket's stream: the
+        // deterministic sign that the first socket's request is gone.
+        const runner = yield* makeGitActionRunner;
+        const observerReleased = yield* Deferred.make<void>();
+        yield* buildAppUnderTest({
+          layers: {
+            vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+            gitManager: push.gitManager,
+            gitActionRunner: {
+              ...runner,
+              start: (input) =>
+                runner
+                  .start(input)
+                  .pipe(Stream.ensuring(Deferred.succeed(observerReleased, undefined))),
+            },
+          },
+        });
+        const cookie = yield* getAuthenticatedSessionCookieHeader();
+        const input = recoverablePush();
+
+        // The first socket closes mid-push.
+        const first = yield* Effect.scoped(
+          withWsRpcClient(yield* getWsServerUrlForCookie(cookie), (client) =>
+            client[WS_METHODS.gitRunStackedAction](input).pipe(Stream.take(2), Stream.runCollect),
+          ),
+        );
+        assert.deepEqual(
+          [...first].map((event) => event.kind),
+          ["action_started", "phase_started"],
+        );
+        // The server let go of the first socket's stream: the push either goes on (the
+        // runner's stream ended) or stopped with its request (a request-owned action).
+        yield* Effect.raceFirst(Deferred.await(observerReleased), Deferred.await(push.interrupted));
+        assert.isFalse(yield* Deferred.isDone(push.interrupted));
+
+        // A new socket of the same client attaches again and sees it through.
+        const events = yield* Effect.scoped(
+          withWsRpcClient(yield* getWsServerUrlForCookie(cookie), (client) =>
+            Effect.gen(function* () {
+              const seen: GitActionProgressEvent[] = [];
+              const attached = yield* Deferred.make<void>();
+              const following = yield* client[WS_METHODS.gitResumeStackedAction](input).pipe(
+                Stream.runForEach((event) =>
+                  Effect.sync(() => void seen.push(event)).pipe(
+                    Effect.andThen(Deferred.succeed(attached, undefined)),
+                  ),
+                ),
+                Effect.forkScoped,
+              );
+              yield* Deferred.await(attached);
+              yield* Deferred.succeed(push.release, undefined);
+              yield* Fiber.join(following);
+              return seen;
+            }),
+          ),
+        );
+        assert.deepEqual(
+          events.map((event) => event.kind),
+          ["action_started", "phase_started", "action_finished"],
+        );
+        assert.equal(push.state.runs, 1);
+        assert.isFalse(yield* Deferred.isDone(push.interrupted));
+        yield* Deferred.await(push.localRefreshStarted);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("still stops an older client's git.runStackedAction when its socket closes", () =>
+    Effect.gen(function* () {
+      const push = yield* makeHeldPushGitManager;
+      yield* buildAppUnderTest({
+        layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+          gitManager: push.gitManager,
+        },
+      });
+      const { recoverable: _recoverable, ...legacy } = recoverablePush();
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          client[WS_METHODS.gitRunStackedAction](legacy).pipe(Stream.take(1), Stream.runDrain),
+        ),
+      );
+      yield* Deferred.await(push.interrupted);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("stops a running recoverable git action through git.cancelStackedAction", () =>
+    Effect.gen(function* () {
+      const push = yield* makeHeldPushGitManager;
+      yield* buildAppUnderTest({
+        layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+          gitManager: push.gitManager,
+        },
+      });
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const input = recoverablePush();
+
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrlForCookie(cookie), (client) =>
+          Effect.gen(function* () {
+            const seen: GitActionProgressEvent[] = [];
+            const pushing = yield* Deferred.make<void>();
+            const following = yield* client[WS_METHODS.gitRunStackedAction](input).pipe(
+              Stream.runForEach((event) =>
+                Effect.sync(() => void seen.push(event)).pipe(
+                  Effect.andThen(
+                    event.kind === "phase_started"
+                      ? Deferred.succeed(pushing, undefined)
+                      : Effect.void,
+                  ),
+                ),
+              ),
+              Effect.result,
+              Effect.forkScoped,
+            );
+            yield* Deferred.await(pushing);
+
+            // An id nothing of this client runs under stops nothing.
+            assert.deepEqual(
+              yield* client[WS_METHODS.gitCancelStackedAction]({
+                actionId: crypto.randomUUID(),
+              }),
+              { cancelled: false },
+            );
+            assert.deepEqual(
+              yield* client[WS_METHODS.gitCancelStackedAction]({ actionId: input.actionId }),
+              { cancelled: true },
+            );
+            const outcome = yield* Fiber.join(following);
+            assertTrue(outcome._tag === "Failure");
+            assert.equal(
+              outcome._tag === "Failure" ? outcome.failure._tag : null,
+              "GitActionStoppedError",
+            );
+            assert.deepEqual(seen.at(-1), {
+              actionId: input.actionId,
+              cwd: input.cwd,
+              action: input.action,
+              kind: "action_failed",
+              phase: "push",
+              message: "Stopped.",
+            });
+            assert.deepEqual(
+              yield* client[WS_METHODS.gitCancelStackedAction]({ actionId: input.actionId }),
+              { cancelled: false },
+            );
+          }),
+        ),
+      );
+      yield* Deferred.await(push.interrupted);
+      assert.equal(push.state.runs, 1);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("keeps a pull request action's result when its worktree link update fails", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
+          projectionWorktreeRepository: {
+            getById: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "ProjectionWorktreeRepository.getById:query",
+                  detail: "database is locked",
+                }),
+              ),
+          },
+          gitManager: {
+            invalidateLocalStatus: () => Effect.void,
+            invalidateRemoteStatus: () => Effect.void,
+            localStatus: () =>
+              Effect.succeed({
+                isRepo: true,
+                hasPrimaryRemote: true,
+                isDefaultRef: false,
+                refName: "feature/demo",
+                hasWorkingTreeChanges: false,
+                workingTree: { files: [], insertions: 0, deletions: 0 },
+              }),
+            remoteStatus: () =>
+              Effect.succeed({ hasUpstream: true, aheadCount: 0, behindCount: 0, pr: null }),
+            runStackedAction: (input, options) =>
+              Effect.gen(function* () {
+                const result = {
+                  action: input.action,
+                  branch: { status: "skipped_not_requested" as const },
+                  commit: { status: "skipped_not_requested" as const },
+                  push: { status: "skipped_not_requested" as const },
+                  pr: {
+                    status: "created" as const,
+                    number: 42,
+                    url: "https://example.test/pull/42",
+                    title: "Demo",
+                  },
+                  toast: { title: "Created PR #42", cta: { kind: "none" as const } },
+                };
+                yield* (
+                  options?.progressReporter?.publish({
+                    actionId: input.actionId,
+                    cwd: input.cwd,
+                    action: input.action,
+                    kind: "action_finished",
+                    result,
+                  }) ?? Effect.void
+                );
+                return result;
+              }),
+          },
+        },
+      });
+
+      const events = yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          client[WS_METHODS.gitRunStackedAction]({
+            actionId: "action-pr",
+            cwd: "/tmp/repo",
+            action: "create_pr",
+            worktreeId: WorktreeId.make("worktree-pr"),
+          }).pipe(Stream.runCollect),
+        ),
+      );
+      // The pull request exists: a failed link update is logged, not reported as a failure.
+      assert.deepEqual(
+        [...events].map((event) => event.kind),
+        ["action_finished"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("routes websocket rpc orchestration methods", () =>

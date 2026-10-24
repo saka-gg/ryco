@@ -145,6 +145,8 @@ describe("shared RPC access policy", () => {
     for (const method of [
       WS_METHODS.projectsReadFile,
       WS_METHODS.vcsReadLocalChanges,
+      // Attaching to a running Git action again observes it and never starts Git.
+      WS_METHODS.gitResumeStackedAction,
       WS_METHODS.vcsReadComparison,
       WS_METHODS.sourceControlListChangeRequests,
       ORCHESTRATION_WS_METHODS.getTaskOutput,
@@ -161,6 +163,7 @@ describe("shared RPC access policy", () => {
       WS_METHODS.terminalWrite,
       WS_METHODS.projectsWriteFile,
       WS_METHODS.gitRunStackedAction,
+      WS_METHODS.gitCancelStackedAction,
       WS_METHODS.vcsPull,
       AGENT_CONTROL_WS_METHODS.acceptProposal,
     ]) {
