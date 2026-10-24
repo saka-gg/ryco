@@ -608,8 +608,8 @@ function ContentSearchResultGroupView(props: {
   const { group } = props;
   return (
     <CommandGroup>
-      {/* The popup's own color: the rows scroll under it. */}
-      <CommandGroupLabel className="sticky top-0 z-10 flex items-center gap-2 bg-popover font-normal">
+      {/* The popup's own color: the rows scroll under it. Its height (h-8) is the rows' scroll-mt-8. */}
+      <CommandGroupLabel className="sticky top-0 z-10 flex h-8 items-center gap-2 bg-popover font-normal">
         <VscodeEntryIcon pathValue={group.path} kind="file" theme={props.resolvedTheme} />
         <span className="shrink-0 text-foreground text-sm">{group.name}</span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground/70">{group.parentPath}</span>
@@ -637,7 +637,13 @@ function ContentSearchResultRowView(props: {
     <CommandItem
       value={row.value}
       aria-label={row.label}
-      className={cn(RESULT_ROW_CLASS, "gap-3 ps-3", props.isActive && ACTIVE_RESULT_ROW_CLASS)}
+      // scroll-mt-8 = the sticky file header's height: arrowing up scrolls the row in below the
+      // header instead of under it (list navigation uses scrollIntoView({ block: "nearest" })).
+      className={cn(
+        RESULT_ROW_CLASS,
+        "scroll-mt-8 gap-3 ps-3",
+        props.isActive && ACTIVE_RESULT_ROW_CLASS,
+      )}
       onMouseDown={(event) => {
         event.preventDefault();
       }}

@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { isMacPlatform } from "../lib/utils";
+import { parkPointer } from "../../test/browserPointer";
 import type { NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
 import {
   DEFAULT_VIEWPORT,
@@ -40,6 +41,16 @@ const WORKSPACE_LINES: ProjectContentMatch[] = [
   { path: "src/wide.ts", lineNumber: 2, preview: "export const wide = true;", ranges: [] },
   { path: "src/wide.ts", lineNumber: 7, preview: "  return wide;", ranges: [] },
 ];
+
+/** Enough lines in three files for the result list to scroll. */
+const MANY_LINES: ProjectContentMatch[] = ["src/a.ts", "src/b.ts", "src/c.ts"].flatMap((path) =>
+  Array.from({ length: 12 }, (_, index) => ({
+    path,
+    lineNumber: index + 1,
+    preview: `const row${index + 1} = 1;`,
+    ranges: [{ start: 6, end: 9 }],
+  })),
+);
 
 /**
  * Stands in for the node's searches: the entries whose path holds the query,
@@ -339,6 +350,65 @@ describe("ChatView workspace search", () => {
       );
     } finally {
       unsubscribe();
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the highlighted line below its file's header while moving up", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshot(),
+      resolveRpc: (body) =>
+        body._tag === WS_METHODS.projectsSearchContent
+          ? { matches: MANY_LINES }
+          : resolveWorkspaceSearchRpc(body),
+      configureFixture: withCapabilities({ projectContentSearch: true }),
+    });
+
+    try {
+      // Keyboard only: a pointer resting over the list would take the highlight as it scrolls.
+      await parkPointer(0, 0);
+      pressModKey(window, "F", true);
+      const input = await waitForFindInFilesInput();
+      await page.getByPlaceholder("Search in Project").fill("row");
+      await expect
+        .element(page.getByTestId("find-in-files").getByRole("status"))
+        .toHaveTextContent("36 results in 3 files");
+
+      // From the first line, ArrowUp wraps to the last; walk back up to the first. Each
+      // highlighted line must sit inside the list and below the sticky file headers.
+      const visited: string[] = [];
+      for (let step = 0; step < MANY_LINES.length; step += 1) {
+        await dispatchInputKey(input, { key: "ArrowUp" });
+        await vi.waitFor(() => {
+          const row = document.querySelector<HTMLElement>(
+            '[data-testid="find-in-files"] [role="option"][data-highlighted]',
+          );
+          expect(row).not.toBeNull();
+          const rowBox = row!.getBoundingClientRect();
+          const listBox = row!
+            .closest('[data-slot="scroll-area-viewport"]')!
+            .getBoundingClientRect();
+          expect(rowBox.top).toBeGreaterThanOrEqual(listBox.top - 1);
+          expect(rowBox.bottom).toBeLessThanOrEqual(listBox.bottom + 1);
+          const covering = [
+            ...document.querySelectorAll(
+              '[data-testid="find-in-files"] [data-slot="command-group-label"]',
+            ),
+          ].filter((label) => {
+            const labelBox = label.getBoundingClientRect();
+            return labelBox.bottom > rowBox.top + 1 && labelBox.top < rowBox.bottom - 1;
+          });
+          expect(covering.map((label) => label.textContent)).toEqual([]);
+          if (visited.at(-1) !== row!.getAttribute("aria-label")) {
+            visited.push(row!.getAttribute("aria-label") ?? "");
+          }
+        });
+      }
+      expect(visited).toEqual(
+        MANY_LINES.map((line) => `${line.path}:${line.lineNumber}, ${line.preview}`).toReversed(),
+      );
+    } finally {
       await mounted.cleanup();
     }
   });
