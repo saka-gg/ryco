@@ -41,6 +41,10 @@ export interface Preferences {
    * its last messages before any connection is ready. Unset means on.
    */
   readonly rememberThreadContent?: boolean;
+  /** Local notifications when a thread finishes, fails or needs you. Unset means off. */
+  readonly threadAlerts?: boolean;
+  /** Thread alerts play the system sound. Unset means off. */
+  readonly threadAlertSound?: boolean;
 }
 
 export function sanitizePreferences(parsed: Preferences): Preferences {
@@ -60,6 +64,8 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     aiFocusRefreshIntervalMs?: AiFocusRefreshIntervalMs;
     sidebarAutoSettleAfterDays?: SidebarAutoSettleAfterDays;
     rememberThreadContent?: boolean;
+    threadAlerts?: boolean;
+    threadAlertSound?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -115,6 +121,10 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.rememberThreadContent === "boolean") {
     preferences.rememberThreadContent = parsed.rememberThreadContent;
+  }
+  if (typeof parsed.threadAlerts === "boolean") preferences.threadAlerts = parsed.threadAlerts;
+  if (typeof parsed.threadAlertSound === "boolean") {
+    preferences.threadAlertSound = parsed.threadAlertSound;
   }
   if (Array.isArray(parsed.favorites)) {
     const decode = Schema.decodeUnknownOption(ModelFavorite);

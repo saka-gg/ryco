@@ -39,6 +39,7 @@ import {
 
 import {
   HostedRootAppShell as RootAppShell,
+  HostedThreadAlerts,
   preloadHostedRootAppShell,
 } from "./hostedRootAppShell";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
@@ -199,6 +200,20 @@ function selectEnvironmentHasShell(state: AppState, environmentId: EnvironmentId
 }
 
 export function HostedHubRoot() {
+  const accountAuthenticated = useHostedHubStore(
+    (state) => state.accountStatus === "authenticated",
+  );
+  return (
+    <>
+      {/* Above the choice of surface, so they keep running for the nodes that
+          stay connected while a Hub page or a node switch replaces the shell. */}
+      {accountAuthenticated ? <HostedThreadAlerts /> : null}
+      <HostedHubSurface />
+    </>
+  );
+}
+
+function HostedHubSurface() {
   const readCache = useHostedReadCache();
   const directoryNodes = useHostedHubStore((state) => state.nodes);
   const directoryStatus = useHostedHubStore((state) => state.directoryStatus);

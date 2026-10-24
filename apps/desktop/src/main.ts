@@ -210,10 +210,7 @@ import {
   type WindowMaterialAddon,
 } from "./windowTranslucency.ts";
 import { validateHubOrigin } from "./hubOrigin.ts";
-import {
-  parseTurnCompleteNotification,
-  shouldShowTurnCompleteNotification,
-} from "./turnCompleteNotification.ts";
+import { installThreadNotificationIpc } from "./threadNotifications.ts";
 import {
   createUnsignedMacUpdateInstallScript,
   parseMacCodeSignatureKind,
@@ -303,14 +300,12 @@ const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
 const SET_KEEP_AWAKE_ENABLED_CHANNEL = "desktop:set-keep-awake-enabled";
 const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
 const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
-const NOTIFY_TURN_COMPLETE_CHANNEL = "desktop:notify-turn-complete";
 const GET_HOSTED_IDENTITY_STATUS_CHANNEL = "desktop:get-hosted-identity-status";
 const CONNECT_HOSTED_IDENTITY_CHANNEL = "desktop:connect-hosted-identity";
 const DISCONNECT_HOSTED_IDENTITY_CHANNEL = "desktop:disconnect-hosted-identity";
 const CONNECT_HOSTED_GITHUB_CHANNEL = "desktop:connect-hosted-github";
 const DISCONNECT_HOSTED_GITHUB_CHANNEL = "desktop:disconnect-hosted-github";
 const CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL = "desktop:cancel-hosted-github-connection";
-const TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL = "desktop:turn-complete-notification-activated";
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isDesktopAuthorizationCallbackRelay =
   isDevelopment && process.env.RYCO_DESKTOP_CALLBACK_RELAY === "1";
@@ -503,9 +498,6 @@ let backendHubLaunch: DesktopHubConnectorLaunch | null = null;
 // The Tailscale Serve configuration the running backend was launched with. A
 // change saved for a deferred relaunch must not read as already served.
 let backendTailscaleServe: DesktopTailscaleServeLaunch | null = null;
-// Retain live turn-complete notifications: Electron GCs Notification objects once
-// the creating scope returns, which would drop their `click`/`close` handlers.
-const activeTurnCompleteNotifications = new Set<Notification>();
 let backendProcess: ChildProcess.ChildProcess | null = null;
 let backendPort = 0;
 let backendBindHost = DESKTOP_LOOPBACK_HOST;
@@ -4512,39 +4504,27 @@ function registerIpcHandlers(): void {
     return windowTranslucency.apply(window, material);
   });
 
-  ipcMain.removeHandler(NOTIFY_TURN_COMPLETE_CHANNEL);
-  ipcMain.handle(NOTIFY_TURN_COMPLETE_CHANNEL, async (_event, rawNotification: unknown) => {
-    const notification = parseTurnCompleteNotification(rawNotification);
-    if (!notification) {
-      return;
-    }
-    if (
-      !shouldShowTurnCompleteNotification({
-        windowFocused: mainWindow?.isFocused() ?? false,
-        notificationsSupported: Notification.isSupported(),
-      })
-    ) {
-      return;
-    }
-
-    const native = new Notification({
-      title: notification.title,
-      ...(notification.body ? { body: notification.body } : {}),
-    });
-    activeTurnCompleteNotifications.add(native);
-    native.on("click", () => {
-      activeTurnCompleteNotifications.delete(native);
-      const targetWindow = mainWindow ?? BrowserWindow.getAllWindows()[0];
-      if (!targetWindow || targetWindow.isDestroyed()) {
-        return;
-      }
-      revealWindow(targetWindow);
-      targetWindow.webContents.send(TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL, notification);
-    });
-    native.on("close", () => {
-      activeTurnCompleteNotifications.delete(native);
-    });
-    native.show();
+  installThreadNotificationIpc({
+    platform: process.platform,
+    ipcMain,
+    onWindowFocus: (listener) => app.on("browser-window-focus", listener),
+    onBeforeQuit: (listener) => app.on("before-quit", listener),
+    getMainWindow: () => mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null,
+    getAllWindows: () => BrowserWindow.getAllWindows(),
+    revealWindow,
+    notificationsSupported: () => Notification.isSupported(),
+    showNotification: ({ title, body, onClick, onClose }) => {
+      const notification = new Notification({ title, body, silent: true });
+      notification.on("click", onClick);
+      notification.on("close", onClose);
+      notification.show();
+      return notification;
+    },
+    setBadgeCount: (count) => app.setBadgeCount(count),
+    setOverlayIcon: (window, image, description) => {
+      const overlay = image === null ? null : nativeImage.createFromDataURL(image);
+      window.setOverlayIcon(overlay?.isEmpty() === false ? overlay : null, description);
+    },
   });
 
   ipcMain.removeHandler(CONTEXT_MENU_CHANNEL);

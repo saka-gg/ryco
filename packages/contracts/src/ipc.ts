@@ -1,6 +1,11 @@
 import type { EffectiveProjectPreferences } from "./settings.ts";
 import type { DesktopWindowMaterial } from "./windowMaterial.ts";
 import type {
+  DesktopNotificationBadge,
+  DesktopThreadNotification,
+  DesktopThreadNotificationResult,
+} from "./desktopNotifications.ts";
+import type {
   LifecycleSuggestions,
   TrashListResult,
   WorkspaceChangesSummaryInput,
@@ -270,7 +275,7 @@ import type {
 } from "./auth.ts";
 import type { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { EditorId } from "./editor.ts";
-import type { ExecutionEnvironmentDescriptor } from "./environment.ts";
+import type { ExecutionEnvironmentDescriptor, ScopedThreadRef } from "./environment.ts";
 import type { ClientSettings, ServerSettings, ServerSettingsPatch } from "./settings.ts";
 import type {
   DeviceAttachInput,
@@ -469,18 +474,6 @@ export interface DesktopServerExposureState {
 
 export interface PickFolderOptions {
   initialPath?: string | null;
-}
-
-/**
- * Payload for a native "agent turn complete" desktop notification. Carries just
- * enough to render the toast and, on click, focus + navigate back to the thread
- * whose turn finished.
- */
-export interface DesktopTurnCompleteNotification {
-  readonly threadId: ThreadId;
-  readonly environmentId?: EnvironmentId | undefined;
-  readonly title: string;
-  readonly body?: string | undefined;
 }
 
 export interface DesktopHubLaunchConfig {
@@ -1060,12 +1053,20 @@ export interface DesktopBridge {
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
   /** Answer a remote install's countdown: relaunch now, or postpone it (the download stays). */
   respondToRemoteInstall: (action: "now" | "postpone") => Promise<DesktopUpdateState>;
-  /** Show a native notification when a turn completes and the window is unfocused. */
-  notifyTurnComplete: (notification: DesktopTurnCompleteNotification) => Promise<void>;
-  /** Subscribe to notification clicks so the renderer can navigate to the thread. */
-  onTurnCompleteNotificationActivated: (
-    listener: (notification: DesktopTurnCompleteNotification) => void,
-  ) => () => void;
+  /**
+   * Shows a thread alert as an OS notification, one per thread. Answers
+   * `window-focused` instead while the window is in front. Absent in desktop
+   * builds that predate it.
+   */
+  notifyThread?: (
+    notification: DesktopThreadNotification,
+  ) => Promise<DesktopThreadNotificationResult>;
+  /** A thread notification was clicked: main revealed the window, the renderer opens the thread. */
+  onThreadNotificationActivated?: (listener: (thread: ScopedThreadRef) => void) => () => void;
+  /** Shows the count badge on the dock or taskbar; main clears it while a window has focus. */
+  setNotificationBadge?: (badge: DesktopNotificationBadge) => Promise<void>;
+  /** Main cleared the badge (a window got focus, or the app is quitting). */
+  onNotificationBadgeCleared?: (listener: () => void) => () => void;
 }
 
 /**

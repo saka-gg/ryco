@@ -10,6 +10,7 @@ import {
   type OrchestrationThreadShell,
   type ThreadLineage,
 } from "@ryco/contracts";
+import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { describe, expect, it } from "vite-plus/test";
 
 import { scopeThreadRef } from "../../scoped.ts";
@@ -521,7 +522,10 @@ describe("archived thread stubs in client-runtime consumers", () => {
 
   it("baselines notifications without stubs, so a later full shell never notifies at once", () => {
     const generation = {};
-    const projector = createThreadNotificationProjector({ readGeneration: () => generation });
+    const projector = createThreadNotificationProjector({
+      readGeneration: () => generation,
+      isSnoozed: isThreadSnoozed,
+    });
     projector.baseline({
       environmentId: env,
       generation,

@@ -1,7 +1,9 @@
-import type { StaticScreenProps } from "@react-navigation/native";
+import { useFocusEffect, type StaticScreenProps } from "@react-navigation/native";
+import { useCallback } from "react";
 
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 
+import { markThreadVisible } from "../../notifications/visibleThread";
 import { ThreadDetailScreen } from "./ThreadDetailScreen";
 
 /**
@@ -23,6 +25,18 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
   const environmentIdRaw = firstParam(props.route.params.environmentId);
   const threadIdRaw = firstParam(props.route.params.threadId);
   const messageIdRaw = firstParam(props.route.params.messageId)?.trim() ?? null;
+
+  // The thread on screen raises no alert of its own while the app is in front.
+  useFocusEffect(
+    useCallback(() => {
+      if (!environmentIdRaw || !threadIdRaw) return undefined;
+      return markThreadVisible({
+        environmentId: EnvironmentId.make(environmentIdRaw),
+        threadId: ThreadId.make(threadIdRaw),
+      });
+    }, [environmentIdRaw, threadIdRaw]),
+  );
+
   if (!environmentIdRaw || !threadIdRaw) return null;
 
   return (

@@ -232,6 +232,20 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Thread alerts",
+    owner: "client",
+    description: "Notifications or a sound when a thread finishes, fails, or needs you.",
+    keywords: "notifications sound badge alerts toast chime approval",
+  },
+  {
+    section: "general",
+    title: "In-app alerts",
+    owner: "client",
+    description: "A toast with Open thread when another thread finishes or needs you.",
+    keywords: "notifications sound badge alerts toast",
+  },
+  {
+    section: "general",
     title: "Update track",
     owner: "client",
     description: "Which release channel the app follows.",

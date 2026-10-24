@@ -4,6 +4,7 @@ import type { DesktopBridge } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
 import { PASTE_AS_TEXT_CHANNEL } from "./editMenu.ts";
 import { DESKTOP_STARTUP_MARKS_CHANNEL, observeRendererStartupMarks } from "./startupMarks.ts";
+import { THREAD_NOTIFICATION_IPC } from "./threadNotificationChannels.ts";
 import { WINDOW_CAPTURE_IPC } from "./windowCaptureChannels.ts";
 
 // Capture before app/terminal listeners, without suppressing Electron key releases.
@@ -82,8 +83,6 @@ const CONNECT_HOSTED_GITHUB_CHANNEL = "desktop:connect-hosted-github";
 const DISCONNECT_HOSTED_GITHUB_CHANNEL = "desktop:disconnect-hosted-github";
 const CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL = "desktop:cancel-hosted-github-connection";
 const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
-const NOTIFY_TURN_COMPLETE_CHANNEL = "desktop:notify-turn-complete";
-const TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL = "desktop:turn-complete-notification-activated";
 const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
 
 // Fixed for the lifetime of a page: main creates the backend URL and token once
@@ -413,19 +412,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(UPDATE_STATE_CHANNEL, wrappedListener);
     };
   },
-  notifyTurnComplete: (notification) =>
-    ipcRenderer.invoke(NOTIFY_TURN_COMPLETE_CHANNEL, notification),
-  onTurnCompleteNotificationActivated: (listener) => {
-    const wrappedListener = (_event: Electron.IpcRendererEvent, notification: unknown) => {
-      if (typeof notification !== "object" || notification === null) return;
-      listener(notification as Parameters<typeof listener>[0]);
-    };
-
-    ipcRenderer.on(TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL, wrappedListener);
-    return () => {
-      ipcRenderer.removeListener(TURN_COMPLETE_NOTIFICATION_ACTIVATED_CHANNEL, wrappedListener);
-    };
-  },
+  notifyThread: (notification) => ipcRenderer.invoke(THREAD_NOTIFICATION_IPC.notify, notification),
+  onThreadNotificationActivated: (listener) =>
+    subscribe(THREAD_NOTIFICATION_IPC.activated, listener),
+  setNotificationBadge: (badge) => ipcRenderer.invoke(THREAD_NOTIFICATION_IPC.setBadge, badge),
+  onNotificationBadgeCleared: (listener) =>
+    subscribe(THREAD_NOTIFICATION_IPC.badgeCleared, () => listener()),
 } satisfies DesktopBridge);
 
 if (startupTimingEnabled) {

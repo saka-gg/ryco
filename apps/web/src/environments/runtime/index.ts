@@ -25,6 +25,7 @@ export {
   getPrimaryEnvironmentConnection,
   listEnvironmentConnections,
   readEnvironmentConnection,
+  readThreadNotificationSource,
   reconnectSavedEnvironment,
   removeSavedEnvironment,
   requireEnvironmentConnection,
