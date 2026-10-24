@@ -17,6 +17,8 @@ import { Effect, FileSystem, Layer, LogLevel, Path, Schema, Context } from "effe
 import { SERVER_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { canonicalizeHubOrigin, normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
+import type { OtlpSignal, OtlpSignalExport } from "./observability/OtelEnvironment.ts";
+
 export const DEFAULT_PORT = 3773;
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
@@ -271,6 +273,17 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   /** Ask browsers for their spans even without an OTLP collector (`RYCO_BROWSER_TRACES`). */
   readonly browserTracesEnabled?: boolean;
   readonly otlpMetricsUrl: string | undefined;
+  /** OTLP logs endpoint (`RYCO_OTLP_LOGS_URL` or the OTEL variables); environment only. */
+  readonly otlpLogsUrl?: string | undefined;
+  /**
+   * How each signal whose endpoint came from `OTEL_EXPORTER_OTLP_*` variables is sent. Absent for
+   * a signal: OTLP/HTTP JSON with no headers, which is how every Ryco-configured URL is sent.
+   */
+  readonly otlpExports?: Partial<Record<OtlpSignal, OtlpSignalExport>> | undefined;
+  /** Validated `OTEL_RESOURCE_ATTRIBUTES`, handed to the exporters instead of the raw variable. */
+  readonly otlpResourceAttributes?: Readonly<Record<string, string>> | undefined;
+  /** Ignored or disabling OTEL settings, logged once at startup. Absent when there are none. */
+  readonly observabilityWarnings?: ReadonlyArray<string> | undefined;
   readonly otlpExportIntervalMs: number;
   readonly otlpServiceName: string;
   readonly mode: RuntimeMode;

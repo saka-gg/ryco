@@ -1,5 +1,5 @@
 import * as NodeHttp from "node:http";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as CliError from "effect/cli/CliError";
+import * as TestClock from "effect/testing/TestClock";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
@@ -1609,6 +1610,82 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
         assert.fail(`Expected UnrecognizedOption, got ${String(optionError?._tag)}`);
       }
       assert.equal(optionError.option, "--dev-url");
+    }),
+  );
+
+  it.effect("summarizes the local trace file and its backups without a server", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-trace-summary-test-"));
+      const { serverTracePath, logsDir } = yield* deriveServerPaths(baseDir, undefined);
+      mkdirSync(logsDir, { recursive: true });
+      // `--since` counts back from the clock, so the fixture's spans end relative to it.
+      const nowMs = Date.now();
+      yield* TestClock.setTime(nowMs);
+      const endNanos = (offsetMs: number) => `${BigInt(nowMs + offsetMs) * 1_000_000n}`;
+      const span = (name: string, durationMs: number, offsetMs: number, exitTag = "Success") =>
+        JSON.stringify({
+          type: "effect-span",
+          name,
+          durationMs,
+          endTimeUnixNano: endNanos(offsetMs),
+          exit: { _tag: exitTag },
+        });
+      writeFileSync(
+        `${serverTracePath}.1`,
+        `${span("ws.rpc", 4, -120_000)}\n${span("ws.rpc", 9, -90_000, "Failure")}\n`,
+      );
+      writeFileSync(
+        serverTracePath,
+        `${span("ws.rpc", 6, -60_000)}\n${span("git.status", 30, -30_000)}\nnot a span\n`,
+      );
+
+      const captured = yield* captureStdout(
+        runCli(["trace", "summary", "--base-dir", baseDir, "--json", "--log-level", "debug"]),
+      );
+      const summary = JSON.parse(captured.output) as {
+        readonly traceFilePath: string;
+        readonly filesRead: ReadonlyArray<string>;
+        readonly spanCount: number;
+        readonly skippedLineCount: number;
+        readonly spans: ReadonlyArray<{
+          readonly name: string;
+          readonly count: number;
+          readonly failures: number;
+          readonly maxMs: number;
+        }>;
+      };
+      // --json owns stdout: config resolution's debug lines stay out of it.
+      assert.deepEqual(captured.lines, [captured.output]);
+      assert.equal(summary.traceFilePath, serverTracePath);
+      assert.deepEqual(summary.filesRead, [`${serverTracePath}.1`, serverTracePath]);
+      assert.equal(summary.spanCount, 4);
+      assert.equal(summary.skippedLineCount, 1);
+      assert.deepEqual(
+        summary.spans.map(({ name, count, failures, maxMs }) => ({ name, count, failures, maxMs })),
+        [
+          { name: "ws.rpc", count: 3, failures: 1, maxMs: 9 },
+          { name: "git.status", count: 1, failures: 0, maxMs: 30 },
+        ],
+      );
+
+      const windowed = yield* captureStdout(
+        runCli(["trace", "summary", "--base-dir", baseDir, "--since", "45s"]),
+      );
+      assert.include(windowed.output, "1 spans ended from");
+      assert.include(windowed.output, "git.status");
+      assert.notInclude(windowed.output, "ws.rpc");
+    }),
+  );
+
+  it.effect("refuses a trace summary for a data directory that does not exist", () =>
+    Effect.gen(function* () {
+      const missing = join(tmpdir(), `ryco-cli-trace-missing-${process.pid}-${Date.now()}`);
+      const error = yield* runCliWithRuntime(["trace", "summary", "--base-dir", missing]).pipe(
+        Effect.flip,
+      );
+      assert.equal((error as { readonly _tag?: string })._tag, "TraceSummaryError");
+      assert.include((error as Error).message, `No Ryco data directory at ${missing}.`);
+      assert.isFalse(existsSync(missing));
     }),
   );
 });

@@ -1,7 +1,9 @@
+import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 import { Config, Effect, Layer, References, Tracer } from "effect";
-import { OtlpExporter, OtlpMetrics, OtlpSerialization, OtlpTracer } from "effect/observability";
+import { Headers } from "effect/http";
+import { OtlpExporter, OtlpMetrics, OtlpTracer } from "effect/observability";
 
-import { ServerConfig } from "../../config.ts";
+import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { makeDiagnosticsService } from "../../diagnostics/Layers/Diagnostics.ts";
 import { Diagnostics } from "../../diagnostics/Services/Diagnostics.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
@@ -13,9 +15,13 @@ import {
 } from "../LocalFileTracer.ts";
 import { LocalDiagnosticsMetricsLive } from "../Services/LocalDiagnosticsMetrics.ts";
 import { BrowserTraceCollector } from "../Services/BrowserTraceCollector.ts";
+import {
+  OTLP_SIGNALS,
+  otlpExporterContext,
+  otlpExporterOptions,
+  otlpRedactedHeaderNames,
+} from "../OtelEnvironment.ts";
 import { makeTraceSink, type TraceSink } from "../TraceSink.ts";
-
-const otlpSerializationLayer = OtlpSerialization.layerJson;
 
 /**
  * Fast SQL statements are left out of the local trace file by default; set
@@ -33,14 +39,49 @@ const TraceSpanMinDurationConfig = Config.Int("RYCO_TRACE_SPAN_MIN_DURATION_MS")
   Config.withDefault(DEFAULT_LOCAL_TRACE_SPAN_MIN_DURATION_MS),
 );
 
+const OTLP_SIGNAL_URLS = {
+  traces: "otlpTracesUrl",
+  metrics: "otlpMetricsUrl",
+  logs: "otlpLogsUrl",
+} as const;
+
+/**
+ * One line per exported signal, naming where it goes (credentials and query values redacted) and,
+ * for an endpoint taken from the OTEL variables, which variable and protocol; then every warning
+ * about OTEL settings that were ignored or turned an export off.
+ */
+const logObservabilityStartup = (config: ServerConfigShape) =>
+  Effect.gen(function* () {
+    for (const signal of OTLP_SIGNALS) {
+      const url = config[OTLP_SIGNAL_URLS[signal]];
+      if (url === undefined) continue;
+      const otel = config.otlpExports?.[signal];
+      yield* Effect.logInfo(
+        `Exporting ${signal} over OTLP to ${redactUrlCredentials(url)}${
+          otel === undefined ? "" : ` (${otel.protocol}, from ${otel.endpointVariable})`
+        }`,
+      );
+    }
+    for (const warning of config.observabilityWarnings ?? []) {
+      yield* Effect.logWarning(warning);
+    }
+  });
+
 export const ObservabilityLive = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig;
 
+    // OTEL header values never reach spans or logs: every configured header name is redacted
+    // wherever Effect prints headers (span attributes, a failed request in a log).
+    const redactedHeaderNamesLayer = Layer.succeed(
+      Headers.CurrentRedactedNames,
+      yield* otlpRedactedHeaderNames(config),
+    );
     const traceReferencesLayer = Layer.mergeAll(
       Layer.succeed(Tracer.MinimumTraceLevel, config.traceMinLevel),
       Layer.succeed(References.TracerTimingEnabled, config.traceTimingEnabled),
       HttpSpanHeadersLive,
+      redactedHeaderNamesLayer,
     );
 
     const tracerLayer = Layer.unwrap(
@@ -69,15 +110,8 @@ export const ObservabilityLive = Layer.unwrap(
             ? undefined
             : yield* OtlpTracer.make({
                 url: config.otlpTracesUrl,
-                exportInterval: `${config.otlpExportIntervalMs} millis`,
-                resource: {
-                  serviceName: config.otlpServiceName,
-                  attributes: {
-                    "service.runtime": "ryco-server",
-                    "service.mode": config.mode,
-                  },
-                },
-              });
+                ...otlpExporterOptions(config, "traces"),
+              }).pipe(Effect.provide(otlpExporterContext(config, "traces")));
 
         const tracer = yield* makeLocalFileTracer({
           filePath: config.serverTracePath,
@@ -103,22 +137,20 @@ export const ObservabilityLive = Layer.unwrap(
           }),
         );
       }),
-    ).pipe(Layer.provideMerge(otlpSerializationLayer), Layer.provide(OtlpExporter.layerFlusher));
+    ).pipe(Layer.provide([OtlpExporter.layerFlusher, redactedHeaderNamesLayer]));
 
     const metricsLayer =
       config.otlpMetricsUrl === undefined
         ? Layer.empty
         : OtlpMetrics.layer({
             url: config.otlpMetricsUrl,
-            exportInterval: `${config.otlpExportIntervalMs} millis`,
-            resource: {
-              serviceName: config.otlpServiceName,
-              attributes: {
-                "service.runtime": "ryco-server",
-                "service.mode": config.mode,
-              },
-            },
-          }).pipe(Layer.provideMerge(otlpSerializationLayer));
+            ...otlpExporterOptions(config, "metrics"),
+          }).pipe(Layer.provide(otlpExporterContext(config, "metrics")));
+
+    // After the server logger exists, so these lines reach the server log and an OTLP log export.
+    const startupLogLayer = Layer.effectDiscard(logObservabilityStartup(config)).pipe(
+      Layer.provide(ServerLoggerLive),
+    );
 
     return Layer.mergeAll(
       ServerLoggerLive,
@@ -126,6 +158,7 @@ export const ObservabilityLive = Layer.unwrap(
       tracerLayer,
       metricsLayer,
       LocalDiagnosticsMetricsLive,
+      startupLogLayer,
     );
   }),
 );

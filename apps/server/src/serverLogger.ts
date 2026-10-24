@@ -1,7 +1,9 @@
 import { AsyncRotatingFileSink } from "@ryco/shared/logging";
 import { Effect, Logger, References, Layer, type LogLevel, type Scope } from "effect";
+import { OtlpExporter, OtlpLogger } from "effect/observability";
 
 import { ServerConfig } from "./config.ts";
+import { otlpExporterContext, otlpExporterOptions } from "./observability/OtelEnvironment.ts";
 
 /** Same rotation as the desktop shell's own log files. */
 export const SERVER_LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
@@ -107,6 +109,8 @@ export const makeServerLogFileLogger = (
 export const ServerLoggerLive = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const minimumLogLevelLayer = Layer.succeed(References.MinimumLogLevel, config.logLevel);
+  // `Logger.tracerLogger` stays when logs are exported: the local trace file and Diagnostics read
+  // span events, so a collector sees an in-span message both as a span event and as a log record.
   const loggers: Array<Logger.Logger<unknown, unknown>> = [
     Logger.consolePretty(),
     Logger.tracerLogger,
@@ -115,6 +119,18 @@ export const ServerLoggerLive = Effect.gen(function* () {
   // shell has no need to copy stdout once the backend serves.
   if (config.mode === "desktop") {
     loggers.push(yield* makeServerLogFileLogger({ filePath: config.serverLogPath }));
+  }
+  if (config.otlpLogsUrl !== undefined) {
+    loggers.push(
+      yield* OtlpLogger.make({
+        url: config.otlpLogsUrl,
+        ...otlpExporterOptions(config, "logs"),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(otlpExporterContext(config, "logs"), OtlpExporter.layerFlusher),
+        ),
+      ),
+    );
   }
   const loggerLayer = Logger.layer(loggers, {
     mergeWithExisting: false,

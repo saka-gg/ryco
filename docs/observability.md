@@ -4,7 +4,7 @@ Ryco has one server-side observability model:
 
 - pretty logs go to stdout for humans
 - completed spans go to a local NDJSON trace file
-- traces and metrics can also be exported over OTLP to a real backend like Grafana LGTM
+- traces, metrics and logs can also be exported over OTLP to a real backend like Grafana LGTM
 
 The local trace file is the persisted source of truth. Only desktop mode also keeps a server log file (`logs/server.log`).
 
@@ -205,6 +205,30 @@ The backend reads observability config at process start. If you change OTLP env 
 
 The trace file is the fastest way to inspect raw span data.
 
+#### Summarize traces from the CLI
+
+`ryco trace summary` reads the trace file and its rotated backups and prints, per span name, how
+many spans ended, how many per minute, p50/p90/max duration, and how many were interrupted or
+failed. It loads no server, database or persistence layer, so it answers while the server is
+stalled or stopped.
+
+```bash
+ryco trace summary                      # every retained span, busiest names first
+ryco trace summary --since 30m          # only spans that ended in the last 30 minutes
+ryco trace summary --limit 50           # show more span names (default 25)
+ryco trace summary --base-dir ~/other-ryco-home
+ryco trace summary --file ./server.trace.ndjson   # a copied file; its .1, .2, ... are read too
+ryco trace summary --since 2h --json    # one JSON document (adds p99), for scripts and agents
+```
+
+It finds the file the way the server does (`RYCO_HOME` or `--base-dir`, `RYCO_TRACE_FILE`,
+`RYCO_TRACE_MAX_FILES`, `--dev-url` for a dev home). With `--since`, rotated files last written
+before the window are not read. Lines that are not spans are counted and reported, not fatal, and
+so is a file that exists but cannot be read (no permission, a link or FIFO in its place).
+Counts and percentiles cover the spans the file keeps: fast successful child spans are left out
+(see [Traces](#traces)), so treat the numbers for short child spans as a lower bound. A named
+`--base-dir` must exist; the command does not create one.
+
 Tail it:
 
 ```bash
@@ -399,6 +423,8 @@ If you need those later, add client-side instrumentation or a dedicated server f
 Usually one of these is true:
 
 - `RYCO_OTLP_TRACES_URL` was not set
+- `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` is set in the environment (the startup log
+  says which export it turned off)
 - the app was launched from a different environment than the one where you exported the vars
 - the app was not fully restarted after changing env
 - Grafana is looking at the wrong time range or service name
@@ -516,7 +542,11 @@ It provides:
 - local NDJSON tracer
 - optional OTLP trace exporter
 - optional OTLP metrics exporter
+- optional OTLP log exporter (`apps/server/src/serverLogger.ts`)
 - Effect trace-level and timing refs
+
+How each signal is exported is resolved once at startup in
+`apps/server/src/observability/OtelEnvironment.ts`.
 
 ### Env Vars
 
@@ -541,10 +571,59 @@ OTLP export:
 
 - `RYCO_OTLP_TRACES_URL`: OTLP trace endpoint
 - `RYCO_OTLP_METRICS_URL`: OTLP metric endpoint
+- `RYCO_OTLP_LOGS_URL`: OTLP log endpoint. Logs have no Settings field; set this or the OTEL
+  variables below
 - `RYCO_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
 - `RYCO_OTLP_SERVICE_NAME`: service name, default `ryco-server`
 
+`RYCO_OTLP_*` URLs and the Settings URLs are sent as OTLP/HTTP JSON with no extra headers.
+
 If the OTLP URLs are unset, local tracing still works and metrics stay in-process only.
+
+With logs exported, a message logged inside a span reaches the collector twice: as a span event
+(the local trace file and Diagnostics need it) and as a log record.
+
+Standard OpenTelemetry variables (fallbacks):
+
+| Variable                                                                           | Effect                                                                                                                                                                                                                                                |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OTEL_SDK_DISABLED`                                                                | `true` (any case) turns every OTLP export off, including `RYCO_OTLP_*` and Settings URLs. `false` leaves them on. Any other value is read as false, with a warning                                                                                    |
+| `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`              | `none` turns that signal off, including `RYCO_OTLP_*` and Settings URLs. `otlp` or unset: the OTEL endpoint may be used. A list without `otlp` (`console`, `prometheus`, ...) keeps the OTEL endpoint from being used for that signal, with a warning |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`                                                      | Base URL; Ryco appends `/v1/traces`, `/v1/metrics` or `/v1/logs` to its path (the query is kept)                                                                                                                                                      |
+| `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT`                                | That signal's full URL, used as is. When set, it replaces the base URL for that signal even if it is invalid                                                                                                                                          |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_PROTOCOL` | `http/protobuf` (default) or `http/json`. `grpc` is not supported: that signal is not sent to the OTEL endpoint, with a warning                                                                                                                       |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS`   | `name=value` pairs, comma-separated, values percent-encoded. Sent only to the OTEL endpoint they belong to. Malformed: that signal is not sent to the OTEL endpoint, with a warning                                                                   |
+| `OTEL_RESOURCE_ATTRIBUTES`                                                         | Extra resource attributes (`key=value`, percent-encoded). A malformed value is ignored with a warning instead of stopping startup. `service.name` and `service.version` in it are ignored                                                             |
+
+Per signal, the first match wins:
+
+1. `OTEL_SDK_DISABLED=true`: not exported.
+2. `OTEL_<SIGNAL>_EXPORTER=none`: not exported.
+3. `RYCO_OTLP_<SIGNAL>_URL`.
+4. The desktop app's observability settings (traces and metrics).
+5. The server's Settings (traces and metrics).
+6. The OTEL endpoint, with its protocol and headers.
+
+So OTEL endpoints never override or turn off an export set up in Ryco; an OTEL value Ryco cannot
+use only produces a warning. At startup the server logs one line per exported signal with its
+redacted URL (and, for an OTEL endpoint, the variable and protocol), then one warning per ignored
+or disabling OTEL setting. Diagnostics and Settings show the resolved traces and metrics URLs;
+the logs export appears only in that startup line.
+
+Watch out: `ryco serve` and a desktop app launched from a terminal inherit that shell's
+environment. If it exports `OTEL_EXPORTER_OTLP_ENDPOINT` for another tool (Claude Code's telemetry
+setup does), Ryco exports there too for every signal Ryco itself does not configure, logs included.
+Unset it, or set `OTEL_<SIGNAL>_EXPORTER=none`, to keep Ryco's data out of that collector. The
+monorepo `bun run dev*` scripts are not affected: Turbo passes only the variables listed in
+`turbo.json`, which include `RYCO_OTLP_*` but no `OTEL_*`.
+
+Not supported: `OTEL_SERVICE_NAME` and `OTEL_SERVICE_VERSION` (provider CLIs that Ryco starts
+inherit them; use `RYCO_OTLP_SERVICE_NAME`), `OTEL_EXPORTER_OTLP_*_COMPRESSION`,
+`OTEL_EXPORTER_OTLP_*_TIMEOUT`, `OTEL_EXPORTER_OTLP_*_CERTIFICATE` and client-key variables,
+`OTEL_BSP_*`, `OTEL_BLRP_*`, `OTEL_METRIC_EXPORT_INTERVAL` (use `RYCO_OTLP_EXPORT_INTERVAL_MS`) and
+`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`. Browser spans forwarded through the server's
+trace proxy are sent as JSON even when `http/protobuf` is configured; OTLP/HTTP collectors accept
+both.
 
 Product analytics (off by default):
 
@@ -590,6 +669,7 @@ Soft budgets live in `apps/web/src/perf/budgets.ts`. See `apps/web/src/perf/READ
 
 ### Current Constraints
 
-- logs outside spans are not persisted, except in desktop mode (`logs/server.log`)
+- logs outside spans are not persisted, except in desktop mode (`logs/server.log`) or when exported
+  over OTLP
 - metrics are not snapshotted locally to disk; use the Diagnostics panel or OTLP export for inspection
 - `serverLogPath` is only written in desktop mode; the trace file is the persisted artifact that matters

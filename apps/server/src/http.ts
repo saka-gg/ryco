@@ -1,4 +1,4 @@
-import { Data, Effect, FileSystem, Option, Path, Stream } from "effect";
+import { Data, Effect, FileSystem, Option, Path, Redacted, Stream } from "effect";
 import { cast } from "effect/Function";
 import {
   HttpBody,
@@ -10,6 +10,7 @@ import {
   Multipart,
 } from "effect/http";
 import { open, rename, unlink } from "node:fs/promises";
+import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 import * as Schema from "effect/Schema";
 import { OtlpTracer } from "effect/observability";
 
@@ -406,17 +407,27 @@ export const otlpTracesProxyRouteLayer = HttpRouter.add(
       return HttpServerResponse.empty({ status: 204 });
     }
 
+    // Forwarded as JSON whatever the configured protocol; OTLP/HTTP collectors accept both.
+    // Headers from OTEL_EXPORTER_OTLP_(TRACES_)HEADERS go only to the endpoint they came with.
+    const otelHeaders = config.otlpExports?.traces?.headers;
     return yield* httpClient
       .post(otlpTracesUrl, {
         body: HttpBody.jsonUnsafe(bodyJson),
+        ...(otelHeaders !== undefined ? { headers: Redacted.value(otelHeaders) } : {}),
       })
       .pipe(
         Effect.flatMap(HttpClientResponse.filterStatusOk),
         Effect.as(HttpServerResponse.empty({ status: 204 })),
-        Effect.tapError((cause) =>
+        // Never the error itself: it carries the request, whose headers and URL may hold
+        // credentials.
+        Effect.tapError((error) =>
           Effect.logWarning("Failed to export browser OTLP traces", {
-            cause,
-            otlpTracesUrl,
+            reason: error.reason._tag,
+            ...(error.response !== undefined ? { status: error.response.status } : {}),
+            ...(error.reason.description !== undefined
+              ? { description: error.reason.description }
+              : {}),
+            otlpTracesUrl: redactUrlCredentials(otlpTracesUrl),
           }),
         ),
         Effect.catch(() =>

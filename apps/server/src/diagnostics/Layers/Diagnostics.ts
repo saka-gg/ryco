@@ -27,7 +27,11 @@ import {
   parseProviderEventLogLine,
 } from "../../provider/providerEventLogRecords.ts";
 import type { TraceSinkHealth } from "../../observability/TraceSink.ts";
-import type { TraceRecord } from "../../observability/TraceRecord.ts";
+import {
+  rotatedTraceFilePaths,
+  traceRecordStatus,
+  type TraceRecord,
+} from "../../observability/TraceRecord.ts";
 import { readResourceTelemetry, recordResourceAttribution } from "../ResourceTelemetry.ts";
 import { readProcessDiagnostics } from "../ProcessDiagnostics.ts";
 import { summarizeOperationalMetrics } from "../OperationalMetrics.ts";
@@ -196,14 +200,6 @@ function toIsoFromUnixNano(value: string): string {
   }
 }
 
-function normalizeOtlpSpanStatus(code: string | undefined): DiagnosticsSpan["status"] {
-  if (!code) return "success";
-  if (code === "2" || code === "STATUS_CODE_ERROR") return "error";
-  if (code === "1" || code === "STATUS_CODE_OK") return "success";
-  if (code === "0" || code === "STATUS_CODE_UNSET") return "unset";
-  return "success";
-}
-
 function normalizeSpanSource(record: TraceRecord): DiagnosticsSpan["source"] {
   if (record.type === "effect-span") {
     return "server";
@@ -218,16 +214,6 @@ function normalizeSpanSource(record: TraceRecord): DiagnosticsSpan["source"] {
     return "server";
   }
   return "unknown";
-}
-
-function normalizeSpanStatus(record: TraceRecord): DiagnosticsSpan["status"] {
-  if (record.type === "effect-span") {
-    const exit = record.exit;
-    if (!exit || exit._tag === "Success") return "success";
-    if (exit._tag === "Interrupted") return "interrupted";
-    return "failure";
-  }
-  return normalizeOtlpSpanStatus(record.status?.code);
 }
 
 function spanFailureMessage(record: TraceRecord): string | undefined {
@@ -257,7 +243,7 @@ function toDiagnosticsSpan(record: TraceRecord): DiagnosticsSpan {
     startTime: toIsoFromUnixNano(record.startTimeUnixNano),
     endTime: toIsoFromUnixNano(record.endTimeUnixNano),
     durationMs: Math.max(0, record.durationMs),
-    status: normalizeSpanStatus(record),
+    status: traceRecordStatus(record),
     ...(failureMessage ? { failureMessage } : {}),
     attributes: redactDiagnosticValue(record.attributes ?? {}) as Record<string, unknown>,
   };
@@ -844,14 +830,10 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
       const serverStartedAt = new Date(serverStartedAtMs).toISOString();
       const traceRecords = makeRingBuffer<TraceRecord>(TRACE_RECORD_LIMIT);
       const resourceSampler = makeResourceSampler();
-      const scannedFilePaths = [
-        ...Array.from(
-          { length: Math.min(10, Math.max(0, Math.floor(config.traceMaxFiles))) },
-          (_, index) =>
-            `${config.serverTracePath}.${Math.min(10, Math.max(0, Math.floor(config.traceMaxFiles))) - index}`,
-        ),
+      const scannedFilePaths = rotatedTraceFilePaths(
         config.serverTracePath,
-      ];
+        Math.min(10, config.traceMaxFiles),
+      );
       let persistedDiagnosticsCache:
         | {
             readonly expiresAt: number;
