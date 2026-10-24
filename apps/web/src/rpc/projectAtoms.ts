@@ -4,7 +4,7 @@ import type {
   FilesystemBrowseResult,
   ProjectSearchEntriesResult,
 } from "@ryco/contracts";
-import { Atom } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
 import { LRUCache } from "@ryco/shared/lruCache";
 import {
   normalizeWorkspaceEntryQuery,

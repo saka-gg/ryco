@@ -1,5 +1,6 @@
 import type { ServerConfig } from "@ryco/contracts";
-import { Layer, Tracer } from "effect";
+import * as Layer from "effect/Layer";
+import * as Tracer from "effect/Tracer";
 
 import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary";
 import type { ClientTracingExporter } from "./clientTracingExporter";

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSync } from "vite-plus";
@@ -83,10 +84,15 @@ function resolveSpecifier(specifier: string, importer: string): string | null {
   return seamSiblings.get(resolved) ?? resolved;
 }
 
-const importCache = new Map<string, ReadonlyArray<string>>();
+interface ParsedImports {
+  /** Specifiers of value imports and re-exports (type-only ones are erased). */
+  readonly valueSpecifiers: ReadonlyArray<string>;
+}
 
-function staticValueImports(file: string): ReadonlyArray<string> {
-  const cached = importCache.get(file);
+const parseCache = new Map<string, ParsedImports>();
+
+function parseImports(file: string): ParsedImports {
+  const cached = parseCache.get(file);
   if (cached) return cached;
   const { module, errors } = parseSync(file, readFileSync(file, "utf8"));
   if (errors.length > 0) throw new Error(`Failed to parse ${file}`);
@@ -101,8 +107,18 @@ function staticValueImports(file: string): ReadonlyArray<string> {
       if (entry.moduleRequest && !entry.isType) specifiers.add(entry.moduleRequest.value);
     }
   }
-  const imports = [...specifiers]
-    .map((specifier) => resolveSpecifier(specifier, file))
+  const parsed = { valueSpecifiers: [...specifiers] };
+  parseCache.set(file, parsed);
+  return parsed;
+}
+
+const importCache = new Map<string, ReadonlyArray<string>>();
+
+function staticValueImports(file: string): ReadonlyArray<string> {
+  const cached = importCache.get(file);
+  if (cached) return cached;
+  const imports = parseImports(file)
+    .valueSpecifiers.map((specifier) => resolveSpecifier(specifier, file))
     .filter((resolved): resolved is string => resolved !== null);
   importCache.set(file, imports);
   return imports;
@@ -145,6 +161,28 @@ const BOOT_GRAPH_ENTRIES = [
   "main.tsx",
   ...BOOT_ROOT_MODULES.map((modulePath) => modulePath.replace(/^src\//u, "")),
 ];
+
+const effectExports = (
+  JSON.parse(
+    readFileSync(
+      path.resolve(
+        path.dirname(createRequire(import.meta.url).resolve("effect")),
+        "../package.json",
+      ),
+      "utf8",
+    ),
+  ) as { exports: Record<string, unknown> }
+).exports;
+
+/**
+ * Whether `specifier` names `effect`'s root or one of its directory entries
+ * (`effect/reactivity`): an index that re-exports every module beneath it.
+ */
+function isEffectBarrel(specifier: string): boolean {
+  if (specifier !== "effect" && !specifier.startsWith("effect/")) return false;
+  const target = exportTarget(effectExports[`.${specifier.slice("effect".length)}`]);
+  return target?.endsWith("/index.js") ?? false;
+}
 
 const HOSTED_RUNTIME: readonly RegExp[] = [
   /^pkg:@noble\//u,
@@ -194,6 +232,22 @@ describe("standard build static import graph", () => {
         forbiddenChains(entry, [/^packages\/shared\/src\/changeRequestHostCapabilities\.ts$/u]),
       ).toEqual([]);
     }
+  });
+
+  it("imports Effect modules by subpath in boot code", () => {
+    // The boot vendor chunk follows package barrels: one value import of
+    // `effect` or `effect/reactivity` from boot code brings every module
+    // beneath it that any lazy chunk uses into boot (Config, ConfigProvider).
+    const barrelImports = new Set<string>();
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      for (const file of staticGraph(path.join(srcRoot, entry)).keys()) {
+        if (file.startsWith("pkg:")) continue;
+        for (const specifier of parseImports(file).valueSpecifiers) {
+          if (isEffectBarrel(specifier)) barrelImports.add(`${display(file)}: ${specifier}`);
+        }
+      }
+    }
+    expect([...barrelImports]).toEqual([]);
   });
 
   it("keeps the preview editor session out of the boot graph", () => {
