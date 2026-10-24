@@ -55,6 +55,12 @@ export interface AcpPatchedProtocolOptions {
     params: unknown,
   ) => Effect.Effect<unknown, AcpError.AcpError, never>;
   readonly onTermination?: (error: AcpError.AcpError) => Effect.Effect<void, never, never>;
+  /**
+   * Runs the enqueue deadline. Defaults to `Effect.timeoutOrElse`; pass a
+   * stall-aware one of the same shape so a host stall or machine sleep does not
+   * expire it.
+   */
+  readonly timeoutOrElse?: typeof Effect.timeoutOrElse;
 }
 
 export interface AcpPatchedProtocol {
@@ -84,6 +90,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   options: AcpPatchedProtocolOptions,
 ): Effect.fn.Return<AcpPatchedProtocol, never, Scope.Scope> {
   const parser = parserFactory.makeUnsafe();
+  const timeoutOrElse = options.timeoutOrElse ?? Effect.timeoutOrElse;
   const serverQueue = yield* Queue.bounded<RpcMessage.FromClientEncoded>(PROTOCOL_QUEUE_CAPACITY);
   const clientQueue = yield* Queue.bounded<RpcMessage.FromServerEncoded>(PROTOCOL_QUEUE_CAPACITY);
   const notificationQueue = yield* options.onNotification
@@ -118,7 +125,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     queueName: string,
   ): Effect.Effect<void, AcpError.AcpError> =>
     Queue.offer(queue, value).pipe(
-      Effect.timeoutOrElse({
+      timeoutOrElse({
         duration: PROTOCOL_ENQUEUE_DEADLINE_MS,
         orElse: () =>
           Effect.fail(

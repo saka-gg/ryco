@@ -43,6 +43,10 @@
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"
     },
+    "./responsiveDeadline": {
+      "types": "./src/responsiveDeadline.ts",
+      "import": "./src/responsiveDeadline.ts"
+    },
     "./threadArtifacts": {
       "types": "./src/threadArtifacts.ts",
       "import": "./src/threadArtifacts.ts"

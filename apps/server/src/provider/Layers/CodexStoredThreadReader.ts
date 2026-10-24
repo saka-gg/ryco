@@ -27,6 +27,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 import { Duration, Effect, Exit, Fiber, Layer, Scope, Semaphore } from "effect";
 import { ChildProcessSpawner } from "effect/process";
+import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -150,6 +151,7 @@ export const makeCodexStoredThreadReader = Effect.fnUntraced(function* (
           ...(options.homePath ? { CODEX_HOME: expandHomePath(options.homePath) } : {}),
         } as Record<string, string>,
         requestTimeoutMs: options.requestTimeoutMs ?? 20_000,
+        timeoutOrElse: timeoutWhileResponsiveOrElse,
         // A process that exits is retired at once, not on the next read's failure.
         onTermination: () =>
           Effect.suspend(() => (holder.reader ? retire(holder.reader) : Effect.void)).pipe(

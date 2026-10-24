@@ -50,12 +50,20 @@ export const SERVER_TIMING_TEST_FILES = [
   "src/provider/Layers/ProviderInstanceRegistryLive.test.ts",
   // Provider shutdown finishes within 1 s.
   "src/provider/Layers/ProviderService.test.ts",
+  // A provider operation that needs 250 ms and an I/O round trip after a 600 ms
+  // stall finishes inside the rest of a 300 ms responsive budget, and a hung one
+  // still fails within a second of its deadline.
+  "src/provider/detachedDeadline.test.ts",
   // A hanging shutdown-hint write is cut off after 2 s, within 6 s overall.
   "src/serverRuntimeStartup.test.ts",
   // Shutdown flushes analytics within 2 s.
   "src/telemetry/Layers/AnalyticsService.test.ts",
   // Usage summaries answer within 2 s while the rates download hangs.
   "src/usage/UsageService.test.ts",
+  // A git child that exits during a 600 ms stall is read inside the rest of a
+  // 300 ms responsive budget (also for forge CLIs in VcsProcess).
+  "src/vcs/GitVcsDriverCore.stall.test.ts",
+  "src/vcs/VcsProcess.test.ts",
   // Allows 20 ms for a 200-event backlog to queue behind a held chunk; under
   // parallel load it split into 4 chunks in CI.
   "src/ws/context/orchestrationStreamBatching.test.ts",

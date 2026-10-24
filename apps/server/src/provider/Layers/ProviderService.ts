@@ -89,6 +89,7 @@ import {
   ProviderValidationError,
 } from "../Errors.ts";
 import { runDetachedWithDeadline, runDetachedWithDeadlineOption } from "../detachedDeadline.ts";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import {
   providerOperationTimeoutDetail,
   resolveProviderOperationTimeouts,
@@ -1723,7 +1724,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 Effect.raceFirst(
                   Deferred.await(accepted).pipe(Effect.as("accepted" as const)),
                   Fiber.await(fiber).pipe(Effect.as("exited" as const)),
-                ).pipe(Effect.timeoutOption(Duration.millis(timeoutMs))),
+                ).pipe(timeoutWhileResponsiveOption(timeoutMs)),
               ).pipe(Effect.onInterrupt(() => abandon));
               if (Option.isNone(first)) {
                 yield* abandon;
