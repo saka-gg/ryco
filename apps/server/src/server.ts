@@ -15,6 +15,7 @@ import { ProviderEffectIntentRepositoryLive } from "./persistence/Layers/Provide
 import { RestartContinuationRepositoryLive } from "./persistence/Layers/RestartContinuations.ts";
 import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuation.ts";
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
+import { ServerWakeFenceLive } from "./orchestration/Layers/ServerWakeFence.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Duration, Effect, Layer } from "effect";
@@ -671,6 +672,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   Layer.provideMerge(WorkspaceLifecycleLive),
   // Delete dialog: what the work a checkout alone holds is about.
   Layer.provideMerge(WorkspaceChangeSummaryLive),
+  // One fence for every server wake (delegated results, pull request updates): they share its
+  // pending-start sightings and its cold-start budget.
+  Layer.provideMerge(ServerWakeFenceLive),
   Layer.provideMerge(RuntimeDependenciesLive),
   // One process-scoped manager is shared by control RPC, frame streaming,
   // provider tools, idle cleanup, and crash-recovery ownership.

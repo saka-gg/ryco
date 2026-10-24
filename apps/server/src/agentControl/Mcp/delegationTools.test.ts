@@ -34,6 +34,7 @@ import { AgentControlProposalEvents } from "../Services/AgentControlProposalEven
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
 import { AgentControlProposalEventsLive } from "../Layers/AgentControlProposalEvents.ts";
 import { makeCompletionReturnDelivery } from "../Layers/CompletionReturnDelivery.ts";
+import { ServerWakeFenceLive } from "../../orchestration/Layers/ServerWakeFence.ts";
 import { renderCompletionNotice } from "../completionReturnMessages.ts";
 import { completionFixture, completionFixtureTime as now } from "../completionReturnTestSupport.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
@@ -392,6 +393,7 @@ it.effect("acknowledges a ready task read during the exact turn, so no wake is s
     assert.equal((yield* h.read()).status, "delivered");
     const sent: unknown[] = [];
     const worker = yield* makeCompletionReturnDelivery.pipe(
+      Effect.provide(ServerWakeFenceLive),
       Effect.provideService(ProviderService, {
         getSession: () => Effect.succeed(Option.none()),
       } as never),

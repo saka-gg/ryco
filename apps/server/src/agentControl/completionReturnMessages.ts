@@ -20,6 +20,7 @@ import {
   type CompletionReturnOutcome,
   type CompletionReturnRecord,
 } from "../persistence/Layers/AgentControlCompletionReturns.ts";
+import { serverWakeGuard } from "../orchestration/serverWake.ts";
 
 export const MAX_WAKE_SECTIONS = 10;
 export const MAX_WAKE_TEXT_CHARS = 100_000;
@@ -59,14 +60,6 @@ export function laterInstant(
 }
 export const MAX_DELIVERY_ATTEMPTS = 5;
 export const MAX_REPLAYS = 2;
-/**
- * Cold wakes start a session for their parent. The reactor runs each thread in
- * its own lane, so they no longer block other threads; the cap matches the
- * default concurrent provider starts per instance, which avoids admission-busy
- * failures in post-restart bursts.
- */
-export const MAX_COLD_WAKES_IN_FLIGHT = 4;
-export const COLD_WAKE_GRACE_MS = 120_000;
 export const CHILD_OUTPUT_MAX_CHARS = 8000;
 
 const threadLink = (label: string, threadId: string) =>
@@ -238,12 +231,11 @@ export function buildDelegationReturnCommand(input: {
     type: "thread.turn.start",
     commandId: ids.commandId,
     threadId: input.parent.id,
-    delegationReturnGuard: {
-      latestUserMessageId: input.latestUserMessageId,
-      projectId: input.parent.projectId,
-      runtimeMode: input.parent.runtimeMode,
-      worktreePath: input.parent.worktreePath,
-    },
+    delegationReturnGuard: serverWakeGuard(
+      input.parent,
+      input.latestUserMessageId,
+      "delegation-return",
+    ),
     message: {
       messageId: ids.messageId,
       role: "user" as const,

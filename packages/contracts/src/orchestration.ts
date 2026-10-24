@@ -2035,19 +2035,31 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 /**
- * Delegated-result wake fence. Legacy fields (`turnMessageId`, `turnId`, `runtimeSessionId`,
- * `providerInstanceId`) are decoded for stored events and ledger commands and ignored.
+ * What a server wake (a queued turn start the server sends on its own) delivers: a delegated
+ * result, or a pull request watch update. Only the wording of its rejections and restart
+ * notices depends on it; both pass the same fence.
+ */
+export const ServerWakeSource = Schema.Literals(["delegation-return", "pull-request-watch"]);
+export type ServerWakeSource = typeof ServerWakeSource.Type;
+
+/**
+ * Server wake fence (delegated results, pull request watch updates). Legacy fields
+ * (`turnMessageId`, `turnId`, `runtimeSessionId`, `providerInstanceId`) are decoded for stored
+ * events and ledger commands and ignored.
  */
 export const DelegationReturnGuard = Schema.Struct({
   latestUserMessageId: Schema.NullOr(MessageId),
   projectId: ProjectId,
   runtimeMode: RuntimeMode,
   worktreePath: Schema.NullOr(Schema.String),
+  /** Absent on delegated results, so their commands and stored events stay unchanged. */
+  source: Schema.optional(ServerWakeSource),
   turnMessageId: Schema.optional(MessageId),
   turnId: Schema.optional(TurnId),
   runtimeSessionId: Schema.optional(RuntimeSessionId),
   providerInstanceId: Schema.optional(ProviderInstanceId),
 });
+export type DelegationReturnGuard = typeof DelegationReturnGuard.Type;
 export const ClaudeResumeGuard = Schema.Struct({
   requireReady: Schema.Boolean,
   /**

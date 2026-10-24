@@ -78,6 +78,7 @@ import {
   requireThreadReadyForCheckpointRevert,
 } from "./checkpointRevertPolicy.ts";
 import { projectEvent } from "./projector.ts";
+import { serverWakeCopy } from "./serverWake.ts";
 import { threadReferencesPayload } from "./threadReferences.ts";
 import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
 import {
@@ -1740,10 +1741,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
 
-      // Delegated-result wake fence (delegation-returns §3.5). A wake is a normal queued turn
-      // start that (re)creates or resumes the session, so the parent's turn, runtime and
-      // provider instance are not fenced and legacy guard fields are ignored. Pending starts
-      // are invisible here; CompletionReturnDelivery's parent-idle rule owns them.
+      // Server wake fence (delegation-returns §3.5): delegated results and pull request
+      // watch updates. A wake is a normal queued turn start that (re)creates or resumes the
+      // session, so the thread's turn, runtime and provider instance are not fenced and legacy
+      // guard fields are ignored. Pending starts are invisible here; ServerWakeFence's idle
+      // rule owns them. Only the wording depends on the wake's source.
       const guard = command.delegationReturnGuard;
       if (
         guard &&
@@ -1760,18 +1762,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail:
-            "Delegated result origin changed. Open the child task and return its result manually.",
+          detail: serverWakeCopy(guard).originChanged,
         });
       }
       // usage-limits §5.2: an accepted turn start clears the limit below, and only the user's
-      // or the auto-resume's turn may do that. CompletionReturnDelivery holds the wake while
-      // the limit applies, so this only fires on a race with a new limit.
+      // or the auto-resume's turn may do that. ServerWakeFence holds the wake while the limit
+      // applies, so this only fires on a race with a new limit.
       if (guard && applicableUsageLimit(targetThread) !== null) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail:
-            "The originating chat hit its usage limit. The delegated result waits until it is resumed.",
+          detail: serverWakeCopy(guard).usageLimited,
         });
       }
       const requestedSelection = command.modelSelection ?? targetThread.modelSelection;
