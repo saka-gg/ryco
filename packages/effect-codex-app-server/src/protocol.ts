@@ -45,6 +45,12 @@ export interface CodexAppServerPatchedProtocolOptions {
   readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
   readonly requestTimeoutMs?: number;
   readonly maxFrameBytes?: number;
+  /**
+   * Runs the request and enqueue deadlines. Defaults to `Effect.timeoutOrElse`;
+   * pass a stall-aware one of the same shape so a host stall or machine sleep
+   * does not expire them.
+   */
+  readonly timeoutOrElse?: typeof Effect.timeoutOrElse;
 }
 
 export interface CodexAppServerPatchedProtocol {
@@ -138,6 +144,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const terminationSignal = yield* Deferred.make<void>();
     const maxFrameBytes = options.maxFrameBytes ?? PROTOCOL_MAX_FRAME_BYTES;
     const requestTimeoutMs = options.requestTimeoutMs ?? PROTOCOL_REQUEST_TIMEOUT_MS;
+    const timeoutOrElse = options.timeoutOrElse ?? Effect.timeoutOrElse;
     const outgoing = yield* Queue.bounded<string, Cause.Done<void>>(PROTOCOL_QUEUE_CAPACITY);
     const incomingNotifications = yield* options.onNotification
       ? Queue.sliding<CodexAppServerIncomingNotification>(PROTOCOL_QUEUE_CAPACITY)
@@ -174,7 +181,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       queueName: string,
     ): Effect.Effect<void, CodexError.CodexAppServerError> =>
       Queue.offer(queue, value).pipe(
-        Effect.timeoutOrElse({
+        timeoutOrElse({
           duration: PROTOCOL_ENQUEUE_DEADLINE_MS,
           orElse: () =>
             Effect.fail(
@@ -541,7 +548,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
           Effect.ensuring(removePending(String(requestId))),
         );
       }).pipe(
-        Effect.timeoutOrElse({
+        timeoutOrElse({
           duration: requestTimeoutMs,
           orElse: () =>
             Effect.fail(

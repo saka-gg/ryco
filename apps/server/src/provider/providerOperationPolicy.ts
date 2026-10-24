@@ -6,6 +6,11 @@
  * positive safe integers; anything else is ignored and reported so the caller
  * can log one warning.
  *
+ * The session-start, turn-acceptance and control deadlines count only time the
+ * server's event loop was free to run (`runDetachedWithDeadline`), so a server
+ * stall or machine sleep costs at most one second of them.
+ * `unresponsiveAfterMs` is not a deadline: the turn-liveness sweep measures it.
+ *
  * Pure module: no services, no I/O.
  *
  * @module providerOperationPolicy

@@ -13,6 +13,7 @@ import {
   Stream,
 } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
 import * as Schema from "effect/Schema";
@@ -363,6 +364,7 @@ const makeAcpSessionRuntime = (
           ? { logOutgoing: options.protocolLogging.logOutgoing }
           : {}),
         ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
+        timeoutOrElse: timeoutWhileResponsiveOrElse,
       }),
     ).pipe(Effect.provideService(Scope.Scope, runtimeScope));
 
@@ -523,7 +525,7 @@ const makeAcpSessionRuntime = (
       );
       const hint = options.phaseTimeoutHints?.[phase];
       return effect.pipe(
-        Effect.timeoutOrElse({
+        timeoutWhileResponsiveOrElse({
           duration: timeoutMs,
           orElse: () =>
             Effect.fail(

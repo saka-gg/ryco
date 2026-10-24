@@ -31,6 +31,10 @@ import type * as CodexClient from "effect-codex-app-server/client";
 import type * as CodexErrors from "effect-codex-app-server/errors";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 import { ChildProcessSpawner } from "effect/process";
+import {
+  timeoutWhileResponsive,
+  timeoutWhileResponsiveOrElse,
+} from "@ryco/shared/responsiveDeadline";
 
 import { ServerConfig } from "../config.ts";
 import { runProcess } from "../processRunner.ts";
@@ -678,6 +682,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
             args: ["app-server"],
             cwd: serverConfig.cwd,
             env: runtimeEnvFor(workspace),
+            timeoutOrElse: timeoutWhileResponsiveOrElse,
           }),
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
         const client = yield* Effect.service(codexAppServer.CodexClient.CodexAppServerClient).pipe(
@@ -688,7 +693,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
         return yield* use(client);
       }),
     ).pipe(
-      Effect.timeout(MCP_APP_SERVER_TIMEOUT),
+      timeoutWhileResponsive(MCP_APP_SERVER_TIMEOUT),
       Effect.mapError((cause) => normalizeUnknownError(cause, "Codex app-server MCP call failed.")),
     );
 
