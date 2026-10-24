@@ -165,7 +165,7 @@ it.layer(testLayer)("side question provider isolation", (it) => {
               const binary = `${root}/${provider}`;
               const capture = `${root}/capture.jsonl`;
               const lightweightFlag =
-                provider === "codex" ? "--ignore-user-config" : "--strict-mcp-config";
+                provider === "codex" ? "--ignore-user-config" : "--setting-sources";
               const output = JSON.stringify({ title: "Fix reconnect", branch: "Fix/Reconnect" });
               yield* fs.writeFileString(
                 binary,
@@ -214,11 +214,17 @@ it.layer(testLayer)("side question provider isolation", (it) => {
               if (full) {
                 expect(full.args).not.toContain(lightweightFlag);
                 expect(full.cwd).toBe(input.cwd);
+                if (provider === "codex") {
+                  // The full-config retry keeps the user's config, not their tools.
+                  expect(full.args).toContain("features.shell_tool=false");
+                  expect(full.args).toContain('web_search="disabled"');
+                }
               }
               for (const call of calls) {
                 if (provider === "claude") {
-                  // A title never needs tools or a persisted Claude Code session.
+                  // A title never needs tools, MCP servers or a persisted Claude Code session.
                   expect(call.args[call.args.indexOf("--tools") + 1]).toBe("");
+                  expect(call.args).toContain("--strict-mcp-config");
                   expect(call.args).toContain("--no-session-persistence");
                   expect(call.args).not.toContain("--dangerously-skip-permissions");
                 }
