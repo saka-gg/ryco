@@ -1,6 +1,16 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
 import { describe, expect, it } from "vitest";
-import { ComputerApprovalGate } from "./ComputerApprovalGate.ts";
+import {
+  ComputerApprovalExpiredError,
+  ComputerApprovalGate,
+  ComputerApprovalPendingError,
+  ComputerApprovalQueueFullError,
+  ComputerApprovalUnavailableError,
+  computerApprovalRefusalPayload,
+  isComputerApprovalRefusal,
+} from "./ComputerApprovalGate.ts";
+import { CuaActionError } from "./CuaComputerBackend.ts";
+import { ToolInputError } from "./tools/toolInput.ts";
 
 describe("ComputerApprovalGate", () => {
   it("cancels a concurrent waiter without approving or cancelling another call", async () => {
@@ -322,5 +332,51 @@ describe("ComputerApprovalGate", () => {
     expect(await pending).toBe(true);
     expect(await gate.requestTask(input("pending"))).toBe(true);
     expect(prompts.get("pending")).toHaveLength(1);
+  });
+});
+
+describe("Computer approval refusals", () => {
+  it.each([
+    ["an expiry", () => new ComputerApprovalExpiredError(), "approval_expired", true],
+    ["a second expiry", () => new ComputerApprovalExpiredError(false), "approval_expired", false],
+    ["an unanswered dialog", () => new ComputerApprovalPendingError(), "approval_pending", true],
+    [
+      "a missing dialog",
+      () => new ComputerApprovalUnavailableError(),
+      "approval_unavailable",
+      true,
+    ],
+    [
+      "a full prompt queue",
+      () => new ComputerApprovalQueueFullError("global"),
+      "approval_queue_full",
+      true,
+    ],
+  ] as const)(
+    "reports %s as a not-dispatched refusal with its code",
+    (_label, make, code, retryable) => {
+      const error = make();
+      expect(isComputerApprovalRefusal(error)).toBe(true);
+      expect(error).toMatchObject({ code, effect: "not-dispatched", retryable });
+      expect(computerApprovalRefusalPayload(error)).toStrictEqual({
+        error: { code, effect: "not-dispatched", retryable, message: error.message },
+      });
+    },
+  );
+
+  it("tells the agent to stop asking once the re-request expired too", () => {
+    expect(new ComputerApprovalExpiredError().message).toContain("Request approval again");
+    expect(new ComputerApprovalExpiredError(false).message).toContain(
+      "Do not ask again in this turn",
+    );
+  });
+
+  it("does not treat other failures as approval refusals", () => {
+    for (const error of [
+      new CuaActionError("No input was sent.", "not-dispatched", "approval_expired"),
+      new ToolInputError("approval_expired"),
+      Object.assign(new Error("approval_expired"), { code: "approval_expired" }),
+    ])
+      expect(isComputerApprovalRefusal(error)).toBe(false);
   });
 });

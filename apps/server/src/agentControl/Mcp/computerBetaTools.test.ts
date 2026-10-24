@@ -7,13 +7,14 @@ import {
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
-import { withComputerBetaTools } from "./computerBetaTools.ts";
+import { readComputerConsentReply, withComputerBetaTools } from "./computerBetaTools.ts";
 import {
   stageComputerTurn,
   retireComputerTurn,
   bindComputerTurn,
 } from "../../computer/computerTurnLifecycle.ts";
 import { CuaComputerBackend } from "../../computer/CuaComputerBackend.ts";
+import { ComputerManager } from "../../computer/ComputerManager.ts";
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
 import type { AgentControlMcpTools } from "./tools.ts";
 const session: AgentControlSessionRecord = {
@@ -69,11 +70,11 @@ function fixture() {
     registry: { getTurnAuthority: () => Effect.sync(() => current) } as never,
     projections: { getThreadCheckpointContext: () => Effect.succeed(Option.none()) } as never,
   });
-  const stage = () => {
+  const stage = (runtimeMode: "full-access" | "approval-required" = "full-access") => {
     stageComputerTurn(session.threadId, {
       text: "Inspect Calculator",
       intent: { mode: "request", generation: "epoch:0" },
-      runtimeMode: "full-access",
+      runtimeMode,
       label: "Calculator",
     });
     bindComputerTurn(session.threadId, authority.turnId);
@@ -146,6 +147,94 @@ it("rechecks turn authority after asynchronous desktop admission", async () => {
       turnId: "turn",
       intent: { generation: "epoch:0" },
     });
+  } finally {
+    await runtime.dispose();
+  }
+});
+it.each([
+  ["approves only an accept", { approved: true, outcome: "accept", retryable: false }, true],
+  ["refuses a decline", { approved: false, outcome: "decline", retryable: false }, false],
+  ["refuses a stopped task", { approved: false, outcome: "stopped", retryable: false }, false],
+] as const)("%s", (_label, reply, approved) => {
+  expect(readComputerConsentReply(reply)).toBe(approved);
+});
+it.each([
+  ["an open dialog", { approved: false, outcome: "pending", retryable: true }, "approval_pending"],
+  ["an expiry", { approved: false, outcome: "expired", retryable: true }, "approval_expired"],
+  [
+    "a missing window",
+    { approved: false, outcome: "unavailable", retryable: true },
+    "approval_unavailable",
+  ],
+  [
+    "a full prompt queue",
+    { approved: false, outcome: "busy", retryable: true },
+    "approval_queue_full",
+  ],
+] as const)("refuses this call without binding the turn for %s", (_label, reply, code) => {
+  expect(() => readComputerConsentReply(reply)).toThrow(
+    expect.objectContaining({ code, effect: "not-dispatched", retryable: true }),
+  );
+});
+it("passes on that the turn's re-request also expired", () => {
+  expect(() =>
+    readComputerConsentReply({ approved: false, outcome: "expired", retryable: false }),
+  ).toThrow(expect.objectContaining({ code: "approval_expired", retryable: false }));
+});
+it.each([
+  ["a bare approval without an outcome", { approved: true }],
+  [
+    "an approval that contradicts its outcome",
+    { approved: false, outcome: "accept", retryable: false },
+  ],
+  ["a decline that claims approval", { approved: true, outcome: "decline", retryable: false }],
+  ["an unknown outcome", { approved: false, outcome: "maybe", retryable: true }],
+  ["a non-object reply", "approved"],
+  ["no reply", null],
+] as const)("fails closed on %s", (_label, reply) => {
+  expect(() => readComputerConsentReply(reply)).toThrow(
+    expect.objectContaining({ code: "approval_unavailable", retryable: true }),
+  );
+});
+it("returns an open consent dialog to the agent as approval_pending without native input", async () => {
+  const runtime = fixture();
+  const pressKey = vi.spyOn(CuaComputerBackend.prototype, "pressKey");
+  vi.spyOn(CuaComputerBackend.prototype, "missingPermissions").mockResolvedValue([]);
+  const audit = vi
+    .spyOn(ComputerManager.prototype, "recordComputerAudit")
+    .mockImplementation(() => undefined);
+  runtime.fetcher.mockImplementation(async (_url, options) => {
+    const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+    runtime.requests.push(body);
+    return Response.json(
+      body.operation === "consent"
+        ? { approved: false, outcome: "pending", retryable: true }
+        : { ready: true },
+    );
+  });
+  try {
+    runtime.stage("approval-required");
+    const result = await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_press_key", {
+        key: "enter",
+        include_screenshot: false,
+      }),
+    );
+    expect(result.isError).toBe(true);
+    const text = result.content.find((part) => part.type === "text");
+    expect(JSON.parse(text?.type === "text" ? text.text : "{}")).toMatchObject({
+      error: { code: "approval_pending", effect: "not-dispatched", retryable: true },
+    });
+    expect(runtime.requests).toContainEqual({
+      operation: "consent",
+      threadId: session.threadId,
+      turnId: "turn",
+      clipboard: false,
+    });
+    expect(pressKey).not.toHaveBeenCalled();
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({ effect: "not-dispatched", code: "approval_pending" }),
+    );
   } finally {
     await runtime.dispose();
   }

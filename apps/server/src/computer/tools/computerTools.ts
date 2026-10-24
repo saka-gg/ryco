@@ -81,6 +81,10 @@ import {
 } from "../screenshotFrames.ts";
 import { withDesktopDeliveryMode } from "../DesktopOperationQueue.ts";
 import { CuaActionError } from "../CuaComputerBackend.ts";
+import {
+  computerApprovalRefusalPayload,
+  isComputerApprovalRefusal,
+} from "../ComputerApprovalGate.ts";
 import { cuaCaptureReuseEnabled } from "../computerCallContext.ts";
 import { withModelDesktopObservation } from "../modelDesktopObservation.ts";
 import { withComputerTask } from "../computerTaskContext.ts";
@@ -298,6 +302,7 @@ export function computerAuditErrorOutcome(error: unknown): {
   readonly diagnostics?: ComputerAuditEntry["diagnostics"];
   readonly layer?: ComputerAuditEntry["layer"];
 } {
+  if (isComputerApprovalRefusal(error)) return { effect: "not-dispatched", code: error.code };
   // A CuaActionError already carries the delivery taxonomy's verdict.
   if (error instanceof CuaActionError)
     return {
@@ -2105,16 +2110,18 @@ export function makeAgentGatewayComputerTools(
                   }),
                   isError: true,
                 }
-              : error instanceof CuaActionError
-                ? {
-                    ...mcpToolResultJson(cuaActionErrorPayload(error)),
-                    isError: true,
-                  }
-                : error instanceof ComputerTargetError
-                  ? targetErrorResult(error)
-                  : error instanceof ComputerLeaseError
-                    ? leaseErrorResult(error)
-                    : mcpToolResultError(errorText(error));
+              : isComputerApprovalRefusal(error)
+                ? { ...mcpToolResultJson(computerApprovalRefusalPayload(error)), isError: true }
+                : error instanceof CuaActionError
+                  ? {
+                      ...mcpToolResultJson(cuaActionErrorPayload(error)),
+                      isError: true,
+                    }
+                  : error instanceof ComputerTargetError
+                    ? targetErrorResult(error)
+                    : error instanceof ComputerLeaseError
+                      ? leaseErrorResult(error)
+                      : mcpToolResultError(errorText(error));
           // A missing OS grant is the only failure a user has to act on, so it
           // is the only one that raises a card. Everything else — a target that
           // moved, an undelivered keystroke, arguments the desktop refused — is

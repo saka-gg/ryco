@@ -17,6 +17,10 @@ import {
   DEFAULT_COMPUTER_CAPTURE_MAX_DIMENSION,
   MAX_COMPUTER_CLIPBOARD_BYTES,
 } from "../ComputerBackend.ts";
+import {
+  ComputerApprovalExpiredError,
+  ComputerApprovalPendingError,
+} from "../ComputerApprovalGate.ts";
 import { ComputerTargetError } from "../uiTreeTargeting.ts";
 import { ComputerManager } from "../ComputerManager.ts";
 import { CuaActionError } from "../CuaComputerBackend.ts";
@@ -1564,6 +1568,38 @@ describe("agent gateway computer tools", () => {
       await manager.dispose();
     }
   });
+  it.each([
+    ["expired", () => new ComputerApprovalExpiredError(), "approval_expired"],
+    ["unanswered", () => new ComputerApprovalPendingError(), "approval_pending"],
+  ] as const)(
+    "reports %s approval as retryable without dispatch or arming a refusal loop",
+    async (_label, refusal, code) => {
+      let attempts = 0;
+      const { backend, manager, call } = await setup(new FakeComputerBackend(), async () => {
+        if (attempts++ < 4) throw refusal();
+        return true;
+      });
+      const audit = vi.spyOn(manager, "recordComputerAudit");
+      const args = { window_id: "fake-calculator", key: "enter", include_screenshot: false };
+      try {
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          const refused = await call("computer_press_key", args);
+          expect(refused.isError).toBe(true);
+          expect(resultJson(refused)).toMatchObject({
+            error: { code, effect: "not-dispatched", retryable: true },
+          });
+        }
+        expect(backend.callsFor("pressKey")).toHaveLength(0);
+        expect(audit).toHaveBeenLastCalledWith(
+          expect.objectContaining({ effect: "not-dispatched", code }),
+        );
+        expect((await call("computer_press_key", args)).isError).not.toBe(true);
+        expect(backend.callsFor("pressKey")).toHaveLength(1);
+      } finally {
+        await manager.dispose();
+      }
+    },
+  );
   it("bounds repeated native refusals without claiming any input was dispatched", async () => {
     const { backend, manager, call } = await setup();
     const key = vi
