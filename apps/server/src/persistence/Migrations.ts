@@ -1004,13 +1004,29 @@ export const findRepairsNeedingWrites = Effect.fn("findRepairsNeedingWrites")(fu
   repairs: ReadonlyArray<MigrationRepair> = migrationRepairs,
 ) {
   const sql = yield* SqlClient.SqlClient;
+  // A connection that is query-only already (a read-only check) stays so afterwards.
+  const [before] = yield* sql<{ readonly query_only: number }>`PRAGMA query_only`;
+  const wasQueryOnly = Number(before?.query_only ?? 0) !== 0;
+  // Repairs run without their transactions here: Bun's client opens one with BEGIN IMMEDIATE,
+  // itself a write that query_only rejects, which would report every repair that uses one.
+  // Nothing is written either way, so dropping the transaction changes nothing else.
+  const probe = new Proxy(sql, {
+    get: (target, property, receiver) =>
+      property === "withTransaction"
+        ? <A, E, R>(effect: Effect.Effect<A, E, R>) => effect
+        : Reflect.get(target, property, receiver),
+  });
   return yield* Effect.acquireUseRelease(
     sql`PRAGMA query_only = ON`,
     () =>
       Effect.gen(function* () {
         for (const repair of repairs) {
           if (!repairApplies(repair, toMigrationInclusive)) continue;
-          const exit = yield* Effect.exit(repair.run(toMigrationInclusive));
+          const exit = yield* Effect.exit(
+            repair
+              .run(toMigrationInclusive)
+              .pipe(Effect.provideService(SqlClient.SqlClient, probe)),
+          );
           if (exit._tag === "Success") continue;
           const failure = Cause.findErrorOption(exit.cause);
           if (Option.isSome(failure) && isSqliteReadonlyError(failure.value)) {
@@ -1020,7 +1036,7 @@ export const findRepairsNeedingWrites = Effect.fn("findRepairsNeedingWrites")(fu
         }
         return [] as ReadonlyArray<string>;
       }),
-    () => sql`PRAGMA query_only = OFF`.pipe(Effect.orDie),
+    () => (wasQueryOnly ? Effect.void : sql`PRAGMA query_only = OFF`.pipe(Effect.orDie)),
   );
 });
 

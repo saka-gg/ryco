@@ -48,6 +48,43 @@ it.effect("names a repair that would write, and leaves the database as it was", 
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );
 
+it.effect(
+  "probes repairs without their transactions, so a client that opens one with BEGIN IMMEDIATE (Bun) finds none",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
+      // Bun's client starts every transaction on a writable connection with BEGIN IMMEDIATE,
+      // which query_only rejects as a write even when the repair inside would write nothing.
+      const bunLike = new Proxy(sql, {
+        get: (target, property, receiver) =>
+          property === "withTransaction"
+            ? <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+                Effect.acquireUseRelease(
+                  sql.unsafe("BEGIN IMMEDIATE"),
+                  () => effect,
+                  () => sql.unsafe("COMMIT").pipe(Effect.orDie),
+                )
+            : Reflect.get(target, property, receiver),
+      });
+      const found = yield* findRepairsNeedingWrites().pipe(
+        Effect.provideService(SqlClient.SqlClient, bunLike),
+      );
+      assert.deepEqual(found, []);
+    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);
+
+it.effect("leaves a query-only connection query-only", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations();
+    yield* sql`PRAGMA query_only = ON`;
+    assert.deepEqual(yield* findRepairsNeedingWrites(), []);
+    const queryOnly = yield* sql<{ readonly query_only: number }>`PRAGMA query_only`;
+    assert.equal(queryOnly[0]?.query_only, 1);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);
+
 it.effect("stops at the first repair that would write, before one that depends on it", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
