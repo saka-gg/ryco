@@ -18,7 +18,7 @@ import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
 import {
   getChangeRequestHostCapabilities,
   type ChangeRequestHostRequest,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 
 import {
   azureRemoteRepositoryKey,

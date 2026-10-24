@@ -1,5 +1,5 @@
 import type { ChangeRequest, VcsRef } from "@ryco/contracts";
-import { getChangeRequestHostCapabilities } from "@ryco/shared/sourceControl";
+import { getChangeRequestHostCapabilities } from "@ryco/shared/changeRequestHostCapabilities";
 import { Option } from "effect";
 import { describe, expect, it } from "vitest";
 

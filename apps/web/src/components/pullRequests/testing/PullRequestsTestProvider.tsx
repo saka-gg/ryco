@@ -55,11 +55,11 @@ import type {
   SourceControlProviderKind,
 } from "@ryco/contracts";
 import { reviewDraftKey } from "@ryco/client-runtime/state/pull-request-review";
+import { resolveChangeRequestPresentationForKind } from "@ryco/shared/sourceControl";
 import {
   getChangeRequestHostCapabilities,
-  resolveChangeRequestPresentationForKind,
   type ChangeRequestHostCapabilities,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 import { useMemo, useReducer, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { usePullRequestReviewDraftStore } from "../../../pullRequestReviewDraftStore";

@@ -17,12 +17,14 @@ import {
   EMPTY_AGENT_CONTROL_QUEUE_STATE,
   applyAgentControlStreamEvent,
   findCompletionReturnForChild,
+  isWaitingAutomationRun,
   selectActiveAgentControlProposals,
   selectCompletionReturnsByChildThreadId,
   selectAgentControlProposalsForThread,
   selectRecentAgentControlProposals,
   selectAgentControlExternalActivity,
   selectAgentControlThreadActivity,
+  waitingAutomationRunCount,
 } from "./logic.ts";
 
 const callerThreadId = ThreadId.make("thread-caller");
@@ -750,5 +752,31 @@ describe("delegated child returns", () => {
       parentThreadId: callerThreadId,
     });
     expect(findCompletionReturnForChild(state, ThreadId.make("unreturned"))).toBeNull();
+  });
+});
+
+const queued = (id: string, kind: string, status = "pending-user-approval") =>
+  ({ proposalId: id, status, plan: { kind } }) as unknown as AgentControlProposal;
+
+describe("runs waiting for approval", () => {
+  it("counts automation runs still pending, on the given devices only", () => {
+    const queues = {
+      "env-local": {
+        proposalsById: {
+          a: queued("a", "automationRun"),
+          b: queued("b", "automationRun", "expired"),
+          c: queued("c", "createAutomation"),
+        },
+      },
+      "env-studio": { proposalsById: { d: queued("d", "automationRun") } },
+      "env-gone": { proposalsById: { e: queued("e", "automationRun") } },
+    };
+    expect(waitingAutomationRunCount(queues, ["env-local", "env-studio"])).toBe(2);
+    expect(waitingAutomationRunCount(queues, [])).toBe(0);
+  });
+
+  it("leaves schedule changes to the dialog: they are proposed, not runs", () => {
+    expect(isWaitingAutomationRun(queued("x", "updateAutomation"))).toBe(false);
+    expect(isWaitingAutomationRun(queued("y", "automationRun", "approved"))).toBe(false);
   });
 });

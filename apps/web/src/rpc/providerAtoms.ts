@@ -5,7 +5,7 @@ import {
   createCheckpointDiffStore,
   DISABLED_CHECKPOINT_DIFF_STATE,
 } from "@ryco/client-runtime/rpc";
-import { Atom } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
 
 import { ensureEnvironmentApi } from "../environmentApi";
 

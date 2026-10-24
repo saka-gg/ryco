@@ -24,7 +24,7 @@ vi.mock("~/rpc/useGit", async (importOriginal) => {
   return createUseGitMock(await importOriginal());
 });
 
-import type { ChangeRequestHostCapabilities } from "@ryco/shared/sourceControl";
+import type { ChangeRequestHostCapabilities } from "@ryco/shared/changeRequestHostCapabilities";
 
 import { toastManager } from "~/components/ui/toast";
 import {

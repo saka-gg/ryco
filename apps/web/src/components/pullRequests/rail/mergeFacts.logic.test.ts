@@ -6,7 +6,7 @@ import {
 import {
   getChangeRequestHostCapabilities,
   preferredUpdateBranchMethod,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 import { Option } from "effect";
 import { describe, expect, it } from "vitest";
 
