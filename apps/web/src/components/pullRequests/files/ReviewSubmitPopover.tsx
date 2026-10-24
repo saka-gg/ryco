@@ -5,7 +5,7 @@ import {
   type ReviewDraft,
   type ReviewDraftComment,
 } from "@ryco/client-runtime/state/pull-request-review";
-import { supportsChangeRequestReviewEvent } from "@ryco/shared/sourceControl";
+import { supportsChangeRequestReviewEvent } from "@ryco/shared/changeRequestHostCapabilities";
 import { ArrowUpRightIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 

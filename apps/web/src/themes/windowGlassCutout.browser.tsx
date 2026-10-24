@@ -70,6 +70,33 @@ describe("in-page glass overlay cutout", () => {
     unregister();
   });
 
+  it("lets go of a panel that registered before the cutout installed", async () => {
+    // The cutout loads on demand, so the side chat can register first.
+    dispose?.();
+    const panel = byTestId("panel");
+    const unregister = registerInPageGlassOverlay(panel);
+    dispose = installGlassOverlayCutout(root);
+    await vi.waitFor(() => expect(byTestId("content").style.clipPath).toContain("path(evenodd"));
+
+    unregister();
+    await vi.waitFor(() => expect(byTestId("content").style.clipPath).toBe(""));
+    await nextFrames(40);
+    const originalRequest = window.requestAnimationFrame;
+    let cutoutFrames = 0;
+    window.requestAnimationFrame = (callback) => {
+      if (new Error().stack?.includes("glassOverlayCutout")) cutoutFrames += 1;
+      return originalRequest.call(window, callback);
+    };
+    try {
+      // Its column no longer wakes the cutout when it resizes.
+      byTestId("column").style.height = "420px";
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(cutoutFrames).toBe(0);
+    } finally {
+      window.requestAnimationFrame = originalRequest;
+    }
+  });
+
   it("stops measuring once an open panel's geometry settles", async () => {
     const unregister = registerInPageGlassOverlay(byTestId("panel"));
     await vi.waitFor(() => expect(byTestId("content").style.clipPath).not.toBe(""));

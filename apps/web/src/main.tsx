@@ -17,7 +17,6 @@ import { syncDocumentPresentationTier } from "./lib/presentationTier";
 import { syncDocumentVisualViewportInsets } from "./lib/visualViewportInsets";
 import { syncAppearancePreferenceEnvironment } from "./themes/appearancePreferences";
 import { isWindowTranslucencySupported } from "./themes/windowTranslucency";
-import { installGlassOverlayCutout } from "./lib/glassOverlayCutout";
 import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
 import { initializeWsConnectionState } from "./rpc/wsConnectionState";
 import { syncDocumentMotionVisibility } from "./lib/perf/motion";
@@ -83,10 +82,26 @@ if (hostedPwaLifecycle) {
 const rootElement = document.getElementById("root") as HTMLElement;
 
 // On a translucent window, floating overlays get the page cut out from under
-// them (the macOS desktop only; inert while the window is opaque).
+// them (the macOS desktop only; inert while the window is opaque). Only that
+// window loads the cutout. It is paint-only: an overlay already open when it
+// lands is cut out as it installs, and a failed load only leaves the page
+// visible through the overlays' glass.
 if (isWindowTranslucencySupported()) {
-  const disposeGlassOverlayCutout = installGlassOverlayCutout(rootElement);
-  if (import.meta.hot) import.meta.hot.dispose(disposeGlassOverlayCutout);
+  let disposeGlassOverlayCutout: (() => void) | null = null;
+  let disposed = false;
+  void import("./lib/glassOverlayCutout")
+    .then(({ installGlassOverlayCutout }) => {
+      if (!disposed) disposeGlassOverlayCutout = installGlassOverlayCutout(rootElement);
+    })
+    .catch((error: unknown) => {
+      console.warn("The translucent window's overlay cutout did not start.", error);
+    });
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      disposed = true;
+      disposeGlassOverlayCutout?.();
+    });
+  }
 }
 
 ReactDOM.createRoot(rootElement).render(

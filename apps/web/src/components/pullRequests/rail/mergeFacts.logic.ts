@@ -16,7 +16,7 @@ import {
   canMergeChangeRequests,
   type ChangeRequestHostCapabilities,
   type ChangeRequestUpdateBranchMethod,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 
 /**
  * Pure derivations behind the merge section: the verdict line, the status

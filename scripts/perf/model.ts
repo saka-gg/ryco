@@ -299,6 +299,27 @@ const CHAT_DEFERRED_SOURCES: readonly ForbiddenBundleSource[] = [
   { pattern: /^node_modules\/parse5\//u, reason: "HTML parser (rehype-raw)" },
 ];
 
+/**
+ * The Automations dialog and its schedule vocabulary and math. The shell's
+ * Automations badge counts queue proposals, and the missed-runs notice loads
+ * its words with the first notice; a static edge to these puts them back on
+ * every launch.
+ */
+const AUTOMATION_SCHEDULE_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/shared\/src\/automationSchedule\.ts$/u,
+    reason: "automation schedule math (@ryco/shared/automationSchedule)",
+  },
+  {
+    pattern: /^packages\/client-runtime\/src\/state\/agentControl\/automationSchedules\.ts$/u,
+    reason: "Automations dialog schedule rows",
+  },
+  {
+    pattern: /^apps\/web\/src\/components\/automations\/(?:dialog\/|missedRunsNotice\.logic\.ts$)/u,
+    reason: "Automations dialog or the missed-runs notice's words",
+  },
+];
+
 /** Schemas only the server speaks (`@ryco/contracts/agent-control-mcp`). */
 const SERVER_ONLY_SOURCES: readonly ForbiddenBundleSource[] = [
   {
@@ -365,6 +386,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...MARKDOWN_SOURCES,
         ...DIFF_RENDERER_SOURCES,
         ...SERVER_ONLY_SOURCES,
+        ...AUTOMATION_SCHEDULE_SOURCES,
       ],
     },
     {

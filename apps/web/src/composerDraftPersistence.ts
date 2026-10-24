@@ -3,7 +3,8 @@ import {
   composerDraftEntryStorageKey,
   PersistedComposerImageAttachment,
 } from "@ryco/client-runtime/state/composer";
-import { Option, Schema } from "effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import { isHostedHubMode } from "./env";
 import { createMemoryStorage, createWriteScheduler, type StateStorage } from "./lib/storage";
