@@ -124,6 +124,10 @@ async function makeBackend(capabilities: Record<string, unknown>) {
 
   const backend = new IosSimulatorBackend({
     platform: "darwin",
+    // Explicit, so the backend digests the same sources as capabilityCacheKey()
+    // even when RYCO_DEVICE_HELPER_SOURCE_DIR (set by Ryco Desktop for the
+    // processes it launches) points at an installed app's older helper.
+    helperSourceDir: HELPER_SOURCE_DIR,
     helperCacheRoot: cacheRoot,
     makeHelperClient: () => new StubHelper() as unknown as HelperClient,
     run: async (command, args) => {
