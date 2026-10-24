@@ -13,6 +13,11 @@ describe("parseStatisticsSearch", () => {
     });
   });
 
+  it("accepts the today view and keeps usage as the default", () => {
+    expect(parseStatisticsSearch({ view: "today" }).view).toBe("today");
+    expect(parseStatisticsSearch({ view: "Today" }).view).toBe("usage");
+  });
+
   it("canonicalizes arrays and drops invalid enum values", () => {
     expect(
       parseStatisticsSearch({

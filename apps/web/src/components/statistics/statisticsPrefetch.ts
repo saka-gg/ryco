@@ -4,6 +4,7 @@ import { readHostedRpcCapability } from "~/hostedHub/capabilities";
 
 import { prefetchStatistics } from "../settings/statistics/useStatistics";
 import type { StatisticsSearch } from "./statisticsSearch";
+import { prefetchDailyRecap, TODAY_USAGE_RANGE } from "./today/useDailyRecap";
 import { prefetchUsageSummary } from "./useUsageSummary";
 
 /** The part of the page's search that decides which requests it makes. */
@@ -16,6 +17,16 @@ export type StatisticsPrefetchSearch = Pick<StatisticsSearch, "view" | "range" |
  */
 export function prefetchStatisticsPage(search: StatisticsPrefetchSearch): void {
   switch (search.view) {
+    case "today":
+      // hosted-capability: routed node
+      if (!readHostedRpcCapability(WS_METHODS.serverGetDailyRecap, null).allowed) return;
+      prefetchDailyRecap(search.environmentIds);
+      // Its provider usage sentence and tile, where the session may read usage.
+      // hosted-capability: routed node
+      if (readHostedRpcCapability(WS_METHODS.serverGetUsageSummary, null).allowed) {
+        prefetchUsageSummary(TODAY_USAGE_RANGE, search.environmentIds);
+      }
+      return;
     case "usage":
       // hosted-capability: routed node
       if (!readHostedRpcCapability(WS_METHODS.serverGetUsageSummary, null).allowed) return;

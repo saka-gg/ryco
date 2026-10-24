@@ -196,6 +196,39 @@ describe("useUsageSummary", () => {
     expect(local.getUsageSummary).toHaveBeenCalledTimes(3);
   });
 
+  it("asks nothing while disabled", async () => {
+    const local = connection("local", "This Mac");
+    registry.connections = [local.value];
+    let enabled = false;
+    const hook = await renderHook(() => useUsageSummary({ range: "7d", enabled }));
+    expect(hook.result.current).toMatchObject({ merged: null, loading: false });
+    expect(local.getUsageSummary).not.toHaveBeenCalled();
+    enabled = true;
+    await hook.rerender();
+    await expect.poll(() => local.getUsageSummary.mock.calls.length).toBe(1);
+  });
+
+  it("asks again for a range that ends on the new day", async () => {
+    const local = connection("local", "This Mac");
+    registry.connections = [local.value];
+    let nowMs = Date.parse("2026-10-24T12:00:00.000Z");
+    const hook = await renderHook(() => useUsageSummary({ range: "7d", nowMs }));
+    await expect.poll(() => local.getUsageSummary.mock.calls.length).toBe(1);
+    await hook.act(() => local.releaseAll());
+    await expect.poll(() => hook.result.current.loading).toBe(false);
+    // Later the same day: the answer still holds.
+    nowMs += 60_000;
+    await hook.rerender();
+    expect(hook.result.current.loading).toBe(false);
+    nowMs += 86_400_000;
+    await hook.rerender();
+    await expect.poll(() => local.getUsageSummary.mock.calls.length).toBe(2);
+    const [first, second] = local.getUsageSummary.mock.calls.map(([request]) => request.endDate);
+    expect(second).not.toBe(first);
+    // The previous day's result stays on screen until the new one answers.
+    expect(hook.result.current).toMatchObject({ refreshing: true });
+  });
+
   it("withdraws a superseded range request but lets an unmounted view finish", async () => {
     const local = connection("local", "This Mac");
     registry.connections = [local.value];

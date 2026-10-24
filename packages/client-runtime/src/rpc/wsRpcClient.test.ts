@@ -123,6 +123,25 @@ describe("wsRpcClient", () => {
     expect(transport.request).toHaveBeenCalledTimes(2);
   });
 
+  it("passes the daily recap caller's abort signal to the transport", async () => {
+    const recapWireMethod = vi.fn(() => Effect.succeed({ date: "2026-10-23" }));
+    const transport = {
+      request: vi.fn((invoke: (client: unknown) => Effect.Effect<unknown>, _options?: unknown) =>
+        Effect.runPromise(invoke({ [WS_METHODS.serverGetDailyRecap]: recapWireMethod })),
+      ),
+    };
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    const input = { date: "2026-10-23", timeZone: "Europe/Berlin" };
+    const controller = new AbortController();
+    await client.server.getDailyRecap(input, { signal: controller.signal });
+    await client.server.getDailyRecap(input);
+    expect(recapWireMethod).toHaveBeenCalledWith(input);
+    expect(transport.request.mock.calls.map((call) => call[1])).toEqual([
+      { signal: controller.signal },
+      undefined,
+    ]);
+  });
+
   it("reduces vcs status stream events into flat status snapshots", () => {
     const subscribe = vi.fn(<TValue>(_connect: unknown, listener: (value: TValue) => void) => {
       for (const event of [

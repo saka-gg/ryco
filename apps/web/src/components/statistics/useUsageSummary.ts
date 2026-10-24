@@ -1,4 +1,6 @@
 import {
+  calendarDateInZone,
+  currentTimeZone,
   mergeUsageEnvironmentResults,
   SupersedingLoads,
   usageSummaryCache,
@@ -9,11 +11,14 @@ import {
 import type { EnvironmentId } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { listEnvironmentConnections } from "~/environments/runtime";
 
 import type { StatisticsRange } from "./statisticsSearch";
-import { selectConnections, useConnectedEnvironments } from "./useConnectedEnvironments";
+import {
+  selectConnections,
+  useStatisticsEnvironments,
+  type StatisticsEnvironments,
+} from "./useConnectedEnvironments";
 
 export { usageRequestForRange } from "@ryco/client-runtime/usage";
 
@@ -28,10 +33,6 @@ function usageTarget(connection: EnvironmentConnection): UsageSummaryTarget {
     getUsageSummary: (request, options) =>
       connection.client.server.getUsageSummary(request, options),
   };
-}
-
-function currentTimeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 /**
@@ -52,42 +53,36 @@ export function prefetchUsageSummary(
 export interface UseUsageSummaryResult {
   readonly merged: MergedUsageSummary | null;
   readonly environments: readonly UsageEnvironmentResult[];
-  readonly availableEnvironments: readonly {
-    readonly environmentId: EnvironmentId;
-    readonly label: string;
-  }[];
+  readonly availableEnvironments: StatisticsEnvironments["availableEnvironments"];
   /** Environments whose current request has not answered yet. */
   readonly pendingEnvironmentIds: readonly EnvironmentId[];
-  /** No environment is registered yet, but this app's own node is about to connect. */
-  readonly connecting: boolean;
+  readonly connecting: StatisticsEnvironments["connecting"];
   readonly loading: boolean;
   readonly refreshing: boolean;
   readonly refresh: () => void;
 }
 
+const NO_CONNECTIONS: EnvironmentConnections = [];
+
 export function useUsageSummary(input: {
   readonly range: StatisticsRange;
   readonly environmentIds?: readonly string[] | undefined;
+  /**
+   * A time on the local day the range ends on: a new day asks again. Without
+   * it, the range ends on the day each request is made.
+   */
+  readonly nowMs?: number | undefined;
+  /** False asks nothing and reports no usage. */
+  readonly enabled?: boolean | undefined;
 }): UseUsageSummaryResult {
-  const connections = useConnectedEnvironments();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const availableEnvironments = useMemo(
-    () =>
-      connections
-        .map((connection) => ({
-          environmentId: connection.environmentId,
-          label: connection.knownEnvironment.label,
-        }))
-        .toSorted((left, right) => left.label.localeCompare(right.label)),
-    [connections],
+  const { selected, availableEnvironments, connecting } = useStatisticsEnvironments(
+    input.environmentIds,
   );
-  const selectedConnections = useMemo(
-    () => selectConnections(connections, input.environmentIds),
-    [connections, input.environmentIds],
-  );
+  const selectedConnections = input.enabled === false ? NO_CONNECTIONS : selected;
   const timeZone = currentTimeZone();
+  const endDate = input.nowMs === undefined ? "" : calendarDateInZone(input.nowMs, timeZone);
   const [refreshKey, setRefreshKey] = useState(0);
-  const viewKey = `${input.range}\0${timeZone}\0${refreshKey}`;
+  const viewKey = `${input.range}\0${endDate}\0${timeZone}\0${refreshKey}`;
   // The latest answer per environment, tagged with the view it answered.
   const [answers, setAnswers] = useState<
     ReadonlyMap<
@@ -112,7 +107,11 @@ export function useUsageSummary(input: {
         (connection) => answeredViews.current.get(connection.environmentId) !== viewKey,
       ),
       (connection, signal) =>
-        usageSummaryCache.load(usageTarget(connection), input.range, timeZone, { signal, fresh }),
+        usageSummaryCache.load(usageTarget(connection), input.range, timeZone, {
+          signal,
+          fresh,
+          ...(input.nowMs === undefined ? {} : { nowMs: input.nowMs }),
+        }),
       (connection, result) => {
         answeredViews.current.set(connection.environmentId, viewKey);
         setAnswers((previous) =>
@@ -120,7 +119,7 @@ export function useUsageSummary(input: {
         );
       },
     );
-  }, [input.range, refreshKey, selectedConnections, timeZone, viewKey]);
+  }, [input.nowMs, input.range, refreshKey, selectedConnections, timeZone, viewKey]);
 
   const environments = useMemo(
     () =>
@@ -150,7 +149,7 @@ export function useUsageSummary(input: {
     environments,
     availableEnvironments,
     pendingEnvironmentIds,
-    connecting: connections.length === 0 && primaryEnvironmentId !== null,
+    connecting,
     loading,
     refreshing: loading && merged !== null,
     refresh,

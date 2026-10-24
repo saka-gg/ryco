@@ -27,8 +27,9 @@ export const Route = createFileRoute("/statistics")({
   //
   // On the mounted page only a change it would not request by itself reruns
   // the loader: another view, or another usage range. The activity snapshot
-  // ignores the range, and the usage view asks a newly selected environment
-  // itself, so rerunning on those would only start requests nobody joins.
+  // and today's recap ignore the range, and the usage and today views ask a
+  // newly selected environment themselves, so rerunning on those would only
+  // start requests nobody joins.
   loaderDeps: ({ search }) => {
     // `search` is the validated search above. The assertion breaks the same
     // declaration inference cycle as the route view's.
