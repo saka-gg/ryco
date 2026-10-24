@@ -153,10 +153,12 @@ import {
   setDesktopUpdateChannelPreference,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
-  setDesktopKeepAwakePreference,
+  isDesktopKeepAwakeMode,
+  setDesktopKeepAwakeMode,
   writeDesktopSettings,
 } from "./desktopSettings.ts";
 import {
+  BackendAgentWorkTracker,
   DESKTOP_KEEP_AWAKE_RECHECK_MS,
   DesktopKeepAwakeController,
   isDesktopNodeReachable,
@@ -300,7 +302,7 @@ const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
 const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
 const RESTART_APP_CHANNEL = "desktop:restart-app";
 const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
-const SET_KEEP_AWAKE_ENABLED_CHANNEL = "desktop:set-keep-awake-enabled";
+const SET_KEEP_AWAKE_MODE_CHANNEL = "desktop:set-keep-awake-mode";
 const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
 const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
 const NOTIFY_TURN_COMPLETE_CHANNEL = "desktop:notify-turn-complete";
@@ -484,6 +486,12 @@ let desktopWorkspaceClient: DesktopWorkspaceClient | null = null;
 let desktopWorkspaceRelayManager: DesktopWorkspaceRelayManager | null = null;
 let disposeDesktopWorkspaceSubscription: (() => void) | null = null;
 let desktopKeepAwake: DesktopKeepAwakeController | null = null;
+// What the running backend reports about agent work, over its pipe.
+const backendAgentWork = new BackendAgentWorkTracker({
+  onChange: () => {
+    desktopKeepAwake?.sync();
+  },
+});
 // Window and power lifecycle for the workspace client: it backgrounds a while
 // after the window leaves sight, never on blur, and keeps machine presence fresh.
 const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
@@ -1506,7 +1514,8 @@ function refreshDesktopHubReachability(): Promise<void> {
 
 function readDesktopKeepAwakeInputs() {
   return {
-    enabled: desktopSettings.keepAwakeWhileReachable,
+    mode: desktopSettings.keepAwakeMode,
+    agentWorking: backendAgentWork.agentWorking,
     // What the running backend serves, never a change saved for a relaunch.
     reachable: isDesktopNodeReachable({
       hubReachable: backendHubReachable,
@@ -1524,8 +1533,10 @@ function startDesktopKeepAwake(): void {
     blocker: powerSaveBlocker,
     power: powerMonitor,
     read: readDesktopKeepAwakeInputs,
-    onChange: (active) => {
-      writeDesktopLogHeader(`keep-awake ${active ? "acquired" : "released"}`);
+    onChange: (active, reason) => {
+      writeDesktopLogHeader(
+        active ? `keep-awake acquired reason=${reason ?? "unknown"}` : "keep-awake released",
+      );
     },
   });
   desktopKeepAwake.start();
@@ -3612,6 +3623,7 @@ function startBackend(): void {
       onLifecycleFrame: (frame) => handleBackendFrame(readiness, frame),
       onAppUpdateRequest: (frame) => handleAppUpdateRequest(frame, backendPipe),
       appUpdateState: () => updateState,
+      onAgentWork: (frame) => backendAgentWork.report(child, frame.keepAwake),
     });
     backendUpdatePipes.add(backendPipe);
     child.once("exit", () => {
@@ -3639,6 +3651,7 @@ function startBackend(): void {
   }
   backendReadiness = readiness;
   backendProcess = child;
+  backendAgentWork.begin(child);
   let backendSessionClosed = false;
   const closeBackendSession = (details: string) => {
     if (backendSessionClosed) return;
@@ -3669,6 +3682,8 @@ function startBackend(): void {
     if (backendProcess === child) {
       backendProcess = null;
     }
+    // Work it reported keeps the machine awake while its successor starts, unless Ryco quits.
+    backendAgentWork.end(child, { holdIfWorking: !isQuitting });
     if (backendControlToken === childControlToken) backendControlToken = "";
     if (!isQuitting && !wasExpected) outputCapture.recordUnexpectedExit(details);
     closeBackendSession(`pid=${child.pid ?? "unknown"} ${details}`);
@@ -3981,12 +3996,12 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(GET_KEEP_AWAKE_STATE_CHANNEL);
   ipcMain.handle(GET_KEEP_AWAKE_STATE_CHANNEL, () => desktopKeepAwakeState());
 
-  ipcMain.removeHandler(SET_KEEP_AWAKE_ENABLED_CHANNEL);
-  ipcMain.handle(SET_KEEP_AWAKE_ENABLED_CHANNEL, (_event, rawEnabled: unknown) => {
-    if (typeof rawEnabled !== "boolean") {
+  ipcMain.removeHandler(SET_KEEP_AWAKE_MODE_CHANNEL);
+  ipcMain.handle(SET_KEEP_AWAKE_MODE_CHANNEL, (_event, rawMode: unknown) => {
+    if (!isDesktopKeepAwakeMode(rawMode)) {
       throw new Error("Invalid keep-awake input.");
     }
-    const nextSettings = setDesktopKeepAwakePreference(desktopSettings, rawEnabled);
+    const nextSettings = setDesktopKeepAwakeMode(desktopSettings, rawMode);
     if (nextSettings !== desktopSettings) {
       writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
       desktopSettings = nextSettings;
@@ -5438,6 +5453,7 @@ app.on(
       computerUseRuntime?.dispose();
       desktopWindowCapture?.dispose();
       desktopKeepAwake?.dispose();
+      backendAgentWork.dispose();
       updateInstallInFlight = false;
       remoteAppInstaller.dispose();
       writeDesktopLogHeader("before-quit received");

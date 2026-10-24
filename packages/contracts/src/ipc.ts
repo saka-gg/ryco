@@ -516,12 +516,21 @@ export interface DesktopHubLaunchConfigResult {
   readonly relaunching: boolean;
 }
 
-/** Whether Desktop main is holding this machine awake for the devices that reach it. */
+/**
+ * When Desktop main holds this machine awake: never, while other devices can reach it, or while
+ * they can reach it or agents work on its own backend. Always on AC power only; the display may
+ * still sleep.
+ */
+export type DesktopKeepAwakeMode = "off" | "reachable" | "reachable-or-working";
+
+/** Whether Desktop main is holding this machine awake, and why. */
 export interface DesktopKeepAwakeState {
-  /** The operator's preference. On by default. */
-  readonly enabled: boolean;
+  /** The operator's preference. "reachable-or-working" by default. */
+  readonly mode: DesktopKeepAwakeMode;
   /** Other devices can reach this node through the Hub, the network, or Tailscale. */
   readonly reachable: boolean;
+  /** The local backend reports agent work (and for 2 minutes after it ends). */
+  readonly agentWorking: boolean;
   readonly onBattery: boolean;
   /** Ryco currently holds the system awake. Only ever true on AC power. */
   readonly active: boolean;
@@ -904,9 +913,9 @@ export interface DesktopBridge {
     readonly deferRelaunch?: boolean;
   }) => Promise<DesktopServerExposureState>;
   getHubLaunchConfig: () => Promise<DesktopHubLaunchConfig>;
-  /** Keep a reachable desktop node awake while it is plugged in. Applies live. */
+  /** Keep this desktop awake while it is plugged in and reachable or working. Applies live. */
   getKeepAwakeState?: () => Promise<DesktopKeepAwakeState>;
-  setKeepAwakeEnabled?: (enabled: boolean) => Promise<DesktopKeepAwakeState>;
+  setKeepAwakeMode?: (mode: DesktopKeepAwakeMode) => Promise<DesktopKeepAwakeState>;
   /** Relaunch the Desktop shell without changing persisted launch configuration. */
   restartApp?: () => Promise<void>;
   /** Native account setup is available only in Desktop builds that support hardware-backed keys. */

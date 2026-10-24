@@ -13,6 +13,7 @@ import {
   SETTINGS_SECTION_IDS,
   SETTINGS_SECTION_LABELS,
 } from "./SettingsPage";
+import { DESKTOP_KEEP_AWAKE_ROW_ID } from "./desktopKeepAwake.logic";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
 import {
   DESKTOP_ONLY_SETTINGS_SECTIONS,
@@ -241,6 +242,25 @@ describe("response streaming search", () => {
     });
     const text = `${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase();
     for (const query of ["paragraph", "token", "streaming", "legacy"]) {
+      expect(text).toContain(query);
+    }
+  });
+});
+
+describe("keep-awake search", () => {
+  it("is offered only by a desktop that can set the mode, and jumps to the row", () => {
+    const entry = SETTINGS_SEARCH_INDEX.find(
+      (candidate) => candidate.title === "Keep this computer awake",
+    );
+    expect(entry).toMatchObject({
+      section: "connections",
+      owner: "client",
+      desktopCapability: "setKeepAwakeMode",
+      // The row's title names the device ("this Mac"), so the search jumps by its id.
+      targetId: DESKTOP_KEEP_AWAKE_ROW_ID,
+    });
+    const text = `${entry?.title} ${entry?.description} ${entry?.keywords}`.toLowerCase();
+    for (const query of ["sleep", "awake", "agents", "plugged in"]) {
       expect(text).toContain(query);
     }
   });
