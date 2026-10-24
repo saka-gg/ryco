@@ -121,6 +121,20 @@ describe("keybindingCategories", () => {
     expect(getCommandMeta("modelPicker.jump.5").category).toBe(KEYBINDING_CATEGORIES.modelPicker);
   });
 
+  it("lists the attention commands under Threads, after the thread jumps", () => {
+    expect(getCommandMeta("thread.attention.next")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.thread,
+      title: "Next thread that needs you",
+    });
+    expect(getCommandMeta("thread.attention.previous")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.thread,
+      title: "Previous thread that needs you",
+    });
+    expect(getCommandMeta("thread.jump.9").sortWeight).toBeLessThan(
+      getCommandMeta("thread.attention.next").sortWeight,
+    );
+  });
+
   it("maps script.<id>.run commands to the Project scripts category", () => {
     expect(getCommandMeta("script.test.run").category).toBe(KEYBINDING_CATEGORIES.script);
     expect(getCommandMeta("script.build.run").category).toBe(KEYBINDING_CATEGORIES.script);

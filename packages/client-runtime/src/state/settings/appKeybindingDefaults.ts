@@ -37,7 +37,9 @@ const THREAD_LIFECYCLE_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
 ];
 
 // The next thread that needs attention.
-const THREAD_ATTENTION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [];
+const THREAD_ATTENTION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
+  { key: "mod+alt+a", command: "thread.attention.next", when: "!terminalFocus" },
+];
 
 // Back and forward, and the thread commands that ship with them.
 const NAVIGATION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [

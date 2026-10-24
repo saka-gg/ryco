@@ -923,6 +923,35 @@ describe("resolveShortcutCommand", () => {
       "chat.newWithoutProject",
     );
   });
+
+  it("resolves the next thread that needs you outside the terminal", () => {
+    // The default is client-only: a node sends every default to clients that may predate the command.
+    assert.isFalse(
+      NODE_DEFAULT_RESOLVED_KEYBINDINGS.some((rule) =>
+        rule.command.startsWith("thread.attention."),
+      ),
+    );
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel", context = {}) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context,
+      });
+    // Option+A types "å" on macOS; the physical key names the binding.
+    const optionA = { key: "å", code: "KeyA", metaKey: true, altKey: true };
+    assert.strictEqual(resolve(optionA), "thread.attention.next");
+    assert.strictEqual(
+      resolve({ key: "a", code: "KeyA", ctrlKey: true, altKey: true }, "Linux"),
+      "thread.attention.next",
+    );
+    assert.isNull(resolve(optionA, "MacIntel", { terminalFocus: true }));
+    // Polish AltGr+A types "ą", reported as Ctrl+Alt on Windows.
+    assert.isNull(resolve({ key: "ą", code: "KeyA", ctrlKey: true, altKey: true }, "Win32"));
+    const label = (command: KeybindingCommand, platform: string) =>
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, command, platform);
+    assert.strictEqual(label("thread.attention.next", "MacIntel"), "⌥⌘A");
+    assert.strictEqual(label("thread.attention.next", "Linux"), "Ctrl+Alt+A");
+    assert.isNull(label("thread.attention.previous", "MacIntel"));
+  });
 });
 
 describe("formatShortcutLabel", () => {

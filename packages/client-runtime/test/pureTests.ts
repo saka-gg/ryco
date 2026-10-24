@@ -135,6 +135,7 @@ export const CLIENT_RUNTIME_PURE_TEST_FILES = [
   "src/state/threads/readCache.test.ts",
   "src/state/threads/store.test.ts",
   "src/state/threads/storeSelectors.test.ts",
+  "src/state/threads/threadAttention.test.ts",
   "src/state/threads/threadBodyResidency.test.ts",
   "src/state/threads/threadContentCachePolicy.test.ts",
   "src/state/threads/threadFork.test.ts",

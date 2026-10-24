@@ -68,7 +68,10 @@ export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [
 ] as const;
 
 // The next thread that needs attention.
-export const THREAD_ATTENTION_KEYBINDING_COMMANDS = [] as const;
+export const THREAD_ATTENTION_KEYBINDING_COMMANDS = [
+  "thread.attention.next",
+  "thread.attention.previous",
+] as const;
 
 // Back and forward, and the thread commands that ship with them.
 export const NAVIGATION_KEYBINDING_COMMANDS = [
