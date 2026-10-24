@@ -6,7 +6,11 @@ import {
   compatibilityRepairMarker,
   describeSchemaTooNew,
   inspectMigrationLedger,
+  isUpgradePending,
+  migrationEntries,
+  migrationSchemaDigest,
   runMigrations,
+  schemaDigestOf,
   SUPPORTED_MIGRATION_ID,
 } from "./Migrations.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";
@@ -17,26 +21,39 @@ it.effect("inspects what the next migration pass would do without changing anyth
     const fresh = yield* inspectMigrationLedger();
     assert.isTrue(fresh.fresh);
     assert.isFalse(fresh.hasLedger);
+    assert.isFalse(fresh.hasUserTables);
     assert.equal(fresh.latestApplied, 0);
     assert.equal(fresh.supported, SUPPORTED_MIGRATION_ID);
+    assert.equal(fresh.pending.length, migrationEntries.length);
     assert.equal(fresh.pending.at(-1), SUPPORTED_MIGRATION_ID);
     assert.isAbove(fresh.repairsPending.length, 0);
+    assert.isTrue(isUpgradePending(fresh));
     assert.deepEqual(yield* sql`SELECT name FROM sqlite_master`, []);
 
     yield* runMigrations({ toMigrationInclusive: SUPPORTED_MIGRATION_ID - 1 });
     const behind = yield* inspectMigrationLedger();
     assert.isFalse(behind.fresh);
     assert.isTrue(behind.hasLedger);
+    assert.isTrue(behind.hasUserTables);
     assert.equal(behind.latestApplied, SUPPORTED_MIGRATION_ID - 1);
     assert.deepEqual(behind.pending, [SUPPORTED_MIGRATION_ID]);
     // Only the repair that arrives with the pending migration has never run.
     assert.deepEqual(behind.repairsPending, ["unused-orchestration-indexes"]);
+    assert.isTrue(isUpgradePending(behind));
+    // Bounded to what it already has, nothing is pending.
+    const bounded = yield* inspectMigrationLedger({
+      toMigrationInclusive: SUPPORTED_MIGRATION_ID - 1,
+    });
+    assert.deepEqual(bounded.pending, []);
+    assert.deepEqual(bounded.repairsPending, []);
+    assert.isFalse(isUpgradePending(bounded));
 
     yield* runMigrations();
     const current = yield* inspectMigrationLedger();
     assert.deepEqual(current.pending, []);
     assert.deepEqual(current.repairsPending, []);
     assert.isFalse(current.tooNew);
+    assert.isFalse(isUpgradePending(current));
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );
 
@@ -50,9 +67,15 @@ it.effect("records each compatibility repair once, and a repeat pass writes noth
     `;
     assert.isAbove(markers.length, 20);
     const [before] = yield* sql<{ readonly changes: number }>`SELECT total_changes() AS changes`;
+    const schemaBefore = yield* sql`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`;
     yield* runMigrations();
     const [after] = yield* sql<{ readonly changes: number }>`SELECT total_changes() AS changes`;
     assert.equal(after?.changes, before?.changes);
+    // Every repair finds its work done: a process that skips the pass misses nothing.
+    assert.deepEqual(
+      yield* sql`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`,
+      schemaBefore,
+    );
 
     // A repair the database has not seen (a newer binary's) is pending until it runs.
     yield* sql`DELETE FROM ryco_compatibility_repairs WHERE repair_key = ${compatibilityRepairMarker("thread-forks")}`;
@@ -104,3 +127,37 @@ it("names the restore commands without a backups directory too", () => {
   assert.include(message, "separate data directory. `ryco db list` shows the backups");
   assert.include(message, "`ryco db restore <file> --into <new directory>` restores one");
 });
+
+it("digests the migrations and repair keys, so a new repair changes it", () => {
+  const repairKeys = ["projection-worktree-title", "thread-forks"];
+  const digest = schemaDigestOf({ migrations: migrationEntries, repairKeys });
+  assert.match(digest, /^[0-9a-f]{16}$/);
+  // Two binaries with the same migrations and repairs agree.
+  assert.equal(
+    schemaDigestOf({ migrations: migrationEntries, repairKeys: [...repairKeys] }),
+    digest,
+  );
+  // A binary with one more repair (or one more migration) runs other schema code.
+  assert.notEqual(
+    schemaDigestOf({ migrations: migrationEntries, repairKeys: [...repairKeys, "new-repair"] }),
+    digest,
+  );
+  assert.notEqual(
+    schemaDigestOf({
+      migrations: [...migrationEntries, [SUPPORTED_MIGRATION_ID + 1, "Next"]],
+      repairKeys,
+    }),
+    digest,
+  );
+});
+
+it.effect("digests this binary's own repair keys", () =>
+  Effect.gen(function* () {
+    // A fresh database has every repair pending, in order: this binary's keys.
+    const { repairsPending } = yield* inspectMigrationLedger();
+    assert.equal(
+      migrationSchemaDigest,
+      schemaDigestOf({ migrations: migrationEntries, repairKeys: repairsPending }),
+    );
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);

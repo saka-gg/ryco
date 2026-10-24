@@ -21,7 +21,7 @@ import {
   type DatabaseOwner,
   probeDatabaseOwner,
 } from "./databaseOwnerLock.ts";
-import { latestMigrationId, migrationSchemaDigest } from "./Migrations.ts";
+import { migrationSchemaDigest, SUPPORTED_MIGRATION_ID } from "./Migrations.ts";
 
 const BOOT = 1_784_000_000_000;
 const BOOT_ID = "0b6ff1d4-6c1f-4f5e-9d38-6a1c3e2b7f10";
@@ -98,7 +98,7 @@ const writeOwnerRecord = (
       bootId: BOOT_ID,
       startTime: String(5_000 + record.pid),
       ino,
-      schemaSupported: latestMigrationId,
+      schemaSupported: SUPPORTED_MIGRATION_ID,
       schemaDigest: migrationSchemaDigest,
       ...record,
     })}\n`,

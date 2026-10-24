@@ -65,7 +65,7 @@ import {
   parsePersistedServerRuntimeState,
   persistedServerHost,
 } from "../serverRuntimeState.ts";
-import { latestMigrationId, migrationSchemaDigest } from "./Migrations.ts";
+import { migrationSchemaDigest, SUPPORTED_MIGRATION_ID } from "./Migrations.ts";
 
 export type DatabaseOwnerKind = "server" | "maintenance";
 export type DatabaseOwnerLauncher = "desktop" | "service" | "serve" | "cli" | "unknown";
@@ -128,7 +128,7 @@ export class DatabaseUpgradeBlockedError extends Data.TaggedError("DatabaseUpgra
   readonly from: number;
   /** This binary's schema. */
   readonly to: number;
-  /** The first compatibility repair that would write, when no numbered migration is pending. */
+  /** Keys of the compatibility repairs this database has never recorded (`repairsPending`). */
   readonly repairs: ReadonlyArray<string>;
   readonly message: string;
 }> {}
@@ -682,7 +682,7 @@ async function attemptOwnership(input: {
           bootId,
           startTime,
           ino,
-          schemaSupported: latestMigrationId,
+          schemaSupported: SUPPORTED_MIGRATION_ID,
           schemaDigest: migrationSchemaDigest,
           ...(request.serviceLabel !== undefined ? { serviceLabel: request.serviceLabel } : {}),
         };
@@ -944,7 +944,7 @@ export const DatabaseOwnerLeaseLive: Layer.Layer<
           launcher,
           serviceLabel,
           appVersion: packageJson.version,
-          schemaSupported: latestMigrationId,
+          schemaSupported: SUPPORTED_MIGRATION_ID,
           schemaDigest: migrationSchemaDigest,
           legacy: false,
           self: true,

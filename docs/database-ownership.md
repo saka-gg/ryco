@@ -56,10 +56,11 @@ Every `ryco auth`, `hub`, `e2ee`, `project` and `setup` command opens the databa
 server runs. Opening it, reading it and the commands' own writes stay allowed. Migrating it does
 not: a newer `ryco` CLI next to an older running desktop app must not upgrade the schema under it.
 
-A process that does not own the database first checks, without writing, what it would change:
-pending numbered migrations, and compatibility repairs that would write (each repair runs with
-`PRAGMA query_only = ON`, so its catalog checks work and its first write fails instead of
-happening). Then:
+A process that does not own the database first reads what it would change: pending numbered
+migrations, and compatibility repairs this database has never recorded. Every migration pass
+records the repairs it ran in `ryco_compatibility_repairs` (see
+[database-backups.md](database-backups.md)), so this is a read of the ledger and those records;
+no migration or repair runs. Then:
 
 - **Nothing to change**: it skips the migrations and repairs and carries on.
 - **Changes, nobody owns the database**: it takes maintenance ownership for the migration (waiting
@@ -73,7 +74,13 @@ happening). Then:
 > under a running server. Update and restart that server first (reopen the desktop app), or quit it
 > and run this command again.
 
-The server owning the database migrates at startup as before.
+The server owning the database migrates at startup as before, and re-runs every repair.
+
+Only the process that migrates takes the pre-upgrade backup
+([database-backups.md](database-backups.md)): the server that owns the database, or a CLI that
+migrates a database nobody owns. A CLI that refuses, or that waits for its owner to finish
+upgrading, writes no backup. A CLI leaves the backup's verification and compression to the next
+server start.
 
 ## Stale locks
 
@@ -114,6 +121,11 @@ or nothing listens on its port), so a busy server keeps it. This is best effort 
 (an older server whose runtime file was removed is not seen), and it will be removed two releases
 after the lock shipped.
 
+Those servers also record no compatibility repairs. Until a server of this version has started on
+the database once, every repair counts as pending, so a new CLI next to an older running server
+refuses to migrate ("needs to repair the database schema (…)") even when nothing else changed.
+Restarting the server on the new version records the repairs and ends this.
+
 ## For code
 
 - `probeDatabaseOwner(dbPath)`: `free`, or `owned` by `{ pid, kind, startedAt, launcher, ... }`.
@@ -122,4 +134,9 @@ after the lock shipped.
   { waitMs })`: scoped; released when the scope closes, also on failure and interruption. They fail
   with `DatabaseOwnedError` (`reason` and the `owner`).
 - `DatabaseOwnerLeaseLive` holds the server's ownership in `makeServerLayer`;
-  `migrateUnderOwnershipPolicy` applies the migration rule in the persistence layer's setup.
+  `migrateUnderOwnershipPolicy` applies the migration rule in the persistence layer's setup, around
+  the backup and the migration pass.
+- `inspectMigrationLedger()` and `isUpgradePending(ledger)` (`Migrations.ts`): whether a migration
+  pass would change the database (pending migrations, `repairsPending`), read-only. The rule and
+  the pre-upgrade backup both decide with it. `migrationSchemaDigest` (migrations and repair keys)
+  tells an owner running the same schema code apart.

@@ -15,13 +15,20 @@ import {
   defaultBootTime,
   defaultProcessStartTime,
 } from "../processLock/processIdentity.ts";
+import { databaseBackupsDirectory } from "./databaseBackupPolicy.ts";
 import {
+  acquireDatabaseServer,
   DatabaseOwnerLease,
   databaseOwnerLockPath,
   type DatabaseUpgradeBlockedError,
 } from "./databaseOwnerLock.ts";
 import { makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
-import { latestMigrationId, migrationSchemaDigest, runMigrations } from "./Migrations.ts";
+import {
+  compatibilityRepairMarker,
+  migrationSchemaDigest,
+  runMigrations,
+  SUPPORTED_MIGRATION_ID,
+} from "./Migrations.ts";
 import { migrateUnderOwnershipPolicy } from "./migrationOwnershipPolicy.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";
 
@@ -56,7 +63,32 @@ const inspectFile = (dbPath: string) => {
         }
       ).id,
       schema: db.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name").all(),
+      repairs: db
+        .prepare("SELECT repair_key FROM ryco_compatibility_repairs ORDER BY repair_key")
+        .all(),
     };
+  } finally {
+    db.close();
+  }
+};
+
+/** The pre-upgrade backups of `dbPath` (databaseBackups.ts), oldest name first. */
+const backupFiles = (dbPath: string) => {
+  const directory = databaseBackupsDirectory(dbPath);
+  return NodeFS.existsSync(directory) ? NodeFS.readdirSync(directory).toSorted() : [];
+};
+
+/**
+ * A database this binary migrated, then changed back as a binary without the repair `key` left
+ * it: the repair's column is gone and its record too.
+ */
+const forgetRepair = (dbPath: string, key: string, sql: string) => {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(sql);
+    db.prepare("DELETE FROM ryco_compatibility_repairs WHERE repair_key = ?").run(
+      compatibilityRepairMarker(key),
+    );
   } finally {
     db.close();
   }
@@ -91,7 +123,7 @@ const writeLiveOwner = (dbPath: string, pid: number, overrides: Record<string, u
       bootId: (await defaultBootId()) ?? null,
       startTime: (await defaultProcessStartTime(pid)) ?? null,
       ino,
-      schemaSupported: latestMigrationId - 1,
+      schemaSupported: SUPPORTED_MIGRATION_ID - 1,
       schemaDigest: "0000000000000000",
       ...overrides,
     };
@@ -122,7 +154,7 @@ describe("migrations under database ownership", () => {
   it.live("a CLI never migrates a database a live server owns", () => {
     const dbPath = makeDbPath();
     return Effect.gen(function* () {
-      yield* createDatabase(dbPath, latestMigrationId - 1);
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
       const server = yield* spawnIdleProcess;
       const lock = yield* writeLiveOwner(dbPath, server.pid!);
       const before = inspectFile(dbPath);
@@ -131,8 +163,8 @@ describe("migrations under database ownership", () => {
       const error = blockedError(yield* openAsCli(dbPath));
       // An owner running other schema code never finishes this upgrade: no wait.
       assert.isBelow(Date.now() - startedAt, 5_000);
-      assert.equal(error.from, latestMigrationId - 1);
-      assert.equal(error.to, latestMigrationId);
+      assert.equal(error.from, SUPPORTED_MIGRATION_ID - 1);
+      assert.equal(error.to, SUPPORTED_MIGRATION_ID);
       assert.equal(error.owner?.pid, server.pid);
       assert.include(error.message, "never upgrades a database under a running server");
       assert.include(error.message, "reopen the desktop app");
@@ -140,27 +172,80 @@ describe("migrations under database ownership", () => {
       // Neither the ledger pass nor a repair ran, and the owner's lock is untouched.
       assert.deepEqual(inspectFile(dbPath), before);
       assert.equal(NodeFS.readFileSync(databaseOwnerLockPath(dbPath), "utf8"), lock);
+      // Only a process that may migrate backs up: a refused CLI takes no backup.
+      assert.deepEqual(backupFiles(dbPath), []);
     }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
   });
 
-  it.live("treats a repair that would write as an upgrade too", () => {
+  it.live("treats a repair this database never recorded as an upgrade too", () => {
+    const dbPath = makeDbPath();
+    return Effect.gen(function* () {
+      yield* createDatabase(dbPath);
+      forgetRepair(
+        dbPath,
+        "projection-worktree-title",
+        "ALTER TABLE projection_worktrees DROP COLUMN title",
+      );
+      const server = yield* spawnIdleProcess;
+      yield* writeLiveOwner(dbPath, server.pid!, { schemaSupported: SUPPORTED_MIGRATION_ID });
+      const before = inspectFile(dbPath);
+
+      const error = blockedError(yield* openAsCli(dbPath));
+      assert.deepEqual(error.repairs, ["projection-worktree-title"]);
+      assert.include(error.message, "repair the database schema (projection-worktree-title)");
+      // Nothing ran: no repair, no record, no backup.
+      assert.deepEqual(inspectFile(dbPath), before);
+      assert.deepEqual(backupFiles(dbPath), []);
+    }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
+  });
+
+  it.live(
+    "refuses next to a live server while a database from before repair records has none",
+    () => {
+      const dbPath = makeDbPath();
+      return Effect.gen(function* () {
+        // A database a build without repair records kept current: every repair ran, none is
+        // recorded. Only a pass can tell, and only the owner may run one.
+        yield* createDatabase(dbPath);
+        const db = new DatabaseSync(dbPath);
+        db.exec("DELETE FROM ryco_compatibility_repairs WHERE repair_key LIKE 'schema-repair:%'");
+        db.close();
+        const server = yield* spawnIdleProcess;
+        yield* writeLiveOwner(dbPath, server.pid!, { schemaSupported: SUPPORTED_MIGRATION_ID });
+
+        const error = blockedError(yield* openAsCli(dbPath));
+        assert.equal(error.from, SUPPORTED_MIGRATION_ID);
+        assert.isAbove(error.repairs.length, 20);
+        assert.match(
+          error.message,
+          /repair the database schema \([a-z-]+, [a-z-]+, [a-z-]+ and \d+ more\)/,
+        );
+        assert.deepEqual(backupFiles(dbPath), []);
+      }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
+    },
+  );
+
+  it.live("refuses a newer schema next to a live server, naming the backups", () => {
     const dbPath = makeDbPath();
     return Effect.gen(function* () {
       yield* createDatabase(dbPath);
       const db = new DatabaseSync(dbPath);
-      db.exec("ALTER TABLE projection_worktrees DROP COLUMN title");
+      db.exec(
+        `INSERT INTO effect_sql_migrations (migration_id, created_at, name) VALUES (${SUPPORTED_MIGRATION_ID + 1}, 'now', 'FutureSchema')`,
+      );
       db.close();
       const server = yield* spawnIdleProcess;
-      yield* writeLiveOwner(dbPath, server.pid!, { schemaSupported: latestMigrationId });
+      yield* writeLiveOwner(dbPath, server.pid!, { schemaSupported: SUPPORTED_MIGRATION_ID + 1 });
       const before = inspectFile(dbPath);
 
-      const error = blockedError(yield* openAsCli(dbPath));
-      assert.deepEqual(error.repairs, ["repairProjectionWorktreeTitleColumn"]);
-      assert.include(
-        error.message,
-        "repair the database schema (repairProjectionWorktreeTitleColumn)",
-      );
+      const exit = yield* openAsCli(dbPath);
+      assert.isTrue(Exit.isFailure(exit));
+      const message = String(Exit.isFailure(exit) ? exit.cause : "");
+      assert.include(message, "newer than this binary supports");
+      assert.include(message, `backups are in ${databaseBackupsDirectory(dbPath)}`);
+      assert.include(message, "`ryco db list` shows them");
       assert.deepEqual(inspectFile(dbPath), before);
+      assert.deepEqual(backupFiles(dbPath), []);
     }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
   });
 
@@ -174,6 +259,7 @@ describe("migrations under database ownership", () => {
 
       assert.isTrue(Exit.isSuccess(yield* openAsCli(dbPath)));
       assert.deepEqual(inspectFile(dbPath), before);
+      assert.deepEqual(backupFiles(dbPath), []);
     }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
   });
 
@@ -181,7 +267,7 @@ describe("migrations under database ownership", () => {
     const dbPath = makeDbPath();
     const lockPath = databaseOwnerLockPath(dbPath);
     return Effect.gen(function* () {
-      yield* createDatabase(dbPath, latestMigrationId - 1);
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
       const observed: Array<{
         readonly finalize: boolean;
         readonly lock: Record<string, unknown>;
@@ -202,17 +288,19 @@ describe("migrations under database ownership", () => {
         launcher: "cli",
       });
       assert.isFalse(NodeFS.existsSync(lockPath));
-      assert.equal(inspectFile(dbPath).ledger, latestMigrationId);
+      assert.equal(inspectFile(dbPath).ledger, SUPPORTED_MIGRATION_ID);
     }).pipe(Effect.ensuring(removeHome(dbPath)));
   });
 
-  it.live("applies a missing repair to a database nobody owns", () => {
+  it.live("applies a repair a database nobody owns never recorded, after one backup", () => {
     const dbPath = makeDbPath();
     return Effect.gen(function* () {
       yield* createDatabase(dbPath);
-      const db = new DatabaseSync(dbPath);
-      db.exec("ALTER TABLE projection_worktrees DROP COLUMN title");
-      db.close();
+      forgetRepair(
+        dbPath,
+        "projection-worktree-title",
+        "ALTER TABLE projection_worktrees DROP COLUMN title",
+      );
 
       assert.isTrue(Exit.isSuccess(yield* openAsCli(dbPath)));
       const check = new DatabaseSync(dbPath, { readOnly: true });
@@ -221,14 +309,56 @@ describe("migrations under database ownership", () => {
       }>;
       check.close();
       assert.isTrue(columns.some((column) => column.name === "title"));
+      assert.deepInclude(inspectFile(dbPath).repairs, {
+        repair_key: compatibilityRepairMarker("projection-worktree-title"),
+      });
       assert.isFalse(NodeFS.existsSync(databaseOwnerLockPath(dbPath)));
+      assert.lengthOf(backupFiles(dbPath), 1);
+    }).pipe(Effect.ensuring(removeHome(dbPath)));
+  });
+
+  it.live("backs up a pending migration exactly once, in the process that migrates", () => {
+    const dbPath = makeDbPath();
+    return Effect.gen(function* () {
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
+
+      // A CLI on a database nobody owns migrates it under maintenance ownership.
+      assert.isTrue(Exit.isSuccess(yield* openAsCli(dbPath)));
+      assert.equal(inspectFile(dbPath).ledger, SUPPORTED_MIGRATION_ID);
+      const backups = backupFiles(dbPath);
+      assert.lengthOf(backups, 1);
+      const pad = (id: number) => String(id).padStart(3, "0");
+      assert.match(
+        backups[0]!,
+        new RegExp(
+          `^state-v${pad(SUPPORTED_MIGRATION_ID - 1)}-before-v${pad(SUPPORTED_MIGRATION_ID)}-.*\\.sqlite$`,
+        ),
+      );
+      // Current now: the next process has nothing to upgrade and nothing to back up.
+      assert.isTrue(Exit.isSuccess(yield* openAsCli(dbPath)));
+      assert.deepEqual(backupFiles(dbPath), backups);
+    }).pipe(Effect.ensuring(removeHome(dbPath)));
+  });
+
+  it.live("backs up once in the server that holds the database's lease", () => {
+    const dbPath = makeDbPath();
+    return Effect.gen(function* () {
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
+      const lease = Layer.effect(
+        DatabaseOwnerLease,
+        acquireDatabaseServer(dbPath, { launcher: "serve" }),
+      );
+      const exit = yield* openAsCli(dbPath).pipe(Effect.provide(lease));
+      assert.isTrue(Exit.isSuccess(exit));
+      assert.equal(inspectFile(dbPath).ledger, SUPPORTED_MIGRATION_ID);
+      assert.lengthOf(backupFiles(dbPath), 1);
     }).pipe(Effect.ensuring(removeHome(dbPath)));
   });
 
   it.live("lets the server holding the database's lease migrate it", () => {
     const dbPath = makeDbPath();
     return Effect.gen(function* () {
-      yield* createDatabase(dbPath, latestMigrationId - 1);
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
       const finalizeFlags: Array<boolean> = [];
       yield* migrateUnderOwnershipPolicy(dbPath, ({ finalize }) =>
         Effect.sync(() => finalizeFlags.push(finalize)),
@@ -244,7 +374,7 @@ describe("migrations under database ownership", () => {
             purpose: "serve",
             launcher: "serve",
             appVersion: "0.1.0",
-            schemaSupported: latestMigrationId,
+            schemaSupported: SUPPORTED_MIGRATION_ID,
             schemaDigest: migrationSchemaDigest,
             legacy: false,
             self: true,
@@ -259,10 +389,10 @@ describe("migrations under database ownership", () => {
   it.live("waits for an owner running this schema code to finish its own upgrade", () => {
     const dbPath = makeDbPath();
     return Effect.gen(function* () {
-      yield* createDatabase(dbPath, latestMigrationId - 1);
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
       const server = yield* spawnIdleProcess;
       yield* writeLiveOwner(dbPath, server.pid!, {
-        schemaSupported: latestMigrationId,
+        schemaSupported: SUPPORTED_MIGRATION_ID,
         schemaDigest: migrationSchemaDigest,
       });
       let migratedHere = false;
@@ -282,12 +412,31 @@ describe("migrations under database ownership", () => {
     }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
   });
 
+  it.live("takes no backup while it waits for an owner running this schema code", () => {
+    const dbPath = makeDbPath();
+    return Effect.gen(function* () {
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
+      const server = yield* spawnIdleProcess;
+      yield* writeLiveOwner(dbPath, server.pid!, {
+        schemaSupported: SUPPORTED_MIGRATION_ID,
+        schemaDigest: migrationSchemaDigest,
+      });
+      const cli = yield* Effect.forkChild(openAsCli(dbPath));
+      yield* Effect.sleep(400);
+      assert.isUndefined(cli.pollUnsafe());
+      // The owner backs up (not modelled here) and finishes its upgrade; the CLI only waited.
+      yield* createDatabase(dbPath);
+      assert.isTrue(Exit.isSuccess(yield* Fiber.join(cli)));
+      assert.deepEqual(backupFiles(dbPath), []);
+    }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
+  });
+
   it.live.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "never migrates under a lock it cannot read",
     () => {
       const dbPath = makeDbPath();
       return Effect.gen(function* () {
-        yield* createDatabase(dbPath, latestMigrationId - 1);
+        yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
         const server = yield* spawnIdleProcess;
         yield* writeLiveOwner(dbPath, server.pid!);
         NodeFS.chmodSync(databaseOwnerLockPath(dbPath), 0o000);
@@ -295,7 +444,8 @@ describe("migrations under database ownership", () => {
         const error = blockedError(yield* openAsCli(dbPath));
         assert.isNull(error.owner);
         assert.include(error.message, "cannot tell whether a Ryco server is using it");
-        assert.equal(inspectFile(dbPath).ledger, latestMigrationId - 1);
+        assert.equal(inspectFile(dbPath).ledger, SUPPORTED_MIGRATION_ID - 1);
+        assert.deepEqual(backupFiles(dbPath), []);
       }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
     },
   );
@@ -303,7 +453,7 @@ describe("migrations under database ownership", () => {
   it.live("migrates as before when RYCO_DB_OWNER_LOCK=off", () => {
     const dbPath = makeDbPath();
     return Effect.gen(function* () {
-      yield* createDatabase(dbPath, latestMigrationId - 1);
+      yield* createDatabase(dbPath, SUPPORTED_MIGRATION_ID - 1);
       const server = yield* spawnIdleProcess;
       yield* writeLiveOwner(dbPath, server.pid!);
       const exit = yield* openAsCli(dbPath).pipe(
@@ -312,7 +462,7 @@ describe("migrations under database ownership", () => {
         ),
       );
       assert.isTrue(Exit.isSuccess(exit));
-      assert.equal(inspectFile(dbPath).ledger, latestMigrationId);
+      assert.equal(inspectFile(dbPath).ledger, SUPPORTED_MIGRATION_ID);
     }).pipe(Effect.scoped, Effect.ensuring(removeHome(dbPath)));
   });
 });

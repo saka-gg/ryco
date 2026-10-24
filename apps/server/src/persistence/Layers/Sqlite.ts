@@ -95,8 +95,8 @@ const backUpAndMigrate = (dbPath: string, options: { readonly finalize: boolean 
     }
     const executed = yield* runMigrations({ backupsDir: databaseBackupsDirectory(dbPath) });
     if (mode !== "off" && options.finalize) {
-      // Verify, compress and prune out of boot and hydration; a short-lived process (a CLI
-      // command) is interrupted before it starts, and its raw backup stays valid.
+      // Verify, compress and prune out of boot and hydration. Only the database's long-lived owner
+      // gets here; a CLI that migrated (finalize false) leaves its raw backup to the next server.
       yield* Effect.forkScoped(
         Effect.delay(
           loadDatabaseBackups.pipe(

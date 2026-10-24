@@ -8,9 +8,12 @@ into a new data directory with `ryco db restore` (see [Commands](#commands)).
 
 ## When a backup is written
 
-Every process that opens the database (the desktop app's server, `ryco serve`, the background
-service, and CLI commands such as `ryco project add`) checks what the next migration pass would
-change. It writes a backup first when:
+The process that migrates the database checks what the migration pass would change: the server
+that owns it (the desktop app's server, `ryco serve`, the background service), or a CLI command
+such as `ryco project add` that migrates a database no server is using. A CLI never migrates a
+database a running server owns, and so never backs it up either
+([database-ownership.md](database-ownership.md)). The migrating process writes a backup first
+when:
 
 - a numbered migration is pending, or
 - a compatibility repair runs for the first time on this database. Repairs carry schema changes
@@ -61,8 +64,8 @@ zstd support, gzip level 1 is used. The compressed file replaces the plain one. 
 same 4.5 GB database: `quick_check` 88-117 s on a cold cache, compression 8 s, 4.5 GB → 708 MB
 (6.3x). The server's event loop stayed under 17 ms throughout. Stopping Ryco during this phase is
 immediate: the child processes are killed, and the plain backup stays valid and is finished on the
-next start. A command-line process that exits within the 30 seconds leaves its backup plain; the
-next server compresses it.
+next start. A command-line process that migrated leaves its backup plain; the next server start
+verifies and compresses it.
 
 A backup that fails `quick_check` means the database was already damaged before the upgrade. Ryco
 keeps that copy anyway, renamed with `-unverified`, uncompressed and never removed automatically,

@@ -43,12 +43,9 @@ import Migration0056 from "./Migrations/056_UserInputResponseClaims.ts";
 
 import { createHash } from "node:crypto";
 
-import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
-import type { SqlError } from "effect/sql/SqlError";
 
 import { trackStartupPhase } from "../startupStallMonitor.ts";
 import Migration0057 from "./Migrations/057_AutomationCentre.ts";
@@ -682,11 +679,16 @@ export const repairProjectionThreadReadModelMigrations = Effect.fn(
  * through `since` are applied. Repairs ship the schema changes the numbered ledger cannot
  * deliver reliably (see `repairProjectionWorktreePrTerminalAtColumn`), so a new repair is an
  * upgrade like a new migration: {@link inspectMigrationLedger} reports the ones this database
- * has never completed, and a pre-upgrade backup is taken for them too.
+ * has never completed, a pre-upgrade backup is taken for them too, and a process that does not
+ * own the database refuses to run them under a live server (migrationOwnershipPolicy.ts).
  *
- * `key` is recorded in `ryco_compatibility_repairs` once the repair has run; never rename one
- * (a renamed key only costs one extra backup). A repair that covers several migrations names the
- * last in `through`: a pass bounded below it runs part of the repair and records nothing.
+ * `key` is recorded in `ryco_compatibility_repairs` once the repair has run, and is part of
+ * {@link migrationSchemaDigest}. Never rename one: a renamed key counts as a new repair (one
+ * extra backup, and CLIs refuse to migrate next to a server without it until that server is
+ * updated). Changing what a repair writes needs a new key: outside the owner's own migration
+ * pass, which re-runs every repair, a recorded key is never checked again. A repair that covers
+ * several migrations names the last in `through`: a pass bounded below it runs part of the
+ * repair and records nothing.
  */
 const compatibilityRepairs = [
   { key: "projection-worktree-title", since: 31, run: () => repairProjectionWorktreeTitleColumn() },
@@ -896,54 +898,21 @@ export const describeSchemaTooNew = (input: {
   `\`ryco db restore <file> --into <new directory>\` restores one without touching this database.`;
 
 /**
- * One idempotent compatibility repair: it runs after every ledger pass that
- * reaches `since`, checks the catalog, and writes only when its schema or data
- * is missing. Late schema changes ship this way on purpose (see
- * `repairProjectionWorktreePrTerminalAtColumn`), so a repair that would write is
- * an upgrade just like a pending numbered migration.
+ * Whether the next {@link runMigrations} would upgrade this database: a numbered migration is
+ * pending, or a compatibility repair this binary runs was never recorded here (such a pass always
+ * writes, if only the repair's record). The one answer to "is there an upgrade to do?", for the
+ * pre-upgrade backup and for the ownership policy, read from the ledger and the repair records
+ * without running anything.
  */
-export interface MigrationRepair {
-  readonly name: string;
-  readonly since: number;
-  readonly run: (
-    toMigrationInclusive: number | undefined,
-  ) => Effect.Effect<unknown, SqlError, SqlClient.SqlClient>;
-}
-
-/** The compatibility repairs, named by their keys, for the ownership policy. */
-export const migrationRepairs: ReadonlyArray<MigrationRepair> = compatibilityRepairs.map(
-  ({ key, since, run }) => ({ name: key, since, run }),
-);
-
-const repairApplies = (repair: MigrationRepair, toMigrationInclusive: number | undefined) =>
-  toMigrationInclusive === undefined || toMigrationInclusive >= repair.since;
-
-/** The highest migration id this binary knows. */
-export const latestMigrationId: number = SUPPORTED_MIGRATION_ID;
+export const isUpgradePending = (
+  ledger: Pick<MigrationLedgerInspection, "pending" | "repairsPending">,
+): boolean => ledger.pending.length > 0 || ledger.repairsPending.length > 0;
 
 /**
- * Identifies the schema code of this binary: every numbered migration and every
- * repair. Two processes with the same digest upgrade a database the same way,
- * whatever their package versions (development branches share a version but
- * not their migrations).
+ * Future binaries can fail closed on downgrade. This cannot retrofit a check into already
+ * shipped binaries that ignore newer migration records. `backupsDir` is named in the message.
  */
-export const migrationSchemaDigest: string = createHash("sha256")
-  .update(
-    JSON.stringify([
-      migrationEntries.map(([id, name]) => `${id}_${name}`),
-      migrationRepairs.map((repair) => `${repair.since}:${repair.name}`),
-    ]),
-  )
-  .digest("hex")
-  .slice(0, 16);
-
-export type MigrationLedger = MigrationLedgerInspection;
-
-/**
- * Future binaries can fail closed on downgrade. This cannot retrofit a check
- * into already shipped binaries that ignore newer migration records.
- */
-export const failIfSchemaNewerThanBinary = (ledger: MigrationLedger) =>
+export const failIfSchemaTooNew = (ledger: MigrationLedgerInspection, backupsDir?: string) =>
   ledger.tooNew
     ? Effect.fail(
         new Migrator.MigrationError({
@@ -951,93 +920,33 @@ export const failIfSchemaNewerThanBinary = (ledger: MigrationLedger) =>
           message: describeSchemaTooNew({
             latest: ledger.latestApplied,
             supported: ledger.supported,
+            backupsDir,
           }),
         }),
       )
     : Effect.void;
 
-const SQLITE_READONLY = 8;
-
-/** True for SQLITE_READONLY (and its extended codes), from node:sqlite or bun:sqlite, wrapped or not. */
-export function isSqliteReadonlyError(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 6 && typeof current === "object" && current !== null; depth += 1) {
-    const candidate = current as {
-      readonly errcode?: unknown;
-      readonly errno?: unknown;
-      readonly code?: unknown;
-      readonly cause?: unknown;
-      readonly reason?: { readonly cause?: unknown };
-    };
-    if (typeof candidate.errcode === "number" && (candidate.errcode & 0xff) === SQLITE_READONLY) {
-      return true;
-    }
-    if (typeof candidate.code === "string" && candidate.code.startsWith("SQLITE_READONLY"))
-      return true;
-    if (
-      typeof candidate.code === "string" &&
-      candidate.code.startsWith("SQLITE_") &&
-      typeof candidate.errno === "number" &&
-      (candidate.errno & 0xff) === SQLITE_READONLY
-    ) {
-      return true;
-    }
-    current = candidate.cause ?? candidate.reason?.cause;
-  }
-  return false;
-}
-
 /**
- * The first repair that would write to this database, found without writing:
- * each repair runs with `PRAGMA query_only = ON`, so its catalog checks run as
- * usual and its first write fails at once instead of taking the write lock.
- * Empty when none would. Only meaningful when no numbered migration is pending
- * (repairs assume the ledger pass ran).
- *
- * It stops at the first one: a later repair may read what an earlier one would
- * have written (the order of `migrationRepairs` matters), so past that point a
- * failure says nothing about the database, and one repair to run is already an
- * upgrade.
+ * Identifies schema code by its numbered migrations and the keys of its compatibility repairs,
+ * the identities recorded in a database. Two binaries with the same digest upgrade a database
+ * the same way, whatever their package versions (development branches share a version but not
+ * their migrations).
  */
-export const findRepairsNeedingWrites = Effect.fn("findRepairsNeedingWrites")(function* (
-  toMigrationInclusive?: number,
-  repairs: ReadonlyArray<MigrationRepair> = migrationRepairs,
-) {
-  const sql = yield* SqlClient.SqlClient;
-  // A connection that is query-only already (a read-only check) stays so afterwards.
-  const [before] = yield* sql<{ readonly query_only: number }>`PRAGMA query_only`;
-  const wasQueryOnly = Number(before?.query_only ?? 0) !== 0;
-  // Repairs run without their transactions here: Bun's client opens one with BEGIN IMMEDIATE,
-  // itself a write that query_only rejects, which would report every repair that uses one.
-  // Nothing is written either way, so dropping the transaction changes nothing else.
-  const probe = new Proxy(sql, {
-    get: (target, property, receiver) =>
-      property === "withTransaction"
-        ? <A, E, R>(effect: Effect.Effect<A, E, R>) => effect
-        : Reflect.get(target, property, receiver),
-  });
-  return yield* Effect.acquireUseRelease(
-    sql`PRAGMA query_only = ON`,
-    () =>
-      Effect.gen(function* () {
-        for (const repair of repairs) {
-          if (!repairApplies(repair, toMigrationInclusive)) continue;
-          const exit = yield* Effect.exit(
-            repair
-              .run(toMigrationInclusive)
-              .pipe(Effect.provideService(SqlClient.SqlClient, probe)),
-          );
-          if (exit._tag === "Success") continue;
-          const failure = Cause.findErrorOption(exit.cause);
-          if (Option.isSome(failure) && isSqliteReadonlyError(failure.value)) {
-            return [repair.name] as ReadonlyArray<string>;
-          }
-          return yield* Effect.failCause(exit.cause);
-        }
-        return [] as ReadonlyArray<string>;
-      }),
-    () => (wasQueryOnly ? Effect.void : sql`PRAGMA query_only = OFF`.pipe(Effect.orDie)),
-  );
+export const schemaDigestOf = (input: {
+  readonly migrations: ReadonlyArray<readonly [number, string, ...Array<unknown>]>;
+  readonly repairKeys: ReadonlyArray<string>;
+}): string =>
+  createHash("sha256")
+    .update(
+      JSON.stringify([input.migrations.map(([id, name]) => `${id}_${name}`), input.repairKeys]),
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+/** This binary's {@link schemaDigestOf}, recorded in the database owner lock. */
+export const migrationSchemaDigest: string = schemaDigestOf({
+  migrations: migrationEntries,
+  repairKeys: compatibilityRepairs.map((repair) => repair.key),
 });
 
 /**
@@ -1059,21 +968,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       ? "Running all migrations..."
       : `Running migrations 1 through ${toMigrationInclusive}...`,
   );
-  // Future binaries can fail closed on downgrade. This cannot retrofit a check
-  // into already shipped binaries that ignore newer migration records.
-  const ledger = yield* inspectMigrationLedger({ toMigrationInclusive });
-  if (ledger.tooNew) {
-    return yield* Effect.fail(
-      new Migrator.MigrationError({
-        kind: "BadState",
-        message: describeSchemaTooNew({
-          latest: ledger.latestApplied,
-          supported: ledger.supported,
-          backupsDir,
-        }),
-      }),
-    );
-  }
+  yield* failIfSchemaTooNew(yield* inspectMigrationLedger({ toMigrationInclusive }), backupsDir);
   // Named separately for the startup stall monitor: the ledger pass and the post-ledger repairs
   // (some backfill whole tables once) are the two places a slow boot stalls in here.
   const executedMigrations = yield* trackStartupPhase(

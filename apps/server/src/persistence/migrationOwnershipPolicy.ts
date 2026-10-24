@@ -7,8 +7,9 @@
  *
  * - The server owning the database (its {@link DatabaseOwnerLease}) migrates as
  *   before.
- * - Any other process first checks, read-only, whether anything would change:
- *   pending numbered migrations, or compatibility repairs that would write.
+ * - Any other process first reads what an upgrade would change: pending
+ *   numbered migrations, or compatibility repairs this database has never
+ *   recorded (`inspectMigrationLedger`, `isUpgradePending`; nothing runs).
  *   Nothing to do: it skips the ledger pass and the repairs.
  * - Something to do and nobody owns the database: it takes maintenance
  *   ownership for the migration, so a server starting meanwhile waits for it.
@@ -17,13 +18,15 @@
  *   otherwise refuses with {@link DatabaseUpgradeBlockedError}.
  *
  * Only migrating is gated; opening, reading and the ordinary writes of CLI
- * commands work while a server runs.
+ * commands work while a server runs. `migrate` takes the pre-upgrade backup
+ * too (Layers/Sqlite.ts), so a process that may not migrate never takes one.
  *
  * @module migrationOwnershipPolicy
  */
 import { Clock, Effect, Option } from "effect";
 
 import packageJson from "../../package.json" with { type: "json" };
+import { databaseBackupsDirectory } from "./databaseBackupPolicy.ts";
 import {
   acquireDatabaseMaintenance,
   type DatabaseOwner,
@@ -34,10 +37,10 @@ import {
   probeDatabaseOwner,
 } from "./databaseOwnerLock.ts";
 import {
-  failIfSchemaNewerThanBinary,
-  findRepairsNeedingWrites,
+  failIfSchemaTooNew,
   inspectMigrationLedger,
-  type MigrationLedger,
+  isUpgradePending,
+  type MigrationLedgerInspection,
   migrationSchemaDigest,
 } from "./Migrations.ts";
 
@@ -48,34 +51,32 @@ export const SAME_SCHEMA_OWNER_UPGRADE_WAIT_MS = 30_000;
 const UPGRADE_POLL_MS = 250;
 
 export interface SchemaUpgrade {
-  readonly ledger: MigrationLedger;
-  /**
-   * The first repair that would write (see `findRepairsNeedingWrites`); only
-   * looked for when no numbered migration is pending.
-   */
-  readonly repairs: ReadonlyArray<string>;
+  /** Pending migrations, and the repairs (`repairsPending`) this database has never recorded. */
+  readonly ledger: MigrationLedgerInspection;
   readonly needed: boolean;
 }
 
-/** Read-only: what this binary would change in the database. Fails when the schema is too new. */
-export const inspectSchemaUpgrade = Effect.gen(function* () {
-  const ledger = yield* inspectMigrationLedger();
-  yield* failIfSchemaNewerThanBinary(ledger);
-  const repairs =
-    ledger.pending.length === 0 && ledger.hasLedger ? yield* findRepairsNeedingWrites() : [];
-  return {
-    ledger,
-    repairs,
-    needed: ledger.pending.length > 0 || repairs.length > 0,
-  } satisfies SchemaUpgrade;
-});
+/**
+ * Read-only: what this binary would change in the database at `dbPath`. Fails when the schema
+ * is too new, naming its backups directory.
+ */
+export const inspectSchemaUpgrade = (dbPath: string) =>
+  Effect.gen(function* () {
+    const ledger = yield* inspectMigrationLedger();
+    yield* failIfSchemaTooNew(ledger, databaseBackupsDirectory(dbPath));
+    return { ledger, needed: isUpgradePending(ledger) } satisfies SchemaUpgrade;
+  });
+
+/** At most three repair keys; a database from before repairs were recorded lists all of them. */
+const describeRepairs = (keys: ReadonlyArray<string>) =>
+  keys.length <= 3 ? keys.join(", ") : `${keys.slice(0, 3).join(", ")} and ${keys.length - 3} more`;
 
 const describeUpgrade = (upgrade: SchemaUpgrade) =>
   upgrade.ledger.pending.length > 0
     ? upgrade.ledger.latestApplied === 0
       ? `create the database schema (${upgrade.ledger.supported})`
       : `upgrade the database from schema ${upgrade.ledger.latestApplied} to ${upgrade.ledger.supported}`
-    : `repair the database schema (${upgrade.repairs.join(", ")})`;
+    : `repair the database schema (${describeRepairs(upgrade.ledger.repairsPending)})`;
 
 const restartHint = (owner: DatabaseOwner) => {
   if (owner.legacy) return "quit it and start the updated Ryco";
@@ -114,10 +115,13 @@ export function describeUpgradeBlocked(input: {
 }
 
 /**
- * Run `migrate` only if this process may: see the module comment. `finalize`
- * tells `migrate` whether it runs in the database's long-lived owner (a
+ * Run `migrate` only if this process may: see the module comment. `migrate`
+ * runs at most once, and is where the pre-upgrade backup belongs, so a process
+ * that is refused, or that waits for its owner to upgrade, takes none.
+ * `finalize` tells it whether it runs in the database's long-lived owner (a
  * server), which may start background work that outlives the migration (the
- * pre-migration backup's compression). `runMigrations` has none and ignores it.
+ * pre-upgrade backup's verification and compression); a CLI migrating under
+ * maintenance ownership gets false and leaves that to the next server.
  *
  * A process holding maintenance ownership that wants to migrate through the
  * persistence layer provides its lease as {@link DatabaseOwnerLease}.
@@ -153,7 +157,7 @@ export const migrateUnderOwnershipPolicy = <A, E, R>(
       return;
     }
 
-    const upgrade = yield* inspectSchemaUpgrade;
+    const upgrade = yield* inspectSchemaUpgrade(dbPath);
     // Nothing would change: skip the ledger pass and the repairs (an owner ran them).
     if (!upgrade.needed) return;
 
@@ -171,7 +175,7 @@ export const migrateUnderOwnershipPolicy = <A, E, R>(
           );
           if (refused !== null) return refused;
           // Another process may have migrated while this one waited.
-          if ((yield* inspectSchemaUpgrade).needed) yield* migrate({ finalize: false });
+          if ((yield* inspectSchemaUpgrade(dbPath)).needed) yield* migrate({ finalize: false });
           return null;
         }),
       );
@@ -180,7 +184,7 @@ export const migrateUnderOwnershipPolicy = <A, E, R>(
       ownerError = taken.owner === null ? taken.message : undefined;
     }
 
-    yield* waitForOwnerUpgrade({ owner, ownerError, upgrade });
+    yield* waitForOwnerUpgrade({ dbPath, owner, ownerError, upgrade });
   });
 
 /**
@@ -189,6 +193,7 @@ export const migrateUnderOwnershipPolicy = <A, E, R>(
  * never will, so refuse at once.
  */
 const waitForOwnerUpgrade = (input: {
+  readonly dbPath: string;
   readonly owner: DatabaseOwner | null;
   readonly ownerError: string | undefined;
   readonly upgrade: SchemaUpgrade;
@@ -203,7 +208,7 @@ const waitForOwnerUpgrade = (input: {
       const startedMs = yield* Clock.currentTimeMillis;
       while ((yield* Clock.currentTimeMillis) - startedMs < SAME_SCHEMA_OWNER_UPGRADE_WAIT_MS) {
         yield* Effect.sleep(UPGRADE_POLL_MS);
-        upgrade = yield* inspectSchemaUpgrade;
+        upgrade = yield* inspectSchemaUpgrade(input.dbPath);
         if (!upgrade.needed) return;
       }
     }
@@ -212,7 +217,7 @@ const waitForOwnerUpgrade = (input: {
         owner,
         from: upgrade.ledger.latestApplied,
         to: upgrade.ledger.supported,
-        repairs: upgrade.repairs,
+        repairs: upgrade.ledger.repairsPending,
         message: describeUpgradeBlocked({ owner, upgrade, ownerError: input.ownerError }),
       }),
     );
