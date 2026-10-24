@@ -111,7 +111,10 @@ function parseImports(file: string): ParsedImports {
     }
   }
   const dynamicImports = module.dynamicImports.flatMap(({ moduleRequest }) => {
-    const literal = /^(["'])(.*)\1$/u.exec(source.slice(moduleRequest.start, moduleRequest.end));
+    // A single string literal; concatenations and templates are not followed.
+    const literal = /^(["'])([^"'\\]*)\1$/u.exec(
+      source.slice(moduleRequest.start, moduleRequest.end),
+    );
     const resolved = literal ? resolveSpecifier(literal[2]!, file) : null;
     return resolved ? [resolved] : [];
   });
@@ -172,13 +175,7 @@ const BOOT_GRAPH_ENTRIES = [
 
 const effectExports = (
   JSON.parse(
-    readFileSync(
-      path.resolve(
-        path.dirname(createRequire(import.meta.url).resolve("effect")),
-        "../package.json",
-      ),
-      "utf8",
-    ),
+    readFileSync(createRequire(import.meta.url).resolve("effect/package.json"), "utf8"),
   ) as { exports: Record<string, unknown> }
 ).exports;
 
@@ -234,9 +231,11 @@ describe("standard build static import graph", () => {
 
   it("loads the translucent window's overlay cutout on demand", () => {
     // Only the macOS desktop's translucent window installs it.
-    expect(forbiddenChains("main.tsx", [/^apps\/web\/src\/lib\/glassOverlayCutout\.ts$/u])).toEqual(
-      [],
-    );
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      expect(forbiddenChains(entry, [/^apps\/web\/src\/lib\/glassOverlayCutout\.ts$/u])).toEqual(
+        [],
+      );
+    }
     expect(parseImports(path.join(srcRoot, "main.tsx")).dynamicImports.map(display)).toContain(
       "apps/web/src/lib/glassOverlayCutout.ts",
     );
