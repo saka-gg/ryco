@@ -81,8 +81,8 @@ lost, but the file only gets smaller when pages are returned to the file system.
   exist yet or is empty. Incremental mode adds a pointer map: one page per 819 pages at 4 KiB
   (about 0.12% of the file).
 - Existing databases keep their mode (`NONE`). Changing it needs a full rebuild (`VACUUM`), which
-  never runs while the server is up; an offline repair command is planned. Until then their free
-  space is reused inside the file.
+  never runs while the server is up; `ryco doctor --apply` (below) does it offline. Until then
+  their free space is reused inside the file.
 - On incremental databases the server returns free pages online
   (`apps/server/src/persistence/Layers/DatabaseMaintenance.ts`): once a minute, when more than
   256 pages (1 MiB at the default 4 KiB page size) are free, it frees up to 1,024 pages (4 MiB)
@@ -100,3 +100,83 @@ lost, but the file only gets smaller when pages are returned to the file system.
   which is not eligible yet). The report reads header pragmas, two key lookups and two `stat`
   calls; a part it cannot read shows as 0 or unknown. Older nodes send no report and the section
   stays hidden; older clients ignore it.
+- When automatic shrinking is off (`auto_vacuum = NONE`) and at least 1 GiB could be returned,
+  Storage settings suggest the doctor with the command to run, and the server logs the same
+  suggestion once per boot (15 minutes after start, after the first compaction pass).
+
+## Database: `ryco doctor`
+
+`ryco doctor` checks the database of a data directory and shows how much it could shrink.
+`ryco doctor --apply` removes all superseded history and shrinks the file while no server uses
+it. It is the only way to shrink a database created before automatic shrinking, and the fastest
+way to shrink any database after a lot was removed.
+
+```sh
+ryco doctor                      # read-only report and plan; safe while Ryco runs
+ryco doctor --estimate           # also count the superseded history exactly (reads the whole log)
+ryco doctor --apply              # asks first in a terminal; --yes to skip the question
+ryco doctor --apply --base-dir ~/other-home
+```
+
+The desktop app's data directory takes the CLI of the app's own version:
+`npx ryco-cli@<app version> doctor --apply` (Node.js 22.16 or newer), after quitting the app.
+Storage settings show the exact command.
+
+What `--apply` does (`apps/server/src/doctor/DatabaseDoctor.ts`):
+
+1. Ownership. If this data directory's running background service (`ryco service`) has the
+   database, the doctor stops it and starts it again at the end (`--no-restart-service` leaves it
+   stopped). Any other Ryco server (the desktop app, a `ryco serve`) is a refusal that names it
+   and says what to do; the CLI never stops the desktop app. Then it takes maintenance ownership
+   of the database (see [database-ownership.md](database-ownership.md)): servers that start
+   meanwhile wait for it.
+2. SQLite's exclusive lock on its own connection. It is refused while any other connection has the
+   database open (an older Ryco that does not know the owner lock, a SQLite tool).
+3. Checks: `PRAGMA quick_check` (`--thorough`: `integrity_check`); the schema must be exactly the
+   one this ryco knows, because the doctor never migrates (the app that owns the data might not open
+   an upgraded file): every migration applied and every compatibility repair recorded in
+   `ryco_compatibility_repairs`. A database last run by a Ryco from before those records has none;
+   there the doctor reads each repair's effect in the schema instead, and accepts the database when
+   every one is present (the next start only writes the records). A repair still to run, recorded
+   nowhere and without its effect, is a refusal: start Ryco once first. Every projection must be
+   caught up with the event log. A damaged database is never repaired: restore a backup.
+4. Free disk: the compacted copy needs its size, 1.1x, plus 256 MiB on the database's volume
+   (estimated from the compaction state before anything changes, exact after compaction).
+5. Compaction over the whole log from the beginning, with no age limit and no carry bound, so it
+   also removes the one stale version per activity that online passes can leave; old random-id
+   receipts go too. The WAL is truncated every 50,000 deletions.
+6. `VACUUM INTO` a sibling file (`state.sqlite.doctor-<pid>-<ms>.tmp`) with
+   `auto_vacuum = INCREMENTAL`, then `integrity_check`, row counts of every table, the
+   AUTOINCREMENT high-water marks and the newest event compared with the database. It needs about
+   1x the compacted size; an in-place `VACUUM` would need about twice the file plus temporary space
+   that may be a small tmpfs.
+7. The swap. Before writing the copy, and again before the rename, the doctor asks the system
+   whether any other process has `state.sqlite`, `-wal` or `-shm` open (`lsof` on macOS, `/proc`
+   on Linux; only this user's processes are visible). A process that opened the old file keeps it
+   open across the rename but opens `-wal` and `-shm` by name, which then belong to the new file:
+   two databases sharing one log corrupt each other, and SQLite's lock does not prevent it. So
+   when another process has the file open, or the system cannot say (other platforms), the file
+   is not swapped: history stays removed, and no copy is written (or the one written is deleted).
+   Otherwise the copy gets the database's owner, group and permissions (a run through `sudo`
+   cannot leave a root-owned database behind), the connection closes (removing the WAL), the copy
+   is renamed over the database, the directory is synced, and the database is reopened in WAL
+   mode for a last `quick_check`. What remains is the few milliseconds between the last check and
+   the rename, and only for a process that ignores the owner lock and opens the file exactly
+   then.
+
+Exit codes: 0 done (also "history removed, not shrunk" with the reason, and a declined
+confirmation), 1 a failure midway, 2 refused before anything changed. `--json` prints the report
+and the result as one document.
+
+Interruptions and failures: every step runs in one scope. Ctrl-C (it takes effect after a running
+`VACUUM INTO`), a failure or a lost terminal closes the connections, removes the copy, releases
+ownership and starts a paused service; compaction batches are transactions, so the database stays
+consistent and the next run continues. Until the rename the original file is untouched by the
+copy. A `kill -9` leaves the owner lock (reclaimed by liveness), the copy (removed by the next
+run) and `doctor-service-paused.json` in the state directory: the next run starts the service it
+names.
+
+Afterwards the server returns free pages online like on any new database, and the compaction
+state starts from the head of the log (its receipt cursor from the beginning, since the copy
+renumbers rowids). An interrupted run leaves the compaction cursor where online passes or the
+doctor got furthest, so neither its work nor theirs is repeated.

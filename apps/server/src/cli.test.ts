@@ -1626,4 +1626,19 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
       assert.equal(optionError.option, "--dev-url");
     }),
   );
+
+  it.effect("runs a doctor dry run on a data directory without a database", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-doctor-"));
+      const human = yield* captureStdout(runCli(["doctor", "--base-dir", baseDir]));
+      assert.include(human.output, "There is no database at");
+      assert.include(human.output, join(baseDir, "userdata", "state.sqlite"));
+      const json = yield* captureStdout(runCli(["doctor", "--base-dir", baseDir, "--json"]));
+      const document = JSON.parse(json.output) as {
+        inspection: { exists: boolean; blockers: ReadonlyArray<string> };
+      };
+      assert.equal(document.inspection.exists, false);
+      assert.equal(document.inspection.blockers.length, 1);
+    }),
+  );
 });

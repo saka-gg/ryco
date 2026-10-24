@@ -65,11 +65,13 @@ import {
 import { readDatabaseStorageReport } from "../src/persistence/databaseStorageReport.ts";
 import {
   EventLogCompactionLive,
-  hasCompactionBacklog,
   isPrunableReceiptCommandId,
   makeEventLogCompaction,
-  ONLINE_COMPACTION_PASS_OPTIONS,
 } from "../src/persistence/Layers/EventLogCompaction.ts";
+import {
+  hasCompactionBacklog,
+  ONLINE_COMPACTION_PASS_OPTIONS,
+} from "../src/persistence/Layers/EventLogCompactionDeferred.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import type {

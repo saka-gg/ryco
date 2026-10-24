@@ -17,8 +17,9 @@ process start time that tell a live owner from a stale record.
   background service, and dev servers. A server takes ownership before it binds its port and
   opens the database, and gives it back after both are closed.
 - **Maintenance** owns the database exclusively for one operation: a CLI command that has to
-  migrate it (below), and later `ryco doctor` and `ryco db restore`. Maintenance never starts
-  while a server owns the database.
+  migrate it (below), `ryco doctor --apply` (see
+  [storage-management.md](storage-management.md#database-ryco-doctor)), and later
+  `ryco db restore`. Maintenance never starts while a server owns the database.
 
 ### A second server
 

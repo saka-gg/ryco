@@ -15,8 +15,9 @@ import {
   readEnvironmentConnection,
   updateEnvironmentServerSettings,
 } from "../../environments/runtime";
-import { HardDriveIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, HardDriveIcon } from "lucide-react";
 
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -538,6 +539,48 @@ function DatabaseStorageRows({ database }: { database: DatabaseStorageReport }) 
         }
         control={value(formatBytes(database.reclaimableBytes))}
       />
+      {database.doctor?.recommended ? <DatabaseDoctorRow database={database} /> : null}
     </>
+  );
+}
+
+/**
+ * The offline repair, suggested when the file could shrink a lot but never shrinks by itself.
+ * The node names the command: `ryco doctor --apply` for a CLI node, the CLI of the desktop app's
+ * own version through npx for the desktop app (which the CLI cannot stop).
+ */
+function DatabaseDoctorRow({ database }: { database: DatabaseStorageReport }) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard();
+  const command = database.doctor?.command ?? null;
+  const desktop = command?.startsWith("npx ") === true;
+  const intro = `About ${formatBytes(database.reclaimableBytes)} could be returned to the disk, but this database never shrinks by itself.`;
+  return (
+    <SettingsRow
+      title="Shrink the database file"
+      description={
+        command === null
+          ? `${intro} Stop this development server and run \`ryco doctor --apply\` with the same \`--base-dir\` and \`--dev-url\` it was started with.`
+          : desktop
+            ? `${intro} Quit the Ryco app first, then run this in a terminal (needs Node.js 22.16 or newer). It removes superseded history, writes a compacted copy and turns automatic shrinking on.`
+            : `${intro} Run this in a terminal on the node. It stops the node's background service while it works and starts it again; quit a running \`ryco serve\` first.`
+      }
+      control={
+        command === null ? null : (
+          <Button size="xs" variant="outline" onClick={() => copyToClipboard(command)}>
+            {isCopied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+            {isCopied ? "Copied" : "Copy"}
+          </Button>
+        )
+      }
+    >
+      {command === null ? null : (
+        <p
+          data-testid="database-doctor-command"
+          className="font-mono text-[13px] break-all select-all"
+        >
+          {command}
+        </p>
+      )}
+    </SettingsRow>
   );
 }

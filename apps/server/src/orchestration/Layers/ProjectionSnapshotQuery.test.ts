@@ -19,7 +19,7 @@ import * as SqlStatement from "effect/sql/Statement";
 import { makeCompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
-import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import {
   OrchestrationProjectionSnapshotQueryLive,
   takeNewestRowsWithinByteBudget,
