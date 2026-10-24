@@ -9,6 +9,7 @@ import {
   type GitLocalChangesInput,
   type GitLocalChangesResult,
 } from "@ryco/contracts";
+import { SCRATCH_INDEX_CONFIG_ARGS } from "./GitDurableWrites.ts";
 import { authorizeGitReadWorkspace } from "./GitReadWorkspace.ts";
 import { INTERNAL_PATCH_DIFF_ARGS, type GitVcsDriverShape } from "./GitVcsDriver.ts";
 
@@ -282,10 +283,7 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
             ? true
             : (yield* run(
                 [
-                  "-c",
-                  "core.splitIndex=false",
-                  "-c",
-                  "core.hooksPath=/dev/null",
+                  ...SCRATCH_INDEX_CONFIG_ARGS,
                   "add",
                   "--intent-to-add",
                   "--pathspec-from-file=-",
