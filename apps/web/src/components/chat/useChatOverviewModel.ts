@@ -1,3 +1,4 @@
+import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
 import type {
   ChangeRequest,
   EnvironmentId,
@@ -88,6 +89,8 @@ export interface ChatOverviewModelInput {
   onOpenAgent?: ((agentId: string) => void) | undefined;
   /** Opens the workspace panel's Agents tab focused on one workflow (desktop). */
   onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
+  /** Stop for the thread's native agents (desktop crown). */
+  stopAgent?: SubagentStopAction | null | undefined;
   postPushWorkflowWatch: PostPushWorkflowDiscoveryWatch | null;
   onPostPushDiscoveryComplete: () => void;
 }
@@ -140,6 +143,7 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
     agentPanelModel,
     onOpenAgent,
     onOpenAgentsWorkflow,
+    stopAgent,
     onPostPushDiscoveryComplete,
   } = input;
 
@@ -634,6 +638,7 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
       ...(agentPanelModel ? { agentPanelModel } : {}),
       ...(onOpenAgent ? { onOpenAgent } : {}),
       ...(onOpenAgentsWorkflow ? { onOpenAgentsWorkflow } : {}),
+      ...(stopAgent ? { stopAgent } : {}),
     },
     detectedChangeRequest,
     gitStatus: gitStatusQuery.data ?? null,

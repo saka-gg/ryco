@@ -1,10 +1,11 @@
-import type { CSSProperties } from "react";
+import { useMemo, type CSSProperties } from "react";
 
 import {
   emptyAgentPanelModel,
   formatSubagentTokenCount,
 } from "../../../../threadWorkspaceViewModel";
 import { AgentRosterProvider, AgentRow, AgentRowList } from "../../../agents/agentRoster";
+import { makeAgentStopDecorator } from "../../../agents/AgentStopButton";
 import { CROWN_WORKFLOW_MEMBER_LIMIT } from "../crownLayout";
 import {
   CrownDetailEmpty,
@@ -25,10 +26,12 @@ const CROWN_AGENT_HUE_STYLE = { "--color-info": "var(--crown-agent, #38bdf8)" } 
  * The Subagents section: workflow runs as cards, then direct spawns as
  * compact rows, the way the Agents tab groups them. A member row opens that
  * agent in the Agents tab; a card header (or "+N more") opens the tab focused
- * on its run.
+ * on its run. A live native subagent offers Stop on its row, as in the tab.
  */
 export function AgentsDetail({ layout, variant }: CrownDetailViewProps) {
   const model = layout.agentPanelModel ?? emptyAgentPanelModel();
+  const stopAgent = layout.stopAgent ?? null;
+  const decorateRow = useMemo(() => makeAgentStopDecorator(stopAgent), [stopAgent]);
   const limit = CROWN_WORKFLOW_MEMBER_LIMIT[variant];
   // The flyout's column is too narrow for a row's activity line.
   const rowDensity = variant === "flyout" ? "mini" : "compact";
@@ -41,7 +44,11 @@ export function AgentsDetail({ layout, variant }: CrownDetailViewProps) {
         meta={model.hasAgents ? `${model.liveCount} live` : undefined}
       />
       {model.hasAgents ? (
-        <AgentRosterProvider model={model} onOpenAgent={layout.onOpenAgent ?? null}>
+        <AgentRosterProvider
+          model={model}
+          onOpenAgent={layout.onOpenAgent ?? null}
+          decorateRow={decorateRow}
+        >
           <div className="contents" style={CROWN_AGENT_HUE_STYLE}>
             {workflows.length > 0 ? (
               <div className="flex flex-col gap-1.5" data-slot="crown-workflows">
