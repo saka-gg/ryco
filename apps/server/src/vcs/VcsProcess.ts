@@ -1,4 +1,4 @@
-import { Duration, Context, Effect, Layer, Option, PlatformError, Sink, Stream } from "effect";
+import { Context, Effect, Layer, Option, PlatformError, Sink, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
@@ -8,6 +8,7 @@ import {
   VcsProcessSpawnError,
   VcsProcessTimeoutError,
 } from "@ryco/contracts";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import { governChildProcess } from "../processGovernor.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
@@ -219,10 +220,12 @@ export const make = Effect.fn("makeVcsProcess")(function* () {
       } satisfies VcsProcessOutput;
     });
 
-    // Governed per child (git / forge CLI pools); queue time is not part of the timeout.
+    // Governed per child (git / forge CLI pools); queue time is not part of the timeout,
+    // and neither is a server stall or machine sleep (a child that exited meanwhile is
+    // not killed by a timer that expired before its exit was read).
     return yield* governChildProcess(
       input.command,
-      runProcess.pipe(Effect.scoped, Effect.timeoutOption(Duration.millis(timeoutMs))),
+      runProcess.pipe(Effect.scoped, timeoutWhileResponsiveOption(timeoutMs)),
     ).pipe(
       Effect.flatMap((result) =>
         Option.match(result, {

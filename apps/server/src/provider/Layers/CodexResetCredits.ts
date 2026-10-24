@@ -10,6 +10,10 @@ import {
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import { expandHomePath } from "../../pathExpansion.ts";
+import {
+  timeoutWhileResponsive,
+  timeoutWhileResponsiveOrElse,
+} from "@ryco/shared/responsiveDeadline";
 
 export function parseResetCredits(
   response: CodexSchema.V2GetAccountRateLimitsResponse,
@@ -144,6 +148,7 @@ export const withResetCreditClient = <A, E, R>(
           ...(input.homePath ? { CODEX_HOME: expandHomePath(input.homePath) } : {}),
         },
         requestTimeoutMs: 15_000,
+        timeoutOrElse: timeoutWhileResponsiveOrElse,
       }),
     );
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
@@ -155,7 +160,7 @@ export const withResetCreditClient = <A, E, R>(
     });
     yield* client.notify("initialized", undefined);
     return yield* run(client);
-  }).pipe(Effect.timeout(Duration.seconds(20)), scopedSafeTeardown("codex-reset-credits"));
+  }).pipe(timeoutWhileResponsive(Duration.seconds(20)), scopedSafeTeardown("codex-reset-credits"));
 
 export const readResetAccount = (input: ResetCreditRuntime) =>
   withResetCreditClient(input, (client) =>

@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "@ryco/contracts";
 import { normalizeModelSlug } from "@ryco/shared/model";
+import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 import {
   Deferred,
   Duration,
@@ -213,7 +214,7 @@ export const withCodexStartupPhaseDeadline = <A, R>(
     ),
   );
   return effect.pipe(
-    Effect.timeoutOrElse({
+    timeoutWhileResponsiveOrElse({
       duration: timeoutMs,
       orElse: () =>
         Effect.fail(
@@ -1185,6 +1186,7 @@ export const readStoredCodexThread = (input: {
             ...(input.homePath ? { CODEX_HOME: expandHomePath(input.homePath) } : {}),
           },
           requestTimeoutMs: 20_000,
+          timeoutOrElse: timeoutWhileResponsiveOrElse,
         }),
       );
       const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
@@ -1272,6 +1274,7 @@ export const makeCodexSessionRuntime = (
     const transportFailure = yield* Deferred.make<CodexErrors.CodexAppServerError>();
     const clientContext = yield* CodexClient.layerChildProcess(child, {
       onTermination: (error) => Deferred.succeed(transportFailure, error).pipe(Effect.asVoid),
+      timeoutOrElse: timeoutWhileResponsiveOrElse,
     }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),

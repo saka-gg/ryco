@@ -42,6 +42,7 @@ import {
 } from "./openCodeVersion.ts";
 import { collectStreamAsString, parseGenericCliVersion } from "./providerSnapshot.ts";
 import { NetService } from "@ryco/shared/Net";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 5_000;
@@ -616,7 +617,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       );
 
       const readyExit = yield* Effect.exit(
-        Deferred.await(readyDeferred).pipe(Effect.timeoutOption(timeoutMs)),
+        Deferred.await(readyDeferred).pipe(timeoutWhileResponsiveOption(timeoutMs)),
       );
 
       // Startup-time fibers are no longer needed once ready has resolved (either

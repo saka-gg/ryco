@@ -27,6 +27,7 @@ import {
   Stream,
 } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -1098,10 +1099,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         } satisfies GitVcsDriver.ExecuteGitResult;
       });
 
-      // Governed by the process-wide git pool; queue time is not part of the timeout.
+      // Governed by the process-wide git pool; queue time is not part of the timeout,
+      // and neither is a server stall or machine sleep.
       return yield* governChildProcess(
         "git",
-        runGitCommand().pipe(Effect.scoped, Effect.timeoutOption(timeoutMs)),
+        runGitCommand().pipe(Effect.scoped, timeoutWhileResponsiveOption(timeoutMs)),
       ).pipe(
         Effect.flatMap((result) =>
           Option.match(result, {
