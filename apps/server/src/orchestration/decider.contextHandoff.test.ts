@@ -651,6 +651,43 @@ describe("delegation return atomic origin fence", () => {
     const result = await decide({ ...parent(), usageLimit: usageLimit("other_instance") });
     expect(result._tag).toBe("Success");
   });
+  // One fence for every server wake; only the wording names what the wake carried.
+  for (const [source, originChanged, usageLimited] of [
+    [
+      undefined,
+      "Delegated result origin changed. Open the child task and return its result manually.",
+      "The originating chat hit its usage limit. The delegated result waits until it is resumed.",
+    ],
+    [
+      "pull-request-watch",
+      "The chat changed while this pull request update was prepared.",
+      "The chat hit its usage limit. The pull request update waits until it is resumed.",
+    ],
+  ] as const) {
+    it(`words its rejections for a ${source ?? "delegated result"} wake`, async () => {
+      const base = queuedReturn();
+      const command = {
+        ...base,
+        delegationReturnGuard: {
+          ...base.delegationReturnGuard!,
+          ...(source === undefined ? {} : { source }),
+        },
+      };
+      const changed = await decide({ ...parent(), archivedAt: now }, command);
+      expect(changed._tag === "Failure" ? changed.failure.detail : "").toBe(originChanged);
+      const limited = await decide({ ...parent(), usageLimit: usageLimit("codex_work") }, command);
+      expect(limited._tag === "Failure" ? limited.failure.detail : "").toBe(usageLimited);
+      // The wake's own turn start carries the source on, for the reactor's wording.
+      const accepted = await Effect.runPromise(
+        decideOrchestrationCommand({ command, readModel: makeReadModel(parent()) }),
+      );
+      expect(
+        (Array.isArray(accepted) ? accepted : [accepted]).find(
+          (event) => event.type === "thread.turn-start-requested",
+        )?.payload,
+      ).toMatchObject({ delegationReturnGuard: command.delegationReturnGuard });
+    });
+  }
   it("accepts a later user message whose createdAt is older than the guard's latest", async () => {
     // Order consistency with latestUserMessageIdQuery: max created_at, ties by insertion order.
     const thread = parent();

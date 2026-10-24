@@ -7402,7 +7402,11 @@ describe("ProviderCommandReactor", () => {
     const startTurn = (
       harness: Harness,
       messageId: string,
-      extra: { readonly modelSelection?: ModelSelection; readonly delegated?: true } = {},
+      extra: {
+        readonly modelSelection?: ModelSelection;
+        /** A server wake: a delegated result (`true`) or a pull request update. */
+        readonly delegated?: true | "pull-request-watch";
+      } = {},
     ) =>
       Effect.runPromise(
         harness.engine.dispatch({
@@ -7423,6 +7427,9 @@ describe("ProviderCommandReactor", () => {
                   projectId: asProjectId("project-1"),
                   runtimeMode: "approval-required" as const,
                   worktreePath: null,
+                  ...(extra.delegated === "pull-request-watch"
+                    ? { source: "pull-request-watch" as const }
+                    : {}),
                 },
               }
             : {}),
@@ -7598,6 +7605,30 @@ describe("ProviderCommandReactor", () => {
           deliveryState: "not-sent",
           detail:
             "Ryco restarted before this delegated result reached the provider. Inspect the result before sending it manually.",
+        },
+      });
+      expect(second.sendTurn).not.toHaveBeenCalled();
+      expect(second.startSession).not.toHaveBeenCalled();
+    });
+
+    it("cancels a pull request update start with the pull request wording", async () => {
+      const dbPath = makeDbPath();
+      const first = await createHarness({ dbPath, startReactor: false });
+      await startTurn(first, "pull-request-watch:lost", { delegated: "pull-request-watch" });
+      await disposeHarness();
+
+      const second = await createHarness({ dbPath });
+      await recover(second);
+      await second.drain();
+      const failures = await activitiesOf(second, "provider.turn.start.failed");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        summary: "Pull request update was not sent",
+        payload: {
+          messageId: "pull-request-watch:lost",
+          deliveryState: "not-sent",
+          detail:
+            "Ryco restarted before this pull request update reached the agent. Nothing was sent. Ryco checks the pull request again and reports what is still new.",
         },
       });
       expect(second.sendTurn).not.toHaveBeenCalled();

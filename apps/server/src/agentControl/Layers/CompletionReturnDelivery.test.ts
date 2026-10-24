@@ -64,6 +64,14 @@ import {
 } from "./CompletionReturnDelivery.ts";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ServerWakeFenceLive,
+  makeServerWakeFence,
+} from "../../orchestration/Layers/ServerWakeFence.ts";
+import {
+  ServerWakeFence,
+  type ServerWakeFenceShape,
+} from "../../orchestration/Services/ServerWakeFence.ts";
 
 const layer = Layer.mergeAll(
   CompletionReturnRepositoryLive,
@@ -172,6 +180,8 @@ const setup = (
   options: {
     /** A server base directory, so returned artifacts can be copied; none returns none. */
     readonly baseDir?: string;
+    /** A fence shared with other server wakes; by default each worker builds its own. */
+    readonly fence?: ServerWakeFenceShape;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -237,6 +247,10 @@ const setup = (
     shells.set("parent", shell("parent", "parent-turn", "parent-runtime"));
 
     const makeWorker = makeCompletionReturnDelivery.pipe(
+      // A fresh fence per worker, built on the fakes below: a restarted worker forgets it.
+      options.fence === undefined
+        ? Effect.provide(ServerWakeFenceLive)
+        : Effect.provideService(ServerWakeFence, options.fence),
       Effect.provideService(ProviderService, {
         getSession: (threadId: ThreadId) =>
           Effect.sync(() => {
@@ -685,6 +699,53 @@ it.effect("T5 throttles cold wakes to four in flight; warm parents are not throt
     assert.include((yield* h.read("p6-child")).detail, "another chat's session");
     yield* h.tick(6 + 121);
     assert.deepStrictEqual(parentsOf(), ["p1", "p2", "p3", "p4", "p7", "p5", "p6"]);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("T5 shares the cold-wake budget with the other server wakes of the process", () =>
+  Effect.gen(function* () {
+    // Pull request updates (another server wake) hold every cold slot of the one fence.
+    const fence = yield* makeServerWakeFence.pipe(
+      Effect.provideService(ProviderService, {
+        getSession: () => Effect.succeed(Option.none()),
+      } as never),
+      Effect.provideService(ProjectionSnapshotQuery, {} as never),
+    );
+    const watched = [0, 1, 2, 3].map((index) => ({
+      threadId: ThreadId.make(`watched-${index}`),
+      messageId: MessageId.make(`watch-wake-${index}`),
+    }));
+    for (const wake of watched)
+      assert.isTrue(yield* fence.reserveColdSlot(wake.threadId, wake.messageId, Date.parse(now)));
+    const h = yield* setup({}, { fence });
+    h.shells.set("p1", shell("p1", "p1-turn", null));
+    yield* h.repo.insert(
+      completionFixture({
+        childThreadId: ThreadId.make("p1-child"),
+        initialMessageId: MessageId.make("p1-child-initial"),
+        parentThreadId: ThreadId.make("p1"),
+        status: "ready",
+        capture: { kind: "result", outcome: "completed", capturedAt: now, section: "Section" },
+      }),
+    );
+    yield* h.tick(0);
+    assert.equal(h.sent.length, 0);
+    assert.include((yield* h.read("p1-child")).detail, "another chat's session");
+    // One pull request update's wake was not accepted: its slot comes back to the process.
+    yield* fence.releaseColdSlot(watched[0]!.threadId, watched[0]!.messageId);
+    yield* h.tick(3);
+    assert.deepStrictEqual(
+      h.sent.map((command) => command.threadId as string),
+      ["p1"],
+    );
+    // The delegated result's accepted wake now holds that slot.
+    assert.isFalse(
+      yield* fence.reserveColdSlot(
+        ThreadId.make("next"),
+        MessageId.make("next-wake"),
+        Date.parse(now),
+      ),
+    );
   }).pipe(Effect.provide(layer)),
 );
 
