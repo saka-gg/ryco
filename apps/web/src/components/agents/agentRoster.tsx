@@ -14,6 +14,7 @@ import {
   useMemo,
   useRef,
   type CSSProperties,
+  type ReactElement,
   type ReactNode,
 } from "react";
 
@@ -77,33 +78,50 @@ export const AGENT_STATUS_VISUALS: Record<
   },
 };
 
+/**
+ * Renders around a finished row, e.g. to set a control beside it: a row that
+ * opens its agent is a button, so nothing interactive can go inside it. The
+ * row fills its wrapper, which takes the row's height from
+ * {@link AGENT_ROW_HEIGHT_CLASS}, so a list's divider stays inside that height.
+ */
+export type AgentRowDecorator = (
+  agent: RuntimeSubagent,
+  row: ReactElement,
+  density: AgentRowDensity,
+) => ReactNode;
+
 interface AgentRosterContextValue extends AgentRosterIdentity {
   readonly onOpenAgent: ((agentId: string) => void) | null;
+  readonly decorateRow: AgentRowDecorator | null;
 }
 
 const AgentRosterContext = createContext<AgentRosterContextValue>({
   identities: new Map(),
   labels: new Map(),
   onOpenAgent: null,
+  decorateRow: null,
 });
 
 /**
  * Supplies roster identities for every row below it. With an opener, rows are
- * buttons that open the agent; without one they are static.
+ * buttons that open the agent; without one they are static. A decorator
+ * renders around every row.
  */
 export function AgentRosterProvider({
   model,
   onOpenAgent = null,
+  decorateRow = null,
   children,
 }: {
   model: AgentPanelModel;
   onOpenAgent?: ((agentId: string) => void) | null | undefined;
+  decorateRow?: AgentRowDecorator | null | undefined;
   children: ReactNode;
 }) {
   const identity = useMemo(() => buildAgentRosterIdentity(model), [model]);
   const value = useMemo<AgentRosterContextValue>(
-    () => ({ ...identity, onOpenAgent }),
-    [identity, onOpenAgent],
+    () => ({ ...identity, onOpenAgent, decorateRow }),
+    [identity, onOpenAgent, decorateRow],
   );
   return <AgentRosterContext value={value}>{children}</AgentRosterContext>;
 }
@@ -339,20 +357,28 @@ export function PhaseMemberDots({
 }
 
 /**
- * Row geometry per density; updates never change a row's height.
+ * Row geometry per density, with its height in {@link AGENT_ROW_HEIGHT_CLASS};
+ * updates never change a row's height.
  * - panel: monogram, then two lines (label + time, then activity + role/run), 40px.
  * - compact: one line (monogram, label, activity, status word + time), 30px.
  * - mini: compact without the activity, for columns too narrow to show it.
  */
 const AGENT_ROW_GRID_CLASS = {
   panel:
-    "grid h-10 w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
+    "grid w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
   compact:
-    "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
-  mini: "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+    "grid w-full grid-cols-[1.125rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+  mini: "grid w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
 } as const;
 
 export type AgentRowDensity = keyof typeof AGENT_ROW_GRID_CLASS;
+
+/** A row's fixed height; a decorated row's wrapper takes it instead. */
+export const AGENT_ROW_HEIGHT_CLASS: Record<AgentRowDensity, string> = {
+  panel: "h-10",
+  compact: "h-[30px]",
+  mini: "h-[30px]",
+};
 
 /** Fixed-height row: what the agent is, then what it is doing now. */
 export function AgentRow({
@@ -362,7 +388,7 @@ export function AgentRow({
   agent: RuntimeSubagent;
   density?: AgentRowDensity;
 }) {
-  const { onOpenAgent } = use(AgentRosterContext);
+  const { onOpenAgent, decorateRow } = use(AgentRosterContext);
   const { label, role } = useAgentRowIdentity(agent);
   const visuals = AGENT_STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
@@ -394,7 +420,10 @@ export function AgentRow({
             {activityLine}
           </span>
         ) : null}
-        <span className="inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
+        <span
+          data-agent-row-aside
+          className="inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70"
+        >
           {statusWord}
           <AgentElapsed agent={agent} />
         </span>
@@ -411,7 +440,10 @@ export function AgentRow({
           <AgentMonogram agent={agent} label={label} />
         </span>
         <AgentLabel label={label} className="col-start-2 row-start-1" />
-        <span className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
+        <span
+          data-agent-row-aside
+          className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70"
+        >
           {statusWord}
           <AgentElapsed agent={agent} />
         </span>
@@ -425,7 +457,10 @@ export function AgentRow({
           {activityLine}
         </span>
         {aside ? (
-          <span className="col-start-3 row-start-2 max-w-32 truncate text-right text-[10.5px] text-muted-foreground/65">
+          <span
+            data-agent-row-aside
+            className="col-start-3 row-start-2 max-w-32 truncate text-right text-[10.5px] text-muted-foreground/65"
+          >
             {aside}
           </span>
         ) : null}
@@ -436,11 +471,12 @@ export function AgentRow({
 
   const className = cn(
     AGENT_ROW_GRID_CLASS[density],
+    decorateRow ? "h-full" : AGENT_ROW_HEIGHT_CLASS[density],
     "outline-none transition-colors",
     onOpenAgent && "hover:bg-accent/35 focus-visible:ring-2 focus-visible:ring-ring/50",
   );
   const densityAttribute = density === "panel" ? {} : { "data-density": density };
-  return onOpenAgent ? (
+  const row = onOpenAgent ? (
     <button
       type="button"
       className={className}
@@ -457,4 +493,5 @@ export function AgentRow({
       {content}
     </div>
   );
+  return decorateRow ? decorateRow(agent, row, density) : row;
 }

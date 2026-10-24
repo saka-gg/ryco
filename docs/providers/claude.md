@@ -245,6 +245,19 @@ finishes. Ryco shows the thread as working from the moment Claude starts that re
 reasoning and text stream like any other turn. Stop ends a background turn too. If a background turn
 starts but produces no output for two minutes, Ryco ends it.
 
+## Stopping One Subagent
+
+A running subagent can be stopped on its own: hover its row in the Agents panel or in the crown's
+Subagents section and click the stop button, or open the agent and click Stop in its header. On a
+touch screen, or any device that can't hover, the stop button stays in view on the row. Ryco asks
+Claude Code to stop just that task. The turn that launched it keeps running, and the agent's
+row then reads Interrupted (or Stopped, when Claude Code reports the task as killed). Ryco never
+stops the turn instead. If the stop fails, or the agent still runs after 20 seconds, a notice says
+so and Stop is offered again.
+
+Stop is only offered for agents the thread's current Claude session started. Workflows and their
+agents have no Stop of their own, and neither do other providers' agents.
+
 ## Approvals
 
 When Claude asks before running a tool, the approval card leads with Decline and Approve once.
