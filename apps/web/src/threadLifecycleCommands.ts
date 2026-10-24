@@ -117,7 +117,7 @@ async function confirmWithDialog(message: string): Promise<boolean> {
   return localApi ? localApi.dialogs.confirm(message) : window.confirm(message);
 }
 
-/** Archives a thread, asking first when "Confirm before archiving" is on. */
+/** Archives a thread, asking first when "Archive confirmation" is on. */
 export async function requestThreadArchive(
   input: {
     readonly target: ScopedThreadRef;

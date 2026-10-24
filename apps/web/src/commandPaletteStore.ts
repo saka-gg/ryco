@@ -31,7 +31,7 @@ export interface CurrentThreadLifecycle {
   readonly setSettled: (settled: boolean) => void;
   /** Snoozes the thread until `snoozedUntil`, or wakes it with null. */
   readonly snooze: (snoozedUntil: string | null) => void;
-  /** Archives the thread, asking first when "Confirm before archiving" is on. */
+  /** Archives the thread, asking first when "Archive confirmation" is on. */
   readonly archive: () => void;
   readonly markUnread: () => void;
 }
