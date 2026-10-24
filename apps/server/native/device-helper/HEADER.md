@@ -5,10 +5,12 @@ a booted iOS Simulator without `Simulator.app`, using CoreSimulator and
 SimulatorKit private APIs.
 
 Source ships in-repo and is compiled on the user's machine with their own Xcode
-(`build.sh`), because the private API surface moves with the toolchain. Cache the
-binary keyed by Xcode build version (`xcodebuild -version`), as
-`scripts/device-helper-smoke.ts` does under
-`~/Library/Caches/ryco/device-helper/<build>/`.
+(`build.sh`), because the private API surface moves with the toolchain. The
+binary is cached under `~/Library/Caches/ryco/device-helper/<key>/`, where the
+key (`deviceHelperCacheKey` in `@ryco/shared/deviceHelperCache`) combines the
+Xcode version and build with a digest of `Sources/` and `build.sh`. The server
+and `scripts/device-helper-smoke.ts` share that derivation, and any source
+change produces a new key, so a stale binary is never reused.
 
 ## Design choices
 
@@ -25,7 +27,15 @@ the "must never starve RPC" requirement.
 **Private frameworks are `dlopen`'d at runtime**, resolved from `xcode-select -p`
 (or `DEVELOPER_DIR`). Nothing is linked at build time, so the binary is
 relocatable and a moved/upgraded Xcode produces a diagnosable error rather than a
-dyld crash.
+dyld crash. CoreSimulator is system-wide
+(`/Library/Developer/PrivateFrameworks`). SimulatorKit lives in the Xcode
+bundle, and Xcode 27 moved it: Xcode 26 and earlier ship it under
+`Contents/Developer/Library/PrivateFrameworks`, Xcode 27 under
+`Contents/SharedFrameworks`. `build.sh` and `simulatorKitCandidatePaths`
+(`CoreSimulatorBridge.swift`) try both, in that order, and a failure names every
+location tried. Swift resolves the path once and hands it to the HID bridge
+(`RycoHIDBridge.simulatorKitPath`), so the bridge opens exactly the image that
+was loaded instead of keeping its own copy of the lookup.
 
 **The Objective-C bridges must be compiled with ARC.** `swiftc` hands `.m` files
 to clang _without_ `-fobjc-arc`; under manual retain/release the accessibility
@@ -74,6 +84,22 @@ Buttons: `home`, `lock`, `side`, `siri`, `volume-up`, `volume-down`.
 Indigo, so orientation changes are not part of this protocol; drive them at the
 UI level (`xcrun simctl` / the device's own controls). Documented here because
 the absence is a deliberate choice, not an oversight.
+
+### Input on Xcode 27
+
+From CoreSimulator 1155.4 (installed by Xcode 27) the guest drops legacy Indigo
+button and keyboard events and delivers Indigo touches unreliably, while the
+host-side send still succeeds. Input there goes through the guest's `dtuhidd`
+service, which this helper does not speak yet. Rather than ack input that never
+arrives, the helper reports it as unavailable: `--probe` fails the `hid`
+capability with the reason, and `attach` answers `capabilities.input: false`
+with `degraded.hid` set. Streaming, screenshots and `describe-ui` keep working.
+
+The gate is the host's CoreSimulator version (`CoreSimulatorVersion.h`, also
+reported as `toolchain.coreSimulatorVersion` by `--probe`), not the selected
+Xcode: CoreSimulator is system-wide and installed by the newest Xcode on the
+machine, so a Mac with Xcode 26 selected but Xcode 27 installed is affected too,
+for every simulator runtime.
 
 ### Errors
 
@@ -144,3 +170,7 @@ the call.
 boots or reuses a simulator, streams ≥30 frames asserting keyframe and Annex B
 NAL structure, injects a tap, dumps the accessibility tree, verifies PNG magic on
 a screenshot, and shuts down only a simulator it booted itself.
+
+`apps/server/src/device/helperBuildScript.test.ts` runs the real `build.sh`
+against fake Xcode 26 and Xcode 27 layouts with a stub `xcrun`, so the
+SimulatorKit lookup and the source list are covered in CI without a compiler.

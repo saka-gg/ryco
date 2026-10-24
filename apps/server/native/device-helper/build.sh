@@ -35,8 +35,22 @@ if [ -z "$DEVELOPER_DIR_PATH" ]; then
   echo "error: no active developer directory; run 'sudo xcode-select -s /Applications/Xcode.app'" >&2
   exit 1
 fi
-if [ ! -d "$DEVELOPER_DIR_PATH/Library/PrivateFrameworks/SimulatorKit.framework" ]; then
-  echo "error: SimulatorKit not found under $DEVELOPER_DIR_PATH" >&2
+# Xcode 26 and earlier ship SimulatorKit under the developer dir; Xcode 27 moved
+# it to Contents/SharedFrameworks. Mirrors simulatorKitCandidatePaths in
+# CoreSimulatorBridge.swift (same order). The server runs this script as
+# `/bin/sh build.sh`, so these lines stay POSIX and bash 3.2 safe.
+CONTENTS_DIR="$(dirname "$DEVELOPER_DIR_PATH")"
+SIMULATORKIT_FOUND=""
+for candidate in \
+  "$DEVELOPER_DIR_PATH/Library/PrivateFrameworks/SimulatorKit.framework" \
+  "$CONTENTS_DIR/SharedFrameworks/SimulatorKit.framework"; do
+  if [ -d "$candidate" ]; then
+    SIMULATORKIT_FOUND="$candidate"
+    break
+  fi
+done
+if [ -z "$SIMULATORKIT_FOUND" ]; then
+  echo "error: SimulatorKit not found under $DEVELOPER_DIR_PATH or $CONTENTS_DIR/SharedFrameworks" >&2
   echo "       point xcode-select at a full Xcode install, not the command line tools" >&2
   exit 1
 fi
@@ -56,7 +70,10 @@ TARGET_TRIPLE="$(uname -m)-apple-macosx13.0"
 # accessibility bridge under manual retain/release and crash on the first
 # translator response.
 OBJC_OBJECTS=()
-for source in "$SOURCE_DIR/Sources/AXBridge.m" "$SOURCE_DIR/Sources/HIDBridge.m"; do
+for source in \
+  "$SOURCE_DIR/Sources/AXBridge.m" \
+  "$SOURCE_DIR/Sources/CoreSimulatorVersion.m" \
+  "$SOURCE_DIR/Sources/HIDBridge.m"; do
   object="$OUT_DIR/$(basename "${source%.m}").o"
   xcrun clang \
     -c \

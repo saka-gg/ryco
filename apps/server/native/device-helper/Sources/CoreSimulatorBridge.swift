@@ -55,11 +55,27 @@ func resolveDeveloperDirectory() -> String {
   return path.isEmpty ? "/Applications/Xcode.app/Contents/Developer" : path
 }
 
+/// Candidate locations for the SimulatorKit binary inside an Xcode bundle.
+///
+/// Xcode 27 moved SimulatorKit from `Contents/Developer/Library/PrivateFrameworks`
+/// to `Contents/SharedFrameworks`; both are tried so one helper spans Xcode 26
+/// and 27. Order matters only for error messages: at most one exists in any
+/// given install. `build.sh` checks the same two locations in the same order.
+func simulatorKitCandidatePaths(developerDirectory: String) -> [String] {
+  let contentsDirectory = (developerDirectory as NSString).deletingLastPathComponent
+  return [
+    developerDirectory + "/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit",
+    contentsDirectory + "/SharedFrameworks/SimulatorKit.framework/SimulatorKit",
+  ]
+}
+
 /// The dlopen handles the capability probe needs for `dlsym` lookups.
 struct PrivateFrameworkHandles {
   /// nil when SimulatorKit itself would not load. The probe reports that as one
   /// HID failure rather than listing every Indigo symbol as missing.
   let simulatorKit: UnsafeMutableRawPointer?
+  /// The SimulatorKit binary that loaded, nil when none did.
+  let simulatorKitPath: String?
 }
 
 /// dlopens CoreSimulator, SimulatorKit and the accessibility translator.
@@ -80,12 +96,20 @@ func loadPrivateFrameworks(
     throw SimulatorError.frameworkLoadFailed("CoreSimulator (\(message))")
   }
 
-  let simulatorKitPath = developerDirectory
-    + "/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"
-  let simulatorKit = dlopen(simulatorKitPath, RTLD_NOW)
+  var simulatorKit: UnsafeMutableRawPointer?
+  var simulatorKitPath: String?
+  var loadFailures: [String] = []
+  for candidate in simulatorKitCandidatePaths(developerDirectory: developerDirectory) {
+    if let handle = dlopen(candidate, RTLD_NOW) {
+      simulatorKit = handle
+      simulatorKitPath = candidate
+      break
+    }
+    loadFailures.append("\(candidate) (\(String(cString: dlerror())))")
+  }
   if simulatorKit == nil && requireSimulatorKit {
-    let message = String(cString: dlerror())
-    throw SimulatorError.frameworkLoadFailed("SimulatorKit at \(simulatorKitPath) (\(message))")
+    throw SimulatorError.frameworkLoadFailed(
+      "SimulatorKit at " + loadFailures.joined(separator: ", "))
   }
 
   // Accessibility translation is optional: without it `describe-ui` degrades,
@@ -94,11 +118,11 @@ func loadPrivateFrameworks(
     "/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation"
   _ = dlopen(accessibility, RTLD_NOW)
 
-  // The HID bridge re-derives the SimulatorKit path; hand it the same directory
-  // so an overridden DEVELOPER_DIR cannot pull the two out of agreement.
-  setenv("RYCO_DEVELOPER_DIR", developerDirectory, 1)
+  // The HID bridge opens exactly the image loaded here, so an overridden
+  // DEVELOPER_DIR or a relocated framework cannot pull the two out of agreement.
+  RycoHIDBridge.simulatorKitPath = simulatorKitPath
 
-  return PrivateFrameworkHandles(simulatorKit: simulatorKit)
+  return PrivateFrameworkHandles(simulatorKit: simulatorKit, simulatorKitPath: simulatorKitPath)
 }
 
 /// The CoreSimulator device-set, and lookups over it.
