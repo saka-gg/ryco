@@ -90,6 +90,63 @@ describe("bulk sidebar actions", () => {
     expect(s.dispatch).toHaveBeenCalledTimes(1);
   });
 
+  it("sends nothing more to a node that reconnects mid-batch", async () => {
+    const s = setup();
+    // node-a reconnects while its first command is out.
+    s.dispatch.mockImplementationOnce(async () => {
+      s.contexts.set(nodeA, { ...s.contexts.get(nodeA)!, generation: {} });
+      return { sequence: 1 };
+    });
+    const result = await s.run([ref("a"), ref("b"), ref("c"), ref("d", nodeB)]);
+    expect(s.sent("thread.settle").map((command) => command.threadId)).toEqual(["a", "d"]);
+    expect(result).toMatchObject({
+      applied: [ref("a"), ref("d", nodeB)],
+      skipped: [ref("b"), ref("c")],
+      failed: [],
+    });
+    // Only node-b's thread is still on the connection its command went out on.
+    expect(s.read()).toMatchObject([{ target: ref("d", nodeB), count: undefined }]);
+    s.history.dispose();
+  });
+
+  it("sends no Undo to a node that reconnects while Undo runs", async () => {
+    const s = setup();
+    await s.run([ref("a"), ref("b"), ref("c", nodeB)]);
+    // node-b reconnects while the first Undo is out, before its own thread's turn.
+    s.dispatch.mockImplementationOnce(async () => {
+      s.contexts.set(nodeB, { ...s.contexts.get(nodeB)!, generation: {} });
+      return { sequence: 2 };
+    });
+    await s.history.undo(s.read()[0]!.id);
+    expect(s.sent("thread.sidebar.undo").map((command) => command.threadId)).toEqual(["a", "b"]);
+    expect(s.failed).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message:
+          "1 of 3 threads could not be restored. Its machine reconnected before Undo was sent.",
+      }),
+    );
+  });
+
+  it("is the keyboard Undo's newest notice and undoes every thread by its id", async () => {
+    const s = setup();
+    await s.run([ref("a"), ref("b"), ref("c")]);
+    expect(s.history.latest()).toMatchObject({ action: "settle", count: 3, pending: false });
+    await s.history.dispatch(ref("single"), settle(ref("single")));
+    expect(s.history.latest()).toMatchObject({ target: ref("single"), count: undefined });
+    await s.history.undo(s.history.latest()!.id);
+    const group = s.history.latest();
+    expect(group).toMatchObject({ action: "settle", count: 3 });
+    await s.history.undo(group!.id);
+    expect(s.sent("thread.sidebar.undo").map((command) => command.threadId)).toEqual([
+      "single",
+      "a",
+      "b",
+      "c",
+    ]);
+    expect(s.history.latest()).toBeNull();
+    expect(s.failed).not.toHaveBeenCalled();
+  });
+
   it("sends at most four commands at once", async () => {
     const s = setup();
     const pending: (() => void)[] = [];

@@ -37,7 +37,7 @@ async function inPool<T>(items: readonly T[], run: (item: T) => Promise<void>): 
 
 export interface SidebarUndoBatchResult {
   readonly applied: readonly ScopedThreadRef[];
-  /** Threads whose node was not ready; nothing was sent for them. */
+  /** Threads whose node was not ready (or reconnected first); nothing was sent for them. */
   readonly skipped: readonly ScopedThreadRef[];
   readonly failed: readonly { readonly target: ScopedThreadRef; readonly error: unknown }[];
   /** Applied threads whose node is too old to undo the action. */
@@ -46,8 +46,9 @@ export interface SidebarUndoBatchResult {
 
 /**
  * Sends one lifecycle command to each target through `history`, a few at a time. A target
- * whose node is not ready (`readContext` returns null) is skipped. One notice undoes every
- * applied settle or snooze its node can undo; a failed command leaves the notice.
+ * whose node is not ready (`readContext` returns null), or reconnects before its command
+ * goes out, is skipped. One notice undoes every applied settle or snooze its node can undo;
+ * a failed command leaves the notice.
  */
 export async function dispatchSidebarUndoBatch(input: {
   readonly history: SidebarUndoHistory;
@@ -97,6 +98,9 @@ export async function dispatchSidebarUndoBatch(input: {
   const members = undoable
     ? queue.filter(({ context }) => context.supported).map(({ target }) => target)
     : [];
+  // Every command, Undo included, goes out only while its node is still on the
+  // connection the batch read: a node that reconnected mid-batch may not be
+  // ready for changes yet, and its threads may have changed.
   const valid = (member: ScopedThreadRef) => {
     const send = sent.get(scopedThreadKey(member));
     return send !== undefined && readContext(member)?.generation === send.context.generation;
@@ -105,6 +109,10 @@ export async function dispatchSidebarUndoBatch(input: {
     const errors: unknown[] = [];
     await inPool(live, async (member) => {
       const send = sent.get(scopedThreadKey(member))!;
+      if (!valid(member)) {
+        errors.push(new Error("Its machine reconnected before Undo was sent."));
+        return;
+      }
       try {
         await send.context.api.orchestration.dispatchCommand({
           type: "thread.sidebar.undo",
@@ -146,6 +154,11 @@ export async function dispatchSidebarUndoBatch(input: {
   const failed: { target: ScopedThreadRef; error: unknown }[] = [];
   let withoutUndo = 0;
   await inPool(queue, async ({ target, context, command }) => {
+    if (!valid(target)) {
+      skipped.push(target);
+      notice?.drop(target);
+      return;
+    }
     try {
       await context.api.orchestration.dispatchCommand(command);
       applied.push(target);
