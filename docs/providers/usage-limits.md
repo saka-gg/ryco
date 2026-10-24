@@ -10,16 +10,23 @@ that check is **20 percentage points above even pace** (a deficit).
 
 The comparison is labelled **at last check**. Time passing does not improve the comparison without
 a new provider snapshot. It is neither a forecast nor banked credit or debt. Refresh provider status
-for another check. Each provider instance and window is displayed separately; duplicate instances
-and different accounts are never added or averaged into a combined allowance.
+for another check. Each window is displayed separately; duplicate instances of one account and
+different accounts are never added or averaged into a combined allowance.
 
 Pace is unavailable for disconnected, disabled, unavailable, unready or unauthenticated providers,
 missing or invalid inputs, clock inconsistencies, and windows that have reset. Missing usage is
 unavailable, never zero. Small differences within two percentage points and the first 3% of a
 window have no pace label. Existing usage amounts, credits, reset times and accounting are unchanged.
 
-Accounts pooled in a CLIProxyAPI hub appear on Statistics → Limits instead; see
-[CLIProxyAPI hubs](./cliproxyapi.md).
+Statistics → Limits lists the accounts provider instances sign in to directly, grouped by
+provider, next to the accounts pooled in CLIProxyAPI hubs (see
+[CLIProxyAPI hubs](./cliproxyapi.md)). An account signed in on several nodes or instances shows
+once, with its freshest reading and the nodes it was seen on. Instances count as one account when
+they report the same provider, email and plan; a node that reports no plan joins only when that is
+unambiguous. Banked Codex resets come from the newest read that reported them. Instances routed
+through a hub show a note instead of their own limits, and direct accounts never enter a hub's
+pooled average. The iOS app's Limits tab lists accounts the same way, naming the devices each is
+signed in on, with a banked-reset block for each device's Codex instance.
 
 Claude instances with a separate home use that home's credential file for usage reads. They do not
 fall back to the default account's global macOS Keychain entry. Refreshes are persisted only to the
