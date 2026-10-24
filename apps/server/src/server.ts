@@ -66,6 +66,7 @@ import { desktopNativeNodeClaimRoutesLayer } from "./hubConnector/desktopNativeN
 import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { DatabaseMaintenanceLive } from "./persistence/Layers/DatabaseMaintenance.ts";
+import { EventLogCompactionLive } from "./persistence/Layers/EventLogCompaction.ts";
 import { ServerLifecycleEventsLive } from "./serverLifecycleEvents.ts";
 import { AnalyticsServiceLayerLive } from "./telemetry/Layers/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -611,10 +612,15 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
 // the public HTTP server, router, or any client-visible state.
 const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
-  // Background database upkeep (event-log compaction). Server only: CLI layers never build it.
+  // Background database upkeep (event-log compaction, free-page reclaim). Server only: CLI
+  // layers never build it.
   DatabaseMaintenanceLive,
   WorktreeNotesServiceLive,
-  StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
+  // Compaction state for the database report (the same memoized layer the upkeep uses).
+  StorageServiceLive.pipe(
+    Layer.provide(ProviderProtectedPathsLive),
+    Layer.provide(EventLogCompactionLive),
+  ),
   SessionImportLive,
   // Chat forks: recovery of unfinished forks once commands are admitted. The ledger is provided
   // beneath the services (below), so startup's orphan-chat sweep sees the chats forks still need.

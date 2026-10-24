@@ -4,7 +4,7 @@
  *
  *   node apps/server/scripts/measure-event-compaction.ts --db <state.sqlite> \
  *     [--mode online|offline] [--no-read-worker] [--verify-replay] [--pre-093-indexes] [--keep] \
- *     [--out result.json]
+ *     [--as-incremental] [--reclaim-ticks N] [--reclaim-chunk-pages N] [--out result.json]
  *
  * The source file is never written: the script copies it (with its WAL) through SQLite's backup
  * API into a temporary directory next to it and works on the copy. It reports, as one JSON object:
@@ -23,7 +23,14 @@
  *   copy of the compacted log and compares them (sha256 per table), with rebuild durations;
  * - `--no-autocheckpoint`: diagnostic; the main connection does not checkpoint at commit (as with
  *   a checkpoint worker), to separate delete cost from commit-time checkpoint cost;
- * - `VACUUM INTO` of the compacted copy: the size the file would shrink to.
+ * - `VACUUM INTO` of the compacted copy: the size the file would shrink to;
+ * - `--as-incremental`: rebuilds the working copy with `auto_vacuum = INCREMENTAL` first, as a
+ *   database created by this version would be (the replay copy stays as it was);
+ * - `--reclaim-ticks N`: after compaction, N back-to-back ticks of the server's free-page reclaim
+ *   (one runs per minute in the server) on the compacted copy (`--reclaim-chunk-pages` overrides
+ *   the steps per transaction, for tuning): pages per tick, chunk durations,
+ *   event-loop delay, the file size after a checkpoint, and the Storage settings report (cost,
+ *   and what it shows) on the result.
  */
 import { createHash } from "node:crypto";
 import {
@@ -43,6 +50,7 @@ import { backup, DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { DatabaseStorageReport } from "@ryco/contracts";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -50,6 +58,13 @@ import { ServerConfig } from "../src/config.ts";
 import { OrchestrationProjectionPipelineLive } from "../src/orchestration/Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionPipeline } from "../src/orchestration/Services/ProjectionPipeline.ts";
 import {
+  DEFAULT_FREE_PAGE_RECLAIM_OPTIONS,
+  type FreePageReclaimResult,
+  reclaimFreePages,
+} from "../src/persistence/Layers/DatabaseMaintenance.ts";
+import { readDatabaseStorageReport } from "../src/persistence/databaseStorageReport.ts";
+import {
+  EventLogCompactionLive,
   hasCompactionBacklog,
   isPrunableReceiptCommandId,
   makeEventLogCompaction,
@@ -73,6 +88,9 @@ const { values } = parseArgs({
     "pre-093-indexes": { type: "boolean", default: false },
     keep: { type: "boolean", default: false },
     "no-autocheckpoint": { type: "boolean", default: false },
+    "as-incremental": { type: "boolean", default: false },
+    "reclaim-ticks": { type: "string", default: "0" },
+    "reclaim-chunk-pages": { type: "string" },
     out: { type: "string" },
   },
 });
@@ -139,6 +157,7 @@ function fileStats(path: string) {
       pageSize: pragma("page_size"),
       pageCount: pragma("page_count"),
       freelistCount: pragma("freelist_count"),
+      autoVacuum: pragma("auto_vacuum"),
       events: byType.reduce((total, row) => total + row.events, 0),
       eventBytes: byType.reduce((total, row) => total + row.bytes, 0),
       eventsByKind: Object.fromEntries(
@@ -268,6 +287,7 @@ async function compact(dbPath: string) {
       perPass: passes.map((pass) => ({
         scannedSequences: pass.scannedSequences,
         deletedEvents: pass.deletedEvents,
+        deletedBytes: pass.deletedBytes,
         deletedReceipts: pass.deletedReceipts,
         durationMs: round(pass.durationMs, 0),
         mainThreadMs: round(pass.mainThreadMs, 0),
@@ -359,6 +379,123 @@ async function rebuild(dbPath: string) {
   return { rebuildMs: round(rebuildMs, 0), hashes };
 }
 
+/** Rebuilds a copy in place with incremental auto-vacuum (what a new database gets). */
+function rebuildAsIncremental(dbPath: string) {
+  const db = new DatabaseSync(dbPath);
+  const startedAt = performance.now();
+  try {
+    db.exec("PRAGMA auto_vacuum = INCREMENTAL");
+    db.exec("VACUUM");
+    db.exec("PRAGMA journal_mode = WAL");
+  } finally {
+    db.close();
+  }
+  return { rebuildMs: round(performance.now() - startedAt, 0) };
+}
+
+/** Back-to-back reclaim ticks on the compacted copy, measured like the passes above. */
+async function reclaim(dbPath: string, ticks: number) {
+  const options = {
+    ...DEFAULT_FREE_PAGE_RECLAIM_OPTIONS,
+    ...(values["reclaim-chunk-pages"] ? { chunkPages: Number(values["reclaim-chunk-pages"]) } : {}),
+  };
+  const runtime = runtimeFor(dbPath);
+  const checkpoint = () =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`PRAGMA wal_checkpoint(TRUNCATE)`;
+      }),
+    );
+  try {
+    await checkpoint();
+    const fileBytesBefore = statSync(dbPath).size;
+    const histogram = monitorEventLoopDelay({ resolution: 1 });
+    let lastBeat = performance.now();
+    let maxHeartbeatGapMs = 0;
+    const heartbeat = setInterval(() => {
+      const now = performance.now();
+      maxHeartbeatGapMs = Math.max(maxHeartbeatGapMs, now - lastBeat);
+      lastBeat = now;
+    }, 1);
+    histogram.enable();
+    const results: Array<FreePageReclaimResult & { readonly tickMs: number }> = [];
+    const startedAt = performance.now();
+    for (let tick = 0; tick < ticks; tick += 1) {
+      const tickStartedAt = performance.now();
+      const result = await runtime.runPromise(reclaimFreePages(options));
+      results.push({ ...result, tickMs: performance.now() - tickStartedAt });
+    }
+    const wallMs = performance.now() - startedAt;
+    histogram.disable();
+    clearInterval(heartbeat);
+    // Automatic checkpoints during the ticks may already have applied the smaller size.
+    const fileBytesBeforeCheckpoint = statSync(dbPath).size;
+    await checkpoint();
+    // The Storage settings report on the compacted copy: its cost and what it shows.
+    const reportMs: Array<number> = [];
+    let report: DatabaseStorageReport | undefined;
+    for (let run = 0; run < 20; run += 1) {
+      const reportStartedAt = performance.now();
+      report = await runtime.runPromise(
+        Effect.gen(function* () {
+          const config = yield* ServerConfig;
+          return yield* readDatabaseStorageReport({ compactionSetting: "on" }).pipe(
+            Effect.provideService(ServerConfig, { ...config, dbPath }),
+          );
+        }).pipe(Effect.provide(EventLogCompactionLive)),
+      );
+      reportMs.push(performance.now() - reportStartedAt);
+    }
+    const chunks = results.flatMap((result) => result.chunkDurationsMs).toSorted((a, b) => a - b);
+    return {
+      ticks,
+      autoVacuum: results[0]?.autoVacuum ?? "none",
+      options,
+      wallMs: round(wallMs, 0),
+      perTick: results.map((result) => ({
+        reclaimedPages: result.reclaimedPages,
+        freePagesBefore: result.freePagesBefore,
+        freePagesAfter: result.freePagesAfter,
+        chunks: result.chunkDurationsMs.length,
+        tickMs: round(result.tickMs),
+        maxChunkMs: round(result.maxChunkMs),
+      })),
+      reclaimedPages: results.reduce((total, result) => total + result.reclaimedPages, 0),
+      chunkMs: {
+        count: chunks.length,
+        max: round(chunks.at(-1) ?? 0),
+        p50: round(percentile(chunks, 0.5)),
+        p99: round(percentile(chunks, 0.99)),
+        mean: round(chunks.reduce((total, ms) => total + ms, 0) / Math.max(1, chunks.length)),
+      },
+      eventLoopDelayMs: {
+        max: round(histogram.max / 1e6),
+        p99: round(histogram.percentile(99) / 1e6),
+        mean: round(histogram.mean / 1e6),
+      },
+      maxHeartbeatGapMs: round(maxHeartbeatGapMs),
+      fileBytesBefore,
+      fileBytesBeforeCheckpoint,
+      fileBytesAfter: statSync(dbPath).size,
+      storageReport: {
+        ms: {
+          max: round(Math.max(...reportMs)),
+          p50: round(
+            percentile(
+              reportMs.toSorted((a, b) => a - b),
+              0.5,
+            ),
+          ),
+        },
+        report,
+      },
+    };
+  } finally {
+    await runtime.dispose();
+  }
+}
+
 function vacuumInto(dbPath: string) {
   const target = join(workDir, "vacuumed.sqlite");
   const db = new DatabaseSync(dbPath);
@@ -386,10 +523,13 @@ try {
       closeSync(fd);
     }
   }
+  const incremental = values["as-incremental"] ? rebuildAsIncremental(compacted) : undefined;
   const before = fileStats(compacted);
   const run = await compact(compacted);
   const after = fileStats(compacted);
   const vacuum = vacuumInto(compacted);
+  const reclaimTicks = Math.max(0, Math.floor(Number(values["reclaim-ticks"] ?? 0)));
+  const reclaimed = reclaimTicks > 0 ? await reclaim(compacted, reclaimTicks) : undefined;
   let replay: Record<string, unknown> | undefined;
   if (values["verify-replay"]) {
     const originalCopy = join(workDir, "rebuild-original.sqlite");
@@ -422,6 +562,8 @@ try {
         freedPages: after.freelistCount - before.freelistCount,
       },
       vacuum,
+      ...(incremental ? { asIncremental: incremental } : {}),
+      ...(reclaimed ? { reclaim: reclaimed } : {}),
       ...(replay ? { replay } : {}),
     },
     null,
