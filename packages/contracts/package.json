@@ -146,6 +146,11 @@
       "import": "./src/providerRuntime.ts",
       "require": "./src/providerRuntime.ts"
     },
+    "./pull-request-watch": {
+      "types": "./src/pullRequestWatch.ts",
+      "import": "./src/pullRequestWatch.ts",
+      "require": "./src/pullRequestWatch.ts"
+    },
     "./rpc": {
       "types": "./src/rpc.ts",
       "import": "./src/rpc.ts",

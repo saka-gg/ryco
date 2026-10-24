@@ -351,6 +351,18 @@
       "types": "./src/worktreePullRequests.ts",
       "import": "./src/worktreePullRequests.ts"
     },
+    "./changeRequestChecks": {
+      "types": "./src/changeRequestChecks.ts",
+      "import": "./src/changeRequestChecks.ts"
+    },
+    "./pullRequestWatch": {
+      "types": "./src/pullRequestWatch.ts",
+      "import": "./src/pullRequestWatch.ts"
+    },
+    "./pullRequestWatchSummary": {
+      "types": "./src/pullRequestWatchSummary.ts",
+      "import": "./src/pullRequestWatchSummary.ts"
+    },
     "./threadPriority": {
       "types": "./src/threadPriority.ts",
       "import": "./src/threadPriority.ts"
