@@ -3,6 +3,13 @@ import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
 import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
+import {
+  createQuitGuardRequester,
+  createRunningChatsQuitConfirmation,
+  createSystemShutdownNotice,
+  type QuitDialogOptions,
+} from "./quitConfirmation.ts";
+import { DESKTOP_QUIT_GUARD_IPC } from "./quitGuardChannels.ts";
 import { Duplex } from "node:stream";
 import {
   attachDesktopResourceTelemetry,
@@ -3850,6 +3857,21 @@ function forwardSystemResumeToRenderers(): void {
 }
 
 /**
+ * A system shutdown or logout (macOS, Linux) never waits for a person: quits in the next
+ * moments skip the running-chats confirmation, and an open one gives way.
+ */
+let systemShutdownWatchRegistered = false;
+function watchSystemShutdown(): void {
+  if (systemShutdownWatchRegistered) return;
+  systemShutdownWatchRegistered = true;
+  powerMonitor.on("shutdown", () => {
+    systemShutdownNotice.mark();
+    writeDesktopLogHeader("system shutdown received");
+    if (quitCleanupHandler.confirming()) app.quit();
+  });
+}
+
+/**
  * Ask every window to re-check its connections now: after a wake, or after a
  * backend crash restart, open sockets look alive but are dead.
  */
@@ -3905,6 +3927,12 @@ function registerIpcHandlers(): void {
       },
       write: (path, contents) => FS.promises.writeFile(path, contents, "utf8"),
     });
+  });
+  ipcMain.removeAllListeners(DESKTOP_QUIT_GUARD_IPC.reply);
+  ipcMain.on(DESKTOP_QUIT_GUARD_IPC.reply, (event, raw: unknown) => {
+    // Only the window that was asked, from its own document, can answer.
+    if (event.senderFrame !== event.sender.mainFrame) return;
+    quitGuardRequester.receive(event.sender, raw);
   });
   ipcMain.removeHandler("desktop:quit-shortcut-get");
   ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
@@ -5561,6 +5589,7 @@ async function bootstrap(): Promise<void> {
   await windowCaptureLoad;
   registerWindowCaptureIpc?.();
   forwardSystemResumeToRenderers();
+  watchSystemShutdown();
   desktopWorkspaceActivity.attachPower(powerMonitor);
   startDesktopKeepAwake();
   writeDesktopLogHeader("bootstrap ipc handlers registered");
@@ -5574,39 +5603,131 @@ async function bootstrap(): Promise<void> {
   ensureInitialBackendWindowOpen();
 }
 
-app.on(
-  "before-quit",
-  createQuitCleanupHandler({
-    cleanup: () => {
-      isQuitting = true;
-      discardEarlyDesktopBackend();
-      shellEnvironmentAbortController.abort();
-      computerUseRuntime?.dispose();
-      desktopWindowCapture?.dispose();
-      desktopKeepAwake?.dispose();
-      updateInstallInFlight = false;
-      remoteAppInstaller.dispose();
-      writeDesktopLogHeader("before-quit received");
-      clearUpdatePollTimer();
-      cancelBackendReadinessWait();
-      // A relaunch/update already awaits shutdown. Ordinary quit must also
-      // keep Electron alive long enough for the bounded force-stop fallback.
-      const pending = backendProcess === null ? undefined : stopBackendAndWaitForExit();
-      desktopAuthorizationBroker.cancel();
-      desktopNativeE2eeHandshakeService?.dispose();
-      disposeDesktopWorkspaceSubscription?.();
-      disposeDesktopWorkspaceSubscription = null;
-      void desktopSshEnvironmentBridge?.dispose().catch(() => undefined);
-      restoreStdIoCapture?.();
-      return Promise.resolve(pending).then(() => closeDesktopLogs());
-    },
-    quit: () => app.quit(),
-  }),
-);
+/** A shutdown or logout notice: quits in the next moments must not wait for a person. */
+const systemShutdownNotice = createSystemShutdownNotice();
+
+const quitGuardRequester = createQuitGuardRequester<Electron.WebContents>({
+  send: (contents, request) => {
+    if (contents.isDestroyed() || contents.isCrashed()) return false;
+    contents.send(DESKTOP_QUIT_GUARD_IPC.request, request);
+    return true;
+  },
+  watchGone: (contents, onGone) => {
+    if (contents.isDestroyed() || contents.isCrashed()) {
+      onGone();
+      return () => undefined;
+    }
+    const navigated = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
+      if (details.isMainFrame && !details.isSameDocument) onGone();
+    };
+    contents.once("destroyed", onGone);
+    contents.on("render-process-gone", onGone);
+    contents.on("did-start-navigation", navigated);
+    return () => {
+      contents.off("destroyed", onGone);
+      contents.off("render-process-gone", onGone);
+      contents.off("did-start-navigation", navigated);
+    };
+  },
+});
+
+/** The app window whose renderer can answer: shell reported usable, not crashed or destroyed. */
+function findQuitGuardWindow(): { window: BrowserWindow; contents: Electron.WebContents } | null {
+  const candidates = [
+    BrowserWindow.getFocusedWindow(),
+    mainWindow,
+    ...BrowserWindow.getAllWindows(),
+  ];
+  for (const window of candidates) {
+    if (!window || window.isDestroyed()) continue;
+    const contents = window.webContents;
+    if (contents.isDestroyed() || contents.isCrashed() || !appShellUsableContents.has(contents)) {
+      continue;
+    }
+    return { window, contents };
+  }
+  return null;
+}
+
+function logQuitConfirmation(line: string): void {
+  writeDesktopLogHeader(line);
+  // Only packaged builds keep a desktop log file.
+  if (!app.isPackaged) console.info(`[desktop-quit] ${line}`);
+}
+
+async function showQuitConfirmationDialog(
+  window: BrowserWindow,
+  options: QuitDialogOptions,
+  signal: AbortSignal,
+): Promise<{ response: number; checkboxChecked: boolean }> {
+  // Windows ends a session without a before-quit: an open dialog must not hold it.
+  const onSessionEnd = () => {
+    systemShutdownNotice.mark();
+    logQuitConfirmation("system session end received");
+    app.quit();
+  };
+  if (process.platform === "win32") window.once("query-session-end", onSessionEnd);
+  try {
+    return await dialog.showMessageBox(window, {
+      ...options,
+      buttons: [...options.buttons],
+      signal,
+    });
+  } finally {
+    window.off("query-session-end", onSessionEnd);
+  }
+}
+
+const quitConfirmation = createRunningChatsQuitConfirmation({
+  // Quitting stops chats only on a backend this process owns.
+  findTarget: () => (backendProcess === null ? null : findQuitGuardWindow()),
+  requester: quitGuardRequester,
+  showDialog: showQuitConfirmationDialog,
+  reveal: revealWindow,
+  appName: APP_DISPLAY_NAME,
+  log: logQuitConfirmation,
+});
+
+const quitCleanupHandler = createQuitCleanupHandler({
+  confirm: quitConfirmation.confirm,
+  mustQuitNow: () => isQuitting || updateInstallInFlight || systemShutdownNotice.active(),
+  onAbsorbed: quitConfirmation.revealDialog,
+  onConfirmError: (error) =>
+    logQuitConfirmation(
+      `quit confirmation: failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+    ),
+  cleanup: () => {
+    isQuitting = true;
+    discardEarlyDesktopBackend();
+    shellEnvironmentAbortController.abort();
+    computerUseRuntime?.dispose();
+    desktopWindowCapture?.dispose();
+    desktopKeepAwake?.dispose();
+    updateInstallInFlight = false;
+    remoteAppInstaller.dispose();
+    writeDesktopLogHeader("before-quit received");
+    clearUpdatePollTimer();
+    cancelBackendReadinessWait();
+    // A relaunch/update already awaits shutdown. Ordinary quit must also
+    // keep Electron alive long enough for the bounded force-stop fallback.
+    const pending = backendProcess === null ? undefined : stopBackendAndWaitForExit();
+    desktopAuthorizationBroker.cancel();
+    desktopNativeE2eeHandshakeService?.dispose();
+    disposeDesktopWorkspaceSubscription?.();
+    disposeDesktopWorkspaceSubscription = null;
+    void desktopSshEnvironmentBridge?.dispose().catch(() => undefined);
+    restoreStdIoCapture?.();
+    return Promise.resolve(pending).then(() => closeDesktopLogs());
+  },
+  quit: () => app.quit(),
+});
+
+app.on("before-quit", quitCleanupHandler);
 
 app
   .whenReady()
   .then(() => {
+    handleTerminationSignals();
     if (isDesktopAuthorizationCallbackRelay) {
       setTimeout(() => app.exit(0), 5_000).unref();
       return;
@@ -5642,7 +5763,18 @@ app.on("child-process-gone", (_event, details) => {
   );
 });
 
-if (process.platform !== "win32") {
+/**
+ * A termination signal quits without asking anyone. Registered once Electron is ready:
+ * Electron's own shutdown-signal handler, installed while it starts, replaces any handler
+ * installed before and quits through `before-quit` as if a person had asked, so these never
+ * ran and a signal could open the running-chats confirmation. A signal before `ready` takes
+ * Electron's quit path (or, in the first moments, the default exit, and the backend follows
+ * its parent out); no confirmation can open then, as no backend child or usable window exists.
+ */
+let terminationSignalsHandled = false;
+function handleTerminationSignals(): void {
+  if (terminationSignalsHandled || process.platform === "win32") return;
+  terminationSignalsHandled = true;
   process.on("SIGINT", () => {
     if (isQuitting) return;
     isQuitting = true;

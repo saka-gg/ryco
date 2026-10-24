@@ -761,6 +761,46 @@ export type DesktopHubOriginValidation =
 
 export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
 
+/**
+ * What a chat that quitting would stop is doing. Only `working` chats can be continued after a
+ * restart: chats waiting for a person are never continued.
+ */
+export type DesktopQuitRunningChatStatus = "working" | "approval" | "input" | "connecting";
+
+/** A chat on this desktop's own backend that quitting Ryco would stop. */
+export interface DesktopQuitRunningChat {
+  readonly threadId: string;
+  readonly title: string;
+  readonly status: DesktopQuitRunningChatStatus;
+}
+
+/**
+ * The renderer's answer to "which chats would quitting stop?". `unknown` while this desktop's
+ * environment is not known or has no live snapshot (cached or held-over rows show nothing running).
+ */
+export type DesktopQuitRunningChatsReport =
+  | { readonly status: "unknown" }
+  | {
+      readonly status: "known";
+      /** Every running chat on this desktop's backend; `chats` lists at most 8 of them. */
+      readonly runningCount: number;
+      /** Running chats that are `working`, the only ones a restart can continue. */
+      readonly resumableCount: number;
+      /** Most recently started first. */
+      readonly chats: ReadonlyArray<DesktopQuitRunningChat>;
+      /** Running chats on other nodes; quitting does not stop them. */
+      readonly otherNodesRunningCount: number;
+      /** The node's `continueThreadsAfterRestart`, `null` while its settings are not loaded. */
+      readonly continueThreadsAfterRestart: boolean | null;
+    };
+
+/** Answers Desktop main's questions before a quit. One per window; the last registration wins. */
+export interface DesktopQuitGuardResponder {
+  readonly runningChats: () => DesktopQuitRunningChatsReport;
+  /** Persist the node's `continueThreadsAfterRestart`; resolves once the node saved it. */
+  readonly setContinueAfterRestart: (enabled: boolean) => Promise<void>;
+}
+
 export interface DesktopThreadExportInput {
   readonly filename: string;
   readonly contents: string;
@@ -781,6 +821,13 @@ export interface DesktopBridge {
     getMode(): Promise<DesktopQuitShortcutMode>;
     setMode(mode: DesktopQuitShortcutMode): Promise<void>;
     onFeedback(listener: (state: "press-twice" | "hold" | null) => void): () => void;
+  };
+  /**
+   * Lets Desktop main ask this window, before a quit, which chats quitting would stop. Absent on
+   * hosts that predate the quit confirmation. Returns the unregister function.
+   */
+  quitGuard?: {
+    register(responder: DesktopQuitGuardResponder): () => void;
   };
   browser?: {
     getState(): Promise<ProjectBrowserState>;
