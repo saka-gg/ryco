@@ -1,10 +1,9 @@
-import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import { useEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
 import { useConnectionRegistry } from "../providers/ConnectionRegistryProvider";
-import { useWsConnectionOpenedCount } from "../rpc/wsConnectionState";
+import { useWsConnectionStatusesForEnvironments } from "../rpc/wsConnectionState";
 import { useEnvironmentServerConfigs } from "../state/environmentServerConfigs";
 import { usePreferences } from "../state/preferencesStore";
 import { selectSidebarThreadsAcrossEnvironments, useStore } from "../state/threadsRuntime";
@@ -19,7 +18,6 @@ import {
 export function ThreadPriorityRefreshBridge() {
   const { driver } = useConnectionRegistry();
   const [connections, setConnections] = useState(() => driver.supervisor.list());
-  const connectionOpenedCount = useWsConnectionOpenedCount();
   const configs = useEnvironmentServerConfigs();
   const preferences = usePreferences();
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
@@ -32,24 +30,36 @@ export function ThreadPriorityRefreshBridge() {
     [driver],
   );
 
-  const environments = useMemo(() => {
-    void connectionOpenedCount;
-    return connections.map((connection) => {
-      const status = getWsConnectionStatusForEnvironment(connection.environmentId);
-      return {
-        environmentId: connection.environmentId,
-        generation: status.attemptCount,
-        connected: status.phase === "connected",
-        supported:
-          configs.get(connection.environmentId)?.environment.capabilities.threadPriorityRanking ===
-          true,
-      };
-    });
-  }, [configs, connectionOpenedCount, connections]);
+  // Each connection's own socket, subscribed, so a socket that reopens or drops
+  // without the connection list changing still reaches the coordinator. (A
+  // `void openedCount` version key here was dropped by React Compiler, which
+  // keys a memo on what its callback reads.)
+  const statuses = useWsConnectionStatusesForEnvironments(
+    connections.map((connection) => connection.environmentId),
+  );
+  const environments = useMemo(
+    () =>
+      connections.map((connection) => {
+        const status = statuses.get(connection.environmentId);
+        return {
+          environmentId: connection.environmentId,
+          generation: status?.attemptCount ?? 0,
+          connected: status?.phase === "connected",
+          supported:
+            configs.get(connection.environmentId)?.environment.capabilities
+              .threadPriorityRanking === true,
+        };
+      }),
+    [configs, connections, statuses],
+  );
 
+  // `environments` is rebuilt on every status write of a listed socket (retry
+  // timers, errors, online flips); the coordinator only hears about the ones
+  // that change what it decides on.
   useEffect(() => {
-    setMobileThreadPriorityRefreshEnvironments(environments);
-    void notifyMobileThreadPriorityEnvironmentsChanged();
+    if (setMobileThreadPriorityRefreshEnvironments(environments)) {
+      void notifyMobileThreadPriorityEnvironmentsChanged();
+    }
   }, [environments]);
 
   useEffect(() => {

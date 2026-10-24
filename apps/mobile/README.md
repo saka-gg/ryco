@@ -143,6 +143,47 @@ the medians. A turn that has not ended `--turn-timeout` seconds after the window
 stops the measurement: the CLI cannot stop it, and the app re-renders for every
 thread, so later windows would record its stream as well.
 
+## React Compiler
+
+`experiments.reactCompiler` in `app.config.ts` turns on babel-preset-expo's React
+Compiler pass, and `babel.config.js` scopes it to every file under `src`. It stays
+off for `packages/client-runtime` (consumed as source, shared with the web app) and
+for `modules/*`. Development and release builds, iOS and Android, compile the same
+set of functions.
+
+A function the compiler cannot model still ships, just uncompiled: a release build
+never fails on it. `src/perf/reactCompilerCoverage.test.ts` makes that visible. It
+compiles every source file the way a release build does and fails on:
+
+- **a new bailout**, a function that is not in its `KNOWN_BAILOUTS` list. Fix the
+  function, or, if it cannot be fixed now, list it with the reason. The failure
+  prints the current list, ready to paste.
+- **a stale entry**, a listed function that compiles now. Delete the entry (and that
+  function's manual `useMemo`/`useCallback`/`memo`) in the change that fixed it.
+- **a cached store read**: `readEnvironmentApi`, `getWsConnectionStatusForEnvironment`,
+  `catalog.getRuntime`, `catalog.hasHydrated` and similar calls inside a compiled memo
+  scope, including inside an array callback the scope runs. The compiler re-runs a
+  scope only when its inputs change, so the read goes stale: a node that dropped keeps
+  showing "connected". Subscribe instead (`useEnvironmentApi`, `useEnvironmentsWithApi`,
+  `useWsConnectionStatusesForEnvironments`, `useSavedEnvironmentSnapshots`, or
+  `useSyncExternalStore`). The check sees the calls written in a compiled function and
+  in the callbacks it runs, not a read inside a helper it calls: keep such helpers pure
+  and pass the subscribed snapshot in, as `wsUiStateForEnvironment(status)` does.
+- **a memo dependency the callback never reads**, and **`void x;` statements** in a
+  component, hook or memo callback. The compiler keys a memo on what its body reads
+  and deletes `void x;`, so a "version key" listed only to force a recompute is
+  dropped. Read the value itself, or subscribe to a snapshot that changes with it.
+
+The usual rewrites for a bailout: move `try/finally` out of the component with
+`runWhileBusy` or `runThenSettle` (`src/lib/runWhileBusy.ts`); read refs in effects
+and handlers, not while rendering; subscribe to a store instead of reading it in
+render. A deliberate opt-out is a `"use no memo"` directive at the top of the function
+plus a `KNOWN_BAILOUTS` entry that says why. Do not exclude files in
+`babel.config.js`.
+
+After changing `babel.config.js`, restart Metro: it keeps the Babel config it started
+with (the transform cache is keyed on the config, so no `--clear` is needed).
+
 ## Relay E2EE runtime acceptance (owner, on a physical device)
 
 The relay E2EE protocol (`docs/relay-e2ee-protocol.md`) puts three requirements
