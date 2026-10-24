@@ -87,6 +87,7 @@ import {
   type AzureDevOpsPullRequest,
   type NormalizedAzureDevOpsPullRequestRecord,
 } from "./azureDevOpsPullRequests.ts";
+import { forgeFailureFields } from "./forgeHttpRateLimit.ts";
 import { INTERNAL_PATCH_DIFF_ARGS } from "../vcs/GitVcsDriver.ts";
 
 export const AZURE_DEVOPS_DIFF_MAX_BYTES = 8 * 1024 * 1024;
@@ -266,7 +267,16 @@ export function makeAzureDevOpsPullRequestOperations(azure: AzureDevOpsCliShape)
   const executeJson = (cwd: string, operation: string, args: ReadonlyArray<string>) =>
     azure.execute({ cwd, args: [...args, "--only-show-errors", "--output", "json"] }).pipe(
       Effect.map((output) => output.stdout.trim()),
-      Effect.mapError((error) => cliError(operation, error.detail, error)),
+      // Keep the kind az's failure was read as, so a throttled read still reports a rate limit.
+      Effect.mapError(
+        (error) =>
+          new AzureDevOpsCliError({
+            operation,
+            detail: error.detail,
+            ...forgeFailureFields(error),
+            cause: error,
+          }),
+      ),
     );
 
   const readPullRequest = (cwd: string, reference: string) =>

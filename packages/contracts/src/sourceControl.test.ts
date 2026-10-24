@@ -17,6 +17,7 @@ import {
   SourceControlCreateIssueInput,
   SourceControlWorkflowRunListInput,
   SourceControlWorkflowRerunInput,
+  SourceControlProviderError,
 } from "./sourceControl.ts";
 
 const standaloneChangeRequest = {
@@ -451,6 +452,80 @@ describe("SourceControlWorkflowRerunInput", () => {
       jobId: "456",
     });
     expect(() => decode({ cwd: "/repo", runId: "123", target: "job" })).toThrow();
+  });
+});
+
+describe("SourceControlProviderError", () => {
+  const encode = Schema.encodeUnknownSync(SourceControlProviderError);
+  const decode = Schema.decodeUnknownSync(SourceControlProviderError);
+  const wire = (error: SourceControlProviderError) => JSON.parse(JSON.stringify(encode(error)));
+
+  it("round-trips the reason and retry time", () => {
+    const decoded = decode(
+      wire(
+        new SourceControlProviderError({
+          provider: "github",
+          operation: "listChangeRequests",
+          detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+          reason: "rate-limited",
+          retryAt: 1_000_000_600_000,
+        }),
+      ),
+    );
+    expect(decoded.reason).toBe("rate-limited");
+    expect(decoded.retryAt).toBe(1_000_000_600_000);
+    // The message stays the same, so older substring readers keep working.
+    expect(decoded.message).toBe(
+      "Source control provider github failed in listChangeRequests: GitHub API rate limit exceeded. Wait for the reset window and retry.",
+    );
+  });
+
+  it("decodes errors from servers that send neither field", () => {
+    const decoded = decode({
+      _tag: "SourceControlProviderError",
+      provider: "gitlab",
+      operation: "getChangeRequest",
+      detail: "Merge request not found.",
+    });
+    expect(decoded.reason).toBeUndefined();
+    expect(decoded.retryAt).toBeUndefined();
+  });
+
+  it("is still read by clients that predate the fields", () => {
+    class OlderSourceControlProviderError extends Schema.TaggedError<OlderSourceControlProviderError>()(
+      "SourceControlProviderError",
+      {
+        provider: Schema.String,
+        operation: Schema.String,
+        detail: Schema.String,
+        cause: Schema.optional(Schema.Defect()),
+      },
+    ) {}
+    const decoded = Schema.decodeUnknownSync(OlderSourceControlProviderError)(
+      wire(
+        new SourceControlProviderError({
+          provider: "bitbucket",
+          operation: "listChangeRequests",
+          detail: "Bitbucket is rate limiting requests (HTTP 429).",
+          reason: "rate-limited",
+          retryAt: 1_000_000_030_000,
+        }),
+      ),
+    );
+    expect(decoded.detail).toBe("Bitbucket is rate limiting requests (HTTP 429).");
+  });
+
+  it("keeps the reason a closed set and the retry time a whole epoch ms", () => {
+    const base = {
+      _tag: "SourceControlProviderError",
+      provider: "github",
+      operation: "listChangeRequests",
+      detail: "x",
+    };
+    // A kind added later must map to "failed": older clients cannot decode a new literal.
+    expect(() => decode({ ...base, reason: "quota-reserved" })).toThrow();
+    expect(() => decode({ ...base, retryAt: 1.5 })).toThrow();
+    expect(() => decode({ ...base, retryAt: -1 })).toThrow();
   });
 });
 

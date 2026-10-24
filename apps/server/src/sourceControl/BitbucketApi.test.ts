@@ -1,9 +1,10 @@
 import { assert, it } from "@effect/vitest";
-import { DateTime, Effect, FileSystem, Option } from "effect";
+import { Clock, DateTime, Effect, FileSystem, Option } from "effect";
 import { AtlassianConnectionId } from "@ryco/contracts";
 
 import * as BitbucketApi from "./BitbucketApi.ts";
 import { makeLayer } from "./bitbucketApiTestLayer.ts";
+import * as BitbucketSourceControlProvider from "./BitbucketSourceControlProvider.ts";
 import type { AtlassianConnectionRecord } from "../persistence/Services/AtlassianConnections.ts";
 import { manualBitbucketTokenSecretName } from "../atlassian/AtlassianConnectionService.ts";
 
@@ -1189,3 +1190,56 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect("types a 429 with Retry-After as a rate limit up to the provider error", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json(
+        { type: "error", error: { message: "Rate limit for this resource has been exceeded" } },
+        { status: 429, headers: { "Retry-After": "30" } },
+      ),
+  });
+
+  return Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const bitbucket = yield* BitbucketApi.BitbucketApi;
+    const apiError = yield* bitbucket
+      .listPullRequests({ cwd: "/repo", headSelector: "feature", state: "open" })
+      .pipe(Effect.flip);
+    assert.strictEqual(apiError.status, 429);
+    assert.strictEqual(apiError.failureKind, "rate-limited");
+    assert.strictEqual(apiError.retryAt, now + 30_000);
+    assert.strictEqual(apiError.detail, "Bitbucket is rate limiting requests (HTTP 429).");
+
+    const provider = yield* BitbucketSourceControlProvider.make();
+    const error = yield* provider
+      .listChangeRequests({ cwd: "/repo", headSelector: "feature", state: "open" })
+      .pipe(Effect.flip);
+    assert.strictEqual(error._tag, "SourceControlProviderError");
+    assert.strictEqual(error.reason, "rate-limited");
+    assert.strictEqual(error.retryAt, now + 30_000);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("types a 404 as not found and leaves other failures unclassified", () => {
+  const { layer } = makeLayer({
+    response: (request) =>
+      request.url.endsWith("/pullrequests/404")
+        ? Response.json({ error: { message: "Not found" } }, { status: 404 })
+        : Response.json({ error: { message: "Oops" } }, { status: 500 }),
+  });
+
+  return Effect.gen(function* () {
+    const provider = yield* BitbucketSourceControlProvider.make();
+    const notFound = yield* provider
+      .getChangeRequest({ cwd: "/repo", reference: "404" })
+      .pipe(Effect.flip);
+    assert.strictEqual(notFound.reason, "not-found");
+    assert.strictEqual(notFound.retryAt, undefined);
+    const failed = yield* provider
+      .getChangeRequest({ cwd: "/repo", reference: "500" })
+      .pipe(Effect.flip);
+    assert.strictEqual(failed.reason, undefined);
+    assert.ok(failed.detail.startsWith("Bitbucket returned HTTP 500"));
+  }).pipe(Effect.provide(layer));
+});

@@ -11,6 +11,7 @@ import {
 import * as BitbucketApi from "./BitbucketApi.ts";
 import * as BitbucketIssues from "./bitbucketIssues.ts";
 import * as BitbucketPullRequests from "./bitbucketPullRequests.ts";
+import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import { makeBitbucketDiscovery } from "./SourceControlProviderDiscoveryCatalog.ts";
 
@@ -18,12 +19,7 @@ function providerError(
   operation: string,
   cause: BitbucketApi.BitbucketApiError,
 ): SourceControlProviderError {
-  return new SourceControlProviderError({
-    provider: "bitbucket",
-    operation,
-    detail: cause.detail,
-    cause,
-  });
+  return sourceControlProviderErrorFrom("bitbucket", operation, cause);
 }
 
 function toChangeRequest(

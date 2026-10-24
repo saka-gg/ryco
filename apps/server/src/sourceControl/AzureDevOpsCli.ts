@@ -1,11 +1,14 @@
 import { Context, Effect, FileSystem, Layer, Result, Schema, SchemaIssue } from "effect";
 import {
+  SourceControlProviderErrorReason,
   TrimmedNonEmptyString,
   type SourceControlRepositoryVisibility,
   type VcsError,
 } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { classifyForgeFailure, type ForgeFailureKind } from "./forgeFailure.ts";
+import { forgeFailureFields } from "./forgeHttpRateLimit.ts";
 import * as AzureDevOpsPullRequests from "./azureDevOpsPullRequests.ts";
 import * as AzureDevOpsWorkItems from "./azureDevOpsWorkItems.ts";
 import type {
@@ -28,6 +31,10 @@ export class AzureDevOpsCliError extends Schema.TaggedError<AzureDevOpsCliError>
   {
     operation: Schema.String,
     detail: Schema.String,
+    /** Why Azure DevOps refused, read from what az said (never the command line). */
+    failureKind: Schema.optional(SourceControlProviderErrorReason),
+    /** Epoch ms Azure DevOps named for the retry, with failureKind "rate-limited". */
+    retryAt: Schema.optional(Schema.Number),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -196,52 +203,90 @@ function errorText(error: VcsError | unknown): string {
   return String(error);
 }
 
+function mentionsMissingAz(lower: string): boolean {
+  return lower.includes("command not found: az") || lower.includes("enoent");
+}
+
+const AZ_SIGN_IN_PHRASES = [
+  "az devops login",
+  "please run az login",
+  "not logged in",
+  "authentication failed",
+];
+/** "Unauthorized" as a word of its own, not inside a repository or branch name (`unauthorized-api`). */
+const AZ_UNAUTHORIZED_WORD = /(?:^|[^\w./-])unauthorized(?:$|[^\w./-])/u;
+
+/** The detail rule, unchanged: any "unauthorized" counts. */
+function mentionsAzSignIn(lower: string): boolean {
+  return azSaysSignInRequired(lower) || lower.includes("unauthorized");
+}
+
+/** Sign-in failures as az words them, for the typed kind; az echoes repository and branch names. */
+function azSaysSignInRequired(lower: string): boolean {
+  return (
+    AZ_SIGN_IN_PHRASES.some((phrase) => lower.includes(phrase)) || AZ_UNAUTHORIZED_WORD.test(lower)
+  );
+}
+
+function mentionsMissingPullRequest(lower: string): boolean {
+  return (
+    lower.includes("pull request") &&
+    (lower.includes("not found") || lower.includes("does not exist"))
+  );
+}
+
+/**
+ * Turns a failed `az` call into an `AzureDevOpsCliError`. Detail strings match
+ * on the whole error text, as before; it holds the command line and cwd, so
+ * `failureKind` comes only from what az said (`forgeFailureText`).
+ */
 function normalizeAzureDevOpsCliError(
   operation: "execute",
   error: VcsError | unknown,
 ): AzureDevOpsCliError {
   const text = errorText(error);
   const lower = text.toLowerCase();
-
-  if (lower.includes("command not found: az") || lower.includes("enoent")) {
-    return new AzureDevOpsCliError({
+  const forge = classifyForgeFailure(error);
+  const { kindIf } = forge;
+  const fail = (detail: string, failureKind?: ForgeFailureKind) =>
+    new AzureDevOpsCliError({
       operation,
-      detail:
-        "Azure CLI (`az`) with the Azure DevOps extension is required but not available on PATH.",
+      detail,
+      ...forgeFailureFields({ failureKind }),
       cause: error,
     });
+
+  // Before the sign-in rule: a throttled request must not read as "not authenticated".
+  if (forge.rateLimited) {
+    return fail(
+      "Azure DevOps is rate limiting requests. Ryco tries again shortly.",
+      "rate-limited",
+    );
   }
 
-  if (
-    lower.includes("az devops login") ||
-    lower.includes("please run az login") ||
-    lower.includes("not logged in") ||
-    lower.includes("authentication failed") ||
-    lower.includes("unauthorized")
-  ) {
-    return new AzureDevOpsCliError({
-      operation,
-      detail: "Azure DevOps CLI is not authenticated. Run `az devops login` and retry.",
-      cause: error,
-    });
+  const missingTool = forge.missingToolIf(mentionsMissingAz);
+  if (missingTool !== undefined || mentionsMissingAz(lower)) {
+    return fail(
+      "Azure CLI (`az`) with the Azure DevOps extension is required but not available on PATH.",
+      missingTool,
+    );
   }
 
-  if (
-    lower.includes("pull request") &&
-    (lower.includes("not found") || lower.includes("does not exist"))
-  ) {
-    return new AzureDevOpsCliError({
-      operation,
-      detail: "Pull request not found. Check the PR number or URL and try again.",
-      cause: error,
-    });
+  if (mentionsAzSignIn(lower)) {
+    return fail(
+      "Azure DevOps CLI is not authenticated. Run `az devops login` and retry.",
+      kindIf("unauthenticated", azSaysSignInRequired),
+    );
   }
 
-  return new AzureDevOpsCliError({
-    operation,
-    detail: text,
-    cause: error,
-  });
+  if (mentionsMissingPullRequest(lower)) {
+    return fail(
+      "Pull request not found. Check the PR number or URL and try again.",
+      kindIf("not-found", mentionsMissingPullRequest),
+    );
+  }
+
+  return fail(text);
 }
 
 function normalizeChangeRequestId(reference: string): string {
@@ -398,6 +443,7 @@ export const make = Effect.fn("makeAzureDevOpsCli")(function* () {
           new AzureDevOpsCliError({
             operation: input.operation,
             detail: error.detail,
+            ...forgeFailureFields(error),
             cause: error,
           }),
       ),
