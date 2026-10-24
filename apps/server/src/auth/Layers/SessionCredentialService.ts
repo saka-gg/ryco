@@ -25,7 +25,9 @@ import {
   base64UrlDecodeUtf8,
   base64UrlEncode,
   resolveLegacySessionCookieNames,
+  resolveSessionCookieMaxAge,
   resolveSessionCookieName,
+  resolveSessionCookieScope,
   signPayload,
   timingSafeEqualBase64Url,
 } from "../utils.ts";
@@ -158,14 +160,11 @@ export const makeSessionCredentialService = Effect.gen(function* () {
   const rotationLock = yield* Semaphore.make(1);
   const wsReconnectEligibleSessionsRef = yield* Ref.make(new Set<string>());
   const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
-  const cookieName = resolveSessionCookieName({
-    mode: serverConfig.mode,
-    port: serverConfig.port,
-  });
-  const legacyCookieNames = resolveLegacySessionCookieNames({
-    mode: serverConfig.mode,
-    port: serverConfig.port,
-  });
+  const cookieScope = resolveSessionCookieScope(serverConfig);
+  const cookieName = resolveSessionCookieName(cookieScope);
+  const legacyCookieNames = resolveLegacySessionCookieNames(cookieScope);
+  // A browser cookie lives as long as its session (http.ts), so this caps both.
+  const cookieSessionMaxAge = resolveSessionCookieMaxAge(cookieScope);
 
   const toSessionCredentialError = (message: string) => (cause: unknown) =>
     new SessionCredentialError({
@@ -345,7 +344,12 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     Effect.gen(function* () {
       const sessionId = AuthSessionId.make(crypto.randomUUID());
       const issuedAt = yield* DateTime.now;
-      const ttl = input?.ttl ?? DEFAULT_SESSION_TTL;
+      const requestedTtl = input?.ttl ?? DEFAULT_SESSION_TTL;
+      const ttl =
+        (input?.method ?? "browser-session-cookie") === "browser-session-cookie" &&
+        cookieSessionMaxAge !== undefined
+          ? Duration.min(requestedTtl, cookieSessionMaxAge)
+          : requestedTtl;
       const expiresAt = DateTime.add(issuedAt, {
         milliseconds:
           input?.link === undefined

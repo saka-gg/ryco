@@ -268,6 +268,51 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
     }).pipe(Effect.provide(makeServerAuthLayer())),
   );
 
+  it.effect("keeps dev servers with separate homes signed in side by side in one browser", () => {
+    const devUrl = new URL("http://localhost:5750");
+    const cookieRequest = (cookies: Record<string, string>) =>
+      ({ cookies, headers: {} }) as unknown as Parameters<
+        ServerAuthShape["authenticateHttpRequest"]
+      >[0];
+    const pairInBrowser = Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairing = yield* serverAuth.issuePairingCredential();
+      const { sessionToken } = yield* serverAuth.exchangeBootstrapCredential(
+        pairing.credential,
+        requestMetadata,
+      );
+      const state = yield* serverAuth.getSessionState(cookieRequest({}));
+      return {
+        cookieName: state.auth.sessionCookieName,
+        sessionToken,
+        authenticate: (cookies: Record<string, string>) =>
+          serverAuth.authenticateHttpRequest(cookieRequest(cookies)),
+      };
+    });
+    // Fresh layers: two servers with their own homes, not one server's memoized services.
+    return Effect.gen(function* () {
+      const first = yield* pairInBrowser;
+      yield* Effect.gen(function* () {
+        const second = yield* pairInBrowser;
+        // Cookies are per host, not per port: one jar holds both, plus a server's that uses
+        // the shared name.
+        expect(second.cookieName).not.toBe(first.cookieName);
+        const jar = {
+          ryco_session: second.sessionToken,
+          [first.cookieName]: first.sessionToken,
+          [second.cookieName]: second.sessionToken,
+        };
+        expect((yield* first.authenticate(jar)).role).toBe("client");
+        expect((yield* second.authenticate(jar)).role).toBe("client");
+        // A worktree home never reads the shared name, which another key signed.
+        const foreignOnly = yield* Effect.flip(
+          first.authenticate({ ryco_session: second.sessionToken }),
+        );
+        expect(foreignOnly.status).toBe(401);
+      }).pipe(Effect.provide(Layer.fresh(makeServerAuthLayer({ devUrl, port: 14020 }))));
+    }).pipe(Effect.provide(Layer.fresh(makeServerAuthLayer({ devUrl, port: 13790 }))));
+  });
+
   it.effect("issues startup pairing URLs that bootstrap owner sessions", () =>
     Effect.gen(function* () {
       const serverAuth = yield* ServerAuth;
