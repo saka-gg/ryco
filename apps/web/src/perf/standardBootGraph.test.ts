@@ -289,6 +289,24 @@ describe("standard build static import graph", () => {
     ).toEqual([]);
   });
 
+  it("loads the missed-runs notice's words with the first notice", () => {
+    // They share the Automations dialog's schedule vocabulary, which the shell
+    // otherwise loads only with the dialog. This walk follows every re-export
+    // of the agent control barrel, so it cannot tell whether the badge reaches
+    // the schedule rows; the bundle budget's RootAppShell rules check that on
+    // the build.
+    expect(
+      forbiddenChains("components/RootAppShell.tsx", [
+        /^apps\/web\/src\/components\/automations\/(?:dialog\/|missedRunsNotice\.logic\.ts$)/u,
+      ]),
+    ).toEqual([]);
+    expect(
+      parseImports(
+        path.join(srcRoot, "components/automations/MissedAutomationRunsNotice.tsx"),
+      ).dynamicImports.map(display),
+    ).toContain("apps/web/src/components/automations/missedRunsNotice.logic.ts");
+  });
+
   it("keeps the diff renderer out of the pull requests page until the Files tab", () => {
     expect(
       forbiddenChains("components/pullRequests/PullRequestsPage.tsx", [
