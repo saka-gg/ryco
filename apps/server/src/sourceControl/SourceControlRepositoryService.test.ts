@@ -1,6 +1,9 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import nodePath from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
 import { GitCommandError, type SourceControlProviderError } from "@ryco/contracts";
@@ -8,6 +11,7 @@ import { GitCommandError, type SourceControlProviderError } from "@ryco/contract
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
+import { CLONE_CONCURRENCY } from "./gitCloneRun.ts";
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
@@ -64,6 +68,32 @@ function processOutput(): GitVcsDriver.ExecuteGitResult {
     stderrTruncated: false,
   };
 }
+
+/** git clones into a hidden staging sibling of the destination, then moves it into place. */
+const STAGING_NAME = (name: string) =>
+  new RegExp(`^\\.${name}\\.ryco-clone-[0-9a-f]{6}-\\d+-[0-9a-f-]{36}$`, "u");
+
+function assertCloneArgs(args: ReadonlyArray<string> | undefined, url: string, name: string) {
+  assert.deepStrictEqual(args?.slice(0, 4), ["clone", "--progress", "--", url]);
+  assert.match(args?.[4] ?? "", STAGING_NAME(name));
+}
+
+/** Waits (real time) until `condition` holds; clone fibers do real filesystem work first. */
+const waitUntil = (condition: () => boolean) =>
+  Effect.promise(async () => {
+    for (let attempt = 0; attempt < 500 && !condition(); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (!condition()) throw new Error("condition not reached");
+  });
+
+/** Writes what a fetched repository looks like into the clone target, as git would. */
+const writeClonedRepository = (input: GitVcsDriver.ExecuteGitInput) =>
+  Effect.promise(async () => {
+    const target = nodePath.join(input.cwd, input.args.at(-1)!);
+    await mkdir(nodePath.join(target, ".git"), { recursive: true });
+    await writeFile(nodePath.join(target, ".git", "HEAD"), "ref: refs/heads/main\n");
+  });
 
 function makeLayer(input: {
   readonly provider?: SourceControlProvider.SourceControlProviderShape;
@@ -198,12 +228,11 @@ it.effect("clones a looked-up repository into the requested destination", () =>
         remoteUrl: CLONE_URLS.url,
         repository: { provider: "github", ...CLONE_URLS },
       });
-      assert.deepStrictEqual(cloneCalls, [
-        {
-          cwd: parent,
-          args: ["clone", "--", CLONE_URLS.url, "ryco"],
-        },
-      ]);
+      assert.strictEqual(cloneCalls.length, 1);
+      assert.strictEqual(cloneCalls[0]?.cwd, parent);
+      assertCloneArgs(cloneCalls[0]?.args, CLONE_URLS.url, "ryco");
+      assert.isTrue(yield* fs.exists(destinationPath));
+      assert.deepStrictEqual(yield* fs.readDirectory(parent), ["ryco"]);
     }).pipe(
       Effect.provide(
         makeLayer({
@@ -217,6 +246,283 @@ it.effect("clones a looked-up repository into the requested destination", () =>
         }),
       ),
     );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a clone that fails part-way leaves nothing at the destination", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-clone-parent-",
+    });
+    const destinationPath = `${parent}/ryco`;
+
+    const error = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service
+        .cloneRepository({ remoteUrl: CLONE_URLS.url, destinationPath })
+        .pipe(Effect.flip);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) =>
+              Effect.promise(async () => {
+                const pack = nodePath.join(input.cwd, input.args.at(-1)!, "objects", "pack");
+                await mkdir(pack, { recursive: true });
+                await writeFile(nodePath.join(pack, "partial.pack"), "partial");
+              }).pipe(
+                Effect.andThen(input.progress?.onStderrLine?.("fatal: early EOF") ?? Effect.void),
+                Effect.andThen(
+                  Effect.fail(
+                    new GitCommandError({
+                      operation: input.operation,
+                      command: "git clone",
+                      cwd: input.cwd,
+                      detail: "git clone failed: fatal: early EOF",
+                    }),
+                  ),
+                ),
+              ),
+          },
+        }),
+      ),
+    );
+
+    assert.strictEqual(error._tag, "SourceControlRepositoryError");
+    assert.match(error.detail, /early EOF/);
+    assert.isFalse(yield* fs.exists(destinationPath));
+    assert.deepStrictEqual(yield* fs.readDirectory(parent), []);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("does not cut a clone off after two minutes", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-clone-parent-",
+    });
+    const timeouts: Array<number | undefined> = [];
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      yield* service.cloneRepository({ remoteUrl: CLONE_URLS.url, destinationPath: `${parent}/r` });
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) =>
+              Effect.sync(() => {
+                timeouts.push(input.timeoutMs);
+                return processOutput();
+              }),
+          },
+        }),
+      ),
+    );
+
+    assert.deepStrictEqual(timeouts, [Number.POSITIVE_INFINITY]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("runs at most CLONE_CONCURRENCY clones at once", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-clone-parent-",
+    });
+    const releases: Array<Deferred.Deferred<void>> = [];
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const clones = yield* Effect.forEach([0, 1, 2], (index) =>
+        service
+          .cloneRepository({
+            remoteUrl: CLONE_URLS.url,
+            destinationPath: `${parent}/repo-${index}`,
+          })
+          .pipe(Effect.forkChild),
+      );
+      yield* waitUntil(() => releases.length === Math.min(3, CLONE_CONCURRENCY));
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      assert.strictEqual(releases.length, Math.min(3, CLONE_CONCURRENCY));
+
+      yield* Deferred.succeed(releases[0]!, undefined);
+      yield* waitUntil(() => releases.length === Math.min(3, CLONE_CONCURRENCY + 1));
+      for (const release of releases) yield* Deferred.succeed(release, undefined);
+      yield* waitUntil(() => releases.length === 3);
+      for (const release of releases) yield* Deferred.succeed(release, undefined);
+      yield* Effect.forEach(clones, Fiber.join);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: () =>
+              Effect.gen(function* () {
+                const release = yield* Deferred.make<void>();
+                releases.push(release);
+                yield* Deferred.await(release);
+                return processOutput();
+              }),
+          },
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("keeps cloning when the request goes away, and the same request joins it", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-clone-parent-",
+    });
+    const destinationPath = `${parent}/ryco`;
+    const release = yield* Deferred.make<void>();
+    let cloneCalls = 0;
+    let gitInterrupted = false;
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const request = { remoteUrl: CLONE_URLS.url, destinationPath };
+
+      // The connection drops: RpcServer interrupts the request.
+      const first = yield* service.cloneRepository(request).pipe(Effect.forkChild);
+      yield* waitUntil(() => cloneCalls === 1);
+      yield* Fiber.interrupt(first);
+      assert.isFalse(gitInterrupted);
+      const entries = yield* fs.readDirectory(parent);
+      assert.strictEqual(entries.length, 1);
+      assert.match(entries[0] ?? "", STAGING_NAME("ryco"));
+
+      // The client sends the same request again: it waits for the running clone.
+      const second = yield* service.cloneRepository(request).pipe(Effect.forkChild);
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)));
+      yield* Deferred.succeed(release, undefined);
+      const result = yield* Fiber.join(second);
+      assert.strictEqual(result.cwd, destinationPath);
+      assert.strictEqual(cloneCalls, 1);
+      assert.deepStrictEqual(yield* fs.readDirectory(parent), ["ryco"]);
+
+      // And once more after it finished: its outcome, not "not empty".
+      assert.deepStrictEqual(yield* service.cloneRepository(request), result);
+      assert.strictEqual(cloneCalls, 1);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) =>
+              Effect.sync(() => {
+                cloneCalls += 1;
+              }).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(writeClonedRepository(input)),
+                Effect.onInterrupt(() =>
+                  Effect.sync(() => {
+                    gitInterrupted = true;
+                  }),
+                ),
+                Effect.as(processOutput()),
+              ),
+          },
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("still refuses a destination that is not empty", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-clone-parent-",
+    });
+    const destinationPath = `${parent}/ryco`;
+    yield* fs.makeDirectory(destinationPath);
+    yield* fs.writeFileString(`${destinationPath}/notes.txt`, "mine");
+    let cloneCalls = 0;
+    let lookups = 0;
+
+    const errors = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return [
+        yield* service
+          .cloneRepository({ remoteUrl: CLONE_URLS.url, destinationPath })
+          .pipe(Effect.flip),
+        // Before any provider lookup: the folder can be neither a running clone nor a kept one.
+        yield* service
+          .cloneRepository({ provider: "github", repository: "octocat/ryco", destinationPath })
+          .pipe(Effect.flip),
+      ];
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          provider: makeProvider({
+            getRepositoryCloneUrls: () =>
+              Effect.sync(() => {
+                lookups += 1;
+                return CLONE_URLS;
+              }),
+          }),
+          git: {
+            execute: () =>
+              Effect.sync(() => {
+                cloneCalls += 1;
+                return processOutput();
+              }),
+          },
+        }),
+      ),
+    );
+
+    for (const error of errors) assert.match(error.detail, /already exists and is not empty/);
+    assert.strictEqual(cloneCalls, 0);
+    assert.strictEqual(lookups, 0);
+    assert.deepStrictEqual(yield* fs.readDirectory(parent), ["ryco"]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a request with other credentials in the URL starts its own clone", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-clone-parent-",
+    });
+    const cloneUrls: string[] = [];
+
+    const results = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const destinationPath = `${parent}/ryco`;
+      const first = yield* service.cloneRepository({
+        remoteUrl: "https://user:wrong@example.com/octocat/ryco.git",
+        destinationPath,
+      });
+      // The first left a repository there, so the second fails on the destination; it neither
+      // gets the first one's kept outcome nor its URL.
+      const second = yield* service
+        .cloneRepository({
+          remoteUrl: "https://user:right@example.com/octocat/ryco.git",
+          destinationPath,
+        })
+        .pipe(Effect.flip);
+      return { first, second };
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) =>
+              Effect.sync(() => {
+                cloneUrls.push(input.args[3] ?? "");
+              }).pipe(Effect.andThen(writeClonedRepository(input)), Effect.as(processOutput())),
+          },
+        }),
+      ),
+    );
+
+    assert.strictEqual(results.first.remoteUrl, "https://user:wrong@example.com/octocat/ryco.git");
+    assert.match(results.second.detail, /already exists and is not empty/);
+    assert.notInclude(JSON.stringify(results.second), "wrong");
+    assert.deepStrictEqual(cloneUrls, ["https://user:wrong@example.com/octocat/ryco.git"]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
@@ -306,7 +612,8 @@ it.effect("uses provider clone auth and HTTPS when the provider supplies clone c
           url: "https://octocat@github.com/octocat/ryco",
         },
       });
-      assert.deepStrictEqual(cloneCalls[0]?.args, ["clone", "--", CLONE_URLS.url, "ryco"]);
+      assertCloneArgs(cloneCalls[0]?.args, CLONE_URLS.url, "ryco");
+      assert.strictEqual(cloneCalls[0]?.env?.GIT_PROGRESS_DELAY, "0");
       assert.strictEqual(cloneCalls[0]?.env?.RYCO_GIT_USERNAME, "x-bitbucket-api-token-auth");
       assert.strictEqual(cloneCalls[0]?.env?.RYCO_GIT_PASSWORD, "secret-token");
       assert.strictEqual(cloneCalls[0]?.env?.GIT_TERMINAL_PROMPT, "0");
@@ -357,12 +664,12 @@ it.effect("uses detected provider clone auth for raw HTTPS clone URLs", () =>
       });
 
       assert.strictEqual(result.remoteUrl, "https://bitbucket.org/ryco-app/ryco-post-index.git");
-      assert.deepStrictEqual(cloneCalls[0]?.args, [
-        "clone",
-        "--",
+      assertCloneArgs(
+        cloneCalls[0]?.args,
         "https://bitbucket.org/ryco-app/ryco-post-index.git",
         "bitbucket-test",
-      ]);
+      );
+      assert.strictEqual(cloneCalls[0]?.env?.GIT_PROGRESS_DELAY, "0");
       assert.strictEqual(cloneCalls[0]?.env?.RYCO_GIT_USERNAME, "x-bitbucket-api-token-auth");
       assert.strictEqual(cloneCalls[0]?.env?.RYCO_GIT_PASSWORD, "secret-token");
       assert.ok(cloneCalls[0]?.env?.GIT_ASKPASS);
@@ -423,11 +730,10 @@ it.effect("accepts explicit HTTPS, SSH, and SCP-style clone URLs", () => {
       });
     }
 
-    assert.deepStrictEqual(cloneCalls, [
-      ["clone", "--", "https://github.com/octocat/ryco.git", "repo-0"],
-      ["clone", "--", "ssh://git@github.com/octocat/ryco.git", "repo-1"],
-      ["clone", "--", "git@github.com:octocat/ryco.git", "repo-2"],
-    ]);
+    assert.strictEqual(cloneCalls.length, 3);
+    assertCloneArgs(cloneCalls[0], "https://github.com/octocat/ryco.git", "repo-0");
+    assertCloneArgs(cloneCalls[1], "ssh://git@github.com/octocat/ryco.git", "repo-1");
+    assertCloneArgs(cloneCalls[2], "git@github.com:octocat/ryco.git", "repo-2");
   }).pipe(
     Effect.provide(
       makeLayer({
