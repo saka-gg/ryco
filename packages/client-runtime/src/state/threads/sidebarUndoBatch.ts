@@ -1,18 +1,17 @@
 import type { CommandId, ScopedThreadRef } from "@ryco/contracts";
 
 import { scopedThreadKey } from "../../scoped.ts";
-import type {
-  SidebarActionCommand,
-  SidebarUndoContext,
-  SidebarUndoDescribe,
-  SidebarUndoHistory,
+import {
+  SIDEBAR_UNDO_BATCH_LIMIT,
+  type SidebarActionCommand,
+  type SidebarUndoContext,
+  type SidebarUndoDescribe,
+  type SidebarUndoHistory,
 } from "./sidebarUndo.ts";
 
 // Kept out of the threads barrel (and so out of the boot chunk): only bulk
 // actions import it, through its own subpath export.
 
-/** Most threads one bulk action changes; a node keeps 256 Undo receipts. */
-export const SIDEBAR_UNDO_BATCH_LIMIT = 100;
 /** Commands of one bulk action in flight at once. */
 export const SIDEBAR_UNDO_BATCH_CONCURRENCY = 4;
 

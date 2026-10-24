@@ -10,6 +10,12 @@ import { scopedThreadKey } from "../../scoped.ts";
 export const SIDEBAR_UNDO_DURATION_MS = 5_000;
 /** A bulk notice applies for at most this long, so its Undo still finds the node's 30 s receipts. */
 const SIDEBAR_UNDO_APPLYING_LIMIT_MS = 25_000;
+/**
+ * Most threads one bulk action changes; a node keeps 256 Undo receipts. Here
+ * rather than with the batch dispatcher, so the screens that cap a selection
+ * do not load it.
+ */
+export const SIDEBAR_UNDO_BATCH_LIMIT = 100;
 export type SidebarUndoAction = "archive" | "settle" | "snooze" | "unpin";
 export type SidebarUndoCommand = Extract<
   DispatchableClientOrchestrationCommand,

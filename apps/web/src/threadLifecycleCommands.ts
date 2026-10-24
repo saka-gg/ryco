@@ -1,8 +1,7 @@
 import type { SidebarUndoDescribe } from "@ryco/client-runtime/state/threads";
-import {
-  dispatchSidebarUndoBatch,
-  type SidebarBatchCommand,
-  type SidebarUndoBatchResult,
+import type {
+  SidebarBatchCommand,
+  SidebarUndoBatchResult,
 } from "@ryco/client-runtime/state/threads/sidebarUndoBatch";
 import type { ScopedThreadRef, ThreadId } from "@ryco/contracts";
 
@@ -110,6 +109,9 @@ async function dispatchThreadBatch(
 ): Promise<SidebarUndoBatchResult | null> {
   let result: SidebarUndoBatchResult;
   try {
+    // Loaded with the first bulk action, so the shell does not carry it.
+    const { dispatchSidebarUndoBatch } =
+      await import("@ryco/client-runtime/state/threads/sidebarUndoBatch");
     result = await dispatchSidebarUndoBatch({
       history: sidebarUndo,
       readContext: readSidebarUndoContext,

@@ -1,4 +1,4 @@
-import { SIDEBAR_UNDO_BATCH_LIMIT } from "@ryco/client-runtime/state/threads/sidebarUndoBatch";
+import { SIDEBAR_UNDO_BATCH_LIMIT } from "@ryco/client-runtime/state/threads";
 
 import type { InboxSidebarRow } from "./inboxSidebarModel";
 
