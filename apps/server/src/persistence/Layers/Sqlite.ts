@@ -10,6 +10,7 @@ import {
 } from "../databaseBackupPolicy.ts";
 import { inspectMigrationLedger, runMigrations } from "../Migrations.ts";
 import type { SqliteCheckpointWorkerOptions } from "../SqliteCheckpointWorker.ts";
+import { migrateUnderOwnershipPolicy } from "../migrationOwnershipPolicy.ts";
 import * as SqliteReadClientLayer from "../SqliteReadClient.ts";
 import { BLOCKING_BUSY_TIMEOUT_MS, MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
 import { ServerConfig } from "../../config.ts";
@@ -45,6 +46,11 @@ export const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(functi
   return clientModule.layer(config);
 }, Layer.unwrap);
 
+/**
+ * Which database `setup` prepares. A file database may be shared with other processes, so it
+ * migrates under the ownership policy and is backed up before it changes; an in-memory one is
+ * private to this connection.
+ */
 type SetupTarget = { readonly kind: "file"; readonly dbPath: string } | { readonly kind: "memory" };
 
 /**
@@ -57,62 +63,71 @@ const loadFailureText = ({ cause }: { readonly cause?: unknown }) =>
   cause instanceof Error ? cause.message : String(cause);
 
 /**
- * Brings the schema up to date. A file database that is about to change gets a restorable
- * backup first (databaseBackups.ts); the backup never blocks or fails the upgrade.
+ * Brings a file database's schema up to date, after a restorable backup when it is about to
+ * change (databaseBackups.ts); the backup never blocks or fails the upgrade. Runs only in the
+ * process the ownership policy lets migrate; `finalize` is true in the database's long-lived
+ * owner, which may start the backup's background pass.
  */
-const upgradeSchema = (target: SetupTarget, options: { readonly finalize?: boolean } = {}) =>
+const backUpAndMigrate = (dbPath: string, options: { readonly finalize: boolean }) =>
+  Effect.gen(function* () {
+    const mode = yield* readPremigrationBackupMode;
+    if (mode !== "off") {
+      const ledger = yield* inspectMigrationLedger();
+      if (needsPremigrationBackup(ledger)) {
+        const sql = yield* SqlClient.SqlClient;
+        yield* trackStartupPhase(
+          "persistence.migrations.backup",
+          loadDatabaseBackups.pipe(
+            Effect.flatMap(({ snapshotBeforeMigration }) =>
+              snapshotBeforeMigration({
+                sql,
+                dbPath,
+                ledger,
+                mode,
+                openSqlite: makeRuntimeSqliteLayer,
+              }),
+            ),
+            Effect.catch((error) =>
+              Effect.logWarning(
+                `Upgrading the database without a backup: could not load the backup code: ${loadFailureText(error)}. See docs/database-backups.md to back it up yourself.`,
+              ),
+            ),
+          ),
+        );
+      }
+    }
+    const executed = yield* runMigrations({ backupsDir: databaseBackupsDirectory(dbPath) });
+    if (mode !== "off" && options.finalize) {
+      // Verify, compress and prune out of boot and hydration. Only the database's long-lived owner
+      // gets here; a CLI that migrated (finalize false) leaves its raw backup to the next server.
+      yield* Effect.forkScoped(
+        Effect.delay(
+          loadDatabaseBackups.pipe(
+            Effect.flatMap(({ finalizeDatabaseBackups }) =>
+              finalizeDatabaseBackups({ dbPath, openSqlite: makeRuntimeSqliteLayer }),
+            ),
+            Effect.catch((error) =>
+              Effect.logWarning(`Database backup maintenance failed: ${loadFailureText(error)}`),
+            ),
+          ),
+          BACKUP_FINALIZE_DELAY,
+        ),
+      );
+    }
+    return executed;
+  });
+
+/**
+ * Brings the schema up to date. A file database is migrated, and backed up first, only by the
+ * process allowed to (migrationOwnershipPolicy.ts): a CLI refused by a live server, or waiting
+ * for one to finish its own upgrade, never takes a backup.
+ */
+const upgradeSchema = (target: SetupTarget) =>
   target.kind === "memory"
     ? runMigrations()
-    : Effect.gen(function* () {
-        const { dbPath } = target;
-        const mode = yield* readPremigrationBackupMode;
-        if (mode !== "off") {
-          const ledger = yield* inspectMigrationLedger();
-          if (needsPremigrationBackup(ledger)) {
-            const sql = yield* SqlClient.SqlClient;
-            yield* trackStartupPhase(
-              "persistence.migrations.backup",
-              loadDatabaseBackups.pipe(
-                Effect.flatMap(({ snapshotBeforeMigration }) =>
-                  snapshotBeforeMigration({
-                    sql,
-                    dbPath,
-                    ledger,
-                    mode,
-                    openSqlite: makeRuntimeSqliteLayer,
-                  }),
-                ),
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    `Upgrading the database without a backup: could not load the backup code: ${loadFailureText(error)}. See docs/database-backups.md to back it up yourself.`,
-                  ),
-                ),
-              ),
-            );
-          }
-        }
-        const executed = yield* runMigrations({ backupsDir: databaseBackupsDirectory(dbPath) });
-        if (mode !== "off" && (options.finalize ?? true)) {
-          // Verify, compress and prune out of boot and hydration; a short-lived process (a CLI
-          // command) is interrupted before it starts, and its raw backup stays valid.
-          yield* Effect.forkScoped(
-            Effect.delay(
-              loadDatabaseBackups.pipe(
-                Effect.flatMap(({ finalizeDatabaseBackups }) =>
-                  finalizeDatabaseBackups({ dbPath, openSqlite: makeRuntimeSqliteLayer }),
-                ),
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    `Database backup maintenance failed: ${loadFailureText(error)}`,
-                  ),
-                ),
-              ),
-              BACKUP_FINALIZE_DELAY,
-            ),
-          );
-        }
-        return executed;
-      });
+    : migrateUnderOwnershipPolicy(target.dbPath, (options) =>
+        backUpAndMigrate(target.dbPath, options),
+      );
 
 const runSetup = (target: SetupTarget) =>
   Effect.gen(function* () {
@@ -156,6 +171,7 @@ const runSetup = (target: SetupTarget) =>
     yield* sql`PRAGMA journal_size_limit = 67108864;`;
     // Named for the startup stall monitor: a slow ledger pass or one-time repair (9.5 s and
     // 27.4 s stalls were observed before the listener bound) is otherwise unattributed.
+    // A file database is migrated only by its owner (migrationOwnershipPolicy.ts).
     yield* trackStartupPhase("persistence.migrations", upgradeSchema(target));
     yield* Effect.logDebug("startup sqlite setup complete", {
       durationMs: Date.now() - startedAt,
@@ -163,6 +179,7 @@ const runSetup = (target: SetupTarget) =>
   });
 
 const makeSetup = (target: SetupTarget) => Layer.effectDiscard(runSetup(target));
+const memorySetup = makeSetup({ kind: "memory" });
 
 export interface SqlitePersistenceOptions {
   /**
@@ -208,9 +225,7 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
 }, Layer.unwrap);
 
 const memoryPersistence = (sqlite: Layer.Layer<SqlClient.SqlClient, SqlError>) =>
-  SqliteReadClientLayer.layerMain.pipe(
-    Layer.provideMerge(Layer.provideMerge(makeSetup({ kind: "memory" }), sqlite)),
-  );
+  SqliteReadClientLayer.layerMain.pipe(Layer.provideMerge(Layer.provideMerge(memorySetup, sqlite)));
 
 /** A new in-memory database that runs every migration itself. */
 export const SqlitePersistenceMemoryFresh = memoryPersistence(
@@ -232,10 +247,7 @@ const buildMigratedMemoryImage = Effect.gen(function* () {
     return yield* client.export;
   }).pipe(
     Effect.provide(
-      Layer.provideMerge(
-        makeSetup({ kind: "memory" }),
-        NodeSqliteClient.layer({ filename: ":memory:" }),
-      ),
+      Layer.provideMerge(memorySetup, NodeSqliteClient.layer({ filename: ":memory:" })),
     ),
   );
 }).pipe(
