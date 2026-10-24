@@ -157,6 +157,15 @@ export function sharesPaneLeaves(a: PaneNode, b: PaneNode): boolean {
   return paneLeaves(b).some((ref) => keys.has(paneKey(ref)));
 }
 
+/** The threads on screen with `route` open: every pane of the split it is in, or just itself. */
+export function visiblePaneThreads(
+  root: PaneNode | null,
+  route: ScopedThreadRef | null,
+): ScopedThreadRef[] {
+  if (route === null) return [];
+  return root !== null && paneContains(root, route) ? paneLeaves(root) : [route];
+}
+
 export type PaneDropRefusal = "full" | "environment" | "axis";
 export type PaneDropVerdict =
   | { kind: "split" | "move" }

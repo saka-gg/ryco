@@ -60,7 +60,7 @@ export const DESKTOP_PURE_TEST_FILES = [
   "src/startupTiming.test.ts",
   "src/tailscaleEndpointProvider.test.ts",
   "src/threadExportSave.test.ts",
-  "src/turnCompleteNotification.test.ts",
+  "src/threadNotifications.test.ts",
   "src/unsignedMacUpdateInstaller.test.ts",
   "src/updateChannels.test.ts",
   "src/updateMachine.test.ts",

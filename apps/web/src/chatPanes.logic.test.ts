@@ -11,6 +11,7 @@ import {
   resolvePaneDrop,
   sharesPaneLeaves,
   splitPane,
+  visiblePaneThreads,
   type PaneNode,
 } from "./chatPanes.logic";
 const ref = (id: string, env = "local") => ({
@@ -131,5 +132,11 @@ describe("bounded thread panes", () => {
   it("detects whether two layouts share a pane", () => {
     expect(sharesPaneLeaves(pair(), leaf)).toBe(true);
     expect(sharesPaneLeaves(pair(), { kind: "thread", ref: c })).toBe(false);
+  });
+  it("shows every pane of the split the route is in, else only the route", () => {
+    expect(visiblePaneThreads(pair(), b)).toEqual([a, b]);
+    expect(visiblePaneThreads(pair(), c)).toEqual([c]);
+    expect(visiblePaneThreads(null, a)).toEqual([a]);
+    expect(visiblePaneThreads(pair(), null)).toEqual([]);
   });
 });

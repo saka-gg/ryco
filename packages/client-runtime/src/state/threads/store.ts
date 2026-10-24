@@ -486,7 +486,21 @@ function mapThreadShell(
     latestTurn: thread.latestTurn,
     pendingSourceProposedPlan: thread.latestTurn?.sourceProposedPlan,
   };
-  const summary: SidebarThreadSummary = {
+  const summary = mapThreadSummary(thread, environmentId, session);
+  return {
+    shell,
+    session,
+    turnState,
+    summary,
+  };
+}
+
+function mapThreadSummary(
+  thread: OrchestrationThreadShell,
+  environmentId: EnvironmentId,
+  session: ThreadSession | null,
+): SidebarThreadSummary {
+  return {
     id: thread.id,
     environmentId,
     projectId: thread.projectId,
@@ -519,12 +533,21 @@ function mapThreadShell(
     priority: thread.priority,
     lineage: thread.lineage ?? null,
   };
-  return {
-    shell,
-    session,
-    turnState,
-    summary,
-  };
+}
+
+/**
+ * The summary a `thread-upserted` event writes for `thread` (a relocated
+ * checkout's path aside), for consumers that follow shell events one by one.
+ */
+export function mapThreadShellSummary(
+  thread: OrchestrationThreadShell,
+  environmentId: EnvironmentId,
+): SidebarThreadSummary {
+  return mapThreadSummary(
+    thread,
+    environmentId,
+    thread.session ? mapSession(thread.session) : null,
+  );
 }
 
 function mapArchivedThreadStub(
