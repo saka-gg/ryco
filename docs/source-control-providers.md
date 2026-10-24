@@ -22,6 +22,10 @@ Ryco works with the platforms your team already uses:
 - Open the Command Palette (`Cmd/Ctrl + K`) → **Add Project**
 - Choose **GitHub repository**, **GitLab repository**, **Forgejo repository**, **Bitbucket repository**, **Azure DevOps repository**, or paste any **Git URL**
 - Enter the repository path (`owner/repo`, `group/project`, `workspace/repository`, or `project/repository`) or a full Git URL, pick a destination, and start coding
+- Large repositories can take as long as they need. A clone stops only when git prints nothing for 5 minutes (a dead network, a server that stopped answering).
+- The clone runs on the machine that holds the project, not in the app window. If the connection drops while it runs (a hidden tab, a sleeping laptop, a reconnect), it keeps going there. Add the same repository to the same destination again to wait for it, or to pick up the finished project for up to 30 minutes. A clone that nothing waits for during 10 minutes is stopped.
+- git clones into a hidden folder next to the destination (`.<name>.ryco-clone-…`) and moves it into place when done, so a failed or stopped clone never leaves a half checkout at the destination. If git fetched the whole repository but could not check out its files (for example a Git LFS quota or a failing hook), the repository is kept at the destination and the error says what to fix.
+- At most two clones run at once on a machine (one on a two-core machine); more wait for their turn.
 
 **Publish local projects to the cloud**
 
