@@ -8,7 +8,7 @@ import {
   ProjectId,
   type RepositoryIdentity,
 } from "@ryco/contracts";
-import { Deferred, Duration, Effect, Layer, Option, PubSub } from "effect";
+import { Deferred, Duration, Effect, Layer, Option, PubSub, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
@@ -412,7 +412,7 @@ describe("repository identity sync", () => {
           }),
         readFingerprint: (workspaceRoot) => Effect.succeed(`git:${workspaceRoot}|1`),
         now: () => NOW,
-        subscribe: PubSub.subscribe(events),
+        subscribe: Effect.map(PubSub.subscribe(events), Stream.fromSubscription),
       });
       yield* Deferred.await(sweepStarted);
       yield* projects.upsert(project("b"));
@@ -487,7 +487,7 @@ describe("repository identity sync", () => {
         dispatch: () => Effect.succeed({ sequence: 1 }),
         readFingerprint: (workspaceRoot) => Effect.succeed(`git:${workspaceRoot}|1`),
         now: () => NOW,
-        subscribe: PubSub.subscribe(events),
+        subscribe: Effect.map(PubSub.subscribe(events), Stream.fromSubscription),
       });
       yield* Deferred.await(firstProbe);
       // Let the failed sweep finish and schedule its retry.

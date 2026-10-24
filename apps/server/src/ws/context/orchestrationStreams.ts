@@ -1,4 +1,4 @@
-import { Array as Arr, Deferred, Effect, Fiber, Option, PubSub, Queue, Ref, Stream } from "effect";
+import { Array as Arr, Deferred, Effect, Fiber, Option, Queue, Ref, Stream } from "effect";
 import {
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
@@ -41,6 +41,7 @@ import {
   orchestrationShellFrameKey,
 } from "./orchestrationEventCoalescing.ts";
 import { rechunkByBudget, tapArray } from "../streamBatching.ts";
+import { dedupeBySequence } from "../../orchestration/sequenceOrderedStream.ts";
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
 
@@ -493,24 +494,6 @@ export const makeOrchestrationStreamHelpers = (deps: {
   const enrichOrchestrationEvents = (events: ReadonlyArray<OrchestrationEvent>) =>
     Effect.forEach(events, enrichProjectEvent, { concurrency: 4 });
 
-  /**
-   * Drops items at or below the last sequence sent. The state lives in the
-   * closure: each subscription builds its own pipeline.
-   */
-  const dedupeBySequence =
-    <A>(getSequence: (item: A) => number, initialSequence: number) =>
-    <E, R>(stream: Stream.Stream<A, E, R>): Stream.Stream<A, E, R> => {
-      let lastSequence = initialSequence;
-      return stream.pipe(
-        Stream.filter((item) => {
-          const nextSequence = getSequence(item);
-          if (nextSequence <= lastSequence) return false;
-          lastSequence = nextSequence;
-          return true;
-        }),
-      );
-    };
-
   const makeReplayBoundaryTracker = (snapshotSequence: number) =>
     Effect.gen(function* () {
       const latestLiveSequence = yield* Ref.make(snapshotSequence);
@@ -626,7 +609,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
    */
   const runLiveFeed = (input: {
     readonly stream: WsReplayStreamKind;
-    readonly liveSubscription: PubSub.Subscription<OrchestrationEvent>;
+    readonly liveEvents: Stream.Stream<OrchestrationEvent>;
     readonly liveQueue: Queue.Queue<OrchestrationEvent, OrchestrationGetSnapshotError>;
     readonly overflowedRef: Ref.Ref<boolean>;
     readonly replayMetrics: WsReplayMetrics;
@@ -684,7 +667,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
           .push(event)
           .pipe(Effect.andThen(input.coalesceKey(event) === null ? Effect.void : armFlush));
 
-      yield* Stream.fromSubscription(input.liveSubscription).pipe(
+      yield* input.liveEvents.pipe(
         Stream.runForEach((event) => input.onEvent(event, push)),
         Effect.ensuring(
           Effect.gen(function* () {
@@ -890,7 +873,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
         const loadedSnapshot = resumed ? undefined : yield* snapshot;
         const snapshotSequence =
           loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
-        const liveSubscription = yield* orchestrationEngine.subscribeDomainEvents;
+        const liveEvents = yield* orchestrationEngine.subscribeDomainEvents;
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
@@ -904,7 +887,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
 
         const queuedBytesRef = yield* runLiveFeed({
           stream: "shell",
-          liveSubscription,
+          liveEvents,
           liveQueue,
           overflowedRef,
           replayMetrics,
@@ -972,7 +955,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
         const loadedSnapshot = resumed ? undefined : yield* snapshot;
         const snapshotSequence =
           loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
-        const liveSubscription = yield* orchestrationEngine.subscribeDomainEvents;
+        const liveEvents = yield* orchestrationEngine.subscribeDomainEvents;
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
@@ -1000,7 +983,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
 
         const queuedBytesRef = yield* runLiveFeed({
           stream: "thread",
-          liveSubscription,
+          liveEvents,
           liveQueue,
           overflowedRef,
           replayMetrics,

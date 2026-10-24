@@ -16,7 +16,7 @@ import type {
   OrchestrationReadModel,
 } from "@ryco/contracts";
 import { Context } from "effect";
-import type { Effect, PubSub, Scope, Stream } from "effect";
+import type { Effect, Scope, Stream } from "effect";
 
 import type { OrchestrationCommandAdmissionError, OrchestrationDispatchError } from "../Errors.ts";
 import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
@@ -133,18 +133,22 @@ export interface OrchestrationEngineShape {
   /**
    * Stream persisted domain events in dispatch order.
    *
-   * This is a hot runtime stream (new events only), not a historical replay.
+   * Hot, not a historical replay: each run subscribes when it starts, with the delivery
+   * guarantee of `subscribeDomainEvents` from that point.
    */
   readonly streamDomainEvents: Stream.Stream<OrchestrationEvent>;
 
   /**
-   * Acquire a live domain event subscription synchronously in the caller's fiber.
+   * Subscribe now, in the caller's fiber; the subscription lives for the caller's scope. Use it
+   * when follow-up work forks a consumer and must not miss a publish before that consumer starts.
    *
-   * Use this when follow-up work forks a consumer and must not miss a publish
-   * between subscription setup and the forked consumer actually starting.
+   * The returned stream delivers every committed event with a sequence above the last one
+   * published when it subscribed, exactly once and in sequence order. Publication never waits
+   * for subscribers: one that falls more than the bus's live window behind reads the missed range
+   * from the event store first. Run the stream once.
    */
   readonly subscribeDomainEvents: Effect.Effect<
-    PubSub.Subscription<OrchestrationEvent>,
+    Stream.Stream<OrchestrationEvent>,
     never,
     Scope.Scope
   >;
