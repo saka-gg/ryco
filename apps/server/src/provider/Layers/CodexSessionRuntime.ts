@@ -61,6 +61,7 @@ import {
 } from "../../providerTools/deviceToolGateway.ts";
 import { type CodexResumeCursor, CodexResumeCursorSchema } from "../codexResumeCursor.ts";
 import { classifyCodexStderrLine } from "../codexStderr.ts";
+import { type AgentProcessPriorityShape, spawnAgentProcess } from "../agentProcessPriority.ts";
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -149,6 +150,8 @@ export interface CodexSessionRuntimeOptions {
   readonly collabReconcileInterval?: Duration.Input;
   /** How long Stop waits for each collab child's turn interrupt. Default 3 s. */
   readonly collabChildInterruptTimeout?: Duration.Input;
+  /** Lowers `codex app-server` (and everything it starts); undefined spawns it unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 /**
@@ -1250,24 +1253,24 @@ export const makeCodexSessionRuntime = (
       ...(options.environment ?? process.env),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(options.binaryPath, ["app-server"], {
-          cwd: options.cwd,
-          env,
-          shell: process.platform === "win32",
-        }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} app-server`,
-              cause,
-            }),
-        ),
-      );
+    const child = yield* spawnAgentProcess(
+      spawner,
+      options.processPriority,
+      ChildProcess.make(options.binaryPath, ["app-server"], {
+        cwd: options.cwd,
+        env,
+        shell: process.platform === "win32",
+      }),
+    ).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+      Effect.mapError(
+        (cause) =>
+          new CodexErrors.CodexAppServerSpawnError({
+            command: `${options.binaryPath} app-server`,
+            cause,
+          }),
+      ),
+    );
 
     const transportFailure = yield* Deferred.make<CodexErrors.CodexAppServerError>();
     const clientContext = yield* CodexClient.layerChildProcess(child, {
