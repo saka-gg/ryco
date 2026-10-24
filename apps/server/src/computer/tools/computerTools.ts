@@ -4,6 +4,7 @@ import { parseCuaActionDiagnostics } from "@ryco/shared/cuaActionDiagnostics";
 import { ComputerProgressGuard, type ComputerProgressAction } from "./computerProgressGuard.ts";
 import {
   boundComputerPastePayload,
+  computerPasteWorkspaceRoot,
   readClipboardText,
   readComputerPastePayload,
 } from "./computerPasteInput.ts";
@@ -2484,6 +2485,7 @@ export function makeAgentGatewayComputerTools(
     type: string,
     step: Record<string, unknown>,
     context: ToolContext,
+    pasteWorkspaceRoot: () => Promise<string>,
   ): Promise<() => Promise<unknown>> => {
     const threadId = context.callerThreadId;
     switch (type) {
@@ -2675,9 +2677,8 @@ export function makeAgentGatewayComputerTools(
         // step, so a path outside it refuses the batch before step zero.
         const payload = await boundComputerPastePayload(
           readComputerPastePayload(step),
-          context,
+          pasteWorkspaceRoot,
           desktopOperationSignal(),
-          options.resolveWorkspaceRoot,
         );
         const windowId = readWindowIdArg(step);
         return () => manager.paste(threadId, payload, windowId);
@@ -2919,6 +2920,11 @@ export function makeAgentGatewayComputerTools(
     // parse is refused whole rather than running its good half. Sequential,
     // so the first invalid step is the one reported.
     const prepared: PreparedRunStep[] = [];
+    const pasteWorkspaceRoot = computerPasteWorkspaceRoot(
+      options.resolveWorkspaceRoot,
+      context,
+      desktopOperationSignal(),
+    );
     for (const [index, entry] of rawSteps.entries()) {
       if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
         throw new ToolInputError(`Step ${index} must be an object with a "type" field.`);
@@ -2950,7 +2956,7 @@ export function makeAgentGatewayComputerTools(
         ifElement: readStepElementCondition(step, "if_element", threadId),
         unlessElement: readStepElementCondition(step, "unless_element", threadId),
         continueOnError: readBooleanArg(step, "continue_on_error") === true,
-        run: await prepareRunStep(type, step, context),
+        run: await prepareRunStep(type, step, context, pasteWorkspaceRoot),
       });
     }
 
@@ -4405,11 +4411,11 @@ export function makeAgentGatewayComputerTools(
         additionalProperties: false,
       },
       async (args, context) => {
+        const signal = desktopOperationSignal();
         const payload = await boundComputerPastePayload(
           readComputerPastePayload(args),
-          context,
-          desktopOperationSignal(),
-          options.resolveWorkspaceRoot,
+          computerPasteWorkspaceRoot(options.resolveWorkspaceRoot, context, signal),
+          signal,
         );
         return manager.paste(context.callerThreadId, payload, readWindowIdArg(args));
       },

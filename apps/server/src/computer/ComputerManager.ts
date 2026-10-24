@@ -3473,6 +3473,11 @@ export class ComputerManager {
       const payload = typeof content === "string" ? { text: content } : content;
       // Validate the destination before temporarily touching the user's clipboard.
       await timedComputerLeg("resolve", () => this.prepareKeyboardTarget(windowId, threadId));
+      // Background exact-target delivery posts the shortcut to that validated
+      // window's process, so the clipboard write in between cannot move it and
+      // the shortcut needs no second listing. Foreground delivery re-aims focus
+      // right before the shortcut, because focus decides where it lands.
+      const targetPrepared = this.canUseBackgroundTarget();
       const prepare = this.backend.prepareClipboardPaste?.bind(this.backend);
       let restore: () => Promise<boolean>;
       if (prepare) {
@@ -3500,11 +3505,15 @@ export class ComputerManager {
       let restored = false;
       let result: ComputerBackendActionResult | void;
       try {
-        result = await this.runKeyboardDispatch(threadId, windowId, () =>
-          this.backend.hotkey(
-            this.agentDialect === "macos" ? ["meta", "v"] : ["ctrl", "v"],
-            windowId,
-          ),
+        result = await this.runKeyboardDispatch(
+          threadId,
+          windowId,
+          () =>
+            this.backend.hotkey(
+              this.agentDialect === "macos" ? ["meta", "v"] : ["ctrl", "v"],
+              windowId,
+            ),
+          targetPrepared,
         );
       } finally {
         // The restore runs whether or not the shortcut dispatched: the payload
@@ -4805,14 +4814,17 @@ export class ComputerManager {
    * seat's keyboard at the named window (or leave it where the last action
    * put it), prove the operation is still live, then inject and hand back
    * the backend's own result. Type, key press, hotkey and paste differ only
-   * in the call each carries.
+   * in the call each carries. `targetPrepared` means the caller already ran
+   * the same targeting and nothing since can have moved the keyboard.
    */
   private async runKeyboardDispatch(
     threadId: string | undefined,
     windowId: string | undefined,
     dispatch: () => Promise<ComputerBackendActionResult | void>,
+    targetPrepared = false,
   ): Promise<ComputerBackendActionResult | void> {
-    await timedComputerLeg("resolve", () => this.prepareKeyboardTarget(windowId, threadId));
+    if (!targetPrepared)
+      await timedComputerLeg("resolve", () => this.prepareKeyboardTarget(windowId, threadId));
     assertDesktopOperationActive();
     return timedComputerLeg("dispatch", dispatch);
   }

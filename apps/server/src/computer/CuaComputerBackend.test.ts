@@ -71,7 +71,10 @@ function fixture(options?: {
   let typingInFlight = 0;
   let typingMaxInFlight = 0;
   let extraWindows: Array<Record<string, unknown>> = [];
-  let toolHandlers: Record<string, (args: Record<string, unknown>) => Record<string, unknown>> = {};
+  let toolHandlers: Record<
+    string,
+    (args: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+  > = {};
   let setValueSwallowed = false;
   let actionResult: Record<string, unknown> = {
     route: "synthetic_events",
@@ -217,7 +220,7 @@ function fixture(options?: {
     if (toolHandler)
       return {
         ok: true,
-        result: toolHandler(request.args ?? {}),
+        result: await toolHandler(request.args ?? {}),
         desktopEpoch: responseEpoch,
         hostPlatform: options?.hostPlatform ?? "darwin",
       };
@@ -259,7 +262,12 @@ function fixture(options?: {
     setBounds: (value: typeof bounds) => {
       bounds = value;
     },
-    onTool: (name: string, handler: (args: Record<string, unknown>) => Record<string, unknown>) => {
+    onTool: (
+      name: string,
+      handler: (
+        args: Record<string, unknown>,
+      ) => Record<string, unknown> | Promise<Record<string, unknown>>,
+    ) => {
       toolHandlers[name] = handler;
     },
     gateTypeText: (wait: Promise<void> | undefined) => {
@@ -3820,6 +3828,40 @@ describe("Cua hardening", () => {
       }
     },
   );
+
+  it("keeps a performed restore when another reply adopts a newer desktop generation first", async () => {
+    const f = fixture({ nativeRevision: 40 });
+    let releaseRestore!: () => void;
+    const restoreReplied = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    f.onTool("clipboard_write", async (args) => {
+      if (args.preserve === true)
+        return { structuredContent: { restore_token: args.preserve_token } };
+      await restoreReplied;
+      return { structuredContent: { clipboard_restored: true } };
+    });
+    try {
+      const restore = await f.backend.prepareClipboardPaste({ text: "payload" });
+      const restoring = restore();
+      await vi.waitFor(() =>
+        expect(f.calls.filter((call) => call.name === "clipboard_write")).toHaveLength(2),
+      );
+      // A lock or Stop bumps the desktop generation, and a fresh observation
+      // adopts it while the restore is still in flight.
+      f.changeDesktop();
+      await withModelDesktopObservation(() =>
+        f.backend.captureScreenshot({ kind: "window", windowId: "cua:10:20" }),
+      );
+      releaseRestore();
+      await expect(restoring).resolves.toBe(true);
+      // The restore's older epoch neither rolls the generation back nor drops
+      // the grounding that observation established.
+      await expect(f.backend.click({ x: -275, y: 30 }, "cua:10:20")).resolves.toBeDefined();
+    } finally {
+      await f.backend.dispose();
+    }
+  });
 
   it("restores and reports uncertainty when the write returns no matching receipt", async () => {
     const f = fixture({ nativeRevision: 40 });

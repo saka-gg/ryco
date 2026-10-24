@@ -4,7 +4,6 @@
  * the clipboard: text, or one image or file from the caller's workspace.
  */
 import { stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
 
 import { MAX_COMPUTER_CLIPBOARD_BYTES, type ComputerClipboardPayload } from "../ComputerBackend.ts";
 import {
@@ -32,7 +31,8 @@ export function readClipboardText(args: Record<string, unknown>): string {
 /**
  * Exactly one payload field. The tool schema cannot say so: a top-level
  * oneOf is rejected by provider tool-schema validators, so this is the check.
- * A null field counts as absent.
+ * A null field counts as absent. A path is only type-checked here;
+ * {@link boundComputerPastePayload} applies the workspace path rules.
  */
 export function readComputerPastePayload(args: Record<string, unknown>): ComputerClipboardPayload {
   const fields = PASTE_FIELDS.filter((field) => args[field] !== undefined && args[field] !== null);
@@ -41,9 +41,28 @@ export function readComputerPastePayload(args: Record<string, unknown>): Compute
     throw new ToolInputError('Paste requires exactly one of "text", "image_path" or "file_path".');
   if (field === "text") return { text: readClipboardText(args) };
   const value = args[field];
-  if (typeof value !== "string" || !isAbsolute(value))
-    throw new ToolInputError(`Argument "${field}" must be an absolute path.`);
+  if (typeof value !== "string") throw new ToolInputError(`Argument "${field}" must be a string.`);
   return field === "image_path" ? { imagePath: value } : { filePath: value };
+}
+
+/**
+ * The caller thread's canonical workspace root for file paste, resolved on
+ * first use and then reused: a batch with several image or file steps reads
+ * the thread projection and canonicalizes the root once.
+ */
+export function computerPasteWorkspaceRoot(
+  resolveWorkspaceRoot: ComputerWorkspaceRootResolver | undefined,
+  context: ToolContext,
+  signal: AbortSignal | undefined,
+): () => Promise<string> {
+  let root: Promise<string> | undefined;
+  return () =>
+    (root ??= canonicalComputerWorkspaceRoot(
+      resolveWorkspaceRoot,
+      context,
+      signal,
+      "No canonical workspace is available for native file paste.",
+    ));
 }
 
 /**
@@ -53,22 +72,15 @@ export function readComputerPastePayload(args: Record<string, unknown>): Compute
  */
 export async function boundComputerPastePayload(
   payload: ComputerClipboardPayload,
-  context: ToolContext,
+  workspaceRoot: () => Promise<string>,
   signal: AbortSignal | undefined,
-  resolveWorkspaceRoot: ComputerWorkspaceRootResolver | undefined,
 ): Promise<ComputerClipboardPayload> {
   signal?.throwIfAborted();
   if ("text" in payload) return payload;
-  const workspaceRoot = await canonicalComputerWorkspaceRoot(
-    resolveWorkspaceRoot,
-    context,
-    signal,
-    "No canonical workspace is available for native file paste.",
-  );
   const image = "imagePath" in payload;
   const path = await boundedWorkspacePath(
     image ? payload.imagePath : payload.filePath,
-    workspaceRoot,
+    await workspaceRoot(),
     image ? "image_path" : "file_path",
   );
   const info = await stat(path).catch(() => undefined);

@@ -317,7 +317,7 @@ describe("task-owned user stop", () => {
   });
 
   it.each(["incomplete", "once-incomplete"] as const)(
-    "rechecks a %s native drain before clipboard restoration",
+    "rechecks a %s native drain before restoring a stopped task's clipboard",
     async (interruptCleanup) => {
       const f = await fixture(capability, { clipboardPreservation: true, interruptCleanup });
       const token = "2cfba20e-1536-4dd3-a92b-92667fefbefe";
@@ -330,6 +330,9 @@ describe("task-owned user stop", () => {
       await expect(cuaRequest(f.endpoint, { method: "stop" })).resolves.toMatchObject({
         ok: false,
       });
+      // The user's Stop refuses the task's ordinary calls before any drain;
+      // only the restore-only path drains, and only it may restore.
+      await f.host.stopTaskByUser(task);
       const restored = await cuaRequest(f.endpoint, {
         method: "call",
         name: "clipboard_write",

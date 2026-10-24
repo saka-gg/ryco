@@ -4533,6 +4533,55 @@ describe("computer_paste", () => {
     }
   });
 
+  it("resolves the workspace once for a batch with several file pastes", async () => {
+    const workspace = await workspaceFixture();
+    const { backend, prepare } = nativePasteBackend();
+    const resolveWorkspaceRoot = vi.fn(() => Effect.succeed<string | null>(workspace.root));
+    const { manager, call } = await setup(backend, undefined, undefined, resolveWorkspaceRoot);
+    try {
+      const result = await call("computer_run", {
+        steps: [
+          { type: "paste", image_path: workspace.inside, window_id: "fake-calculator" },
+          { type: "paste", file_path: workspace.document, window_id: "fake-calculator" },
+        ],
+        include_screenshot: false,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(resolveWorkspaceRoot).toHaveBeenCalledTimes(1);
+      expect(prepare.mock.calls).toEqual([
+        [{ imagePath: workspace.inside }],
+        [{ filePath: workspace.document }],
+      ]);
+    } finally {
+      await manager.dispose();
+      await workspace.cleanup();
+    }
+  });
+
+  it.each([
+    { value: "image.png", message: '"image_path" must be an absolute path.' },
+    { value: 42, message: 'Argument "image_path" must be a string.' },
+  ])("refuses image_path $value before clipboard access", async ({ value, message }) => {
+    const workspace = await workspaceFixture();
+    const { backend, prepare } = nativePasteBackend();
+    const { manager, call } = await setup(backend, undefined, undefined, () =>
+      Effect.succeed(workspace.root),
+    );
+    try {
+      const result = await call("computer_paste", {
+        image_path: value,
+        window_id: "fake-calculator",
+      });
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toContain(message);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(backend.callsFor("hotkey")).toHaveLength(0);
+    } finally {
+      await manager.dispose();
+      await workspace.cleanup();
+    }
+  });
+
   it("advertises no computer tool with a top-level oneOf, anyOf or allOf", async () => {
     // Provider tool-schema validators reject top-level combinators, and one
     // rejected schema can fail the whole request; paste enforces "exactly one

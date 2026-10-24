@@ -1572,6 +1572,51 @@ describe("ComputerManager and FakeComputerBackend", () => {
     }
   });
 
+  it("lists a background paste target once, before the clipboard is touched", async () => {
+    const backend = backgroundTargetBackend();
+    const prepare = vi.fn(async () => {
+      backend.calls.push({ method: "prepareClipboardPaste", args: [] });
+      return async () => true;
+    });
+    Object.assign(backend, { prepareClipboardPaste: prepare });
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      await expect(
+        manager.paste("a", { imagePath: "/workspace/image.png" }, "editor-a"),
+      ).resolves.toMatchObject({ clipboardRestored: true });
+      const methods = backend.calls.map((call) => call.method);
+      const prepared = methods.indexOf("prepareClipboardPaste");
+      const hotkey = methods.indexOf("hotkey");
+      // The shortcut goes to the window validated before the clipboard write.
+      expect(methods.slice(0, prepared)).toContain("listWindows");
+      expect(prepared).toBeLessThan(hotkey);
+      expect(methods.slice(prepared, hotkey)).toEqual(["prepareClipboardPaste"]);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("re-aims foreground focus after the clipboard write, right before the shortcut", async () => {
+    const backend = new FakeComputerBackend();
+    const prepare = vi.fn(async () => {
+      backend.calls.push({ method: "prepareClipboardPaste", args: [] });
+      return async () => true;
+    });
+    Object.assign(backend, { prepareClipboardPaste: prepare });
+    const manager = new ComputerManager({ backend, actionSettleMs: 0 });
+    try {
+      const [window] = await backend.listWindows();
+      await manager.paste("thread-1", "agent text", window!.id);
+      const methods = backend.calls.map((call) => call.method);
+      const prepared = methods.indexOf("prepareClipboardPaste");
+      const hotkey = methods.indexOf("hotkey");
+      expect(methods.slice(0, prepared)).toContain("focusWindow");
+      expect(methods.slice(prepared, hotkey)).toContain("focusWindow");
+    } finally {
+      await manager.dispose();
+    }
+  });
+
   it("tells the backend which thread is driving, so the agent cursor can name it", async () => {
     const backend = new FakeComputerBackend();
     const names: Array<string | null> = [];

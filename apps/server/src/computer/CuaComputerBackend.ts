@@ -298,6 +298,15 @@ function cuaKey(value: string): string {
 /** First native revision whose `clipboard_write` can snapshot and restore every clipboard representation. */
 const CUA_CLIPBOARD_PRESERVATION_REVISION = 40;
 
+interface CuaHostCallOptions {
+  /**
+   * The reply reports an outcome no desktop interruption can make stale, so
+   * a newer desktop generation adopted while it was in flight does not
+   * reject it. Only clipboard cleanup uses this; observations never may.
+   */
+  readonly epochIndependent?: boolean;
+}
+
 /** The Cua backend. Cua owns native actions; Synara owns admission,
  * session authority, explicit delivery policy and the provider result. */
 export class CuaComputerBackend implements ComputerBackend {
@@ -478,6 +487,7 @@ export class CuaComputerBackend implements ComputerBackend {
     request: Record<string, unknown>,
     mutation = false,
     allowModelObservation = true,
+    options: CuaHostCallOptions = {},
   ): Promise<CuaReply> {
     if (this.disposed || !this.endpoint)
       throw new CuaActionError(
@@ -535,23 +545,20 @@ export class CuaComputerBackend implements ComputerBackend {
         this.hostPlatform = reply.hostPlatform;
       const epoch = reply.desktopEpoch;
       if (epoch !== undefined && Number.isSafeInteger(epoch) && epoch >= 0) {
-        if (
+        const stale =
           sendBaseline !== undefined &&
-          this.desktopEpoch !== undefined &&
-          this.desktopEpoch !== sendBaseline
-        )
-          throw new CuaActionError(
-            "The desktop changed while this operation was in flight. Observe again before continuing.",
-            mutation ? "dispatched-unknown" : "not-dispatched",
-            "stale_desktop_epoch",
-          );
-        if (sendBaseline !== undefined && epoch < sendBaseline)
-          throw new CuaActionError(
-            "The desktop changed while this operation was in flight. Observe again before continuing.",
-            mutation ? "dispatched-unknown" : "not-dispatched",
-            "stale_desktop_epoch",
-          );
-        if (epoch !== this.desktopEpoch) {
+          ((this.desktopEpoch !== undefined && this.desktopEpoch !== sendBaseline) ||
+            epoch < sendBaseline);
+        if (stale) {
+          // An epoch-independent reply stays valid, but its older epoch
+          // must not roll back the generation another reply adopted.
+          if (!options.epochIndependent)
+            throw new CuaActionError(
+              "The desktop changed while this operation was in flight. Observe again before continuing.",
+              mutation ? "dispatched-unknown" : "not-dispatched",
+              "stale_desktop_epoch",
+            );
+        } else if (epoch !== this.desktopEpoch) {
           this.desktopEpoch = epoch;
           this.observedGeometry.clear();
           this.snapshotAt = 0;
@@ -599,12 +606,13 @@ export class CuaComputerBackend implements ComputerBackend {
     args: Record<string, unknown> = {},
     mutation = false,
     allowModelObservation = true,
+    options: CuaHostCallOptions = {},
   ): Promise<CuaToolResult> {
     // The native operation itself, on the call's timing record — the name is
     // a fixed driver vocabulary, and nothing from `args` is recorded.
     currentComputerCall()?.timing?.count("native_calls");
     const reply = await timedComputerLeg("call", () =>
-      this.host({ method: "call", name, args }, mutation, allowModelObservation),
+      this.host({ method: "call", name, args }, mutation, allowModelObservation, options),
     );
     const result = reply.result ?? {};
     if (
@@ -2256,8 +2264,13 @@ export class CuaComputerBackend implements ComputerBackend {
     // Known before dispatch so a lost write acknowledgement cannot lose the
     // only handle to the saved clipboard. The token never reaches the model.
     const token = randomUUID();
+    // Whether the snapshot went back does not depend on the desktop
+    // generation: a lock or Stop while the restore is in flight must not turn
+    // a restore the driver performed into a reported loss.
     const restore = async () => {
-      const restored = await this.call("clipboard_write", { restore_token: token }, true);
+      const restored = await this.call("clipboard_write", { restore_token: token }, true, true, {
+        epochIndependent: true,
+      });
       return restored.structuredContent?.clipboard_restored === true;
     };
     try {
