@@ -2044,6 +2044,13 @@ async function waitForServerConfigToApply(): Promise<void> {
   await waitForLayout();
 }
 
+/** The sidebar loads the thread lifecycle shortcuts after it mounts: waits until they listen. */
+async function waitForThreadLifecycleShortcuts(): Promise<void> {
+  await browserWaitFor(() => {
+    expect(useCommandPaletteStore.getState().readCurrentThreadLifecycle).not.toBeNull();
+  });
+}
+
 async function waitForComposerStashBinding(key: string): Promise<void> {
   await browserWaitFor(() => {
     expect(
@@ -2474,9 +2481,12 @@ async function mountChatView(options: {
   };
 }
 
-/** The open lifecycle thread on a node that accepts every command, so actions leave an Undo notice. */
-function mountLifecycleThread(options: { running?: boolean } = {}): Promise<MountedChatView> {
-  return mountChatView({
+/**
+ * The open lifecycle thread on a node that accepts every command, so actions
+ * leave an Undo notice. Resolves once its shortcuts listen.
+ */
+async function mountLifecycleThread(options: { running?: boolean } = {}): Promise<MountedChatView> {
+  const mounted = await mountChatView({
     viewport: DEFAULT_VIEWPORT,
     snapshot: createLifecycleSnapshot(options),
     configureFixture: enableThreadLifecycle,
@@ -2485,6 +2495,13 @@ function mountLifecycleThread(options: { running?: boolean } = {}): Promise<Moun
         ? { sequence: fixture.snapshot.snapshotSequence + 1 }
         : undefined,
   });
+  try {
+    await waitForThreadLifecycleShortcuts();
+  } catch (error) {
+    await mounted.cleanup();
+    throw error;
+  }
+  return mounted;
 }
 
 // --- Phone work-surface fixtures (delivery step 8) ---
@@ -2971,6 +2988,7 @@ export {
   expectComposerActionsContained,
   waitForInteractionModeButton,
   waitForServerConfigToApply,
+  waitForThreadLifecycleShortcuts,
   waitForComposerStashBinding,
   dispatchChatNewShortcut,
   dispatchComposerStashShortcut,

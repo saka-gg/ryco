@@ -78,6 +78,7 @@ import {
   waitForElement,
   waitForLayout,
   waitForServerConfigToApply,
+  waitForThreadLifecycleShortcuts,
   waitForURL,
   waitForWsRequestsToSettle,
   wsRequests,
@@ -658,6 +659,7 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
       (await waitForComposerEditor()).focus();
       const event = pressLifecycleChord("D");
       expect(event.defaultPrevented).toBe(true);
@@ -676,6 +678,7 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
       expect(pressLifecycleChord("D").defaultPrevented).toBe(true);
       await expect
         .element(page.getByText("Wait for the running work to finish.", { exact: true }))
@@ -695,6 +698,7 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
       pressLifecycleChord("S");
       const palette = page.getByTestId("command-palette");
       await expect.element(palette.getByText("Snooze until", { exact: true })).toBeInTheDocument();
@@ -718,6 +722,7 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
       // Opening the thread reads its finished turn.
       await vi.waitFor(() => expect(lastVisitedAt()).toBe(LIFECYCLE_TURN_COMPLETED_AT));
 
