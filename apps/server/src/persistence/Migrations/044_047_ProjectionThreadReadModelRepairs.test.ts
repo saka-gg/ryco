@@ -95,7 +95,8 @@ it.effect("commits the compatibility marker atomically with the backfill", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations({ toMigrationInclusive: 43 });
-    yield* sql`CREATE TABLE ryco_compatibility_repairs (repair_key TEXT PRIMARY KEY)`;
+    // The pass through 43 already recorded its own repairs in this table.
+    yield* sql`CREATE TABLE IF NOT EXISTS ryco_compatibility_repairs (repair_key TEXT PRIMARY KEY)`;
     yield* sql`
       CREATE TRIGGER reject_marker BEFORE INSERT ON ryco_compatibility_repairs
       BEGIN SELECT RAISE(ABORT, 'interrupted repair'); END
@@ -108,7 +109,9 @@ it.effect("commits the compatibility marker atomically with the backfill", () =>
     assert.deepStrictEqual(tables, []);
     yield* sql`DROP TRIGGER reject_marker`;
     yield* repairProjectionThreadSummaryState;
-    const markers = yield* sql`SELECT repair_key FROM ryco_compatibility_repairs`;
+    const markers = yield* sql`
+      SELECT repair_key FROM ryco_compatibility_repairs WHERE repair_key NOT LIKE 'schema-repair:%'
+    `;
     assert.deepStrictEqual(markers, [{ repair_key: "projection-thread-summary-v1" }]);
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );
