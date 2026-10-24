@@ -59,6 +59,9 @@ export const metricNames = {
   gitCommandDuration: "ryco_git_command_duration",
   terminalSessionsTotal: "ryco_terminal_sessions_total",
   terminalRestartsTotal: "ryco_terminal_restarts_total",
+  serverEventLoopStallsTotal: "ryco_server_event_loop_stalls_total",
+  serverEventLoopStallMaxMs: "ryco_server_event_loop_stall_max_ms",
+  serverEventLoopUtilization: "ryco_server_event_loop_utilization",
 } as const;
 
 export const rpcRequestsTotal = Metric.counter(metricNames.rpcRequestsTotal, {
@@ -257,6 +260,19 @@ export const terminalSessionsTotal = Metric.counter(metricNames.terminalSessions
 
 export const terminalRestartsTotal = Metric.counter(metricNames.terminalRestartsTotal, {
   description: "Total terminal restart requests handled.",
+});
+
+export const serverEventLoopStallsTotal = Metric.counter(metricNames.serverEventLoopStallsTotal, {
+  description:
+    "Total event-loop and libuv threadpool stalls of 2 s or more recorded by the lifetime monitor, by kind.",
+});
+
+export const serverEventLoopStallMaxMs = Metric.gauge(metricNames.serverEventLoopStallMaxMs, {
+  description: "Longest event-loop stall in the last 30 s monitor window, 0 when there was none.",
+});
+
+export const serverEventLoopUtilization = Metric.gauge(metricNames.serverEventLoopUtilization, {
+  description: "Event-loop utilization (busy fraction, 0..1) over the last 30 s monitor window.",
 });
 
 export const metricAttributes = (

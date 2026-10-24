@@ -9,6 +9,7 @@ import path from "node:path";
 
 import {
   type DiagnosticsDurationBucket,
+  type DiagnosticsEventLoopHistory,
   type DiagnosticsFailure,
   type DiagnosticsFailureSummary,
   type DiagnosticsResourceSample,
@@ -26,6 +27,7 @@ import {
   isCurrentCanonicalProviderEventLog,
   parseProviderEventLogLine,
 } from "../../provider/providerEventLogRecords.ts";
+import type { EventLoopHistoryReader } from "../../observability/EventLoopStallHistory.ts";
 import type { TraceSinkHealth } from "../../observability/TraceSink.ts";
 import type { TraceRecord } from "../../observability/TraceRecord.ts";
 import { readResourceTelemetry, recordResourceAttribution } from "../ResourceTelemetry.ts";
@@ -787,6 +789,45 @@ async function readProviderEventFailures(input: {
     .slice(-LIST_LIMIT);
 }
 
+/**
+ * The event-loop stall history. Its reader loads with the first snapshot: only the Diagnostics
+ * page asks for it, so it stays off the boot path.
+ */
+function makeLazyEventLoopHistory(serverTracePath: string) {
+  let reader: EventLoopHistoryReader | undefined;
+  return {
+    async read(
+      nowMs: number,
+      warnings: DiagnosticsWarning[],
+    ): Promise<DiagnosticsEventLoopHistory | undefined> {
+      if (reader === undefined) {
+        try {
+          const { makeEventLoopHistoryReader } =
+            await import("../../observability/EventLoopStallHistory.ts");
+          reader ??= makeEventLoopHistoryReader({
+            serverTracePath,
+            readTail: (filePath) => readFileTail(filePath, FILE_TAIL_BYTES),
+            recentLimit: LIST_LIMIT,
+          });
+        } catch (error) {
+          warnings.push({
+            code: "diagnostics.event-loop-history-unavailable",
+            source: "event-loop-stalls",
+            message:
+              error instanceof Error && error.message.trim().length > 0
+                ? error.message
+                : "Unable to load the event-loop stall history reader.",
+          });
+          return undefined;
+        }
+      }
+      return reader.read(nowMs, warnings);
+    },
+    /** The last successful read, for the partial snapshot after a failure. */
+    last: () => reader?.last(),
+  };
+}
+
 function dedupeTraceRecords(records: ReadonlyArray<TraceRecord>): ReadonlyArray<TraceRecord> {
   const byId = new Map<string, TraceRecord>();
   for (const record of records) {
@@ -844,6 +885,7 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
       const serverStartedAt = new Date(serverStartedAtMs).toISOString();
       const traceRecords = makeRingBuffer<TraceRecord>(TRACE_RECORD_LIMIT);
       const resourceSampler = makeResourceSampler();
+      const eventLoopHistory = makeLazyEventLoopHistory(config.serverTracePath);
       const scannedFilePaths = [
         ...Array.from(
           { length: Math.min(10, Math.max(0, Math.floor(config.traceMaxFiles))) },
@@ -919,8 +961,10 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
         getSnapshot(input) {
           const snapshotStartedAt = performance.now();
           return Effect.tryPromise(async () => {
-            const generatedAt = new Date().toISOString();
-            const [currentResource, processTree, telemetry] = await Promise.all([
+            const generatedAtMs = Date.now();
+            const generatedAt = new Date(generatedAtMs).toISOString();
+            const eventLoopWarnings: DiagnosticsWarning[] = [];
+            const [currentResource, processTree, telemetry, eventLoop] = await Promise.all([
               resourceSampler.sample(),
               readProcessDiagnostics(),
               readResourceTelemetry({
@@ -928,9 +972,10 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
                   terminal.pid !== null && terminal.status === "running" ? [terminal.pid] : [],
                 ),
               }),
+              eventLoopHistory.read(generatedAtMs, eventLoopWarnings),
             ]);
             const persistedDiagnostics = await readPersistedShared(generatedAt);
-            const warnings = [...persistedDiagnostics.warnings];
+            const warnings = [...persistedDiagnostics.warnings, ...eventLoopWarnings];
             const allTraceRecords = dedupeTraceRecords([
               ...persistedDiagnostics.traceRecords,
               ...traceRecords.values(),
@@ -1029,6 +1074,7 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
                 snapshotStartedAt,
                 traceSinkHealth: dependencies?.traceSinkHealth,
               }),
+              ...(eventLoop !== undefined ? { eventLoop } : {}),
               warnings,
             };
           }).pipe(
@@ -1036,6 +1082,7 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
               Effect.promise(async () => {
                 const generatedAt = new Date().toISOString();
                 const currentResource = await resourceSampler.sample();
+                const lastEventLoopHistory = eventLoopHistory.last();
                 return {
                   generatedAt,
                   serverStartedAt,
@@ -1096,6 +1143,9 @@ export const makeDiagnosticsService = Effect.fn("makeDiagnosticsService")(
                     snapshotStartedAt,
                     traceSinkHealth: dependencies?.traceSinkHealth,
                   }),
+                  ...(lastEventLoopHistory !== undefined
+                    ? { eventLoop: lastEventLoopHistory }
+                    : {}),
                   warnings: [
                     {
                       code: "diagnostics.snapshot-partial",
