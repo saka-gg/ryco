@@ -46,7 +46,6 @@ export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/components/chat/useChatProjectScripts.ts": ["useChatProjectScripts"],
   "src/components/chat/useCrownShipBinding.tsx": ["useCrownShipBinding"],
   "src/components/chat/useQuoteSourceHighlight.ts": ["useQuoteSourceHighlight"],
-  "src/components/chat/useThreadPlanCatalog.ts": ["useThreadPlanCatalog"],
   "src/components/chat/worktreeLaunch/WorktreeSetupCard.tsx": ["LiveSeconds"],
   "src/components/desktop/SshPasswordPromptDialog.tsx": ["SshPasswordPromptDialog"],
   "src/components/device/SimulatorPanel.tsx": ["SimulatorPanel"],

@@ -155,6 +155,8 @@ import {
 import {
   createProjectSelectorByRef,
   createThreadSelectorByRef,
+  createThreadStructureSelectorByRef,
+  createThreadSummaryStructureSelectorByRef,
   createWorktreeSelector,
 } from "../storeSelectors";
 import { useUiStateStore } from "../uiStateStore";
@@ -170,7 +172,6 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_RUNTIME_MODE,
   MAX_TERMINALS_PER_GROUP,
-  fullThreadEntry,
   isArchivedThreadStub,
   isChatImageAttachment,
   type ChatMessage,
@@ -768,11 +769,17 @@ export default function ChatView(props: ChatViewProps) {
   const worktreeSetupOnScreen = worktreeSetupRunning || worktreeSetupFailed;
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
+  const [threadMessageSearchOpen, setThreadMessageSearchOpen] = useState(false);
+  // Holds through streamed text: the timeline's StreamedMessageMarkdown shows
+  // it, so a delta does not re-render this view. Thread search counts matches
+  // in the text it has, so it follows the live thread while its bar is open.
   const serverThread = useStore(
-    useMemo(
-      () => createThreadSelectorByRef(routeKind === "server" ? routeThreadRef : null),
-      [routeKind, routeThreadRef],
-    ),
+    useMemo(() => {
+      const ref = routeKind === "server" ? routeThreadRef : null;
+      return threadMessageSearchOpen
+        ? createThreadSelectorByRef(ref)
+        : createThreadStructureSelectorByRef(ref);
+    }, [routeKind, routeThreadRef, threadMessageSearchOpen]),
   );
   const setStoreThreadError = useStore((store) => store.setThreadError);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
@@ -871,7 +878,6 @@ export default function ChatView(props: ChatViewProps) {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
-  const [threadMessageSearchOpen, setThreadMessageSearchOpen] = useState(false);
   const [threadMessageSearchQuery, setThreadMessageSearchQuery] = useState("");
   const [threadMessageSearchFocusRequestId, setThreadMessageSearchFocusRequestId] = useState(0);
   const [threadMessageSearchSelectedIndex, setThreadMessageSearchSelectedIndex] = useState(0);
@@ -1214,9 +1220,17 @@ export default function ChatView(props: ChatViewProps) {
     },
     [mutationUnavailableReason, notifyMutationUnavailable, respondToUserInput],
   );
+  // Keyed by the ids, not the thread: a thread change (a new row, an activity)
+  // must not hand every ref-keyed selector and effect a new ref. Thread
+  // search's server-results reset (below) ran on each one and set a fresh
+  // empty list, which rendered this view a second time per change.
+  const activeThreadEnvironmentId = activeThread?.environmentId ?? null;
   const activeThreadRef = useMemo(
-    () => (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null),
-    [activeThread],
+    () =>
+      activeThreadEnvironmentId !== null && activeThreadId !== null
+        ? scopeThreadRef(activeThreadEnvironmentId, activeThreadId)
+        : null,
+    [activeThreadEnvironmentId, activeThreadId],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   // Rows painted from a cache (or kept after a disconnect) are last-known
@@ -2324,8 +2338,10 @@ export default function ChatView(props: ChatViewProps) {
   // stop-everything interrupt: it kills every live background task before
   // interrupting the parent turn.
   // An archived thread's stub carries none of this; its full summary loads on open.
-  const activeThreadSummary = useStore((store) =>
-    fullThreadEntry(selectSidebarThreadSummaryByRef(store, activeThreadRef)),
+  // Held while the shell stream moves only the summary's `updatedAt`, which it
+  // does after every streamed delta.
+  const activeThreadSummary = useStore(
+    useMemo(() => createThreadSummaryStructureSelectorByRef(activeThreadRef), [activeThreadRef]),
   );
   const activeBackgroundLiveness =
     !isWorking && activeThread ? (activeThreadSummary?.backgroundLiveness ?? null) : null;
