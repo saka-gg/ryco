@@ -6,6 +6,7 @@ import {
   ProjectReadIconError,
   ProjectReadFileBinaryError,
   ProjectReadFileError,
+  ProjectSearchContentError,
   ProjectSearchEntriesError,
   ProjectStageFileReferenceError,
   ProjectWriteFileError,
@@ -14,6 +15,7 @@ import {
 
 import { readProjectIcon } from "../project/readProjectIcon.ts";
 import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
+import { WorkspaceContentSearchCursorError } from "../workspace/Services/WorkspaceContentSearch.ts";
 import {
   WorkspaceFileConflictError,
   WorkspaceFileDeletedError,
@@ -24,25 +26,24 @@ import { WorkspacePathOutsideRootError } from "../workspace/Services/WorkspacePa
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
 export const makeProjectHandlers = (ctx: WsRpcContext) => {
-  const { ownerEffect, workspaceEntries, workspaceFileSystem, open } = ctx;
+  const { ownerEffect, workspaceEntries, workspaceContentSearch, workspaceFileSystem, open } = ctx;
   /**
    * A chat folder empty-folder cleanup removed lists as empty: looking at an old chat's files
    * does not bring its folder back (`project/chatFolderRestore.ts`). Checked only on failure.
    */
   const emptyListing: ProjectListEntriesResult = { entries: [], truncated: false };
-  const emptyForRemovedChatFolder = <A, E>(
+  const emptyForRemovedChatFolder = <A, E, B>(
     cwd: string,
     listing: Effect.Effect<A, E>,
-  ): Effect.Effect<A | ProjectListEntriesResult, E> =>
+    empty: B,
+  ): Effect.Effect<A | B, E> =>
     listing.pipe(
       Effect.catch((cause) =>
         Option.match(ctx.removedChatFolders, {
           onNone: () => Effect.fail(cause),
           onSome: ({ isRemoved }) =>
             isRemoved(cwd).pipe(
-              Effect.flatMap((removed) =>
-                removed ? Effect.succeed(emptyListing) : Effect.fail(cause),
-              ),
+              Effect.flatMap((removed) => (removed ? Effect.succeed(empty) : Effect.fail(cause))),
             ),
         }),
       ),
@@ -77,7 +78,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsSearchEntries,
         ownerEffect(
           WS_METHODS.projectsSearchEntries,
-          emptyForRemovedChatFolder(input.cwd, workspaceEntries.search(input)).pipe(
+          emptyForRemovedChatFolder(input.cwd, workspaceEntries.search(input), emptyListing).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectSearchEntriesError({
@@ -89,12 +90,38 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "workspace" },
       ),
+    // The query never reaches logs or span attributes: it may be anything the user typed.
+    [WS_METHODS.projectsSearchContent]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.projectsSearchContent,
+        ownerEffect(
+          WS_METHODS.projectsSearchContent,
+          emptyForRemovedChatFolder(input.cwd, workspaceContentSearch.search(input), {
+            matches: [],
+          }).pipe(
+            Effect.mapError((cause) =>
+              Schema.is(WorkspaceContentSearchCursorError)(cause)
+                ? new ProjectSearchContentError({ message: cause.message, reason: "cursor" })
+                : new ProjectSearchContentError({
+                    message: `Failed to search workspace contents: ${cause.detail}`,
+                    reason: "failed",
+                    cause,
+                  }),
+            ),
+          ),
+        ),
+        { "rpc.aggregate": "workspace" },
+      ),
     [WS_METHODS.projectsListEntries]: (input) =>
       observeRpcEffect(
         WS_METHODS.projectsListEntries,
         ownerEffect(
           WS_METHODS.projectsListEntries,
-          emptyForRemovedChatFolder(input.cwd, workspaceEntries.listEntries(input)).pipe(
+          emptyForRemovedChatFolder(
+            input.cwd,
+            workspaceEntries.listEntries(input),
+            emptyListing,
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectListEntriesError({

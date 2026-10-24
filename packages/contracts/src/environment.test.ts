@@ -99,6 +99,17 @@ describe("ExecutionEnvironmentCapabilities.projectSearchEmptyQuery", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.projectContentSearch", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.projectContentSearch).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ projectContentSearch: true })).capabilities
+        .projectContentSearch,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ projectContentSearch: "true" }))).toThrow();
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.terminalWriteRequireIdle", () => {
   it("stays absent for older nodes and decodes when advertised", () => {
     expect(decodeDescriptor(descriptor({})).capabilities.terminalWriteRequireIdle).toBeUndefined();

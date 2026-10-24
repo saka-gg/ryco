@@ -11,6 +11,8 @@ import {
 import { CHAT_PROJECT_TITLE_MAX_CHARS } from "./orchestration.ts";
 
 const PROJECT_SEARCH_ENTRIES_MAX_LIMIT = 200;
+const PROJECT_SEARCH_CONTENT_QUERY_MAX_LENGTH = 256;
+const PROJECT_SEARCH_CONTENT_MAX_LIMIT = 500;
 const PROJECT_WRITE_FILE_PATH_MAX_LENGTH = 512;
 export const PROJECT_STAGE_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const PROJECT_STAGE_FILE_MAX_BASE64_CHARS = Math.ceil((PROJECT_STAGE_FILE_MAX_BYTES * 4) / 3) + 4;
@@ -75,6 +77,74 @@ export class ProjectSearchEntriesError extends Schema.TaggedError<ProjectSearchE
   "ProjectSearchEntriesError",
   {
     message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+/**
+ * A literal text search of the workspace's file contents. A new option (regex, globs) needs its
+ * own capability: older nodes drop unknown keys and would answer a literal search.
+ */
+export const ProjectSearchContentInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  /** Not trimmed: whitespace is part of what is searched. One line, no NUL. */
+  query: Schema.String.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(PROJECT_SEARCH_CONTENT_QUERY_MAX_LENGTH),
+    Schema.isPattern(/^[^\r\n\0]*$/),
+  ),
+  /** Matching lines per page. */
+  limit: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_SEARCH_CONTENT_MAX_LIMIT)),
+  /** Absent means false. */
+  caseSensitive: Schema.optional(Schema.Boolean),
+  /** Absent means false. */
+  wholeWord: Schema.optional(Schema.Boolean),
+  /** The previous page's `nextCursor`; opaque and node-issued. */
+  cursor: Schema.optional(Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(1024))),
+});
+export type ProjectSearchContentInput = typeof ProjectSearchContentInput.Type;
+
+/** UTF-16 offsets into a match's `preview`. */
+export const ProjectContentMatchRange = Schema.Struct({
+  start: NonNegativeInt,
+  end: NonNegativeInt,
+});
+export type ProjectContentMatchRange = typeof ProjectContentMatchRange.Type;
+
+// Result fields carry no length checks, so a node can raise its caps without breaking older clients.
+export const ProjectContentMatch = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  lineNumber: PositiveInt,
+  /** The matching line, or a window of a long one with `…` at each cut edge. */
+  preview: Schema.String,
+  ranges: Schema.Array(ProjectContentMatchRange),
+});
+export type ProjectContentMatch = typeof ProjectContentMatch.Type;
+
+export const ProjectSearchContentResult = Schema.Struct({
+  /** Whole files in path order: a page never splits one file's matches. */
+  matches: Schema.Array(ProjectContentMatch),
+  /** Present when more matches may follow; pass it back to continue. */
+  nextCursor: Schema.optional(Schema.String),
+  /** The page used up its time budget before it filled; `nextCursor` continues after it. */
+  timedOut: Schema.optional(Schema.Boolean),
+  /**
+   * Only part of the workspace was searched: its file index hit a size cap or
+   * lists tracked files only.
+   */
+  partial: Schema.optional(Schema.Boolean),
+});
+export type ProjectSearchContentResult = typeof ProjectSearchContentResult.Type;
+
+/** `cursor`: the cursor is not one this node can continue; search again from the start. */
+export const ProjectSearchContentFailureReason = Schema.Literals(["cursor", "failed"]);
+export type ProjectSearchContentFailureReason = typeof ProjectSearchContentFailureReason.Type;
+
+export class ProjectSearchContentError extends Schema.TaggedError<ProjectSearchContentError>()(
+  "ProjectSearchContentError",
+  {
+    message: TrimmedNonEmptyString,
+    reason: Schema.optional(ProjectSearchContentFailureReason),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}

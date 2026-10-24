@@ -2733,6 +2733,7 @@ export function setupChatViewBrowserSuite() {
     useCommandPaletteStore.setState({
       open: false,
       openIntent: null,
+      workspaceSearchMode: null,
     });
     useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
     useSidebarFoldStore.getState().reset();
