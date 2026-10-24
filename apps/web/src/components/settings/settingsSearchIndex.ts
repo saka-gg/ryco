@@ -1,14 +1,22 @@
+import { isElectron, isHostedHubMode } from "../../env";
+import type { EnvironmentSettingsTargetState } from "../../hooks/useEnvironmentSettingsTarget";
 import type { SettingsSectionId } from "../../settingsDialogStore";
+import { isLocalOnboardingClient } from "../onboarding/localOnboarding";
+import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
+
+export type SettingsDestination = "client" | "node";
+
+export type SettingsDesktopCapability =
+  | "computerUse"
+  | "quitShortcut"
+  | "windowCapture"
+  | "windowTranslucencySupported";
 
 export interface SettingsSearchEntry {
   readonly section: SettingsSectionId;
-  readonly owner: "client" | "node";
+  readonly owner: SettingsDestination;
   readonly localOnboardingOnly?: boolean;
-  readonly desktopCapability?:
-    | "computerUse"
-    | "quitShortcut"
-    | "windowCapture"
-    | "windowTranslucencySupported";
+  readonly desktopCapability?: SettingsDesktopCapability;
   readonly title: string;
   readonly description: string;
   /** Extra match terms not present in title/description. */
@@ -496,3 +504,103 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "unarchive delete restore retention cleanup suggestions",
   },
 ];
+
+/**
+ * Section titles as the settings nav draws them. They live here, not in the
+ * settings page, so the command palette can name a section without loading it.
+ */
+export const SETTINGS_SECTION_TITLES: Readonly<Record<SettingsSectionId, string>> = {
+  account: "Account",
+  general: "General",
+  inbox: "Inbox",
+  appearance: "Appearance",
+  providers: "Providers",
+  "opinionated-plugins": "Plugins",
+  "mcp-servers": "MCP",
+  integrations: "Integrations",
+  "computer-use": "Computer use",
+  keybindings: "Keybindings",
+  "source-control": "Source control",
+  connections: "Connections",
+  updates: "Updates",
+  security: "Security",
+  diagnostics: "Diagnostics",
+  statistics: "Statistics",
+  archived: "Archive",
+};
+
+/** Sections that open another page instead of rendering a panel in settings. */
+export const SETTINGS_LINK_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["statistics"]);
+
+/**
+ * What the settings page can show: this client, and the device it edits.
+ * Built by {@link readSettingsSearchScope}.
+ */
+export interface SettingsSearchScope {
+  readonly hosted: boolean;
+  /** Desktop with computer use, where Integrations is also an app section. */
+  readonly desktopComputerUse: boolean;
+  readonly localOnboarding: boolean;
+  readonly hasDesktopCapability: (capability: SettingsDesktopCapability) => boolean;
+  /** The device whose settings the page shows. */
+  readonly node: Pick<EnvironmentSettingsTargetState, "target" | "isPrimary" | "nodeRole">;
+}
+
+export function readSettingsSearchScope(node: SettingsSearchScope["node"]): SettingsSearchScope {
+  return {
+    hosted: isHostedHubMode(),
+    desktopComputerUse: isElectron && Boolean(window.desktopBridge?.computerUse),
+    localOnboarding: isLocalOnboardingClient(),
+    hasDesktopCapability: (capability) => Boolean(window.desktopBridge?.[capability]),
+    node,
+  };
+}
+
+/**
+ * Whether the settings nav lists a section under a destination. The page
+ * builds its nav from this and the command palette its Settings results, so a
+ * result never names a section the page then refuses.
+ */
+export function settingsSectionListed(
+  scope: SettingsSearchScope,
+  destination: SettingsDestination,
+  section: SettingsSectionId,
+): boolean {
+  if (destination === "client") {
+    return (
+      settingsSectionInDestination(section, "client", scope.desktopComputerUse) &&
+      (section !== "connections" || !scope.hosted)
+    );
+  }
+  const target = scope.node.target;
+  // The device's own connection settings live under Security; "Connections"
+  // belongs to the app, which is what reaches devices.
+  return (
+    target !== null &&
+    section !== "connections" &&
+    settingsSectionInDestination(section, "node", scope.desktopComputerUse) &&
+    settingsSectionReachable(section, {
+      hosted: scope.hosted || !scope.node.isPrimary,
+      role: target.connected ? scope.node.nodeRole : null,
+      desktop: false,
+    })
+  );
+}
+
+/** The entries a settings search lists for `query`, in index order. */
+export function filterSettingsSearchEntries(
+  query: string,
+  scope: SettingsSearchScope,
+): SettingsSearchEntry[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (normalizedQuery.length === 0) return [];
+  return SETTINGS_SEARCH_INDEX.filter(
+    (entry) =>
+      settingsSectionListed(scope, entry.owner, entry.section) &&
+      (!entry.localOnboardingOnly || scope.localOnboarding) &&
+      (!entry.desktopCapability || scope.hasDesktopCapability(entry.desktopCapability)) &&
+      `${entry.title} ${entry.description} ${entry.keywords ?? ""}`
+        .toLowerCase()
+        .includes(normalizedQuery),
+  );
+}

@@ -1,4 +1,5 @@
 import { isChatProject } from "@ryco/shared/projectKind";
+import { threadHasConversation } from "@ryco/shared/threadFork";
 import { canSnoozeThread, isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
 import type {
@@ -37,6 +38,7 @@ import {
 import type { ThreadCapabilitySupport } from "../../rpc/environmentServerConfigs.ts";
 import { scopeThreadRef, scopedProjectKey, scopedThreadKey } from "../../scoped.ts";
 import { CHAT_PROJECT_LABEL } from "../composer/chatDrafts.ts";
+import { isThreadArchiveBlockedByTurn } from "../lifecycle/index.ts";
 import {
   isArchivedThreadStub,
   type Project,
@@ -94,11 +96,19 @@ export type ThreadInboxMutationBlocker =
   | "read-only"
   | "shell-stale";
 
+/** The owning node cannot take a change from this client right now. */
+export type ThreadInboxConnectionBlocker = Extract<
+  ThreadInboxMutationBlocker,
+  "disconnected" | "shell-stale" | "read-only"
+>;
+
 export interface ThreadInboxLifecycle {
   readonly classification: Exclude<ThreadSettlementClassification, "excluded"> | "snoozed";
   readonly eligibility: CanSettleThreadResult;
   readonly effectiveSettlementTimestamp: string | null;
   readonly settlementBlocker: ThreadSettlementBlocker | null;
+  /** Why the thread cannot be snoozed, by `canSnoozeThread`'s rule. */
+  readonly snoozeBlocker: ThreadSettlementBlocker | null;
   /** Why automatic settlement is held back; manual settle is unaffected. */
   readonly autoSettlementBlocker: ThreadAutoSettlementBlocker | null;
 }
@@ -122,6 +132,41 @@ export interface ThreadInboxEntry {
   readonly canSnooze: boolean;
   readonly focus: ThreadPriorityFocusMetadata | null;
 }
+
+/** Why settling a thread, or moving it back to Active, cannot run. */
+export type ThreadSettleBlocker = ThreadInboxMutationBlocker | ThreadSettlementBlocker;
+/** Why snoozing a thread, or waking it, cannot run. */
+export type ThreadSnoozeBlocker = ThreadInboxMutationBlocker | ThreadSettlementBlocker;
+export type ThreadArchiveBlocker =
+  | ThreadInboxConnectionBlocker
+  | "no-conversation"
+  | "turn-running";
+export type ThreadMarkUnreadBlocker = "no-completed-turn";
+
+export interface ThreadLifecycleActionAvailability<Blocker extends string> {
+  readonly enabled: boolean;
+  /** Why the action cannot run; null while it can. Clients word it themselves. */
+  readonly blocker: Blocker | null;
+}
+
+/**
+ * What can be done to one inbox thread now, for every surface that offers it:
+ * Inbox rows, the command palette and the keyboard shortcuts. Settle and
+ * snooze describe what their toggle runs: Move to Active on a settled thread,
+ * Unsnooze on a snoozed one.
+ */
+export interface ThreadLifecycleAvailability {
+  readonly settle: ThreadLifecycleActionAvailability<ThreadSettleBlocker> & {
+    readonly settled: boolean;
+  };
+  readonly snooze: ThreadLifecycleActionAvailability<ThreadSnoozeBlocker> & {
+    readonly snoozedUntil: string | null;
+  };
+  readonly archive: ThreadLifecycleActionAvailability<ThreadArchiveBlocker>;
+  readonly markUnread: ThreadLifecycleActionAvailability<ThreadMarkUnreadBlocker>;
+}
+
+export type ThreadLifecycleAction = keyof ThreadLifecycleAvailability;
 
 export interface BuildThreadInboxInput {
   readonly projects: ReadonlyArray<Project>;
@@ -204,18 +249,49 @@ function resolveWorktree(input: {
   );
 }
 
+function connectionBlocker(
+  environment: ThreadInboxEnvironment,
+): ThreadInboxConnectionBlocker | null {
+  if (!environment.connected) return "disconnected";
+  if (!environment.shellCurrent) return "shell-stale";
+  if (!environment.mutationReady) return "read-only";
+  return null;
+}
+
+/** A change that needs `support`, the node's own answer for the capability. */
+function capabilityBlocker(
+  environment: ThreadInboxEnvironment,
+  support: ThreadCapabilitySupport | undefined,
+): ThreadInboxMutationBlocker | null {
+  if (support === false) return "unsupported";
+  const blocker = connectionBlocker(environment);
+  if (blocker !== null) return blocker;
+  // Connected, but the node's own capabilities have not arrived yet.
+  if (support !== true) return "shell-stale";
+  return null;
+}
+
 function mutationBlocker(
   environment: ThreadInboxEnvironment,
   isDraft: boolean,
 ): ThreadInboxMutationBlocker | null {
   if (isDraft) return "client-draft";
-  if (environment.threadSettlementSupported === false) return "unsupported";
-  if (!environment.connected) return "disconnected";
-  if (!environment.shellCurrent) return "shell-stale";
-  if (!environment.mutationReady) return "read-only";
-  // Connected, but the node's own capabilities have not arrived yet.
-  if (environment.threadSettlementSupported === "unknown") return "shell-stale";
-  return null;
+  return capabilityBlocker(environment, environment.threadSettlementSupported);
+}
+
+/**
+ * Why an awake thread cannot be snoozed: the node must take settlement and
+ * Snooze, then the thread must be snoozable by `canSnoozeThread`'s rule. One
+ * rule for the entry's `canSnooze` and its lifecycle availability.
+ */
+function awakeSnoozeBlocker(
+  environment: ThreadInboxEnvironment,
+  mutation: ThreadInboxMutationBlocker | null,
+  eligibility: ThreadSettlementBlocker | null,
+): ThreadSnoozeBlocker | null {
+  return (
+    mutation ?? capabilityBlocker(environment, environment.threadSnoozeSupported) ?? eligibility
+  );
 }
 
 /**
@@ -517,6 +593,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       nextSettlementEvaluationAtMs = Math.min(nextSettlementEvaluationAtMs ?? wake, wake);
     }
     const eligibility = canSettleThread(policyInput);
+    const snoozeEligibility = canSnoozeThread(policyInput);
     const blocker = mutationBlocker(environment, false);
     entries.push({
       key,
@@ -533,6 +610,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         eligibility,
         effectiveSettlementTimestamp: getEffectiveSettlementTimestamp(policyInput),
         settlementBlocker: eligibility.blocker,
+        snoozeBlocker: snoozeEligibility.blocker,
         autoSettlementBlocker: getThreadAutoSettlementBlocker(policyInput),
       },
       mutationEnabled: blocker === null,
@@ -540,10 +618,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       pinned,
       current: input.currentThreadKey === key,
       isDraft: false,
-      canSnooze:
-        blocker === null &&
-        environment.threadSnoozeSupported === true &&
-        canSnoozeThread(policyInput).canSnooze,
+      canSnooze: awakeSnoozeBlocker(environment, blocker, snoozeEligibility.blocker) === null,
       focus: null,
     });
   }
@@ -584,6 +659,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         eligibility: { canSettle: false, blocker: "unsupported" },
         effectiveSettlementTimestamp: null,
         settlementBlocker: "unsupported",
+        snoozeBlocker: "unsupported",
         autoSettlementBlocker: null,
       },
       mutationEnabled: false,
@@ -649,5 +725,50 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       ),
     excludedCount,
     nextSettlementEvaluationAtMs,
+  };
+}
+
+function availability<Blocker extends string>(
+  blocker: Blocker | null,
+): ThreadLifecycleActionAvailability<Blocker> {
+  return { enabled: blocker === null, blocker };
+}
+
+/** Archiving needs a connected node, not settlement: it works on nodes that predate it. */
+function archiveBlocker(entry: ThreadInboxEntry): ThreadArchiveBlocker | null {
+  // A draft has sent nothing yet.
+  if (entry.thread === null) return "no-conversation";
+  const blocker = connectionBlocker(entry.environment);
+  if (blocker !== null) return blocker;
+  if (!threadHasConversation(entry.thread)) return "no-conversation";
+  if (isThreadArchiveBlockedByTurn(entry.thread)) return "turn-running";
+  return null;
+}
+
+export function resolveThreadLifecycleAvailability(
+  entry: ThreadInboxEntry,
+): ThreadLifecycleAvailability {
+  const { environment, lifecycle, thread } = entry;
+  const settled = lifecycle.classification === "settled";
+  const snoozedUntil =
+    lifecycle.classification === "snoozed" ? (thread?.snoozedUntil ?? null) : null;
+  return {
+    settle: {
+      // Moving a settled thread back to Active needs only the node.
+      ...availability(entry.mutationBlocker ?? (settled ? null : lifecycle.settlementBlocker)),
+      settled,
+    },
+    snooze: {
+      // Waking needs only Snooze on the node; snoozing also needs settlement.
+      ...availability(
+        snoozedUntil !== null
+          ? capabilityBlocker(environment, environment.threadSnoozeSupported)
+          : awakeSnoozeBlocker(environment, entry.mutationBlocker, lifecycle.snoozeBlocker),
+      ),
+      snoozedUntil,
+    },
+    archive: availability(archiveBlocker(entry)),
+    // Local to this client: only a completed turn has anything to mark.
+    markUnread: availability(thread?.latestTurn?.completedAt ? null : "no-completed-turn"),
   };
 }

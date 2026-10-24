@@ -116,6 +116,7 @@ import { useChatsAvailability } from "../hooks/useChatsAvailability";
 import { SidebarProjectDialogProvider } from "./sidebar/SidebarProjectDialogOwner";
 import { SidebarChromeHeader, SidebarChromeFooter } from "./sidebar/SidebarChrome";
 import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
+import { ThreadLifecycleShortcuts } from "./sidebar/ThreadLifecycleShortcuts";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
 import {
@@ -1465,6 +1466,20 @@ export default function Sidebar() {
           onVisibilityChange={updateThreadJumpHintsVisibility}
         />
       ) : null}
+      <ThreadLifecycleShortcuts
+        routeThreadRef={routeThreadRef}
+        threadByKey={sidebarThreadByKey}
+        projects={projects}
+        worktrees={sidebarWorktrees}
+        environments={inboxEnvironments}
+        localQueuedThreadKeys={localQueuedThreadKeys}
+        deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
+        pinnedThreadKeys={pinnedThreadKeys}
+        autoSettleAfterDays={sidebarAutoSettleAfterDays}
+        archiveThread={archiveThread}
+        keybindings={keybindings}
+        readShortcutContext={getCurrentSidebarShortcutContext}
+      />
       <SidebarSeparator />
       <SidebarChromeFooter />
     </>

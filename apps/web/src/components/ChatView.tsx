@@ -400,6 +400,7 @@ import {
   resolveHeaderLiveAgentCount,
   resolveSendEnvMode,
   resolveChatSendWorktreePlan,
+  resolveThreadVisit,
   shouldShowNewThreadSurface,
   isServerThreadHistoryPending,
   createThreadSubmitGuard,
@@ -1860,19 +1861,27 @@ export default function ChatView(props: ChatViewProps) {
     [openOrReuseProjectDraftThread],
   );
 
+  // The completed turn this focus of the thread showed as read: marking it
+  // unread then holds until the thread is left (see `resolveThreadVisit`).
+  const seenReadTurnRef = useRef<{ threadKey: string; completedAt: string } | null>(null);
   useEffect(() => {
-    if (!paneFocused || !serverThread?.id) return;
-    if (!latestTurnSettled) return;
-    if (!activeLatestTurn?.completedAt) return;
-    const turnCompletedAt = Date.parse(activeLatestTurn.completedAt);
-    if (Number.isNaN(turnCompletedAt)) return;
-    const lastVisitedAt = activeThreadLastVisitedAt ? Date.parse(activeThreadLastVisitedAt) : NaN;
-    if (!Number.isNaN(lastVisitedAt) && lastVisitedAt >= turnCompletedAt) return;
-
-    markThreadVisited(
-      scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
-      activeLatestTurn.completedAt,
-    );
+    const threadKey =
+      paneFocused && serverThread?.id
+        ? scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id))
+        : null;
+    // Leaving the thread, or its pane losing focus, ends the hold.
+    if (seenReadTurnRef.current?.threadKey !== threadKey) seenReadTurnRef.current = null;
+    if (threadKey === null || !latestTurnSettled) return;
+    const completedAt = activeLatestTurn?.completedAt;
+    if (!completedAt || Number.isNaN(Date.parse(completedAt))) return;
+    const visit = resolveThreadVisit({
+      completedAt,
+      lastVisitedAt: activeThreadLastVisitedAt,
+      seenCompletedAt: seenReadTurnRef.current?.completedAt ?? null,
+    });
+    if (visit === "hold") return;
+    seenReadTurnRef.current = { threadKey, completedAt };
+    if (visit === "visit") markThreadVisited(threadKey, completedAt);
   }, [
     activeLatestTurn?.completedAt,
     activeThreadLastVisitedAt,

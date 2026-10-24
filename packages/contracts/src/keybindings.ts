@@ -59,7 +59,13 @@ export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMA
 export const FILE_SEARCH_KEYBINDING_COMMANDS = [] as const;
 
 // Settle, snooze, archive, mark unread and undo for threads.
-export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [] as const;
+export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [
+  "thread.settle",
+  "thread.snooze",
+  "thread.archive",
+  "thread.markUnread",
+  "thread.undo",
+] as const;
 
 // The next thread that needs attention.
 export const THREAD_ATTENTION_KEYBINDING_COMMANDS = [] as const;

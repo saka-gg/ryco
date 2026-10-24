@@ -15,6 +15,7 @@ import type {
   Project,
   SidebarThreadSummary,
   SidebarWorktreeSummary,
+  ThreadLifecycleAction,
 } from "@ryco/client-runtime/state/threads";
 import {
   EnvironmentId,
@@ -38,7 +39,9 @@ import {
   buildSavedInboxSidebarEnvironment,
   createInboxSidebarModelSharing,
   describeInboxFocus,
+  resolveCurrentThreadLifecycle,
   sameInboxProviderCatalogs,
+  threadLifecycleDisabledReason,
   type InboxSidebarEnvironment,
   type InboxSidebarFilters,
 } from "./inboxSidebarModel";
@@ -2017,5 +2020,154 @@ describe("createInboxSidebarModelSharing", () => {
     const back = sharing.share(buildModel(threads()));
     expect(rowByTitle(back, "busy")).not.toBe(rowByTitle(first, "busy"));
     expect(rowByTitle(back, "busy")).toEqual(rowByTitle(first, "busy"));
+  });
+});
+
+describe("current thread lifecycle", () => {
+  const nowMs = Date.parse("2026-08-23T12:00:00.000Z");
+  const completedTurn = {
+    turnId: TurnId.make("turn-1"),
+    state: "completed" as const,
+    requestedAt: "2026-08-23T10:00:00.000Z",
+    startedAt: "2026-08-23T10:00:00.000Z",
+    completedAt: "2026-08-23T10:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const used = (id: string, overrides: Partial<SidebarThreadSummary> = {}) =>
+    thread(id, {
+      latestUserMessageAt: "2026-08-23T10:00:00.000Z",
+      latestTurn: completedTurn,
+      ...overrides,
+    });
+  const idle = used("idle");
+  const running = used("running", {
+    session: {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: TurnId.make("turn-2"),
+      createdAt: "2026-08-23T11:00:00.000Z",
+      updatedAt: "2026-08-23T11:00:00.000Z",
+    },
+    latestTurn: {
+      ...completedTurn,
+      turnId: TurnId.make("turn-2"),
+      state: "running",
+      completedAt: null,
+    },
+  });
+  const live = environment(ENV_A, { threadSnoozeSupported: true });
+  const current = (value: SidebarThreadSummary, environments = [live]) =>
+    resolveCurrentThreadLifecycle({
+      thread: value,
+      projects: [project(ENV_A)],
+      worktrees: [],
+      environments,
+      nowMs,
+    });
+  const reason = (
+    value: SidebarThreadSummary,
+    action: ThreadLifecycleAction,
+    environments = [live],
+  ) => threadLifecycleDisabledReason(current(value, environments)!.availability, action);
+
+  it("names the open thread and what can be done to it", () => {
+    expect(current(idle)).toEqual({
+      target: { environmentId: ENV_A, threadId: idle.id },
+      title: "idle",
+      availability: {
+        settle: { enabled: true, blocker: null, settled: false },
+        snooze: { enabled: true, blocker: null, snoozedUntil: null },
+        archive: { enabled: true, blocker: null },
+        markUnread: { enabled: true, blocker: null },
+      },
+    });
+    expect(current(used("untitled", { title: "" }))?.title).toBe("Untitled task");
+  });
+
+  it("has nothing for a thread the inbox does not list", () => {
+    expect(current({ ...idle, archivedAt: "2026-08-23T11:00:00.000Z" })).toBeNull();
+  });
+
+  it("decides each thread exactly as its inbox row does", () => {
+    const threads = [
+      idle,
+      running,
+      thread("fresh"),
+      used("asking", { hasPendingApprovals: true }),
+      used("settled", { settledOverride: "settled", settledAt: "2026-08-23T11:00:00.000Z" }),
+      used("snoozed", {
+        snoozedAt: "2026-08-23T11:00:00.000Z",
+        snoozedUntil: "2026-08-23T13:00:00.000Z",
+      }),
+    ];
+    for (const environments of [
+      [live],
+      [environment(ENV_A)],
+      [environment(ENV_A, { threadSnoozeSupported: true, mutationReady: false })],
+      [environment(ENV_A, { threadSettlementSupported: "unknown", threadSnoozeSupported: true })],
+    ]) {
+      const rows = build({ threads, environments, nowMs }).flatMap((section) => section.rows);
+      expect(rows).toHaveLength(threads.length);
+      for (const row of rows) {
+        const { availability } = current(
+          threads.find((candidate) => candidate.id === row.threadId)!,
+          environments,
+        )!;
+        expect({
+          settled: availability.settle.settled,
+          snoozedUntil: availability.snooze.snoozedUntil,
+          settlementActionEnabled: availability.settle.enabled,
+          settlementDisabledReason: threadLifecycleDisabledReason(availability, "settle"),
+          snoozeEnabled: availability.snooze.enabled,
+        }).toEqual({
+          settled: row.settled,
+          snoozedUntil: row.snoozedUntil,
+          settlementActionEnabled: row.settlementActionEnabled,
+          settlementDisabledReason: row.settlementDisabledReason,
+          snoozeEnabled: row.snoozedUntil ? row.canUnsnooze : row.canSnooze,
+        });
+      }
+    }
+  });
+
+  it("says why each action is blocked, in the action's own words", () => {
+    const offline = [
+      environment(ENV_A, { connectionState: "offline", threadSnoozeSupported: true }),
+    ];
+    const stale = [environment(ENV_A, { shellCurrent: false, threadSnoozeSupported: true })];
+    const viewer = [environment(ENV_A, { mutationReady: false, threadSnoozeSupported: true })];
+    expect(reason(running, "settle")).toBe("Wait for the running work to finish.");
+    expect(reason(running, "snooze")).toBe("Wait for the running work to finish.");
+    expect(reason(running, "archive")).toBe("Wait for the running work to finish.");
+    expect(reason(running, "markUnread")).toBe("Nothing to mark unread yet.");
+    expect(reason(used("asking", { hasPendingApprovals: true }), "snooze")).toBe(
+      "Resolve the pending approval first.",
+    );
+    expect(reason(thread("fresh"), "archive")).toBe("Send a message before archiving.");
+    expect(reason(idle, "settle", offline)).toBe("Reconnect this machine to change settlement.");
+    expect(reason(idle, "snooze", offline)).toBe("Reconnect this machine to snooze threads.");
+    expect(reason(idle, "archive", offline)).toBe("Reconnect this machine to archive threads.");
+    expect(reason(idle, "snooze", stale)).toBe("Wait for current thread data before snoozing.");
+    expect(reason(idle, "archive", stale)).toBe("Wait for current thread data before archiving.");
+    expect(reason(idle, "archive", viewer)).toBe("Your role cannot change this thread.");
+    expect(reason(idle, "snooze", [environment(ENV_A, { threadSnoozeSupported: false })])).toBe(
+      "Update this machine to use Snooze.",
+    );
+    // Mark unread is this client's own state: no machine blocks it.
+    expect(reason(idle, "markUnread", offline)).toBeNull();
+    expect(
+      threadLifecycleDisabledReason(
+        resolveCurrentThreadLifecycle({
+          thread: idle,
+          projects: [project(ENV_A)],
+          worktrees: [],
+          environments: [live],
+          deliveryUnknownThreadKeys: new Set([`${ENV_A}:${idle.id}`]),
+          nowMs,
+        })!.availability,
+        "snooze",
+      ),
+    ).toBe("Confirm message delivery before snoozing.");
   });
 });
