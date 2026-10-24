@@ -3,11 +3,14 @@ import {
   projectIconCacheBytes,
   readProjectIconSource,
 } from "@ryco/client-runtime/connection";
+import { dailyRecapCache } from "@ryco/client-runtime/state/dailyRecap";
 import { statisticsSnapshotCache } from "@ryco/client-runtime/usage";
 import {
   EnvironmentId,
   ProjectId,
   ThreadId,
+  type DailyRecapRequest,
+  type DailyRecapSnapshot,
   type EnvironmentApi,
   type ExecutionEnvironmentDescriptor,
   type ProjectSearchEntriesResult,
@@ -93,6 +96,27 @@ function cacheStatistics(target: EnvironmentId): Promise<StatisticsSnapshot> {
   );
 }
 
+const RECAP_REQUEST = { date: "2026-10-24", timeZone: "Europe/Berlin" } as DailyRecapRequest;
+
+/** Load `target`'s daily recap into the shared cache; it answers when `release` runs. */
+function loadRecap(target: EnvironmentId) {
+  let release: () => void = () => undefined;
+  const answered = new Promise<DailyRecapSnapshot>((resolve) => {
+    release = () => resolve({ date: RECAP_REQUEST.date } as DailyRecapSnapshot);
+  });
+  const result = dailyRecapCache.load(
+    { environmentId: target, label: target, getDailyRecap: () => answered },
+    RECAP_REQUEST,
+  );
+  return { result, release };
+}
+
+async function cacheRecap(target: EnvironmentId): Promise<void> {
+  const recap = loadRecap(target);
+  recap.release();
+  await recap.result;
+}
+
 function serverConfigFor(target: EnvironmentId): ServerConfig {
   return {
     environment: { environmentId: target, label: target, capabilities: {} },
@@ -109,6 +133,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  dailyRecapCache.clear();
   resetServerStateForTests();
   resetEnvironmentServerConfigsForTests();
   resetPrimaryEnvironmentDescriptorForTests();
@@ -250,6 +275,21 @@ describe("clearWebHostedNodeScopedState", () => {
     expect(statisticsSnapshotCache.peek(environmentId)).toBeUndefined();
     expect(statisticsSnapshotCache.peek(otherEnvironmentId)?.generatedAt).toBe(
       `statistics-${otherEnvironmentId}`,
+    );
+  });
+
+  it("forgets the left environment's daily recaps, in flight too, and keeps the others'", async () => {
+    await cacheRecap(environmentId);
+    await cacheRecap(otherEnvironmentId);
+    const inFlight = loadRecap(environmentId);
+
+    clearWebHostedNodeScopedState(environmentId);
+    inFlight.release();
+    await inFlight.result;
+
+    expect(dailyRecapCache.peek(environmentId, RECAP_REQUEST)).toBeUndefined();
+    expect(dailyRecapCache.peek(otherEnvironmentId, RECAP_REQUEST)?.environmentId).toBe(
+      otherEnvironmentId,
     );
   });
 
@@ -404,6 +444,18 @@ describe("clearWebHostedNodeScopedState", () => {
     expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBeUndefined();
     expect(projectIconCacheBytes(environmentId)).toBe(0);
     expect(statisticsSnapshotCache.peek(environmentId)).toBeUndefined();
+  });
+
+  it("clears every environment's daily recaps at the account-session boundary", async () => {
+    await cacheRecap(otherEnvironmentId);
+    const inFlight = loadRecap(environmentId);
+
+    clearWebHostedAccountScopedState();
+    inFlight.release();
+    await inFlight.result;
+
+    expect(dailyRecapCache.peek(environmentId, RECAP_REQUEST)).toBeUndefined();
+    expect(dailyRecapCache.peek(otherEnvironmentId, RECAP_REQUEST)).toBeUndefined();
   });
 
   it("clears every environment's node caches at the account-session boundary", async () => {

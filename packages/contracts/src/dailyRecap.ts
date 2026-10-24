@@ -41,6 +41,9 @@ export const DailyRecapThreadSection = Schema.Struct({
   truncated: Schema.Boolean,
 });
 
+/** Most projects a recap's `activity.projects` lists. */
+export const DAILY_RECAP_TOP_PROJECTS = 5;
+
 export const DailyRecapSnapshot = Schema.Struct({
   date: UsageCalendarDate,
   timeZone: TrimmedNonEmptyString,
@@ -57,6 +60,25 @@ export const DailyRecapSnapshot = Schema.Struct({
   /** Sections are independent: a thread may have both successful and failed turns. */
   completed: DailyRecapThreadSection,
   failed: DailyRecapThreadSection,
+  /**
+   * Where the day's counted turns went. Absent from nodes that predate it, so a client can tell
+   * "not reported" from an idle day.
+   */
+  activity: Schema.optional(
+    Schema.Struct({
+      /** Run time of the counted turns inside this day, summed across chats that ran in parallel. */
+      agentMs: NonNegativeInt,
+      /** The busiest real projects (never chats): most turns first, then most agent time. */
+      projects: Schema.Array(
+        Schema.Struct({
+          projectId: ProjectId,
+          projectTitle: Schema.String,
+          turns: NonNegativeInt,
+          agentMs: NonNegativeInt,
+        }),
+      ),
+    }),
+  ),
   /** Current outstanding attention, regardless of the selected day; excludes archived threads. */
   needsAttention: Schema.Struct({
     totalThreads: NonNegativeInt,
