@@ -7,7 +7,6 @@ import { createWaitingThreadCountSelector } from "./waiting.ts";
 
 const nodeA = EnvironmentId.make("synthetic-node-a");
 const nodeB = EnvironmentId.make("synthetic-node-b");
-const nowMs = Date.parse("2026-10-23T12:00:00.000Z");
 
 function thread(id: string, patch: Partial<SidebarThreadSummary> = {}): SidebarThreadSummary {
   return {
@@ -37,9 +36,6 @@ function thread(id: string, patch: Partial<SidebarThreadSummary> = {}): SidebarT
   };
 }
 
-const planReady = (id: string, patch: Partial<SidebarThreadSummary> = {}) =>
-  thread(id, { interactionMode: "plan", hasActionableProposedPlan: true, ...patch });
-
 function summaries(
   ...threads: SidebarThreadSummary[]
 ): EnvironmentState["sidebarThreadSummaryById"] {
@@ -59,35 +55,35 @@ function appState(nodes: Record<string, EnvironmentState["sidebarThreadSummaryBy
 }
 
 describe("chats waiting on the user", () => {
-  it("counts approvals, questions and plans to review on the chosen nodes", () => {
+  it("counts approvals and questions on the chosen nodes", () => {
     const select = createWaitingThreadCountSelector();
     const state = appState({
       [nodeA]: summaries(
         thread("approval", { hasPendingApprovals: true }),
         thread("question", { hasPendingUserInput: true }),
-        planReady("plan"),
         thread("idle"),
         thread("archived", { hasPendingApprovals: true, archivedAt: "2026-10-23T10:00:00.000Z" }),
       ),
       [nodeB]: summaries(thread("elsewhere", { hasPendingApprovals: true })),
     });
-    expect(select(state, [nodeA], nowMs)).toBe(3);
-    expect(select(state, [nodeA, nodeB], nowMs)).toBe(4);
-    expect(select(state, [], nowMs)).toBe(0);
+    expect(select(state, [nodeA])).toBe(2);
+    expect(select(state, [nodeA, nodeB])).toBe(3);
+    expect(select(state, [])).toBe(0);
   });
 
-  it("leaves out a snoozed plan until its snooze runs out", () => {
+  it("counts a snoozed approval and leaves out plans to review", () => {
     const select = createWaitingThreadCountSelector();
     const state = appState({
       [nodeA]: summaries(
-        planReady("snoozed", {
+        thread("snoozed", {
+          hasPendingApprovals: true,
           snoozedAt: "2026-10-23T11:00:00.000Z",
           snoozedUntil: "2026-10-23T13:00:00.000Z",
         }),
+        thread("plan", { interactionMode: "plan", hasActionableProposedPlan: true }),
       ),
     });
-    expect(select(state, [nodeA], nowMs)).toBe(0);
-    expect(select(state, [nodeA], Date.parse("2026-10-23T13:00:00.000Z"))).toBe(1);
+    expect(select(state, [nodeA])).toBe(1);
   });
 
   it("rescans a node only when its summaries changed", () => {
@@ -99,8 +95,8 @@ describe("chats waiting on the user", () => {
       },
     });
     const select = createWaitingThreadCountSelector();
-    expect(select(appState({ [nodeA]: counted }), [nodeA], nowMs)).toBe(1);
-    expect(select(appState({ [nodeA]: counted }), [nodeA], nowMs + 60_000)).toBe(1);
+    expect(select(appState({ [nodeA]: counted }), [nodeA])).toBe(1);
+    expect(select(appState({ [nodeA]: counted }), [nodeA])).toBe(1);
     expect(scans).toBe(1);
   });
 });
