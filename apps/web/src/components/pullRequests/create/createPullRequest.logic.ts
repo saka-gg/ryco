@@ -9,10 +9,8 @@ import type {
   VcsRef,
   VcsStatusResult,
 } from "@ryco/contracts";
-import type {
-  ChangeRequestHostCapabilities,
-  ChangeRequestPresentation,
-} from "@ryco/shared/sourceControl";
+import type { ChangeRequestPresentation } from "@ryco/shared/sourceControl";
+import type { ChangeRequestHostCapabilities } from "@ryco/shared/changeRequestHostCapabilities";
 
 /** The remote change requests are opened against (the host's repository). */
 export const CREATE_PULL_REQUEST_REMOTE = "origin";

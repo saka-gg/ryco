@@ -1,5 +1,5 @@
 import type { SourceControlChangeRequestStack } from "@ryco/contracts";
-import { canMergeChangeRequests } from "@ryco/shared/sourceControl";
+import { canMergeChangeRequests } from "@ryco/shared/changeRequestHostCapabilities";
 import { useCallback, useMemo } from "react";
 
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";

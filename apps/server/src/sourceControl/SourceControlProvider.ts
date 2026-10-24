@@ -45,7 +45,7 @@ import {
 import {
   describeUnsupportedChangeRequestRequest,
   type ChangeRequestHostRequest,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 
 export interface SourceControlProviderContext {
   readonly provider: SourceControlProviderInfo;
@@ -412,7 +412,8 @@ export interface SourceControlProviderShape {
  * capability matrix, so every caller (not only the ws handlers) asking for an
  * involvement filter, list search, single-commit diff, or draft the host does
  * not support gets a clear error instead of silently broader results. Flip the
- * host's flag in `@ryco/shared/sourceControl` when the provider implements it.
+ * host's flag in `@ryco/shared/changeRequestHostCapabilities` when the
+ * provider implements it.
  */
 export function withUnsupportedChangeRequestOptionGuards(
   provider: SourceControlProviderShape,

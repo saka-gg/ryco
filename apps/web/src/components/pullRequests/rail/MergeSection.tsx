@@ -1,4 +1,4 @@
-import { preferredUpdateBranchMethod } from "@ryco/shared/sourceControl";
+import { preferredUpdateBranchMethod } from "@ryco/shared/changeRequestHostCapabilities";
 import type { RefObject } from "react";
 
 import { cn } from "../../../lib/utils";

@@ -1,5 +1,5 @@
 import type { ChangeRequestUpdateAction } from "@ryco/contracts";
-import { preferredUpdateBranchMethod } from "@ryco/shared/sourceControl";
+import { preferredUpdateBranchMethod } from "@ryco/shared/changeRequestHostCapabilities";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import {

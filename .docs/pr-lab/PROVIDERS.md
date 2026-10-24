@@ -4,7 +4,7 @@ The pull requests page (SPEC.md) runs on the change request contract (`packages/
 
 ## 0. How capabilities work
 
-**One source of truth.** `getChangeRequestHostCapabilities(kind)` in `packages/shared/src/sourceControl.ts` (`@ryco/shared/sourceControl`) returns a `ChangeRequestHostCapabilities` for each provider kind. Each kind has its own delimited block in `CHANGE_REQUEST_HOST_CAPABILITIES` (`// ── gitlab ──` … `// ── end gitlab ──`), so one host's entry can change without touching another's.
+**One source of truth.** `getChangeRequestHostCapabilities(kind)` in `packages/shared/src/changeRequestHostCapabilities.ts` (`@ryco/shared/changeRequestHostCapabilities`) returns a `ChangeRequestHostCapabilities` for each provider kind. Each kind has its own delimited block in `CHANGE_REQUEST_HOST_CAPABILITIES` (`// ── gitlab ──` … `// ── end gitlab ──`), so one host's entry can change without touching another's.
 
 - **Web.** `model.capabilities` (`PullRequestsModel`) gates every control. A control whose flag is false is hidden, not disabled. Reads the host cannot serve are never made, and facts the host does not send are never guessed: without `mergeReadiness` there is no verdict or merge control. Rows and the detail are separate: `listCheckRollup` and `listReadiness` (`verdict`, `blockers`, `none`) say what list rows carry, `checkRollup` and `mergeReadiness` what the detail carries. A `blockers` row names only the blockers it carries and otherwise reads "Open", never "Ready to merge"; a `none` row reads open, draft, merged or closed. `idleRefresh: "slow"` stretches the idle re-read of an open change request (5 min instead of 60 s) on hosts whose reads spawn many CLI processes.
 - **Server.** `describeUnsupportedChangeRequestRequest(kind, request)` produces the one-sentence error. The ws handlers (`apps/server/src/ws/sourceControlRpc.ts`, `callSourceControlWorkflowMethod` in `ws/context.ts`) call `requireChangeRequestCapability` before the provider module loads. `withUnsupportedChangeRequestOptionGuards` applies the same matrix to the list, diff and create options for every other caller.
@@ -12,10 +12,10 @@ The pull requests page (SPEC.md) runs on the change request contract (`packages/
   - provider code;
   - fixtures shaped exactly like the official response (cite the docs page in the fixture file);
   - provider tests;
-  - the `enabledFlags` expectation in `packages/shared/src/sourceControl.capabilities.test.ts`.
+  - the `enabledFlags` expectation in `packages/shared/src/changeRequestHostCapabilities.test.ts`.
 - **No live writes.** Validate against recorded or hand-built fixtures only. There are no GitLab, Bitbucket, Forgejo or Azure accounts here.
 
-**Consistency rules** (enforced by `sourceControl.capabilities.test.ts`):
+**Consistency rules** (enforced by `changeRequestHostCapabilities.test.ts`):
 
 - `activity` is a prerequisite for every mutation flag: `comment`, `reactions`, `editComments`, `deleteComments`, `lineComments`, `replyToThreads`, `resolveThreads`, any `submitReview.*`, a non-empty `lifecycle`, and any merge method. Viewer permissions (`ChangeRequestViewerCapabilities`), thread ids and comment ids all come from `getChangeRequestActivity`.
 - `lineComments` needs `diff` and `submitReview.comment`.
@@ -302,7 +302,7 @@ The `reviewId` is the summary comment id, else the last line comment id, else `e
 
 **Pipelines (not implemented).** Bitbucket Pipelines also publishes commit statuses, which the detail already reports as status contexts. The page would then list every run twice: as a workflow and as a status. Pairing the two needs the Pipelines status format, which is undocumented. Re-runs are full new pipelines (`POST .../pipelines` with the same `target`), so "Re-run failed" and "Re-run job" would claim more than they do until the web can say so.
 
-**Entry today (`packages/shared/src/sourceControl.ts`):**
+**Entry today (`packages/shared/src/changeRequestHostCapabilities.ts`):**
 
 - `involvementFilters`, `search`, `activity`, `diff`, `commitDiffs`, `fileContents`.
 - `comment`, `editComments`, `deleteComments`, `lineComments`, `replyToThreads`, `resolveThreads`.

@@ -5,12 +5,14 @@ import type {
   VcsStatusResult,
 } from "@ryco/contracts";
 import {
-  describeUnsupportedChangeRequestRequest,
-  getChangeRequestHostCapabilities,
   resolveChangeRequestPresentation,
-  type ChangeRequestHostCapabilities,
   type ChangeRequestPresentation,
 } from "@ryco/shared/sourceControl";
+import {
+  describeUnsupportedChangeRequestRequest,
+  getChangeRequestHostCapabilities,
+  type ChangeRequestHostCapabilities,
+} from "@ryco/shared/changeRequestHostCapabilities";
 import { CircleAlertIcon } from "lucide-react";
 import { useRef, useState, type KeyboardEvent, type RefObject } from "react";
 

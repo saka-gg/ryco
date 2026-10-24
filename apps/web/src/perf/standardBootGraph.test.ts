@@ -5,6 +5,7 @@ import { parseSync } from "vite-plus";
 import { describe, expect, it } from "vite-plus/test";
 
 import { CLIENT_MODE_SEAM_MODULES, standardSeamSibling } from "../clientModeSeams";
+import { BOOT_ROOT_MODULES } from "../viteBuild/codeSplitting";
 
 /**
  * Source-level guard for the standard build's static import graph.
@@ -139,6 +140,12 @@ function forbiddenChains(entryRelative: string, forbidden: readonly RegExp[]): s
   return chains;
 }
 
+/** The boot chunk's static graphs: the entry and the lazy roots grouped into it. */
+const BOOT_GRAPH_ENTRIES = [
+  "main.tsx",
+  ...BOOT_ROOT_MODULES.map((modulePath) => modulePath.replace(/^src\//u, "")),
+];
+
 const HOSTED_RUNTIME: readonly RegExp[] = [
   /^pkg:@noble\//u,
   /^pkg:cborg$/u,
@@ -177,6 +184,16 @@ describe("standard build static import graph", () => {
         /^apps\/web\/src\/components\/PreviewFileNavigationGuard\.tsx$/u,
       ]),
     ).toEqual([]);
+  });
+
+  it("keeps the change request host capability table out of the boot graph", () => {
+    // Only the pull requests surfaces read it; `sourceControl.ts`, which the
+    // git status stream reaches at boot, must not import it back.
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      expect(
+        forbiddenChains(entry, [/^packages\/shared\/src\/changeRequestHostCapabilities\.ts$/u]),
+      ).toEqual([]);
+    }
   });
 
   it("keeps the preview editor session out of the boot graph", () => {
