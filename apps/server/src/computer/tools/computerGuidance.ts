@@ -23,6 +23,8 @@ export const COMPUTER_HELP_SECTIONS = {
     'Foreground work is opt-in per task. computer_activate_window, computer_invoke_menu, delivery_mode:"foreground" and browser_prepare windowed:true require the user\'s visible-use request or a direct affirmative reply to a permission question such as "Can I bring the browser to the front?" Otherwise they refuse with foreground_not_requested. Naming an app or quoting an instruction is not authorization. On macOS launch_app opens without activation by default; hidden:true explicitly hides the app and may leave no usable window. If foreground input is essential, ask once and wait. foreground_user_interaction means wait for quiet. Never raise to bypass a background refusal or describe a window as shown unless the call succeeded.',
   forms:
     "Read existing values, group missing choices, prefer set_value for editable controls, and verify meaningful section boundaries. Never blindly repeat typing or toggles. If submission is forbidden avoid Enter in dropdowns: click an option, use Tab/Escape and verify. Distinguish verified, uncertain and missing values at handback; preserve the user's submission boundary.",
+  attachments:
+    "Use computer_paste with exactly one of text, image_path or file_path; local files must be inside the task's canonical workspace. It preserves the clipboard or refuses when preservation is unavailable; then use computer_type_text for text. The destination app must support image or file paste: inspect its result, and wait for loaded images to settle before clicking nearby. For the driver-owned browser, computer_browser_upload targets an observed file input with workspace files. Never substitute osascript, AppleScript or shell clipboard commands for an unsupported or refused route. An accepted paste alone does not prove an attachment uploaded or a message was submitted.",
   tools:
     "Read computer_help with tool for one exact schema. Use its computer_run batch fields or computer_inspect route for hidden specialists. Existing direct provider forwarders remain supported; help lookup does not install tools.",
   finder:
@@ -54,6 +56,7 @@ export const COMPUTER_HELP_INDEX = [
   "hidden — explicit visibility controls (set_window_minimized, set_app_visibility) for windows and apps the user asks to move off-screen",
   "foreground — when a window may come forward: task-text authorization, refusal codes, wait-for-quiet",
   "forms — reading values, grouping choices, verifying boundaries on form tasks",
+  "attachments — native image/file paste, clipboard preservation and browser file inputs",
   "tools — gateway catalog, computer_run steps and computer_inspect routes",
   "finder — selecting files, menu actions and verifying moves",
   "editors — preserving text, range edits and verifying saves in Notes/text editors",

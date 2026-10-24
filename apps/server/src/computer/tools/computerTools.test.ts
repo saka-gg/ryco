@@ -1,5 +1,8 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
 import { setTimeout as waitForComputer } from "node:timers/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -93,6 +96,7 @@ async function setup(
   resolveForegroundAuthorization: AgentGatewayComputerToolsOptions["resolveForegroundAuthorization"] = async () => ({
     userRequestedVisibleUse: true,
   }),
+  resolveWorkspaceRoot?: AgentGatewayComputerToolsOptions["resolveWorkspaceRoot"],
 ) {
   // A zero settle delay: these tests assert on what the post-action capture
   // does, not on how long the desktop is given to repaint.
@@ -109,6 +113,7 @@ async function setup(
     ...(authorizeAction ? { authorizeAction } : {}),
     resolveForegroundAuthorization,
     relatedTools: browserTools,
+    ...(resolveWorkspaceRoot ? { resolveWorkspaceRoot } : {}),
   });
   const byName = new Map([...tools, ...browserTools].map((tool) => [tool.definition.name, tool]));
   const call = async (
@@ -4351,6 +4356,203 @@ describe("computer_run", () => {
 });
 
 describe("computer_paste", () => {
+  /** A canonical temporary workspace, a file inside it and one outside it. */
+  async function workspaceFixture() {
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), "ryco-native-paste-")));
+    const root = join(temporary, "workspace");
+    await mkdir(join(root, "folder"), { recursive: true });
+    const inside = join(root, "image.png");
+    const document = join(root, "report.pdf");
+    const outside = join(temporary, "private.png");
+    const link = join(root, "linked.png");
+    await writeFile(inside, "fixture");
+    await writeFile(document, "fixture document");
+    await writeFile(outside, "private fixture");
+    await symlink(outside, link);
+    return {
+      root,
+      inside,
+      document,
+      folder: join(root, "folder"),
+      link,
+      cleanup: () => rm(temporary, { recursive: true, force: true }),
+    };
+  }
+
+  function nativePasteBackend() {
+    const prepare = vi.fn(async () => async () => true);
+    const backend = Object.assign(new FakeComputerBackend(), { prepareClipboardPaste: prepare });
+    return { backend, prepare };
+  }
+
+  function resultText(result: McpToolCallResult): string {
+    return result.content.map((entry) => (entry.type === "text" ? entry.text : "")).join("\n");
+  }
+
+  it("pastes a canonical workspace image and rejects an outside symlink before clipboard access", async () => {
+    const workspace = await workspaceFixture();
+    const { backend, prepare } = nativePasteBackend();
+    const { manager, call } = await setup(backend, undefined, undefined, () =>
+      Effect.succeed(workspace.root),
+    );
+    try {
+      const accepted = await call("computer_paste", {
+        image_path: workspace.inside,
+        window_id: "fake-calculator",
+      });
+      expect(accepted.isError).not.toBe(true);
+      expect(prepare).toHaveBeenCalledWith({ imagePath: workspace.inside });
+      const rejected = await call("computer_paste", {
+        image_path: workspace.link,
+        window_id: "fake-calculator",
+      });
+      expect(rejected.isError).toBe(true);
+      expect(resultText(rejected)).toContain("outside the active workspace");
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(backend.callsFor("hotkey")).toHaveLength(1);
+    } finally {
+      await manager.dispose();
+      await workspace.cleanup();
+    }
+  });
+
+  it("hands a workspace file to native paste as its canonical path", async () => {
+    const workspace = await workspaceFixture();
+    const { backend, prepare } = nativePasteBackend();
+    const { manager, call } = await setup(backend, undefined, undefined, () =>
+      Effect.succeed(workspace.root),
+    );
+    try {
+      const result = await call("computer_paste", {
+        // A non-canonical spelling of the same file.
+        file_path: join(workspace.root, "folder", "..", "report.pdf"),
+        window_id: "fake-calculator",
+      });
+      expect(result.isError).not.toBe(true);
+      expect(resultJson(result)).toMatchObject({
+        action: "computer_paste",
+        clipboardRestored: true,
+      });
+      expect(prepare).toHaveBeenCalledWith({ filePath: workspace.document });
+    } finally {
+      await manager.dispose();
+      await workspace.cleanup();
+    }
+  });
+
+  it("refuses a directory before clipboard access", async () => {
+    const workspace = await workspaceFixture();
+    const { backend, prepare } = nativePasteBackend();
+    const { manager, call } = await setup(backend, undefined, undefined, () =>
+      Effect.succeed(workspace.root),
+    );
+    try {
+      const result = await call("computer_paste", {
+        file_path: workspace.folder,
+        window_id: "fake-calculator",
+      });
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toContain("Paste requires an existing regular file.");
+      expect(prepare).not.toHaveBeenCalled();
+      expect(backend.callsFor("hotkey")).toHaveLength(0);
+    } finally {
+      await manager.dispose();
+      await workspace.cleanup();
+    }
+  });
+
+  it.each([
+    { label: "two payloads", args: { text: "a", file_path: "/workspace/a.pdf" } },
+    { label: "no payload", args: {} },
+  ])("refuses $label before clipboard access", async ({ args }) => {
+    const { backend, manager, call } = await setup();
+    try {
+      const result = await call("computer_paste", { ...args, window_id: "fake-calculator" });
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toContain(
+        'Paste requires exactly one of "text", "image_path" or "file_path".',
+      );
+      expect(backend.callsFor("readClipboard")).toHaveLength(0);
+      expect(backend.callsFor("writeClipboard")).toHaveLength(0);
+      expect(backend.callsFor("hotkey")).toHaveLength(0);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it.each(["direct", "batch"])("bounds %s file paste before any input is sent", async (route) => {
+    const { backend, manager, call } = await setup();
+    try {
+      const paste = { image_path: "/unscoped/image.png", window_id: "fake-calculator" };
+      const result =
+        route === "direct"
+          ? await call("computer_paste", paste)
+          : await call("computer_run", {
+              steps: [
+                { type: "press_key", key: "enter", window_id: "fake-calculator" },
+                { type: "paste", ...paste },
+              ],
+              include_screenshot: false,
+            });
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toContain(
+        "No canonical workspace is available for native file paste",
+      );
+      expect(backend.callsFor("pressKey")).toHaveLength(0);
+      expect(backend.callsFor("hotkey")).toHaveLength(0);
+      expect(backend.callsFor("writeClipboard")).toHaveLength(0);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("reports the first invalid batch step even when a later one fails faster", async () => {
+    const workspace = await workspaceFixture();
+    const { backend, prepare } = nativePasteBackend();
+    const { manager, call } = await setup(backend, undefined, undefined, () =>
+      Effect.succeed(workspace.root),
+    );
+    try {
+      const result = await call("computer_run", {
+        steps: [
+          {
+            type: "paste",
+            file_path: join(workspace.root, "missing.pdf"),
+            window_id: "fake-calculator",
+          },
+          { type: "not_a_step" },
+        ],
+        include_screenshot: false,
+      });
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toContain("does not resolve to an existing path");
+      expect(prepare).not.toHaveBeenCalled();
+    } finally {
+      await manager.dispose();
+      await workspace.cleanup();
+    }
+  });
+
+  it("advertises no computer tool with a top-level oneOf, anyOf or allOf", async () => {
+    // Provider tool-schema validators reject top-level combinators, and one
+    // rejected schema can fail the whole request; paste enforces "exactly one
+    // payload" in its handler instead.
+    const { manager, tools } = await setup();
+    try {
+      const definitions = [...tools, ...makeAgentGatewayComputerBrowserTools({ manager })].map(
+        (tool) => tool.definition,
+      );
+      expect(definitions.map((definition) => definition.name)).toContain("computer_paste");
+      for (const definition of definitions) {
+        const schema = definition.inputSchema as Record<string, unknown>;
+        for (const combinator of ["oneOf", "anyOf", "allOf"])
+          expect(schema[combinator], `${definition.name}.${combinator}`).toBeUndefined();
+      }
+    } finally {
+      await manager.dispose();
+    }
+  });
+
   it("saves, pastes, and restores the shared clipboard", async () => {
     const { backend, manager, call } = await setup();
     try {

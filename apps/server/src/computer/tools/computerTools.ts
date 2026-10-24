@@ -2,6 +2,12 @@ import { ComputerToolFailure } from "./toolRuntime.ts";
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
 import { parseCuaActionDiagnostics } from "@ryco/shared/cuaActionDiagnostics";
 import { ComputerProgressGuard, type ComputerProgressAction } from "./computerProgressGuard.ts";
+import {
+  boundComputerPastePayload,
+  readClipboardText,
+  readComputerPastePayload,
+} from "./computerPasteInput.ts";
+import type { ComputerWorkspaceRootResolver } from "./computerWorkspacePath.ts";
 import { beginComputerTurnCall } from "../computerTurnTiming.ts";
 import { bindComputerTargetRef, computerElementRefIdentity } from "../computerElementIdentity.ts";
 import { makeComputerSpaceTools } from "./computerSpaceTools.ts";
@@ -50,7 +56,6 @@ import {
 import {
   COMPUTER_ACTION_OBSERVATION_MAX_DIMENSION,
   DEFAULT_COMPUTER_CAPTURE_MAX_DIMENSION,
-  MAX_COMPUTER_CLIPBOARD_BYTES,
   ComputerBackendError,
   type ComputerAgentDialect,
   type ComputerCaptureRequest,
@@ -358,6 +363,11 @@ export interface AgentGatewayComputerToolsOptions {
   readonly resolveForegroundAuthorization?: (
     context: ToolContext,
   ) => Promise<ComputerForegroundAuthorization>;
+  /**
+   * Workspace boundary for local image/file clipboard payloads. Absent or
+   * unresolved means file and image paste refuse; text paste is unaffected.
+   */
+  readonly resolveWorkspaceRoot?: ComputerWorkspaceRootResolver;
 }
 
 /**
@@ -966,17 +976,6 @@ function readActionName(args: Record<string, unknown>): string {
   if (value.length > COMPUTER_SEMANTIC_ACTION_MAX_LENGTH) {
     throw new ToolInputError(
       `Argument "action" is longer than ${COMPUTER_SEMANTIC_ACTION_MAX_LENGTH} characters.`,
-    );
-  }
-  return value;
-}
-
-/** Bounded in bytes rather than characters: the backend pipes it to a process. */
-function readClipboardText(args: Record<string, unknown>): string {
-  const value = readRawRequiredString(args, "text");
-  if (Buffer.byteLength(value, "utf8") > MAX_COMPUTER_CLIPBOARD_BYTES) {
-    throw new ToolInputError(
-      `Argument "text" is longer than the ${MAX_COMPUTER_CLIPBOARD_BYTES} byte clipboard limit.`,
     );
   }
   return value;
@@ -2447,7 +2446,7 @@ export function makeAgentGatewayComputerTools(
     activate_window: ["window_id", "windowId"],
     launch_app: ["app", "arguments", "wait_for_window", "hidden"],
     write_clipboard: ["text"],
-    paste: ["text", "window_id", "windowId"],
+    paste: ["text", "image_path", "file_path", "window_id", "windowId"],
     set_window_frame: ["window_id", "windowId", "x", "y", "width", "height"],
     invoke_menu: ["window_id", "windowId", "app", "pid", "path"],
     kill_app: ["window_id", "windowId"],
@@ -2481,11 +2480,11 @@ export function makeAgentGatewayComputerTools(
    * What stays deferred is what must stay fresh: semantic targets resolve
    * against live state inside each manager call, at the moment that step runs.
    */
-  const prepareRunStep = (
+  const prepareRunStep = async (
     type: string,
     step: Record<string, unknown>,
     context: ToolContext,
-  ): (() => Promise<unknown>) => {
+  ): Promise<() => Promise<unknown>> => {
     const threadId = context.callerThreadId;
     switch (type) {
       case "click": {
@@ -2672,9 +2671,16 @@ export function makeAgentGatewayComputerTools(
         return () => manager.writeClipboard(threadId, text);
       }
       case "paste": {
-        const text = readClipboardText(step);
+        // A file or image is bounded to the workspace now, with every other
+        // step, so a path outside it refuses the batch before step zero.
+        const payload = await boundComputerPastePayload(
+          readComputerPastePayload(step),
+          context,
+          desktopOperationSignal(),
+          options.resolveWorkspaceRoot,
+        );
         const windowId = readWindowIdArg(step);
-        return () => manager.paste(threadId, text, windowId);
+        return () => manager.paste(threadId, payload, windowId);
       }
       case "set_window_frame": {
         const windowId = readWindowIdArg(step);
@@ -2910,8 +2916,10 @@ export function makeAgentGatewayComputerTools(
       );
     }
     // Validate everything before anything dispatches: a batch that cannot
-    // parse is refused whole rather than running its good half.
-    const prepared: PreparedRunStep[] = rawSteps.map((entry, index) => {
+    // parse is refused whole rather than running its good half. Sequential,
+    // so the first invalid step is the one reported.
+    const prepared: PreparedRunStep[] = [];
+    for (const [index, entry] of rawSteps.entries()) {
       if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
         throw new ToolInputError(`Step ${index} must be an object with a "type" field.`);
       }
@@ -2936,15 +2944,15 @@ export function makeAgentGatewayComputerTools(
             .join(", ")}.`,
         );
       }
-      return {
+      prepared.push({
         type,
         step,
         ifElement: readStepElementCondition(step, "if_element", threadId),
         unlessElement: readStepElementCondition(step, "unless_element", threadId),
         continueOnError: readBooleanArg(step, "continue_on_error") === true,
-        run: prepareRunStep(type, step, context),
-      };
-    });
+        run: await prepareRunStep(type, step, context),
+      });
+    }
 
     const steps: Record<string, unknown>[] = [];
     let stopped = false;
@@ -4373,22 +4381,38 @@ export function makeAgentGatewayComputerTools(
     ),
     observedActionEntry(
       "computer_paste",
-      "Paste text",
-      `Paste text into the target control through the clipboard — the fast path for long or awkward text computer_type_text would spend many keystrokes on. It saves the current clipboard, writes the text, sends the paste shortcut, then puts the user's contents back and reports clipboardRestored. A clipboard holding an image or other non-text content cannot be saved and is replaced. ${SHARED_CLIPBOARD_NOTE} ${KEYBOARD_TARGET_HINT} ${DELIVERY_HINT}`,
+      "Paste content",
+      `Paste exactly one of text, image_path or file_path (a regular file in the task's workspace) with the app's paste command. The user's clipboard is saved and restored; clipboardRestored is false when a newer human copy was kept. Refused before any change when the clipboard cannot be preserved. ${KEYBOARD_TARGET_HINT} ${DELIVERY_HINT}`,
       {
+        // No top-level oneOf: provider tool-schema validators reject it, so
+        // the handler enforces "exactly one" instead.
         type: "object",
         properties: {
           text: {
             type: "string",
             description: "The exact text to paste at the caret.",
           },
+          image_path: {
+            type: "string",
+            description: "Absolute workspace image path.",
+          },
+          file_path: {
+            type: "string",
+            description: "Absolute workspace file path.",
+          },
           ...keyboardTargetProperties,
         },
-        required: ["text"],
         additionalProperties: false,
       },
-      async (args, context) =>
-        manager.paste(context.callerThreadId, readClipboardText(args), readWindowIdArg(args)),
+      async (args, context) => {
+        const payload = await boundComputerPastePayload(
+          readComputerPastePayload(args),
+          context,
+          desktopOperationSignal(),
+          options.resolveWorkspaceRoot,
+        );
+        return manager.paste(context.callerThreadId, payload, readWindowIdArg(args));
+      },
     ),
     actionEntry(
       "computer_activate_window",

@@ -27,8 +27,6 @@ import { ComputerToolFailure } from "./toolRuntime.ts";
  *   caller thread's workspace — the driver checks canonicality; the workspace
  *   boundary is Ryco's own filesystem policy on top of that.
  */
-import { realpath } from "node:fs/promises";
-import { isAbsolute, sep } from "node:path";
 import { Effect } from "effect";
 
 import type { ComputerBrowserToolName } from "@ryco/contracts";
@@ -63,6 +61,11 @@ import {
   type ComputerAuditEffect,
 } from "../computerAuditLog.ts";
 import { computerBrowserEffect, computerBrowserFieldReadback } from "./computerBrowserEffect.ts";
+import {
+  boundedWorkspacePath,
+  canonicalComputerWorkspaceRoot,
+  type ComputerWorkspaceRootResolver,
+} from "./computerWorkspacePath.ts";
 
 export interface AgentGatewayComputerBrowserToolsOptions {
   readonly manager: ComputerManager;
@@ -87,7 +90,7 @@ export interface AgentGatewayComputerBrowserToolsOptions {
    * download paths. Absent or unresolved means the file-transfer tools refuse
    * rather than guess a boundary.
    */
-  readonly resolveWorkspaceRoot?: (context: ToolContext) => Effect.Effect<string | null>;
+  readonly resolveWorkspaceRoot?: ComputerWorkspaceRootResolver;
 }
 
 /**
@@ -167,27 +170,6 @@ function browserResultToMcp(result: ComputerBrowserCallResult): McpToolCallResul
 }
 
 /**
- * Canonicalize one model-supplied filesystem path and prove it resolves inside
- * the workspace. The canonical path is what gets dispatched — a symlink
- * cannot widen the approved set, and the driver's own canonicality check
- * then passes by construction.
- */
-async function boundedWorkspacePath(
-  raw: unknown,
-  workspaceRoot: string,
-  field: string,
-): Promise<string> {
-  if (typeof raw !== "string" || raw.length === 0 || !isAbsolute(raw))
-    throw new ToolInputError(`"${field}" must be an absolute path.`);
-  const canonical = await realpath(raw).catch(() => {
-    throw new ToolInputError(`"${field}" does not resolve to an existing path.`);
-  });
-  if (canonical !== workspaceRoot && !canonical.startsWith(workspaceRoot + sep))
-    throw new ToolInputError(`"${field}" resolves outside the active workspace.`);
-  return canonical;
-}
-
-/**
  * Upload and download are the only browser tools that touch the caller's
  * filesystem. Every path the driver will touch is canonicalized and
  * containment-checked against the thread's workspace root before dispatch —
@@ -199,17 +181,15 @@ async function boundBrowserPaths(
   args: Record<string, unknown>,
   context: ToolContext,
   signal: AbortSignal,
-  resolveWorkspaceRoot: AgentGatewayComputerBrowserToolsOptions["resolveWorkspaceRoot"],
+  resolveWorkspaceRoot: ComputerWorkspaceRootResolver | undefined,
 ): Promise<Record<string, unknown>> {
   if (name !== "computer_browser_upload" && name !== "computer_browser_download") return args;
-  const root = resolveWorkspaceRoot
-    ? await Effect.runPromise(resolveWorkspaceRoot(context), { signal })
-    : null;
-  if (!root?.trim())
-    throw new ToolInputError(
-      "No canonical workspace is available for browser file transfer; the call was refused before it ran.",
-    );
-  const workspaceRoot = await realpath(root);
+  const workspaceRoot = await canonicalComputerWorkspaceRoot(
+    resolveWorkspaceRoot,
+    context,
+    signal,
+    "No canonical workspace is available for browser file transfer; the call was refused before it ran.",
+  );
   if (name === "computer_browser_upload") {
     const files = args.files;
     if (!Array.isArray(files) || files.length === 0 || files.length > 32)
