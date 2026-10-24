@@ -302,7 +302,7 @@ function RecapThreadList(props: {
           <button
             key={`${thread.environmentId}:${thread.threadId}`}
             type="button"
-            className="block w-full px-4 py-3 text-left outline-none transition-colors hover:bg-accent/40 focus-visible:bg-accent/40"
+            className="block w-full px-4 py-3 text-left outline-none transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
             onClick={() => props.onOpenThread(thread.environmentId, thread.threadId)}
           >
             <span className="block truncate text-sm font-medium">{thread.threadTitle}</span>
