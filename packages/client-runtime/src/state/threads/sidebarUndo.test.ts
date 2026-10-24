@@ -530,6 +530,126 @@ it("finishes a submitted Undo and archive reopening even when acknowledgment cro
   expect(s.read()).toEqual([]);
 });
 
+describe("bulk notices", () => {
+  const refs = ["a", "b", "c"].map((id) => ({
+    environmentId: target.environmentId,
+    threadId: ThreadId.make(`thread-${id}`),
+  }));
+  const [a, b, c] = refs as [typeof target, typeof target, typeof target];
+  const track = (
+    s: ReturnType<typeof setup>,
+    overrides: Partial<Parameters<typeof s.history.track>[0]> = {},
+  ) =>
+    s.history.track({
+      action: "settle",
+      members: refs,
+      ready: Promise.resolve(),
+      valid: () => true,
+      restore: async () => {},
+      ...overrides,
+    });
+
+  it("covers every thread in one notice with caller copy for its count", () => {
+    const s = setup();
+    const notice = track(s, {
+      describe: ({ count, applying }) => ({
+        title: applying ? `Settling ${count} threads…` : `${count} threads settled`,
+        undoLabel: `Undo settle for ${count} threads`,
+      }),
+    });
+    expect(s.read()).toMatchObject([
+      {
+        action: "settle",
+        target: a,
+        count: 3,
+        applying: true,
+        copy: { title: "Settling 3 threads…" },
+      },
+    ]);
+    notice.applied();
+    expect(s.read()).toMatchObject([
+      { count: 3, applying: false, copy: { undoLabel: "Undo settle for 3 threads" } },
+    ]);
+    s.history.dispose();
+  });
+
+  it("stays while applying and starts its five seconds once applied", async () => {
+    const s = setup();
+    const notice = track(s);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.read()).toMatchObject([{ applying: true }]);
+    notice.applied();
+    await vi.advanceTimersByTimeAsync(4_900);
+    expect(s.read()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(s.read()).toEqual([]);
+  });
+
+  it("closes a notice that never finishes applying", async () => {
+    const s = setup();
+    const notice = track(s);
+    await vi.advanceTimersByTimeAsync(25_100);
+    expect(s.read()).toEqual([]);
+    notice.applied();
+    expect(s.read()).toEqual([]);
+  });
+
+  it("loses only the threads a newer action or a failure takes out", async () => {
+    const s = setup();
+    const notice = track(s);
+    await s.history.dispatch(b, {
+      type: "thread.snooze",
+      commandId: CommandId.make("newer"),
+      threadId: b.threadId,
+      snoozedUntil: "2026-10-01T12:00:00.000Z",
+    });
+    expect(s.read()).toMatchObject([
+      { action: "settle", target: a, count: 2 },
+      { action: "snooze", target: b },
+    ]);
+    notice.drop(a);
+    expect(s.read()[0]).toMatchObject({ target: c, count: undefined });
+    // A failure on a thread a newer action took over leaves that newer notice alone.
+    notice.drop(b);
+    expect(s.read()).toHaveLength(2);
+    notice.drop(c);
+    expect(s.read()).toMatchObject([{ action: "snooze", target: b }]);
+    s.history.dispose();
+  });
+
+  it("counts once against the five-notice cap", async () => {
+    const s = setup();
+    track(s).applied();
+    for (let i = 0; i < 5; i++) {
+      const ref = { ...target, threadId: ThreadId.make(`single-${i}`) };
+      await s.history.dispatch(ref, {
+        type: "thread.settle",
+        commandId: CommandId.make(`single-${i}`),
+        threadId: ref.threadId,
+      });
+      expect(s.read()).toHaveLength(Math.min(i + 2, 5));
+      expect(s.read().some((notice) => notice.count === 3)).toBe(i < 4);
+    }
+    s.history.dispose();
+  });
+
+  it("restores only the threads that are still valid", async () => {
+    const s = setup();
+    const stale = new Set<string>();
+    const restore = vi.fn(async (_members: readonly (typeof target)[]) => {});
+    track(s, { valid: (member) => !stale.has(member.threadId), restore }).applied();
+    stale.add(b.threadId);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(s.read()).toMatchObject([{ target: a, count: 2 }]);
+    await s.history.undo(s.read()[0]!.id);
+    expect(restore).toHaveBeenCalledExactlyOnceWith([a, c]);
+    expect(s.read()).toEqual([]);
+    track(s, { valid: () => false }).applied();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(s.read()).toEqual([]);
+  });
+});
+
 it("local pin revisions tolerate response progress but detect ordering and lifecycle changes", async () => {
   const { sidebarUndoThreadRevision } = await import("./sidebarUndo.ts");
   const thread = {
