@@ -22,12 +22,14 @@ import { useMemo, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 import {
+  formatCost,
   formatDayLabel,
   formatInteger,
   formatModelLabel,
   formatProviderLabel,
   formatTimestamp,
   formatTokens,
+  formatUsd,
 } from "~/lib/statisticsFormat";
 
 import { Panel, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
@@ -41,17 +43,6 @@ import {
   filterUsageBuckets,
   sumUsageTotals,
 } from "./selectors";
-
-const usd = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatCost(value: number | null): string {
-  return value === null ? "Unavailable" : usd.format(value);
-}
 
 export function UsageView({
   search,
@@ -428,7 +419,7 @@ function UsageAreaChart({
       formatYTick={(value) =>
         metric === "cost" ? `$${value.toFixed(value < 10 ? 1 : 0)}` : formatTokens(value)
       }
-      formatValue={(value) => (metric === "cost" ? usd.format(value) : formatInteger(value))}
+      formatValue={(value) => (metric === "cost" ? formatUsd(value) : formatInteger(value))}
     />
   );
 }
