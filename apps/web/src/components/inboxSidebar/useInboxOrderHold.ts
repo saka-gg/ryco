@@ -1,4 +1,10 @@
-import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from "react";
 
 export type InboxOrderHoldRuntime = typeof import("./inboxOrderHoldRuntime");
 // Outside the hook: the React Compiler cannot lower `import()`.
@@ -22,9 +28,12 @@ export interface InboxOrderHold {
 /**
  * Whether the user is aiming at the inbox `element` (see `trackInboxAim`).
  * The tracking loads once `element` mounts, outside the shell's bundle; until
- * it arrives, nothing holds.
+ * it arrives, nothing holds. `onRelease` runs each time a hold ends.
  */
-export function useInboxOrderHold(element: HTMLElement | null): InboxOrderHold {
+export function useInboxOrderHold(
+  element: HTMLElement | null,
+  onRelease: () => void,
+): InboxOrderHold {
   const [holding, setHolding] = useState(false);
   const [runtime, setRuntime] = useState<InboxOrderHoldRuntime | null>(null);
   // A pointerover always precedes the pointermove and pointerdown on a new
@@ -34,6 +43,7 @@ export function useInboxOrderHold(element: HTMLElement | null): InboxOrderHold {
   const onPointerOverCapture = (event: ReactPointerEvent) => {
     claimedTarget.current = event.target;
   };
+  const release = useEffectEvent(onRelease);
 
   useEffect(() => {
     if (!element) return;
@@ -41,7 +51,10 @@ export function useInboxOrderHold(element: HTMLElement | null): InboxOrderHold {
       void loadInboxOrderHoldRuntime().then(setRuntime, () => undefined);
       return;
     }
-    const stopTracking = runtime.trackInboxAim(element, claimedTarget, setHolding);
+    const stopTracking = runtime.trackInboxAim(element, claimedTarget, (aiming) => {
+      setHolding(aiming);
+      if (!aiming) release();
+    });
     return () => {
       stopTracking();
       setHolding(false);

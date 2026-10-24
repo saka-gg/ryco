@@ -172,7 +172,14 @@ export function InboxSidebar(props: InboxSidebarProps) {
   // data; once the pointer leaves, they glide to their live order. Changing
   // what the list shows starts a new hold.
   const [holdElement, setHoldElement] = useState<HTMLElement | null>(null);
-  const orderHold = useInboxOrderHold(holdElement);
+  const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
+  const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
+  // Rows that move as a hold ends drop the card's pending close, so the card
+  // would stay open after the pointer left. The user stopped aiming: close it.
+  const orderHold = useInboxOrderHold(holdElement, () => {
+    previewHandle.close();
+    hintHandle.close();
+  });
   const holdLogic = orderHold.hold;
   const holdKey = JSON.stringify([query, environmentId, nestDelegated, props.aiFocusEnabled]);
   const [heldOrder, setHeldOrder] = useState<InboxOrderSnapshot | null>(null);
@@ -259,8 +266,6 @@ export function InboxSidebar(props: InboxSidebarProps) {
     enabled: motionEnabled,
     orderSignature,
   });
-  const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
-  const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
   const { onOpenThread } = props;
   // One callback for every row: a per-row closure would defeat the row's memo.
   const openRow = useCallback(

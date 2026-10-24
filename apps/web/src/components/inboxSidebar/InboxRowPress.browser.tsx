@@ -414,6 +414,28 @@ describe("holding the inbox order while the user aims at it", () => {
     await vi.waitFor(() => expect(sectionTitles()).toEqual(["Recent"]));
   });
 
+  it("closes the row's hover card when rows move as the pointer leaves", async () => {
+    await mountInbox({ changes: { a1: "running" } });
+    const toInput = await pointerInput();
+    await pointAt(toInput, rowButton(keyOf("a2"))!);
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="inbox-preview"]')?.textContent).toContain(
+        "Task A2",
+      ),
+    );
+    publishThreads(threads({ a1: "completed" }));
+    await vi.waitFor(() => expect(glyphLabel("a1")).toBe("Completed"));
+    await nextFrames(2);
+    expect(sectionTitles()).toEqual(["Active now", "Recent"]);
+
+    // The rows that move as the hold ends drop the card's pending close.
+    await moveTo(toInput(1_000, 850));
+    await vi.waitFor(() => expect(sectionTitles()).toEqual(["Recent"]));
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="inbox-preview"]')).toBeNull(),
+    );
+  });
+
   it("lets rows move once the user types outside the inbox", async () => {
     await mountInbox({ changes: { a1: "running" } });
     const toInput = await pointerInput();
@@ -501,13 +523,22 @@ describe("holding the inbox order while the user aims at it", () => {
       () => publishThreads(threads({ a2: "running", a3: "running" })),
       { capture: true, once: true },
     );
+    // Where the row is when the click lands: the press ends right after it.
+    let atClick: DOMRect | null = null;
+    window.addEventListener(
+      "click",
+      () => {
+        atClick = pressed.getBoundingClientRect();
+      },
+      { capture: true, once: true },
+    );
     const session = cdpSession();
     await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
     await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 
     await expect.poll(() => onOpenThread.mock.calls.length).toBe(1);
     expect(onOpenThread).toHaveBeenCalledExactlyOnceWith(refOf("b2"));
-    expectSameRect(before, pressed.getBoundingClientRect());
+    expectSameRect(before, atClick!);
     // The press is over: the new order applies.
     await vi.waitFor(() => expect(sectionTitles()).toEqual(["Active now", "Recent"]));
     expect(sectionOf("a2")).toBe("Active now");
