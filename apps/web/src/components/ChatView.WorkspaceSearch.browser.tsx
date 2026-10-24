@@ -160,6 +160,29 @@ describe("ChatView workspace search", () => {
     }
   });
 
+  it("starts the typed text after the search icon", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshot(),
+      resolveRpc: resolveWorkspaceSearchRpc,
+    });
+
+    try {
+      pressModKey(window, "p");
+      const input = await waitForQuickOpenInput();
+      // The autocomplete pads its input for the icon by the input's slot name.
+      expect(input.getAttribute("data-slot")).toBe("autocomplete-input");
+      const icon = input
+        .closest('[data-testid="quick-open"]')!
+        .querySelector('[data-slot="autocomplete-start-addon"] svg')!;
+      const textStart =
+        input.getBoundingClientRect().left + parseFloat(getComputedStyle(input).paddingLeft);
+      expect(textStart).toBeGreaterThanOrEqual(icon.getBoundingClientRect().right);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("lists only files for an empty query on nodes that list the workspace", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
