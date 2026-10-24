@@ -8,6 +8,7 @@ import {
   formatCliProxyPlan,
   groupCliProxyAccounts,
   groupSubscriptionLimits,
+  hubKeysByDirectAccount,
   listCliProxyApiKeys,
   listDirectProviderAccounts,
   type CliProxyAccountHealth,
@@ -40,7 +41,7 @@ import { useSettingsDialogStore } from "~/settingsDialogStore";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
 import { formatRateLimitResetText } from "../../settings/codexUsageLimits";
-import { SettingsNotice, useRelativeTimeTick } from "../../settings/settingsLayout";
+import { SettingsNotice, useRelativeLabelTick } from "../../settings/settingsLayout";
 import { Panel, Sparkline, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
 import { AccountEmail, CliProxyAccountName } from "../../usage/AccountEmail";
 import { ProviderLimitWindow } from "../../usage/ProviderLimitWindow";
@@ -66,6 +67,32 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+const secondsToMs = (seconds: number | undefined) =>
+  seconds === undefined ? undefined : seconds * 1000;
+
+/** The instants the view reads against now: checks, resets and hub retry times. */
+function limitsLabelInstants(
+  accounts: ReadonlyArray<DirectProviderAccount>,
+  hubs: ReadonlyArray<HubWithEnvironment>,
+): ReadonlyArray<number | undefined> {
+  const instants: Array<number | undefined> = [];
+  for (const account of accounts) {
+    instants.push(Date.parse(account.snapshot.checkedAt));
+    for (const { window } of account.windows) instants.push(secondsToMs(window.resetsAt));
+  }
+  for (const { hub } of hubs) {
+    instants.push(Date.parse(hub.checkedAt));
+    for (const account of hub.accounts) {
+      for (const window of account.quota.windows) instants.push(secondsToMs(window.resetsAt));
+      for (const { retryAt } of account.cooldowns) {
+        if (retryAt) instants.push(Date.parse(retryAt));
+      }
+      if (account.nextRetryAt) instants.push(Date.parse(account.nextRetryAt));
+    }
+  }
+  return instants;
+}
+
 export function LimitsView({
   search,
   onSearchChange,
@@ -74,8 +101,6 @@ export function LimitsView({
   readonly onSearchChange: (next: StatisticsSearch) => void;
 }) {
   const result = useSubscriptionLimits({ environmentIds: search.environmentIds });
-  // The tick can predate freshly received snapshots, which would make them look future-dated.
-  const now = Math.max(useRelativeTimeTick(30_000), result.receivedAtMs);
   const openSettings = useSettingsDialogStore((state) => state.openSettings);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const hubs = useMemo(
@@ -102,6 +127,15 @@ export function LimitsView({
       ),
     [result.environments],
   );
+  // Ticks when a label, pace or health could change, and reads the clock again as soon as a
+  // snapshot changes, so a live provider push never looks future-dated to pace. The hub receipt
+  // time covers hub reads within the same render.
+  const now = Math.max(
+    useRelativeLabelTick(
+      useMemo(() => limitsLabelInstants(direct.accounts, hubs), [direct.accounts, hubs]),
+    ),
+    result.receivedAtMs,
+  );
   // The filter only narrows the view while both sources have accounts to show.
   const hubAccountCount = useMemo(
     () => groupCliProxyAccounts(hubs).reduce((total, group) => total + group.accounts.length, 0),
@@ -119,9 +153,10 @@ export function LimitsView({
       }),
     [direct, hubs, source],
   );
+  const readingHubs = result.environments.some((environment) => environment.status === "loading");
   const failedEnvironments = result.environments.filter(
     (environment): environment is LimitsEnvironmentResult & { message: string } =>
-      environment.status !== "ok",
+      environment.status === "failed" || environment.status === "unsupported",
   );
   const multipleEnvironments = result.environments.length > 1;
   // A loopback hub is a different machine on each node, so its label names the node too.
@@ -136,6 +171,13 @@ export function LimitsView({
           : entry.hub.label,
       ] as const;
     }),
+  );
+  // From every hub, not the filtered groups, so the note stays under the Direct filter.
+  const alsoInHubs = new Map(
+    [...hubKeysByDirectAccount(direct.accounts, hubs)].map(([accountKey, hubKeys]) => [
+      accountKey,
+      [...new Set(hubKeys.flatMap((hubKey) => hubLabels.get(hubKey) ?? []))],
+    ]),
   );
   // The filter stays visible while it narrows the view, so it can always be cleared.
   const environmentFilter =
@@ -162,23 +204,27 @@ export function LimitsView({
       result.environments.length === 1 ? result.environments[0]!.environmentId : null,
     );
 
-  if (result.loading && result.environments.length === 0) return <StatSkeleton />;
-
   if (hubs.length === 0 && directAccountCount === 0) {
     return (
       <div className="space-y-4">
+        {/* Stays mounted while a filter change re-reads hubs, so it keeps focus. */}
         {environmentFilter}
         {environmentNotices}
-        <StatePanel
-          icon={GaugeIcon}
-          title="No subscription limits to show"
-          description="Sign in to Claude, Codex or OpenCode Go with a subscription to see how much of it is left. To pool several subscriptions, connect a CLIProxyAPI hub in Settings → Providers."
-          action={
-            <Button size="sm" variant="outline" onClick={manageProviders}>
-              <SettingsIcon /> Open providers
-            </Button>
-          }
-        />
+        {/* A hub still being read may hold accounts, so nothing is called empty before it answers. */}
+        {result.loading || readingHubs ? (
+          <StatSkeleton />
+        ) : (
+          <StatePanel
+            icon={GaugeIcon}
+            title="No subscription limits to show"
+            description="Sign in to Claude, Codex or OpenCode Go with a subscription to see how much of it is left. To pool several subscriptions, connect a CLIProxyAPI hub in Settings → Providers."
+            action={
+              <Button size="sm" variant="outline" onClick={manageProviders}>
+                <SettingsIcon /> Open providers
+              </Button>
+            }
+          />
+        )}
       </div>
     );
   }
@@ -208,7 +254,8 @@ export function LimitsView({
           <h2 className="text-lg font-semibold tracking-tight">Subscription limits</h2>
           <p className="text-xs text-muted-foreground">
             {pluralize(directAccountCount + hubAccountCount, "account")} · {summary}
-            {lastChecked ? ` · checked ${formatRelativeTimeLabel(lastChecked)}` : ""}
+            {lastChecked ? ` · checked ${formatRelativeTimeLabel(lastChecked, now)}` : ""}
+            {readingHubs ? " · reading hubs…" : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -287,11 +334,12 @@ export function LimitsView({
           group={group}
           now={now}
           hubLabels={showHubLabels ? hubLabels : null}
+          alsoInHubs={alsoInHubs}
           multipleEnvironments={multipleEnvironments}
         />
       ))}
 
-      {hubs.length === 0 ? (
+      {hubs.length === 0 && !readingHubs ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-dashed px-4 py-3 text-xs text-muted-foreground">
           <span>
             Pool several subscriptions behind a CLIProxyAPI hub to see each one&apos;s quota and
@@ -308,17 +356,26 @@ export function LimitsView({
       ) : null}
 
       {hubs.length > 0 && source !== "direct" ? (
-        <HubList hubs={hubs} multipleEnvironments={multipleEnvironments} />
+        <HubList hubs={hubs} now={now} multipleEnvironments={multipleEnvironments} />
       ) : null}
     </div>
   );
 }
 
-function PooledSummary({ pooled }: { readonly pooled: ReadonlyArray<PooledLimitWindow> }) {
+function PooledSummary({
+  pooled,
+  now,
+  besideDirect,
+}: {
+  readonly pooled: ReadonlyArray<PooledLimitWindow>;
+  readonly now: number;
+  /** Direct cards share the panel; the pool averages hub accounts only, so it says so. */
+  readonly besideDirect: boolean;
+}) {
   return (
     <div className="flex flex-wrap gap-2 border-b border-border/60 px-3.5 py-2.5">
       {pooled.map((window) => {
-        const reset = formatRateLimitResetText(window.nextResetsAt);
+        const reset = formatRateLimitResetText(window.nextResetsAt, now);
         return (
           <div
             key={window.id}
@@ -330,7 +387,8 @@ function PooledSummary({ pooled }: { readonly pooled: ReadonlyArray<PooledLimitW
               {Math.round(100 - window.usedPercent)}% left
             </p>
             <p className="text-[11px] text-muted-foreground">
-              avg of {window.accountCount} accounts{reset ? ` · next ${reset}` : ""}
+              avg of {window.accountCount} {besideDirect ? "hub accounts" : "accounts"}
+              {reset ? ` · next ${reset}` : ""}
             </p>
           </div>
         );
@@ -346,11 +404,14 @@ function ProviderGroup({
   group,
   now,
   hubLabels,
+  alsoInHubs,
   multipleEnvironments,
 }: {
   readonly group: SubscriptionLimitGroup;
   readonly now: number;
   readonly hubLabels: HubLabels;
+  /** Labels of the hubs that also hold each direct account, by account key. */
+  readonly alsoInHubs: ReadonlyMap<string, readonly string[]>;
   readonly multipleEnvironments: boolean;
 }) {
   // A single account's window is already on its card; only shared windows are pooled.
@@ -367,7 +428,9 @@ function ProviderGroup({
       action={<span className="text-[11px] text-muted-foreground">{counts}</span>}
       bodyClassName="overflow-hidden"
     >
-      {pooled.length > 0 ? <PooledSummary pooled={pooled} /> : null}
+      {pooled.length > 0 ? (
+        <PooledSummary pooled={pooled} now={now} besideDirect={group.directAccounts.length > 0} />
+      ) : null}
       {/* Cells draw right and bottom borders; the negative margins clip the outer edges. */}
       <div className="-mr-px -mb-px grid sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {group.directAccounts.map((account) => (
@@ -375,6 +438,7 @@ function ProviderGroup({
             key={account.key}
             account={account}
             now={now}
+            alsoIn={alsoInHubs.get(account.key) ?? []}
             multipleEnvironments={multipleEnvironments}
           />
         ))}
@@ -480,25 +544,23 @@ function DirectHealthBadge({ health }: { readonly health: DirectAccountHealth })
 function DirectAccountCard({
   account,
   now,
+  alsoIn,
   multipleEnvironments,
 }: {
   readonly account: DirectProviderAccount;
   readonly now: number;
+  readonly alsoIn: readonly string[];
   readonly multipleEnvironments: boolean;
 }) {
   const { snapshot } = account;
-  const plan =
-    snapshot.auth.label ??
-    snapshot.rateLimits?.limitName ??
-    formatCliProxyPlan(snapshot.rateLimits?.planType);
   const instanceNames = [...new Set(account.locations.map((location) => location.displayName))];
   const nodes = [...new Set(account.locations.map((location) => location.environmentLabel))];
   const where = multipleEnvironments
     ? `${instanceNames.join(", ")} on ${nodes.join(" · ")}`
     : instanceNames.join(", ");
-  const details = [plan, where].filter(Boolean).join(" · ");
+  const details = [account.plan, where].filter(Boolean).join(" · ");
   const credits = snapshot.rateLimits?.credits;
-  const resets = snapshot.rateLimits?.resetCredits?.availableCount;
+  const resets = account.resetCredits?.availableCount;
   return (
     <AccountCard
       source="direct"
@@ -515,6 +577,7 @@ function DirectAccountCard({
         <>
           checked {formatRelativeTimeLabel(snapshot.checkedAt, now)}
           {nodes.length > 1 ? ` · signed in on ${nodes.length} nodes` : ""}
+          {alsoIn.length > 0 ? ` · also in ${alsoIn.join(", ")}` : ""}
           {resets ? ` · ${pluralize(resets, "banked reset")}` : ""}
           {credits?.hasCredits
             ? ` · credits ${credits.unlimited ? "unlimited" : (credits.balance ?? "available")}`
@@ -537,7 +600,13 @@ function DirectAccountCard({
   );
 }
 
-function HubHealthBadge({ health }: { readonly health: CliProxyAccountHealth }) {
+function HubHealthBadge({
+  health,
+  now,
+}: {
+  readonly health: CliProxyAccountHealth;
+  readonly now: number;
+}) {
   switch (health.kind) {
     case "ready":
       return <Badge variant="success">Ready</Badge>;
@@ -549,7 +618,7 @@ function HubHealthBadge({ health }: { readonly health: CliProxyAccountHealth }) 
           variant="warning"
           title={
             health.until
-              ? `The hub retries this account ${formatRateLimitResetText(Date.parse(health.until) / 1000) ?? "later"}.`
+              ? `The hub retries this account ${formatRateLimitResetText(Date.parse(health.until) / 1000, now) ?? "later"}.`
               : undefined
           }
         >
@@ -600,7 +669,7 @@ function HubAccountCard({
     <AccountCard
       source="hub"
       details={[plan, hubLabel].filter(Boolean).join(" · ")}
-      health={<HubHealthBadge health={health} />}
+      health={<HubHealthBadge health={health} now={now} />}
       name={
         <CliProxyAccountName account={account} className="text-[13px] leading-5 text-foreground" />
       }
@@ -727,9 +796,11 @@ function ApiKeyPanel({
 
 function HubList({
   hubs,
+  now,
   multipleEnvironments,
 }: {
   readonly hubs: ReadonlyArray<HubWithEnvironment>;
+  readonly now: number;
   readonly multipleEnvironments: boolean;
 }) {
   return (
@@ -753,7 +824,7 @@ function HubList({
             </div>
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
               {hub.version ? <span>CLIProxyAPI {hub.version}</span> : null}
-              <span>checked {formatRelativeTimeLabel(hub.checkedAt)}</span>
+              <span>checked {formatRelativeTimeLabel(hub.checkedAt, now)}</span>
               <Badge variant={hub.status === "ok" ? "success" : "error"}>
                 {hub.status === "ok" ? "Connected" : "Unreachable"}
               </Badge>

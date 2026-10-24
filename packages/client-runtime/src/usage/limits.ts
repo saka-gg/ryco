@@ -150,9 +150,8 @@ export interface PooledLimitWindow {
 }
 
 /**
- * Averages each window label over the given accounts. Windows pool by label, so a direct
- * account's 5h window and a hub account's 5h window share one pool; an account counts once per
- * label.
+ * Averages each window label over the given accounts. Windows pool by label, so every account's
+ * 5h window shares one pool; an account counts once per label.
  */
 export function poolLimitWindows(
   accounts: ReadonlyArray<ReadonlyArray<LabelledLimitWindow>>,

@@ -23,15 +23,17 @@ const NO_PROVIDERS: readonly ServerProvider[] = [];
 
 interface HubReadResult {
   readonly environmentId: EnvironmentId;
-  readonly label: string;
   /** `unsupported`: the node predates hubs, so it is not asked. */
   readonly status: "ok" | "failed" | "unsupported";
   readonly hubs: readonly CliProxyHubSnapshot[];
   readonly message?: string;
 }
 
-/** One environment's hub read, with its provider snapshots as they are now. */
-export interface LimitsEnvironmentResult extends HubReadResult {
+/** One selected environment's last hub read, with its provider snapshots as they are now. */
+export interface LimitsEnvironmentResult extends Omit<HubReadResult, "status"> {
+  readonly label: string;
+  /** `loading`: no hub read has answered for it yet, so it lists no hubs. */
+  readonly status: HubReadResult["status"] | "loading";
   readonly connected: boolean;
   /** Live provider snapshots; their `rateLimits` are the accounts the node signs in to itself. */
   readonly providers: readonly ServerProvider[];
@@ -46,7 +48,7 @@ export interface UseSubscriptionLimitsResult {
   readonly environments: readonly LimitsEnvironmentResult[];
   readonly loading: boolean;
   readonly refreshing: boolean;
-  /** When the current results arrived; snapshot times are never later than this. */
+  /** When the current hub reads arrived; hub snapshot times are never later than this. */
   readonly receivedAtMs: number;
   /** Re-read every hub, asking nodes to bypass their caches (within their upstream floor). */
   readonly refresh: () => void;
@@ -109,10 +111,7 @@ export function useSubscriptionLimits(input: {
     setRefreshing(true);
     const results = await Promise.all(
       selected.map(async (connection): Promise<HubReadResult> => {
-        const base = {
-          environmentId: connection.environmentId,
-          label: connection.knownEnvironment.label,
-        };
+        const base = { environmentId: connection.environmentId };
         if (unsupported.has(connection.environmentId)) {
           return { ...base, status: "unsupported", hubs: [], message: UNSUPPORTED_MESSAGE };
         }
@@ -162,20 +161,22 @@ export function useSubscriptionLimits(input: {
     void pollerRef.current?.refresh();
   }, []);
 
-  const environments = useMemo(
-    () =>
-      hubResults.map((result): LimitsEnvironmentResult => {
-        const primary = result.environmentId === primaryEnvironmentId;
-        const runtime = savedRuntimeById[result.environmentId];
-        const config = primary ? primaryConfig : (runtime?.serverConfig ?? null);
-        return {
-          ...result,
-          connected: primary || runtime?.connectionState === "connected",
-          providers: config?.providers ?? NO_PROVIDERS,
-        };
-      }),
-    [hubResults, primaryConfig, primaryEnvironmentId, savedRuntimeById],
-  );
+  // Every selected environment shows its live providers at once; its hubs join when read.
+  const environments = useMemo(() => {
+    const hubReads = new Map(hubResults.map((result) => [result.environmentId, result]));
+    return selected.map((connection): LimitsEnvironmentResult => {
+      const { environmentId } = connection;
+      const primary = environmentId === primaryEnvironmentId;
+      const runtime = savedRuntimeById[environmentId];
+      const config = primary ? primaryConfig : (runtime?.serverConfig ?? null);
+      return {
+        ...(hubReads.get(environmentId) ?? { environmentId, status: "loading", hubs: [] }),
+        label: connection.knownEnvironment.label,
+        connected: primary || runtime?.connectionState === "connected",
+        providers: config?.providers ?? NO_PROVIDERS,
+      };
+    });
+  }, [hubResults, primaryConfig, primaryEnvironmentId, savedRuntimeById, selected]);
 
   return { availableEnvironments, environments, loading, refreshing, receivedAtMs, refresh };
 }

@@ -122,6 +122,13 @@ const apiKey = (keyHint: string): CliProxyApiKeyUsage => ({
 describe("LimitsView", () => {
   let mounted: Awaited<ReturnType<typeof render>> | null = null;
   const onSearchChange = vi.fn<(next: StatisticsSearch) => void>();
+  // A new element each time, so a rerender renders again instead of bailing out on equal props.
+  const view = () => (
+    <LimitsView
+      search={parseStatisticsSearch({ view: "limits" })}
+      onSearchChange={onSearchChange}
+    />
+  );
 
   beforeEach(() => {
     onSearchChange.mockReset();
@@ -286,6 +293,63 @@ describe("LimitsView", () => {
     expect(page.getByRole("radiogroup", { name: "Limit source" }).query()).toBeNull();
   });
 
+  it("shows direct accounts while hubs are still being read", async () => {
+    const environment = { environmentId: desktop, label: "This machine", providers: [codex] };
+    serve([{ ...environment, status: "loading", hubs: [] }]);
+    mounted = await render(view());
+
+    await expect.element(page.getByText("23% used")).toBeVisible();
+    await expect.element(page.getByText("reading hubs…", { exact: false })).toBeVisible();
+    expect(page.getByRole("button", { name: "Connect a hub" }).query()).toBeNull();
+    expect(page.getByRole("alert").query()).toBeNull();
+
+    serve([{ ...environment, status: "ok", hubs: [] }]);
+    await mounted.rerender(view());
+
+    await expect.element(page.getByRole("button", { name: "Connect a hub" })).toBeVisible();
+    expect(document.body.textContent).not.toContain("reading hubs");
+  });
+
+  it("waits for hub reads before saying there is nothing to show", async () => {
+    const environment = { environmentId: desktop, label: "This machine" };
+    serve([{ ...environment, status: "loading", hubs: [] }]);
+    mounted = await render(view());
+
+    expect(document.querySelector(".animate-pulse")).not.toBeNull();
+    expect(document.body.textContent).not.toContain("No subscription limits to show");
+
+    serve([{ ...environment, status: "ok", hubs: [] }]);
+    await mounted.rerender(view());
+
+    await expect.element(page.getByText("No subscription limits to show")).toBeVisible();
+  });
+
+  it("keeps the environment filter mounted while a filter change re-reads hubs", async () => {
+    const both = [
+      { environmentId: desktop, label: "This machine" },
+      { environmentId: ssh, label: "Build box" },
+    ];
+    const filtered = () => (
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits", environmentIds: [ssh] })}
+        onSearchChange={onSearchChange}
+      />
+    );
+    serve([{ environmentId: ssh, label: "Build box", status: "loading", hubs: [] }], both);
+    mounted = await render(filtered());
+
+    const filter = page.getByRole("combobox", { name: "Limits environment" });
+    await expect.element(filter).toBeVisible();
+    expect(document.querySelector(".animate-pulse")).not.toBeNull();
+    const trigger = filter.element();
+
+    serve([{ environmentId: ssh, label: "Build box", status: "ok", hubs: [] }], both);
+    await mounted.rerender(filtered());
+
+    await expect.element(page.getByText("No subscription limits to show")).toBeVisible();
+    expect(filter.element()).toBe(trigger);
+  });
+
   it("mixes direct and hub accounts of a provider and filters them by source", async () => {
     const routedClaude = provider({
       instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -299,8 +363,18 @@ describe("LimitsView", () => {
       driver: ProviderDriverKind.make("claudeAgent"),
       displayName: "Claude personal",
       auth: { status: "authenticated", label: "Claude Max Subscription" },
-      rateLimits: { primary: { usedPercent: 40, windowDurationMins: 300 } },
+      rateLimits: { primary: { usedPercent: 90, windowDurationMins: 300 } },
     });
+    const hubAccount = (authIndex: string, usedPercent: number) =>
+      account({
+        authIndex,
+        name: `claude-${authIndex}.json`,
+        quota: {
+          status: "ok",
+          checkedAt,
+          windows: [{ id: "five_hour", usedPercent, windowDurationMins: 300 }],
+        },
+      });
     serve([
       {
         environmentId: desktop,
@@ -309,15 +383,7 @@ describe("LimitsView", () => {
         providers: [routedClaude, directClaude],
         hubs: [
           {
-            ...loopbackHub([
-              account({
-                quota: {
-                  status: "ok",
-                  checkedAt,
-                  windows: [{ id: "five_hour", usedPercent: 20, windowDurationMins: 300 }],
-                },
-              }),
-            ]),
+            ...loopbackHub([hubAccount("a", 20), hubAccount("b", 40)]),
             routedInstanceIds: [routedClaude.instanceId],
           },
         ],
@@ -330,20 +396,203 @@ describe("LimitsView", () => {
       />,
     );
 
-    await expect.element(page.getByText("1 direct · 1 via hub")).toBeVisible();
-    // The pool averages the direct 40% and the hub's 20%.
+    await expect.element(page.getByText("1 direct · 2 via hub")).toBeVisible();
+    // The pool averages the hub's 20% and 40% only; the direct 90% is never averaged in.
     await expect.element(page.getByText("70% left")).toBeVisible();
+    await expect.element(page.getByText("avg of 2 hub accounts")).toBeVisible();
+    await expect.element(page.getByText("90% used")).toBeVisible();
     await expect.element(page.getByText("Claude proxied", { exact: true })).toBeVisible();
     expect(document.body.textContent).not.toContain("99% used");
 
     await page.getByRole("radio", { name: "CLIProxyAPI" }).click();
-    await expect.element(page.getByText("1 via hub", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("2 via hub", { exact: true })).toBeVisible();
+    // Without direct cards beside it, the hub view reads as it always has.
+    await expect.element(page.getByText("avg of 2 accounts")).toBeVisible();
     expect(document.body.textContent).not.toContain("Claude Max Subscription");
     expect(document.body.textContent).not.toContain("Claude proxied");
 
     await page.getByRole("radio", { name: "Direct" }).click();
     await expect.element(page.getByText("1 direct", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("avg of");
     expect(page.getByRole("heading", { name: "Hubs" }).query()).toBeNull();
+  });
+
+  it("counts an account signed in on two nodes once", async () => {
+    serve([
+      { environmentId: desktop, label: "This machine", status: "ok", hubs: [], providers: [codex] },
+      { environmentId: ssh, label: "Build box", status: "ok", hubs: [], providers: [codex] },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("1 account · 1 direct", { exact: false })).toBeVisible();
+    await expect.element(page.getByText("signed in on 2 nodes", { exact: false })).toBeVisible();
+  });
+
+  it("keeps one email on two plans as two accounts", async () => {
+    const team = provider({
+      ...codex,
+      instanceId: ProviderInstanceId.make("codex-team"),
+      displayName: "Codex team",
+      rateLimits: { ...codex.rateLimits, planType: "plus" },
+    });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        hubs: [],
+        providers: [codex, team],
+      },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("2 accounts · 2 direct", { exact: false })).toBeVisible();
+    await expect.element(page.getByText("Direct", { exact: true }).nth(1)).toBeVisible();
+  });
+
+  it("notes a direct account a hub also holds, under every source filter", async () => {
+    const directClaude = provider({
+      instanceId: ProviderInstanceId.make("claude-personal"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude personal",
+      auth: { status: "authenticated", email: "shared.person@example.com" },
+      rateLimits: { primary: { usedPercent: 40, windowDurationMins: 300 } },
+    });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        providers: [directClaude],
+        hubs: [loopbackHub([account({ email: "Shared.Person@example.com" })])],
+      },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    const note = page.getByText("also in 127.0.0.1:8317", { exact: false });
+    await expect.element(note).toBeVisible();
+    expect(document.body.textContent?.toLowerCase()).not.toContain("shared.person@example.com");
+
+    await page.getByRole("radio", { name: "Direct" }).click();
+    await expect.element(page.getByText("1 direct", { exact: true })).toBeVisible();
+    await expect.element(note).toBeVisible();
+  });
+
+  it("takes the banked resets from the node that reported them", async () => {
+    const older = new Date(Date.parse(checkedAt) - 60_000).toISOString();
+    serve([
+      { environmentId: desktop, label: "This machine", status: "ok", hubs: [], providers: [codex] },
+      {
+        environmentId: ssh,
+        label: "Build box",
+        status: "ok",
+        hubs: [],
+        providers: [
+          provider({
+            ...codex,
+            checkedAt: older,
+            rateLimits: { ...codex.rateLimits, resetCredits: { availableCount: 2 } },
+          }),
+        ],
+      },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("signed in on 2 nodes", { exact: false })).toBeVisible();
+    await expect.element(page.getByText("2 banked resets", { exact: false })).toBeVisible();
+  });
+
+  it("judges pace against a live snapshot as soon as it arrives", async () => {
+    const pacedCodex = (checkedAtMs: number) =>
+      provider({
+        ...codex,
+        checkedAt: new Date(checkedAtMs).toISOString(),
+        rateLimits: {
+          planType: "pro",
+          // Half of the 5-hour window has passed at the check.
+          primary: {
+            usedPercent: 23,
+            windowDurationMins: 300,
+            resetsAt: (checkedAtMs + 150 * 60_000) / 1000,
+          },
+        },
+      });
+    const environment = {
+      environmentId: desktop,
+      label: "This machine",
+      status: "ok",
+      connected: true,
+      hubs: [],
+    } as const;
+    serve([{ ...environment, providers: [pacedCodex(Date.now() - 1_000)] }]);
+    mounted = await render(view());
+    const reserve = page.getByRole("button", { name: /27 percentage points below even pace/ });
+    await expect.element(reserve).toBeVisible();
+
+    // A provider push read after the view's last tick; no hub read comes with it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const pushedAt = Date.now() - 5;
+    harness.result = {
+      ...harness.result!,
+      environments: [{ ...environment, providers: [pacedCodex(pushedAt)] }],
+    };
+    await mounted.rerender(view());
+
+    await expect.element(reserve).toBeVisible();
+    expect(document.body.textContent).not.toContain("Pace unavailable");
+  });
+
+  it("words every time label against the view's clock", async () => {
+    // Both hub accounts' 5-hour windows reset 62 minutes after the reads.
+    const resetsAt = (Date.parse(checkedAt) + 62 * 60_000) / 1000;
+    const hubAccount = (authIndex: string) =>
+      account({
+        authIndex,
+        name: `claude-${authIndex}.json`,
+        quota: {
+          status: "ok",
+          checkedAt,
+          windows: [{ id: "five_hour", usedPercent: 30, windowDurationMins: 300, resetsAt }],
+        },
+      });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        providers: [codex],
+        hubs: [loopbackHub([hubAccount("a"), hubAccount("b")])],
+      },
+    ]);
+    // The view's clock runs three minutes past every read; no label may read Date.now() instead.
+    harness.result = { ...harness.result!, receivedAtMs: Date.parse(checkedAt) + 3 * 60_000 };
+    mounted = await render(view());
+
+    await expect.element(page.getByText("· checked 3m ago", { exact: false })).toBeVisible();
+    // The summary line, the direct card and the hub row.
+    expect(document.body.textContent?.match(/checked 3m ago/g)).toHaveLength(3);
+    expect(document.body.textContent).not.toContain("just now");
+    await expect.element(page.getByText("next resets in 59m", { exact: false })).toBeVisible();
   });
 
   it("offers the provider settings when nothing reports limits", async () => {
