@@ -16,8 +16,13 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { cleanup, render } from "vitest-browser-react";
 
+import type { PaneNode } from "../../chatPanes.logic";
 import { useChatPanesStore } from "../../chatPanesStore";
-import { resetClosedViewsForTests, type ClosedViewOwner } from "../../closedViews";
+import {
+  rememberClosedView,
+  resetClosedViewsForTests,
+  type ClosedViewOwner,
+} from "../../closedViews";
 import { type RightPanelSearchUpdate, useRightPanelTabs } from "../../hooks/useRightPanelTabs";
 import { isMacPlatform } from "../../lib/utils";
 import {
@@ -211,7 +216,11 @@ it("closes the active tab, then the panel on its launcher, then leaves the key a
 it("closes the focused split pane once the panel is closed", async () => {
   await mount();
   const closeFocused = vi.fn(() => true);
-  useChatPanesStore.getState().registerController({ focusSibling: () => false, closeFocused });
+  useChatPanesStore.getState().registerController({
+    focusSibling: () => false,
+    closeFocused,
+    reopen: () => false,
+  });
 
   expect(press("w").defaultPrevented).toBe(true);
   expect(closeFocused).toHaveBeenCalledOnce();
@@ -297,4 +306,33 @@ it("reopens a tab closed in another thread there, once that thread is known", as
   expect(press("t", { shift: true }).defaultPrevented).toBe(true);
   await expect.poll(() => router.state.location.pathname).toBe("/view-test/a");
   await expect.poll(shown).toBe("files");
+});
+
+it("reopens a closed pane in the split, else opens its thread", async () => {
+  const { router } = await mount();
+  seedThread(b);
+  const layout: PaneNode = {
+    kind: "split",
+    axis: "horizontal",
+    ratio: 0.6,
+    first: { kind: "thread", ref: a },
+    second: { kind: "thread", ref: b },
+  };
+  const reopen = vi.fn(() => true);
+  useChatPanesStore.getState().registerController({
+    focusSibling: () => false,
+    closeFocused: () => false,
+    reopen,
+  });
+
+  rememberClosedView({ kind: "pane", ref: b, layout });
+  expect(press("t", { shift: true }).defaultPrevented).toBe(true);
+  expect(reopen).toHaveBeenCalledWith(b, layout);
+  expect(router.state.location.pathname).toBe("/view-test/a");
+
+  // A split with no room for it (or none at all, on a draft) opens its thread.
+  reopen.mockReturnValue(false);
+  rememberClosedView({ kind: "pane", ref: b, layout });
+  expect(press("t", { shift: true }).defaultPrevented).toBe(true);
+  await expect.poll(() => router.state.location.pathname).toBe("/view-test/b");
 });

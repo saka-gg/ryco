@@ -24,6 +24,8 @@ function restore(): PaneNode | null {
 export interface ChatPanesController {
   focusSibling: (offset: 1 | -1) => boolean;
   closeFocused: () => boolean;
+  /** Brings a closed pane back into the split, given the layout it left. */
+  reopen: (ref: ScopedThreadRef, layout: PaneNode) => boolean;
 }
 interface ChatPanesState {
   root: PaneNode | null;

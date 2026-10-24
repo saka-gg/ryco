@@ -101,6 +101,9 @@ function reopenView(
   view: ClosedView,
 ): void {
   if (view.kind === "pane") {
+    // Back into the split around this thread; one that cannot take it (full,
+    // another environment, a draft route) gives way to the pane's own thread.
+    if (useChatPanesStore.getState().controller?.reopen(view.ref, view.layout)) return;
     void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(view.ref) });
     return;
   }
@@ -167,8 +170,9 @@ function handleViewShortcut(
  * `view.close` closes the workspace panel's active tab, else the panel while
  * it shows only the launcher, else the focused split pane; with nothing to
  * close, the key goes on to the window (or the browser). `view.reopenClosed`
- * brings back the newest closed view that can still be shown, opening its
- * thread or draft when it belongs to another one. Holding either key acts once.
+ * brings back the newest closed view that can still be shown: a tab in its
+ * thread or draft, opening that when it is another one, and a pane in the
+ * split. Holding either key acts once.
  */
 export function useViewShortcuts(input: ViewShortcutsInput): void {
   const navigate = useNavigate();
