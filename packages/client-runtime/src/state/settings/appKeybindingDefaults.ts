@@ -50,7 +50,10 @@ const NAVIGATION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
 ];
 
 // Close and reopen views and tabs.
-const VIEW_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [];
+const VIEW_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
+  { key: "mod+w", command: "view.close", when: "!terminalFocus" },
+  { key: "mod+shift+t", command: "view.reopenClosed", when: "!terminalFocus" },
+];
 
 export const CLIENT_ONLY_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   ...CORE_CLIENT_DEFAULT_KEYBINDINGS,

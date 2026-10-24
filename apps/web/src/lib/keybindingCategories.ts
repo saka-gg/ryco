@@ -19,7 +19,7 @@ export const KEYBINDING_CATEGORIES = {
   editor: { id: "editor", label: "Editor", sortWeight: 80 },
   modelPicker: { id: "modelPicker", label: "Model picker", sortWeight: 90 },
   thread: { id: "thread", label: "Threads", sortWeight: 100 },
-  view: { id: "view", label: "Tabs", sortWeight: 104 },
+  view: { id: "view", label: "Tabs and panes", sortWeight: 104 },
   pane: { id: "pane", label: "Split view", sortWeight: 105 },
   pullRequests: { id: "pullRequests", label: "Pull requests", sortWeight: 107 },
   projects: { id: "projects", label: "Projects", sortWeight: 108 },
@@ -114,7 +114,10 @@ const NAVIGATION_COMMAND_META = {
 } satisfies StaticCommandMetaGroup;
 
 // Close and reopen views and tabs.
-const VIEW_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+const VIEW_COMMAND_META = {
+  "view.close": { title: "Close tab or pane", sortWeight: 1 },
+  "view.reopenClosed": { title: "Reopen closed tab or pane", sortWeight: 2 },
+} satisfies StaticCommandMetaGroup;
 
 // Typed over every static command, so a command without a title fails typecheck.
 const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticCommandMeta>> = {

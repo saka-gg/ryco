@@ -40,6 +40,7 @@ import {
   startPaneDrag,
   useChatPanesStore,
 } from "../../chatPanesStore";
+import { rememberClosedView, restoreClosedPaneLayout } from "../../closedViews";
 import { shortcutLabelForCommand } from "../../keybindings";
 import { readMotionDurationMs } from "../../lib/perf/motion";
 import { cn } from "../../lib/utils";
@@ -211,6 +212,15 @@ function nextLayoutMotionWithoutKeys(
     ],
     entering,
   };
+}
+
+/** Where typing continues in a pane. */
+function paneComposer(container: HTMLElement | null, ref: ScopedThreadRef): HTMLElement | null {
+  return (
+    container
+      ?.querySelector(`[data-pane-thread="${CSS.escape(paneKey(ref))}"]`)
+      ?.querySelector<HTMLElement>('[data-testid="composer-editor"]') ?? null
+  );
 }
 
 function rectStyle(rect: PaneRect): CSSProperties {
@@ -487,8 +497,10 @@ export function ChatPanes({
         });
         if (router.state.location.pathname !== destination.pathname) return;
       }
-      if (useChatPanesStore.getState().root === original)
+      if (useChatPanesStore.getState().root === original) {
         useChatPanesStore.getState().setRoot(next);
+        rememberClosedView({ kind: "pane", ref, layout: original });
+      }
     } catch {
       toastManager.add({
         type: "error",
@@ -499,7 +511,12 @@ export function ChatPanes({
       operation.current = false;
     }
   };
-  const activate = async (ref: ScopedThreadRef, target?: HTMLElement | null) => {
+  const activate = async (
+    ref: ScopedThreadRef,
+    // A function is read once the route has reached the pane: a pane that has
+    // only just mounted cannot take focus before it renders as the focused one.
+    target?: HTMLElement | null | (() => HTMLElement | null),
+  ) => {
     // One navigation at a time. A blocked save cannot race later targets or
     // replay a button action against a different thread.
     if (operation.current) return;
@@ -511,8 +528,9 @@ export function ChatPanes({
         params: buildThreadRouteParams(ref),
       });
       if (!mounted.current) return;
-      if (router.state.location.pathname === destination.pathname && target?.isConnected)
-        target.focus({ preventScroll: true });
+      const element = typeof target === "function" ? target() : target;
+      if (router.state.location.pathname === destination.pathname && element?.isConnected)
+        element.focus({ preventScroll: true });
       else if (lastFocusedElement.current?.isConnected)
         lastFocusedElement.current.focus({ preventScroll: true });
     } catch {
@@ -538,16 +556,27 @@ export function ChatPanes({
         const index = leaves.findIndex((ref) => paneKey(ref) === paneKey(actions.threadRef));
         const next = leaves[(index + offset + leaves.length) % leaves.length]!;
         // Land in the sibling's composer so typing continues there.
-        const composer = container.current
-          ?.querySelector(`[data-pane-thread="${CSS.escape(paneKey(next))}"]`)
-          ?.querySelector<HTMLElement>('[data-testid="composer-editor"]');
-        void actions.activate(next, composer);
+        void actions.activate(next, paneComposer(container.current, next));
         return true;
       },
       closeFocused: () => {
         const actions = controllerActions.current;
         if (!actions.split) return false;
         void actions.close(actions.threadRef);
+        return true;
+      },
+      busy: () => operation.current,
+      reopen: (ref, layout) => {
+        const actions = controllerActions.current;
+        // Callers wait while busy (`busy()`); this only guards against one that does not.
+        if (operation.current || paneContains(currentRoot.current, ref)) return false;
+        // Where it was while the split is still as the close left it, else
+        // beside the focused pane.
+        const restored = restoreClosedPaneLayout(currentRoot.current, ref, layout);
+        const store = useChatPanesStore.getState();
+        if (restored) store.setRoot(restored);
+        else if (!store.open(ref, undefined, actions.threadRef)) return false;
+        void actions.activate(ref, () => paneComposer(container.current, ref));
         return true;
       },
     });
