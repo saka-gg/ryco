@@ -7,18 +7,13 @@ import type { NavigationHistory } from "electron";
 export type WindowNavigation = "back" | "forward";
 
 /**
- * A mouse's back and forward buttons and a keyboard's browser keys, which Windows and Linux
- * report to the window as app commands. Any other command is null.
- */
-export function appCommandNavigation(command: string): WindowNavigation | null {
-  if (command === "browser-backward") return "back";
-  if (command === "browser-forward") return "forward";
-  return null;
-}
-
-/**
  * A macOS trackpad swipe between pages. Electron names it from the swipe's deltaX ("left" for 1,
  * "right" for -1); like Firefox and VS Code, "left" goes back. Up and down are null.
+ *
+ * A mouse's back and forward buttons are not window events here: Chromium hands them to the page
+ * under the pointer, which steps its own history (the app reads them itself). Electron also
+ * reports them as `app-command` on Windows and Linux, so moving on that event as well would go
+ * two pages at once; the window leaves app commands alone.
  */
 export function swipeNavigation(direction: string): WindowNavigation | null {
   if (direction === "left") return "back";

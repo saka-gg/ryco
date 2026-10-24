@@ -4180,6 +4180,8 @@ export default function ChatView(props: ChatViewProps) {
     [copyReferenceThreadId, copyReferencePullRequestUrl],
   );
   const { copyToClipboard: copyThreadReference } = useCopyToClipboard<ThreadReferenceCopyTarget>({
+    // Nothing reads `isCopied`; without its reset timer only the first copy re-renders ChatView.
+    timeout: 0,
     onCopy: (target) => {
       toastManager.add({
         type: "success",

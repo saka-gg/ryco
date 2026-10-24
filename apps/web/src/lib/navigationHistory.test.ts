@@ -81,10 +81,9 @@ describe("installDesktopHistoryNavigation", () => {
     shell.tier = "desktop";
   });
 
-  function desktop(platform: string) {
+  function desktop() {
     const history = historyAt("/thread", "/pull-requests", "/settings");
-    const target = new EventTarget() as EventTarget & { navigator: { platform: string } };
-    target.navigator = { platform };
+    const target = new EventTarget();
     let menuListener: ((action: string) => void) | null = null;
     const uninstall = installDesktopHistoryNavigation(
       history,
@@ -112,8 +111,8 @@ describe("installDesktopHistoryNavigation", () => {
     };
   }
 
-  it("goes back and forward on the desktop app's menu actions", () => {
-    const app = desktop("Win32");
+  it("goes back and forward on the desktop app's swipe actions", () => {
+    const app = desktop();
 
     app.menu("open-settings");
     expect(app.history.location.pathname).toBe("/settings");
@@ -123,42 +122,40 @@ describe("installDesktopHistoryNavigation", () => {
     expect(app.history.location.pathname).toBe("/settings");
   });
 
-  it("leaves the page to an open dialog and to the phone tier", () => {
-    const app = desktop("MacIntel");
+  it("reads the mouse back and forward buttons and consumes them", () => {
+    const app = desktop();
 
-    shell.dialogOpen = true;
-    app.menu(DESKTOP_NAVIGATE_BACK_MENU_ACTION);
-    app.mouseUp(3);
+    expect(app.mouseUp(0).defaultPrevented).toBe(false);
     expect(app.history.location.pathname).toBe("/settings");
-
-    shell.dialogOpen = false;
-    shell.tier = "phone";
-    app.menu(DESKTOP_NAVIGATE_BACK_MENU_ACTION);
-    app.mouseUp(3);
+    // Consumed, so Chromium does not step the page a second time.
+    expect(app.mouseUp(3).defaultPrevented).toBe(true);
+    expect(app.history.location.pathname).toBe("/pull-requests");
+    expect(app.mouseUp(4).defaultPrevented).toBe(true);
     expect(app.history.location.pathname).toBe("/settings");
   });
 
-  it("reads the mouse back and forward buttons on macOS only", () => {
-    const mac = desktop("MacIntel");
+  it("keeps the page still under an open dialog", () => {
+    const app = desktop();
+    shell.dialogOpen = true;
 
-    expect(mac.mouseUp(0).defaultPrevented).toBe(false);
-    expect(mac.history.location.pathname).toBe("/settings");
-    expect(mac.mouseUp(3).defaultPrevented).toBe(true);
-    expect(mac.history.location.pathname).toBe("/pull-requests");
-    expect(mac.mouseUp(4).defaultPrevented).toBe(true);
-    expect(mac.history.location.pathname).toBe("/settings");
+    app.menu(DESKTOP_NAVIGATE_BACK_MENU_ACTION);
+    // Consumed as well: Chromium's own step would move the page under the dialog.
+    expect(app.mouseUp(3).defaultPrevented).toBe(true);
+    expect(app.history.location.pathname).toBe("/settings");
+  });
 
-    // Windows and Linux send the buttons as menu actions; reading them here
-    // as well would go back twice.
-    const windows = desktop("Win32");
-    expect(windows.mouseUp(3).defaultPrevented).toBe(false);
-    expect(windows.history.location.pathname).toBe("/settings");
+  it("leaves the phone tier to Chromium's own handling", () => {
+    const app = desktop();
+    shell.tier = "phone";
+
+    app.menu(DESKTOP_NAVIGATE_BACK_MENU_ACTION);
+    expect(app.mouseUp(3).defaultPrevented).toBe(false);
+    expect(app.history.location.pathname).toBe("/settings");
   });
 
   it("installs nothing without the desktop bridge", () => {
     const history = historyAt("/thread", "/settings");
-    const target = new EventTarget() as EventTarget & { navigator: { platform: string } };
-    target.navigator = { platform: "MacIntel" };
+    const target = new EventTarget();
     const addEventListener = vi.spyOn(target, "addEventListener");
 
     installDesktopHistoryNavigation(history, undefined, target as unknown as Window)();
@@ -167,12 +164,12 @@ describe("installDesktopHistoryNavigation", () => {
   });
 
   it("stops listening once uninstalled", () => {
-    const app = desktop("MacIntel");
+    const app = desktop();
 
     app.uninstall();
 
     expect(app.hasMenuListener()).toBe(false);
-    app.mouseUp(3);
+    expect(app.mouseUp(3).defaultPrevented).toBe(false);
     expect(app.history.location.pathname).toBe("/settings");
   });
 });

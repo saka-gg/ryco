@@ -5,7 +5,6 @@ import {
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
-  appCommandNavigation,
   navigateWindow,
   swipeNavigation,
   type WindowNavigation,
@@ -30,16 +29,6 @@ function navigate(
   navigateWindow({ navigation, focusedPage, sendToApp });
   return sendToApp;
 }
-
-describe("appCommandNavigation", () => {
-  it("maps the browser keys and mouse buttons and nothing else", () => {
-    expect(appCommandNavigation("browser-backward")).toBe("back");
-    expect(appCommandNavigation("browser-forward")).toBe("forward");
-    for (const command of ["browser-refresh", "media-play-pause", "volume-up", ""]) {
-      expect(appCommandNavigation(command)).toBeNull();
-    }
-  });
-});
 
 describe("swipeNavigation", () => {
   it("goes back on a left swipe and forward on a right one", () => {

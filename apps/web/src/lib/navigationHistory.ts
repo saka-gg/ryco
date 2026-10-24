@@ -7,7 +7,6 @@ import type { RouterHistory } from "@tanstack/react-router";
 
 import { hasOpenDialogShortcutTarget } from "../keybindings";
 import { getPresentationTier } from "./presentationTier";
-import { isMacPlatform } from "./utils";
 
 export type NavigationHistoryDirection = "back" | "forward";
 
@@ -31,11 +30,12 @@ export function stepNavigationHistory(
 }
 
 /**
- * Steps the history for the desktop app's mouse back and forward buttons,
- * browser keys and trackpad swipes. Windows and Linux report the mouse buttons
- * to the desktop app, which sends them as menu actions with the rest; macOS
- * reports them only to the page, so they are read here. Open dialogs and the
- * phone tier keep them, as they keep the keys.
+ * Steps the history for the desktop app's trackpad swipes, which it sends as
+ * menu actions, and for a mouse's back and forward buttons. Chromium itself
+ * steps the page for a back or forward button the page leaves unconsumed, on
+ * every platform, so the buttons are read and consumed here: that keeps them
+ * to one step, and lets an open dialog keep them, as it keeps the keys. The
+ * phone tier keeps Chromium's own handling.
  */
 export function installDesktopHistoryNavigation(
   history: RouterHistory,
@@ -43,20 +43,23 @@ export function installDesktopHistoryNavigation(
   target: Window,
 ): () => void {
   if (!bridge) return () => {};
-  const step = (direction: NavigationHistoryDirection) => {
-    if (hasOpenDialogShortcutTarget() || getPresentationTier() === "phone") return;
-    stepNavigationHistory(history, direction);
-  };
   const unsubscribe = bridge.onMenuAction((action) => {
-    if (action === DESKTOP_NAVIGATE_BACK_MENU_ACTION) step("back");
-    else if (action === DESKTOP_NAVIGATE_FORWARD_MENU_ACTION) step("forward");
+    const direction =
+      action === DESKTOP_NAVIGATE_BACK_MENU_ACTION
+        ? "back"
+        : action === DESKTOP_NAVIGATE_FORWARD_MENU_ACTION
+          ? "forward"
+          : null;
+    if (!direction || hasOpenDialogShortcutTarget() || getPresentationTier() === "phone") return;
+    stepNavigationHistory(history, direction);
   });
-  if (!isMacPlatform(target.navigator.platform)) return unsubscribe;
   const onMouseUp = (event: MouseEvent) => {
     // Buttons 3 and 4 are a mouse's back and forward buttons.
     if (event.defaultPrevented || (event.button !== 3 && event.button !== 4)) return;
+    if (getPresentationTier() === "phone") return;
     event.preventDefault();
-    step(event.button === 3 ? "back" : "forward");
+    if (hasOpenDialogShortcutTarget()) return;
+    stepNavigationHistory(history, event.button === 3 ? "back" : "forward");
   };
   target.addEventListener("mouseup", onMouseUp);
   return () => {

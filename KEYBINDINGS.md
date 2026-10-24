@@ -151,8 +151,8 @@ focused control.
 - `navigation.back` / `navigation.forward`: go back or forward through the pages you opened in this
   window (`mod+[` / `mod+]` outside the terminal). They never leave Ryco. They also work while you
   type in the composer; other text fields keep the keys. In the desktop app, a mouse's back and
-  forward buttons and a trackpad swipe between pages do the same. While the browser panel has
-  focus, a swipe (and on Windows and Linux, a mouse button) moves its page instead.
+  forward buttons and a trackpad swipe between pages do the same. Over the browser panel, a mouse
+  button moves its page instead, and so does a swipe while the panel has focus.
 - `thread.interrupt`: stop the running turn in the focused chat, like the stop button (`mod+.`
   outside the terminal).
 - `thread.copyReference`: copy the thread's pull request link, or its thread ID when it has none

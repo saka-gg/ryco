@@ -1,12 +1,7 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
-import {
-  appCommandNavigation,
-  navigateWindow,
-  swipeNavigation,
-  type WindowNavigation,
-} from "./desktopNavigationCommands.ts";
+import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
 import {
@@ -4889,12 +4884,12 @@ function createWindow(): BrowserWindow {
     quitShortcutGuards.delete(quitGuard);
   });
 
-  // Mouse back and forward buttons and browser keys (Windows, Linux) and trackpad swipes (macOS)
-  // move the focused page shown in this window: the browser panel's, or else the app's.
-  const navigate = (navigation: WindowNavigation | null) => {
+  // A trackpad swipe between pages (macOS) moves the focused page shown in this window: the
+  // browser panel's, or else the app's. Mouse buttons stay with the page (swipeNavigation).
+  window.on("swipe", (_event, direction) => {
     const focused = webContents.getFocusedWebContents();
     navigateWindow({
-      navigation,
+      navigation: swipeNavigation(direction),
       focusedPage:
         window.contentView.children.find(
           (view): view is WebContentsView =>
@@ -4904,9 +4899,7 @@ function createWindow(): BrowserWindow {
         if (!window.webContents.isDestroyed()) window.webContents.send(MENU_ACTION_CHANNEL, action);
       },
     });
-  };
-  window.on("app-command", (_event, command) => navigate(appCommandNavigation(command)));
-  window.on("swipe", (_event, direction) => navigate(swipeNavigation(direction)));
+  });
 
   window.webContents.on("context-menu", (event, params) => {
     event.preventDefault();
