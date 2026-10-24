@@ -15,9 +15,16 @@ sorting timestamp. Existing manual positions, local pins, and priority rankings 
 Unpin restores the local pin using the existing sorter. Archive Undo also reopens the thread
 when Archive displaced it and the user has stayed on the resulting route. Manual navigation wins.
 
-Web uses the existing stacked thread toast. Native uses a short-lived notice with a labeled
-Undo button and a screen-reader announcement. Native exposes Undo where its existing surfaces
-expose the actions; it does not add a pinning surface. The frozen web phone presentation is unchanged.
+Web uses the existing stacked thread toast. On web and desktop, `mod+z` (the `thread.undo`
+command) also undoes the newest notice. A new notice claims the key in the composer until you
+press another key or edit text there, including a paste, cut or drop from a menu; after that the
+key is the composer's own undo again. Other text fields, code editors, dialogs, the model picker
+and the terminal always keep their own undo. Without a notice the key is left alone, so native
+undo and the desktop Edit menu work as before. Holding the key undoes once.
+
+Native uses a short-lived notice with a labeled Undo button and a screen-reader announcement.
+Native exposes Undo where its existing surfaces expose the actions; it does not add a pinning
+surface. The frozen web phone presentation is unchanged.
 
 ## Safety and compatibility
 

@@ -7,6 +7,7 @@ import { useChatPanesStore } from "../chatPanesStore";
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
 import { useSidebarFoldStore } from "./sidebar/sidebarFold";
+import { useSettingsSearchRevealStore } from "./settings/settingsSearchReveal";
 
 // Production CSS is part of the behavior under test because row height depends on it.
 import "../index.css";
@@ -74,6 +75,7 @@ import { getServerConfig } from "../rpc/serverState";
 import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { clearRightPanelSessionSearch } from "../rightPanelSessionState";
+import { sidebarUndo } from "../sidebarUndo";
 import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
 import { useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
@@ -671,6 +673,70 @@ function addThreadToSnapshot(
         },
       },
     ],
+  };
+}
+
+// Recent, so the thread is not settled automatically by age.
+const LIFECYCLE_TURN_REQUESTED_AT = new Date(Date.now() - 120_000).toISOString();
+const LIFECYCLE_TURN_COMPLETED_AT = new Date(Date.now() - 60_000).toISOString();
+
+/** The bootstrap thread after a turn that finished, or one still running. */
+function createLifecycleSnapshot(options: { running?: boolean } = {}): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-lifecycle-shortcuts" as MessageId,
+    targetText: "lifecycle shortcuts",
+  });
+  const thread = snapshot.threads[0]!;
+  const turnId = "turn-lifecycle-shortcuts" as TurnId;
+  const requestedAt = LIFECYCLE_TURN_REQUESTED_AT;
+  return {
+    ...snapshot,
+    threads: [
+      {
+        ...thread,
+        latestTurn: options.running
+          ? {
+              turnId,
+              state: "running",
+              requestedAt,
+              startedAt: requestedAt,
+              completedAt: null,
+              assistantMessageId: null,
+            }
+          : {
+              turnId,
+              state: "completed",
+              requestedAt,
+              startedAt: requestedAt,
+              completedAt: LIFECYCLE_TURN_COMPLETED_AT,
+              assistantMessageId: null,
+            },
+        session: {
+          ...thread.session!,
+          status: options.running ? "running" : "ready",
+          activeTurnId: options.running ? turnId : null,
+        },
+      },
+    ],
+  };
+}
+
+/** A `configureFixture` for a node that can settle, snooze and undo thread actions. */
+function enableThreadLifecycle(nextFixture: TestFixture): void {
+  const capabilities = {
+    repositoryIdentity: true,
+    threadSettlement: true,
+    threadSnooze: true,
+    threadSidebarUndo: true,
+    threadPriorityRanking: false,
+  };
+  nextFixture.serverConfig = {
+    ...nextFixture.serverConfig,
+    environment: { ...nextFixture.serverConfig.environment, capabilities },
+  };
+  nextFixture.welcome = {
+    ...nextFixture.welcome,
+    environment: { ...nextFixture.welcome.environment, capabilities },
   };
 }
 
@@ -1978,6 +2044,13 @@ async function waitForServerConfigToApply(): Promise<void> {
   await waitForLayout();
 }
 
+/** The sidebar loads the thread lifecycle shortcuts after it mounts: waits until they listen. */
+async function waitForThreadLifecycleShortcuts(): Promise<void> {
+  await browserWaitFor(() => {
+    expect(useCommandPaletteStore.getState().readCurrentThreadLifecycle).not.toBeNull();
+  });
+}
+
 async function waitForComposerStashBinding(key: string): Promise<void> {
   await browserWaitFor(() => {
     expect(
@@ -2050,6 +2123,30 @@ function dispatchThreadPinToggleShortcut(): void {
       cancelable: true,
     }),
   );
+}
+
+/** ⌥⇧⌘ (Ctrl+Alt+Shift off macOS) plus `letter`, from the focused element. */
+function pressLifecycleChord(letter: "A" | "D" | "S" | "U"): KeyboardEvent {
+  const useMetaForMod = isMacPlatform(navigator.platform);
+  const event = new KeyboardEvent("keydown", {
+    key: letter,
+    code: `Key${letter}`,
+    altKey: true,
+    shiftKey: true,
+    metaKey: useMetaForMod,
+    ctrlKey: !useMetaForMod,
+    bubbles: true,
+    cancelable: true,
+  });
+  (document.activeElement ?? window).dispatchEvent(event);
+  return event;
+}
+
+/** The type of every orchestration command sent so far. */
+function dispatchedCommandTypes(): unknown[] {
+  return wsRequests
+    .filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand)
+    .map((request) => (request as { type?: unknown }).type);
 }
 
 function releaseModShortcut(key?: string): void {
@@ -2382,6 +2479,29 @@ async function mountChatView(options: {
     },
     router,
   };
+}
+
+/**
+ * The open lifecycle thread on a node that accepts every command, so actions
+ * leave an Undo notice. Resolves once its shortcuts listen.
+ */
+async function mountLifecycleThread(options: { running?: boolean } = {}): Promise<MountedChatView> {
+  const mounted = await mountChatView({
+    viewport: DEFAULT_VIEWPORT,
+    snapshot: createLifecycleSnapshot(options),
+    configureFixture: enableThreadLifecycle,
+    resolveRpc: (body) =>
+      body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+        ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+        : undefined,
+  });
+  try {
+    await waitForThreadLifecycleShortcuts();
+  } catch (error) {
+    await mounted.cleanup();
+    throw error;
+  }
+  return mounted;
 }
 
 // --- Phone work-surface fixtures (delivery step 8) ---
@@ -2735,6 +2855,11 @@ export function setupChatViewBrowserSuite() {
       openIntent: null,
     });
     useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
+    // A notice left by an earlier test would take this test's Undo key.
+    sidebarUndo.dispose();
+    // A reveal the palette asked for, left untaken by an earlier test, would
+    // scroll the next settings page.
+    useSettingsSearchRevealStore.setState({ request: null });
     useSidebarFoldStore.getState().reset();
     useStore.setState({
       activeEnvironmentId: null,
@@ -2809,6 +2934,9 @@ export {
   createPromptStashEntry,
   createSnapshotForTargetUser,
   addThreadToSnapshot,
+  createLifecycleSnapshot,
+  enableThreadLifecycle,
+  LIFECYCLE_TURN_COMPLETED_AT,
   toThreadWindowSnapshot,
   threadRefFor,
   threadKeyFor,
@@ -2860,10 +2988,13 @@ export {
   expectComposerActionsContained,
   waitForInteractionModeButton,
   waitForServerConfigToApply,
+  waitForThreadLifecycleShortcuts,
   waitForComposerStashBinding,
   dispatchChatNewShortcut,
   dispatchComposerStashShortcut,
   dispatchThreadPinToggleShortcut,
+  pressLifecycleChord,
+  dispatchedCommandTypes,
   releaseModShortcut,
   triggerChatNewShortcutUntilPath,
   triggerChatNewLocalShortcutUntilPath,
@@ -2881,6 +3012,7 @@ export {
   getCommandPaletteLegendEntries,
   dispatchInputKey,
   mountChatView,
+  mountLifecycleThread,
   createSnapshotWithWorkSurfaceCheckpoint,
   resolveWorkSurfaceRpc,
   queryPhoneSurfacePopup,

@@ -471,6 +471,24 @@ export function isServerThreadHistoryPending(input: {
 }
 
 /**
+ * What the focused thread's read marker does with its latest completed turn:
+ * mark it read (`visit`), nothing when it is read already (`read`), or keep it
+ * unread (`hold`) after the user marked a turn unread that this focus of the
+ * thread already showed as read. A new turn, or the thread focused again, is
+ * read as before.
+ */
+export function resolveThreadVisit(input: {
+  readonly completedAt: string;
+  readonly lastVisitedAt: string | undefined;
+  /** The completed turn this focus of the thread showed as read, if any. */
+  readonly seenCompletedAt: string | null;
+}): "visit" | "read" | "hold" {
+  const lastVisitedAtMs = input.lastVisitedAt ? Date.parse(input.lastVisitedAt) : Number.NaN;
+  if (lastVisitedAtMs >= Date.parse(input.completedAt)) return "read";
+  return input.seenCompletedAt === input.completedAt ? "hold" : "visit";
+}
+
+/**
  * Per-thread "a send is in flight" flags. ChatView follows thread navigation
  * instead of remounting, so a send still running for one thread must neither
  * block the thread the user moved on to nor be cleared by a send there.

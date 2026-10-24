@@ -2,6 +2,7 @@ import { scopedProjectKey, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
   EnvironmentId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnId,
@@ -15,6 +16,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildThreadInbox,
   deriveThreadSnoozeEligibility,
+  resolveThreadLifecycleAvailability,
   scopedInboxWorktreeKey,
   type BuildThreadInboxInput,
   type ThreadInboxDraftSummary,
@@ -907,5 +909,198 @@ describe("deriveThreadSnoozeEligibility", () => {
         nowMs,
       }),
     ).toEqual({ canSnooze: false, blocker: "unsupported" });
+  });
+});
+
+describe("thread lifecycle availability", () => {
+  const completedTurn = {
+    turnId: TurnId.make("turn-1"),
+    state: "completed" as const,
+    requestedAt: "2026-07-31T10:00:00.000Z",
+    startedAt: "2026-07-31T10:00:00.000Z",
+    completedAt: "2026-07-31T10:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const idle = (overrides: Partial<SidebarThreadSummary> = {}) =>
+    makeThread(environmentA, "thread-idle", {
+      latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+      latestTurn: completedTurn,
+      ...overrides,
+    });
+  const running = idle({
+    session: {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: TurnId.make("turn-2"),
+      createdAt: "2026-07-31T11:00:00.000Z",
+      updatedAt: "2026-07-31T11:00:00.000Z",
+    },
+    latestTurn: {
+      ...completedTurn,
+      turnId: TurnId.make("turn-2"),
+      state: "running",
+      completedAt: null,
+    },
+  });
+  const snoozed = idle({
+    snoozedAt: "2026-07-31T11:00:00.000Z",
+    snoozedUntil: "2026-07-31T13:00:00.000Z",
+  });
+  const key = scopedThreadKey({
+    environmentId: environmentA,
+    threadId: ThreadId.make("thread-idle"),
+  });
+  const availabilityOf = (
+    thread: SidebarThreadSummary,
+    environment: Partial<ThreadInboxEnvironment> = {},
+    overrides: Partial<BuildThreadInboxInput> = {},
+  ) => {
+    const inbox = buildThreadInbox(
+      baseInput({
+        threads: [thread],
+        environments: [
+          makeEnvironment(environmentA, { threadSnoozeSupported: true, ...environment }),
+        ],
+        ...overrides,
+      }),
+    );
+    const [entry] = [...inbox.active, ...inbox.settled, ...inbox.snoozed];
+    return resolveThreadLifecycleAvailability(entry!);
+  };
+
+  it("allows every action on an idle thread of a ready node", () => {
+    expect(availabilityOf(idle())).toEqual({
+      settle: { enabled: true, blocker: null, settled: false },
+      snooze: { enabled: true, blocker: null, snoozedUntil: null },
+      archive: { enabled: true, blocker: null },
+      markUnread: { enabled: true, blocker: null },
+    });
+  });
+
+  it("describes the toggle: Move to Active once settled, Unsnooze once snoozed", () => {
+    expect(
+      availabilityOf(idle({ settledOverride: "settled", settledAt: "2026-07-31T11:00:00.000Z" }))
+        .settle,
+    ).toEqual({ enabled: true, blocker: null, settled: true });
+    expect(availabilityOf(snoozed).snooze).toEqual({
+      enabled: true,
+      blocker: null,
+      snoozedUntil: "2026-07-31T13:00:00.000Z",
+    });
+    // Waking needs only Snooze on the node; snoozing needs settlement too.
+    expect(availabilityOf(snoozed, { threadSettlementSupported: "unknown" }).snooze.enabled).toBe(
+      true,
+    );
+    expect(availabilityOf(idle(), { threadSettlementSupported: "unknown" }).snooze.blocker).toBe(
+      "shell-stale",
+    );
+    expect(availabilityOf(snoozed, { threadSnoozeSupported: false }).snooze.blocker).toBe(
+      "unsupported",
+    );
+  });
+
+  it("holds settle, snooze and archive while a turn runs", () => {
+    expect(availabilityOf(running)).toMatchObject({
+      settle: { enabled: false, blocker: "session-running" },
+      snooze: { enabled: false, blocker: "session-running" },
+      archive: { enabled: false, blocker: "turn-running" },
+    });
+  });
+
+  it.each([
+    [{ hasPendingApprovals: true }, "pending-approval"],
+    [{ hasPendingUserInput: true }, "pending-user-input"],
+  ] as const)("holds settle and snooze for %j", (overrides, blocker) => {
+    expect(availabilityOf(idle(overrides))).toMatchObject({
+      settle: { enabled: false, blocker },
+      snooze: { enabled: false, blocker },
+      archive: { enabled: true },
+    });
+  });
+
+  it.each([
+    ["localQueuedThreadKeys", "local-queue"],
+    ["deliveryUnknownThreadKeys", "delivery-unknown"],
+  ] as const)("holds settle and snooze for %s", (input, blocker) => {
+    expect(availabilityOf(idle(), {}, { [input]: [key] })).toMatchObject({
+      settle: { enabled: false, blocker },
+      snooze: { enabled: false, blocker },
+      archive: { enabled: true },
+    });
+  });
+
+  it.each([
+    [{ connected: false }, "disconnected"],
+    [{ shellCurrent: false }, "shell-stale"],
+    [{ mutationReady: false }, "read-only"],
+  ] as const)("blocks every change through the node for %j", (environment, blocker) => {
+    expect(availabilityOf(idle(), environment)).toEqual({
+      settle: { enabled: false, blocker, settled: false },
+      snooze: { enabled: false, blocker, snoozedUntil: null },
+      archive: { enabled: false, blocker },
+      // Mark unread is this client's own state.
+      markUnread: { enabled: true, blocker: null },
+    });
+  });
+
+  it("archives on a node without settlement or snooze", () => {
+    expect(
+      availabilityOf(idle(), { threadSettlementSupported: false, threadSnoozeSupported: false }),
+    ).toMatchObject({
+      settle: { enabled: false, blocker: "unsupported" },
+      snooze: { enabled: false, blocker: "unsupported" },
+      archive: { enabled: true, blocker: null },
+    });
+    expect(availabilityOf(idle(), { threadSnoozeSupported: false }).snooze.blocker).toBe(
+      "unsupported",
+    );
+  });
+
+  it("needs a conversation to archive and a completed turn to mark unread", () => {
+    expect(availabilityOf(idle({ latestUserMessageAt: null, latestTurn: null }))).toMatchObject({
+      archive: { enabled: false, blocker: "no-conversation" },
+      markUnread: { enabled: false, blocker: "no-completed-turn" },
+    });
+  });
+
+  it("allows no action on a local draft", () => {
+    const draft: ThreadInboxDraftSummary = {
+      environmentId: environmentA,
+      threadId: ThreadId.make("thread-draft"),
+      projectId,
+      title: "Draft",
+      createdAt: "2026-07-31T11:00:00.000Z",
+      branch: null,
+      worktreePath: null,
+    };
+    const entry = buildThreadInbox(baseInput({ drafts: [draft] })).active[0]!;
+    expect(resolveThreadLifecycleAvailability(entry)).toEqual({
+      settle: { enabled: false, blocker: "client-draft", settled: false },
+      snooze: { enabled: false, blocker: "client-draft", snoozedUntil: null },
+      archive: { enabled: false, blocker: "no-conversation" },
+      markUnread: { enabled: false, blocker: "no-completed-turn" },
+    });
+  });
+
+  it("matches the entry's own snooze eligibility", () => {
+    for (const thread of [idle(), running, idle({ hasPendingApprovals: true })]) {
+      for (const environment of [
+        {},
+        { threadSnoozeSupported: "unknown" as const },
+        { connected: false },
+      ]) {
+        const inbox = buildThreadInbox(
+          baseInput({
+            threads: [thread],
+            environments: [
+              makeEnvironment(environmentA, { threadSnoozeSupported: true, ...environment }),
+            ],
+          }),
+        );
+        const entry = inbox.active[0]!;
+        expect(resolveThreadLifecycleAvailability(entry).snooze.enabled).toBe(entry.canSnooze);
+      }
+    }
   });
 });

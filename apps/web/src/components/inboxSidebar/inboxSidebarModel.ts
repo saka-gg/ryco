@@ -30,9 +30,15 @@ import type {
 import {
   buildThreadInbox,
   planDelegatedNesting,
+  resolveThreadLifecycleAvailability,
   resolveThreadWorkspacePullRequestLink,
   type DelegatedNestingItem,
-  type ThreadInboxEntry,
+  type ThreadArchiveBlocker,
+  type ThreadInboxEnvironment,
+  type ThreadLifecycleAction,
+  type ThreadLifecycleAvailability,
+  type ThreadSettleBlocker,
+  type ThreadSnoozeBlocker,
 } from "@ryco/client-runtime/state/threads";
 import {
   visiblePullRequestLinks,
@@ -52,6 +58,7 @@ import {
   type ServerProvider,
   type ServerConfig,
   type ProviderDriverKind,
+  type ScopedThreadRef,
   type SidebarAutoSettleAfterDays,
   type ThreadId,
   type ThreadLineage,
@@ -774,6 +781,7 @@ function sectionKey(
 
 const NO_DELEGATED_CHILDREN: ReadonlyArray<InboxSidebarRow> = [];
 const UNKNOWN_PROJECT_LABEL = "Unknown project";
+const UNTITLED_THREAD_TITLE = "Untitled task";
 
 /**
  * A host carries what its folded children are doing: it is working while one of
@@ -881,8 +889,8 @@ function compareActive(left: InboxSidebarRow, right: InboxSidebarRow): number {
   return leftPriority - rightPriority || compareRecent(left, right);
 }
 
-function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
-  switch (entry.mutationBlocker) {
+function settleBlockerReason(blocker: ThreadSettleBlocker): string {
+  switch (blocker) {
     case "client-draft":
       return "Drafts cannot be settled yet.";
     case "unsupported":
@@ -893,11 +901,6 @@ function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
       return "Your role cannot change this thread.";
     case "shell-stale":
       return "Wait for current thread data before changing settlement.";
-    case null:
-      break;
-  }
-
-  switch (entry.lifecycle.settlementBlocker) {
     case "pending-approval":
       return "Resolve the pending approval first.";
     case "pending-user-input":
@@ -914,13 +917,60 @@ function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
     case "thread-deleted":
     case "worktree-archived":
       return "Archived work cannot be settled.";
-    case "unsupported":
-      return "Update this machine to use Settle.";
-    case null:
-      return null;
   }
+}
 
-  return null;
+/** Snoozing shares settling's reasons, except those that name the action. */
+function snoozeBlockerReason(blocker: ThreadSnoozeBlocker): string {
+  switch (blocker) {
+    case "client-draft":
+      return "Drafts cannot be snoozed yet.";
+    case "unsupported":
+      return "Update this machine to use Snooze.";
+    case "disconnected":
+      return "Reconnect this machine to snooze threads.";
+    case "shell-stale":
+      return "Wait for current thread data before snoozing.";
+    case "delivery-unknown":
+      return "Confirm message delivery before snoozing.";
+    default:
+      return settleBlockerReason(blocker);
+  }
+}
+
+function archiveBlockerReason(blocker: ThreadArchiveBlocker): string {
+  switch (blocker) {
+    case "disconnected":
+      return "Reconnect this machine to archive threads.";
+    case "shell-stale":
+      return "Wait for current thread data before archiving.";
+    case "read-only":
+      return "Your role cannot change this thread.";
+    case "no-conversation":
+      return "Send a message before archiving.";
+    case "turn-running":
+      return "Wait for the running work to finish.";
+  }
+}
+
+/**
+ * Why an action cannot run on the thread now, worded alike by the inbox, the
+ * command palette and the shortcuts. Null while it can.
+ */
+export function threadLifecycleDisabledReason(
+  availability: ThreadLifecycleAvailability,
+  action: ThreadLifecycleAction,
+): string | null {
+  switch (action) {
+    case "settle":
+      return availability.settle.blocker && settleBlockerReason(availability.settle.blocker);
+    case "snooze":
+      return availability.snooze.blocker && snoozeBlockerReason(availability.snooze.blocker);
+    case "archive":
+      return availability.archive.blocker && archiveBlockerReason(availability.archive.blocker);
+    case "markUnread":
+      return availability.markUnread.blocker && "Nothing to mark unread yet.";
+  }
 }
 
 /** A model's short display name from its provider's catalog; null when the catalog lacks it. */
@@ -936,6 +986,68 @@ export function modelDisplayName(
   return model ? inboxModelName(getModelDisplayName(model), provider!.driver) : null;
 }
 
+function toThreadInboxEnvironment(environment: InboxSidebarEnvironment): ThreadInboxEnvironment {
+  return {
+    environmentId: environment.environmentId,
+    label: environment.label,
+    threadSettlementSupported: environment.threadSettlementSupported,
+    threadSnoozeSupported: environment.threadSnoozeSupported,
+    autoSettleAfterDays: environment.autoSettleAfterDays,
+    connected: environment.connectionState === "connected",
+    mutationReady: environment.mutationReady,
+    shellCurrent: environment.shellCurrent,
+  };
+}
+
+export interface InboxThreadLifecycle {
+  readonly target: ScopedThreadRef;
+  readonly title: string;
+  readonly availability: ThreadLifecycleAvailability;
+}
+
+/**
+ * One thread's lifecycle state, decided exactly as its inbox row decides it,
+ * for surfaces that act on the open thread. Null for a thread the inbox does
+ * not list, such as an archived one.
+ */
+export function resolveCurrentThreadLifecycle(
+  input: Pick<
+    BuildInboxSidebarInput,
+    | "projects"
+    | "worktrees"
+    | "environments"
+    | "deliveryUnknownThreadKeys"
+    | "localQueuedThreadKeys"
+    | "pinnedThreadKeys"
+    | "autoSettleAfterDays"
+  > & {
+    readonly thread: SidebarThreadOrStub;
+    readonly nowMs: number;
+  },
+): InboxThreadLifecycle | null {
+  const environment = input.environments.find(
+    (candidate) => candidate.environmentId === input.thread.environmentId,
+  );
+  const inbox = buildThreadInbox({
+    projects: input.projects,
+    worktrees: input.worktrees,
+    threads: [input.thread],
+    environments: environment ? [toThreadInboxEnvironment(environment)] : [],
+    localQueuedThreadKeys: input.localQueuedThreadKeys,
+    deliveryUnknownThreadKeys: input.deliveryUnknownThreadKeys,
+    pinnedThreadKeys: input.pinnedThreadKeys,
+    autoSettleAfterDays: input.autoSettleAfterDays,
+    nowMs: input.nowMs,
+  });
+  const entry = inbox.active[0] ?? inbox.settled[0] ?? inbox.snoozed[0];
+  if (entry === undefined) return null;
+  return {
+    target: entry.ref,
+    title: entry.title || UNTITLED_THREAD_TITLE,
+    availability: resolveThreadLifecycleAvailability(entry),
+  };
+}
+
 export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSidebarModel {
   const nowMs = input.nowMs ?? Date.now();
   const environmentById = new Map(
@@ -946,16 +1058,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     projects: input.projects,
     worktrees: input.worktrees,
     threads: input.threads,
-    environments: input.environments.map((environment) => ({
-      environmentId: environment.environmentId,
-      label: environment.label,
-      threadSettlementSupported: environment.threadSettlementSupported,
-      threadSnoozeSupported: environment.threadSnoozeSupported,
-      autoSettleAfterDays: environment.autoSettleAfterDays,
-      connected: environment.connectionState === "connected",
-      mutationReady: environment.mutationReady,
-      shellCurrent: environment.shellCurrent,
-    })),
+    environments: input.environments.map(toThreadInboxEnvironment),
     localQueuedThreadKeys: input.localQueuedThreadKeys,
     deliveryUnknownThreadKeys,
     pinnedThreadKeys: input.pinnedThreadKeys,
@@ -1005,13 +1108,14 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
+    const availability = resolveThreadLifecycleAvailability(entry);
     const providerDriver = resolveProviderDriver(thread);
     const rowPullRequests = resolveRowPullRequests(thread, worktree);
     rows.push({
       key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       environmentId: thread.environmentId,
       threadId: thread.id,
-      title: thread.title || "Untitled task",
+      title: thread.title || UNTITLED_THREAD_TITLE,
       pinned: entry.pinned,
       gitCwd: thread.worktreePath ?? worktree?.worktreePath ?? project?.cwd ?? null,
       sourceControlEnabled: Boolean(
@@ -1080,15 +1184,11 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
       settled,
       snoozedUntil: snoozed ? (thread.snoozedUntil ?? null) : null,
-      canSnooze: entry.canSnooze,
-      canUnsnooze:
-        environment?.threadSnoozeSupported === true &&
-        environment.mutationReady &&
-        environment.shellCurrent &&
-        environment.connectionState === "connected",
-      settlementActionEnabled:
-        entry.mutationEnabled && (settled || entry.lifecycle.eligibility.canSettle),
-      settlementDisabledReason: settlementDisabledReason(entry),
+      // The snooze toggle: Snooze on an awake row, Unsnooze on a snoozed one.
+      canSnooze: !snoozed && availability.snooze.enabled,
+      canUnsnooze: snoozed && availability.snooze.enabled,
+      settlementActionEnabled: availability.settle.enabled,
+      settlementDisabledReason: threadLifecycleDisabledReason(availability, "settle"),
       effectiveSettlementTimestamp: entry.lifecycle.effectiveSettlementTimestamp,
       focus: entry.focus,
       lineage: thread.lineage ?? null,

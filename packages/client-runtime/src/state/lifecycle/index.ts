@@ -42,6 +42,14 @@ export const isThreadTurnRunning = (thread: ThreadLifecycleSubject): boolean =>
   thread.session?.activeTurnId != null ||
   thread.latestTurn?.state === "running";
 
+/**
+ * The session is running a turn right now, which archiving waits for. Narrower
+ * than `isThreadTurnRunning`: a turn only recorded as running does not block.
+ */
+export const isThreadArchiveBlockedByTurn = (
+  thread: Pick<ThreadLifecycleSubject, "session">,
+): boolean => thread.session?.status === "running" && thread.session.activeTurnId != null;
+
 /** A provider runtime is attached; stopping it keeps the conversation and its terminals' history. */
 export const isThreadSessionLive = (thread: ThreadLifecycleSubject): boolean =>
   thread.session !== null &&

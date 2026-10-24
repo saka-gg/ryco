@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isThreadArchiveBlockedByTurn,
   isWorkspaceDeleted,
   isWorkspaceReviewAction,
   listThreadLifecycleActions,
@@ -61,6 +62,17 @@ describe("conversation lifecycle actions", () => {
     ]);
     expect(items.some((action) => /close|trash/i.test(action.label))).toBe(false);
     expect(items.find((action) => action.id === "delete")?.destructive).toBe(true);
+  });
+
+  it("holds archiving only while the session runs a turn", () => {
+    expect(
+      isThreadArchiveBlockedByTurn(
+        thread({ session: { status: "running", activeTurnId: "turn" } }),
+      ),
+    ).toBe(true);
+    expect(isThreadArchiveBlockedByTurn(thread({ session: { status: "running" } }))).toBe(false);
+    expect(isThreadArchiveBlockedByTurn(thread({ latestTurn: { state: "running" } }))).toBe(false);
+    expect(isThreadArchiveBlockedByTurn(thread())).toBe(false);
   });
 });
 

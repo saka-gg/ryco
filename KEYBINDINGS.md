@@ -142,7 +142,25 @@ focused control.
 
 <!-- File search commands -->
 
-<!-- Thread lifecycle commands -->
+#### Thread lifecycle
+
+- `thread.settle`: settle the open thread, or move a settled one back to Active (default `mod+alt+shift+d`)
+- `thread.snooze`: pick a time to snooze the open thread until in the command palette, or wake a snoozed one (default `mod+alt+shift+s`)
+- `thread.archive`: archive the open thread, asking first when the "Archive confirmation" setting is on (default `mod+alt+shift+a`)
+- `thread.markUnread`: mark the open thread unread; it stays unread until you leave it (default `mod+alt+shift+u`)
+- `thread.undo`: undo the newest settle, snooze, archive or unpin from its Undo notice (default `mod+z`)
+
+The first four work while you type, but not in the terminal, a menu or a dialog. When the thread
+cannot take the action, for example while it is working or its machine is offline, a toast says
+why. Without an open thread the key goes to the focused control. The command palette offers the
+same four actions for the open thread, with the same reason when one cannot run.
+
+`thread.undo` acts only while an Undo notice is shown. In the composer it does so until you press
+another key or edit text after the notice appeared; then the key is the composer's own undo again.
+Other text fields, code editors, dialogs and the terminal always keep their own undo, and without a
+notice the key goes to the focused control.
+
+Their defaults live in the app, not on the node, so older apps have no keys for them.
 
 <!-- Attention commands -->
 

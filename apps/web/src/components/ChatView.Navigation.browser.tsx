@@ -18,6 +18,7 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
 import { isMacPlatform } from "../lib/utils";
+import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
@@ -27,8 +28,10 @@ import {
   CHAT_NEW_KEYBINDING,
   COMPOSER_STASH_KEYBINDING,
   DEFAULT_VIEWPORT,
+  LIFECYCLE_TURN_COMPLETED_AT,
   LOCAL_ENVIRONMENT_ID,
   NOW_ISO,
+  PHONE_VIEWPORT,
   PROJECT_ID,
   PROJECT_LOGICAL_KEY,
   REMOTE_ENVIRONMENT_ID,
@@ -44,6 +47,7 @@ import {
   createDraftFromChatNewLocalShortcut,
   createDraftFromChatNewShortcut,
   createDraftOnlySnapshot,
+  createLifecycleSnapshot,
   createMockEnvironmentApi,
   createProjectlessSnapshot,
   createSnapshotForTargetUser,
@@ -51,15 +55,18 @@ import {
   dispatchChatNewShortcut,
   dispatchInputKey,
   dispatchThreadPinToggleShortcut,
+  dispatchedCommandTypes,
   draftIdFromPath,
   draftThreadIdFor,
   enableChatNewLocalShortcut,
   enableChatNewShortcut,
+  enableThreadLifecycle,
   fixture,
   getCommandPaletteLegendEntries,
   materializePromotedDraftThreadViaDomainEvent,
   mountChatView,
   openCommandPaletteFromTrigger,
+  pressLifecycleChord,
   selectionSnapshot,
   serverThreadPath,
   startPromotedServerThreadViaDomainEvent,
@@ -71,6 +78,7 @@ import {
   waitForElement,
   waitForLayout,
   waitForServerConfigToApply,
+  waitForThreadLifecycleShortcuts,
   waitForURL,
   waitForWsRequestsToSettle,
   wsRequests,
@@ -642,6 +650,113 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("settles the open thread from its shortcut while the composer has focus", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot(),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      (await waitForComposerEditor()).focus();
+      const event = pressLifecycleChord("D");
+      expect(event.defaultPrevented).toBe(true);
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.settle"));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("says why a running thread cannot be settled and sends nothing", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot({ running: true }),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      expect(pressLifecycleChord("D").defaultPrevented).toBe(true);
+      await expect
+        .element(page.getByText("Wait for the running work to finish.", { exact: true }))
+        .toBeInTheDocument();
+      expect(dispatchedCommandTypes()).not.toContain("thread.settle");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens the snooze times from the snooze shortcut and snoozes until the one picked", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createLifecycleSnapshot(),
+      configureFixture: enableThreadLifecycle,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      pressLifecycleChord("S");
+      const palette = page.getByTestId("command-palette");
+      await expect.element(palette.getByText("Snooze until", { exact: true })).toBeInTheDocument();
+      await palette.getByText("Tomorrow morning", { exact: true }).click();
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.snooze"));
+      expect(useCommandPaletteStore.getState().open).toBe(false);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the open thread unread after Mark unread until it is left", async () => {
+    const otherThreadId = "thread-lifecycle-other" as ThreadId;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(createLifecycleSnapshot(), otherThreadId),
+      configureFixture: enableThreadLifecycle,
+    });
+    const lastVisitedAt = () => useUiStateStore.getState().threadLastVisitedAtById[THREAD_KEY];
+    const markedUnread = new Date(Date.parse(LIFECYCLE_TURN_COMPLETED_AT) - 1).toISOString();
+
+    try {
+      await waitForServerConfigToApply();
+      await waitForThreadLifecycleShortcuts();
+      // Opening the thread reads its finished turn.
+      await vi.waitFor(() => expect(lastVisitedAt()).toBe(LIFECYCLE_TURN_COMPLETED_AT));
+
+      pressLifecycleChord("U");
+      await expect
+        .element(page.getByText("Thread marked unread", { exact: true }))
+        .toBeInTheDocument();
+      expect(lastVisitedAt()).toBe(markedUnread);
+      await waitForLayout();
+      expect(lastVisitedAt()).toBe(markedUnread);
+
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: otherThreadId },
+      });
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath(otherThreadId),
+        "The other thread should open.",
+      );
+      await waitForLayout();
+      expect(lastVisitedAt()).toBe(markedUnread);
+
+      // Opening it again reads it.
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: THREAD_ID },
+      });
+      await vi.waitFor(() => expect(lastVisitedAt()).toBe(LIFECYCLE_TURN_COMPLETED_AT));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("does not consume chat.new when there is no project context", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -888,6 +1003,65 @@ describe("ChatView Navigation (full app)", () => {
         .element(palette.getByText("New thread in Project", { exact: true }))
         .not.toBeInTheDocument();
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("finds a setting while typing and reveals it in its section", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-command-palette-settings-search" as MessageId,
+        targetText: "command palette settings search",
+      }),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      useCommandPaletteStore.getState().setOpen(true);
+      const palette = page.getByTestId("command-palette");
+      await page.getByPlaceholder("Search commands, projects, and threads...").fill("diff style");
+      await expect.element(palette.getByText("Settings", { exact: true })).toBeInTheDocument();
+      await expect.element(palette.getByText("Appearance", { exact: true })).toBeInTheDocument();
+      await palette.getByText("Diff style", { exact: true }).click();
+
+      await waitForURL(mounted.router, (path) => path === "/settings", "Settings should open.");
+      expect(useSettingsDialogStore.getState()).toMatchObject({
+        section: "appearance",
+        editingScope: "client",
+      });
+      await vi.waitFor(() =>
+        expect(document.activeElement?.getAttribute("data-settings-section")).toBe("Diff style"),
+      );
+    } finally {
+      useSettingsDialogStore.getState().closeSettings();
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps Settings results off the frozen phone tier", async () => {
+    const mounted = await mountChatView({
+      viewport: PHONE_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-command-palette-phone-settings" as MessageId,
+        targetText: "command palette phone settings",
+      }),
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await vi.waitFor(() =>
+        expect(document.documentElement.getAttribute("data-tier")).toBe("phone"),
+      );
+      useCommandPaletteStore.getState().setOpen(true);
+      const palette = page.getByTestId("command-palette");
+      await page.getByPlaceholder("Search commands, projects, and threads...").fill("diff style");
+      await expect
+        .element(palette.getByText("No matching commands, projects, or threads."))
+        .toBeInTheDocument();
+      expect(palette.element().textContent).not.toContain("Diff style");
+    } finally {
+      useCommandPaletteStore.getState().setOpen(false);
       await mounted.cleanup();
     }
   });
