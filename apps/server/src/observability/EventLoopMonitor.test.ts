@@ -23,11 +23,8 @@ import {
   type LoopTickReading,
   type StallEvidence,
 } from "./EventLoopMonitor.ts";
-import {
-  EVENT_LOOP_STALL_LOG_FILE_NAME,
-  parseStallLog,
-  type EventLoopStallLine,
-} from "./EventLoopStallLog.ts";
+import { parseStallLog } from "./EventLoopStallHistory.ts";
+import { EVENT_LOOP_STALL_LOG_FILE_NAME, type EventLoopStallLine } from "./EventLoopStallLog.ts";
 
 const WALL_ZERO = Date.parse("2026-10-23T08:00:00.000Z");
 

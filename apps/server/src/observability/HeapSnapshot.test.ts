@@ -5,14 +5,16 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Logger } from "effect";
 
+import { describeStartupPhasesOverlapping } from "../startupStallMonitor.ts";
 import {
   HEAP_SNAPSHOT_COOLDOWN_MS,
   HEAP_SNAPSHOT_FREE_DISK_RESERVE_BYTES,
+  HEAP_SNAPSHOT_PHASE,
   heapSnapshotFileName,
-  installHeapSnapshotSignalHandler,
   makeHeapSnapshotTaker,
   type HeapSnapshotDeps,
 } from "./HeapSnapshot.ts";
+import { installHeapSnapshotSignalHandler } from "./HeapSnapshotSignal.ts";
 
 const NOW = Date.parse("2026-10-23T08:00:00.000Z");
 const GiB = 1024 ** 3;
@@ -28,7 +30,6 @@ const harness = (overrides: Partial<HeapSnapshotDeps> = {}) => {
   const writes: Array<string> = [];
   const logs: Array<LogLine> = [];
   const deps: HeapSnapshotDeps = {
-    platform: "darwin",
     logsDir,
     pid: 4242,
     nowMs: () => nowMs,
@@ -66,6 +67,16 @@ const harness = (overrides: Partial<HeapSnapshotDeps> = {}) => {
   };
 };
 
+/** Polls real time: the handler runs the snapshot on its own fiber. */
+const waitFor = (condition: () => boolean) =>
+  Effect.promise(async () => {
+    const startedAt = Date.now();
+    while (!condition()) {
+      if (Date.now() - startedAt > 5_000) throw new Error("condition not met within 5 s");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  });
+
 const seedSnapshot = (logsDir: string, name: string, ageMs: number, contents = "old") => {
   const filePath = NodePath.join(logsDir, name);
   NodeFS.writeFileSync(filePath, contents);
@@ -77,12 +88,16 @@ const seedSnapshot = (logsDir: string, name: string, ageMs: number, contents = "
 describe("HeapSnapshot", () => {
   it.effect("does not install a handler on Windows", () =>
     Effect.gen(function* () {
-      const test = harness({ platform: "win32" });
+      const test = harness();
       try {
         const before = process.listenerCount("SIGUSR2");
         yield* Effect.scoped(
           Effect.gen(function* () {
-            yield* installHeapSnapshotSignalHandler(test.deps);
+            yield* installHeapSnapshotSignalHandler({
+              platform: "win32",
+              logsDir: test.logsDir,
+              deps: test.deps,
+            });
             expect(process.listenerCount("SIGUSR2")).toBe(before);
           }),
         );
@@ -94,25 +109,66 @@ describe("HeapSnapshot", () => {
 
   it.effect("writes a snapshot on SIGUSR2 while installed and removes the handler after", () =>
     Effect.gen(function* () {
+      const phasesDuringWrite: Array<ReadonlyArray<string>> = [];
       const test = harness();
+      const writeSnapshot = test.deps.writeSnapshot;
       try {
         const before = process.listenerCount("SIGUSR2");
         yield* Effect.scoped(
           Effect.gen(function* () {
-            yield* installHeapSnapshotSignalHandler(test.deps);
+            yield* installHeapSnapshotSignalHandler({
+              platform: "darwin",
+              logsDir: test.logsDir,
+              deps: {
+                ...test.deps,
+                writeSnapshot: (filePath) => {
+                  // The writer loads on demand but tracks its phase in the registry the stall
+                  // monitors read.
+                  phasesDuringWrite.push(describeStartupPhasesOverlapping(Date.now(), 0));
+                  writeSnapshot(filePath);
+                },
+              },
+            });
             expect(process.listenerCount("SIGUSR2")).toBe(before + 1);
             // Emitting runs the listeners without sending a real signal to the test worker.
             process.emit("SIGUSR2", "SIGUSR2");
-            yield* Effect.promise(async () => {
-              const startedAt = Date.now();
-              while (!test.files().some((name) => name.endsWith(".heapsnapshot"))) {
-                if (Date.now() - startedAt > 5_000) throw new Error("no snapshot written");
-                await new Promise((resolve) => setTimeout(resolve, 5));
-              }
-            });
+            yield* waitFor(() => test.files().some((name) => name.endsWith(".heapsnapshot")));
           }),
         ).pipe(test.run);
         expect(process.listenerCount("SIGUSR2")).toBe(before);
+        expect(test.writes).toHaveLength(1);
+        expect(phasesDuringWrite).toHaveLength(1);
+        expect(
+          phasesDuringWrite[0]?.some(
+            (phase) => phase.startsWith(`${HEAP_SNAPSHOT_PHASE} (`) && phase.endsWith("in flight)"),
+          ),
+        ).toBe(true);
+      } finally {
+        test.cleanup();
+      }
+    }),
+  );
+
+  it.effect("writes one snapshot for signals that arrive while the writer loads", () =>
+    Effect.gen(function* () {
+      const test = harness();
+      try {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* installHeapSnapshotSignalHandler({
+              platform: "darwin",
+              logsDir: test.logsDir,
+              deps: test.deps,
+            });
+            process.emit("SIGUSR2", "SIGUSR2");
+            process.emit("SIGUSR2", "SIGUSR2");
+            yield* waitFor(
+              () =>
+                test.files().some((name) => name.endsWith(".heapsnapshot")) &&
+                test.logs.some((line) => line.message.startsWith("Heap snapshot request ignored")),
+            );
+          }),
+        ).pipe(test.run);
         expect(test.writes).toHaveLength(1);
       } finally {
         test.cleanup();

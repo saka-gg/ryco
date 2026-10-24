@@ -2,15 +2,21 @@
  * The event-loop stall history: `event-loop-stalls.ndjson` next to the server trace file, one JSON
  * record per line plus one rotated backup.
  *
- * Written by the lifetime monitor (`EventLoopMonitor.ts`) and read back by Diagnostics. The reader
- * is lenient on purpose: a hand-edited line, a line from a newer server or a line cut short by a
- * concurrent append must never break the Diagnostics snapshot, so every field is checked, rounded
- * and bounded here before it reaches the contract schema.
+ * Written by the lifetime monitor (`EventLoopMonitor.ts`) and read back by Diagnostics
+ * (`EventLoopStallHistory.ts`, loaded on demand). Reading is lenient on purpose: a hand-edited
+ * line, a line from a newer server or a line cut short by a concurrent append must never break the
+ * Diagnostics snapshot, so every field is checked, rounded and bounded here
+ * ({@link normalizeStallLine}, one rule for writer and reader) before it reaches the contract
+ * schema.
  *
  * @module EventLoopStallLog
  */
 import path from "node:path";
 
+/** A record is an event-loop stall of at least this long (or a summary of several). */
+export const EVENT_LOOP_STALL_THRESHOLD_MS = 2_000;
+/** Stalls after the first of each kind in one window fold into one summary record. */
+export const EVENT_LOOP_WINDOW_MS = 30_000;
 export const EVENT_LOOP_STALL_LOG_FILE_NAME = "event-loop-stalls.ndjson";
 /** Two files of 512 KiB keep well over a thousand records. */
 export const EVENT_LOOP_STALL_LOG_MAX_BYTES = 512 * 1024;
@@ -119,7 +125,7 @@ const OPTIONAL_INT_FIELDS = [
  * Brings a record into the shape the contract accepts: integers rounded and clamped, non-finite
  * or empty optionals dropped, phases bounded. Returns null when a required field is unusable.
  */
-const normalizeStallLine = (raw: Record<string, unknown>): EventLoopStallLine | null => {
+export const normalizeStallLine = (raw: Record<string, unknown>): EventLoopStallLine | null => {
   const time = toIsoTime(raw.time);
   const kind = toBoundedString(raw.kind, KIND_MAX_CHARS);
   if (time === undefined || kind === undefined) return null;
@@ -151,47 +157,3 @@ const normalizeStallLine = (raw: Record<string, unknown>): EventLoopStallLine | 
 /** One line, without the trailing newline. Integers are rounded; absent fields are left out. */
 export const encodeStallLine = (line: EventLoopStallLine): string =>
   JSON.stringify(normalizeStallLine(line as unknown as Record<string, unknown>) ?? line);
-
-/**
- * Parses one line leniently: requires an ISO `time`, a non-empty `kind` and a finite,
- * non-negative `durationMs`; drops unknown fields; clamps the rest. Null for anything else.
- */
-export const parseStallLine = (text: string): EventLoopStallLine | null => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-  return normalizeStallLine(parsed as Record<string, unknown>);
-};
-
-export interface ParsedStallLog {
-  readonly records: ReadonlyArray<EventLoopStallLine>;
-  readonly malformedLineCount: number;
-}
-
-/**
- * Parses the text of a stall log (or a tail of it). A last line without a newline may be a write
- * still in progress: it is skipped without counting as malformed when it does not parse.
- */
-export const parseStallLog = (text: string): ParsedStallLog => {
-  const lines = text.split("\n");
-  const unterminated = lines.pop() ?? "";
-  const records: Array<EventLoopStallLine> = [];
-  let malformedLineCount = 0;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const record = parseStallLine(trimmed);
-    if (record === null) malformedLineCount += 1;
-    else records.push(record);
-  }
-  const partial = unterminated.trim();
-  if (partial.length > 0) {
-    const record = parseStallLine(partial);
-    if (record !== null) records.push(record);
-  }
-  return { records, malformedLineCount };
-};

@@ -453,7 +453,8 @@ kill -USR2 "$(jq -r .pid ~/.ryco/userdata/server-runtime.json)"
   size and duration), as a `server.heapSnapshot` span, and as the tracked phase
   `server.heap-snapshot`, so the stall it causes names it.
 - Windows has no `SIGUSR2`, so there is no trigger there yet. Only the server installs the handler;
-  `ryco` CLI commands do not.
+  `ryco` CLI commands do not. The snapshot writer itself loads with the first signal, so it adds
+  nothing to server startup.
 
 ## Common Workflows
 

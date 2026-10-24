@@ -1,5 +1,6 @@
 /**
- * Heap snapshots of a live server on `kill -USR2 <pid>`.
+ * The heap snapshot writer behind `kill -USR2 <pid>` (the handler is in `HeapSnapshotSignal.ts`,
+ * which loads this module with the first signal).
  *
  * The snapshot goes to the logs directory as `server-<pid>-<time>.heapsnapshot` (mode 0600: it
  * holds tokens and thread content). Writing one blocks the event loop for seconds to a minute and
@@ -7,20 +8,16 @@
  * when the disk is low, and old snapshots beyond the newest few are removed first. Every failure is
  * logged; none stops the server.
  *
- * Windows has no SIGUSR2; the handler is not installed there.
- *
  * @module HeapSnapshot
  */
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeV8 from "node:v8";
 
-import { Data, Effect, Layer, type Scope } from "effect";
+import { Data, Effect } from "effect";
 
-import { ServerConfig } from "../config.ts";
 import { trackStartupPhase } from "../startupStallMonitor.ts";
 
-export const HEAP_SNAPSHOT_SIGNAL = "SIGUSR2";
 /** Snapshots kept on disk, the new one included. */
 export const HEAP_SNAPSHOT_RETAINED = 3;
 export const HEAP_SNAPSHOT_COOLDOWN_MS = 10_000;
@@ -33,7 +30,6 @@ const PARTIAL_FILE_PATTERN = /^server-(\d+)-.+\.heapsnapshot\.partial$/u;
 export const HEAP_SNAPSHOT_PHASE = "server.heap-snapshot";
 
 export interface HeapSnapshotDeps {
-  readonly platform: NodeJS.Platform;
   readonly logsDir: string;
   readonly pid: number;
   readonly nowMs: () => number;
@@ -273,7 +269,6 @@ const isProcessAlive = (pid: number) => {
 };
 
 export const makeDefaultHeapSnapshotDeps = (logsDir: string): HeapSnapshotDeps => ({
-  platform: process.platform,
   logsDir,
   pid: process.pid,
   nowMs: Date.now,
@@ -287,38 +282,3 @@ export const makeDefaultHeapSnapshotDeps = (logsDir: string): HeapSnapshotDeps =
   },
   isProcessAlive,
 });
-
-/**
- * Installs the SIGUSR2 handler for the life of the enclosing scope. Installing it also keeps the
- * signal from terminating the process (its default action).
- */
-export const installHeapSnapshotSignalHandler = (
-  deps: HeapSnapshotDeps,
-  signal: NodeJS.Signals = HEAP_SNAPSHOT_SIGNAL,
-): Effect.Effect<void, never, Scope.Scope> =>
-  Effect.gen(function* () {
-    if (deps.platform === "win32") return;
-    const taker = makeHeapSnapshotTaker(deps);
-    const runFork = Effect.runForkWith(yield* Effect.context<never>());
-    yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        const handler = () => {
-          runFork(taker.take);
-        };
-        process.on(signal, handler);
-        return handler;
-      }),
-      (handler) => Effect.sync(() => process.off(signal, handler)),
-    );
-  });
-
-/**
- * `kill -USR2 <server pid>` writes a heap snapshot into the logs directory. Only the server layer
- * provides this; CLI subcommands never register the handler.
- */
-export const HeapSnapshotLive: Layer.Layer<never, never, ServerConfig> = Layer.effectDiscard(
-  Effect.gen(function* () {
-    const config = yield* ServerConfig;
-    yield* installHeapSnapshotSignalHandler(makeDefaultHeapSnapshotDeps(config.logsDir));
-  }),
-);

@@ -12,11 +12,10 @@ import {
   EVENT_LOOP_STALL_LOG_FILE_NAME,
   eventLoopStallLogPath,
   eventLoopStallLogPaths,
-  parseStallLine,
-  parseStallLog,
   truncateStallPhase,
   type EventLoopStallLine,
 } from "./EventLoopStallLog.ts";
+import { parseStallLine, parseStallLog } from "./EventLoopStallHistory.ts";
 
 const line: EventLoopStallLine = {
   time: "2026-10-23T08:00:30.000Z",

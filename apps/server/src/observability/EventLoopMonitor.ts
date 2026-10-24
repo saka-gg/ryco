@@ -45,6 +45,8 @@ import {
   EVENT_LOOP_STALL_LOG_MAX_BYTES,
   EVENT_LOOP_STALL_LOG_MAX_FILES,
   EVENT_LOOP_STALL_PHASE_LIMIT,
+  EVENT_LOOP_STALL_THRESHOLD_MS,
+  EVENT_LOOP_WINDOW_MS,
   eventLoopStallLogPath,
   truncateStallPhase,
   type EventLoopStallLine,
@@ -57,8 +59,6 @@ import {
 } from "./Metrics.ts";
 
 export const EVENT_LOOP_TICK_MS = 1_000;
-export const EVENT_LOOP_WINDOW_MS = 30_000;
-export const EVENT_LOOP_STALL_THRESHOLD_MS = 2_000;
 export const THREADPOOL_STALL_THRESHOLD_MS = 2_000;
 /**
  * Least time between two threadpool canaries. Issuing one costs a threadpool round trip and an

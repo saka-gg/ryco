@@ -124,7 +124,7 @@ import { CliProxyServiceLive } from "./cliProxy/CliProxyService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import { EventLoopMonitorLive } from "./observability/EventLoopMonitor.ts";
-import { HeapSnapshotLive } from "./observability/HeapSnapshot.ts";
+import { HeapSnapshotLive } from "./observability/HeapSnapshotSignal.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
