@@ -1,7 +1,7 @@
 import {
   getChangeRequestHostCapabilities,
   type ChangeRequestHostCapabilities,
-} from "@ryco/shared/sourceControl";
+} from "@ryco/shared/changeRequestHostCapabilities";
 
 /**
  * A host whose provider implements only list, search, the detail, checkout

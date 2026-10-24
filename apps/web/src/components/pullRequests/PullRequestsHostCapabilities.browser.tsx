@@ -18,7 +18,7 @@ vi.mock("~/components/projectExplorer/usePullRequestFilesViewed", async () => {
 });
 
 import type { SourceControlProviderKind } from "@ryco/contracts";
-import type { ChangeRequestHostCapabilities } from "@ryco/shared/sourceControl";
+import type { ChangeRequestHostCapabilities } from "@ryco/shared/changeRequestHostCapabilities";
 
 import { FilesTab } from "./files/FilesTab";
 import { usePullRequestFilesUiStore } from "./files/pullRequestFilesStore";
@@ -35,8 +35,8 @@ import { READ_ONLY_HOST_CAPABILITIES } from "./testing/readOnlyHost";
 
 /*
  * The page on hosts other than GitHub, with each host's real capability matrix
- * entry (`@ryco/shared/sourceControl`): controls a host does not implement are
- * hidden, and reads it cannot serve are never made.
+ * entry (`@ryco/shared/changeRequestHostCapabilities`): controls a host does
+ * not implement are hidden, and reads it cannot serve are never made.
  */
 
 afterEach(async () => {

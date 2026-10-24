@@ -17,7 +17,7 @@ import {
   PencilIcon,
   SparklesIcon,
 } from "lucide-react";
-import { canSubmitChangeRequestReview } from "@ryco/shared/sourceControl";
+import { canSubmitChangeRequestReview } from "@ryco/shared/changeRequestHostCapabilities";
 import { useLayoutEffect, useMemo, useState } from "react";
 
 import { usePageLeadingInsetClass } from "../../hooks/usePageLeadingInsetClass";

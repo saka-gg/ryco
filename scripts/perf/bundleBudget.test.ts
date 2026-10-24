@@ -350,6 +350,31 @@ describe("bundle budgets", () => {
     }
   });
 
+  it("forbids the Automations dialog's schedule vocabulary in the app shell", () => {
+    const closure = DEFAULT_BUNDLE_BUDGET_POLICY.closures.find(
+      (entry) => entry.name === "RootAppShell",
+    )!;
+    const forbidden = (source: string) =>
+      closure.forbiddenSources.some((rule) => rule.pattern.test(source));
+    for (const source of [
+      "packages/shared/src/automationSchedule.ts",
+      "packages/client-runtime/src/state/agentControl/automationSchedules.ts",
+      "apps/web/src/components/automations/dialog/dialogWords.ts",
+      "apps/web/src/components/automations/missedRunsNotice.logic.ts",
+    ]) {
+      assert.isTrue(forbidden(source), source);
+    }
+    for (const source of [
+      // The badge, the notice and the dialog's open state stay in the shell.
+      "packages/client-runtime/src/state/agentControl/logic.ts",
+      "packages/client-runtime/src/state/agentControl/missedAutomationRuns.ts",
+      "apps/web/src/components/automations/MissedAutomationRunsNotice.tsx",
+      "apps/web/src/components/automations/automationsDialogStore.ts",
+    ]) {
+      assert.isFalse(forbidden(source), source);
+    }
+  });
+
   it("forbids the hosted runtime in every default standard closure", () => {
     for (const closure of DEFAULT_BUNDLE_BUDGET_POLICY.closures) {
       const forbidden = (source: string) =>

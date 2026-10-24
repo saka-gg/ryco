@@ -8,13 +8,12 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   canMergeChangeRequests,
   canSubmitChangeRequestReview,
-  changeRequestCommitUrl,
   describeUnsupportedChangeRequestRequest,
   getChangeRequestHostCapabilities,
   preferredUpdateBranchMethod,
   supportsChangeRequestReviewEvent,
   type ChangeRequestHostCapabilities,
-} from "./sourceControl.ts";
+} from "./changeRequestHostCapabilities.ts";
 
 const KINDS: ReadonlyArray<SourceControlProviderKind> = [
   "github",
@@ -453,18 +452,6 @@ describe("describeUnsupportedChangeRequestRequest", () => {
         involvement: "review-requested",
         query: "fix",
       }),
-    ).toBeNull();
-  });
-});
-
-describe("changeRequestCommitUrl", () => {
-  it("links GitHub commits under the pull request and nothing elsewhere", () => {
-    expect(changeRequestCommitUrl("github", "https://github.com/a/b/pull/7/", "abc")).toBe(
-      "https://github.com/a/b/pull/7/commits/abc",
-    );
-    expect(changeRequestCommitUrl("github", null, "abc")).toBeNull();
-    expect(
-      changeRequestCommitUrl("gitlab", "https://gitlab.com/g/p/-/merge_requests/7", "abc"),
     ).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  changeRequestCommitUrl,
   classifySourceControlCommentAuthorRole,
   detectSourceControlProviderFromRemoteUrl,
   getChangeRequestTerminologyForKind,
@@ -216,5 +217,17 @@ describe("parseGitHubRepositoryIdentityFromUrl", () => {
     expect(parseGitHubRepositoryIdentityFromUrl("https://github.com/acme")).toBeNull();
     expect(parseGitHubRepositoryIdentityFromUrl("git@github.com:acme/ryco.git")).toBeNull();
     expect(parseGitHubRepositoryIdentityFromUrl("https://token@github.com/acme/ryco")).toBeNull();
+  });
+});
+
+describe("changeRequestCommitUrl", () => {
+  it("links GitHub commits under the pull request and nothing elsewhere", () => {
+    expect(changeRequestCommitUrl("github", "https://github.com/a/b/pull/7/", "abc")).toBe(
+      "https://github.com/a/b/pull/7/commits/abc",
+    );
+    expect(changeRequestCommitUrl("github", null, "abc")).toBeNull();
+    expect(
+      changeRequestCommitUrl("gitlab", "https://gitlab.com/g/p/-/merge_requests/7", "abc"),
+    ).toBeNull();
   });
 });

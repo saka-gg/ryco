@@ -3,7 +3,7 @@ import {
   deriveChangeRequestNextAction,
   summarizeChangeRequestChecks,
 } from "@ryco/client-runtime/state/pull-request-review";
-import type { ChangeRequestListReadiness } from "@ryco/shared/sourceControl";
+import type { ChangeRequestListReadiness } from "@ryco/shared/changeRequestHostCapabilities";
 
 /**
  * What a list row says on its second line: the pull request's readiness as a
