@@ -191,10 +191,14 @@ export function ChatThreadRouteView({
     },
     [navigate, threadRef],
   );
-  // Not on the frozen phone tier: no view shortcuts, and its closed tabs are not remembered.
+  // Only while the thread and its panel are on screen, and not on the frozen
+  // phone tier: otherwise no view shortcuts, and no closed tabs remembered.
   const closedViewOwner = useMemo<ClosedViewOwner | null>(
-    () => (threadRef && presentationTier !== "phone" ? { kind: "thread", ref: threadRef } : null),
-    [presentationTier, threadRef],
+    () =>
+      threadRef && canRenderRouteThread && presentationTier !== "phone"
+        ? { kind: "thread", ref: threadRef }
+        : null,
+    [canRenderRouteThread, presentationTier, threadRef],
   );
   const keybindings = useAppKeybindings();
   const {

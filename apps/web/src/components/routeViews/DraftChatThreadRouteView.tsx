@@ -4,7 +4,7 @@ import { useDeviceRuntime } from "../device/useDeviceRuntime";
 import { useCallback, useEffect, useMemo, type ReactElement } from "react";
 
 import { useAppKeybindings } from "../../appKeybindings";
-import type { ClosedViewOwner } from "../../closedViews";
+import { handOverClosedTabs, type ClosedViewOwner } from "../../closedViews";
 import { DraftId } from "../../composerDraftStore";
 import { useDraftSession } from "../../composerDraftSelectors";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
@@ -141,10 +141,13 @@ export function DraftChatThreadRouteView({
     },
     [draftId, navigate],
   );
-  // Not on the frozen phone tier: no view shortcuts, and its closed tabs are not remembered.
+  // Only while the draft and its panel are on screen (not once it forwards to
+  // its thread), and not on the frozen phone tier: otherwise no view
+  // shortcuts, and no closed tabs remembered.
+  const showsDraftPanel = draftSession !== null && canonicalThreadRef === null;
   const closedViewOwner = useMemo<ClosedViewOwner | null>(
-    () => (presentationTier !== "phone" ? { kind: "draft", draftId } : null),
-    [draftId, presentationTier],
+    () => (showsDraftPanel && presentationTier !== "phone" ? { kind: "draft", draftId } : null),
+    [draftId, presentationTier, showsDraftPanel],
   );
   const keybindings = useAppKeybindings();
   const {
@@ -186,12 +189,13 @@ export function DraftChatThreadRouteView({
       rightPanelThreadKey,
       `${canonicalThreadRef.environmentId}:${canonicalThreadRef.threadId}`,
     );
+    handOverClosedTabs({ kind: "draft", draftId }, { kind: "thread", ref: canonicalThreadRef });
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(canonicalThreadRef),
       replace: true,
     });
-  }, [canonicalThreadRef, navigate, rightPanelThreadKey]);
+  }, [canonicalThreadRef, draftId, navigate, rightPanelThreadKey]);
 
   useEffect(() => {
     if (draftSession || canonicalThreadRef) {

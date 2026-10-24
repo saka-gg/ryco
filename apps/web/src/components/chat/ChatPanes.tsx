@@ -565,8 +565,10 @@ export function ChatPanes({
         void actions.close(actions.threadRef);
         return true;
       },
+      busy: () => operation.current,
       reopen: (ref, layout) => {
         const actions = controllerActions.current;
+        // Callers wait while busy (`busy()`); this only guards against one that does not.
         if (operation.current || paneContains(currentRoot.current, ref)) return false;
         // Where it was while the split is still as the close left it, else
         // beside the focused pane.

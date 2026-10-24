@@ -15,14 +15,16 @@ export { SUBMIT_SHORTCUT_LABEL };
  * actions ending in the primary one (⌘↵). Esc cancels. Errors stay inline
  * next to the actions so the draft is never lost. While it sends, the field
  * is read-only rather than disabled, so it keeps focus (and the caret). A
- * field holding text is marked `data-unsent-comment`, so closing the
- * workspace tab around it from the keyboard is refused.
+ * field holding text other than `savedValue` is marked `data-unsent-draft`,
+ * so closing the workspace tab around it from the keyboard is refused.
  */
 export function CommentField({
   textareaRef,
   ...props
 }: {
   readonly value: string;
+  /** The text already saved when editing one, so an unchanged edit is not unsent. */
+  readonly savedValue?: string | undefined;
   readonly onChange: (value: string) => void;
   readonly placeholder: string;
   readonly ariaLabel: string;
@@ -55,8 +57,10 @@ export function CommentField({
       props.onCancel();
     }
   };
+  const text = props.value.trim();
+  const unsent = text !== "" && text !== (props.savedValue ?? "").trim();
   return (
-    <div className="flex flex-col" data-unsent-comment={props.value.trim() ? "" : undefined}>
+    <div className="flex flex-col" data-unsent-draft={unsent ? "" : undefined}>
       <textarea
         ref={textareaRef}
         aria-label={props.ariaLabel}

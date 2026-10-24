@@ -1,3 +1,4 @@
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@ryco/contracts";
 import { useNavigate, type UseNavigateResult } from "@tanstack/react-router";
 import { useEffect, useEffectEvent } from "react";
@@ -16,12 +17,14 @@ import { useComposerDraftStore } from "../../composerDraftStore";
 import { resolveShortcutCommand, shouldIgnoreSplitViewShortcut } from "../../keybindings";
 import { isComposerFocused } from "../../lib/composerFocus";
 import { isTerminalFocused } from "../../lib/terminalFocus";
+import { getModelPickerOpen } from "../../modelPickerOpenState";
 import { buildRightPanelTargetSearch, type RightPanelTabTarget } from "../../rightPanelTabs.logic";
 import {
   selectSidebarThreadSummaryByRef,
   selectThreadAvailabilityByRef,
   useStore,
 } from "../../store";
+import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { toastManager } from "../ui/toast";
 
@@ -36,10 +39,11 @@ interface ViewShortcutsInput {
 
 type Navigate = UseNavigateResult<string>;
 
-// ThreadWorkspacePanel marks its tab content; CommentField marks a field
-// holding text (a pull request reply or line comment, a note on picked lines).
+// ThreadWorkspacePanel marks its tab content; the pull request and note
+// editors mark a field holding text that is not sent or saved yet (a reply,
+// line comment or note, an edited description, post or title).
 const WORKSPACE_TABPANEL_SELECTOR = '[data-slot="workspace-tabpanel"]';
-const UNSENT_COMMENT_SELECTOR = "[data-unsent-comment]";
+const UNSENT_DRAFT_SELECTOR = "[data-unsent-draft]";
 
 /** The narrow-viewport sheet showing the workspace panel; its keys stay with the panel. */
 function hostsWorkspacePanel(dialog: Element): boolean {
@@ -47,13 +51,25 @@ function hostsWorkspacePanel(dialog: Element): boolean {
 }
 
 /** Whether the open workspace panel holds text that closing its tab would drop. */
-function hasUnsentWorkspaceComment(): boolean {
+function hasUnsentWorkspaceDraft(): boolean {
   const panel = document.querySelector(WORKSPACE_TABPANEL_SELECTOR);
   return (
     panel !== null &&
     panel.closest("[hidden], [inert]") === null &&
-    panel.querySelector(UNSENT_COMMENT_SELECTOR) !== null
+    panel.querySelector(UNSENT_DRAFT_SELECTOR) !== null
   );
+}
+
+/** Whether the terminal drawer of the route's thread (or draft) is open, for `when` clauses. */
+function isRouteTerminalOpen(owner: ClosedViewOwner): boolean {
+  let ref: ScopedThreadRef | null = owner.kind === "thread" ? owner.ref : null;
+  if (owner.kind === "draft") {
+    const session = useComposerDraftStore.getState().getDraftSession(owner.draftId);
+    ref = session ? scopeThreadRef(session.environmentId, session.threadId) : null;
+  }
+  if (!ref) return false;
+  return selectThreadTerminalState(useTerminalStateStore.getState().terminalStateByThreadKey, ref)
+    .terminalOpen;
 }
 
 /** Whether a thread can be shown again: gone or archived never, not loaded yet maybe later. */
@@ -135,22 +151,33 @@ function handleViewShortcut(
 ): void {
   const { owner } = input;
   if (!owner || event.defaultPrevented || useCommandPaletteStore.getState().open) return;
-  if (shouldIgnoreSplitViewShortcut(event, hostsWorkspacePanel)) return;
+  // The same context as the chat-wide shortcuts, so a rule bound to the same
+  // keys under another condition is not shadowed. Resolving first keeps the
+  // dialog scan below off every other key press.
   const command = resolveShortcutCommand(event, input.keybindings, {
-    context: { terminalFocus: isTerminalFocused(), composerFocus: isComposerFocused() },
+    context: {
+      terminalFocus: isTerminalFocused(),
+      terminalOpen: isRouteTerminalOpen(owner),
+      modelPickerOpen: getModelPickerOpen(),
+      commandPaletteOpen: false,
+      composerFocus: isComposerFocused(),
+    },
   });
   if (command !== "view.close" && command !== "view.reopenClosed") return;
+  if (shouldIgnoreSplitViewShortcut(event, hostsWorkspacePanel)) return;
   // Holding the key closes or reopens one view, never the window behind it.
-  if (event.repeat) {
+  // While a pane closes or moves focus, act on nothing: its navigation decides
+  // what is open next.
+  if (event.repeat || useChatPanesStore.getState().controller?.busy()) {
     consume(event);
     return;
   }
   if (command === "view.close") {
-    if (hasUnsentWorkspaceComment()) {
+    if (hasUnsentWorkspaceDraft()) {
       consume(event);
       toastManager.add({
         type: "warning",
-        title: "Finish or discard your comment before closing this tab",
+        title: "Finish or discard your draft before closing this tab",
       });
       return;
     }

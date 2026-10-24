@@ -500,3 +500,22 @@ it("leaves a closed pane the full split has no room for", async () => {
   expect(controller().reopen(threadE, layout)).toBe(false);
   expect(useChatPanesStore.getState().root).toBe(full);
 });
+
+it("reports itself busy while a pane close waits for its save", async () => {
+  await mount();
+  useChatPanesStore.getState().open(b, "right", a);
+  await expect.element(page.getByRole("button", { name: "Close pane 2" })).toBeVisible();
+  let finishSave!: (saved: boolean) => void;
+  vi.mocked(flushPreviewFiles).mockReturnValueOnce(
+    new Promise<boolean>((resolve) => {
+      finishSave = resolve;
+    }),
+  );
+  expect(controller().busy()).toBe(false);
+
+  await page.getByRole("button", { name: "Close pane 2" }).click();
+  await expect.poll(() => controller().busy()).toBe(true);
+  finishSave(true);
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(1);
+  expect(controller().busy()).toBe(false);
+});

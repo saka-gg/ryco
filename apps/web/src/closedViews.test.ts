@@ -4,6 +4,8 @@ import { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { closePane, resizePane, splitPane, type PaneNode } from "./chatPanes.logic";
 import {
   CLOSED_VIEW_LIMIT,
+  handOverClosedTabs,
+  moveClosedTabs,
   pickClosedView,
   pushClosedView,
   rememberClosedView,
@@ -100,6 +102,27 @@ describe("closed views", () => {
       stack: [waiting],
     });
     expect(pickClosedView([], () => "reopen")).toEqual({ view: null, stack: [] });
+  });
+
+  it("hands a draft's closed tabs to the thread it became, in place", () => {
+    const draft: ClosedViewOwner = { kind: "draft", draftId: DraftId.make("d") };
+    const pane: ClosedView = { kind: "pane", ref: b, layout: pair };
+    const stack = push(files(threadA), review(draft), pane, files(draft));
+    expect(moveClosedTabs(stack, draft, threadB)).toEqual([
+      files(threadB),
+      pane,
+      review(threadB),
+      files(threadA),
+    ]);
+    // The thread had closed the same tab itself: the newer entry stays.
+    expect(moveClosedTabs(push(review(draft), review(threadB)), draft, threadB)).toEqual([
+      review(threadB),
+    ]);
+    expect(moveClosedTabs(push(review(draft), review(threadB)), threadA, threadB)).toHaveLength(2);
+
+    rememberClosedView(review(draft));
+    handOverClosedTabs(draft, threadA);
+    expect(takeClosedView(() => "reopen")).toEqual(review(threadA));
   });
 
   it("takes from the window's stack until it runs out", () => {

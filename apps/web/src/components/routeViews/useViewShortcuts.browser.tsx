@@ -1,8 +1,12 @@
 import "../../index.css";
 
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
+import {
+  APP_DEFAULT_KEYBINDINGS,
+  APP_DEFAULT_RESOLVED_KEYBINDINGS,
+} from "@ryco/client-runtime/state/settings";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@ryco/contracts";
+import { compileResolvedKeybindingsConfig } from "@ryco/shared/keybindings";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -25,6 +29,7 @@ import {
 } from "../../closedViews";
 import { type RightPanelSearchUpdate, useRightPanelTabs } from "../../hooks/useRightPanelTabs";
 import { isMacPlatform } from "../../lib/utils";
+import { setModelPickerOpen } from "../../modelPickerOpenState";
 import {
   getRightPanelMode,
   isRightPanelOpen,
@@ -43,13 +48,17 @@ const environmentId = EnvironmentId.make("view-test");
 const a = scopeThreadRef(environmentId, ThreadId.make("a"));
 const b = scopeThreadRef(environmentId, ThreadId.make("b"));
 let layout: "inline" | "sheet" = "inline";
+let keybindings = APP_DEFAULT_RESOLVED_KEYBINDINGS;
+/** A saved comment the review tab's field edits, like a pending review comment. */
+let savedReply: string | undefined;
 
 /** The review tab's content: a reply field, like the pull request and note composers. */
 function ReviewSurface() {
-  const [comment, setComment] = useState("");
+  const [comment, setComment] = useState(savedReply ?? "");
   return (
     <CommentField
       value={comment}
+      savedValue={savedReply}
       onChange={setComment}
       placeholder="Reply…"
       ariaLabel="Reply"
@@ -94,7 +103,7 @@ function ThreadRouteProbe() {
   });
   useViewShortcuts({
     owner,
-    keybindings: APP_DEFAULT_RESOLVED_KEYBINDINGS,
+    keybindings,
     closeActiveView: tabs.closeActiveView,
     isPanelTargetOpen: tabs.isPanelTargetOpen,
     openPanelTarget: tabs.openPanelTarget,
@@ -192,6 +201,9 @@ function seedThread(ref: ScopedThreadRef) {
 afterEach(async () => {
   await cleanup();
   layout = "inline";
+  keybindings = APP_DEFAULT_RESOLVED_KEYBINDINGS;
+  savedReply = undefined;
+  setModelPickerOpen(false);
   resetClosedViewsForTests();
   useChatPanesStore.setState({ controller: null });
   useStore.setState({ environmentStateById: {} });
@@ -220,6 +232,7 @@ it("closes the focused split pane once the panel is closed", async () => {
     focusSibling: () => false,
     closeFocused,
     reopen: () => false,
+    busy: () => false,
   });
 
   expect(press("w").defaultPrevented).toBe(true);
@@ -245,7 +258,7 @@ it("keeps a tab holding an unsent comment open", async () => {
 
   expect(press("w", { from: reply.element() }).defaultPrevented).toBe(true);
   expect(add).toHaveBeenCalledWith(
-    expect.objectContaining({ title: "Finish or discard your comment before closing this tab" }),
+    expect.objectContaining({ title: "Finish or discard your draft before closing this tab" }),
   );
   expect(shown()).toBe("review");
 
@@ -323,6 +336,7 @@ it("reopens a closed pane in the split, else opens its thread", async () => {
     focusSibling: () => false,
     closeFocused: () => false,
     reopen,
+    busy: () => false,
   });
 
   rememberClosedView({ kind: "pane", ref: b, layout });
@@ -335,4 +349,77 @@ it("reopens a closed pane in the split, else opens its thread", async () => {
   rememberClosedView({ kind: "pane", ref: b, layout });
   expect(press("t", { shift: true }).defaultPrevented).toBe(true);
   await expect.poll(() => router.state.location.pathname).toBe("/view-test/b");
+});
+
+it("closes a tab whose saved comment is open for editing but unchanged", async () => {
+  const add = vi.spyOn(toastManager, "add").mockReturnValue("toast");
+  savedReply = "Saved earlier";
+  const { show } = await mount();
+  await show("files");
+  await show("review");
+  const reply = page.getByRole("textbox", { name: "Reply" });
+  await expect.element(reply).toHaveValue("Saved earlier");
+
+  expect(press("w", { from: reply.element() }).defaultPrevented).toBe(true);
+  await expect.poll(shown).toBe("files");
+  expect(add).not.toHaveBeenCalled();
+
+  await show("review");
+  await reply.fill("Saved earlier, then changed");
+  expect(press("w", { from: reply.element() }).defaultPrevented).toBe(true);
+  expect(add).toHaveBeenCalledOnce();
+  expect(shown()).toBe("review");
+});
+
+it("waits while a pane closes or moves focus", async () => {
+  const { show } = await mount();
+  await show("files");
+  const busy = vi.fn(() => true);
+  const reopen = vi.fn(() => true);
+  const closeFocused = vi.fn(() => true);
+  useChatPanesStore.getState().registerController({
+    focusSibling: () => false,
+    closeFocused,
+    reopen,
+    busy,
+  });
+  const layout: PaneNode = {
+    kind: "split",
+    axis: "horizontal",
+    ratio: 0.5,
+    first: { kind: "thread", ref: a },
+    second: { kind: "thread", ref: b },
+  };
+  seedThread(b);
+  rememberClosedView({ kind: "pane", ref: b, layout });
+
+  // Consumed, so the window and the browser never get them, but nothing acts.
+  expect(press("t", { shift: true }).defaultPrevented).toBe(true);
+  expect(press("w").defaultPrevented).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(reopen).not.toHaveBeenCalled();
+  expect(shown()).toBe("files");
+
+  // The closed pane is still there once the controller is free.
+  busy.mockReturnValue(false);
+  expect(press("t", { shift: true }).defaultPrevented).toBe(true);
+  expect(reopen).toHaveBeenCalledWith(b, layout);
+});
+
+it("leaves the key to a rule bound to it under another condition", async () => {
+  keybindings = compileResolvedKeybindingsConfig([
+    ...APP_DEFAULT_KEYBINDINGS,
+    { key: "mod+w", command: "modelPicker.toggle", when: "modelPickerOpen" },
+  ]);
+  const { show } = await mount();
+  await show("files");
+
+  setModelPickerOpen(true);
+  expect(press("w").defaultPrevented).toBe(false);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(shown()).toBe("files");
+
+  setModelPickerOpen(false);
+  expect(press("w").defaultPrevented).toBe(true);
+  await expect.poll(shown).toBe("launcher");
 });

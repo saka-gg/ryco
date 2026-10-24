@@ -78,6 +78,28 @@ export function pushClosedView(
 }
 
 /**
+ * `from`'s closed tabs as `to`'s (a draft that became a thread), in place;
+ * where `to` already had the same view, the newer entry stays.
+ */
+export function moveClosedTabs(
+  stack: ReadonlyArray<ClosedView>,
+  from: ClosedViewOwner,
+  to: ClosedViewOwner,
+): ReadonlyArray<ClosedView> {
+  const seen = new Set<string>();
+  return stack.flatMap((entry) => {
+    const moved =
+      entry.kind === "tab" && sameClosedViewOwner(entry.owner, from)
+        ? { ...entry, owner: to }
+        : entry;
+    const key = closedViewKey(moved);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [moved];
+  });
+}
+
+/**
  * The newest entry `verdict` reopens, and the stack without it and without
  * the entries above it that can never come back. Kept entries stay in place.
  */
@@ -126,6 +148,11 @@ let closedViews: ReadonlyArray<ClosedView> = [];
 
 export function rememberClosedView(view: ClosedView): void {
   closedViews = pushClosedView(closedViews, view);
+}
+
+/** Tabs closed on a draft reopen on the thread it became. */
+export function handOverClosedTabs(from: ClosedViewOwner, to: ClosedViewOwner): void {
+  closedViews = moveClosedTabs(closedViews, from, to);
 }
 
 /** Takes the newest view `verdict` reopens, forgetting the ones that can never come back. */

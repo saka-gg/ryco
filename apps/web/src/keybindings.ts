@@ -225,10 +225,17 @@ export function shouldIgnoreScopedNavigationShortcut(
   if (event.isComposing) return true;
   if (isBareModifierKeyEvent(event)) return true;
   if (isEditableShortcutTarget(event.target)) return true;
-  const hostsScope = (dialog: Element) => dialog.contains(scope);
-  const targetDialog = dialogShortcutElementForTarget(event.target);
-  if (targetDialog && !hostsScope(targetDialog)) return true;
-  return hasOpenDialogShortcutTarget(hostsScope);
+  return dialogOwnsShortcut(event.target, (dialog) => dialog.contains(scope));
+}
+
+/** Whether a dialog holds the keyboard, apart from the dialogs `ignoreDialog` accepts. */
+function dialogOwnsShortcut(
+  target: EventTarget | null | undefined,
+  ignoreDialog?: (dialog: Element) => boolean,
+): boolean {
+  const targetDialog = dialogShortcutElementForTarget(target);
+  if (targetDialog && !ignoreDialog?.(targetDialog)) return true;
+  return hasOpenDialogShortcutTarget(ignoreDialog);
 }
 
 /**
@@ -247,9 +254,7 @@ export function shouldIgnoreSplitViewShortcut(
   if (event.type !== undefined && event.type !== "keydown") return true;
   if (event.isComposing) return true;
   if (isBareModifierKeyEvent(event)) return true;
-  const targetDialog = dialogShortcutElementForTarget(event.target);
-  if (targetDialog && !ignoreDialog?.(targetDialog)) return true;
-  return hasOpenDialogShortcutTarget(ignoreDialog);
+  return dialogOwnsShortcut(event.target, ignoreDialog);
 }
 
 export function isSplitViewCommand(
