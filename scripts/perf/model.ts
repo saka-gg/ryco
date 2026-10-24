@@ -318,8 +318,10 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 709 KiB gzip and 142 files beyond boot on 2026-10-15 (813 KiB on 2026-10-12,
  * 974 KiB before route-level splitting). Tight enough that the overview stack
  * (78 KiB) returning to the static graph fails the budget, not only the rules.
+ * 746 KiB on 2026-10-24, 752 KiB with the transcript's row height estimates
+ * (6 KiB that every thread open and switch uses before its first paint).
  */
-const CHAT_ROUTE_GZIP_BUDGET = 750 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 760 * KIB;
 const CHAT_ROUTE_MAX_FILES = 155;
 
 /** OTLP export loads when client tracing is configured, never at boot. */

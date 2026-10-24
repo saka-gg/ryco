@@ -6,6 +6,7 @@ import {
   buildPlanImplementationThreadTitle,
   buildPlanImplementationPrompt,
   buildProposedPlanMarkdownFilename,
+  isProposedPlanCollapsible,
   planFollowUpRefines,
   proposedPlanTitle,
   resolvePlanFollowUpSubmission,
@@ -19,6 +20,20 @@ describe("proposedPlanTitle", () => {
 
   it("returns null when the plan has no heading", () => {
     expect(proposedPlanTitle("- step 1")).toBeNull();
+  });
+});
+
+describe("isProposedPlanCollapsible", () => {
+  it("folds plans over 900 characters or 20 lines", () => {
+    expect(isProposedPlanCollapsible("# Plan\n\n- one\n- two")).toBe(false);
+    expect(isProposedPlanCollapsible("x".repeat(900))).toBe(false);
+    expect(isProposedPlanCollapsible("x".repeat(901))).toBe(true);
+    expect(isProposedPlanCollapsible(Array.from({ length: 20 }, () => "- s").join("\n"))).toBe(
+      false,
+    );
+    expect(isProposedPlanCollapsible(Array.from({ length: 21 }, () => "- s").join("\n"))).toBe(
+      true,
+    );
   });
 });
 

@@ -2,6 +2,7 @@ import { memo, useState, useId } from "react";
 import type { EnvironmentId } from "@ryco/contracts";
 import {
   buildCollapsedProposedPlanPreviewMarkdown,
+  isProposedPlanCollapsible,
   buildProposedPlanMarkdownFilename,
   downloadPlanAsTextFile,
   normalizePlanMarkdownForExport,
@@ -56,8 +57,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   });
   const savePathInputId = useId();
   const title = proposedPlanTitle(planMarkdown) ?? "Proposed plan";
-  const lineCount = planMarkdown.split("\n").length;
-  const canCollapse = planMarkdown.length > 900 || lineCount > 20;
+  const canCollapse = isProposedPlanCollapsible(planMarkdown);
   const displayedPlanMarkdown = stripDisplayedPlanMarkdown(planMarkdown);
   const collapsedPreview = canCollapse
     ? buildCollapsedProposedPlanPreviewMarkdown(planMarkdown, { maxLines: 10 })

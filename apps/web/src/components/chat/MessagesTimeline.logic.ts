@@ -528,6 +528,9 @@ export type MessagesTimelineRow =
     }
   | { kind: "working"; id: string; createdAt: string | null };
 
+/** A turn's changed-files card lists this many files; the rest hide behind "Show N more". */
+export const MAX_VISIBLE_CHANGED_FILES = 6;
+
 /**
  * The size class of a timeline row for the virtualized list. Rows of one class
  * share a measured-size average, so tall assistant replies do not inflate the

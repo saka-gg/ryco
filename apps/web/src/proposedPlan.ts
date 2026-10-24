@@ -21,6 +21,21 @@ export function stripDisplayedPlanMarkdown(planMarkdown: string): string {
   return sourceLines.join("\n");
 }
 
+/** A plan card starts folded to a preview (with "Expand plan") above these sizes. */
+const COLLAPSIBLE_PLAN_MIN_CHARS = 900;
+const COLLAPSIBLE_PLAN_MIN_LINES = 20;
+
+export function isProposedPlanCollapsible(planMarkdown: string): boolean {
+  if (planMarkdown.length > COLLAPSIBLE_PLAN_MIN_CHARS) return true;
+  let lines = 1;
+  for (let index = planMarkdown.indexOf("\n"); index !== -1;) {
+    lines += 1;
+    if (lines > COLLAPSIBLE_PLAN_MIN_LINES) return true;
+    index = planMarkdown.indexOf("\n", index + 1);
+  }
+  return false;
+}
+
 export function buildCollapsedProposedPlanPreviewMarkdown(
   planMarkdown: string,
   options?: {
