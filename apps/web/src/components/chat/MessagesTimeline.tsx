@@ -89,6 +89,7 @@ import {
   deriveTimelineMinimapItems,
   isErroredWorkEntry,
   isTimelineScrolledToEnd,
+  MAX_VISIBLE_CHANGED_FILES,
   deriveMessagesTimelineRows,
   findMessagesTimelineRowIndex,
   messagesOfTimelineRow,
@@ -181,6 +182,7 @@ import {
   useTimelineReadingPosition,
   type ReadingPositionOutcome,
 } from "./useTimelineReadingPosition";
+import { useTimelineRowHeightHints } from "./useTimelineRowHeightHints";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by row components via useContext. Split into
@@ -239,6 +241,8 @@ const EMPTY_THREAD_MESSAGE_SEARCH_OCCURRENCES_BY_MESSAGE_ID: ReadonlyMap<
 > = new Map();
 const EMPTY_EXPANSION_OVERRIDES: Readonly<Record<string, boolean>> = {};
 const MESSAGE_SEARCH_HIGHLIGHT_DURATION_MS = 1_800;
+/** The transcript scroller's side padding; the row-width probe mirrors it. */
+const TIMELINE_SCROLLER_GUTTER_CLASS_NAME = "px-3 sm:px-5";
 const MESSAGE_ACTION_BUTTON_CLASS_NAME =
   "size-6 min-w-6 rounded-md border-0 bg-transparent px-0 text-muted-foreground/45 shadow-none transition-[background-color,color,box-shadow] before:hidden hover:bg-foreground/8 hover:text-foreground/75 hover:shadow-sm/5 focus-visible:ring-1 focus-visible:ring-ring/60 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/35";
 
@@ -504,6 +508,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   usePendingQuoteHighlight(routeThreadKey, isPhoneTier ? null : timelineViewportElement);
   // Sized like the timeline column, which the Chat width setting widens without a viewport resize.
   const timelineColumnProbeRef = useRef<HTMLDivElement | null>(null);
+  // Unmeasured rows are laid out at what they measured before (same thread, width and font)
+  // or at an estimate from their content, so the scroll range is right before rows render.
+  const {
+    getEstimatedItemSize,
+    onItemSizeChanged,
+    onRowColumnResize,
+    rowColumnRef: rowHeightColumnRef,
+  } = useTimelineRowHeightHints({ listRef, routeThreadKey });
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | null>(null);
@@ -771,6 +783,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
       );
       setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth, contentWidth));
+      // Rows wrap at a new width: remembered heights of the old one stop applying.
+      onRowColumnResize();
       // A shorter viewport can turn a non-scrolling transcript into a
       // scrolling one (and back), so the pill has to be re-decided here too.
       evaluateIsAtEnd();
@@ -785,7 +799,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [evaluateIsAtEnd, timelineViewportElement]);
+  }, [evaluateIsAtEnd, onRowColumnResize, timelineViewportElement]);
 
   // The list mounts only when there is something to show (see the empty branch below).
   const showsList = rows.length > 0 || isWorking;
@@ -1025,12 +1039,31 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   aria-hidden
                   className="pointer-events-none invisible absolute inset-x-0 top-0 mx-auto h-0 max-w-(--chat-timeline-max-width)"
                 />
+                {/* Exactly as wide as a row: the scroller's gutter, then the row column. It
+                    precedes the list, so its width is readable when the list first lays out. */}
+                <div
+                  aria-hidden
+                  className={cn(
+                    "pointer-events-none invisible absolute inset-x-0 top-0 h-0",
+                    TIMELINE_SCROLLER_GUTTER_CLASS_NAME,
+                  )}
+                >
+                  <div
+                    ref={rowHeightColumnRef}
+                    data-timeline-row-column-probe=""
+                    className="mx-auto h-0 w-full max-w-(--chat-timeline-max-width)"
+                  />
+                </div>
                 <LegendList<MessagesTimelineRow>
                   ref={listRef}
                   data={rows}
                   keyExtractor={keyExtractor}
                   getItemType={timelineRowItemType}
+                  getEstimatedItemSize={getEstimatedItemSize}
+                  onItemSizeChanged={onItemSizeChanged}
                   renderItem={renderItem}
+                  // Sizes the initial container pool and the out-of-range fallback only; each
+                  // row's own height comes from `getEstimatedItemSize`.
                   estimatedItemSize={56}
                   recycleItems={false}
                   initialScrollAtEnd={readingPosition.initialScrollAtEnd}
@@ -1049,7 +1082,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   // stable` used to reserve space for. `chat-transcript-viewport`
                   // fades its edges under the floating bars on a translucent
                   // window (index.css).
-                  className="chat-transcript-viewport h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
+                  className={cn(
+                    "chat-transcript-viewport h-full overflow-x-hidden overscroll-y-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                    TIMELINE_SCROLLER_GUTTER_CLASS_NAME,
+                  )}
                   ListHeaderComponent={listHeader}
                   ListFooterComponent={TIMELINE_LIST_FOOTER}
                 />
@@ -2375,9 +2411,6 @@ const AssistantChangedFilesSection = memo(function AssistantChangedFilesSection(
     />
   );
 });
-
-// Long file lists collapse to this many rows; the rest hide behind "Show N more".
-const MAX_VISIBLE_CHANGED_FILES = 6;
 
 /** Inner component that only mounts when there are actual changed files,
  *  so the store subscription is unconditional (no hooks after early return). */
