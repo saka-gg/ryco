@@ -24,6 +24,8 @@ vi.mock("../components/RootAppShell", () => ({
       </div>
     );
   },
+  // The hosted root loads thread alerts from the shell's module.
+  ThreadAlertsBootstrap: () => null,
 }));
 import { getHostedReadVault } from "../persistence/hostedReadVault";
 import {

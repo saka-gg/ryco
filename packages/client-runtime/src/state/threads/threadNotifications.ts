@@ -1,5 +1,4 @@
 import type { EnvironmentId, ScopedThreadRef, ThreadId, TurnId } from "@ryco/contracts";
-import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { scopeThreadRef, scopedThreadKey } from "../../scoped.ts";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
 import {
@@ -8,7 +7,13 @@ import {
   type SidebarThreadSummary,
 } from "./types.ts";
 
-export type ThreadNotificationKind = "approval" | "input" | "plan-ready" | "completed" | "failed";
+export type ThreadNotificationKind =
+  | "approval"
+  | "input"
+  | "plan-ready"
+  | "completed"
+  | "failed"
+  | "stopped";
 
 export interface ThreadNotificationEvent {
   readonly id: string;
@@ -35,14 +40,28 @@ type EnvironmentState = {
   readonly threads: Map<ThreadId, ThreadState>;
 };
 
-function describe(thread: SidebarThreadSummary, nowMs: number) {
+export interface ThreadNotificationProjectorInput {
+  readonly readGeneration: (environmentId: EnvironmentId) => object | null;
+  /**
+   * The Inbox's snooze rule, `isThreadSnoozed` from `@ryco/shared/threadSnooze`.
+   * Passed in rather than imported, so a client that loads its alerts lazily
+   * shares the copy its shell already loaded.
+   */
+  readonly isSnoozed: (thread: SidebarThreadSummary, nowMs: number) => boolean;
+}
+
+function describe(
+  thread: SidebarThreadSummary,
+  nowMs: number,
+  isSnoozed: ThreadNotificationProjectorInput["isSnoozed"],
+) {
   const activity = deriveThreadActivityStatus(thread);
   const terminal = thread.latestTurn?.state;
   const terminalKey =
-    terminal === "completed" || terminal === "error"
+    terminal === "completed" || terminal === "error" || terminal === "interrupted"
       ? JSON.stringify([thread.latestTurn!.turnId, terminal])
       : null;
-  const suppressed = thread.archivedAt !== null || isThreadSnoozed(thread, nowMs);
+  const suppressed = thread.archivedAt !== null || isSnoozed(thread, nowMs);
   let kind: ThreadNotificationKind | null = null;
   if (!suppressed) {
     if (activity === "approval" || activity === "input" || activity === "plan-ready")
@@ -50,6 +69,9 @@ function describe(thread: SidebarThreadSummary, nowMs: number) {
     else if (activity === "idle" && thread.latestTurn?.completedAt) {
       if (terminal === "completed") kind = "completed";
       if (terminal === "error") kind = "failed";
+      // Ended before it finished: the provider exited or aborted it, or someone
+      // pressed Stop. The shell does not say which; the alert policy decides.
+      if (terminal === "interrupted") kind = "stopped";
     }
   }
   return {
@@ -67,9 +89,7 @@ function describe(thread: SidebarThreadSummary, nowMs: number) {
  * thread updates. A resumed stream must baseline its already accepted local shell
  * before replaying updates; stale or absent baselines never produce notifications.
  */
-export function createThreadNotificationProjector(input: {
-  readonly readGeneration: (environmentId: EnvironmentId) => object | null;
-}) {
+export function createThreadNotificationProjector(input: ThreadNotificationProjectorInput) {
   const environments = new Map<EnvironmentId, EnvironmentState>();
   const validSequence = (sequence: number) => Number.isSafeInteger(sequence) && sequence >= 0;
   const current = (environmentId: EnvironmentId, generation: object) => {
@@ -110,7 +130,7 @@ export function createThreadNotificationProjector(input: {
       const baseline = new Map<ThreadId, ThreadState>();
       for (const thread of threads) {
         if (thread.environmentId !== environmentId || isArchivedThreadStub(thread)) continue;
-        const state = describe(thread, nowMs);
+        const state = describe(thread, nowMs, input.isSnoozed);
         baseline.set(thread.id, {
           fingerprint: state.fingerprint,
           terminalSeen: state.terminalKey,
@@ -135,8 +155,9 @@ export function createThreadNotificationProjector(input: {
       const state = current(thread.environmentId, generation);
       if (!state || !advance(state, sequence, thread.id)) return null;
       const previous = state.threads.get(thread.id);
-      const next = describe(thread, nowMs);
-      const terminalNotification = next.kind === "completed" || next.kind === "failed";
+      const next = describe(thread, nowMs, input.isSnoozed);
+      const terminalNotification =
+        next.kind === "completed" || next.kind === "failed" || next.kind === "stopped";
       const shouldNotify =
         previous !== undefined &&
         next.kind !== null &&

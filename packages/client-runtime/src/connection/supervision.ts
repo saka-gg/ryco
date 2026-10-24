@@ -303,6 +303,19 @@ export type ReleaseThreadDetailSubscription = (
   options?: ThreadDetailSubscriptionReleaseOptions,
 ) => void;
 
+/**
+ * What the shell stream just committed to the store: a snapshot that replaced
+ * the environment's shell, or one batch's accepted events in order (rankings
+ * and kinds a newer node added are left out).
+ */
+export type ShellAcceptance =
+  | { readonly kind: "snapshot"; readonly environmentId: EnvironmentId }
+  | {
+      readonly kind: "events";
+      readonly environmentId: EnvironmentId;
+      readonly events: ReadonlyArray<OrchestrationShellStreamEvent>;
+    };
+
 interface PendingSavedEnvironmentConnection {
   /**
    * Cancels the attempt and aborts its requests. With `error`, everyone waiting
@@ -355,6 +368,14 @@ export interface EnvironmentConnectionSupervisor {
       readonly onReady: () => void;
     },
   ) => void;
+  /**
+   * Observes what the shell stream commits, once the store holds it and its
+   * after-hooks ran. A listener can run inside a store mutation barrier, so it
+   * must not reach the user synchronously.
+   */
+  readonly subscribeShellAcceptance: (
+    listener: (acceptance: ShellAcceptance) => void,
+  ) => () => void;
   readonly retainThreadDetailSubscription: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
@@ -420,6 +441,7 @@ export function createEnvironmentConnectionSupervisor<
     PendingSavedEnvironmentConnection
   >();
   const listeners = new Set<() => void>();
+  const shellAcceptanceListeners = new Set<(acceptance: ShellAcceptance) => void>();
   const threadDetailSubscriptions = new Map<string, ThreadDetailSubscriptionEntry>();
   // When, and how large, the thread bodies of disposed subscriptions were last
   // used. The store keeps those bodies after the subscription goes; this is
@@ -464,6 +486,19 @@ export function createEnvironmentConnectionSupervisor<
   const emit = () => {
     for (const listener of listeners) listener();
     input.onRegistryChange?.();
+  };
+  const emitShellAcceptance = (acceptance: ShellAcceptance) => {
+    // Listeners run inside shell application: one failing must not stop it.
+    for (const listener of Array.from(shellAcceptanceListeners)) {
+      try {
+        listener(acceptance);
+      } catch (error) {
+        console.warn("Shell acceptance listener failed", {
+          environmentId: acceptance.environmentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   };
   const keyFor = (environmentId: EnvironmentId, threadId: ThreadId) =>
     scopedThreadKey(scopeThreadRef(environmentId, threadId));
@@ -1316,6 +1351,11 @@ export function createEnvironmentConnectionSupervisor<
         attachListedThreads(environmentId);
       }
     }
+    if (shellAcceptanceListeners.size === 0) return;
+    const events = accepted.filter(
+      (update): update is OrchestrationShellStreamEvent => update.kind !== "thread-priorities",
+    );
+    if (events.length > 0) emitShellAcceptance({ kind: "events", environmentId, events });
   };
   // Shell items arrive one WebSocket chunk at a time (a thread upsert per
   // streaming tick). They wait for the next frame and land as one store commit
@@ -1382,6 +1422,7 @@ export function createEnvironmentConnectionSupervisor<
     }
     reconcileForEnvironment(environmentId);
     input.stateSink.reconcileSnapshotDerivedState();
+    emitShellAcceptance({ kind: "snapshot", environmentId });
   };
   const syncSaved = async () => {
     const records = input.listSavedEnvironmentRecords();
@@ -1578,6 +1619,12 @@ export function createEnvironmentConnectionSupervisor<
       return projectionTracker.read(environmentId)?.sequence ?? null;
     },
     syncShellSnapshot,
+    subscribeShellAcceptance: (listener) => {
+      shellAcceptanceListeners.add(listener);
+      return () => {
+        shellAcceptanceListeners.delete(listener);
+      };
+    },
     retainThreadDetailSubscription: retain,
     disposeThreadDetailSubscriptionsForEnvironment: disposeForEnvironment,
     disposeThreadDetailSubscription: (environmentId, threadId) =>

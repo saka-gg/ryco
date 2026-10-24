@@ -4,40 +4,76 @@
 It converts accepted shell state transitions into notification candidates for web,
 desktop, and native adapters. It does not request permission, display notifications,
 register device tokens, send remote push messages, or provide background delivery.
-Applications must wire their own delivery adapter before this produces user-facing alerts.
+
+`startThreadNotificationFeed`, from the same module, wires the projector to the
+connection supervisor. Every client runs one feed and owns only delivery:
+
+- The web app, in the browser and in the desktop window, turns candidates into in-app
+  toasts, browser or desktop notifications, sound and a badge. A tiny shell component
+  loads the alerts once the shell is idle. In hosted mode the hosted root mounts it for a
+  signed-in account, above its choice of surface, so Hub pages and node switch surfaces
+  that replace the shell do not pause them. They wait for client settings to load, run the
+  feed while any alert is on, and stay off on the frozen phone tier. The badge counts the
+  threads that alerted while Ryco was in the background, on the favicon and the installed
+  app's icon in a browser, and clears when Ryco is back in front.
+- The desktop main process shows the OS notification, one per thread, and the dock or
+  taskbar badge for the renderer. While its window is in front it answers
+  `window-focused` instead, since an embedded page can hold the document's focus, and
+  the renderer alerts in the app.
+- The native app posts local notifications while it runs, once alerts are turned on in
+  its settings: one per thread, unless that thread is on screen while the app is in front,
+  with the system sound when that is on. Opening one opens the thread. iOS suspends the
+  app soon after it leaves the screen, so alerts arrive while it is open; delivery after
+  that needs remote push.
 
 ## Integration
 
-1. Provide `readGeneration(environmentId)`, returning the existing connection lifecycle's
-   opaque attempt token only while its authorized shell is current. Return `null` while
-   disconnected, recovering, or awaiting a current snapshot. Do not create a second
-   readiness policy for notifications.
-2. After the authoritative shell reducer accepts a snapshot, call `baseline` with its
-   sequence, token, normalized `SidebarThreadSummary` rows, and current time. Baselines
-   never emit historical notifications. Every replacement connection needs a baseline.
-   For a resumed stream, seed the already accepted local shell at its accepted sequence
-   before applying replayed events.
-3. After accepting each live thread upsert, call `observe` with that event's sequence,
-   token, normalized thread, and current time. Feed accepted thread removals to `remove`.
-   Multiple distinct threads may share one accepted envelope sequence; observe each
-   once. Duplicate rows at that sequence and older envelopes are ignored.
-   Do not feed cached rows or optimistic client edits into this projector.
-4. A non-null result is an immutable candidate with `ref`, `groupKey`, `kind`, `title`,
-   `turnId`, and `id`. Group by `groupKey`; route to the exact environment and thread in
-   `ref`. Revalidate with `isCurrent(candidate)` immediately before delivery, including
-   after asynchronous permission or platform calls. A new connection, snapshot,
+1. The supervisor reports what the shell stream committed through
+   `subscribeShellAcceptance`: each snapshot it applied, and each batch's accepted events
+   in order, after the store commit and its after-hooks. A listener can run inside a store
+   mutation barrier, so the feed only projects there and delivers candidates in a
+   microtask, after revalidating each with `isCurrent`.
+2. `readGeneration(environmentId)` is the connection's `shellSnapshotReadiness` token, the
+   per-socket-attempt evidence that sending already relies on. It is `null` while
+   disconnected, resubscribing, or before the attempt's snapshot or resume. Hosted items of
+   a stale lifecycle generation are fenced before they reach the supervisor, so nothing
+   from them is ever accepted or observed; the attempt token needs no second check.
+3. The feed baselines silently, from the store at the sequence `readShellProjectionSequence`
+   returns (which applies buffered shell items first), when a connection publishes a new
+   token (a new attempt's snapshot, or a resume), when the stream applies a snapshot
+   within the same attempt, when a connection registers, and when the feed starts. A
+   resumed stream is baselined on the shell it holds, so replayed events are observed.
+4. Each accepted `thread-upserted` event is observed with its own sequence and the
+   summary the store writes for it (`mapThreadShellSummary`), not the batch's final row,
+   so a thread created and asking for approval within one batch still alerts. Accepted
+   removals go to `remove`. Several threads may share one envelope sequence; duplicate
+   rows at that sequence and older envelopes are ignored. Cached rows (cache hydration,
+   the Hub read cache) and optimistic client edits never reach the supervisor, so they
+   never reach the projector.
+5. A candidate carries `ref`, `groupKey`, `kind`, `title`, `turnId`, and `id`, and the feed
+   adds whether the thread was delegated. Group by `groupKey`; route to the exact
+   environment and thread in `ref`. Revalidate with `isCurrent(candidate)` after every
+   asynchronous step (permission prompts, platform calls). A new connection, snapshot,
    resolved request, or removed thread invalidates queued candidates.
-5. Call `clear(environmentId)` when forgetting an environment and `reset()` on logout.
-   The projector retains only transition metadata, not message bodies or audio.
+6. The feed clears an environment whose connection is removed or replaced, and `stop()`
+   resets the projector. It retains only transition metadata, not message bodies or audio.
 
-The projector shares the Inbox's activity and snooze classification. It emits approval,
-input, ready-plan, completed-turn, and failed-turn transitions. Live background work
+The projector shares the Inbox's activity and snooze classification. The caller passes
+the snooze rule (`isThreadSnoozed` from `@ryco/shared/threadSnooze`), so a client that
+loads its alerts lazily shares the copy its shell already loaded. It emits approval,
+input, ready-plan, completed-turn, failed-turn, and stopped-turn transitions. A stopped
+turn is one that ended interrupted: the provider exited or aborted it, or someone pressed
+Stop. The shell does not say which, so `planThreadAlert` delivers it only while the app
+is in the background: in front, it is nearly always your own Stop. Live background work
 postpones completion. Repeated upserts, archived threads, stale generations, old sequences,
 and threads first seen without a baseline do not generate alerts. Already known terminal
 turns are not announced again after an approval resolves or a plan is dismissed.
 
 This deliberately favors avoiding replay over offline catch-up: a completion that first
-appears in a reconnect snapshot stays silent. OS delivery, delivery preferences, visible
-thread suppression, durable notification history, and Live Activities remain adapter work.
+appears in a reconnect snapshot stays silent, and one still buffered when the connection
+dropped can be too. Only connected environments alert. A hosted browser tab that has
+been hidden for a while releases the connections no open view holds and takes fresh
+snapshots when it returns, so while it is hidden it alerts only for the nodes it keeps
+connected. Remote push, durable notification history, and Live Activities are not built.
 The opaque generation token is local runtime metadata and must not be serialized into a
 push payload. Titles are user data; platform adapters own lock-screen privacy preferences.

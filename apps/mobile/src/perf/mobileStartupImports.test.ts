@@ -313,6 +313,17 @@ describe("mobile launch graph boundaries", () => {
     expect(reachable).not.toContain("packages/contracts/src/index.ts");
   });
 
+  it("loads thread alerts and expo-notifications only once alerts are on", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain("apps/mobile/src/notifications/ThreadAlertsBridge.tsx");
+    expect(
+      chainsTo(LAUNCH_ENTRY, [
+        /^pkg:expo-notifications$/u,
+        /^apps\/mobile\/src\/notifications\/threadAlerts(?:\.logic)?\.ts$/u,
+      ]),
+    ).toEqual([]);
+  });
+
   it("loads the hosted relay connection and E2EE session only with the hosted runtime", () => {
     expect(
       chainsTo(LAUNCH_ENTRY, [

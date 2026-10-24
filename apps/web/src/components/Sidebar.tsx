@@ -1292,21 +1292,6 @@ export default function Sidebar() {
     };
   }, [clearSelection, selectedThreadCount]);
 
-  // Clicking a turn-complete desktop notification focuses the window (handled in
-  // the main process) and navigates to the thread whose turn finished.
-  useEffect(() => {
-    const bridge = typeof window !== "undefined" ? window.desktopBridge : undefined;
-    if (!bridge?.onTurnCompleteNotificationActivated) {
-      return;
-    }
-    return bridge.onTurnCompleteNotificationActivated((notification) => {
-      if (!notification.environmentId) {
-        return;
-      }
-      navigateToThread(scopeThreadRef(notification.environmentId, notification.threadId));
-    });
-  }, [navigateToThread]);
-
   const commandPaletteShortcutLabel = shortcutLabelForCommand(
     keybindings,
     "commandPalette.toggle",

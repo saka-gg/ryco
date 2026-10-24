@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 
-import { preloadableLazy } from "../../lib/preloadableLazy";
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { AppBootLoadingSurface } from "../AppBootLoadingSurface";
 import type { RootAppShellProps } from "../RootAppShell";
 
@@ -36,4 +36,22 @@ export function HostedRootAppShell(props: RootAppShellProps) {
       <LazyRootAppShell {...props} />
     </Suspense>
   );
+}
+
+// From the workspace shell's chunk, which an authenticated account preloads
+// anyway, so the alerts add no chunk of their own.
+const LazyThreadAlertsBootstrap = preloadableLazy(() =>
+  import("../RootAppShell").then((module) => module.ThreadAlertsBootstrap),
+);
+
+/**
+ * Thread alerts as the hosted root runs them: above its choice of surface, so
+ * a Hub page, the node directory or a node switch surface that replaces the
+ * workspace shell does not stop them while other nodes stay connected.
+ */
+export function HostedThreadAlerts() {
+  const ready = useLazyComponentReady(LazyThreadAlertsBootstrap, true, {
+    onLoadError: (error) => console.warn("Thread alerts failed to load.", error),
+  });
+  return ready ? <LazyThreadAlertsBootstrap /> : null;
 }

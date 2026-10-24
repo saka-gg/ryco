@@ -64,7 +64,11 @@ import {
 import { ServerStateBootstrap } from "./ServerStateBootstrap";
 import { ThreadPriorityRefreshBridge } from "./ThreadPriorityRefreshBridge";
 import { MessageQueueDrainBridge } from "./MessageQueueDrainBridge";
+import { ThreadAlertsBootstrap } from "../notifications/ThreadAlertsBootstrap";
 import { getRoutedHostedNode } from "../hostedHub/nodeRoutes";
+
+// The hosted root mounts thread alerts itself, from this chunk (`hostedRootAppShell`).
+export { ThreadAlertsBootstrap };
 
 export interface RootAppShellProps {
   readonly authGateState: {
@@ -111,6 +115,11 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
   // Every state with chat routes can queue, including hosted-static, which sends
   // to saved environments; readiness is per environment.
   const chatAvailable = primaryEnvironmentAuthenticated || authGateState.status === "hosted-static";
+  // Only where this shell is the root. The hosted root, which renders it as
+  // hosted-hub or hosted-cached, mounts thread alerts above its choice of
+  // surface, so its Hub pages and node switch surfaces do not stop them.
+  const ownsThreadAlerts =
+    authGateState.status === "authenticated" || authGateState.status === "hosted-static";
   const localTracingAllowed = authGateState.status === "authenticated";
   // The presentation-tier seam lives inside `AppSidebarLayout`: the provider
   // and the route subtree stay mounted identically for both tiers (a tier
@@ -145,6 +154,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
+        {ownsThreadAlerts ? <ThreadAlertsBootstrap /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
           <EventRouter hosted={authGateState.status === "hosted-hub"} />

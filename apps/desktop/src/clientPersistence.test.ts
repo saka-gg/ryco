@@ -76,6 +76,8 @@ const clientSettings: ClientSettings = {
   gitStatusPollIntervalMs: 0,
   sourceControlRefreshMode: "automatic",
   notifyOnTurnCompleteWhenUnfocused: true,
+  threadNotificationSound: false,
+  threadNotificationToasts: true,
 };
 
 const savedRegistryRecord: PersistedSavedEnvironmentRecord = {
