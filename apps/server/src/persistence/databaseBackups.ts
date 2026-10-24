@@ -17,6 +17,10 @@
  * 16-30 s for 10 GB, measured), while a clone of 4.5 GB took 0.11-0.55 s and held the write lock
  * for under 10 ms. See docs/database-backups.md.
  *
+ * Manual backups (`ryco db backup`) do use `VACUUM INTO`, on a read-only connection: it is a
+ * consistent snapshot that never blocks a live server's writer, and its output is compacted.
+ * Restores (`ryco db restore`) only ever write a new data directory, after checking the copy.
+ *
  * @module databaseBackups
  */
 import { execFile } from "node:child_process";
@@ -29,13 +33,15 @@ import {
   mkdir,
   open,
   readdir,
+  realpath,
   rename,
   rm,
+  rmdir,
   stat,
   statfs,
 } from "node:fs/promises";
 import { setPriority } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import * as zlib from "node:zlib";
@@ -47,7 +53,11 @@ import type { SqlError } from "effect/sql/SqlError";
 
 import { syncDirectory, syncFile } from "../fsDurability.ts";
 import { databaseBackupsDirectory, type PremigrationBackupMode } from "./databaseBackupPolicy.ts";
-import type { MigrationLedgerInspection } from "./Migrations.ts";
+import {
+  migrationEntries,
+  SUPPORTED_MIGRATION_ID,
+  type MigrationLedgerInspection,
+} from "./Migrations.ts";
 
 // What startup needs before it knows a backup is due lives in databaseBackupPolicy.ts, so that
 // startup with nothing to migrate never loads this module. Re-exported: this is the backups API.
@@ -501,7 +511,11 @@ export const cleanStaleBackupPartials = Effect.fn("cleanStaleBackupPartials")(fu
  */
 export const pruneDatabaseBackups = Effect.fn("pruneDatabaseBackups")(function* (
   dbPath: string,
-  options: { readonly keep?: string | undefined } = {},
+  options: {
+    readonly keep?: string | undefined;
+    /** The kinds to prune; both when undefined. */
+    readonly kinds?: ReadonlyArray<BackupKind> | undefined;
+  } = {},
 ) {
   const backups = (yield* listDatabaseBackups(dbPath)).filter(
     (backup) => backup.state !== "unverified",
@@ -519,7 +533,7 @@ export const pruneDatabaseBackups = Effect.fn("pruneDatabaseBackups")(function* 
     ...(newestSchemaUpgrade === undefined ? [] : [identity(newestSchemaUpgrade)]),
   ]);
   const removed: string[] = [];
-  for (const kind of ["before", "manual"] as const) {
+  for (const kind of options.kinds ?? (["before", "manual"] as const)) {
     const identities = [...new Set(backups.filter((backup) => backup.kind === kind).map(identity))];
     const expired = new Set(
       identities
@@ -630,7 +644,8 @@ class BackupSkip extends Data.TaggedError("BackupSkip")<{
   readonly detail: string;
 }> {}
 
-const formatBytes = (bytes: number) => {
+/** A size in decimal units (1 GB = 10^9 bytes), for log lines and command output. */
+export const formatBytes = (bytes: number) => {
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
   if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
   if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} kB`;
@@ -648,16 +663,21 @@ const queryNumber = (
     return typeof value === "number" ? value : typeof value === "bigint" ? Number(value) : 0;
   });
 
+/** The database has a migration ledger (`effect_sql_migrations`). */
+const hasLedgerTable = (
+  run: (sql: string) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, SqlError>,
+) =>
+  Effect.map(
+    run("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'"),
+    (rows) => rows.length > 0,
+  );
+
 /** The highest recorded migration of a database, 0 without a ledger. */
 const readLedgerVersion = (
   run: (sql: string) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, SqlError>,
 ) =>
   Effect.gen(function* () {
-    const hasLedger =
-      (yield* run(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'",
-      )).length > 0;
-    return hasLedger
+    return (yield* hasLedgerTable(run))
       ? yield* queryNumber(run, "SELECT max(migration_id) AS id FROM effect_sql_migrations")
       : 0;
   });
@@ -1108,6 +1128,9 @@ const checkRawBackup = (input: {
 
 const supportsZstd = typeof zlib.createZstdCompress === "function";
 
+/** The codec new backups are compressed with: zstd where the runtime has it, else gzip. */
+const preferredCodec = (): BackupCodec => (supportsZstd ? "zst" : "gz");
+
 const compressStream = (codec: BackupCodec) =>
   codec === "zst"
     ? zlib.createZstdCompress({
@@ -1117,6 +1140,20 @@ const compressStream = (codec: BackupCodec) =>
         },
       })
     : zlib.createGzip({ level: 1 });
+
+/**
+ * Compresses `from` into the new file `to` (created exclusively, mode 0600) in this process:
+ * zstd level 1 with a frame checksum, or gzip level 1. The caller flushes and publishes it.
+ */
+const compressInProcess = (from: string, to: string, codec: BackupCodec) =>
+  io("compress", from, (signal) =>
+    pipeline(
+      createReadStream(from, { highWaterMark: COMPRESS_CHUNK_BYTES }),
+      compressStream(codec),
+      createWriteStream(to, { flags: "wx", mode: 0o600 }),
+      { signal },
+    ),
+  );
 
 const exists = (path: string) =>
   io("stat", path, () =>
@@ -1155,7 +1192,7 @@ const compressRawBackup = (input: {
   Effect.gen(function* () {
     const { backup, env } = input;
     const directory = dirname(backup.path);
-    const codec: BackupCodec = supportsZstd ? "zst" : "gz";
+    const codec = preferredCodec();
     const finalName = withCodec(parseBackupName(backup.name)!, codec);
     const finalPath = join(directory, finalName);
     const partial = join(directory, partialName(finalName, env.pid));
@@ -1175,14 +1212,7 @@ const compressRawBackup = (input: {
           });
         }
       } else {
-        yield* io("compress", backup.path, (signal) =>
-          pipeline(
-            createReadStream(backup.path, { highWaterMark: COMPRESS_CHUNK_BYTES }),
-            compressStream(codec),
-            createWriteStream(partial, { flags: "wx", mode: 0o600 }),
-            { signal },
-          ),
-        );
+        yield* compressInProcess(backup.path, partial, codec);
       }
       yield* restrictToOwner(partial);
       yield* io("sync", partial, () => syncFile(partial));
@@ -1300,3 +1330,770 @@ export const finalizeDatabaseBackups = (input: {
     );
   });
 };
+
+// ---------------------------------------------------------------------------------------------
+// Manual backups and restores (`ryco db backup | list | restore`)
+// ---------------------------------------------------------------------------------------------
+
+/** What a backup file holds, read from its first bytes: plain SQLite or a compressed copy. */
+export type BackupFileFormat = "sqlite" | BackupCodec;
+
+const SQLITE_MAGIC = Buffer.from("SQLite format 3\0", "latin1");
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
+
+/**
+ * The format of `path` by its magic bytes, not its name (a renamed or mislabelled file is still
+ * read correctly); undefined when it is neither SQLite, zstd nor gzip.
+ */
+export const detectBackupCodec = (path: string) =>
+  io("read", path, async (): Promise<BackupFileFormat | undefined> => {
+    const file = await open(path, "r");
+    try {
+      const head = Buffer.alloc(SQLITE_MAGIC.length);
+      const { bytesRead } = await file.read(head, 0, head.length, 0);
+      const bytes = head.subarray(0, bytesRead);
+      if (bytes.equals(SQLITE_MAGIC)) return "sqlite";
+      if (bytes.length >= 4 && bytes.subarray(0, 4).equals(ZSTD_MAGIC)) return "zst";
+      if (bytes.length >= 2 && bytes.subarray(0, 2).equals(GZIP_MAGIC)) return "gz";
+      return undefined;
+    } finally {
+      await file.close();
+    }
+  });
+
+const SQLITE_HEADER_BYTES = 100;
+
+/**
+ * The database size a SQLite header states: page size times the "in-header database size",
+ * which is valid when the change counter matches its version-valid-for number (every writer
+ * since SQLite 3.7.0). Undefined when the header does not say.
+ */
+const databaseBytesFromHeader = (head: Buffer): number | undefined => {
+  if (head.length < SQLITE_HEADER_BYTES) return undefined;
+  if (!head.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC)) return undefined;
+  const storedPageSize = head.readUInt16BE(16);
+  const pageSize = storedPageSize === 1 ? 65_536 : storedPageSize;
+  const pageCount = head.readUInt32BE(28);
+  const valid =
+    pageSize >= 512 &&
+    (pageSize & (pageSize - 1)) === 0 &&
+    pageCount > 0 &&
+    head.readUInt32BE(24) === head.readUInt32BE(92);
+  return valid ? pageSize * pageCount : undefined;
+};
+
+/**
+ * The size of the database a compressed backup holds, from the header in its first decompressed
+ * bytes; undefined when that cannot be read (the restore itself then reports why).
+ */
+const compressedDatabaseBytes = (file: string, codec: BackupCodec) =>
+  Effect.promise(async () => {
+    const source = createReadStream(file, { highWaterMark: 64 * 1024 });
+    const decompressor = codec === "zst" ? zlib.createZstdDecompress() : zlib.createGunzip();
+    source.on("error", (error) => decompressor.destroy(error));
+    const chunks: Buffer[] = [];
+    let length = 0;
+    try {
+      for await (const chunk of source.pipe(decompressor) as AsyncIterable<Buffer>) {
+        chunks.push(chunk);
+        length += chunk.length;
+        if (length >= SQLITE_HEADER_BYTES) break;
+      }
+      return databaseBytesFromHeader(Buffer.concat(chunks));
+    } catch {
+      return undefined;
+    } finally {
+      source.destroy();
+      decompressor.destroy();
+    }
+  });
+
+export type DatabaseBackupCommandFailure =
+  | "no-database"
+  | "insufficient-space"
+  | "check-failed"
+  | "not-a-file"
+  | "live-database"
+  | "unknown-format"
+  | "unsupported-codec"
+  | "unsafe-target"
+  | "target-not-empty"
+  | "damaged"
+  | "not-a-ryco-database"
+  | "io";
+
+/** A manual backup or restore that cannot go ahead; `message` says why, for the terminal. */
+export class DatabaseBackupCommandError extends Data.TaggedError("DatabaseBackupCommandError")<{
+  readonly reason: DatabaseBackupCommandFailure;
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+const commandError = (reason: DatabaseBackupCommandFailure, message: string, cause?: unknown) =>
+  new DatabaseBackupCommandError({ reason, message, ...(cause === undefined ? {} : { cause }) });
+
+const asCommandError = (error: DatabaseBackupError) => commandError("io", error.message, error);
+
+/**
+ * For the steps after a backup or restore is published: a failure there does not undo it, so it
+ * is reported in `warnings` instead of failing the command.
+ */
+const warnInstead =
+  (warnings: string[], what: string) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A | undefined, never, R> =>
+    effect.pipe(
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          warnings.push(`${what}: ${errorText(error)}`);
+          return undefined;
+        }),
+      ),
+    );
+
+/** First lines of a `quick_check` / `integrity_check` that did not say "ok". */
+const checkProblems = (lines: ReadonlyArray<string>) =>
+  lines.length === 1 && lines[0] === "ok" ? undefined : lines.slice(0, 5).join("; ");
+
+const runCheck = (
+  run: (sql: string) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, SqlError>,
+  pragma: "quick_check" | "integrity_check",
+) =>
+  Effect.map(run(`PRAGMA ${pragma}`), (rows) => rows.map((row) => String(Object.values(row)[0])));
+
+/** Every message along an error's `cause` chain (SqlError wraps the driver's error twice). */
+const causeMessages = (error: unknown): string => {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current !== undefined && current !== null && depth < 6; depth += 1) {
+    messages.push(errorText(current));
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return messages.join(" | ");
+};
+
+/**
+ * Runs `use` on a read-only connection to `filename`. Bun's SQLite cannot read a WAL database
+ * through a read-only connection while its `-shm` file does not exist yet (no other process has
+ * it open): the first query fails with "unable to open database file" (measured with Bun 1.4.3;
+ * the open itself succeeds). A probe query finds that out before `use` starts, and only then
+ * `use` runs on a read-write connection instead; `use` only reads, as every other CLI command
+ * that opens the database. A failure inside `use` is never retried.
+ */
+const withReadConnection = <A, E>(
+  openSqlite: OpenSqlite,
+  filename: string,
+  use: Effect.Effect<A, E | SqlError, SqlClient.SqlClient>,
+): Effect.Effect<A, E | SqlError> =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const readOnly = yield* Layer.build(openSqlite({ filename, readonly: true })).pipe(
+        Effect.tap((context) =>
+          Effect.gen(function* () {
+            const client = yield* SqlClient.SqlClient;
+            yield* client.unsafe("PRAGMA schema_version");
+          }).pipe(Effect.provide(context)),
+        ),
+        Effect.map(Option.some),
+        Effect.catchIf(
+          (error) => /unable to open database file/i.test(causeMessages(error)),
+          () => Effect.succeed(Option.none()),
+        ),
+      );
+      const context = Option.isSome(readOnly)
+        ? readOnly.value
+        : yield* Layer.build(openSqlite({ filename }));
+      return yield* use.pipe(Effect.provide(context));
+    }),
+  );
+
+export interface ManualBackupResult {
+  readonly path: string;
+  /** The schema (latest migration) the backup holds. */
+  readonly schema: number;
+  /** The live database and its WAL when the backup started. */
+  readonly databaseBytes: number;
+  /** The compacted copy `VACUUM INTO` wrote, before compression. */
+  readonly copyBytes: number;
+  /** The compressed backup. */
+  readonly bytes: number;
+  readonly codec: BackupCodec;
+  readonly copyMs: number;
+  readonly checkMs: number;
+  readonly compressMs: number;
+  readonly ms: number;
+  /** Older manual backups removed by retention. */
+  readonly pruned: ReadonlyArray<string>;
+  /** Clean-up after the backup was published that did not work; the backup is complete. */
+  readonly warnings: ReadonlyArray<string>;
+}
+
+export type ManualBackupStep = "copy" | "check" | "compress";
+
+/**
+ * `ryco db backup`: a compacted, checked and compressed copy of `dbPath`, safe while a server
+ * runs. `VACUUM INTO` on a read-only connection is one read transaction, so it never takes the
+ * write lock and a live writer keeps going (measured beside `ryco serve` on a 4.5 GB database:
+ * insert p99 3.2-5.5 ms during the backup, 2.0-3.1 ms before it). Unlike the pre-upgrade backup
+ * it fails instead of skipping: someone asked for it.
+ */
+export const createManualBackup = Effect.fn("createManualBackup")(function* (input: {
+  readonly dbPath: string;
+  readonly openSqlite: OpenSqlite;
+  /** Called as each step starts, for progress output. */
+  readonly onStep?: ((step: ManualBackupStep) => Effect.Effect<void>) | undefined;
+}) {
+  const env = yield* BackupEnvironment;
+  const startedAt = performance.now();
+  const { dbPath, openSqlite } = input;
+  const step = (name: ManualBackupStep) => input.onStep?.(name) ?? Effect.void;
+
+  const database = yield* io("stat", dbPath, () => stat(dbPath)).pipe(Effect.option);
+  if (Option.isNone(database) || !database.value.isFile()) {
+    return yield* commandError("no-database", `No Ryco database at ${dbPath}.`);
+  }
+  const backupsDir = databaseBackupsDirectory(dbPath);
+  yield* io("mkdir", backupsDir, () => mkdir(backupsDir, { recursive: true, mode: 0o700 })).pipe(
+    Effect.mapError(asCommandError),
+  );
+  yield* cleanStaleBackupPartials(dbPath).pipe(Effect.ignore);
+
+  const databaseBytes =
+    database.value.size + (yield* fileSize(`${dbPath}-wal`).pipe(Effect.mapError(asCommandError)));
+  const space = yield* Effect.promise(() => env.statfs(backupsDir).catch(() => undefined));
+  const needed = BACKUP_FREE_SPACE_FACTOR * databaseBytes;
+  if (space !== undefined && space.bavail * space.bsize < needed) {
+    return yield* commandError(
+      "insufficient-space",
+      `Not enough free space for a backup in ${backupsDir}: ${formatBytes(space.bavail * space.bsize)} free, ${formatBytes(needed)} needed for a ${formatBytes(databaseBytes)} database.`,
+    );
+  }
+
+  const createdAt = yield* Clock.currentTimeMillis;
+  const stem = backupStem(dbPath);
+  const codec = preferredCodec();
+  // Every partial this call writes, for cleanup on failure.
+  const partials: string[] = [];
+  const track = (partial: string) => {
+    partials.push(partial);
+    inFlightPartials.add(partial);
+    return partial;
+  };
+  const discardPartials = Effect.suspend(() =>
+    Effect.forEach(
+      partials.flatMap((partial) =>
+        ["", "-wal", "-shm", "-journal"].map((suffix) => `${partial}${suffix}`),
+      ),
+      (path) => Effect.ignore(removeFile(path)),
+    ),
+  );
+
+  return yield* Effect.gen(function* () {
+    yield* step("copy");
+    const copyStartedAt = performance.now();
+    // One connection to the live database. The plain copy is named after the live schema; the
+    // published name uses the schema found in the copy.
+    const rawPartial = yield* withReadConnection(
+      openSqlite,
+      dbPath,
+      Effect.gen(function* () {
+        const client = yield* SqlClient.SqlClient;
+        const liveSchema = yield* readLedgerVersion(clientRunner(client));
+        const partial = track(
+          join(
+            backupsDir,
+            partialName(
+              formatBackupName({ stem, from: liveSchema, to: "manual", at: createdAt }),
+              env.pid,
+            ),
+          ),
+        );
+        yield* client.unsafe("VACUUM INTO ?", [partial]);
+        return partial;
+      }),
+    );
+    const copyMs = Math.round(performance.now() - copyStartedAt);
+
+    yield* step("check");
+    const checkStartedAt = performance.now();
+    const shape = yield* withReadConnection(
+      openSqlite,
+      rawPartial,
+      Effect.gen(function* () {
+        const run = clientRunner(yield* SqlClient.SqlClient);
+        return {
+          problems: checkProblems(yield* runCheck(run, "quick_check")),
+          schema: yield* readLedgerVersion(run),
+          pageCount: yield* queryNumber(run, "PRAGMA page_count"),
+          pageSize: yield* queryNumber(run, "PRAGMA page_size"),
+        };
+      }),
+    );
+    const copyBytes = yield* fileSize(rawPartial).pipe(Effect.mapError(asCommandError));
+    const checkMs = Math.round(performance.now() - checkStartedAt);
+    if (shape.problems !== undefined) {
+      return yield* commandError(
+        "check-failed",
+        `The copy of ${dbPath} failed quick_check (${shape.problems}), so the database itself is damaged. No backup was written.`,
+      );
+    }
+    if (copyBytes !== shape.pageCount * shape.pageSize) {
+      return yield* commandError(
+        "check-failed",
+        `The copy of ${dbPath} is ${copyBytes} bytes, not ${shape.pageCount} pages of ${shape.pageSize} bytes. No backup was written.`,
+      );
+    }
+
+    yield* step("compress");
+    const compressStartedAt = performance.now();
+    const name = { stem, from: shape.schema, to: "manual", at: createdAt, codec } as const;
+    const compressedPartial = track(join(backupsDir, partialName(formatBackupName(name), env.pid)));
+    yield* compressInProcess(rawPartial, compressedPartial, codec);
+    yield* restrictToOwner(compressedPartial);
+    yield* io("sync", compressedPartial, () => syncFile(compressedPartial));
+    const bytes = yield* fileSize(compressedPartial);
+    const path = yield* publishBackup(compressedPartial, backupsDir, name);
+    const compressMs = Math.round(performance.now() - compressStartedAt);
+
+    // The backup is complete once it has its name, so what follows only warns.
+    const warnings: string[] = [];
+    yield* syncBackupsDirectory(dbPath).pipe(
+      warnInstead(warnings, `Could not flush ${backupsDir} to disk`),
+    );
+    yield* removeFile(rawPartial).pipe(
+      warnInstead(
+        warnings,
+        `Could not remove the plain copy ${rawPartial}; the next backup removes it`,
+      ),
+    );
+    const pruned = yield* pruneDatabaseBackups(dbPath, { keep: path, kinds: ["manual"] }).pipe(
+      warnInstead(warnings, "Could not remove older manual backups"),
+      Effect.map((removed) => removed ?? []),
+    );
+    return {
+      path,
+      schema: shape.schema,
+      databaseBytes,
+      copyBytes,
+      bytes,
+      codec,
+      copyMs,
+      checkMs,
+      compressMs,
+      ms: Math.round(performance.now() - startedAt),
+      pruned,
+      warnings,
+    } satisfies ManualBackupResult;
+  }).pipe(
+    Effect.catchTags({
+      SqlError: (error) =>
+        Effect.fail(commandError("io", `Could not back up ${dbPath}: ${error.message}`, error)),
+      DatabaseBackupError: (error) => Effect.fail(asCommandError(error)),
+    }),
+    Effect.onExit((exit) => (exit._tag === "Success" ? Effect.void : discardPartials)),
+    Effect.ensuring(
+      Effect.sync(() => {
+        for (const partial of partials) inFlightPartials.delete(partial);
+      }),
+    ),
+  );
+});
+
+/** A backup, as `ryco db list` shows it. */
+export interface ListedDatabaseBackup extends DatabaseBackup {
+  /** This build can open it: its schema is not newer than the newest migration it knows. */
+  readonly opensWithThisBuild: boolean;
+}
+
+export const describeDatabaseBackups = Effect.fn("describeDatabaseBackups")(function* (
+  dbPath: string,
+) {
+  const backups = yield* listDatabaseBackups(dbPath);
+  return {
+    directory: databaseBackupsDirectory(dbPath),
+    supportedSchema: SUPPORTED_MIGRATION_ID,
+    // The listed records are this call's own, so they are extended in place.
+    backups: backups.map((backup): ListedDatabaseBackup =>
+      Object.assign(backup, { opensWithThisBuild: backup.from <= SUPPORTED_MIGRATION_ID }),
+    ),
+  };
+});
+
+/** `path` made absolute, then each of its ancestors up to the root, nearest first. */
+const selfAndAncestors = (path: string): ReadonlyArray<string> => {
+  const chain = [resolve(path)];
+  for (let current = chain[0]!, parent = dirname(current); parent !== current;) {
+    chain.push(parent);
+    current = parent;
+    parent = dirname(current);
+  }
+  return chain;
+};
+
+/**
+ * An absolute path with every symlink of its existing part resolved; the part that does not
+ * exist yet is appended as given.
+ */
+const canonicalPath = async (path: string): Promise<string> => {
+  const chain = selfAndAncestors(path);
+  for (const [index, ancestor] of chain.entries()) {
+    try {
+      return join(await realpath(ancestor), relative(ancestor, chain[0]!));
+    } catch (error) {
+      const code = errorCode(error);
+      if ((code !== "ENOENT" && code !== "ENOTDIR") || index === chain.length - 1) throw error;
+    }
+  }
+  return chain[0]!;
+};
+
+const identityOf = async (path: string) => {
+  const info = await stat(path).catch(() => undefined);
+  return info === undefined ? undefined : `${info.dev}:${info.ino}`;
+};
+
+/** `dev:ino` of `path` and each existing ancestor, nearest first. */
+const identityChain = async (path: string): Promise<ReadonlyArray<string>> =>
+  (await Promise.all(selfAndAncestors(path).map(identityOf))).filter(
+    (identity): identity is string => identity !== undefined,
+  );
+
+/** Case-insensitive volumes are the default on macOS and Windows; a false match only refuses. */
+const comparablePath = (path: string) =>
+  process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
+
+const isWithin = (child: string, parent: string) => {
+  const [a, b] = [comparablePath(child), comparablePath(parent)];
+  return a === b || a.startsWith(b.endsWith(sep) ? b : `${b}${sep}`);
+};
+
+/**
+ * Why restoring into `target` would touch the data directory in use, if it would: the target is
+ * that directory, lies inside it, or contains it. Paths are compared after resolving symlinks,
+ * and existing directories also by device and inode.
+ */
+const unsafeRestoreTarget = async (
+  target: string,
+  live: ReadonlyArray<string>,
+): Promise<string | undefined> => {
+  const canonicalTarget = await canonicalPath(target);
+  const targetChain = await identityChain(target);
+  const targetIdentity = await identityOf(target);
+  for (const path of live) {
+    const canonicalLive = await canonicalPath(path);
+    const liveIdentity = await identityOf(path);
+    if (
+      isWithin(canonicalTarget, canonicalLive) ||
+      (liveIdentity !== undefined && targetChain.includes(liveIdentity))
+    ) {
+      return `it is, or is inside, the data directory in use (${path})`;
+    }
+    if (
+      isWithin(canonicalLive, canonicalTarget) ||
+      (targetIdentity !== undefined && (await identityChain(path)).includes(targetIdentity))
+    ) {
+      return `it contains the data directory in use (${path})`;
+    }
+  }
+  return undefined;
+};
+
+/** The directories from `path` up to (not including) its nearest existing ancestor, top first. */
+const missingDirectories = async (path: string) => {
+  const chain = selfAndAncestors(path);
+  for (const [index, ancestor] of chain.entries()) {
+    const present = await lstat(ancestor).then(
+      () => true,
+      () => false,
+    );
+    if (present) return { missing: chain.slice(0, index).toReversed(), existingAncestor: ancestor };
+  }
+  return { missing: chain.slice(0, -1).toReversed(), existingAncestor: chain.at(-1)! };
+};
+
+const supportsZstdDecompress = typeof zlib.createZstdDecompress === "function";
+
+export interface RestoreResult {
+  /** The restored database file. */
+  readonly path: string;
+  /** The data directory to start Ryco on (`--base-dir`). */
+  readonly baseDir: string;
+  readonly format: BackupFileFormat;
+  readonly schema: number;
+  readonly supportedSchema: number;
+  readonly opensWithThisBuild: boolean;
+  readonly check: "quick_check" | "integrity_check";
+  readonly bytes: number;
+  /** Not errors: what the person restoring should know (another branch, a newer schema, a failed flush). */
+  readonly warnings: ReadonlyArray<string>;
+  readonly ms: number;
+}
+
+/**
+ * `ryco db restore`: writes the database in `file` (plain, zstd or gzip, by its magic bytes) to
+ * `target.dbPath` in a new or empty data directory, after checking it. Everything is validated
+ * before anything is created; the live data directory is never written; a failure removes what
+ * this call created.
+ */
+export const restoreDatabaseBackup = Effect.fn("restoreDatabaseBackup")(function* (input: {
+  readonly file: string;
+  /** The new data directory and the database path inside it (`<baseDir>/userdata/state.sqlite`). */
+  readonly target: { readonly baseDir: string; readonly dbPath: string };
+  /** The data directory in use, which a restore never touches. */
+  readonly live: { readonly baseDir: string; readonly stateDir: string; readonly dbPath: string };
+  readonly openSqlite: OpenSqlite;
+  /** `integrity_check` instead of `quick_check` (much slower on large databases). */
+  readonly fullCheck?: boolean | undefined;
+}) {
+  const env = yield* BackupEnvironment;
+  const startedAt = performance.now();
+  const file = resolve(input.file);
+  const targetDir = resolve(input.target.baseDir);
+  const targetDb = resolve(input.target.dbPath);
+  const ioError = Effect.mapError(asCommandError);
+
+  // 1. The input.
+  const info = yield* io("stat", file, () => stat(file)).pipe(Effect.option);
+  if (Option.isNone(info) || !info.value.isFile()) {
+    return yield* commandError("not-a-file", `${file} is not a file.`);
+  }
+  const liveDb = yield* io("resolve", input.live.dbPath, () =>
+    canonicalPath(input.live.dbPath),
+  ).pipe(ioError);
+  const canonicalFile = yield* io("resolve", file, () => canonicalPath(file)).pipe(ioError);
+  // By device and inode too: a hard link to the database in use has a path of its own.
+  const [fileIdentity, liveIdentity] = yield* Effect.promise(() =>
+    Promise.all([identityOf(file), identityOf(input.live.dbPath)]),
+  );
+  const why =
+    comparablePath(canonicalFile) === comparablePath(liveDb) ||
+    (liveIdentity !== undefined && fileIdentity === liveIdentity)
+      ? "is the database in use"
+      : (yield* fileSize(`${file}-wal`).pipe(ioError)) > 0
+        ? "has a write-ahead log next to it, so a database is using it"
+        : undefined;
+  if (why !== undefined) {
+    return yield* commandError(
+      "live-database",
+      `${file} ${why}, not a backup. Back it up with \`ryco db backup\` and restore that backup.`,
+    );
+  }
+  const format = yield* detectBackupCodec(file).pipe(ioError);
+  if (format === undefined) {
+    return yield* commandError(
+      "unknown-format",
+      `${file} is not a database backup: it is neither a SQLite file nor zstd or gzip.`,
+    );
+  }
+  if (format === "zst" && !supportsZstdDecompress) {
+    return yield* commandError(
+      "unsupported-codec",
+      `This runtime cannot read zstd. Decompress it with \`zstd -d ${file}\` and restore the .sqlite file.`,
+    );
+  }
+
+  // 2. The target: outside the data directory in use, new or empty.
+  const unsafe = yield* io("resolve", targetDir, () =>
+    unsafeRestoreTarget(targetDir, [
+      input.live.baseDir,
+      input.live.stateDir,
+      dirname(input.live.dbPath),
+    ]),
+  ).pipe(ioError);
+  if (unsafe !== undefined) {
+    return yield* commandError(
+      "unsafe-target",
+      `Refusing to restore into ${targetDir}: ${unsafe}. Restore into a new directory outside it.`,
+    );
+  }
+  const targetEntries = yield* io("list", targetDir, async () => {
+    try {
+      const entry = await stat(targetDir);
+      return entry.isDirectory() ? await readdir(targetDir) : null;
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return [];
+      throw error;
+    }
+  }).pipe(ioError);
+  if (targetEntries === null || targetEntries.length > 0) {
+    return yield* commandError(
+      "target-not-empty",
+      `${targetDir} ${targetEntries === null ? "is not a directory" : "is not empty"}. Restore into a new or empty directory.`,
+    );
+  }
+  for (const sidecar of ["", "-wal", "-shm"]) {
+    if (yield* exists(`${targetDb}${sidecar}`).pipe(ioError)) {
+      return yield* commandError(
+        "target-not-empty",
+        `${targetDb}${sidecar} already exists. Restore into a new or empty directory.`,
+      );
+    }
+  }
+
+  // 3. Space for the restored database: a plain file's size, or the size a compressed backup's
+  // SQLite header states. The target may share a volume with the database in use, and filling
+  // it would make that database's writes fail. Without a readable header, the compressed size
+  // is a lower bound.
+  const { missing, existingAncestor } = yield* io("resolve", targetDb, () =>
+    missingDirectories(dirname(targetDb)),
+  ).pipe(ioError);
+  const restoredBytes =
+    format === "sqlite" ? info.value.size : yield* compressedDatabaseBytes(file, format);
+  const neededBytes = restoredBytes ?? info.value.size;
+  const space = yield* Effect.promise(() => env.statfs(existingAncestor).catch(() => undefined));
+  if (space !== undefined && space.bavail * space.bsize < neededBytes) {
+    return yield* commandError(
+      "insufficient-space",
+      `Not enough free space in ${existingAncestor}: ${formatBytes(space.bavail * space.bsize)} free, ${restoredBytes === undefined ? "at least " : ""}${formatBytes(neededBytes)} needed for the restored database.`,
+    );
+  }
+
+  // 4. Write, check and publish; undo everything on failure.
+  const created: string[] = [];
+  const partial = join(dirname(targetDb), `.${basename(targetDb)}.${env.pid}.partial`);
+  const undo = Effect.gen(function* () {
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      yield* Effect.ignore(removeFile(`${partial}${suffix}`));
+    }
+    for (const directory of created.toReversed()) {
+      yield* Effect.promise(() => rmdir(directory).catch(() => undefined));
+    }
+  });
+  const fullCheck = input.fullCheck === true;
+  return yield* Effect.gen(function* () {
+    for (const directory of missing) {
+      yield* io("mkdir", directory, () => mkdir(directory, { mode: 0o700 }));
+      created.push(directory);
+    }
+    yield* format === "sqlite"
+      ? io("copy", file, () => copyFile(file, partial, constants.COPYFILE_EXCL))
+      : io("decompress", file, (signal) =>
+          pipeline(
+            createReadStream(file, { highWaterMark: COMPRESS_CHUNK_BYTES }),
+            format === "zst" ? zlib.createZstdDecompress() : zlib.createGunzip(),
+            createWriteStream(partial, { flags: "wx", mode: 0o600 }),
+            { signal },
+          ),
+        ).pipe(
+          // zlib reports a bad checksum or a truncated stream as Z_* / ZSTD_* errors.
+          Effect.mapError((error) =>
+            /^(?:Z_|ZSTD_)/.test(String(errorCode(error.cause) ?? ""))
+              ? commandError(
+                  "damaged",
+                  `${file} is damaged or incomplete: ${errorText(error.cause)}. Nothing was restored.`,
+                  error,
+                )
+              : asCommandError(error),
+          ),
+        );
+    yield* restrictToOwner(partial);
+    yield* io("sync", partial, () => syncFile(partial));
+
+    const pragma = fullCheck ? "integrity_check" : "quick_check";
+    const shape = yield* withReadConnection(
+      input.openSqlite,
+      partial,
+      Effect.gen(function* () {
+        const run = clientRunner(yield* SqlClient.SqlClient);
+        const problems = checkProblems(yield* runCheck(run, pragma));
+        const ledger = (yield* hasLedgerTable(run))
+          ? (yield* run(
+              "SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id",
+            )).map((row) => ({ id: Number(row.migration_id), name: String(row.name) }))
+          : null;
+        return { problems, ledger };
+      }),
+    ).pipe(
+      Effect.catchTag("SqlError", (error) =>
+        Effect.fail(
+          commandError(
+            "damaged",
+            `${file} does not hold a readable SQLite database: ${error.message}. Nothing was restored.`,
+            error,
+          ),
+        ),
+      ),
+    );
+    if (shape.problems !== undefined) {
+      return yield* commandError(
+        "damaged",
+        `The database in ${file} fails ${pragma} (${shape.problems}). Nothing was restored.`,
+      );
+    }
+    if (shape.ledger === null) {
+      return yield* commandError(
+        "not-a-ryco-database",
+        `${file} holds a SQLite database without a Ryco migration ledger. Nothing was restored.`,
+      );
+    }
+    for (const sidecar of ["-wal", "-shm", "-journal"]) {
+      yield* removeFile(`${partial}${sidecar}`);
+    }
+
+    const schema = shape.ledger.reduce((latest, row) => Math.max(latest, row.id), 0);
+    const known = new Map<number, string>(migrationEntries.map(([id, name]) => [id, name]));
+    const foreign = shape.ledger.filter(
+      (row) => row.id <= SUPPORTED_MIGRATION_ID && known.get(row.id) !== row.name,
+    );
+    const warnings = [
+      ...(foreign.length === 0
+        ? []
+        : [
+            `A different branch or build of Ryco wrote this database: ${foreign
+              .slice(0, 3)
+              .map(
+                (row) =>
+                  `migration ${row.id} is ${row.name} there but ${known.get(row.id) ?? "unknown"} here`,
+              )
+              .join(
+                "; ",
+              )}${foreign.length > 3 ? ` (and ${foreign.length - 3} more)` : ""}. Open it with the build that wrote it.`,
+          ]),
+      ...(schema > SUPPORTED_MIGRATION_ID
+        ? [
+            `It has schema ${schema}, newer than this build supports (${SUPPORTED_MIGRATION_ID}), so this build will not open it. Start a Ryco build that supports schema ${schema} on it.`,
+          ]
+        : []),
+    ];
+
+    for (const sidecar of ["-wal", "-shm"]) {
+      if (yield* exists(`${targetDb}${sidecar}`)) {
+        return yield* commandError(
+          "target-not-empty",
+          `${targetDb}${sidecar} appeared while restoring. Nothing was restored.`,
+        );
+      }
+    }
+    const bytes = yield* fileSize(partial);
+    const published = yield* publishWithoutReplacing(partial, [targetDb]);
+    if (published === undefined) {
+      return yield* commandError(
+        "target-not-empty",
+        `${targetDb} appeared while restoring. Nothing was restored.`,
+      );
+    }
+    // Restored once it has its name, so what follows only warns.
+    yield* io("sync", dirname(targetDb), () => syncDirectory(dirname(targetDb))).pipe(
+      warnInstead(warnings, `Could not flush ${dirname(targetDb)} to disk`),
+    );
+    if (created.length > 0) {
+      const parent = dirname(created[0]!);
+      yield* io("sync", parent, () => syncDirectory(parent)).pipe(Effect.ignore);
+    }
+    return {
+      path: targetDb,
+      baseDir: targetDir,
+      format,
+      schema,
+      supportedSchema: SUPPORTED_MIGRATION_ID,
+      opensWithThisBuild: schema <= SUPPORTED_MIGRATION_ID,
+      check: pragma,
+      bytes,
+      warnings,
+      ms: Math.round(performance.now() - startedAt),
+    } satisfies RestoreResult;
+  }).pipe(
+    Effect.catchTag("DatabaseBackupError", (error) => Effect.fail(asCommandError(error))),
+    Effect.onExit((exit) => (exit._tag === "Success" ? Effect.void : undo)),
+  );
+});

@@ -883,7 +883,12 @@ export const describeSchemaTooNew = (input: {
   `Database schema ${input.latest} is newer than this binary supports (${input.supported}). ` +
   `Use a Ryco build that supports schema ${input.latest}. To keep using this build, restore a ` +
   `backup taken before the upgrade into a separate data directory` +
-  (input.backupsDir ? `; backups are in ${input.backupsDir}.` : ".");
+  (input.backupsDir
+    ? `; backups are in ${input.backupsDir}. \`ryco db list\` shows them`
+    : `. \`ryco db list\` shows the backups`) +
+  // Without them, the command looks in the default data directory, not this server's.
+  ` (pass the server's \`--base-dir\` or \`--dev-url\`, if it uses one), and ` +
+  `\`ryco db restore <file> --into <new directory>\` restores one without touching this database.`;
 
 /**
  * Run all pending migrations.
