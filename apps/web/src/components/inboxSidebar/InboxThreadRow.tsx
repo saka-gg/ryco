@@ -585,6 +585,8 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             <MenuPopup
               align="end"
               aria-label={menuLabel}
+              // A selection menu is named by its count, not by this row's trigger.
+              {...(menuLabel ? { "aria-labelledby": undefined } : {})}
               className="min-w-56"
               data-thread-selection-safe
             >

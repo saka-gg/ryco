@@ -1287,8 +1287,7 @@ export default function Sidebar() {
   useEffect(() => {
     const onMouseDown = (event: globalThis.MouseEvent) => {
       if (selectedThreadCount === 0) return;
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (!shouldClearThreadSelectionOnMouseDown(target)) return;
+      if (!shouldClearThreadSelectionOnMouseDown(event.target)) return;
       clearSelection();
     };
 

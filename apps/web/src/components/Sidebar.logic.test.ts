@@ -390,6 +390,11 @@ describe("shouldClearThreadSelectionOnMouseDown", () => {
 
     expect(shouldClearThreadSelectionOnMouseDown(unrelated)).toBe(true);
   });
+
+  it("clears selection for presses on no element", () => {
+    expect(shouldClearThreadSelectionOnMouseDown(null)).toBe(true);
+    expect(shouldClearThreadSelectionOnMouseDown({} as EventTarget)).toBe(true);
+  });
 });
 
 describe("resolveThreadSelectionClick", () => {

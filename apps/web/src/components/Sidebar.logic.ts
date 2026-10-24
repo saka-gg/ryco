@@ -312,9 +312,14 @@ export function isCompletionUnseen(
   return completedAt > lastVisitedAt;
 }
 
-export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
-  if (target === null) return true;
-  return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
+/**
+ * Whether a mousedown on `target` clears the thread selection: presses on
+ * thread rows and their menus keep it. Takes the raw event target, because a
+ * press on a row's icon lands on an SVG element, which is no HTMLElement.
+ */
+export function shouldClearThreadSelectionOnMouseDown(target: EventTarget | null): boolean {
+  if (target === null || !("closest" in target)) return true;
+  return !(target as Element).closest(THREAD_SELECTION_SAFE_SELECTOR);
 }
 
 /**

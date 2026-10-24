@@ -10,6 +10,7 @@ import { render } from "vitest-browser-react";
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { isMacPlatform } from "../../lib/utils";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
+import { shouldClearThreadSelectionOnMouseDown } from "../Sidebar.logic";
 import { useTierOverrideStore } from "../../tierOverrideStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { useInboxFilterStore } from "./inboxFilterStore";
@@ -224,6 +225,27 @@ describe("Inbox row selection", () => {
       expect.any(String),
     );
     expect(selectedRows()).toEqual([]);
+  });
+
+  it("opens the selection menu from a selected row's actions button", async () => {
+    // As the sidebar does: a press outside rows and their menus clears the selection.
+    const clearOutside = (event: MouseEvent) => {
+      if (shouldClearThreadSelectionOnMouseDown(event.target)) {
+        useThreadSelectionStore.getState().clearSelection();
+      }
+    };
+    window.addEventListener("mousedown", clearOutside);
+    try {
+      await mountInbox();
+      await select("r1", "r2");
+      // The press lands on the button's icon, an SVG element.
+      await page.getByRole("button", { name: "Thread actions for Task r2" }).click();
+      await expect.element(page.getByRole("menu", { name: "2 selected threads" })).toBeVisible();
+      await expect.element(menuItem("Settle (2)")).toBeVisible();
+      expect(selectedRows()).toEqual(["Task r1", "Task r2"]);
+    } finally {
+      window.removeEventListener("mousedown", clearOutside);
+    }
   });
 
   it("deletes only the rows whose machine takes changes and reports the others", async () => {
