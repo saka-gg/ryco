@@ -184,6 +184,9 @@ describe("server boot import boundaries", () => {
         /^apps\/server\/src\/sourceControl\/(?:GitHubCli|GitLabCli|BitbucketApi|AzureDevOpsCli|gitHubPullRequests|gitLabMergeRequests|bitbucketPullRequests|azureDevOpsPullRequests)\.ts$/u,
       ),
     ).toEqual([]);
+    // Database backups load once a migration is pending or their background pass runs; startup
+    // only needs databaseBackupPolicy.ts.
+    expect(reached(/^apps\/server\/src\/persistence\/databaseBackups\.ts$/u)).toEqual([]);
   });
 });
 

@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
+import { syncDirectory } from "../fsDurability.ts";
+
 export type ProtectedSecretStoreBackend = "bun-secrets" | "keytar" | "permissioned-file";
 
 export type ProtectedSecretStoreErrorCode =
@@ -217,15 +219,6 @@ async function recoverInstalledSecret(path: string): Promise<void> {
       await syncDirectory(dirname(path));
       return;
     }
-  }
-}
-
-async function syncDirectory(path: string): Promise<void> {
-  const directory = await open(path, constants.O_RDONLY);
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
   }
 }
 
