@@ -7,6 +7,18 @@ describe("LRUCache", () => {
     expect(cache.get("missing")).toBeNull();
   });
 
+  it("counts its entries", () => {
+    const cache = new LRUCache<string>(2, 1_000);
+    expect(cache.size).toBe(0);
+    cache.set("a", "A", 10);
+    cache.set("a", "A2", 10);
+    cache.set("b", "B", 10);
+    cache.set("c", "C", 10);
+    expect(cache.size).toBe(2);
+    cache.delete("c");
+    expect(cache.size).toBe(1);
+  });
+
   it("evicts oldest by max entries", () => {
     const cache = new LRUCache<string>(2, 1_000);
     cache.set("a", "A", 10);
