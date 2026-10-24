@@ -1,4 +1,5 @@
-import { getAppKeybindings, replaceAppKeybindings, resetAppKeybindings } from "../appKeybindings";
+import { getAppKeybindings, resetAppKeybindings } from "../appKeybindings";
+import { replaceAppKeybindings } from "../appKeybindingsEditing";
 import { serializeShortcut } from "../lib/shortcutCapture";
 import { serializeWhenAst } from "../lib/keybindingWhenPresets";
 import { useChatPanesStore } from "../chatPanesStore";

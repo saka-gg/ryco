@@ -23,6 +23,11 @@ successfully saved bindings. Corrupt or unreadable documents are retained and su
 **Retry loading** retries the read; **Replace local bindings with defaults** explicitly
 replaces the local document. Ordinary edits cannot overwrite an unreadable document.
 
+Every Ryco version in a browser profile or desktop installation shares this document, so it is
+read one entry at a time. Entries this version cannot use, such as shortcuts for commands added
+by a newer version, are ignored here and written back unchanged when you save. Rebinding or
+unbinding a command here replaces its unusable entries; **Restore defaults** removes them all.
+
 ## Import existing node bindings
 
 There is no automatic adoption of a node's bindings. Existing files remain available at
@@ -40,7 +45,9 @@ script and project IDs on different nodes cannot collide. Only the active projec
 bindings participate in shortcut resolution; execution uses that project's node API.
 
 Legacy RPC mutation methods remain in the wire protocol for compatibility but reject writes
-with a message directing older clients to App preferences.
+with a message directing older clients to App preferences. Nodes still send their frozen
+defaults and legacy file to older clients, limited to the commands nodes served when app defaults
+moved into the app. A legacy rule for a newer command is reported as an invalid entry instead.
 
 A legacy file is a JSON array of rules:
 
@@ -55,47 +62,12 @@ See [`packages/contracts/src/keybindings.ts`](packages/contracts/src/keybindings
 
 ## Defaults
 
-```json
-[
-  { "key": "mod+j", "command": "terminal.toggle" },
-  { "key": "mod+d", "command": "terminal.split", "when": "terminalFocus" },
-  { "key": "mod+n", "command": "terminal.new", "when": "terminalFocus" },
-  { "key": "mod+w", "command": "terminal.close", "when": "terminalFocus" },
-  { "key": "mod+p", "command": "workspace.files", "when": "!terminalFocus" },
-  { "key": "ctrl+shift+g", "command": "workspace.review", "when": "!terminalFocus" },
-  { "key": "ctrl+`", "command": "workspace.terminal", "when": "!terminalFocus" },
-  { "key": "mod+d", "command": "diff.toggle", "when": "!terminalFocus" },
-  { "key": "mod+k", "command": "commandPalette.toggle", "when": "!terminalFocus" },
-  { "key": "mod+n", "command": "chat.new", "when": "!terminalFocus" },
-  { "key": "mod+shift+o", "command": "chat.new", "when": "!terminalFocus" },
-  { "key": "mod+shift+n", "command": "chat.newLocal", "when": "!terminalFocus" },
-  { "key": "mod+s", "command": "composer.stash", "when": "!terminalFocus" },
-  { "key": "mod+shift+m", "command": "modelPicker.toggle", "when": "!terminalFocus" },
-  { "key": "mod+o", "command": "editor.openFavorite" },
-  { "key": "mod+shift+[", "command": "thread.previous" },
-  { "key": "mod+shift+]", "command": "thread.next" },
-  { "key": "mod+1", "command": "thread.jump.1" },
-  { "key": "mod+2", "command": "thread.jump.2" },
-  { "key": "mod+3", "command": "thread.jump.3" },
-  { "key": "mod+4", "command": "thread.jump.4" },
-  { "key": "mod+5", "command": "thread.jump.5" },
-  { "key": "mod+6", "command": "thread.jump.6" },
-  { "key": "mod+7", "command": "thread.jump.7" },
-  { "key": "mod+8", "command": "thread.jump.8" },
-  { "key": "mod+9", "command": "thread.jump.9" },
-  { "key": "mod+1", "command": "modelPicker.jump.1", "when": "modelPickerOpen" },
-  { "key": "mod+2", "command": "modelPicker.jump.2", "when": "modelPickerOpen" },
-  { "key": "mod+3", "command": "modelPicker.jump.3", "when": "modelPickerOpen" },
-  { "key": "mod+4", "command": "modelPicker.jump.4", "when": "modelPickerOpen" },
-  { "key": "mod+5", "command": "modelPicker.jump.5", "when": "modelPickerOpen" },
-  { "key": "mod+6", "command": "modelPicker.jump.6", "when": "modelPickerOpen" },
-  { "key": "mod+7", "command": "modelPicker.jump.7", "when": "modelPickerOpen" },
-  { "key": "mod+8", "command": "modelPicker.jump.8", "when": "modelPickerOpen" },
-  { "key": "mod+9", "command": "modelPicker.jump.9", "when": "modelPickerOpen" }
-]
-```
-
-For most up to date defaults, see [`DEFAULT_KEYBINDINGS` in `packages/shared/src/keybindings.ts`](packages/shared/src/keybindings.ts)
+**App preferences → Keybindings** lists every command with its current shortcut and marks the ones
+you changed. The defaults come from two lists: the frozen node list,
+[`NODE_DEFAULT_KEYBINDINGS`](packages/shared/src/keybindings.ts), and the app's own list,
+[`APP_DEFAULT_KEYBINDINGS`](packages/client-runtime/src/state/settings/appKeybindingDefaults.ts).
+The app list starts from the node list, may replace some of its rules, and adds the defaults of
+newer commands. Nodes only ever send the node list.
 
 ## Configuration
 
@@ -111,24 +83,75 @@ Invalid imports are rejected without changing local preferences. The same shared
 
 ### Available Commands
 
+#### Terminal
+
 - `terminal.toggle`: open/close terminal drawer
 - `terminal.split`: split terminal (in focused terminal context by default)
 - `terminal.new`: create new terminal (in focused terminal context by default)
 - `terminal.close`: close/kill the focused terminal (in focused terminal context by default)
+
+#### Workspace and diff
+
 - `workspace.files`: open the thread workspace files view
 - `workspace.review`: open the thread review/diff view
 - `workspace.terminal`: open the thread terminal view
+- `workspace.simulator`: open the thread iOS Simulator view
 - `diff.toggle`: toggle the diff panel
+
+#### Palette and sidebar
+
 - `commandPalette.toggle`: open or close the global command palette
+- `sidebar.showInbox` / `sidebar.showProjects`: switch the sidebar to Inbox or Projects
+
+#### Chat and composer
+
 - `chat.new`: create a new chat thread preserving the active thread's branch/worktree state
 - `chat.newLocal`: create a new chat thread for the active project in a new environment (local/worktree determined by app settings (default `local`))
-- `chat.newWithoutProject`: start a chat without a project, in its own Ryco-managed folder (see [docs/chats.md](docs/chats.md)). It has no default key; bind one, for example `{ "key": "mod+alt+n", "command": "chat.newWithoutProject", "when": "!terminalFocus" }`. It does nothing when the node does not offer chats, and the key goes to the focused control instead.
+- `chat.newWithoutProject`: start a chat without a project, in its own Ryco-managed folder (see [docs/chats.md](docs/chats.md)). It defaults to `mod+alt+n` outside the terminal. The default lives in the app, not on the node, so older apps have no key for it. It does nothing when the node does not offer chats, and the key goes to the focused control instead.
 - `composer.stash`: stash prompt text and images, or open the stash picker when the composer is empty
+
+#### Editor
+
 - `editor.openFavorite`: open current project/worktree in the last-used editor
+
+#### Model picker
+
 - `modelPicker.toggle`: open or close the model picker
 - `modelPicker.jump.1` through `modelPicker.jump.9`: pick a visible model by position while the model picker is open
+
+#### Threads
+
+- `thread.find`: search the messages of the current thread
+- `thread.pinToggle`: pin or unpin the current thread
 - `thread.previous` / `thread.next`: navigate between threads
 - `thread.jump.1` through `thread.jump.9`: jump to a visible thread by position
+
+#### Split view
+
+- `pane.split`: pick a thread to open in split view
+- `pane.close`: close the focused pane
+- `pane.focusNext` / `pane.focusPrevious`: focus the next or previous pane
+
+With a single pane, `pane.close`, `pane.focusNext` and `pane.focusPrevious` leave the key to the
+focused control.
+
+#### Pages
+
+- `pullRequests.open`: open the pull requests page (no default key)
+- `projects.open`: open the projects page (no default key)
+
+<!-- File search commands -->
+
+<!-- Thread lifecycle commands -->
+
+<!-- Attention commands -->
+
+<!-- History and navigation commands -->
+
+<!-- View and tab commands -->
+
+#### Scripts
+
 - `projectScript.{environment}/{project}/{id}.run`: a locally assigned script shortcut. The app constructs these scoped IDs; legacy `script.{id}.run` rules are supported only through explicit import.
 
 ### Key Syntax
@@ -152,6 +175,14 @@ With `alt`, some layouts change the character a letter key types. On macOS, for 
 Option+N is a dead key and Option+P types `π`. In that case the binding matches the physical
 letter key, so a `mod+alt+n` binding works as ⌘⌥N. Layouts that still report the plain letter while Alt is
 held match by that letter.
+
+On Windows and Linux, AltGr types characters on many layouts (Polish AltGr+A types `ą`, German
+AltGr+8 types `[`), and Windows reports it as Ctrl+Alt. In a text field or the terminal those keys
+keep typing: while Ctrl is held, the physical letter stands in only for the letters of a non-Latin
+layout (Russian Ctrl+Alt+P reports `з` and matches `mod+alt+p`), and a symbol typed with AltGr
+never matches a binding when the browser reports AltGr. Elsewhere they type nothing, so Ctrl+Alt
+shortcuts match by the physical key on every layout (US-International Ctrl+Alt+P reports `ö` and
+matches `mod+alt+p`).
 
 ### `when` Conditions
 
@@ -197,3 +228,22 @@ Unknown condition keys evaluate to `false`.
 - Rules are evaluated in array order.
 - For a key event, the last rule where both `key` matches and `when` evaluates to `true` wins.
 - That means precedence is across commands, not only within the same command.
+
+## Adding a command
+
+A new command takes four places. Each has one group or section per feature, so features built in
+parallel never edit the same lines:
+
+1. The command, in its group in [`packages/contracts/src/keybindings.ts`](packages/contracts/src/keybindings.ts).
+2. Its default key, if it has one, in its group in
+   [`appKeybindingDefaults.ts`](packages/client-runtime/src/state/settings/appKeybindingDefaults.ts).
+   A test fails when two defaults share a key and `when`.
+3. Its title, in its group in [`apps/web/src/lib/keybindingCategories.ts`](apps/web/src/lib/keybindingCategories.ts).
+   Typecheck fails when a command has no title.
+4. Its entry and default key in **Available Commands** above. A feature section replaces its
+   comment there.
+
+Never add a command to `NODE_DEFAULT_KEYBINDINGS` or to the commands nodes serve in
+`apps/server/src/keybindings.ts`. Nodes send those to older apps, which cannot read a command they
+don't know. To move a node default's key to a new command, list the node rule in
+`SUPERSEDED_NODE_DEFAULT_KEYBINDINGS`; nodes keep sending it unchanged.

@@ -17,6 +17,7 @@ export interface ShortcutEventLike extends ShortcutModifierStateLike {
   type?: string;
   code?: string;
   key: string;
+  getModifierState?(key: string): boolean;
 }
 
 const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
@@ -37,6 +38,10 @@ const EVENT_CODE_KEY_ALIASES: Readonly<Record<string, readonly string[]>> = {
 
 const LETTER_EVENT_CODE = /^Key([A-Z])$/;
 const PLAIN_LETTER_KEY = /^[a-z]$/i;
+// A letter of a non-Latin layout (Russian Ctrl+Alt+P reports "з"), never one AltGr types on a
+// Latin layout (Polish "ą") or a shared symbol letter (German AltGr+M types "µ").
+const NON_LATIN_LETTER_KEY = /^(?![\p{Script=Latin}\p{Script=Common}])\p{L}$/u;
+const LETTER_OR_DIGIT_KEY = /^(?:\p{L}|[0-9])$/u;
 
 export function normalizeShortcutEventKey(key: string): string {
   const normalized = key.toLowerCase();
@@ -50,16 +55,43 @@ export function normalizeShortcutEventKey(key: string): string {
  * `alt+<letter>` binding. Fall back to the physical key only while Alt is held
  * and the layout did not already produce a plain letter, so every layout that
  * does report letters (Windows/Linux Ctrl+Alt, non-QWERTY) keeps its own key.
+ * Windows reports AltGr as Ctrl+Alt, and in a text field AltGr types letters
+ * such as Polish "ą" on the A key, so there (`altGraphTypes`) with Ctrl held
+ * the fallback applies only to the letters of a non-Latin layout, and never
+ * while AltGr is reported.
  */
-function resolveAltTransformedLetter(event: ShortcutEventLike): string | null {
+function resolveAltTransformedLetter(
+  event: ShortcutEventLike,
+  altGraphTypes: boolean,
+): string | null {
   if (!event.altKey || !event.code || PLAIN_LETTER_KEY.test(event.key)) return null;
+  if (
+    altGraphTypes &&
+    event.ctrlKey &&
+    (event.getModifierState?.("AltGraph") === true || !NON_LATIN_LETTER_KEY.test(event.key))
+  ) {
+    return null;
+  }
   const match = LETTER_EVENT_CODE.exec(event.code);
   return match?.[1] ? match[1].toLowerCase() : null;
 }
 
-function resolveShortcutEventKeys(event: ShortcutEventLike): Set<string> {
+/**
+ * In a text field, a symbol typed with AltGr (German AltGr+8 is "[") is text,
+ * not a shortcut, wherever the browser reports AltGr. A letter or digit still
+ * matches by its physical key (German Ctrl+Alt+Ü is the [ key).
+ */
+function isAltGraphCharacter(event: ShortcutEventLike): boolean {
+  return (
+    event.getModifierState?.("AltGraph") === true &&
+    event.key.length === 1 &&
+    !LETTER_OR_DIGIT_KEY.test(event.key)
+  );
+}
+
+function resolveShortcutEventKeys(event: ShortcutEventLike, altGraphTypes: boolean): Set<string> {
   const keys = new Set([normalizeShortcutEventKey(event.key)]);
-  const altLetter = resolveAltTransformedLetter(event);
+  const altLetter = resolveAltTransformedLetter(event, altGraphTypes);
   if (altLetter) keys.add(altLetter);
   const aliases = event.code ? EVENT_CODE_KEY_ALIASES[event.code] : undefined;
   if (!aliases) return keys;
@@ -86,11 +118,24 @@ export function matchesKeybindingModifiers(
   );
 }
 
+export interface KeybindingMatchOptions {
+  /**
+   * The keydown reached a control that takes text, where AltGr types
+   * characters. Elsewhere it types nothing, so Ctrl+Alt+letter matches by its
+   * physical key on every layout (US-International Ctrl+Alt+P reports "ö").
+   */
+  readonly editableTarget?: boolean;
+}
+
 export function matchesKeybindingShortcut(
   event: ShortcutEventLike,
   shortcut: KeybindingShortcut,
   useMetaForMod: boolean,
+  options?: KeybindingMatchOptions,
 ): boolean {
   if (!matchesKeybindingModifiers(event, shortcut, useMetaForMod)) return false;
-  return resolveShortcutEventKeys(event).has(shortcut.key);
+  // macOS has no AltGr; Option belongs to ⌘⌥ chords there.
+  const altGraphTypes = !useMetaForMod && options?.editableTarget === true;
+  if (altGraphTypes && isAltGraphCharacter(event)) return false;
+  return resolveShortcutEventKeys(event, altGraphTypes).has(shortcut.key);
 }

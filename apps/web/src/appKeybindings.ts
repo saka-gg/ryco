@@ -1,8 +1,6 @@
 import type { KeybindingRule } from "@ryco/contracts";
 import {
-  appKeybindingsFromRules,
   createAppKeybindingsStore,
-  importAppKeybindings,
   keybindingsForProject,
   type ScriptShortcutScope,
 } from "@ryco/client-runtime/state/settings";
@@ -34,6 +32,7 @@ const subscribe = (listener: () => void) => {
 /** Non-React consumers share the snapshot, with no executable rules until hydration succeeds. */
 export const hydrateAppKeybindings = store.hydrate;
 export const retryAppKeybindings = store.reload;
+export const updateAppKeybindingsPreferences = store.update;
 export function getAppKeybindings(scope: ScriptShortcutScope | null = null) {
   return keybindingsForProject(store.getSnapshot().bindings, scope);
 }
@@ -56,15 +55,8 @@ export function useAppKeybindings(scope: ScriptShortcutScope | null = null) {
     [bindings, environmentId, projectId],
   );
 }
-export function replaceAppKeybindings(rules: readonly KeybindingRule[]): Promise<void> {
-  const next = appKeybindingsFromRules(rules);
-  return store.update(() => next);
-}
 export function resetAppKeybindings(): Promise<void> {
   return store.reset();
-}
-export function importLegacyKeybindings(rules: readonly KeybindingRule[]): Promise<void> {
-  return store.update((current) => importAppKeybindings(current, rules));
 }
 export function updateAppKeybinding(
   command: KeybindingRule["command"],
