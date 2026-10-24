@@ -38,7 +38,7 @@ describe("saving the editor over saved preferences", () => {
   // As another version may save them: a rule that matches this version's default, and an
   // unbinding of a command that has no default here.
   const saved: AppKeybindings = {
-    rules: [{ key: "mod+p", command: "workspace.files", when: "!terminalFocus" }],
+    rules: [{ key: "ctrl+shift+g", command: "workspace.review", when: "!terminalFocus" }],
     disabledCommands: ["projects.open"],
   };
   const resolvedShortcuts = (preferences: AppKeybindings) =>
@@ -64,13 +64,13 @@ describe("saving the editor over saved preferences", () => {
   it("replaces the saved form of commands the user changed", () => {
     const snapshot = [
       ...APP_DEFAULT_KEYBINDINGS.map((rule) =>
-        rule.command === "workspace.files" ? { ...rule, key: "mod+shift+e" } : rule,
+        rule.command === "workspace.review" ? { ...rule, key: "mod+shift+r" } : rule,
       ),
       { key: "mod+alt+o", command: "projects.open" },
     ];
     expect(appKeybindingsFromEditor(saved, snapshot)).toEqual({
       rules: [
-        { key: "mod+shift+e", command: "workspace.files", when: "!terminalFocus" },
+        { key: "mod+shift+r", command: "workspace.review", when: "!terminalFocus" },
         { key: "mod+alt+o", command: "projects.open" },
       ],
       disabledCommands: [],

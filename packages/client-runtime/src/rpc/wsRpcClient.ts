@@ -147,6 +147,11 @@ export interface WsRpcClient {
     readonly readIcon: RpcUnaryMethod<typeof WS_METHODS.projectsReadIcon>;
     readonly readFileBinary: RpcUnaryMethod<typeof WS_METHODS.projectsReadFileBinary>;
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
+    /** Aborting `signal` withdraws the request; the node stops searching. */
+    readonly searchContent: (
+      input: RpcInput<typeof WS_METHODS.projectsSearchContent>,
+      options?: { readonly signal?: AbortSignal | undefined },
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.projectsSearchContent>>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
     readonly stageFileReference: RpcUnaryMethod<typeof WS_METHODS.projectsStageFileReference>;
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
@@ -613,6 +618,13 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsReadFileBinary](input)),
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
+      searchContent: (input, options) => {
+        const signal = options?.signal;
+        return transport.request(
+          (client) => client[WS_METHODS.projectsSearchContent](input),
+          signal === undefined ? undefined : { signal },
+        );
+      },
       writeFile: (input) =>
         transport.request((client) => client[WS_METHODS.projectsWriteFile](input)),
       stageFileReference: (input) =>
