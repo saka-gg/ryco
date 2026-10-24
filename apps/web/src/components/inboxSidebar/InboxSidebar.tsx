@@ -12,7 +12,10 @@ import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } f
 
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
+import { useIdleLazyComponentReady } from "../../lib/idleLazyComponent";
 import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib/perf/motion";
+import { preloadableLazy } from "../../lib/preloadableLazy";
+import { dispatchThreadSettlementBatch } from "../../threadLifecycleCommands";
 import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
 import { handleSidebarListScroll } from "../sidebar/sidebarFold";
 import { omnifieldListQuery } from "../sidebar/sidebarOmnifield.logic";
@@ -23,7 +26,7 @@ import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
-import { InboxSettleFinished } from "./InboxSettleFinished";
+import type { InboxSettleFinishedProps } from "./InboxSettleFinished";
 import {
   buildInboxSidebarModel,
   createInboxSidebarModelSharing,
@@ -34,6 +37,23 @@ import {
 import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
 import { useInboxRowSelection } from "./useInboxRowSelection";
+
+// Settle finished is optional and shown on hover, so its code loads in an idle
+// slot after the shell instead of with it.
+const LazyInboxSettleFinished = preloadableLazy(() =>
+  import("./InboxSettleFinished").then((module) => module.InboxSettleFinished),
+);
+
+/** Loads Settle finished's chunk now; once it has, Recent shows it on its first render. */
+export const preloadInboxSettleFinished = LazyInboxSettleFinished.preload;
+
+const settleFinishedThreads = (targets: readonly ScopedThreadRef[]) =>
+  dispatchThreadSettlementBatch(targets, true);
+
+function DeferredInboxSettleFinished(props: Omit<InboxSettleFinishedProps, "onSettle">) {
+  const ready = useIdleLazyComponentReady(LazyInboxSettleFinished, "Settle finished");
+  return ready ? <LazyInboxSettleFinished {...props} onSettle={settleFinishedThreads} /> : null;
+}
 
 export interface InboxSidebarProps {
   readonly threadActions?: InboxThreadActions | undefined;
@@ -327,7 +347,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
                           {section.rows.length}
                         </span>
                         {section.key === "recent" && !isPhone ? (
-                          <InboxSettleFinished
+                          <DeferredInboxSettleFinished
                             activeThreadKey={props.activeThreadKey}
                             rows={section.rows}
                           />

@@ -144,6 +144,9 @@ export function InboxSelectionMenuItems(props: {
   readonly snoozePresets: ReadonlyArray<InboxSnoozePreset>;
   readonly onRun: (request: InboxBulkRequest) => void;
 }) {
+  // It renders only in an open menu, fresh on each open, so memoizing it would
+  // only add code to the shell.
+  "use no memo";
   const { rows, actions, deleteThreads } = props.selection;
   const item = (
     action: Exclude<InboxBulkRequest["action"], "snooze">,

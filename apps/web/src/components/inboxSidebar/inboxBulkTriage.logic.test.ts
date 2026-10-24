@@ -2,12 +2,13 @@ import type { Project, SidebarThreadSummary } from "@ryco/client-runtime/state/t
 import { EnvironmentId, ProjectId, ProviderDriverKind, ThreadId, TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveInboxBulkActions, selectSettleFinishedRows } from "./inboxBulkTriage.logic";
+import { resolveInboxBulkActions } from "./inboxBulkTriage.logic";
 import {
   buildInboxSidebarSections,
   type InboxSidebarEnvironment,
   type InboxSidebarRow,
 } from "./inboxSidebarModel";
+import { selectSettleFinishedRows } from "./inboxSettleFinished.logic";
 
 const READY = EnvironmentId.make("ready");
 const VIEWER = EnvironmentId.make("viewer");

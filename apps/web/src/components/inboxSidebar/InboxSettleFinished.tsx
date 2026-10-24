@@ -1,23 +1,31 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type { ScopedThreadRef } from "@ryco/contracts";
 import { CheckIcon } from "lucide-react";
 import { useState } from "react";
 
-import { dispatchThreadSettlementBatch } from "../../threadLifecycleCommands";
 import { useUiStateStore } from "../../uiStateStore";
 import { isCompletionUnseen } from "../Sidebar.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { selectSettleFinishedRows } from "./inboxBulkTriage.logic";
+import { selectSettleFinishedRows } from "./inboxSettleFinished.logic";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
+
+// InboxSidebar loads this after the shell. Import only boot modules and modules
+// nothing else imports: a module that also sits in a shell chunk would move
+// into a chunk file of its own. That is why `onSettle` is passed in.
+
+export interface InboxSettleFinishedProps {
+  readonly rows: ReadonlyArray<InboxSidebarRow>;
+  readonly activeThreadKey: string | null;
+  /** Settles the threads with one Undo; the button stays disabled until it resolves. */
+  readonly onSettle: (targets: readonly ScopedThreadRef[]) => Promise<unknown>;
+}
 
 /**
  * The Recent header's "Settle finished": settles, with one Undo, every
  * finished thread there whose result the user has seen. Absent when none
  * qualifies. It reads the visits itself, so a visit renders only this button.
  */
-export function InboxSettleFinished(props: {
-  readonly rows: ReadonlyArray<InboxSidebarRow>;
-  readonly activeThreadKey: string | null;
-}) {
+export function InboxSettleFinished(props: InboxSettleFinishedProps) {
   const lastVisitedAtByKey = useUiStateStore((state) => state.threadLastVisitedAtById);
   const [pending, setPending] = useState(false);
   const finished = selectSettleFinishedRows(props.rows, {
@@ -29,10 +37,9 @@ export function InboxSettleFinished(props: {
   if (finished.length === 0) return null;
   const settle = () => {
     setPending(true);
-    void dispatchThreadSettlementBatch(
-      finished.map((row) => scopeThreadRef(row.environmentId, row.threadId)),
-      true,
-    ).finally(() => setPending(false));
+    void props
+      .onSettle(finished.map((row) => scopeThreadRef(row.environmentId, row.threadId)))
+      .finally(() => setPending(false));
   };
   return (
     <Tooltip>

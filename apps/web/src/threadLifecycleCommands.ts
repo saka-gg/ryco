@@ -1,4 +1,3 @@
-import type { SidebarUndoDescribe } from "@ryco/client-runtime/state/threads";
 import type {
   SidebarBatchCommand,
   SidebarUndoBatchResult,
@@ -13,7 +12,8 @@ import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { readEnvironmentApi } from "./environmentApi";
 import { newCommandId } from "./lib/utils";
 import { readLocalApi } from "./localApi";
-import { readSidebarUndoContext, sidebarUndo } from "./sidebarUndo";
+import { sidebarUndo } from "./sidebarUndo";
+import type { ThreadBatchAction } from "./threadLifecycleBatch";
 import type { SidebarThreadSummary } from "./types";
 
 // The lifecycle changes every surface makes (Inbox rows and menus, the project
@@ -85,81 +85,29 @@ export async function dispatchThreadSnooze(
   }
 }
 
-const threadCount = (count: number) => (count === 1 ? "1 thread" : `${count} threads`);
-
-/** Says that a bulk action left `count` threads alone: their machine takes no changes now. */
-export function presentSkippedThreads(count: number): void {
-  toastManager.add({
-    type: "warning",
-    title: `Skipped ${threadCount(count)}`,
-    description: `${count === 1 ? "Its" : "Their"} machine is not ready. Try again when it reconnects.`,
-  });
-}
-
-/** A bulk notice's copy; `count` is what its Undo still restores. */
-const bulkNoticeCopy =
-  (action: "settle" | "snooze", applyingVerb: string, doneVerb: string): SidebarUndoDescribe =>
-  ({ count, applying }) => ({
-    title: applying
-      ? `${applyingVerb} ${threadCount(count)}…`
-      : `${threadCount(count)} ${doneVerb}`,
-    undoLabel: `Undo ${action} for ${threadCount(count)}`,
-  });
-
 /**
- * Sends one lifecycle command to each thread, with one Undo notice for the lot.
- * Shows at most one toast each for failed threads, skipped threads (their
- * machine is not ready) and threads whose machine cannot undo. Never rejects.
+ * Sends `command` to each thread with one Undo notice. The batch code and its
+ * copy (threadLifecycleBatch.ts) load with the first bulk action. Never rejects.
  */
 async function dispatchThreadBatch(
   targets: readonly ScopedThreadRef[],
+  action: ThreadBatchAction,
   command: (threadId: ThreadId) => SidebarBatchCommand,
-  copy: { readonly failure: (threads: string) => string; readonly notice?: SidebarUndoDescribe },
 ): Promise<SidebarUndoBatchResult | null> {
-  let result: SidebarUndoBatchResult;
   try {
-    // Loaded with the first bulk action, so the shell does not carry it.
-    const { dispatchSidebarUndoBatch } =
-      await import("@ryco/client-runtime/state/threads/sidebarUndoBatch");
-    result = await dispatchSidebarUndoBatch({
-      history: sidebarUndo,
-      readContext: readSidebarUndoContext,
-      newCommandId,
-      targets,
-      command: (target) => command(target.threadId),
-      describe: copy.notice,
-    });
+    const batch = await import("./threadLifecycleBatch");
+    return await batch.dispatchThreadBatch(targets, action, command);
   } catch (error) {
+    // Only loading the batch code can fail here.
     toastManager.add(
       stackedThreadToast({
         type: "error",
-        title: copy.failure(threadCount(targets.length)),
+        title: "Could not update threads",
         description: errorDescription(error, "The request failed."),
       }),
     );
     return null;
   }
-  const { applied, skipped, failed, withoutUndo } = result;
-  const [firstFailure] = failed;
-  if (firstFailure) {
-    toastManager.add(
-      stackedThreadToast({
-        type: "error",
-        title: copy.failure(threadCount(failed.length)),
-        description: errorDescription(firstFailure.error, "The request failed."),
-      }),
-    );
-  }
-  if (skipped.length > 0) presentSkippedThreads(skipped.length);
-  // The notice counts only what its Undo restores; say why the rest is missing.
-  if (withoutUndo > 0 && applied.length > withoutUndo) {
-    toastManager.add({
-      type: "info",
-      title: `${threadCount(withoutUndo)} cannot be undone`,
-      description: `Update ${withoutUndo === 1 ? "its" : "their"} machine to use Undo.`,
-    });
-  }
-  return result;
 }
 
 /** Settles threads, or moves them back to Active, at most 100 at once. */
@@ -167,15 +115,8 @@ export function dispatchThreadSettlementBatch(
   targets: readonly ScopedThreadRef[],
   settled: boolean,
 ): Promise<SidebarUndoBatchResult | null> {
-  return dispatchThreadBatch(
-    targets,
-    (threadId) => settlementCommand(threadId, settled),
-    settled
-      ? {
-          failure: (threads) => `Could not settle ${threads}`,
-          notice: bulkNoticeCopy("settle", "Settling", "settled"),
-        }
-      : { failure: (threads) => `Could not move ${threads} to Active` },
+  return dispatchThreadBatch(targets, settled ? "settle" : "unsettle", (threadId) =>
+    settlementCommand(threadId, settled),
   );
 }
 
@@ -184,15 +125,16 @@ export function dispatchThreadSnoozeBatch(
   targets: readonly ScopedThreadRef[],
   snoozedUntil: string | null,
 ): Promise<SidebarUndoBatchResult | null> {
-  return dispatchThreadBatch(
-    targets,
-    (threadId) => snoozeCommand(threadId, snoozedUntil),
-    snoozedUntil
-      ? {
-          failure: (threads) => `Could not snooze ${threads}`,
-          notice: bulkNoticeCopy("snooze", "Snoozing", "snoozed"),
-        }
-      : { failure: (threads) => `Could not unsnooze ${threads}` },
+  return dispatchThreadBatch(targets, snoozedUntil ? "snooze" : "unsnooze", (threadId) =>
+    snoozeCommand(threadId, snoozedUntil),
+  );
+}
+
+/** Says that a bulk action left `count` threads alone: their machine takes no changes now. */
+export function presentSkippedThreads(count: number): void {
+  void import("./threadLifecycleBatch").then(
+    (batch) => batch.presentSkippedThreads(count),
+    (error: unknown) => console.warn("Could not report skipped threads.", error),
   );
 }
 

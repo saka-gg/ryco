@@ -54,21 +54,19 @@ export function useInboxRowSelection(input: {
 }): InboxRowSelection {
   const displayedRowsRef = useRef(input.displayedRows);
   const onDeleteThreadsRef = useRef(input.onDeleteThreads);
-  // Read when a row is clicked; synced after render so the React Compiler can
-  // optimize the list (render-time ref writes make it bail out).
   useLayoutEffect(() => {
+    // Read when a row is clicked; synced after render so the React Compiler can
+    // optimize the list (render-time ref writes make it bail out).
     displayedRowsRef.current = input.displayedRows;
     onDeleteThreadsRef.current = input.onDeleteThreads;
-  }, [input.displayedRows, input.onDeleteThreads]);
-  // A filter, a collapsed section or host, or a thread that left hides rows:
-  // they leave the selection, so no action reaches what the list does not show.
-  useLayoutEffect(() => {
+    // A filter, a collapsed section or host, or a thread that left hides rows:
+    // they leave the selection, so no action reaches what the list does not show.
     const store = useThreadSelectionStore.getState();
     if (store.selectedThreadKeys.size === 0) return;
     const displayed = new Set(input.displayedRows.map((row) => row.key));
     const hidden = [...store.selectedThreadKeys].filter((key) => !displayed.has(key));
     if (hidden.length > 0) store.removeFromSelection(hidden);
-  }, [input.displayedRows]);
+  }, [input.displayedRows, input.onDeleteThreads]);
   const [selection] = useState<InboxRowSelection>(() => ({
     click: (row, event) => {
       const intent = resolveThreadSelectionClick(event, isMacPlatform(navigator.platform));

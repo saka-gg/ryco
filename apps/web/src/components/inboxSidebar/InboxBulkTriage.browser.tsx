@@ -3,7 +3,7 @@ import "../../index.css";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import { EnvironmentId, ProjectId, ThreadId, TurnId, type ScopedThreadRef } from "@ryco/contracts";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
@@ -13,7 +13,7 @@ import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { useTierOverrideStore } from "../../tierOverrideStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { useInboxFilterStore } from "./inboxFilterStore";
-import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
+import { InboxSidebar, type InboxSidebarProps, preloadInboxSettleFinished } from "./InboxSidebar";
 import type { InboxSidebarEnvironment } from "./inboxSidebarModel";
 
 const lifecycle = vi.hoisted(() => ({
@@ -290,6 +290,8 @@ describe("Inbox row selection", () => {
 });
 
 describe("Inbox on the frozen phone tier", () => {
+  // Loaded, so a missing Settle finished is the phone tier's doing, not its chunk's.
+  beforeAll(() => preloadInboxSettleFinished());
   let stopTierSync: (() => void) | null = null;
   afterEach(() => {
     stopTierSync?.();
@@ -311,6 +313,8 @@ describe("Inbox on the frozen phone tier", () => {
 });
 
 describe("Inbox Settle finished", () => {
+  // It loads in an idle slot after the shell; loaded first, it renders with the list.
+  beforeAll(() => preloadInboxSettleFinished());
   const visit = (...ids: string[]) => {
     const { markThreadVisited } = useUiStateStore.getState();
     for (const id of ids) markThreadVisited(keyOf(id));
