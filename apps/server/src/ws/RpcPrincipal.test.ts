@@ -4,7 +4,13 @@ import { Effect } from "effect";
 import { AuthSessionId } from "@ryco/contracts";
 
 import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
-import { directRpcPrincipal, relayRpcPrincipal } from "./RpcPrincipal.ts";
+import {
+  directRpcPrincipal,
+  RELAY_UNIDENTIFIED_OWNER_KEY,
+  type RelayChannelAuthority,
+  relayRpcPrincipal,
+  rpcPrincipalOwnerKey,
+} from "./RpcPrincipal.ts";
 
 it.effect("enforces viewer, operator, owner, and direct-owner access", () =>
   Effect.gen(function* () {
@@ -13,6 +19,7 @@ it.effect("enforces viewer, operator, owner, and direct-owner access", () =>
     const relayOwner = relayRpcPrincipal("owner", "channel-owner");
     const directOwner = directRpcPrincipal({
       sessionId: AuthSessionId.make("session-owner"),
+      chainId: AuthSessionId.make("session-owner"),
       subject: "owner",
       method: "browser-session-cookie",
       role: "owner",
@@ -39,3 +46,52 @@ it.effect("enforces viewer, operator, owner, and direct-owner access", () =>
     ).toBe("Success");
   }),
 );
+
+it("keys work that outlives a connection by pairing, by device, or as unidentified", () => {
+  const fingerprint = Uint8Array.of(0x01, 0x02, 0xfe);
+  const enrolled = (): RelayChannelAuthority => ({
+    trustSource: "account-enrolled",
+    enrollmentId: "enrollment-1",
+    clientIdentityFingerprint: fingerprint,
+    role: "operator",
+  });
+  const locallyVerified = (): RelayChannelAuthority => ({
+    trustSource: "locally-verified",
+    clientIdentityFingerprint: fingerprint,
+    role: "operator",
+  });
+  const otherDevice = (): RelayChannelAuthority => ({
+    trustSource: "locally-verified",
+    clientIdentityFingerprint: Uint8Array.of(0x09),
+    role: "operator",
+  });
+  const relayKey = (channelId: string, authority?: () => RelayChannelAuthority) =>
+    rpcPrincipalOwnerKey(relayRpcPrincipal("operator", channelId, authority));
+
+  // A reconnect opens a new channel: the device stays the owner, whichever trust source
+  // vouched for it this time.
+  expect(relayKey("channel-a", enrolled)).toBe("relay-device:0102fe");
+  expect(relayKey("channel-b", enrolled)).toBe(relayKey("channel-a", enrolled));
+  expect(relayKey("channel-b", locallyVerified)).toBe(relayKey("channel-a", enrolled));
+  expect(relayKey("channel-b", otherDevice)).not.toBe(relayKey("channel-a", enrolled));
+  // Channels that identify no device share one owner.
+  expect(relayKey("channel-a")).toBe(RELAY_UNIDENTIFIED_OWNER_KEY);
+  expect(relayKey("channel-b", () => ({ trustSource: "none" }))).toBe(relayKey("channel-a"));
+
+  // A bearer renewal issues a new session in the same pairing: the owner stays.
+  const session = (sessionId: string, chainId: string) =>
+    directRpcPrincipal({
+      sessionId: AuthSessionId.make(sessionId),
+      chainId: AuthSessionId.make(chainId),
+      subject: "one-time-token",
+      method: "bearer-session-token",
+      role: "client",
+    });
+  expect(rpcPrincipalOwnerKey(session("session-1", "pairing-1"))).toBe("direct:pairing-1");
+  expect(rpcPrincipalOwnerKey(session("session-2", "pairing-1"))).toBe(
+    rpcPrincipalOwnerKey(session("session-1", "pairing-1")),
+  );
+  expect(rpcPrincipalOwnerKey(session("session-3", "pairing-2"))).not.toBe(
+    rpcPrincipalOwnerKey(session("session-1", "pairing-1")),
+  );
+});

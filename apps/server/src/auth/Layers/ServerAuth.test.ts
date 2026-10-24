@@ -21,7 +21,7 @@ import { makeServerAuth, ServerAuthLive, toBootstrapExchangeAuthError } from "./
 import { ServerAuthPolicyLive } from "./ServerAuthPolicy.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { makeSessionCredentialService } from "./SessionCredentialService.ts";
-import { directRpcPrincipal } from "../../ws/RpcPrincipal.ts";
+import { directRpcPrincipal, rpcPrincipalOwnerKey } from "../../ws/RpcPrincipal.ts";
 
 const makeServerConfigLayer = (overrides?: Partial<ServerConfigShape>) =>
   Layer.effect(
@@ -397,6 +397,10 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         { ...requestMetadata, deviceType: "mobile" },
       );
 
+      const original = yield* serverAuth.authenticateHttpRequest(
+        makeBearerRequest(paired.sessionToken),
+      );
+
       // Renewed right after pairing: nothing to renew yet.
       const tooSoon = yield* Effect.flip(
         serverAuth.rotateBearerSession(makeBearerRequest(paired.sessionToken)),
@@ -415,6 +419,12 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         makeBearerRequest(renewed.sessionToken),
       );
       expect(verified.subject).toBe("one-time-token");
+      // A new session of the same pairing: work it started before the renewal keeps its owner.
+      expect(verified.sessionId).not.toBe(original.sessionId);
+      expect(verified.chainId).toBe(original.chainId);
+      expect(rpcPrincipalOwnerKey(directRpcPrincipal(verified))).toBe(
+        rpcPrincipalOwnerKey(directRpcPrincipal(original)),
+      );
 
       // A browser session cookie never renews into anything, as a cookie or
       // presented as a bearer.

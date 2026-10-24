@@ -9,6 +9,7 @@ import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions
 import {
   type AuthSessionRecord,
   AuthSessionRepository,
+  type RevokedAuthSession,
 } from "../../persistence/Services/AuthSessions.ts";
 import { ServerSecretStore } from "../Services/ServerSecretStore.ts";
 import {
@@ -220,10 +221,12 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       clientSession,
     }).pipe(Effect.asVoid);
 
-  const emitRemoved = (sessionId: AuthSessionId) =>
+  const emitRemoved = (removed: RevokedAuthSession, reason: "revoked" | "superseded") =>
     PubSub.publish(changesPubSub, {
       type: "clientRemoved",
-      sessionId,
+      sessionId: removed.sessionId,
+      chainId: removed.chainId,
+      reason,
     }).pipe(Effect.asVoid);
 
   // A pairing shows as its current session; rotation and sockets of earlier
@@ -304,15 +307,15 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     );
 
   /** Drops revoked sessions from the connected set and announces their removal. */
-  const forgetRevoked = (revokedSessionIds: ReadonlyArray<AuthSessionId>) =>
+  const forgetRevoked = (revoked: ReadonlyArray<RevokedAuthSession>) =>
     Effect.gen(function* () {
-      if (revokedSessionIds.length === 0) return;
+      if (revoked.length === 0) return;
       yield* Ref.update(connectedSessionsRef, (current) => {
         const next = new Map(current);
-        for (const revokedSessionId of revokedSessionIds) next.delete(revokedSessionId);
+        for (const session of revoked) next.delete(session.sessionId);
         return next;
       });
-      yield* Effect.forEach(revokedSessionIds, emitRemoved, {
+      yield* Effect.forEach(revoked, (session) => emitRemoved(session, "revoked"), {
         concurrency: "unbounded",
         discard: true,
       });
@@ -322,9 +325,9 @@ export const makeSessionCredentialService = Effect.gen(function* () {
   const revokeChain = (sessionId: AuthSessionId) =>
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
-      const revokedSessionIds = yield* authSessions.revoke({ sessionId, revokedAt });
-      yield* forgetRevoked(revokedSessionIds);
-      return revokedSessionIds;
+      const revoked = yield* authSessions.revoke({ sessionId, revokedAt });
+      yield* forgetRevoked(revoked);
+      return revoked;
     });
 
   // A rotated session's first use: the session it replaced is superseded, and
@@ -337,7 +340,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         supersededAt,
       });
       if (!superseded) return;
-      yield* emitRemoved(predecessorId);
+      yield* emitRemoved({ sessionId: predecessorId, chainId: record.chainId }, "superseded");
       yield* publishChainHead(record.chainId);
     });
 
@@ -465,6 +468,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
 
       return {
         sessionId: claims.sid,
+        chainId: record.chainId,
         token,
         method: claims.method,
         client: toClientMetadata(row.value.client),
@@ -551,6 +555,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
 
       return {
         sessionId: row.value.sessionId,
+        chainId: row.value.chainId,
         token,
         method: row.value.method,
         client: toClientMetadata(row.value.client),
@@ -572,7 +577,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
 
   const revoke: SessionCredentialServiceShape["revoke"] = (sessionId) =>
     revokeChain(sessionId).pipe(
-      Effect.map((revokedSessionIds) => revokedSessionIds.length > 0),
+      Effect.map((revoked) => revoked.length > 0),
       Effect.mapError(toSessionCredentialError("Failed to revoke session.")),
     );
 
@@ -715,7 +720,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
       const revoked = yield* authSessions.revokeLinked({ ...selector, revokedAt });
-      yield* forgetRevoked(revoked.map((session) => session.sessionId));
+      yield* forgetRevoked(revoked);
       return new Set(revoked.map((session) => session.chainId)).size;
     }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke linked sessions.")));
 
@@ -726,7 +731,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         currentSessionId: sessionId,
         revokedAt,
       });
-      yield* forgetRevoked(revoked.map((session) => session.sessionId));
+      yield* forgetRevoked(revoked);
       // Clients revoked, not sessions: each pairing counts once, however many
       // times it rotated.
       return new Set(revoked.map((session) => session.chainId)).size;

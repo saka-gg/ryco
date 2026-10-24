@@ -288,3 +288,23 @@ describe.skipIf(!hasCurrentBuild)("built server bundle imports", () => {
     expect([...external].filter((specifier) => patchAdded.has(specifier))).toEqual([]);
   });
 });
+
+// Recoverable Git actions: the service and its layer are on the boot path, the runner
+// itself loads with the first recoverable action.
+describe("recoverable git action boundaries", () => {
+  it("keeps the runner off the serve path's static imports", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/git/GitActionRunner.ts");
+    expect(graph.files).not.toContain("apps/server/src/git/gitActionRunnerCore.ts");
+  });
+
+  it.skipIf(!hasCurrentBuild)("keeps the runner out of the built boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region src\/git\/gitActionRunnerCore\.ts$/mu,
+      );
+    }
+  });
+});

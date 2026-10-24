@@ -137,7 +137,7 @@ export interface AuthSessionRepositoryShape {
   /** Revokes the session's whole rotation chain; returns every session revoked. */
   readonly revoke: (
     input: RevokeAuthSessionInput,
-  ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+  ) => Effect.Effect<ReadonlyArray<RevokedAuthSession>, AuthSessionRepositoryError>;
   /** Revokes every session outside the current session's rotation chain; returns each one revoked. */
   readonly revokeAllExcept: (
     input: RevokeOtherAuthSessionsInput,

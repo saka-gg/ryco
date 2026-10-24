@@ -12,6 +12,7 @@ import {
 } from "./orchestration.ts";
 import {
   WsAgentControlSubscribeProposalsRpc,
+  WsGitResumeStackedActionRpc,
   WsGitRunStackedActionRpc,
   WsHostedRpcGroup,
   WsOrchestrationReplayEventsPageRpc,
@@ -247,6 +248,8 @@ describe("forward-compatible orchestration event replays", () => {
  */
 const strictStreams = [
   WsAgentControlSubscribeProposalsRpc,
+  // The same progress events as the run it attaches to again.
+  WsGitResumeStackedActionRpc,
   WsGitRunStackedActionRpc,
   WsServerSubscribeLocalTaskChangesRpc,
   WsServerSubscribeNodeUpdateRpc,
