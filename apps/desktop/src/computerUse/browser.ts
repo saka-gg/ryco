@@ -20,7 +20,34 @@ export interface BrowserTransport {
     signal: AbortSignal,
   ): Promise<unknown>;
   stop(): void;
+  /**
+   * Called after claim and activity and before the first command of a BROWSER_MUTATING_ACTIONS action
+   * on `tab`; the returned function runs when the action settles (success or failure). The Ryco
+   * browser ends a user's element pick here and refuses new picks until it runs (browser-picker).
+   */
+  beginAgentMutation?(tab: string, signal: AbortSignal): Promise<() => void>;
 }
+
+/**
+ * Actions that change the page or its tab: input, navigation, reload, close. The driver brackets
+ * each with BrowserTransport.beginAgentMutation. browser-agent-control adds "resize" and "appearance"
+ * and uses this set for its human hold and dialog scope; browser-agent-upload adds "upload". Reads
+ * (tabs, observe, screenshot, and agent-control's wait/console/network) are never in it.
+ */
+export const BROWSER_MUTATING_ACTIONS: ReadonlySet<string> = new Set([
+  "navigate",
+  "reload",
+  "back",
+  "forward",
+  "click",
+  "hover",
+  "fill",
+  "select",
+  "scroll",
+  "type",
+  "key",
+  "close",
+]);
 
 export function browserUrl(value: string): string {
   const url = new URL(value);
@@ -170,17 +197,38 @@ export class BrowserComputerDriver {
       mode: visible ? "foreground" : "background",
       action: action === "observe" ? "find_elements" : action,
     });
-    if (action === "show") {
-      await transport.show(tab, context.signal);
-      return result(
-        browser === "ryco" ? { shown: false, presentation: "workspace" } : { shown: true },
-      );
+    const endMutation = BROWSER_MUTATING_ACTIONS.has(action)
+      ? await transport.beginAgentMutation?.(tab, context.signal)
+      : undefined;
+    try {
+      if (endMutation) context.check(); // The bracket may have waited.
+      if (action === "show") {
+        await transport.show(tab, context.signal);
+        return result(
+          browser === "ryco" ? { shown: false, presentation: "workspace" } : { shown: true },
+        );
+      }
+      if (action === "close") {
+        await transport.close(tab, context.signal);
+        this.observations.delete(`${browser}:${tab}`);
+        return result({ closed: true });
+      }
+      return await this.act(context, browser, transport, tab, target, action);
+    } finally {
+      endMutation?.();
     }
-    if (action === "close") {
-      await transport.close(tab, context.signal);
-      this.observations.delete(`${browser}:${tab}`);
-      return result({ closed: true });
-    }
+  }
+
+  /** Everything after show/close: history, navigation, observe, screenshot and the interactions. */
+  private async act(
+    context: ComputerOperationContext,
+    browser: ComputerBrowser,
+    transport: BrowserTransport,
+    tab: string,
+    target: BrowserTab,
+    action: string,
+  ): Promise<ComputerUseResult> {
+    const args = context.request.args;
     if (action === "reload" || action === "back" || action === "forward") {
       this.observations.delete(`${browser}:${tab}`);
       if (action === "reload")

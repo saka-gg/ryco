@@ -156,3 +156,120 @@ it("keeps Ryco visibility requests in the workspace without foreground consent",
     expect.objectContaining({ mode: "background" }),
   );
 });
+
+it("brackets mutating actions with beginAgentMutation and leaves reads alone", async () => {
+  const tab = { id: "1", url: "https://example.com/", title: "Test" };
+  const log: string[] = [];
+  let failNavigate = false;
+  const transport: BrowserTransport = {
+    tabs: vi.fn(async () => [tab]),
+    open: vi.fn(),
+    show: vi.fn(),
+    close: vi.fn(async () => {
+      log.push("close");
+    }),
+    stop: vi.fn(),
+    send: vi.fn(async (_tab, method) => {
+      log.push(method);
+      if (method === "Page.navigate" && failNavigate) throw new Error("navigation failed");
+      if (method === "Page.getFrameTree")
+        return { frameTree: { frame: { id: "frame", loaderId: "doc" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Page.captureScreenshot") return { data: "png" };
+      return { result: { value: {} } };
+    }),
+    beginAgentMutation: vi.fn(async () => {
+      log.push("begin");
+      return () => {
+        log.push("end");
+      };
+    }),
+  };
+  const context: ComputerOperationContext = {
+    request: {
+      sessionId: "s",
+      threadId: "t",
+      turnId: "u",
+      tool: "browser",
+      args: { action: "navigate", tab: "1", url: tab.url },
+    },
+    signal: new AbortController().signal,
+    check: vi.fn(),
+    authorizeApp: vi.fn(),
+    authorizeForeground: vi.fn(),
+    claim: vi.fn(),
+    activity: vi.fn(async () => {
+      log.push("activity");
+    }),
+  };
+  const driver = new BrowserComputerDriver(new Map([["ryco", transport]]));
+  const run = async (args: Record<string, unknown>) => {
+    log.length = 0;
+    return driver.execute(
+      { ...context, request: { ...context.request, args: { tab: "1", ...args } } },
+      "ryco",
+    );
+  };
+
+  await run({ action: "navigate", url: tab.url });
+  expect(log).toEqual(["activity", "begin", "Page.navigate", "end"]);
+  expect(transport.beginAgentMutation).toHaveBeenCalledWith("1", context.signal);
+
+  failNavigate = true;
+  await expect(run({ action: "navigate", url: tab.url })).rejects.toThrow("navigation failed");
+  expect(log).toEqual(["activity", "begin", "Page.navigate", "end"]);
+
+  await run({ action: "observe" });
+  expect(log).toEqual([
+    "activity",
+    "Page.getFrameTree",
+    "Page.createIsolatedWorld",
+    "Runtime.evaluate",
+  ]);
+  await run({ action: "screenshot" });
+  expect(log).not.toContain("begin");
+  expect(log).toContain("Page.captureScreenshot");
+  await run({ action: "show" });
+  expect(log).toEqual(["activity"]);
+
+  await run({ action: "close" });
+  expect(log).toEqual(["activity", "begin", "close", "end"]);
+  expect(transport.beginAgentMutation).toHaveBeenCalledTimes(3);
+});
+
+it("checks the operation again after a mutation bracket", async () => {
+  const tab = { id: "1", url: "https://example.com/", title: "Test" };
+  const transport: BrowserTransport = {
+    tabs: vi.fn(async () => [tab]),
+    open: vi.fn(),
+    show: vi.fn(),
+    close: vi.fn(),
+    stop: vi.fn(),
+    send: vi.fn(async () => ({})),
+    beginAgentMutation: vi.fn(async () => () => {}),
+  };
+  let cancelled = false;
+  const context: ComputerOperationContext = {
+    request: {
+      sessionId: "s",
+      threadId: "t",
+      turnId: "u",
+      tool: "browser",
+      args: { action: "reload", tab: "1" },
+    },
+    signal: new AbortController().signal,
+    // Cancelled while the bracket waited (after the pre-activity check passed).
+    check: vi.fn(() => {
+      if (cancelled) throw new Error("Computer use was stopped.");
+    }),
+    authorizeApp: vi.fn(),
+    authorizeForeground: vi.fn(),
+    claim: vi.fn(),
+    activity: vi.fn(async () => {
+      cancelled = true;
+    }),
+  };
+  const driver = new BrowserComputerDriver(new Map([["ryco", transport]]));
+  await expect(driver.execute(context, "ryco")).rejects.toThrow("Computer use was stopped.");
+  expect(transport.send).not.toHaveBeenCalled();
+});
