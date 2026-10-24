@@ -40,20 +40,29 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import * as zlib from "node:zlib";
 
-import { Clock, Config, Context, Data, Duration, Effect, Layer, Option } from "effect";
+import { Clock, Context, Data, Effect, Layer, Option } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { Connection } from "effect/sql/SqlConnection";
 import type { SqlError } from "effect/sql/SqlError";
 
 import { syncDirectory, syncFile } from "../fsDurability.ts";
+import { databaseBackupsDirectory, type PremigrationBackupMode } from "./databaseBackupPolicy.ts";
 import type { MigrationLedgerInspection } from "./Migrations.ts";
+
+// What startup needs before it knows a backup is due lives in databaseBackupPolicy.ts, so that
+// startup with nothing to migrate never loads this module. Re-exported: this is the backups API.
+export {
+  BACKUP_FINALIZE_DELAY,
+  databaseBackupsDirectory,
+  needsPremigrationBackup,
+  type PremigrationBackupMode,
+  readPremigrationBackupMode,
+} from "./databaseBackupPolicy.ts";
 
 /** Above this size a backup needs a copy-on-write clone; a full copy would stall startup. */
 export const PREMIGRATION_FULL_COPY_MAX_BYTES = 2 * 1024 ** 3;
 /** A restart within this window reuses an unchanged backup of the same upgrade. */
 export const PREMIGRATION_BACKUP_DEDUPE_WINDOW_MS = 10 * 60_000;
-/** Phase 2 waits this long after startup, out of boot and hydration. */
-export const BACKUP_FINALIZE_DELAY = Duration.seconds(30);
 /** Backups kept per kind (pre-upgrade, manual). */
 export const BACKUP_RETENTION_PER_KIND = 3;
 /** A backup needs this multiple of the live database's size free on disk. */
@@ -62,7 +71,6 @@ export const BACKUP_FREE_SPACE_FACTOR = 2;
 const STALE_PARTIAL_AGE_MS = 24 * 60 * 60_000;
 const COMPRESS_CHUNK_BYTES = 1024 * 1024;
 
-export type PremigrationBackupMode = "auto" | "always" | "off";
 export type BackupKind = "before" | "manual";
 export type BackupCodec = "zst" | "gz";
 
@@ -75,9 +83,6 @@ export type OpenSqlite = (config: {
 // ---------------------------------------------------------------------------------------------
 // Names
 // ---------------------------------------------------------------------------------------------
-
-/** Where backups of `dbPath` live: next to it, in `backups/`. */
-export const databaseBackupsDirectory = (dbPath: string) => join(dirname(dbPath), "backups");
 
 /**
  * Every backup name. `from = 000` is a database without a migration ledger; `seq` only appears
@@ -351,29 +356,6 @@ export const BackupEnvironment = Context.Reference<BackupEnvironment>(
   "ryco/persistence/databaseBackups/BackupEnvironment",
   { defaultValue: nodeBackupEnvironment },
 );
-
-/** `RYCO_PREMIGRATION_BACKUP`: `auto` (default), `always` (no size limit) or `off`. */
-export const readPremigrationBackupMode = Effect.gen(function* () {
-  const configured = yield* Config.String("RYCO_PREMIGRATION_BACKUP").pipe(
-    Config.option,
-    Effect.orElseSucceed(() => Option.none<string>()),
-  );
-  const value = Option.getOrElse(configured, () => "")
-    .trim()
-    .toLowerCase();
-  if (value === "" || value === "auto") return "auto" as PremigrationBackupMode;
-  if (value === "always" || value === "off") return value as PremigrationBackupMode;
-  yield* Effect.logWarning(
-    `Ignoring RYCO_PREMIGRATION_BACKUP=${value}: expected auto, always or off. Using auto.`,
-  );
-  return "auto" as PremigrationBackupMode;
-});
-
-/** An existing database that the next migration pass will change. */
-export const needsPremigrationBackup = (ledger: MigrationLedgerInspection) =>
-  !ledger.fresh &&
-  !ledger.tooNew &&
-  (ledger.pending.length > 0 || ledger.repairsPending.length > 0);
 
 // ---------------------------------------------------------------------------------------------
 // Listing, cleanup and retention

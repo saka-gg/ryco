@@ -20,7 +20,7 @@ import {
 } from "@ryco/contracts";
 import { resolveStorageRetentionPolicy, retentionDue } from "@ryco/shared/storageRetention";
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
-import { databaseBackupsDirectory } from "../persistence/databaseBackups.ts";
+import { databaseBackupsDirectory } from "../persistence/databaseBackupPolicy.ts";
 import { readDatabaseStorageReport } from "../persistence/databaseStorageReport.ts";
 import { EventLogCompaction } from "../persistence/Services/EventLogCompaction.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";

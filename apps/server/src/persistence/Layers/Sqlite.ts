@@ -5,11 +5,9 @@ import type { SqlError } from "effect/sql/SqlError";
 import {
   BACKUP_FINALIZE_DELAY,
   databaseBackupsDirectory,
-  finalizeDatabaseBackups,
   needsPremigrationBackup,
   readPremigrationBackupMode,
-  snapshotBeforeMigration,
-} from "../databaseBackups.ts";
+} from "../databaseBackupPolicy.ts";
 import { inspectMigrationLedger, runMigrations } from "../Migrations.ts";
 import * as SqliteReadClientLayer from "../SqliteReadClient.ts";
 import { BLOCKING_BUSY_TIMEOUT_MS, MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
@@ -47,6 +45,15 @@ export const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(functi
 type SetupTarget = { readonly kind: "file"; readonly dbPath: string } | { readonly kind: "memory" };
 
 /**
+ * The backup code (~30 KB) stays out of the boot path: startup loads it only when a backup is
+ * due, otherwise the background pass loads it 30 s later. Failing to load it skips the backup
+ * and never fails the upgrade.
+ */
+const loadDatabaseBackups = Effect.tryPromise(() => import("../databaseBackups.ts"));
+const loadFailureText = ({ cause }: { readonly cause?: unknown }) =>
+  cause instanceof Error ? cause.message : String(cause);
+
+/**
  * Brings the schema up to date. A file database that is about to change gets a restorable
  * backup first (databaseBackups.ts); the backup never blocks or fails the upgrade.
  */
@@ -62,13 +69,22 @@ const upgradeSchema = (target: SetupTarget, options: { readonly finalize?: boole
             const sql = yield* SqlClient.SqlClient;
             yield* trackStartupPhase(
               "persistence.migrations.backup",
-              snapshotBeforeMigration({
-                sql,
-                dbPath,
-                ledger,
-                mode,
-                openSqlite: makeRuntimeSqliteLayer,
-              }),
+              loadDatabaseBackups.pipe(
+                Effect.flatMap(({ snapshotBeforeMigration }) =>
+                  snapshotBeforeMigration({
+                    sql,
+                    dbPath,
+                    ledger,
+                    mode,
+                    openSqlite: makeRuntimeSqliteLayer,
+                  }),
+                ),
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `Upgrading the database without a backup: could not load the backup code: ${loadFailureText(error)}. See docs/database-backups.md to back it up yourself.`,
+                  ),
+                ),
+              ),
             );
           }
         }
@@ -78,7 +94,16 @@ const upgradeSchema = (target: SetupTarget, options: { readonly finalize?: boole
           // command) is interrupted before it starts, and its raw backup stays valid.
           yield* Effect.forkScoped(
             Effect.delay(
-              finalizeDatabaseBackups({ dbPath, openSqlite: makeRuntimeSqliteLayer }),
+              loadDatabaseBackups.pipe(
+                Effect.flatMap(({ finalizeDatabaseBackups }) =>
+                  finalizeDatabaseBackups({ dbPath, openSqlite: makeRuntimeSqliteLayer }),
+                ),
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `Database backup maintenance failed: ${loadFailureText(error)}`,
+                  ),
+                ),
+              ),
               BACKUP_FINALIZE_DELAY,
             ),
           );
