@@ -826,7 +826,8 @@ export const makeServerLayer = Layer.unwrap(
       runtimeStateLayer,
       tailscaleServeLayer,
       SleepInhibitorLive,
-      // Agent work for sleep holds; in desktop mode Desktop main holds the machine awake from it.
+      // Agent work for sleep holds: Desktop main holds the machine awake from it in desktop
+      // mode, and a headless node without --prevent-sleep holds it itself.
       makeAgentWorkHoldLayer(config),
     );
 

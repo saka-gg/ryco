@@ -304,6 +304,64 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect(
+    "keeps the machine awake while agents work unless a flag, env or node.json turns it off",
+    () =>
+      Effect.gen(function* () {
+        const baseDir = join(os.tmpdir(), `ryco-cli-config-keep-awake-${process.pid}`);
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.makeDirectory(join(baseDir, "userdata"), { recursive: true });
+        const nodeJsonPath = join(baseDir, "userdata", "node.json");
+        yield* fs.remove(nodeJsonPath, { force: true });
+        const resolve = (overrides: Partial<ResolveServerFlags>, env: Record<string, string>) =>
+          resolveServerConfig(makeServerFlags(baseDir, overrides), Option.none(), {
+            useNodeConfig: true,
+          }).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
+                NetService.layer,
+              ),
+            ),
+          );
+        const keepAwake = (overrides: Partial<ResolveServerFlags>, env: Record<string, string>) =>
+          resolve(overrides, env).pipe(Effect.map((config) => config.keepAwakeWhileWorking));
+
+        // Nothing configured: on.
+        assert.strictEqual(yield* keepAwake({}, {}), true);
+
+        // node.json beats the default, the environment beats node.json, and a flag beats both.
+        yield* fs.writeFileString(
+          nodeJsonPath,
+          JSON.stringify({ version: 1, keepAwakeWhileWorking: false }),
+        );
+        assert.strictEqual(yield* keepAwake({}, {}), false);
+        assert.strictEqual(yield* keepAwake({}, { RYCO_KEEP_AWAKE_WHILE_WORKING: "true" }), true);
+        assert.strictEqual(
+          yield* keepAwake(
+            { keepAwakeWhileWorking: Option.some(false) },
+            { RYCO_KEEP_AWAKE_WHILE_WORKING: "true" },
+          ),
+          false,
+        );
+        assert.strictEqual(
+          yield* keepAwake(
+            { keepAwakeWhileWorking: Option.some(true) },
+            { RYCO_KEEP_AWAKE_WHILE_WORKING: "false" },
+          ),
+          true,
+        );
+
+        // Desktop main holds a desktop backend awake, so the setting stays unset there.
+        const desktop = yield* resolve(
+          { mode: Option.some("desktop"), keepAwakeWhileWorking: Option.some(true) },
+          { RYCO_KEEP_AWAKE_WHILE_WORKING: "true" },
+        );
+        assert.isFalse("keepAwakeWhileWorking" in desktop);
+        yield* fs.remove(baseDir, { recursive: true });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("refuses an unknown command word instead of creating a folder for it", () =>
     Effect.gen(function* () {
       const baseDir = join(os.tmpdir(), `ryco-cli-config-word-${process.pid}`);
@@ -544,6 +602,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: true,
         tailscaleServePort: 8443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
     }),
   );
@@ -616,6 +675,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
     }),
   );
@@ -1074,6 +1134,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
     }),
   );
@@ -1209,6 +1270,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
         preventSleep: false,
+        keepAwakeWhileWorking: true,
       });
     }),
   );
