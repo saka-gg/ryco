@@ -369,6 +369,9 @@ export function SidebarOmnifield(props: SidebarOmnifieldProps) {
                     onAnimationEnd={leaving ? () => leavingTokens.done(token) : undefined}
                     className={cn(
                       "sidebar-omnifield-token inline-flex h-5 min-w-0 shrink items-center gap-1 overflow-hidden whitespace-nowrap rounded-[6px] px-1.5 text-[10.5px] outline-none",
+                      // A status label is short and has no ellipsis: the named
+                      // tokens shrink instead, so it is never cut mid-word.
+                      token.kind === "status" && "shrink-0",
                       TOKEN_TONE[token.kind],
                     )}
                   >
