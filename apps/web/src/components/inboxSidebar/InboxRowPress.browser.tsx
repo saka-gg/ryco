@@ -433,6 +433,24 @@ describe("holding the inbox order while the user aims at it", () => {
     await vi.waitFor(() => expect(sectionTitles()).toEqual(["Recent"]));
   });
 
+  it("lets rows move once the user taps outside the inbox", async () => {
+    await mountInbox({ changes: { a1: "running" } });
+    const toInput = await pointerInput();
+    await pointAt(toInput, rowButton(keyOf("a2"))!);
+    publishThreads(threads({ a1: "completed" }));
+    await vi.waitFor(() => expect(glyphLabel("a1")).toBe("Completed"));
+    await nextFrames(2);
+    expect(sectionTitles()).toEqual(["Active now", "Recent"]);
+
+    // The mouse stays parked on the sidebar while a finger taps the composer.
+    document
+      .querySelector('input[aria-label="Composer"]')!
+      .dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, isPrimary: true, pointerType: "touch" }),
+      );
+    await vi.waitFor(() => expect(sectionTitles()).toEqual(["Recent"]));
+  });
+
   it("moves a row the user settles at once, while the rest hold", async () => {
     await mountInbox();
     const toInput = await pointerInput();

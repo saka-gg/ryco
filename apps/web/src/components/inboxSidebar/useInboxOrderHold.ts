@@ -26,12 +26,13 @@ export interface InboxOrderHold {
  *
  * The pointer is tracked from document-level pointermove, so the answer stays
  * right when the node under it unmounts (a row's glyph changing), where
- * enter/leave events never fire. Typing into a field outside the inbox, or
- * leaving the window, counts as leaving until the pointer moves again, so a
- * pointer resting on the sidebar while the user writes in the composer holds
- * nothing. Modifier keys alone don't release, so a Cmd- or Shift-click still
- * lands on the row the user aimed at. Touch has no hover: a tap holds from its press until its click,
- * which arrives after the release, so the click lands on the row it pressed.
+ * enter/leave events never fire. Typing into a field outside the inbox, a
+ * press elsewhere, or leaving the window counts as leaving until the pointer
+ * moves again, so a pointer resting on the sidebar while the user writes in
+ * the composer or taps elsewhere holds nothing. Modifier keys alone don't
+ * release, so a Cmd- or Shift-click still lands on the row the user aimed at.
+ * Touch has no hover: a tap holds from its press until its click, which
+ * arrives after the release, so the click lands on the row it pressed.
  */
 export function useInboxOrderHold(element: HTMLElement | null): InboxOrderHold {
   const [holding, setHolding] = useState(false);
@@ -91,7 +92,12 @@ export function useInboxOrderHold(element: HTMLElement | null): InboxOrderHold {
       if (!isInside(event.target)) setWithin(false);
     };
     const handlePointerDown = (event: PointerEvent) => {
-      if (!isInside(event.target)) return;
+      if (!isInside(event.target)) {
+        // A mouse got here by moving out, which already released; a tap
+        // elsewhere while the mouse rests on the sidebar did not.
+        setWithin(false);
+        return;
+      }
       clearTimeout(pressTimer);
       pressing = true;
       publish();
