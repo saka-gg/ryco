@@ -1,5 +1,12 @@
 import { WS_METHODS } from "@ryco/contracts";
-import { ActivityIcon, BarChart3Icon, GaugeIcon, ShieldAlertIcon } from "lucide-react";
+import {
+  ActivityIcon,
+  BarChart3Icon,
+  GaugeIcon,
+  ShieldAlertIcon,
+  SunIcon,
+  type LucideIcon,
+} from "lucide-react";
 
 import { useHostedRpcCapability } from "~/hostedHub/capabilities";
 import { useHostedHubStore } from "~/hostedHub/state";
@@ -16,8 +23,18 @@ import { ScrollArea } from "../ui/scroll-area";
 import { StatePanel } from "../settings/statistics/parts";
 import { ActivityView } from "./activity/ActivityView";
 import { LimitsView } from "./limits/LimitsView";
-import type { StatisticsSearch } from "./statisticsSearch";
+import type { StatisticsSearch, StatisticsView } from "./statisticsSearch";
+import { TodayView, TodayWindowLabel } from "./today/TodayView";
 import { UsageView } from "./usage/UsageView";
+
+const VIEWS: readonly StatisticsView[] = ["today", "usage", "activity", "limits"];
+
+const VIEW_ICONS: Record<StatisticsView, LucideIcon> = {
+  today: SunIcon,
+  usage: BarChart3Icon,
+  activity: ActivityIcon,
+  limits: GaugeIcon,
+};
 
 export function StatisticsPage({
   search,
@@ -28,11 +45,13 @@ export function StatisticsPage({
 }) {
   const appSidebarCollapsed = useAppSidebarCollapsed();
   const method =
-    search.view === "usage"
-      ? WS_METHODS.serverGetUsageSummary
-      : search.view === "limits"
-        ? WS_METHODS.serverReadCliProxyHubs
-        : WS_METHODS.serverGetStatistics;
+    search.view === "today"
+      ? WS_METHODS.serverGetDailyRecap
+      : search.view === "usage"
+        ? WS_METHODS.serverGetUsageSummary
+        : search.view === "limits"
+          ? WS_METHODS.serverReadCliProxyHubs
+          : WS_METHODS.serverGetStatistics;
   // hosted-capability: routed node
   const capability = useHostedRpcCapability(method, null);
   const nodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state));
@@ -52,9 +71,8 @@ export function StatisticsPage({
               <p className="text-[11px] text-muted-foreground">Usage and work signals</p>
             </div>
             <div className="inline-flex shrink-0 rounded-lg bg-muted/75 p-0.5">
-              {(["usage", "activity", "limits"] as const).map((view) => {
-                const Icon =
-                  view === "usage" ? BarChart3Icon : view === "activity" ? ActivityIcon : GaugeIcon;
+              {VIEWS.map((view) => {
+                const Icon = VIEW_ICONS[view];
                 return (
                   <button
                     key={view}
@@ -74,7 +92,14 @@ export function StatisticsPage({
             </div>
           </div>
           <div className="hidden text-right sm:block">
-            {search.view === "limits" ? (
+            {search.view === "today" ? (
+              <>
+                <p className="text-xs font-medium">
+                  <TodayWindowLabel />
+                </p>
+                <p className="text-[11px] text-muted-foreground">Local calendar day</p>
+              </>
+            ) : search.view === "limits" ? (
               <>
                 <p className="text-xs font-medium">Live subscription quota</p>
                 <p className="text-[11px] text-muted-foreground">
@@ -106,6 +131,8 @@ export function StatisticsPage({
                   hostedCapabilityCopy(capability, nodeLabel) ?? "Owner access is required."
                 }
               />
+            ) : search.view === "today" ? (
+              <TodayView search={search} onSearchChange={onSearchChange} />
             ) : search.view === "usage" ? (
               <UsageView search={search} onSearchChange={onSearchChange} />
             ) : search.view === "limits" ? (
