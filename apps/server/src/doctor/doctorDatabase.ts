@@ -115,8 +115,9 @@ export interface SchemaCompatibility {
   readonly supported: number;
   readonly pendingMigrations: ReadonlyArray<number>;
   /**
-   * Keys of the compatibility repairs this binary runs that the database has never recorded
-   * (`repairsPending`): the next server start would run them.
+   * Keys of the compatibility repairs the next server start would run (`repairsPending`): never
+   * recorded here, except, on a database without any repair record (last run by a release from
+   * before them), the ones whose effect is already there. Those only get their record.
    */
   readonly repairs: ReadonlyArray<string>;
 }
@@ -127,9 +128,10 @@ export const isSchemaCurrent = (schema: SchemaCompatibility): boolean =>
   !isUpgradePending({ pending: schema.pendingMigrations, repairsPending: schema.repairs });
 
 /**
- * The database's schema against this binary's, from the migration ledger and the
- * `ryco_compatibility_repairs` records (`inspectMigrationLedger`). Nothing runs, so it also works
- * on a read-only connection.
+ * The database's schema against this binary's, from the migration ledger, the
+ * `ryco_compatibility_repairs` records and, on a database without any record, each repair's effect
+ * in the schema (`inspectMigrationLedger`). Nothing runs, so it also works on a read-only
+ * connection.
  */
 export const readSchemaCompatibility: Effect.Effect<
   SchemaCompatibility,

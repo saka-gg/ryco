@@ -135,9 +135,11 @@ What `--apply` does (`apps/server/src/doctor/DatabaseDoctor.ts`):
 3. Checks: `PRAGMA quick_check` (`--thorough`: `integrity_check`); the schema must be exactly the
    one this ryco knows, because the doctor never migrates (the app that owns the data might not open
    an upgraded file): every migration applied and every compatibility repair recorded in
-   `ryco_compatibility_repairs` (a database last run by a Ryco from before those records has every
-   repair pending until this version has started on it once); every projection must be caught up
-   with the event log. A damaged database is never repaired: restore a backup.
+   `ryco_compatibility_repairs`. A database last run by a Ryco from before those records has none;
+   there the doctor reads each repair's effect in the schema instead, and accepts the database when
+   every one is present (the next start only writes the records). A repair still to run, recorded
+   nowhere and without its effect, is a refusal: start Ryco once first. Every projection must be
+   caught up with the event log. A damaged database is never repaired: restore a backup.
 4. Free disk: the compacted copy needs its size, 1.1x, plus 256 MiB on the database's volume
    (estimated from the compaction state before anything changes, exact after compaction).
 5. Compaction over the whole log from the beginning, with no age limit and no carry bound, so it

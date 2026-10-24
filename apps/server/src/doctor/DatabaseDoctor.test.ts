@@ -94,6 +94,10 @@ const makeHome = () => {
   return { baseDir, stateDir, dbPath, target };
 };
 
+/** What a release from before repair records leaves: every repair ran, none is recorded. */
+const forgetRepairRecords =
+  "DELETE FROM ryco_compatibility_repairs WHERE repair_key LIKE 'schema-repair:%'";
+
 const query = <T>(dbPath: string, sql: string): T => {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
@@ -700,24 +704,67 @@ describe("DatabaseDoctor", () => {
     }),
   );
 
-  it.live("refuses a database with a compatibility repair it never recorded", () =>
+  it.live("accepts a database from before repair records that has every repair's effect", () =>
     Effect.gen(function* () {
-      // What a server from before repair records, or one that stopped before recording a new
-      // repair, leaves: the repair runs again on the next start, so the doctor must not compact.
+      // A release from before repair records ran every repair at each start and recorded none.
+      // The next start writes only the records, so there is nothing to wait for.
       const home = makeHome();
-      execute(
-        home.dbPath,
-        `DELETE FROM ryco_compatibility_repairs WHERE repair_key = '${compatibilityRepairMarker("lifecycle-markers")}'`,
-      );
+      execute(home.dbPath, forgetRepairRecords);
       const inspection = yield* inspectDatabase(
         home.target,
+        { estimate: false },
+        makePorts(newRecorder()),
+      );
+      assert.deepEqual(inspection.schema?.repairs, []);
+      assert.deepEqual(inspection.blockers, []);
+
+      const result = yield* repairDatabase(
+        home.target,
+        { thorough: false, restartService: true },
+        makePorts(newRecorder()),
+      );
+      assert.equal(result.status, "repaired", result.message);
+      assert.equal(result.swapped, true);
+    }),
+  );
+
+  it.live("refuses a database with a compatibility repair the next start would run", () =>
+    Effect.gen(function* () {
+      // From before repair records, and one repair's effect is missing: the next start runs it,
+      // so the doctor must not compact.
+      const older = makeHome();
+      execute(older.dbPath, `${forgetRepairRecords}; DROP TABLE lifecycle_markers`);
+      const inspection = yield* inspectDatabase(
+        older.target,
         { estimate: false },
         makePorts(newRecorder()),
       );
       assert.deepEqual(inspection.schema?.repairs, ["lifecycle-markers"]);
       assert.equal(inspection.blockers.length, 1);
       assert.match(inspection.blockers[0] ?? "", /compatibility repairs \(lifecycle-markers\)/);
+      const olderBefore = fileState(older.dbPath);
+      const olderResult = yield* repairDatabase(
+        older.target,
+        { thorough: false, restartService: true },
+        makePorts(newRecorder()),
+      );
+      assertRefusedUnchanged(olderResult, olderBefore, older.dbPath);
+      assert.match(olderResult.message, /Start Ryco once on this data directory/);
 
+      // A database with other records, missing one (a server stopped before it recorded a new
+      // repair): the records are the rule, whether or not the effect is there.
+      const home = makeHome();
+      execute(
+        home.dbPath,
+        `DELETE FROM ryco_compatibility_repairs WHERE repair_key = '${compatibilityRepairMarker("lifecycle-markers")}'`,
+      );
+      const recorded = yield* inspectDatabase(
+        home.target,
+        { estimate: false },
+        makePorts(newRecorder()),
+      );
+      assert.deepEqual(recorded.schema?.repairs, ["lifecycle-markers"]);
+      assert.equal(recorded.blockers.length, 1);
       const before = fileState(home.dbPath);
       const result = yield* repairDatabase(
         home.target,
@@ -725,7 +772,6 @@ describe("DatabaseDoctor", () => {
         makePorts(newRecorder()),
       );
       assertRefusedUnchanged(result, before, home.dbPath);
-      assert.match(result.message, /Start Ryco once on this data directory/);
     }),
   );
 
