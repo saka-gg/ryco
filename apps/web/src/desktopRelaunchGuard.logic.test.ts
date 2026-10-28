@@ -6,6 +6,7 @@ import {
   collectInterruptibleTurnsByEnvironment,
   countActiveDesktopTurns,
   describeActiveDesktopTurns,
+  interruptibleThreadStatus,
 } from "./desktopRelaunchGuard.logic";
 
 const LOCAL = EnvironmentId.make("env-local");
@@ -127,5 +128,29 @@ describe("describeActiveDesktopTurns", () => {
     expect(describeActiveDesktopTurns(1)).toBe("1 agent turn is still running");
     expect(describeActiveDesktopTurns(3)).toBe("3 agent turns are still running");
     expect(describeActiveDesktopTurns(null)).toBe("Agent turns may still be running");
+  });
+});
+
+describe("interruptibleThreadStatus", () => {
+  it("names what stopping the node would interrupt", () => {
+    expect(interruptibleThreadStatus(thread({ session: runningSession }))).toBe("working");
+    expect(interruptibleThreadStatus(thread({ backgroundLiveness: "working" }))).toBe("working");
+    expect(interruptibleThreadStatus(thread({ hasPendingApprovals: true }))).toBe("approval");
+    expect(interruptibleThreadStatus(thread({ hasPendingUserInput: true }))).toBe("input");
+    expect(
+      interruptibleThreadStatus(
+        thread({ session: { ...runningSession, status: "connecting" } as typeof runningSession }),
+      ),
+    ).toBe("connecting");
+  });
+
+  it("is null for idle, monitoring and archived threads", () => {
+    expect(interruptibleThreadStatus(thread())).toBeNull();
+    expect(interruptibleThreadStatus(thread({ backgroundLiveness: "monitoring" }))).toBeNull();
+    expect(
+      interruptibleThreadStatus(
+        thread({ archivedAt: "2026-10-04T00:00:00.000Z", session: runningSession }),
+      ),
+    ).toBeNull();
   });
 });

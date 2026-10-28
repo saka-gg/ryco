@@ -251,6 +251,22 @@ describe("web bundle splitting boundaries", () => {
     expect(primaryActions).toContain("onFocus={preloadAutomationsDialog}");
   });
 
+  it("starts the desktop quit guard on every Electron window, behind the quit feedback chunk", async () => {
+    // Without the responder, Desktop main quits without asking, and nothing else would notice.
+    const mainEntry = await readSource("../main.tsx");
+    const feedback = await readSource("../components/QuitShortcutFeedback.tsx");
+
+    expect(mainEntry).toContain('import("./components/QuitShortcutFeedback")');
+    expect(mainEntry).toMatch(
+      /\{isElectron && \(\s*<React\.Suspense fallback=\{null\}>\s*<DesktopQuitFeedback \/>/u,
+    );
+    expect(mainEntry).not.toContain("desktopQuitGuard");
+    expect(feedback).toContain(
+      'import { startDesktopQuitGuardResponder } from "../desktopQuitGuard";',
+    );
+    expect(feedback).toContain("useEffect(() => startDesktopQuitGuardResponder(), []);");
+  });
+
   it("keeps React.lazy off every surface except an explicit allowlist", async () => {
     // `React.lazy` commits its fallback on every first mount and React then
     // holds the reveal for up to 300 ms; code-split surfaces use
