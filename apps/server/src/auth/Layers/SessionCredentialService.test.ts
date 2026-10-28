@@ -20,7 +20,7 @@ import {
 } from "./SessionCredentialService.ts";
 
 const makeServerConfigLayer = (
-  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
+  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken" | "devUrl">>,
 ) =>
   Layer.effect(
     ServerConfig,
@@ -36,7 +36,7 @@ const makeServerConfigLayer = (
   );
 
 const makeSessionCredentialLayer = (
-  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
+  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken" | "devUrl">>,
 ) =>
   SessionCredentialServiceLive.pipe(
     Layer.provide(SqlitePersistenceMemory),
@@ -370,6 +370,36 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       const expired = yield* Effect.flip(sessions.verify(linked.token));
       expect(expired.message).toContain("expired");
     }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("caps the browser sessions of a dev server with its own home at seven days", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issuedAtMs = yield* Clock.currentTimeMillis;
+      const cookie = yield* sessions.issue({
+        method: "browser-session-cookie",
+        subject: "browser",
+      });
+      const bearer = yield* sessions.issue({ method: "bearer-session-token", subject: "phone" });
+
+      // The cookie's expiry is the session's, so it leaves the browser within a week.
+      expect(cookie.expiresAt.epochMilliseconds).toBe(
+        issuedAtMs + Duration.toMillis(Duration.days(7)),
+      );
+      expect(bearer.expiresAt.epochMilliseconds).toBe(
+        issuedAtMs + Duration.toMillis(Duration.days(30)),
+      );
+      expect(sessions.cookieName).toMatch(/^ryco_session_dev_[0-9a-f]{8}$/);
+      // Not the default home: the shared cookie belongs to another signing key.
+      expect(sessions.legacyCookieNames).toEqual([]);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          makeSessionCredentialLayer({ devUrl: new URL("http://localhost:5750") }),
+          TestClock.layer(),
+        ),
+      ),
+    ),
   );
 
   it.effect("revokes a device's Hub-linked sessions by enrollment or by client key", () =>
