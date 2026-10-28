@@ -72,6 +72,7 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/chat/modelPickerSearch.test.ts",
   "src/components/chat/paneReactKeys.logic.test.ts",
   "src/components/chat/pendingContextHandoff.test.ts",
+  "src/components/chat/timelineRowHeights.logic.test.ts",
   "src/components/chat/traitsMenuLogic.test.ts",
   "src/components/chat/useChatSessionTabsPrefetch.test.ts",
   "src/components/chat/userMessageTerminalContexts.test.ts",
