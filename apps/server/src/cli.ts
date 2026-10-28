@@ -44,6 +44,7 @@ import type * as Terminal from "effect/Terminal";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
+  DEFAULT_KEEP_AWAKE_WHILE_WORKING,
   DEFAULT_PORT,
   resolveHubConnectorConfig,
   resolveNodeE2eePolicyConfig,
@@ -300,6 +301,12 @@ const preventSleepFlag = Flag.Boolean("prevent-sleep").pipe(
   ),
   Flag.optional,
 );
+const keepAwakeWhileWorkingFlag = Flag.Boolean("keep-awake-while-working").pipe(
+  Flag.withDescription(
+    "Keep the machine from idle-sleeping while agents work and for 2 minutes after, on AC power only (default on; --no-keep-awake-while-working turns it off; equivalent to RYCO_KEEP_AWAKE_WHILE_WORKING). --prevent-sleep holds it for the whole run instead.",
+  ),
+  Flag.optional,
+);
 const tailscaleServeFlag = Flag.Boolean("tailscale-serve").pipe(
   Flag.withDescription(
     "Configure Tailscale Serve to expose this backend over HTTPS on the Tailnet.",
@@ -369,6 +376,10 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   preventSleep: Config.Boolean("RYCO_PREVENT_SLEEP").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  keepAwakeWhileWorking: Config.Boolean("RYCO_KEEP_AWAKE_WHILE_WORKING").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
@@ -450,6 +461,7 @@ interface CliServerFlags {
   readonly hubRequireApprovedClientE2EE?: Option.Option<boolean>;
   readonly hubE2eePolicy?: Option.Option<string>;
   readonly preventSleep?: Option.Option<boolean>;
+  readonly keepAwakeWhileWorking?: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
 }
@@ -513,6 +525,7 @@ export const resolveServerConfig = (
       hubRequireApprovedClientE2EE: flags.hubRequireApprovedClientE2EE ?? Option.none(),
       hubE2eePolicy: flags.hubE2eePolicy ?? Option.none(),
       preventSleep: flags.preventSleep ?? Option.none(),
+      keepAwakeWhileWorking: flags.keepAwakeWhileWorking ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
     } satisfies CliServerFlags;
@@ -856,6 +869,16 @@ export const resolveServerConfig = (
         env.preventSleep ??
         nodeConfig?.preventSleep ??
         false,
+      // Desktop main holds the machine awake for a desktop backend, so it stays unset there.
+      ...(mode === "desktop"
+        ? {}
+        : {
+            keepAwakeWhileWorking:
+              Option.getOrUndefined(normalizedFlags.keepAwakeWhileWorking) ??
+              env.keepAwakeWhileWorking ??
+              nodeConfig?.keepAwakeWhileWorking ??
+              DEFAULT_KEEP_AWAKE_WHILE_WORKING,
+          }),
       hubConnector,
       hubE2eePolicy,
     };
@@ -1537,6 +1560,7 @@ const sharedServerCommandFlags = {
   hubRequireApprovedClientE2EE: hubRequireApprovedClientE2EEFlag,
   hubE2eePolicy: hubE2eePolicyFlag,
   preventSleep: preventSleepFlag,
+  keepAwakeWhileWorking: keepAwakeWhileWorkingFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
 } as const;
@@ -3437,6 +3461,7 @@ const serviceInstallCommand = Command.make("install", {
   tailscaleServePort: tailscaleServePortFlag,
   restrictToCwd: restrictToCwdFlag,
   preventSleep: preventSleepFlag,
+  keepAwakeWhileWorking: keepAwakeWhileWorkingFlag,
   cwd: Argument.String("cwd").pipe(
     Argument.withDescription(
       "Working directory for provider sessions (defaults to the current directory).",
@@ -3468,6 +3493,7 @@ const serviceInstallCommand = Command.make("install", {
         restrictToWorkspace: Option.getOrUndefined(flags.restrictToCwd),
         // A node installed to stay reachable should not idle-sleep; opt out explicitly.
         preventSleep: Option.getOrUndefined(flags.preventSleep) ?? saved?.preventSleep ?? true,
+        keepAwakeWhileWorking: Option.getOrUndefined(flags.keepAwakeWhileWorking),
       });
       yield* serviceProcess(() => writeNodeConfig(configPath, settings));
       const { definitionPath } = yield* serviceProcess(() =>
