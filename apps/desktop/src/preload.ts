@@ -73,7 +73,7 @@ const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mode";
 const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled";
 const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
 const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
-const SET_KEEP_AWAKE_ENABLED_CHANNEL = "desktop:set-keep-awake-enabled";
+const SET_KEEP_AWAKE_MODE_CHANNEL = "desktop:set-keep-awake-mode";
 const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
 const RESTART_APP_CHANNEL = "desktop:restart-app";
 const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
@@ -310,7 +310,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(SET_TAILSCALE_SERVE_ENABLED_CHANNEL, input),
   getHubLaunchConfig: () => ipcRenderer.invoke(GET_HUB_LAUNCH_CONFIG_CHANNEL),
   getKeepAwakeState: () => ipcRenderer.invoke(GET_KEEP_AWAKE_STATE_CHANNEL),
-  setKeepAwakeEnabled: (enabled) => ipcRenderer.invoke(SET_KEEP_AWAKE_ENABLED_CHANNEL, enabled),
+  setKeepAwakeMode: (mode) => ipcRenderer.invoke(SET_KEEP_AWAKE_MODE_CHANNEL, mode),
   restartApp: () => ipcRenderer.invoke(RESTART_APP_CHANNEL),
   getHostedIdentityState: () => ipcRenderer.invoke(GET_HOSTED_IDENTITY_STATUS_CHANNEL),
   connectHostedIdentity: () => ipcRenderer.invoke(CONNECT_HOSTED_IDENTITY_CHANNEL),

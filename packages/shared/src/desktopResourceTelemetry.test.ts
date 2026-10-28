@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createTelemetryLineReader,
   DESKTOP_TELEMETRY_MAX_BYTES,
+  parseDesktopAgentWorkFrame,
   parseDesktopBackendLifecycleFrame,
   parseDesktopResourceTelemetry,
 } from "./desktopResourceTelemetry.ts";
@@ -133,5 +134,35 @@ describe("private desktop telemetry protocol", () => {
     expect(parseDesktopBackendLifecycleFrame({ type: "fatal", message: "no code" })).toBeNull();
     expect(parseDesktopBackendLifecycleFrame({ type: "sample" })).toBeNull();
     expect(parseDesktopBackendLifecycleFrame(null)).toBeNull();
+  });
+
+  it("parses agent-work frames and keeps them out of the lifecycle frames", () => {
+    expect(
+      parseDesktopAgentWorkFrame({ type: "agent-work", working: true, keepAwake: true }),
+    ).toEqual({ type: "agent-work", working: true, keepAwake: true });
+    // Extra fields are stripped.
+    expect(
+      parseDesktopAgentWorkFrame({
+        type: "agent-work",
+        working: false,
+        keepAwake: true,
+        threads: ["t-1"],
+      }),
+    ).toEqual({ type: "agent-work", working: false, keepAwake: true });
+    for (const malformed of [
+      { type: "agent-work", working: true },
+      { type: "agent-work", keepAwake: false },
+      { type: "agent-work", working: "yes", keepAwake: true },
+      { type: "agent-work", working: true, keepAwake: 1 },
+      { type: "startup-ready", working: true, keepAwake: true },
+      null,
+      "agent-work",
+      [{ type: "agent-work", working: true, keepAwake: true }],
+    ]) {
+      expect(parseDesktopAgentWorkFrame(malformed)).toBeNull();
+    }
+    expect(
+      parseDesktopBackendLifecycleFrame({ type: "agent-work", working: true, keepAwake: true }),
+    ).toBeNull();
   });
 });

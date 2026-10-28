@@ -174,6 +174,32 @@ export function parseDesktopBackendLifecycleFrame(
 }
 
 /**
+ * Backend → desktop: whether agents are working on this backend. Sent once the backend's
+ * startup command gate opened, then on every change; nothing is sent before that, so the first
+ * frame is authoritative. `keepAwake` is what sleep holds follow (`working`, plus a 2-minute
+ * release tail). `working` is the value without the tail, for consumers that need "anything
+ * running right now". Kept apart from {@link DesktopBackendLifecycleFrame}: it is runtime
+ * state, not a readiness fact of the backend generation.
+ */
+export interface DesktopAgentWorkFrame {
+  readonly type: "agent-work";
+  readonly working: boolean;
+  readonly keepAwake: boolean;
+}
+
+export function parseDesktopAgentWorkFrame(value: unknown): DesktopAgentWorkFrame | null {
+  if (
+    !record(value) ||
+    value.type !== "agent-work" ||
+    typeof value.working !== "boolean" ||
+    typeof value.keepAwake !== "boolean"
+  ) {
+    return null;
+  }
+  return { type: "agent-work", working: value.working, keepAwake: value.keepAwake };
+}
+
+/**
  * App updates over the same pipe. The backend relays a client's request
  * (`server.updateNode`, `server.checkNodeUpdate`) to the desktop app that owns it:
  * - `app-update-check`: check the update feed now.

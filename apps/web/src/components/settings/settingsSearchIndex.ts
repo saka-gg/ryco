@@ -9,6 +9,7 @@ export type SettingsDestination = "client" | "node";
 export type SettingsDesktopCapability =
   | "computerUse"
   | "quitShortcut"
+  | "setKeepAwakeMode"
   | "windowCapture"
   | "windowTranslucencySupported";
 
@@ -436,6 +437,17 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "client",
     description: "Serve over your tailnet with HTTPS.",
     keywords: "vpn remote",
+  },
+  {
+    section: "connections",
+    title: "Keep this computer awake",
+    owner: "client",
+    desktopCapability: "setKeepAwakeMode",
+    description:
+      "Stop idle sleep while other devices reach this computer or agents work, on AC power.",
+    keywords: "sleep caffeinate power battery plugged in awake agents",
+    // DESKTOP_KEEP_AWAKE_ROW_ID: the row's title names the device, so it cannot be the target.
+    targetId: "desktop-keep-awake",
   },
   {
     section: "connections",

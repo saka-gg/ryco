@@ -17,6 +17,7 @@ vi.mock("electron", async () => {
 });
 import type { DesktopUpdateState } from "@ryco/contracts";
 import {
+  type DesktopAgentWorkFrame,
   type DesktopAppUpdateRequestFrame,
   type DesktopBackendLifecycleFrame,
   parseDesktopAppUpdateStateFrame,
@@ -172,6 +173,38 @@ describe("desktop resource telemetry", () => {
     ]);
     expect(lifecycle).toEqual([{ type: "startup-ready" }]);
     expect(pipe.destroyed).toBe(false);
+    stop.close();
+    pipe.destroy();
+  });
+
+  it("hands agent-work frames to their owner, drops malformed ones and survives a throw", () => {
+    const { pipe } = backendPipe();
+    const work: DesktopAgentWorkFrame[] = [];
+    const lifecycle: DesktopBackendLifecycleFrame[] = [];
+    const stop = attachDesktopResourceTelemetry(pipe, {
+      onLifecycleFrame: (frame) => lifecycle.push(frame),
+      onAgentWork: (frame) => {
+        work.push(frame);
+        if (work.length === 1) throw new Error("keep-awake exploded");
+      },
+    });
+    pipe.emit(
+      "data",
+      [
+        '{"type":"agent-work","working":true,"keepAwake":true}',
+        '{"type":"agent-work","working":"yes","keepAwake":true}',
+        '{"type":"agent-work","working":false,"keepAwake":true,"extra":1}',
+        '{"type":"startup-ready"}',
+        "",
+      ].join("\n"),
+    );
+    expect(work).toEqual([
+      { type: "agent-work", working: true, keepAwake: true },
+      { type: "agent-work", working: false, keepAwake: true },
+    ]);
+    expect(lifecycle).toEqual([{ type: "startup-ready" }]);
+    expect(pipe.destroyed).toBe(false);
+    expect(electron.getAppMetrics).not.toHaveBeenCalled();
     stop.close();
     pipe.destroy();
   });

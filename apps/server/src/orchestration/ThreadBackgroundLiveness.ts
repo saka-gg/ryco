@@ -10,7 +10,9 @@
  * matches reality: orphaned background work is not live.
  *
  * All live background work presents as "working", including background
- * shells and monitor tasks that outlive the foreground turn.
+ * shells and monitor tasks that outlive the foreground turn. The agent-work
+ * tracker (`AgentWorkActivity`) also counts it, and listens for changes
+ * through `onLiveThreadsChange` because no domain event reports them.
  *
  * @module ThreadBackgroundLivenessService
  */
@@ -85,8 +87,21 @@ export class ThreadBackgroundLivenessService extends Context.Service<
 
     /** Threads with at least one live agent or watch loop (graceful-shutdown hints). */
     readonly listLiveThreadIds: () => ReadonlyArray<string>;
+
+    /**
+     * Called after a thread gains its first live task, loses its last one, or has its live
+     * tasks reported by another runtime: every change that can alter what
+     * {@link listLiveThreadIds} and a runtime-scoped {@link listLiveTaskIds} answer. Never called
+     * for progress ticks or for another task on a thread that already has live work. A listener
+     * that throws is ignored. Returns the unsubscribe function.
+     */
+    readonly onLiveThreadsChange: (listener: (threadId: string) => void) => () => void;
   }
 >()("ryco/orchestration/ThreadBackgroundLiveness/ThreadBackgroundLivenessService") {}
+
+type RecordTaskLivenessInput = Parameters<
+  ThreadBackgroundLivenessService["Service"]["recordTaskLiveness"]
+>[0];
 
 interface TaskLivenessHistory {
   taskType: string | undefined;
@@ -135,8 +150,33 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
     }
   };
 
-  return {
-    recordTaskLiveness: (input) => {
+  const listeners = new Set<(threadId: string) => void>();
+  // Runs one mutation of `threadId` and tells the listeners when it changed whether the thread
+  // has live work, or which runtime that work belongs to. Each mutation touches one thread only.
+  const mutateThread = (threadId: string, mutate: () => void) => {
+    if (listeners.size === 0) {
+      mutate();
+      return;
+    }
+    const wasLive = stateByThreadId.has(threadId);
+    const runtimeBefore = runtimeByThreadId.get(threadId);
+    mutate();
+    const isLive = stateByThreadId.has(threadId);
+    if (wasLive === isLive && (!isLive || runtimeByThreadId.get(threadId) === runtimeBefore)) {
+      return;
+    }
+    for (const listener of listeners) {
+      try {
+        listener(threadId);
+      } catch {
+        // A listener must not break ingestion, which calls in here synchronously.
+      }
+    }
+  };
+
+  // The mutations themselves; the service wraps each in `mutateThread`.
+  const mutations = {
+    recordTaskLiveness: (input: RecordTaskLivenessInput) => {
       if (input.runtimeSessionId !== undefined) {
         if (
           runtimeByThreadId.has(input.threadId) &&
@@ -227,8 +267,20 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
         taskType !== undefined && MONITOR_TASK_TYPES.has(taskType) ? state.monitors : state.agents;
       bucket.add(input.taskId);
     },
+  };
 
-    clearThreadLiveness: clearThread,
+  return {
+    recordTaskLiveness: (input) =>
+      mutateThread(input.threadId, () => mutations.recordTaskLiveness(input)),
+
+    clearThreadLiveness: (threadId) => mutateThread(threadId, () => clearThread(threadId)),
+
+    onLiveThreadsChange: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
 
     // `drop` prunes empty threads, so every key has live work.
     listLiveThreadIds: () => [...stateByThreadId.keys()],
