@@ -16,10 +16,12 @@
  * A caller inside a transaction on the main connection must keep reading
  * there (uncommitted rows are invisible here); see {@link readClientFor}.
  *
- * Which reads run here: statistics, the daily recap, and the projection reads
- * listed in `READ_WORKER_METHODS` (orchestration/Layers/ProjectionSnapshotQuery.ts),
- * which also records the rule for adding one. Engine hydration, shell builds and
- * event replay stay on the main connection.
+ * Which reads run here: statistics, the daily recap, event-log compaction's
+ * selection and receipt pages (persistence/Layers/EventLogCompaction.ts), and
+ * the projection reads listed in `READ_WORKER_METHODS`
+ * (orchestration/Layers/ProjectionSnapshotQuery.ts), which also records the
+ * rule for adding one. Engine hydration, shell builds and event replay stay on
+ * the main connection.
  *
  * The worker source is inlined and started with `eval: true`, so it needs no
  * separate bundle entry and runs the same from source, from the published CLI

@@ -194,6 +194,7 @@
         "@types/node": "catalog:",
         "effect-acp": "workspace:*",
         "effect-codex-app-server": "workspace:*",
+        "fast-check": "catalog:",
         "tsdown": "catalog:",
         "typescript": "catalog:",
         "vite-plus": "catalog:",
@@ -284,6 +285,7 @@
       "devDependencies": {
         "@noble/curves": "catalog:",
         "@noble/hashes": "catalog:",
+        "fast-check": "catalog:",
         "typescript": "catalog:",
         "vite-plus": "catalog:",
         "vitest": "catalog:",
