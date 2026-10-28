@@ -49,12 +49,51 @@ export const StorageUsageSample = Schema.Struct({
   measuredBytes: NonNegativeInt,
   incompleteEntries: NonNegativeInt,
 });
+/** Background removal of superseded history from the event log (see docs/storage-management.md). */
+export const DatabaseCompactionReport = Schema.Struct({
+  /** Removing (`RYCO_EVENT_COMPACTION` unset or `on`); false when off or only dry-running. */
+  enabled: Schema.Boolean,
+  headSequence: NonNegativeInt,
+  /** History up to here has been examined. */
+  compactedThroughSequence: NonNegativeInt,
+  /** The last pass left nothing settled behind (events older than a day, old receipts). */
+  caughtUp: Schema.Boolean,
+  lastPassCompletedAt: Schema.NullOr(IsoDateTime),
+  removedEvents: NonNegativeInt,
+  removedBytes: NonNegativeInt,
+  /** Superseded bytes the rest of the history likely holds; null before the first pass. */
+  estimatedCompactableBytes: Schema.NullOr(NonNegativeInt),
+});
+export type DatabaseCompactionReport = typeof DatabaseCompactionReport.Type;
+
+/** The node's state database: its size, free space inside it, and what could be returned. */
+export const DatabaseStorageReport = Schema.Struct({
+  fileBytes: NonNegativeInt,
+  /**
+   * Size of the `-wal` file. SQLite keeps and reuses it after merging its writes into the file
+   * (up to `journal_size_limit`), so this is space on disk, not writes still pending.
+   */
+  walBytes: NonNegativeInt,
+  pageSize: NonNegativeInt,
+  pageCount: NonNegativeInt,
+  /** Pages inside the file that hold nothing; SQLite reuses them before growing the file. */
+  freePages: NonNegativeInt,
+  /** `incremental`: free pages are returned to the file system online; `none`: they stay. */
+  autoVacuum: Schema.Literals(["none", "full", "incremental"]),
+  compaction: DatabaseCompactionReport,
+  /** Free pages plus the compaction estimate. */
+  reclaimableBytes: NonNegativeInt,
+});
+export type DatabaseStorageReport = typeof DatabaseStorageReport.Type;
+
 export const StorageSnapshot = Schema.Struct({
   scannedAt: IsoDateTime,
   entries: Schema.Array(StorageEntry),
   truncated: Schema.Boolean,
   nextCursor: Schema.NullOr(Schema.String),
   history: Schema.Array(StorageUsageSample),
+  /** Absent from nodes that predate it; older clients ignore it. */
+  database: Schema.optionalKey(DatabaseStorageReport),
 });
 export type StorageSnapshot = typeof StorageSnapshot.Type;
 export const StorageScanInput = Schema.Struct({

@@ -8,10 +8,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vitest";
 import {
+  type DatabaseStorageReport,
   DEFAULT_SERVER_SETTINGS,
   GitCommandError,
   OrchestrationShellSnapshot,
   ProjectId,
+  StorageSnapshot,
   ThreadId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -155,7 +157,7 @@ const fixture = Effect.gen(function* () {
     logsDir: path.join(root, "logs"),
   } as ServerConfigShape;
   const policy = yield* makeWorkspaceAccessPolicy(undefined);
-  const service = makeStorageService({
+  const deps: Parameters<typeof makeStorageService>[0] = {
     sql,
     config,
     providerProtection: {
@@ -212,11 +214,15 @@ const fixture = Effect.gen(function* () {
           });
         }).pipe(Effect.mapError((cause) => cause as never)),
     },
-  });
+  };
+  const service = makeStorageService(deps);
   const entry = (yield* service.scan()).entries.find((item) => item.path === checkout)!;
   return {
     sql,
     service,
+    /** The same node with a database report reader, as the server builds it. */
+    withDatabase: (readDatabase: Effect.Effect<DatabaseStorageReport>) =>
+      makeStorageService({ ...deps, readDatabase }),
     root,
     repo,
     checkout,
@@ -249,6 +255,50 @@ const fixture = Effect.gen(function* () {
 it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
   "safe node storage lifecycle",
   (it) => {
+    it.effect("carries the node's database report on every inventory page", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const report: DatabaseStorageReport = {
+            fileBytes: 8_192_000,
+            walBytes: 4_096,
+            pageSize: 4_096,
+            pageCount: 2_000,
+            freePages: 300,
+            autoVacuum: "incremental",
+            compaction: {
+              enabled: true,
+              headSequence: 900,
+              compactedThroughSequence: 450,
+              caughtUp: false,
+              lastPassCompletedAt: "2026-10-20T12:00:00.000Z",
+              removedEvents: 120,
+              removedBytes: 60_000,
+              estimatedCompactableBytes: 60_000,
+            },
+            reclaimableBytes: 300 * 4_096 + 60_000,
+          };
+          let reads = 0;
+          const f = yield* fixture;
+          const service = f.withDatabase(
+            Effect.sync(() => {
+              reads += 1;
+              return report;
+            }),
+          );
+          const first = yield* service.scan();
+          // A later page replaces the shown snapshot, so it carries the report too.
+          const later = yield* service.scan(undefined, "~after-every-entry");
+          assert.isAbove(first.entries.length, 0);
+          assert.deepEqual(first.database, report);
+          assert.deepEqual(later.database, report);
+          assert.strictEqual(reads, 2);
+          const wire = Schema.encodeSync(StorageSnapshot)(first);
+          assert.deepEqual(Schema.decodeUnknownSync(StorageSnapshot)(wire).database, report);
+          // Without a reader the key is absent, as from a node that predates it.
+          assert.isFalse("database" in (yield* f.service.scan()));
+        }),
+      ),
+    );
     it.effect(
       "previews clean owned checkouts, retains branches/history and replays only the recorded result",
       () =>

@@ -66,8 +66,40 @@ live frame coalescing.
   state. Unset, empty, `on`, `1`, `true` or `yes` runs it (the default). Any other value turns it
   off and logs a warning naming the accepted values, so a mistyped kill switch never deletes. CLI
   commands never compact.
-- Removed events free pages inside the database file; the file itself does not shrink. Online
-  passes keep at most one stale version per activity whose versions straddle two passes.
+- Removed events free pages inside the database file (see below for when the file shrinks).
+  Online passes keep at most one stale version per activity whose versions straddle two passes.
 - Measure on a copy with `node apps/server/scripts/measure-event-compaction.ts --db <state.sqlite>`
   (fixture homes from `generate-fixture-home.ts --progress-ticks-per-turn N
   --reasoning-flushes-per-turn N --subagent-flushes-per-turn N`).
+
+## Database: free space and automatic shrinking
+
+Deleting rows (compaction, thread purges, finished message chunks) leaves free pages inside
+`state.sqlite`. SQLite reuses them for new data before it grows the file, so free space is not
+lost, but the file only gets smaller when pages are returned to the file system.
+
+- New databases are created with `auto_vacuum = INCREMENTAL` (`apps/server/src/persistence/Layers/Sqlite.ts`).
+  SQLite accepts the mode only while the file has no tables, and before it switches to WAL; the
+  setup sets it first, and on Bun the client's own WAL switch is skipped for a file that does not
+  exist yet or is empty. Incremental mode adds a pointer map: one page per 819 pages at 4 KiB
+  (about 0.12% of the file).
+- Existing databases keep their mode (`NONE`). Changing it needs a full rebuild (`VACUUM`), which
+  never runs while the server is up; an offline repair command is planned. Until then their free
+  space is reused inside the file.
+- On incremental databases the server returns free pages online
+  (`apps/server/src/persistence/Layers/DatabaseMaintenance.ts`): once a minute, when more than
+  256 pages (1 MiB at the default 4 KiB page size) are free, it frees up to 1,024 pages (4 MiB)
+  down to that floor, in transactions of 128 single-page `PRAGMA incremental_vacuum(1)` steps,
+  pausing after each one at least 2 ms and three times as long as it took. The floor stays free
+  for new writes. The file shrinks when the write-ahead log is next checkpointed. A chunk slower
+  than 50 ms logs a warning; failures log and retry the next minute. This runs whatever
+  `RYCO_EVENT_COMPACTION` says, and never on `NONE` databases.
+- Storage settings show the database after a scan (every inventory page carries it): file and
+  write-ahead log size, free space inside the file, whether automatic shrinking is on, history
+  compaction progress (events and bytes removed so far, the share of history examined, up to date
+  or catching up, the last pass), and an estimate of reclaimable space: free pages plus the bytes
+  compaction is still expected to remove, extrapolated from what it removed per examined
+  sequence so far (unknown before the first pass; the unexamined part includes the last day,
+  which is not eligible yet). The report reads header pragmas, two key lookups and two `stat`
+  calls; a part it cannot read shows as 0 or unknown. Older nodes send no report and the section
+  stays hidden; older clients ignore it.

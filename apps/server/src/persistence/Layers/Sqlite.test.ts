@@ -174,6 +174,83 @@ it.effect("keeps SQLite's own checkpoints without the worker and in memory", () 
   );
 });
 
+const withTempDatabase = <E>(
+  prefix: string,
+  test: (dbPath: string) => Effect.Effect<void, E, SqlClient.SqlClient>,
+  prepare?: (dbPath: string) => void,
+) => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+  prepare?.(dbPath);
+  return test(dbPath).pipe(
+    Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+};
+
+const readModes = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const [vacuum] = yield* sql<{ readonly auto_vacuum: number }>`PRAGMA auto_vacuum`;
+  const [journal] = yield* sql<{ readonly journal_mode: string }>`PRAGMA journal_mode`;
+  const [ledger] = yield* sql<{
+    readonly migrations: number;
+  }>`SELECT count(*) AS migrations FROM effect_sql_migrations`;
+  return {
+    autoVacuum: vacuum?.auto_vacuum,
+    journalMode: journal?.journal_mode,
+    migrations: Number(ledger?.migrations ?? 0),
+  };
+});
+
+it.effect("creates new database files with incremental auto-vacuum, in WAL mode", () =>
+  withTempDatabase("ryco-sqlite-new-", () =>
+    Effect.gen(function* () {
+      const modes = yield* readModes;
+      assert.equal(modes.autoVacuum, 2);
+      assert.equal(modes.journalMode, "wal");
+      assert.isAbove(modes.migrations, 0);
+    }),
+  ),
+);
+
+it.effect("treats an empty database file as new", () =>
+  withTempDatabase(
+    "ryco-sqlite-empty-",
+    () =>
+      Effect.gen(function* () {
+        const modes = yield* readModes;
+        assert.equal(modes.autoVacuum, 2);
+        assert.equal(modes.journalMode, "wal");
+      }),
+    (dbPath) => NodeFS.writeFileSync(dbPath, ""),
+  ),
+);
+
+it.effect("keeps the auto-vacuum mode of an existing database and migrates it as before", () =>
+  withTempDatabase(
+    "ryco-sqlite-existing-",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const modes = yield* readModes;
+        assert.equal(modes.autoVacuum, 0);
+        assert.equal(modes.journalMode, "wal");
+        assert.isAbove(modes.migrations, 0);
+        const rows = yield* sql<{ readonly id: number }>`SELECT id FROM legacy_probe`;
+        assert.deepEqual([...rows], [{ id: 1 }]);
+      }),
+    (dbPath) => {
+      // A database written before this change: tables exist, auto_vacuum NONE, WAL.
+      const db = new DatabaseSync(dbPath);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec(
+        "CREATE TABLE legacy_probe(id INTEGER PRIMARY KEY); INSERT INTO legacy_probe VALUES (1)",
+      );
+      db.close();
+    },
+  ),
+);
+
 const schemaAndLedger = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const schema =
