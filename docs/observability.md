@@ -397,6 +397,26 @@ That is a server-side acknowledgment metric. It does not measure:
 
 If you need those later, add client-side instrumentation or a dedicated server fanout metric.
 
+### Domain-Event Subscribers That Fall Behind
+
+Publishing a committed event never waits for its subscribers (the reactors and live feeds). The
+bus keeps the latest 4,096 events. A subscriber that falls further behind reads the events it
+missed from the event store before it continues. The runtime queue counters with
+`queue="orchestration.domain-events"` show this:
+
+- `ryco_runtime_queue_overflows_total`: missed ranges read from the store
+- `ryco_runtime_queue_recoveries_total`: events read that way
+
+They stay at zero while every subscriber keeps up. A steady rise means a subscriber is slow,
+usually a reactor waiting on git or a provider. They also rise once per subscriber when events
+reach the database without this server publishing them: events another process appended to the
+same database (an offline `ryco project` command), or a command whose post-commit step and its
+recovery both failed. A failed read is retried, at most 5 s apart, from the last event already
+delivered, with a warning log `domain event subscriber could not read missed events; retrying`. A
+missed event this server cannot decode ends that subscriber, with the error log
+`domain event subscriber cannot decode missed events`. Restarting the server starts every
+subscriber again at the newest event.
+
 ## Event-Loop Stalls
 
 The server watches its own event loop for as long as it runs

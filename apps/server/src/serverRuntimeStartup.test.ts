@@ -1110,7 +1110,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.gen(function* () {
           const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-          return yield* PubSub.subscribe(pubsub);
+          return Stream.fromSubscription(yield* PubSub.subscribe(pubsub));
         }),
       } satisfies OrchestrationEngineShape),
       Effect.provide(Layer.merge(ServerSettingsService.layerTest(), NodeServices.layer)),
@@ -1164,7 +1164,7 @@ it.effect(
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.gen(function* () {
             const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-            return yield* PubSub.subscribe(pubsub);
+            return Stream.fromSubscription(yield* PubSub.subscribe(pubsub));
           }),
         } satisfies OrchestrationEngineShape),
         Effect.provide(

@@ -47,6 +47,7 @@ export const SERVER_PURE_TEST_FILES = [
   "src/orchestration/decider.steer.test.ts",
   "src/orchestration/decider.tokenMode.test.ts",
   "src/orchestration/projector.test.ts",
+  "src/orchestration/sequenceOrderedStream.test.ts",
   "src/orchestration/threadIndex.test.ts",
   "src/orchestration/threadHistoryCursor.test.ts",
   "src/orchestration/threadShellSummaryProjection.test.ts",

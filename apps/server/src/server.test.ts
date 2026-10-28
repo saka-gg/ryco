@@ -899,7 +899,7 @@ const buildAppUnderTest = (options?: {
             streamDomainEvents: Stream.empty,
             subscribeDomainEvents: Effect.gen(function* () {
               const pubsub = yield* PubSub.unbounded<OrchestrationEvent>();
-              return yield* PubSub.subscribe(pubsub);
+              return Stream.fromSubscription(yield* PubSub.subscribe(pubsub));
             }),
             ...options?.layers?.orchestrationEngine,
           }),
@@ -6413,7 +6413,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               const subscription = yield* PubSub.subscribe(livePubSub);
               yield* PubSub.publish(livePubSub, replayedEvent);
               yield* PubSub.publish(livePubSub, liveEvent);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {
@@ -6487,7 +6487,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         orchestrationEngine: {
           readEventsPage: (fromSequenceExclusive) =>
             Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
-          subscribeDomainEvents: PubSub.subscribe(livePubSub),
+          subscribeDomainEvents: Effect.map(PubSub.subscribe(livePubSub), Stream.fromSubscription),
         },
         projectionSnapshotQuery: {
           getShellSnapshot: () => Effect.succeed(pagedShellSnapshot()),
@@ -6562,7 +6562,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           orchestrationEngine: {
             readEventsPage: (fromSequenceExclusive) =>
               Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
-            subscribeDomainEvents: PubSub.subscribe(livePubSub),
+            subscribeDomainEvents: Effect.map(
+              PubSub.subscribe(livePubSub),
+              Stream.fromSubscription,
+            ),
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () => Effect.succeed(pagedShellSnapshot()),
@@ -6797,7 +6800,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 hasMore: after.length > limit,
               });
             },
-            subscribeDomainEvents: PubSub.subscribe(livePubSub),
+            subscribeDomainEvents: Effect.map(
+              PubSub.subscribe(livePubSub),
+              Stream.fromSubscription,
+            ),
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () =>
@@ -6959,7 +6965,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             subscribeDomainEvents: Effect.gen(function* () {
               const subscription = yield* PubSub.subscribe(livePubSub);
               yield* PubSub.publish(livePubSub, liveBoundaryEvent);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {
@@ -7043,7 +7049,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               const subscription = yield* PubSub.subscribe(livePubSub);
               yield* PubSub.publish(livePubSub, replayedEvent);
               yield* PubSub.publish(livePubSub, liveEvent);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {
@@ -7123,7 +7129,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               }),
             subscribeDomainEvents: Effect.gen(function* () {
               const subscription = yield* PubSub.subscribe(livePubSub);
-              return subscription;
+              return Stream.fromSubscription(subscription);
             }),
           },
           projectionSnapshotQuery: {

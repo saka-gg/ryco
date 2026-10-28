@@ -146,9 +146,9 @@ const make = Effect.gen(function* () {
   const start: ThreadDeletionReactorShape["start"] = Effect.fn("start")(function* () {
     // Acquire synchronously so a create dispatched immediately after start
     // cannot be published before this reactor owns its subscription.
-    const subscription = yield* orchestrationEngine.subscribeDomainEvents;
+    const events = yield* orchestrationEngine.subscribeDomainEvents;
     yield* Effect.forkScoped(
-      Stream.runForEach(Stream.fromSubscription(subscription), (event) =>
+      Stream.runForEach(events, (event) =>
         (event.type === "thread.deleted" || event.type === "thread.trashed"
           ? worker.enqueue(event)
           : Effect.void

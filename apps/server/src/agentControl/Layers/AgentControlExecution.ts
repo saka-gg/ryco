@@ -1331,7 +1331,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             } else {
               const resolution = yield* Effect.scoped(
                 Effect.gen(function* () {
-                  const subscription = yield* engine.subscribeDomainEvents;
+                  const events = yield* engine.subscribeDomainEvents;
                   yield* dispatch("turn-steer-requested", {
                     type: "thread.turn.steer",
                     commandId: commandIdFor(operation.operationId, "turn-steer"),
@@ -1346,7 +1346,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                     createdAt: new Date().toISOString(),
                     requestedAt: new Date().toISOString(),
                   });
-                  return yield* Stream.fromSubscription(subscription).pipe(
+                  return yield* events.pipe(
                     Stream.filter(
                       (event) =>
                         (event.type === "thread.turn-steer-accepted" ||

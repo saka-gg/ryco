@@ -31,7 +31,7 @@ import {
 } from "@ryco/contracts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, FileSystem, Layer, Option, PubSub, Ref, Schema } from "effect";
+import { Effect, FileSystem, Layer, Option, PubSub, Ref, Schema, Stream } from "effect";
 
 import fs from "node:fs";
 import os from "node:os";
@@ -760,7 +760,9 @@ for (const reason of [undefined, "deferred"] as const) {
           const execution = yield* makeTestExecution({
             proposalStore: stores.proposalStore,
             operationStore: stores.operationStore,
-            engine: { subscribeDomainEvents: PubSub.subscribe(events) },
+            engine: {
+              subscribeDomainEvents: Effect.map(PubSub.subscribe(events), Stream.fromSubscription),
+            },
             commandApplication: {
               apply: (command: ClientOrchestrationCommand) =>
                 Effect.gen(function* () {

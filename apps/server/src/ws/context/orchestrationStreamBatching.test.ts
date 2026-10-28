@@ -95,7 +95,7 @@ const makeHarnessWith = (options: {
             hasMore: after.length > limit,
           };
         }),
-      subscribeDomainEvents: PubSub.subscribe(harness.live),
+      subscribeDomainEvents: Effect.map(PubSub.subscribe(harness.live), Stream.fromSubscription),
     } as unknown as OrchestrationEngineShape;
     const projectionSnapshotQuery = {
       getThreadShellById: (threadId: ThreadId) =>
