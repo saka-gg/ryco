@@ -1,5 +1,4 @@
 import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
-import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import {
   applyAutoSettleRuleToNodes,
   describeAutoSettleRuleApplyResult,
@@ -31,7 +30,7 @@ import { updateEnvironmentServerSettings } from "../../connection/environmentApi
 import { getCachedHubNodeRoster, subscribeCachedHubNodeRoster } from "../../hostedHub/nodeRoster";
 import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
 import { useConnectionRegistry } from "../../providers/ConnectionRegistryProvider";
-import { useWsConnectionOpenedCount } from "../../rpc/wsConnectionState";
+import { useWsConnectionStatusesForEnvironments } from "../../rpc/wsConnectionState";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { updatePreferences, usePreferences } from "../../state/preferencesStore";
 import { refreshMobileThreadPrioritiesNow } from "../../threadPriorityRefreshRuntime";
@@ -68,7 +67,6 @@ export function SettingsInboxRouteScreen() {
   const { driver } = useConnectionRegistry();
   const [connections, setConnections] = useState(() => driver.supervisor.list());
   const configs = useEnvironmentServerConfigs();
-  const connectionOpenedCount = useWsConnectionOpenedCount();
   const preferences = usePreferences();
   const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -89,8 +87,15 @@ export function SettingsInboxRouteScreen() {
     [driver],
   );
 
+  // Each connected environment's own socket, subscribed: a status read in render
+  // is cached by React Compiler and never sees the socket reopen or drop. Only
+  // environments with a live connection are listed, so any other reads as not
+  // connected.
+  const statuses = useWsConnectionStatusesForEnvironments(
+    connections.map((connection) => connection.environmentId),
+  );
+
   const rows = useMemo(() => {
-    void connectionOpenedCount;
     const connectionById = new Map(
       connections.map((connection) => [connection.environmentId, connection] as const),
     );
@@ -100,13 +105,11 @@ export function SettingsInboxRouteScreen() {
         label:
           connectionById.get(environmentId)?.knownEnvironment.label ??
           serverConfig.environment.label,
-        connected:
-          connectionById.has(environmentId) &&
-          getWsConnectionStatusForEnvironment(environmentId).phase === "connected",
+        connected: statuses.get(environmentId)?.phase === "connected",
         serverConfig,
       })),
     );
-  }, [configs, connectionOpenedCount, connections]);
+  }, [configs, connections, statuses]);
 
   const selectedRow = rows.find((row) => row.environmentId === pickerEnvironmentId) ?? null;
   const pickerModel = buildModelPickerModel({
@@ -172,8 +175,7 @@ export function SettingsInboxRouteScreen() {
     hostedNodes.find((node) => node.environmentId === environmentId)?.effectiveRole === "owner" ||
     savedRows.find((row) => row.record.environmentId === environmentId)?.runtime.role === "owner";
   const isNodeConnected = (environmentId: EnvironmentId) =>
-    connections.some((connection) => connection.environmentId === environmentId) &&
-    getWsConnectionStatusForEnvironment(environmentId).phase === "connected";
+    statuses.get(environmentId)?.phase === "connected";
   const ruleModel = buildAutoSettleRuleModel({
     configs,
     labelOf: (environmentId, config) => nodeLabels.get(environmentId) ?? config.environment.label,

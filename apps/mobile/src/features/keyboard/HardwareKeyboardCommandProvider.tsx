@@ -4,7 +4,6 @@ import { useCallback, useMemo, useSyncExternalStore, type PropsWithChildren } fr
 import { KeyboardCommands } from "../../native/KeyboardCommands";
 import {
   dispatchHardwareKeyboardCommand,
-  getHardwareKeyboardCommandRegistrationVersion,
   getRegisteredHardwareKeyboardCommands,
   parseActiveThreadPath,
   subscribeToHardwareKeyboardCommandRegistrations,
@@ -19,19 +18,21 @@ export function HardwareKeyboardCommandProvider({
   pathname,
 }: PropsWithChildren<{ readonly pathname: string }>) {
   const navigation = useNavigation();
-  const registrationVersion = useSyncExternalStore(
+  // The registration set itself, not a version counter: React Compiler keys a
+  // memo on what its callback reads and would drop an unread version key.
+  const registered = useSyncExternalStore(
     subscribeToHardwareKeyboardCommandRegistrations,
-    getHardwareKeyboardCommandRegistrationVersion,
-    getHardwareKeyboardCommandRegistrationVersion,
+    getRegisteredHardwareKeyboardCommands,
+    getRegisteredHardwareKeyboardCommands,
   );
   const enabledCommands = useMemo(() => {
-    const commands = new Set<HardwareKeyboardCommand>(getRegisteredHardwareKeyboardCommands());
+    const commands = new Set<HardwareKeyboardCommand>(registered);
     if (pathname !== "/" || navigation.canGoBack()) commands.add("back");
     if (parseActiveThreadPath(pathname)) {
       commands.add("review");
     }
     return [...commands];
-  }, [pathname, registrationVersion, navigation]);
+  }, [pathname, registered, navigation]);
 
   const onCommand = useCallback(
     (command: HardwareKeyboardCommand) => {

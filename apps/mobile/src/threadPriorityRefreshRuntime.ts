@@ -1,5 +1,6 @@
 import {
   getThreadPriorityRefreshCoordinator,
+  sameThreadPriorityRefreshEnvironments,
   type ThreadPriorityManualRefreshResult,
   type ThreadPriorityRefreshConfig,
   type ThreadPriorityRefreshEnvironment,
@@ -25,10 +26,13 @@ const coordinator = getThreadPriorityRefreshCoordinator(runtimeIdentity, {
   // Automatic failures stay quiet. Manual refresh reports them in Settings.
 });
 
+/** Stores the environment list; `true` when it differs in anything the coordinator reads. */
 export function setMobileThreadPriorityRefreshEnvironments(
   environments: ReadonlyArray<ThreadPriorityRefreshEnvironment>,
-): void {
+): boolean {
+  const changed = !sameThreadPriorityRefreshEnvironments(environmentSnapshot, environments);
   environmentSnapshot = environments;
+  return changed;
 }
 
 export async function configureMobileThreadPriorityRefresh(
