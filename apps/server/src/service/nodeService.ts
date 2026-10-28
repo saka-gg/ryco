@@ -12,8 +12,13 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 import { runProcess, type ProcessRunResult } from "../processRunner.ts";
+import {
+  nodeServiceManagerOfProcess,
+  nodeServicePlatform,
+  type NodeServicePlatform,
+} from "./nodeServiceManager.ts";
 
-export type NodeServicePlatform = "launchd" | "systemd";
+export { nodeServiceManagerOfProcess, nodeServicePlatform, type NodeServicePlatform };
 
 export const DEFAULT_NODE_SERVICE_LABEL = "space.ryco.node";
 
@@ -31,14 +36,6 @@ export interface NodeServiceSpec {
   readonly workingDirectory: string;
   readonly logPath: string;
   readonly environment: Readonly<Record<string, string>>;
-}
-
-export function nodeServicePlatform(
-  platform: NodeJS.Platform = process.platform,
-): NodeServicePlatform | null {
-  if (platform === "darwin") return "launchd";
-  if (platform === "linux") return "systemd";
-  return null;
 }
 
 /**

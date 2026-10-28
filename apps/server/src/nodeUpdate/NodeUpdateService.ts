@@ -642,7 +642,9 @@ export const NodeUpdateServiceLive = Layer.effect(
         argv1: process.argv[1],
         platform: process.platform,
         serviceLabel: process.env.RYCO_SERVICE_LABEL,
+        pid: process.pid,
         parentPid: process.ppid,
+        systemdExecPid: process.env.SYSTEMD_EXEC_PID,
         temporaryDirectory: os.tmpdir(),
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),

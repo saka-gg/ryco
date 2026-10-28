@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-const UNUSED_INDEXES = [
+export const UNUSED_INDEXES = [
   "idx_orch_events_command_id",
   "idx_orch_events_correlation_id",
   "idx_orch_command_receipts_aggregate",

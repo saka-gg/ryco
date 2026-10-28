@@ -20,7 +20,7 @@ import { latestCompletedTurnAt } from "./087_ProjectionThreadAnchorsAndStatistic
  * skips ids at or below the latest applied one and parallel branches may claim the same id. It
  * replaces the trigger only while it exists and its stored body lacks the guard.
  */
-const TRIGGER_NAME = "projection_turns_latest_completed_update";
+export const TRIGGER_NAME = "projection_turns_latest_completed_update";
 
 const WATCHED_COLUMNS = [
   "thread_id",
@@ -32,7 +32,9 @@ const WATCHED_COLUMNS = [
 ] as const;
 
 /** Present in the stored trigger SQL once the guarded body is installed. */
-const GUARD = WATCHED_COLUMNS.map((column) => `OLD.${column} IS NOT NEW.${column}`).join(" OR ");
+export const GUARD = WATCHED_COLUMNS.map((column) => `OLD.${column} IS NOT NEW.${column}`).join(
+  " OR ",
+);
 
 const GUARDED_TRIGGER = `CREATE TRIGGER ${TRIGGER_NAME}
      AFTER UPDATE OF ${WATCHED_COLUMNS.join(", ")}

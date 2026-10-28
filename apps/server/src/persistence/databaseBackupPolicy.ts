@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 
 import { Config, Duration, Effect, Option } from "effect";
 
-import type { MigrationLedgerInspection } from "./Migrations.ts";
+import { isUpgradePending, type MigrationLedgerInspection } from "./Migrations.ts";
 
 /** Phase 2 waits this long after startup, out of boot and hydration. */
 export const BACKUP_FINALIZE_DELAY = Duration.seconds(30);
@@ -39,6 +39,4 @@ export const readPremigrationBackupMode = Effect.gen(function* () {
 
 /** An existing database that the next migration pass will change. */
 export const needsPremigrationBackup = (ledger: MigrationLedgerInspection) =>
-  !ledger.fresh &&
-  !ledger.tooNew &&
-  (ledger.pending.length > 0 || ledger.repairsPending.length > 0);
+  !ledger.fresh && !ledger.tooNew && isUpgradePending(ledger);

@@ -20,7 +20,9 @@ const probe = (overrides: Partial<NodeInstallationProbe>): NodeInstallationProbe
   resolvedScriptPath: null,
   platform: "darwin",
   serviceLabel: undefined,
+  pid: 4300,
   parentPid: 4242,
+  systemdExecPid: undefined,
   temporaryDirectory: "/var/folders/xy/T",
   isRycoCheckout: () => false,
   ...overrides,
@@ -154,6 +156,15 @@ describe("node installation detection", () => {
       service: "systemd",
       serviceLabel: "space.ryco.node.1a2b3c4d",
     });
+    // systemd 248+ names the process it started; its children inherit that too.
+    const asSystemdUnit = {
+      platform: "linux",
+      serviceLabel: "space.ryco.node",
+      pid: 4300,
+    } as const;
+    const linuxNpm = "/usr/lib/node_modules/ryco-cli/dist/bin.mjs";
+    expect(at(linuxNpm, { ...asSystemdUnit, systemdExecPid: "4300" }).service).toBe("systemd");
+    expect(at(linuxNpm, { ...asSystemdUnit, systemdExecPid: "900" }).service).toBeNull();
     expect(
       at("C:\\npm\\node_modules\\ryco-cli\\dist\\bin.mjs", {
         platform: "win32",

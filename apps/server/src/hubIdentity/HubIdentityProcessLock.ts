@@ -1,8 +1,19 @@
-import { execFile } from "node:child_process";
-import { constants } from "node:fs";
-import { lstat, open, readFile, rm } from "node:fs/promises";
-import { uptime } from "node:os";
-import { promisify } from "node:util";
+import {
+  createLockFileExclusive,
+  type LockFileIdentity,
+  readLockFile,
+  reclaimLockFile,
+  removeLockFileIfUnchanged,
+} from "../processLock/exclusiveLockFile.ts";
+import {
+  defaultBootId,
+  defaultBootTime,
+  defaultProcessAlive,
+  defaultProcessStartTime,
+  isHolderAbandoned,
+  type RecordedProcess,
+  UNPARSEABLE_LOCK_GRACE_MS,
+} from "../processLock/processIdentity.ts";
 
 /**
  * Which process may use one Hub node identity.
@@ -36,94 +47,31 @@ export interface HubIdentityProcessLock {
   readonly release: () => Promise<void>;
 }
 
-/** Large enough for `<pid> <boot epoch ms> <boot id> <start ticks>\n`, small enough to never read a stray file. */
+/** Large enough for `<pid> <boot epoch ms> <boot id> <start time>\n`, small enough to never read a stray file. */
 const LOCK_FILE_MAX_BYTES = 128;
 /** The two trailing fields are absent from a lock written before they existed. */
 const LOCK_FILE_PATTERN =
   /^([1-9][0-9]{0,9}) ([0-9]{1,16})(?: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|-) ([0-9]{1,20}|-))?\n?$/;
-const BOOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const START_TIME_PATTERN = /^[0-9]{1,20}$/;
-/**
- * Two boot-time estimates further apart than this belong to different boots.
- * Generous, because the estimate moves with every wall-clock correction, and
- * mistaking a live holder for a stale one is the worse error. Only consulted
- * where the kernel has no boot id to compare.
- */
-const BOOT_TIME_TOLERANCE_MS = 10 * 60_000;
-/**
- * A lock file that cannot be parsed is either being written right now or was
- * left half-written by a crash. Only the second survives this long.
- */
-const UNPARSEABLE_LOCK_GRACE_MS = 60_000;
 
-const execFileAsync = promisify(execFile);
+type HubLockRecord = RecordedProcess;
 
-const errorCode = (error: unknown): string | undefined =>
-  (error as NodeJS.ErrnoException | undefined)?.code;
-
-/** Wall-clock time of this boot, in milliseconds. */
-const defaultBootTime = (): number => Math.round(Date.now() - uptime() * 1_000);
-
-/**
- * The kernel's own identifier for this boot, where the platform has one.
- *
- * Exact where the boot-time estimate is a heuristic: a board without a
- * real-time clock whose first network time sync lands after the service
- * started shifts that estimate by however wrong its clock was.
- */
-async function defaultBootId(): Promise<string | undefined> {
-  try {
-    let raw: string | undefined;
-    if (process.platform === "linux") {
-      raw = await readFile("/proc/sys/kernel/random/boot_id", "utf8");
-    } else if (process.platform === "darwin") {
-      raw = (
-        await execFileAsync("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], {
-          timeout: 2_000,
-        })
-      ).stdout;
-    }
-    const value = raw?.trim().toLowerCase();
-    return value !== undefined && BOOT_ID_PATTERN.test(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * When a process started, in clock ticks since boot. Linux only, where reading
- * it is a file read; elsewhere a live pid is taken at its word.
- *
- * What tells a reused pid from the holder: after a container restart the old
- * lock's pid can belong to any process the new server spawned.
- */
-async function defaultProcessStartTime(pid: number): Promise<string | undefined> {
-  if (process.platform !== "linux") return undefined;
-  try {
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-    // Field 22. The command name before it is parenthesized and may itself
-    // contain spaces and parentheses, so count from the last `)`.
-    const startTime = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-    return startTime !== undefined && START_TIME_PATTERN.test(startTime) ? startTime : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function defaultProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error: unknown) {
-    // EPERM is a live process owned by someone else; only ESRCH proves the
-    // holder is gone.
-    return errorCode(error) !== "ESRCH";
-  }
-}
+const decodeHubLockRecord = (content: string): HubLockRecord | undefined => {
+  const match = LOCK_FILE_PATTERN.exec(content);
+  if (match === null) return undefined;
+  const optional = (value: string | undefined) =>
+    value === undefined || value === "-" ? undefined : value;
+  return {
+    pid: Number(match[1]),
+    bootTime: Number(match[2]),
+    bootId: optional(match[3]),
+    startTime: optional(match[4]),
+  };
+};
 
 export function makeHubIdentityProcessLock(options: {
   readonly path: string;
   readonly pid?: number;
+  readonly platform?: NodeJS.Platform;
   readonly now?: () => number;
   readonly bootTime?: () => number;
   readonly bootId?: () => Promise<string | undefined>;
@@ -135,105 +83,45 @@ export function makeHubIdentityProcessLock(options: {
   const now = options.now ?? Date.now;
   const bootTime = options.bootTime ?? defaultBootTime;
   const processStartTime = options.processStartTime ?? defaultProcessStartTime;
-  const processAlive = options.processAlive ?? defaultProcessAlive;
   // A boot id cannot change while this process runs, so it is looked up once.
   let bootIdLookup: Promise<string | undefined> | undefined;
   const bootId = () => (bootIdLookup ??= (options.bootId ?? defaultBootId)());
+  const probe = {
+    platform: options.platform ?? process.platform,
+    bootTime,
+    bootId,
+    processAlive: options.processAlive ?? defaultProcessAlive,
+    processStartTime,
+  };
   let held = false;
   let acquiring: Promise<HubIdentityProcessLockResult> | undefined;
 
-  const readHolder = async (): Promise<
-    | { readonly kind: "absent" }
-    | { readonly kind: "unparseable"; readonly mtimeMs: number; readonly ino: number }
-    | {
-        readonly kind: "holder";
-        readonly pid: number;
-        readonly bootTime: number;
-        readonly bootId: string | undefined;
-        readonly startTime: string | undefined;
-        readonly ino: number;
-      }
-  > => {
-    let stats;
-    try {
-      stats = await lstat(path);
-    } catch (error: unknown) {
-      if (errorCode(error) === "ENOENT") return { kind: "absent" };
-      throw error;
-    }
-    if (!stats.isFile() || stats.size > LOCK_FILE_MAX_BYTES) {
-      // Not something this module wrote. Never delete it; report it as held so
-      // a person looks at it rather than two connectors sharing an identity.
-      return {
-        kind: "holder",
-        pid: 0,
-        bootTime: 0,
-        bootId: undefined,
-        startTime: undefined,
-        ino: stats.ino,
-      };
-    }
-    let content;
-    try {
-      content = await readFile(path, "utf8");
-    } catch (error: unknown) {
-      // Released, or reclaimed by a racing process, since the `lstat`: the path
-      // is free, not unreadable — reporting it as an unusable lock would carry
-      // on without one while the racing process takes it.
-      if (errorCode(error) === "ENOENT") return { kind: "absent" };
-      throw error;
-    }
-    const match = LOCK_FILE_PATTERN.exec(content);
-    if (match === null) return { kind: "unparseable", mtimeMs: stats.mtimeMs, ino: stats.ino };
-    const optional = (value: string | undefined) =>
-      value === undefined || value === "-" ? undefined : value;
-    return {
-      kind: "holder",
-      pid: Number(match[1]),
-      bootTime: Number(match[2]),
-      bootId: optional(match[3]),
-      startTime: optional(match[4]),
-      ino: stats.ino,
-    };
+  const readHolder = async () => {
+    const read = await readLockFile(path, {
+      maxBytes: LOCK_FILE_MAX_BYTES,
+      decode: decodeHubLockRecord,
+    });
+    // A lock this process may not read cannot be judged: carry on without it.
+    if (read.kind === "unreadable") throw new Error(`Cannot read ${path} (${read.code})`);
+    return read;
   };
 
-  /** Remove the lock file only if it is still the one that was judged abandoned. */
-  const removeIfUnchanged = async (ino: number): Promise<boolean> => {
-    try {
-      const current = await lstat(path);
-      if (current.ino !== ino) return false;
-      await rm(path);
-      return true;
-    } catch (error: unknown) {
-      return errorCode(error) === "ENOENT";
-    }
-  };
+  const isStale = (mtimeMs: number) => now() - mtimeMs > UNPARSEABLE_LOCK_GRACE_MS;
+  /** Throws when an abandoned lock cannot be removed. */
+  const reclaim = async (judged: LockFileIdentity) =>
+    (await reclaimLockFile(path, judged, isStale)) === "removed";
 
   /** True when the path is now free to create. */
   const clearIfAbandoned = async (): Promise<boolean> => {
     const holder = await readHolder();
     if (holder.kind === "absent") return true;
-    if (holder.kind === "unparseable") {
-      return now() - holder.mtimeMs > UNPARSEABLE_LOCK_GRACE_MS
-        ? removeIfUnchanged(holder.ino)
-        : false;
-    }
-    if (holder.pid === 0) return false;
+    if (holder.kind === "unparseable") return isStale(holder.mtimeMs) ? reclaim(holder) : false;
+    // Not something this module wrote. Never delete it; report it as held so
+    // a person looks at it rather than two connectors sharing an identity.
+    if (holder.kind === "foreign") return false;
     // This process, from a connector that never released it.
-    if (holder.pid === pid) return removeIfUnchanged(holder.ino);
-    const currentBootId = await bootId();
-    const sameBoot =
-      holder.bootId !== undefined && currentBootId !== undefined
-        ? holder.bootId === currentBootId
-        : Math.abs(holder.bootTime - bootTime()) <= BOOT_TIME_TOLERANCE_MS;
-    // A pid from an earlier boot can only be a reused one.
-    let abandoned = !sameBoot || !processAlive(holder.pid);
-    if (!abandoned && holder.startTime !== undefined) {
-      // A live pid that started at another time is a different process.
-      const startTime = await processStartTime(holder.pid);
-      abandoned = startTime !== undefined && startTime !== holder.startTime;
-    }
-    return abandoned ? removeIfUnchanged(holder.ino) : false;
+    if (holder.record.pid === pid) return reclaim(holder);
+    return (await isHolderAbandoned(holder.record, probe)) ? reclaim(holder) : false;
   };
 
   const create = async (): Promise<boolean> => {
@@ -242,20 +130,7 @@ export function makeHubIdentityProcessLock(options: {
     const record = `${pid} ${bootTime()} ${(await bootId()) ?? "-"} ${
       (await processStartTime(pid)) ?? "-"
     }\n`;
-    let handle;
-    try {
-      handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    } catch (error: unknown) {
-      if (errorCode(error) === "EEXIST") return false;
-      throw error;
-    }
-    try {
-      await handle.writeFile(record);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    return true;
+    return createLockFileExclusive(path, record);
   };
 
   const tryAcquire = async (): Promise<HubIdentityProcessLockResult> => {
@@ -289,7 +164,9 @@ export function makeHubIdentityProcessLock(options: {
       held = false;
       try {
         const holder = await readHolder();
-        if (holder.kind === "holder" && holder.pid === pid) await removeIfUnchanged(holder.ino);
+        if (holder.kind === "holder" && holder.record.pid === pid) {
+          await removeLockFileIfUnchanged(path, holder);
+        }
       } catch {
         // A lock this process cannot remove is reclaimed by the next start: its
         // pid will be dead.

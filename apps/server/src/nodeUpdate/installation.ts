@@ -18,7 +18,8 @@ import type {
 import { Duration, Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { compareCliVersions, isParseableCliVersion } from "../provider/cliVersion.ts";
-import { isEphemeralCliInstall, nodeServicePlatform } from "../service/nodeService.ts";
+import { isEphemeralCliInstall } from "../service/nodeService.ts";
+import { nodeServiceManagerOfProcess } from "../service/nodeServiceManager.ts";
 
 export const RYCO_CLI_PACKAGE = "ryco-cli";
 
@@ -47,8 +48,11 @@ export interface NodeInstallationProbe {
   readonly resolvedScriptPath: string | null;
   readonly platform: NodeJS.Platform;
   readonly serviceLabel: string | undefined;
+  readonly pid: number;
   /** launchd starts its jobs itself, so a launchd service's parent is pid 1. */
   readonly parentPid: number;
+  /** `SYSTEMD_EXEC_PID`: the process a systemd unit started (systemd 248+). */
+  readonly systemdExecPid: string | undefined;
   readonly temporaryDirectory: string;
   /** Whether `root` is a Git checkout of the Ryco repository. */
   readonly isRycoCheckout: (root: string) => boolean;
@@ -88,16 +92,8 @@ export function npmGlobalPrefix(scriptPath: string, platform: NodeJS.Platform): 
   return scriptPath.slice(0, prefix.length);
 }
 
-function serviceManagerFor(probe: NodeInstallationProbe): NodeServiceManager | null {
-  if (!probe.serviceLabel) return null;
-  const manager = nodeServicePlatform(probe.platform);
-  // An inherited label alone does not make a foreground process the launchd job.
-  if (manager === "launchd" && probe.parentPid !== 1) return null;
-  return manager;
-}
-
 export function detectNodeInstallation(probe: NodeInstallationProbe): DetectedNodeInstallation {
-  const service = probe.mode === "desktop" ? null : serviceManagerFor(probe);
+  const service = probe.mode === "desktop" ? null : nodeServiceManagerOfProcess(probe);
   const base = {
     service,
     serviceLabel: service === null ? null : (probe.serviceLabel ?? null),
@@ -337,7 +333,9 @@ export const probeNodeInstallation = Effect.fn("probeNodeInstallation")(function
   readonly argv1: string | undefined;
   readonly platform: NodeJS.Platform;
   readonly serviceLabel: string | undefined;
+  readonly pid: number;
   readonly parentPid: number;
+  readonly systemdExecPid: string | undefined;
   readonly temporaryDirectory: string;
 }) {
   const fs = yield* FileSystem.FileSystem;
@@ -357,7 +355,9 @@ export const probeNodeInstallation = Effect.fn("probeNodeInstallation")(function
       resolvedScriptPath: resolved,
       platform: input.platform,
       serviceLabel: input.serviceLabel,
+      pid: input.pid,
       parentPid: input.parentPid,
+      systemdExecPid: input.systemdExecPid,
       temporaryDirectory: input.temporaryDirectory,
       isRycoCheckout: (root) => checkout && root === checkoutRoot,
     });
