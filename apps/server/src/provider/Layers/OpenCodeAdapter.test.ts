@@ -16,9 +16,11 @@ import {
   Redacted,
   Schema,
   Scope,
+  Queue,
   Stream,
   Tracer,
 } from "effect";
+import { TestClock } from "effect/testing";
 import { beforeEach } from "vite-plus/test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
@@ -40,6 +42,7 @@ import { agentControlHostContext } from "../../agentControl/ProviderInjection.ts
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import type { OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import { isMissingConversationError } from "../resumeFailure.ts";
+import { TOOL_UPDATE_HEARTBEAT_MS } from "../toolUpdateGate.ts";
 import {
   buildOpenCodePermissionRules,
   isOpenCodeNativeAttachment,
@@ -461,6 +464,15 @@ const taskSentinel = () =>
     callID: "sentinel",
     tool: "read",
   });
+const bashPart = (state: Record<string, unknown>, sessionID = taskRoot) => ({
+  id: "bash-part",
+  sessionID,
+  messageID: "bash-message",
+  type: "tool",
+  callID: "bash-call",
+  tool: "bash",
+  state,
+});
 
 const retentionToolPart = (call: string, state: Record<string, unknown>) => ({
   id: `retention-part-${call}`,
@@ -542,9 +554,213 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         );
         assert.equal(terminals[0]?.payload.subagent.model, "test/child-model");
         assert.equal(terminals[0]?.payload.subagent.parentProviderItemId, "native-call");
-        assert.equal(events.filter((event) => event.itemId === "native-call").length, 4);
+        // Two running and two failed parts arrive. The second running part repeats what clients
+        // already show, so the tool-update gate drops it; terminal updates always pass.
+        assert.equal(events.filter((event) => event.itemId === "native-call").length, 3);
         yield* adapter.stopSession(threadId);
       }),
+  );
+
+  it.effect("emits a running bash part only when what clients show changes", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("bash-tool-updates");
+      const input = { command: "bun run test", description: "Run tests" };
+      const outputUpTo = (lines: number) =>
+        Array.from({ length: lines }, (_, line) => `line ${line + 1}\n`).join("");
+      runtimeMock.state.subscribedEvents = [
+        // OpenCode streams the tool input into `raw` while the part is pending.
+        ...["", '{"command":', '{"command":"bun run test"'].map((raw) =>
+          nativePartEvent(bashPart({ status: "pending", input: {}, raw })),
+        ),
+        // Bash rewrites the part with the output so far for every chunk.
+        ...Array.from({ length: 40 }, (_, chunk) =>
+          nativePartEvent(
+            bashPart({
+              status: "running",
+              input,
+              metadata: { output: outputUpTo(chunk + 1) },
+              time: { start: 1 },
+            }),
+          ),
+        ),
+        ...Array.from({ length: 6 }, (_, chunk) =>
+          nativePartEvent(
+            bashPart({
+              status: "running",
+              input,
+              title: "Run tests",
+              metadata: { output: outputUpTo(41 + chunk) },
+              time: { start: 1 },
+            }),
+          ),
+        ),
+        nativePartEvent(
+          bashPart({
+            status: "completed",
+            input,
+            output: outputUpTo(46),
+            title: "Run tests",
+            metadata: { output: outputUpTo(46) },
+            time: { start: 1, end: 2 },
+          }),
+        ),
+        taskSentinel(),
+      ];
+      const fiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.itemId === "sentinel"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("bash-tool-updates"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const events = Array.from(yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds")));
+      const toolEvents = events.filter((event) => event.itemId === "bash-call");
+      // Without the gate: 3 started, 46 updated, 1 completed.
+      assert.deepEqual(
+        toolEvents.map((event) => event.type),
+        ["item.started", "item.updated", "item.updated", "item.completed"],
+      );
+      assert.deepEqual(
+        toolEvents.map((event) => (event.type === "item.updated" ? event.payload.title : null)),
+        [null, "bash", "Run tests", null],
+      );
+      const completed = toolEvents.at(-1);
+      assert.equal(
+        completed?.type === "item.completed" ? completed.payload.detail : undefined,
+        outputUpTo(46),
+      );
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("re-emits an unchanged running tool once its heartbeat has passed", () => {
+    const live = { queue: [] as unknown[], wake: null as (() => void) | null, closed: false };
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("bash-tool-heartbeat");
+      runtimeMock.state.liveEvents = live;
+      // Startup primes the stream with its first event before reading history.
+      runtimeMock.state.subscribedEvents = [{ type: "server.connected", properties: {} }];
+      const received = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.runForEach((event) => Queue.offer(received, event)),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("bash-tool-heartbeat"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const running = (chunk: number) =>
+        nativePartEvent(
+          bashPart({
+            status: "running",
+            input: { command: "bun run test" },
+            metadata: { output: "line\n".repeat(chunk) },
+            time: { start: 1 },
+          }),
+        );
+      // Events are handled in order and a terminal part always passes, so receiving the sentinel
+      // means every chunk sent before it was handled at the current clock.
+      const send = (...events: Array<unknown>) =>
+        Effect.gen(function* () {
+          live.queue.push(...events, taskSentinel());
+          live.wake?.();
+          live.wake = null;
+          const updates: Array<ProviderRuntimeEvent> = [];
+          for (;;) {
+            const event = yield* Queue.take(received);
+            if (event.itemId === "sentinel") return updates;
+            if (event.itemId === "bash-call") updates.push(event);
+          }
+        });
+
+      const first = yield* send(running(1), running(2));
+      yield* TestClock.adjust(TOOL_UPDATE_HEARTBEAT_MS - 1);
+      const beforeHeartbeat = yield* send(running(3));
+      yield* TestClock.adjust(1);
+      const atHeartbeat = yield* send(running(4), running(5));
+
+      assert.deepEqual(
+        [first, beforeHeartbeat, atHeartbeat].map((updates) => updates.length),
+        [1, 0, 1],
+      );
+      const [heartbeat] = atHeartbeat;
+      assert.equal(heartbeat?.type === "item.updated" ? heartbeat.payload.title : null, "bash");
+      yield* adapter.stopSession(threadId);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          live.closed = true;
+          live.wake?.();
+        }),
+      ),
+    );
+  });
+
+  it.effect("gates a child-session tool's subagent.updated with its item.updated", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("child-bash-tool-updates");
+      const child = makeChildSession("bash-child", taskRoot);
+      const childPartEvent = (part: unknown) => ({
+        type: "message.part.updated",
+        properties: { sessionID: child.id, part },
+      });
+      runtimeMock.state.subscribedEvents = [
+        { type: "session.created", properties: { sessionID: child.id, info: child } },
+        ...Array.from({ length: 10 }, (_, chunk) =>
+          childPartEvent(
+            bashPart(
+              {
+                status: "running",
+                input: { command: "ls" },
+                metadata: { output: "file\n".repeat(chunk + 1) },
+                time: { start: 1 },
+              },
+              child.id,
+            ),
+          ),
+        ),
+        taskSentinel(),
+      ];
+      const fiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.itemId === "sentinel"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("child-bash-tool-updates"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const events = Array.from(yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds")));
+      assert.equal(events.filter((event) => event.type === "subagent.started").length, 1);
+      // Only the tool branch's updates (their summary is the tool title); without the gate: 10.
+      const toolSubagentUpdates = events.filter(
+        (event) => event.type === "subagent.updated" && event.payload.summary === "bash",
+      );
+      assert.equal(toolSubagentUpdates.length, 1);
+      const toolUpdates = events.filter(
+        (event) => event.type === "item.updated" && event.itemId === "bash-call",
+      );
+      assert.equal(toolUpdates.length, 1);
+      const [toolUpdate] = toolUpdates;
+      assert.equal(
+        toolUpdate?.type === "item.updated" ? toolUpdate.payload.agentId : undefined,
+        toolSubagentUpdates[0]?.type === "subagent.updated"
+          ? String(toolSubagentUpdates[0].payload.subagent.subagentId)
+          : null,
+      );
+      yield* adapter.stopSession(threadId);
+    }),
   );
 
   it.effect("keeps background Tasks running until a native completion notification", () =>
