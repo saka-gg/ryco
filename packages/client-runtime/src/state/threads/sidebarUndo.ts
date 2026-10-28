@@ -138,17 +138,15 @@ export function createSidebarUndoHistory(deps: {
   let entries: Entry[] = [];
   let timer: unknown;
   const current = (entry: Entry) => (entry.restoring || now() < entry.expiresAt) && entry.valid();
-  const publish = () =>
-    deps.changed(
-      entries.map(({ id, action, target, pending, applying, threadTitle }) => ({
-        id,
-        action,
-        target,
-        pending,
-        applying,
-        threadTitle,
-      })),
-    );
+  const notice = ({
+    id,
+    action,
+    target,
+    pending,
+    applying,
+    threadTitle,
+  }: Entry): SidebarUndoNotice => ({ id, action, target, pending, applying, threadTitle });
+  const publish = () => deps.changed(entries.map(notice));
   const remove = (id: number) => {
     entries.find((entry) => entry.id === id)?.cleanup?.();
     entries = entries.filter((entry) => entry.id !== id);
@@ -352,6 +350,12 @@ export function createSidebarUndoHistory(deps: {
       for (const entry of entries)
         if (scopedThreadKey(entry.target) === scopedThreadKey(target)) remove(entry.id);
       schedule();
+    },
+    /** The newest notice whose Undo can still run, for a keyboard Undo. */
+    latest(): SidebarUndoNotice | null {
+      prune();
+      const entry = entries.findLast((entry) => !entry.pending);
+      return entry === undefined ? null : notice(entry);
     },
     async undo(id: number) {
       prune();

@@ -70,6 +70,29 @@ describe("keybindingCategories", () => {
     expect(getCommandMeta("thread.jump.9").category).toBe(KEYBINDING_CATEGORIES.thread);
   });
 
+  it("lists the open thread's lifecycle commands under Threads, after jumping", () => {
+    const lifecycle = (
+      [
+        "thread.settle",
+        "thread.snooze",
+        "thread.archive",
+        "thread.markUnread",
+        "thread.undo",
+      ] as const
+    ).map((command) => getCommandMeta(command));
+    expect(lifecycle.map(({ title }) => title)).toEqual([
+      "Settle current thread or move it to Active",
+      "Snooze or unsnooze current thread",
+      "Archive current thread",
+      "Mark current thread unread",
+      "Undo last thread action",
+    ]);
+    for (const meta of lifecycle) {
+      expect(meta.category).toBe(KEYBINDING_CATEGORIES.thread);
+      expect(meta.sortWeight).toBeGreaterThan(getCommandMeta("thread.jump.9").sortWeight);
+    }
+  });
+
   it("maps split-view commands to the Split view category", () => {
     expect(getCommandMeta("pane.split")).toMatchObject({
       category: KEYBINDING_CATEGORIES.pane,

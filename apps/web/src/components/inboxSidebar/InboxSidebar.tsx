@@ -10,18 +10,14 @@ import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
-import { readEnvironmentApi } from "../../environmentApi";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { PREFERS_REDUCED_MOTION_QUERY, shouldEnableAutoAnimate } from "../../lib/perf/motion";
-import { newCommandId } from "../../lib/utils";
-import { sidebarUndo } from "../../sidebarUndo";
 import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
 import { handleSidebarListScroll } from "../sidebar/sidebarFold";
 import { omnifieldListQuery } from "../sidebar/sidebarOmnifield.logic";
 import { Button } from "../ui/button";
 import { SidebarContent } from "../ui/sidebar";
-import { toastManager } from "../ui/toast";
 import { TooltipCreateHandle } from "../ui/tooltip";
 import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
 import { useInboxFilterStore } from "./inboxFilterStore";
@@ -82,46 +78,6 @@ export function InboxSidebar(props: InboxSidebarProps) {
       return next;
     });
   }, []);
-  const setThreadSettlement = useCallback(
-    async (row: InboxSidebarRow, settled: boolean): Promise<boolean> => {
-      const api = readEnvironmentApi(row.environmentId);
-      if (!api) {
-        toastManager.add({
-          type: "error",
-          title: "Could not update thread",
-          description: "The owning machine is not connected.",
-        });
-        return false;
-      }
-      // Built outside the try: the React Compiler cannot lower conditionals
-      // inside try/catch and would skip the whole component.
-      const command = settled
-        ? ({
-            type: "thread.settle",
-            commandId: newCommandId(),
-            threadId: row.threadId,
-          } as const)
-        : ({
-            type: "thread.unsettle",
-            commandId: newCommandId(),
-            threadId: row.threadId,
-            reason: "user",
-          } as const);
-      const failureTitle = settled ? "Could not settle thread" : "Could not move thread to Active";
-      try {
-        await sidebarUndo.dispatch(
-          { environmentId: row.environmentId, threadId: row.threadId },
-          command,
-        );
-        return true;
-      } catch (error) {
-        const description = error instanceof Error ? error.message : "The request failed.";
-        toastManager.add({ type: "error", title: failureTitle, description });
-        return false;
-      }
-    },
-    [],
-  );
   // Keeps rows that did not change identical across model runs, so memoized
   // rows skip rendering when only a few threads moved.
   const [modelSharing] = useState(() => createInboxSidebarModelSharing());
@@ -249,7 +205,6 @@ export function InboxSidebar(props: InboxSidebarProps) {
       motionEnabled={motionEnabled}
       previewHandle={previewHandle}
       onOpenRow={openRow}
-      onSetSettlement={setThreadSettlement}
       row={row}
     />
   );
