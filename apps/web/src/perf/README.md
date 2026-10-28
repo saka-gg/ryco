@@ -26,6 +26,27 @@ When disabled, all mark helpers are no-ops and budget tests use mocked `Performa
 
 Helpers live in `tabSwitchInstrumentation.ts`. Soft budgets are defined in `budgets.ts`.
 
+`ryco:tab-switch:first-paint` is marked when the new tab commits, before the transcript is
+visible: LegendList keeps its rows hidden (`opacity: 0`) until its initial scroll to the end lands.
+The timeline reveal marks time that moment instead. `MessagesTimeline` marks each list mount (`N`
+counts mounts) and the first animation frame its rows are visible:
+
+| Mark or measure                          | Meaning                                                                   |
+| ---------------------------------------- | ------------------------------------------------------------------------- |
+| `ryco:timeline-reveal:mount:<key>:N`     | The timeline's list mounted (layout effect, before the first paint)       |
+| `ryco:timeline-reveal:visible:<key>:N`   | First frame with the transcript rows visible                              |
+| `ryco:timeline-reveal:<key>:N` (measure) | Mount to visible                                                          |
+| `ryco:tab-switch-reveal:<key>` (measure) | Session-tab click to visible (only for the mount that click opened)       |
+| `ryco:timeline-reveal:rehidden:<key>:N`  | The rows hid again after their reveal (once per mount; should not happen) |
+
+The mount-to-visible duration is also recorded as the `web.timeline.reveal` perf reporter. A
+session-tab click belongs to the next timeline mount: the clicked thread's mount measures it, and
+a mount of another thread drops it. A click that opens no list is dropped too: a click on the
+thread already open, one on an empty thread (its list mounts with the first send), and one that no
+timeline claims within 30 s. So a later open of the same thread without a click is not measured
+against an old click; the one exception is a reopen within those 30 s of a click whose navigation
+was left before the thread opened.
+
 ## Startup marks
 
 Startup phases are always recorded (no flag) as `ryco:startup:<phase>` marks by
