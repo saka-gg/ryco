@@ -30,6 +30,31 @@ const ProjectionTurnByIdDbRowSchema = ProjectionTurnById.mapFields(
   }),
 );
 
+/**
+ * Whether two turn rows hold the same values in every column `upsertByTurnId` writes.
+ * `checkpointFiles` compares by JSON: a key-order difference can only cause a spurious write,
+ * never a missed one.
+ */
+export function sameProjectionTurnRow(a: ProjectionTurnById, b: ProjectionTurnById): boolean {
+  return (
+    a.threadId === b.threadId &&
+    a.turnId === b.turnId &&
+    a.pendingMessageId === b.pendingMessageId &&
+    a.sourceProposedPlanThreadId === b.sourceProposedPlanThreadId &&
+    a.sourceProposedPlanId === b.sourceProposedPlanId &&
+    a.assistantMessageId === b.assistantMessageId &&
+    a.state === b.state &&
+    a.requestedAt === b.requestedAt &&
+    a.startedAt === b.startedAt &&
+    a.completedAt === b.completedAt &&
+    a.checkpointTurnCount === b.checkpointTurnCount &&
+    a.checkpointRef === b.checkpointRef &&
+    a.checkpointStatus === b.checkpointStatus &&
+    (a.checkpointFiles === b.checkpointFiles ||
+      JSON.stringify(a.checkpointFiles) === JSON.stringify(b.checkpointFiles))
+  );
+}
+
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown) =>
     Schema.isSchemaError(cause)
@@ -275,6 +300,9 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
       ),
     );
 
+  const replaceByTurnId: ProjectionTurnRepositoryShape["replaceByTurnId"] = ({ previous, next }) =>
+    sameProjectionTurnRow(previous, next) ? Effect.void : upsertByTurnId(next);
+
   const replacePendingTurnStart: ProjectionTurnRepositoryShape["replacePendingTurnStart"] = (row) =>
     sql
       .withTransaction(
@@ -358,6 +386,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
 
   return {
     upsertByTurnId,
+    replaceByTurnId,
     replacePendingTurnStart,
     getPendingTurnStartByThreadId,
     deletePendingTurnStartByThreadId,
