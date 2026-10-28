@@ -312,9 +312,26 @@ export function isCompletionUnseen(
   return completedAt > lastVisitedAt;
 }
 
-export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
-  if (target === null) return true;
-  return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
+/**
+ * Whether a mousedown on `target` clears the thread selection: presses on
+ * thread rows and their menus keep it. Takes the raw event target, because a
+ * press on a row's icon lands on an SVG element, which is no HTMLElement.
+ */
+export function shouldClearThreadSelectionOnMouseDown(target: EventTarget | null): boolean {
+  if (target === null || !("closest" in target)) return true;
+  return !(target as Element).closest(THREAD_SELECTION_SAFE_SELECTOR);
+}
+
+/**
+ * What a click on a thread row does to the selection: Cmd-click (Ctrl-click
+ * off Mac) toggles the row, Shift-click selects a range. Null opens the row.
+ */
+export function resolveThreadSelectionClick(
+  event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey">,
+  isMac: boolean,
+): "toggle" | "range" | null {
+  if (isMac ? event.metaKey : event.ctrlKey) return "toggle";
+  return event.shiftKey ? "range" : null;
 }
 
 // A double-click dispatches two `click` events before `dblclick`: the first has

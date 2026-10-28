@@ -57,7 +57,12 @@ vi.mock("./components/ui/toast", () => ({
   toastManager: { add: vi.fn(), close: vi.fn(), update: vi.fn() },
   stackedThreadToast: (options: unknown) => options,
 }));
-import { readSidebarUndoContext, readSidebarUndoLocalContext, sidebarUndo } from "./sidebarUndo";
+import {
+  presentSidebarUndoNotices,
+  readSidebarUndoContext,
+  readSidebarUndoLocalContext,
+  sidebarUndo,
+} from "./sidebarUndo";
 import { requestThreadPinChange } from "./threadPinning";
 import { toastManager } from "./components/ui/toast";
 const target = { environmentId: EnvironmentId.make("node"), threadId: ThreadId.make("thread") };
@@ -132,6 +137,71 @@ describe("web sidebar undo readiness and ordering", () => {
     } finally {
       history.dispose();
     }
+  });
+});
+
+describe("web sidebar undo notices", () => {
+  const shown = (options: unknown) => {
+    const { title, description, actionProps } = options as Parameters<typeof toastManager.add>[0];
+    return { title, description, undoLabel: actionProps?.["aria-label"] };
+  };
+  const added = () => shown(vi.mocked(toastManager.add).mock.lastCall?.[0]);
+  const updated = () => shown(vi.mocked(toastManager.update).mock.lastCall?.[1]);
+
+  it("shows a bulk notice in its own words, and follows its count", () => {
+    vi.mocked(toastManager.add).mockReturnValueOnce("bulk");
+    const bulk = {
+      id: 100,
+      action: "settle" as const,
+      target,
+      count: 3,
+      pending: false,
+      applying: true,
+      copy: { title: "Settling 3 threads…", undoLabel: "Undo settle for 3 threads" },
+    };
+    presentSidebarUndoNotices([bulk]);
+    expect(added()).toEqual({
+      title: "Settling 3 threads…",
+      description: undefined,
+      undoLabel: "Undo settle for 3 threads",
+    });
+
+    presentSidebarUndoNotices([
+      { ...bulk, count: 2, copy: { title: "Settling 2 threads…", undoLabel: "Undo for 2" } },
+    ]);
+    presentSidebarUndoNotices([
+      {
+        ...bulk,
+        count: undefined,
+        applying: false,
+        copy: { title: "1 thread settled", undoLabel: "Undo settle for 1 thread" },
+      },
+    ]);
+    expect(toastManager.add).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toastManager.update).mock.calls.map(([id]) => id)).toEqual(["bulk", "bulk"]);
+    expect(updated()).toEqual({
+      title: "1 thread settled",
+      description: undefined,
+      undoLabel: "Undo settle for 1 thread",
+    });
+  });
+
+  it("names the thread of a single notice", () => {
+    presentSidebarUndoNotices([
+      {
+        id: 101,
+        action: "settle",
+        target,
+        pending: false,
+        applying: false,
+        threadTitle: "Synthetic Thread",
+      },
+    ]);
+    expect(added()).toEqual({
+      title: "Thread settled",
+      description: "Synthetic Thread",
+      undoLabel: "Undo settle Synthetic Thread",
+    });
   });
 });
 

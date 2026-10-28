@@ -6,7 +6,7 @@ import {
   SettingsIcon,
   UserRoundIcon,
 } from "lucide-react";
-import React, { memo, useCallback, useEffect, useState } from "react";
+import React, { memo, useCallback } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
 import { WS_METHODS } from "@ryco/contracts";
 import { APP_BASE_NAME, APP_STAGE_LABEL, APP_VERSION } from "../../branding";
@@ -25,8 +25,8 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { scheduleIdleTask } from "../../lib/idleTask";
-import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
+import { useIdleLazyComponentReady } from "../../lib/idleLazyComponent";
+import { preloadableLazy } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import type { SidebarMode } from "../../uiStateStore";
 
@@ -225,12 +225,7 @@ const LazySidebarUpdateEverythingPill = preloadableLazy(() =>
 export const preloadSidebarUpdateEverythingPill = LazySidebarUpdateEverythingPill.preload;
 
 function DeferredSidebarUpdateEverythingPill() {
-  const [wanted, setWanted] = useState(LazySidebarUpdateEverythingPill.isLoaded);
-  useEffect(() => (wanted ? undefined : scheduleIdleTask(() => setWanted(true))), [wanted]);
-  // A failed load leaves the pill out; it is optional and must not take the sidebar down.
-  const ready = useLazyComponentReady(LazySidebarUpdateEverythingPill, wanted, {
-    onLoadError: (error) => console.warn("Update pill failed to load.", error),
-  });
+  const ready = useIdleLazyComponentReady(LazySidebarUpdateEverythingPill, "Update pill");
   return ready ? <LazySidebarUpdateEverythingPill /> : null;
 }
 
