@@ -17,7 +17,10 @@ import {
  */
 
 /** Node default rules this app replaces, matched by key, command and `when`. */
-export const SUPERSEDED_NODE_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [];
+export const SUPERSEDED_NODE_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
+  // Quick open takes mod+p; the Files panel moves to mod+shift+e.
+  { key: "mod+p", command: "workspace.files", when: "!terminalFocus" },
+];
 
 // Commands outside the feature groups below.
 const CORE_CLIENT_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
@@ -25,7 +28,11 @@ const CORE_CLIENT_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
 ];
 
 // Quick open and find in files.
-const FILE_SEARCH_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [];
+const FILE_SEARCH_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
+  { key: "mod+p", command: "workspace.quickOpen", when: "!terminalFocus" },
+  { key: "mod+shift+f", command: "workspace.findInFiles", when: "!terminalFocus" },
+  { key: "mod+shift+e", command: "workspace.files", when: "!terminalFocus" },
+];
 
 // Settle, snooze, archive, mark unread and undo for threads.
 const THREAD_LIFECYCLE_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [

@@ -69,6 +69,34 @@ describe("app default keybindings", () => {
     }
   });
 
+  it("gives quick open mod+p, find in files mod+shift+f and the Files panel mod+shift+e in this app only", () => {
+    const nodeFilesRule = { key: "mod+p", command: "workspace.files", when: "!terminalFocus" };
+    // Nodes keep serving mod+p for the Files panel to apps that predate quick open.
+    expect(NODE_DEFAULT_KEYBINDINGS).toContainEqual(nodeFilesRule);
+    expect(
+      NODE_DEFAULT_KEYBINDINGS.some(
+        (rule) =>
+          rule.command === "workspace.quickOpen" || rule.command === "workspace.findInFiles",
+      ),
+    ).toBe(false);
+    expect(APP_DEFAULT_KEYBINDINGS).not.toContainEqual(nodeFilesRule);
+    expect(APP_DEFAULT_KEYBINDINGS).toContainEqual({
+      key: "mod+p",
+      command: "workspace.quickOpen",
+      when: "!terminalFocus",
+    });
+    expect(APP_DEFAULT_KEYBINDINGS).toContainEqual({
+      key: "mod+shift+f",
+      command: "workspace.findInFiles",
+      when: "!terminalFocus",
+    });
+    expect(APP_DEFAULT_KEYBINDINGS).toContainEqual({
+      key: "mod+shift+e",
+      command: "workspace.files",
+      when: "!terminalFocus",
+    });
+  });
+
   it("resolves the app defaults and stores nothing for an untouched editor", () => {
     expect(resolveAppKeybindings()).toEqual(APP_DEFAULT_RESOLVED_KEYBINDINGS);
     expect(appKeybindingsFromRules(APP_DEFAULT_KEYBINDINGS)).toEqual(DEFAULT_APP_KEYBINDINGS);

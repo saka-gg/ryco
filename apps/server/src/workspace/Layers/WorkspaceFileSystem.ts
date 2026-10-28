@@ -29,13 +29,14 @@ import { WorkspaceEntries } from "../Services/WorkspaceEntries.ts";
 import { WorkspacePathOutsideRootError, WorkspacePaths } from "../Services/WorkspacePaths.ts";
 import { detectRasterImageMimeType } from "../../imageMime.ts";
 
-const WORKSPACE_PREVIEW_MAX_BYTES = 512 * 1024;
+/** The largest file the Files panel previews; content search skips larger ones too. */
+export const WORKSPACE_PREVIEW_MAX_BYTES = 512 * 1024;
 const WORKSPACE_PREVIEW_TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const STAGED_FILE_ROOT = ".ryco/attachments";
 const UNSAFE_PATH_SEGMENT_CHARS = new Set(["<", ">", ":", '"', "/", "\\", "|", "?", "*"]);
 
-function isLikelyBinaryPreview(bytes: Uint8Array): boolean {
+export function isLikelyBinaryPreview(bytes: Uint8Array): boolean {
   return bytes.subarray(0, Math.min(bytes.length, 8_192)).includes(0);
 }
 

@@ -2853,6 +2853,7 @@ export function setupChatViewBrowserSuite() {
     useCommandPaletteStore.setState({
       open: false,
       openIntent: null,
+      workspaceSearchMode: null,
     });
     useInboxFilterStore.setState({ draft: "", environmentId: null, project: null, status: "all" });
     // A notice left by an earlier test would take this test's Undo key.
