@@ -139,7 +139,7 @@ import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ryco/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
-import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
+import { usePerfMark, useTimelineRevealMark } from "../../perf/tabSwitchInstrumentation";
 import { visibleSecondTicker } from "../../lib/perf/ticker";
 import {
   type ActivityPayloadOutput,
@@ -787,6 +787,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [evaluateIsAtEnd, timelineViewportElement]);
 
+  // The list mounts only when there is something to show (see the empty branch below).
+  const showsList = rows.length > 0 || isWorking;
+  // Opt-in perf marks for when the transcript actually becomes visible (LegendList keeps its rows
+  // hidden until its initial scroll lands).
+  useTimelineRevealMark(listRef, routeThreadKey, showsList);
+
   // Diagnostic: LegendList keeps its rows hidden until it decides the layout is
   // ready, and an opened thread has sometimes stayed blank until the user
   // scrolled. Once rows stop changing for a second, a transcript that is still
@@ -999,7 +1005,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // instead of mounting this timeline; the empty branch here only covers the
   // narrow window where an optimistic send has cleared the hero but no row has
   // materialized yet, so it stays blank rather than flashing placeholder copy.
-  if (rows.length === 0 && !isWorking) {
+  if (!showsList) {
     return <div aria-hidden className="h-full" />;
   }
 

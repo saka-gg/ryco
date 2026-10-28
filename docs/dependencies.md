@@ -65,8 +65,14 @@ upstream release and Metro integration before closing these audit findings.
 Versioned patches contain application behavior as well as packaging fixes. Port
 them against pristine upstream source and compare the resulting behavior before
 changing `patchedDependencies`. In particular, the list, navigation, and Expo JSI
-patches must survive upgrades. The Pierre patch exposes the mobile parser and type
-subpaths without importing the browser entry point.
+patches must survive upgrades. The list patch also carries web-entry (`react.*`) behavior:
+the per-item `getEstimatedItemSize` prop (upstream 3.6.0 still has none), and an initial
+scroll to the end that completes once the scroller is pinned at its end. 3.3.10 counts the
+footer twice in that target, so the scroll never arrives and the transcript waited for a
+100 ms fallback timer; 3.6.0 no longer counts it twice, so an upgrade may drop that part
+once `apps/web/src/components/chat/legendListWebPatch.browser.tsx` passes without it.
+The Pierre patch exposes the mobile parser and type subpaths without importing the
+browser entry point.
 
 After upgrading MSW, regenerate `apps/web/test/public/mockServiceWorker.js` with the
 installed CLI (the root `msw.workerDirectory` entry points at that directory). This
