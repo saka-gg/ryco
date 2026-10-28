@@ -27,6 +27,7 @@ import {
   OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderRuntimeEvent,
   RuntimeSessionId,
   ThreadId,
   TurnId,
@@ -47,6 +48,11 @@ import {
   type OpenCodeRuntimeShape,
   OPENCODE_NATIVE_ATTACHMENT_MAX_BYTES,
 } from "../opencodeRuntime.ts";
+import {
+  drainRuntimeEvents,
+  makeRetentionProbe,
+  type RetentionProbe,
+} from "../testUtils/adapterRetention.ts";
 import {
   appendOpenCodeAssistantTextDelta,
   makeOpenCodeAdapter,
@@ -455,6 +461,46 @@ const taskSentinel = () =>
     callID: "sentinel",
     tool: "read",
   });
+
+const retentionToolPart = (call: string, state: Record<string, unknown>) => ({
+  id: `retention-part-${call}`,
+  sessionID: taskRoot,
+  messageID: "retention-message",
+  type: "tool",
+  callID: call,
+  tool: "bash",
+  state,
+});
+const RETENTION_RUNNING_UPDATES = 20;
+
+// Plain function: an Effect.gen frame would keep its last call's tracked parts alive. Each update
+// is a distinct part object, as OpenCode sends the whole part again; a running bash part carries
+// its output so far in `metadata.output`, so retained running updates grow quadratically.
+function queueRetentionToolCall(live: { queue: unknown[] }, probe: RetentionProbe, call: string) {
+  const input = { command: `cat ${call}` };
+  live.queue.push(
+    nativePartEvent(probe.track(retentionToolPart(call, { status: "pending", input, raw: "" }))),
+  );
+  for (let update = 1; update <= RETENTION_RUNNING_UPDATES; update += 1) {
+    const state = {
+      status: "running",
+      input,
+      title: input.command,
+      metadata: { output: probe.payload(200 * update) },
+      time: { start: 1 },
+    };
+    live.queue.push(nativePartEvent(probe.track(retentionToolPart(call, state))));
+  }
+  const completed = {
+    status: "completed",
+    input,
+    output: probe.payload(),
+    title: input.command,
+    metadata: {},
+    time: { start: 1, end: 2 },
+  };
+  live.queue.push(nativePartEvent(probe.track(retentionToolPart(call, completed))));
+}
 
 it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
   it.effect(
@@ -2469,6 +2515,67 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       assert.deepEqual(closeCallsDuringRun, []);
     }),
   );
+
+  it.effect("retention: keeps no tool part history during a turn", () => {
+    const live = { queue: [] as unknown[], wake: null as (() => void) | null, closed: false };
+    const probe = makeRetentionProbe();
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-retention");
+      runtimeMock.state.liveEvents = live;
+      runtimeMock.state.subscribedEvents = [{ type: "server.connected", properties: {} }];
+      const events = yield* drainRuntimeEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-opencode-retention"),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Read every file",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+
+      const isCompleted = (event: ProviderRuntimeEvent) =>
+        event.threadId === threadId && event.type === "item.completed";
+      const toolsCompleted = events.expect(isCompleted, 50);
+      const sentinelSeen = events.expect(
+        (event) => isCompleted(event) && event.itemId === "retention-sentinel",
+      );
+      for (let call = 0; call < 50; call += 1) {
+        queueRetentionToolCall(live, probe, `retention-call-${call}`);
+      }
+      // Untracked and last, so the drained stream's latest event holds none of the tracked parts.
+      live.queue.push(
+        nativePartEvent(
+          retentionToolPart("retention-sentinel", {
+            status: "completed",
+            input: {},
+            output: "",
+            title: "sentinel",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          }),
+        ),
+      );
+      live.wake?.();
+      live.wake = null;
+      yield* toolsCompleted;
+      yield* sentinelSeen;
+
+      assert.equal(probe.tracked, 50 * (RETENTION_RUNNING_UPDATES + 2));
+      assert.equal(yield* Effect.promise(probe.reachable), 0);
+      yield* adapter.stopSession(threadId);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          live.closed = true;
+          live.wake?.();
+        }),
+      ),
+    );
+  });
 });
 
 it.effect(
