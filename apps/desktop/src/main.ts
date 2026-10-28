@@ -33,6 +33,7 @@ import {
   Notification,
   protocol,
   safeStorage,
+  screen,
   session,
   shell,
   webContents,
@@ -102,6 +103,7 @@ import {
   isAppLoadRequestCurrent,
   isEarlyAppLoadStalled,
   resolveBackendAppWindowAction,
+  resolveCrashedAppWindowRecovery,
 } from "./backendAppWindowLoad.ts";
 import {
   createDesktopBackendChildEnv,
@@ -176,6 +178,21 @@ import {
 } from "./clientPersistence.ts";
 import { isBackendReadinessAborted, waitForHttpReady } from "./backendReadiness.ts";
 import { createBackendRestartBackoff } from "./backendRestartBackoff.ts";
+import { sanitizeLogValue } from "./logValue.ts";
+import { runRecoveryDialogLoop } from "./recoveryDialog.ts";
+import {
+  attachRendererCrashRecovery,
+  type RendererCrashRecovery,
+  type RendererRecoveryAttempt,
+} from "./rendererCrashRecovery.ts";
+import { watchUpdateDownload, type WatchedUpdateDownload } from "./updateDownloadWatchdog.ts";
+import {
+  createDesktopWindowStateStore,
+  DESKTOP_WINDOW_MIN_SIZE,
+  DESKTOP_WINDOW_STATE_FILE_NAME,
+  type DesktopWindowBounds,
+  isWindowPositionUnreported,
+} from "./windowState.ts";
 import { showDesktopConfirmDialog } from "./confirmDialog.ts";
 import {
   resolveDesktopCoreAdvertisedEndpoints,
@@ -319,6 +336,7 @@ const BACKEND_BASE_DIR = DESKTOP_PATHS.backendBaseDir;
 const STATE_DIR = DESKTOP_PATHS.stateDir;
 const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
+const DESKTOP_WINDOW_STATE_PATH = Path.join(STATE_DIR, DESKTOP_WINDOW_STATE_FILE_NAME);
 const SAVED_ENVIRONMENT_REGISTRY_PATH = Path.join(STATE_DIR, "saved-environments.json");
 const SHELL_ENVIRONMENT_CACHE_PATH = DESKTOP_PATHS.shellEnvironmentCachePath;
 const DESKTOP_WORKSPACE_CLIENT_DIR = Path.join(STATE_DIR, "desktop-workspace-client");
@@ -547,6 +565,20 @@ let backendEverReady = false;
 const appShellUsableContents = new WeakSet<Electron.WebContents>();
 // The app's own pages (one per `createWindow`), which load the preload and answer menu actions.
 const appWindowContents = new WeakSet<Electron.WebContents>();
+// Reopens the window where it was (bounds and maximized state).
+const desktopWindowState = createDesktopWindowStateStore({
+  filePath: DESKTOP_WINDOW_STATE_PATH,
+  log: logDesktopEvent,
+  now: () => performance.now(),
+  positionReported: !isWindowPositionUnreported({
+    platform: process.platform,
+    sessionType: readEnv("XDG_SESSION_TYPE"),
+    waylandDisplay: readEnv("WAYLAND_DISPLAY"),
+    ozonePlatform: app.commandLine.getSwitchValue("ozone-platform"),
+  }),
+});
+// Reloads each app window whose renderer process died (keyed like appWindowContents).
+const rendererCrashRecoveries = new WeakMap<Electron.WebContents, RendererCrashRecovery>();
 // The backend child each window's app document was requested from, and when.
 // A load requested when the backend bound its port is not repeated at its
 // readiness (unless it failed or the backend took too long; see
@@ -615,10 +647,6 @@ function logTimestamp(): string {
 
 function logScope(scope: string): string {
   return `${scope} run=${APP_RUN_ID}`;
-}
-
-function sanitizeLogValue(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
 }
 
 function readPersistedBackendObservabilitySettings(): {
@@ -1546,6 +1574,8 @@ function relaunchDesktopApp(reason: string): void {
   if (desktopRelaunchRequested) return;
   desktopRelaunchRequested = true;
   setImmediate(() => {
+    // app.exit() below emits no window events, so nothing else saves the window.
+    desktopWindowState.flushAll();
     isQuitting = true;
     clearUpdatePollTimer();
     cancelBackendReadinessWait();
@@ -1575,6 +1605,12 @@ function relaunchDesktopApp(reason: string): void {
 function writeDesktopLogHeader(message: string): void {
   if (!desktopLogSink) return;
   void desktopLogSink.write(`[${logTimestamp()}] [${logScope("desktop")}] ${message}\n`);
+}
+
+/** A desktop event line: the desktop log when packaged, the terminal otherwise. */
+function logDesktopEvent(line: string): void {
+  if (desktopLogSink) writeDesktopLogHeader(line);
+  else console.warn(`[desktop] ${line}`);
 }
 
 /**
@@ -1830,7 +1866,13 @@ function loadPackagedBackendAppWindow(
     notifyRenderersToReconnect();
     return;
   }
+  requestPackagedAppLoad(window, reason);
+}
 
+/** Load the app document from the current backend, once renderer cache maintenance is done. */
+function requestPackagedAppLoad(window: BrowserWindow, reason: string): void {
+  const contents = window.webContents;
+  const child = backendProcess;
   const request: AppLoadRequest<ChildProcess.ChildProcess> | null =
     child === null ? null : { backend: child, requestedAtMs: performance.now(), failed: false };
   if (request !== null) appLoadRequestedFrom.set(contents, request);
@@ -1894,6 +1936,36 @@ function returnWindowToBootPage(window: BrowserWindow, reason: string): void {
   appLoadRequestedFrom.delete(window.webContents);
   writeDesktopLogHeader(`window returns to the boot page reason=${reason}`);
   loadDesktopBootPage(window);
+}
+
+/**
+ * Revive a window whose renderer process died (see rendererCrashRecovery.ts).
+ * The first automatic reload of a crash streak keeps the route; later ones
+ * and the dialog's Reload open the app root, in case the route caused it.
+ */
+function recoverCrashedAppWindow(window: BrowserWindow, attempt: RendererRecoveryAttempt): void {
+  if (window.isDestroyed()) return;
+  const contents = window.webContents;
+  const keepRoute = attempt === 1;
+  if (isDevelopment) {
+    logDesktopEvent(`renderer reload attempt=${attempt} via=${keepRoute ? "reload" : "dev-url"}`);
+    if (keepRoute) contents.reload();
+    else void window.loadURL(resolveDesktopDevServerUrl());
+    return;
+  }
+  const recovery = resolveCrashedAppWindowRecovery({
+    currentUrl: contents.getURL(),
+    backendHttpUrl,
+    // backendReadyChild is never cleared and backendProcess is null once the
+    // child exits: equal means the current child is serving.
+    backendServing: backendProcess !== null && backendReadyChild === backendProcess,
+    keepRoute,
+  });
+  logDesktopEvent(`renderer reload attempt=${attempt} via=${recovery}`);
+  if (recovery === "reload") contents.reload();
+  else if (recovery === "load-app") {
+    requestPackagedAppLoad(window, `renderer-recovery attempt=${attempt}`);
+  } else returnWindowToBootPage(window, "renderer crashed while the backend is not serving");
 }
 
 /**
@@ -2141,6 +2213,8 @@ let macCodeSignatureKindCache: MacCodeSignatureKind | null = null;
 // The running check and download, so a remote install can wait for their outcome.
 let updateCheckTask: Promise<boolean> | null = null;
 let updateDownloadTask: Promise<{ accepted: boolean; completed: boolean }> | null = null;
+// The running download's stall watchdog; `download-progress` keeps it armed.
+let updateDownloadWatch: WatchedUpdateDownload<unknown> | null = null;
 // One per live backend generation (normally one); each hears every updater state.
 const backendUpdatePipes = new Set<DesktopBackendPipe>();
 // Retained so its click handler survives GC, and closed once the countdown ends.
@@ -2667,6 +2741,8 @@ function revealWindow(window: BrowserWindow): void {
 
   if (!window.isVisible()) {
     markDesktopStartupPhase("desktop.window.first-reveal");
+    // Maximizing right before the first show keeps it to one visible transition.
+    desktopWindowState.beforeFirstShow(window);
     window.show();
   }
 
@@ -2955,9 +3031,22 @@ async function downloadAvailableUpdateOrJoin(): Promise<void> {
 async function runUpdateDownload(): Promise<{ accepted: boolean; completed: boolean }> {
   const autoUpdater = requireAutoUpdater();
   console.info("[desktop-updater] Downloading update...");
+  const cancellation = new (loadElectronUpdater().CancellationToken)();
+  const watch = watchUpdateDownload({
+    download: autoUpdater.downloadUpdate(cancellation),
+    cancel: () => {
+      cancellation.cancel();
+      // A differential download checks its token only when the next chunk
+      // arrives, and electron-updater hands every later downloadUpdate() the
+      // pending download. Failing the updater session's stalled requests lets
+      // it settle, so a retry starts a fresh download.
+      void autoUpdater.netSession.closeAllConnections().catch(() => undefined);
+    },
+  });
+  updateDownloadWatch = watch;
 
   try {
-    await autoUpdater.downloadUpdate();
+    await watch.result;
     return { accepted: true, completed: true };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2966,6 +3055,7 @@ async function runUpdateDownload(): Promise<{ accepted: boolean; completed: bool
     console.error(`[desktop-updater] Failed to download update: ${message}`);
     return { accepted: true, completed: false };
   } finally {
+    if (updateDownloadWatch === watch) updateDownloadWatch = null;
     updateDownloadInFlight = false;
   }
 }
@@ -3278,6 +3368,7 @@ async function configureAutoUpdater(): Promise<void> {
     console.error(`[desktop-updater] Updater error: ${message}`);
   });
   autoUpdater.on("download-progress", (progress) => {
+    updateDownloadWatch?.noteProgress();
     const percent = Math.floor(progress.percent);
     if (
       shouldBroadcastDownloadProgress(updateState, progress.percent) ||
@@ -3433,37 +3524,39 @@ function handleBackendStartFailure(
 async function showBackendStartupFailure(detail: string): Promise<void> {
   const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
   if (window && !window.isDestroyed()) revealWindow(window);
-  for (;;) {
-    const options = {
-      type: "error" as const,
-      title: `${APP_DISPLAY_NAME} could not start`,
-      message: `${APP_DISPLAY_NAME} could not start its local server.`,
-      detail,
-      buttons: ["Retry", "Open Logs", "Quit"],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-    };
-    const { response } =
-      window && !window.isDestroyed()
-        ? await dialog.showMessageBox(window, options)
-        : await dialog.showMessageBox(options);
-    if (isQuitting) return;
-    if (response === 1) {
-      await shell.openPath(LOG_DIR).catch(() => "");
-      continue;
-    }
-    if (response === 0) {
+  const options = {
+    type: "error" as const,
+    title: `${APP_DISPLAY_NAME} could not start`,
+    message: `${APP_DISPLAY_NAME} could not start its local server.`,
+    detail,
+    buttons: ["Retry", "Open Logs", "Quit"],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  };
+  await runRecoveryDialogLoop({
+    show: () => showMessageBoxForWindow(window, options),
+    isCancelled: () => isQuitting,
+    openLogs: () => shell.openPath(LOG_DIR),
+    primary: () => {
       writeDesktopLogHeader("backend start retry requested");
       backendStartupHalted = false;
       backendFailurePolicy.reset();
       backendRestartBackoff.reset();
       startBackend();
-      return;
-    }
-    app.quit();
-    return;
-  }
+    },
+    quit: () => app.quit(),
+  });
+}
+
+/** A message box as a sheet on `window` while it is open, app-modal otherwise. */
+function showMessageBoxForWindow(
+  window: BrowserWindow | null,
+  options: Electron.MessageBoxOptions,
+): Promise<Electron.MessageBoxReturnValue> {
+  return window && !window.isDestroyed()
+    ? dialog.showMessageBox(window, options)
+    : dialog.showMessageBox(options);
 }
 
 function describeBackendStartupFailure(input: {
@@ -3774,6 +3867,7 @@ function registerIpcHandlers(): void {
     if (report === null) return;
     // Every report follows the primary shell becoming usable.
     appShellUsableContents.add(event.sender);
+    rendererCrashRecoveries.get(event.sender)?.noteShellUsable();
     markDesktopStartupPhase(
       `desktop.window.app.${report.phase}`,
       formatRendererStartupMarks(report.marks),
@@ -4810,13 +4904,32 @@ function loadDesktopBootPage(window: BrowserWindow): void {
   }
 }
 
+/** Display work areas, primary first (empty when Electron cannot tell). */
+function readDisplayWorkAreas(): DesktopWindowBounds[] {
+  try {
+    const primary = screen.getPrimaryDisplay();
+    return [
+      primary.workArea,
+      ...screen
+        .getAllDisplays()
+        .filter((display) => display.id !== primary.id)
+        .map((display) => display.workArea),
+    ];
+  } catch (error) {
+    logDesktopEvent(
+      `window state displays unavailable message=${sanitizeLogValue(formatErrorMessage(error))}`,
+    );
+    return [];
+  }
+}
+
 function createWindow(): BrowserWindow {
   markDesktopStartupPhase("desktop.window.create");
+  const restoredWindowState = desktopWindowState.restore(readDisplayWorkAreas());
   const window = new BrowserWindow({
-    width: 1100,
-    height: 780,
-    minWidth: 840,
-    minHeight: 620,
+    ...restoredWindowState.bounds,
+    minWidth: DESKTOP_WINDOW_MIN_SIZE.width,
+    minHeight: DESKTOP_WINDOW_MIN_SIZE.height,
     show: false,
     autoHideMenuBar: true,
     backgroundColor: getInitialWindowBackgroundColor(),
@@ -4835,6 +4948,7 @@ function createWindow(): BrowserWindow {
     },
   });
   appWindowContents.add(window.webContents);
+  desktopWindowState.track(window, restoredWindowState);
 
   const quitGuard = createQuitShortcutGuard({
     mode: () => desktopSettings.quitShortcutMode,
@@ -5053,8 +5167,41 @@ function createWindow(): BrowserWindow {
       // A dead renderer cannot reconnect in place; a later backend crash
       // restart must reload it instead of nudging it.
       appShellUsableContents.delete(window.webContents);
+      // The reload itself is scheduled by the crash recovery attached below.
     });
   }
+
+  rendererCrashRecoveries.set(
+    window.webContents,
+    attachRendererCrashRecovery(window, {
+      appName: APP_DISPLAY_NAME,
+      now: () => performance.now(),
+      isQuitting: () => isQuitting,
+      isWindowClosed: () => window.isDestroyed(),
+      // A backend app load requested after the crash (the crash marked any
+      // earlier request failed) and still waiting to navigate.
+      isLoadPending: () => {
+        if (isDevelopment || window.isDestroyed()) return false;
+        const request = appLoadRequestedFrom.get(window.webContents);
+        return request !== undefined && !request.failed;
+      },
+      describeUrl: () =>
+        window.isDestroyed()
+          ? "closed"
+          : classifyDesktopWindowStartupUrl(window.webContents.getURL()),
+      recover: (attempt) => recoverCrashedAppWindow(window, attempt),
+      reveal: () => revealWindow(window),
+      showMessageBox: (options) =>
+        showMessageBoxForWindow(window, { ...options, buttons: [...options.buttons] }),
+      openLogs: () => shell.openPath(LOG_DIR),
+      quit: () => app.quit(),
+      log: logDesktopEvent,
+      onRendererGone: () =>
+        desktopSshEnvironmentBridge?.cancelPendingPasswordPrompts(
+          "SSH authentication was cancelled because the app window crashed.",
+        ),
+    }),
+  );
 
   window.on("closed", () => {
     desktopSshEnvironmentBridge?.cancelPendingPasswordPrompts(
@@ -5485,6 +5632,14 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin" && !isQuitting) {
     app.quit();
   }
+});
+
+// Log only: Chromium restarts a GPU or utility process itself.
+app.on("child-process-gone", (_event, details) => {
+  if (isQuitting || details.reason === "clean-exit") return;
+  logDesktopEvent(
+    `child process gone type=${details.type} reason=${details.reason} exitCode=${details.exitCode}${details.name ? ` name=${sanitizeLogValue(details.name)}` : ""}`,
+  );
 });
 
 if (process.platform !== "win32") {
