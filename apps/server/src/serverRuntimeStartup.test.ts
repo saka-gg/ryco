@@ -31,21 +31,23 @@ import {
   Fiber,
   FileSystem,
   Layer,
+  Logger,
   Metric,
   Option,
   PubSub,
   Ref,
+  References,
   Scope,
   Stream,
 } from "effect";
-import { TestClock } from "effect/testing";
+import { TestClock, TestConsole } from "effect/testing";
 
 import { canonicalJson, sha256Hex } from "./canonicalJson.ts";
 import { ServerConfig } from "./config.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { Keybindings } from "./keybindings.ts";
-import { Open } from "./open.ts";
+import { Open, OpenError } from "./open.ts";
 import { AdvertisedEndpointRegistry } from "./remote/Services/AdvertisedEndpointRegistry.ts";
 import { HttpServer } from "effect/http";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
@@ -107,6 +109,7 @@ import {
   recordStartupHeartbeat,
   makeCommandGate,
   makeServerRuntimeStartup,
+  presentStartupBrowserTarget,
   reconcileOrphanedProviderSessions,
   resolveAutoBootstrapWelcomeTargets,
   startOrchestrationRuntime,
@@ -2104,6 +2107,45 @@ it.live("releases deferred provider driver construction once the HTTP listener s
             release: Effect.sync(() => void released.push("provider-instances")),
             awaitInitialReconcile: Effect.void,
           }),
+        ),
+      ),
+    ),
+  );
+});
+
+it.effect("prints the startup pairing URL to the terminal and never logs it", () => {
+  // Log records reach the trace file and, when traces or logs are exported, an OTLP collector.
+  const logged: Array<string> = [];
+  const captureLogs = Logger.layer([
+    Logger.make((options) => {
+      logged.push(
+        JSON.stringify({
+          message: options.message,
+          annotations: options.fiber.getRef(References.CurrentLogAnnotations),
+        }),
+      );
+    }),
+  ]);
+  const pairingUrl = "http://localhost:3773/pair#token=OWNER-SECRET-TOKEN";
+  return Effect.gen(function* () {
+    yield* presentStartupBrowserTarget(pairingUrl);
+
+    const printed = (yield* TestConsole.logLines).join("\n");
+    assert.include(printed, `Pairing URL: ${pairingUrl}`);
+    assert.include(printed, `Open ${pairingUrl} in your browser.`);
+    assert.isTrue(logged.some((line) => line.includes("Authentication required")));
+    assert.isTrue(logged.some((line) => line.includes("browser auto-open unavailable")));
+    assert.notInclude(logged.join("\n"), "OWNER-SECRET-TOKEN");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        captureLogs,
+        Layer.fresh(TestConsole.layer),
+        Layer.succeed(Open, {
+          openBrowser: () => Effect.fail(new OpenError({ message: "no browser" })),
+        } as unknown as Open["Service"]),
+        ServerConfig.layerTest(process.cwd(), { prefix: "ryco-startup-pairing-" }).pipe(
+          Layer.provide(NodeServices.layer),
         ),
       ),
     ),

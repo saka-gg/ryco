@@ -521,9 +521,9 @@ const maybeOpenBrowser = (target: string) =>
 
     yield* openBrowser(target).pipe(
       Effect.catch(() =>
-        Effect.logInfo("browser auto-open unavailable", {
-          hint: `Open ${target} in your browser.`,
-        }),
+        Effect.logInfo("browser auto-open unavailable").pipe(
+          Effect.andThen(Console.log(`Open ${target} in your browser.`)),
+        ),
       ),
     );
   });
@@ -536,6 +536,21 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
       Effect.withSpan(`server.startup.${phase}`),
     ),
   );
+
+/**
+ * Shows the browser target and opens it. Outside desktop mode the target is a pairing URL holding
+ * a one-time owner credential, so it is printed to the terminal and never logged: log records
+ * reach the trace file and, when traces or logs are exported, an OTLP collector.
+ */
+export const presentStartupBrowserTarget = (target: string) =>
+  Effect.gen(function* () {
+    const serverConfig = yield* ServerConfig;
+    if (serverConfig.mode !== "desktop") {
+      yield* Effect.logInfo("Authentication required. Open Ryco using the pairing URL below.");
+      yield* Console.log(`Pairing URL: ${target}`);
+    }
+    yield* runStartupPhase("browser.open", maybeOpenBrowser(target));
+  });
 
 const incompatibleWorkspaceStateError = (cause: unknown) =>
   new ServerRuntimeStartupError({
@@ -1213,13 +1228,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         );
       } else {
         yield* Effect.logDebug("startup phase: browser open check");
-        const startupBrowserTarget = yield* resolveStartupBrowserTarget;
-        if (serverConfig.mode !== "desktop") {
-          yield* Effect.logInfo("Authentication required. Open Ryco using the pairing URL.").pipe(
-            Effect.annotateLogs({ pairingUrl: startupBrowserTarget }),
-          );
-        }
-        yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));
+        yield* presentStartupBrowserTarget(yield* resolveStartupBrowserTarget);
       }
       yield* Effect.logInfo("startup phase complete", {
         durationMs: Date.now() - runtimeStartedAt,
