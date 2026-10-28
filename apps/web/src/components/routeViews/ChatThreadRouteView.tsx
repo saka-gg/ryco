@@ -36,7 +36,7 @@ import {
 import { selectEnvironmentState, selectThreadExistsByRef, useStore } from "../../store";
 import {
   createEnvironmentFallbackThreadRefSelector,
-  createThreadSelectorByRef,
+  createThreadStructureSelectorByRef,
 } from "../../storeSelectors";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../../threadRoutes";
 import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
@@ -90,21 +90,14 @@ export function ChatThreadRouteView({
   const bootstrapComplete = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).bootstrapComplete,
   );
-  const serverThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
+  // Reads only whether the thread exists and has started, so streamed text
+  // does not re-render the route.
+  const serverThread = useStore(
+    useMemo(() => createThreadStructureSelectorByRef(threadRef), [threadRef]),
+  );
   const threadExists = useStore((store) => selectThreadExistsByRef(store, threadRef));
   const environmentHasServerThreads = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).threadIds.length > 0,
-  );
-  const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
-  const fallbackThreadRef = useStore(
-    useMemo(
-      () =>
-        createEnvironmentFallbackThreadRefSelector(
-          threadRef?.environmentId ?? null,
-          sidebarThreadSortOrder,
-        ),
-      [sidebarThreadSortOrder, threadRef?.environmentId],
-    ),
   );
   const draftThreadExists = useDraftThreadExistsByRef(threadRef);
   const draftThread = useDraftThreadByRef(threadRef);
@@ -113,6 +106,19 @@ export function ChatThreadRouteView({
   const routeInPanes =
     presentationTier !== "phone" && !!threadRef && !!paneRoot && paneContains(paneRoot, threadRef);
   const routeThreadExists = threadExists || draftThreadExists;
+  const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
+  // The fallback is only needed once the route's thread is gone. While it
+  // exists the selector reads no environment: otherwise it re-sorts every
+  // thread on each commit that replaces the shell records (every streamed delta).
+  const fallbackEnvironmentId =
+    routeInPanes || routeThreadExists ? null : (threadRef?.environmentId ?? null);
+  const fallbackThreadRef = useStore(
+    useMemo(
+      () =>
+        createEnvironmentFallbackThreadRefSelector(fallbackEnvironmentId, sidebarThreadSortOrder),
+      [fallbackEnvironmentId, sidebarThreadSortOrder],
+    ),
+  );
   const serverThreadStarted = threadHasStarted(serverThread);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
   // A hosted node switch deliberately demotes the environment to last-known

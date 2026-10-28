@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type MessageId,
   type ScopedProjectRef,
   type ScopedThreadRef,
   type ThreadId,
@@ -12,11 +13,14 @@ import { sortThreads, type ThreadSortInput } from "./threadSort.ts";
 import {
   selectEnvironmentState,
   selectProjectByRef,
+  selectSidebarThreadSummaryByRef,
   selectThreadByRef,
   type AppState,
   type EnvironmentState,
 } from "./store.ts";
 import {
+  fullThreadEntry,
+  type ChatMessage,
   type Project,
   type SidebarThreadOrStub,
   type SidebarThreadSummary,
@@ -103,6 +107,148 @@ export function createThreadSelectorAcrossEnvironments(
     }
     return undefined;
   });
+}
+
+/**
+ * True when `previous` and `next` hold the same value (by reference) under every
+ * own key except those `skip` accepts, keys present in only one of them included.
+ * Listing no fields keeps a field added later structural by default.
+ */
+function sameFieldsExcept(previous: object, next: object, skip: (key: string) => boolean): boolean {
+  const previousRecord = previous as Record<string, unknown>;
+  const nextRecord = next as Record<string, unknown>;
+  for (const key of Object.keys(nextRecord)) {
+    if (!skip(key) && previousRecord[key] !== nextRecord[key]) return false;
+  }
+  for (const key of Object.keys(previousRecord)) {
+    if (!skip(key) && previousRecord[key] !== nextRecord[key]) return false;
+  }
+  return true;
+}
+
+const isUpdatedAtKey = (key: string): boolean => key === "updatedAt";
+const isUpdatedAtOrMessagesKey = (key: string): boolean =>
+  key === "updatedAt" || key === "messages";
+const isTextKey = (key: string): boolean => key === "text";
+
+/**
+ * Two versions of one assistant message that streamed text in both. An empty
+ * message can render differently from one with text (the timeline stands in a
+ * placeholder for a blank reply), so its first text is structure, and so is the
+ * end of its stream.
+ */
+function sameMessageApartFromStreamedText(previous: ChatMessage, next: ChatMessage): boolean {
+  return (
+    previous.role === "assistant" &&
+    previous.streaming &&
+    next.streaming &&
+    previous.text !== "" &&
+    next.text !== "" &&
+    Object.keys(previous).length === Object.keys(next).length &&
+    sameFieldsExcept(previous, next, isTextKey)
+  );
+}
+
+/**
+ * True when `next` differs from `previous` only in the text of assistant
+ * messages that were already streaming with text and still stream, plus the
+ * shell's `updatedAt`. Every other field is compared by reference: the reducer
+ * keeps the identity of everything a delta does not touch. An empty message can
+ * render differently from one with text, so the first text of a message, and
+ * the end of its stream, always count as structure.
+ */
+export function threadDiffersOnlyInStreamedText(previous: Thread, next: Thread): boolean {
+  if (previous === next) return true;
+  if (!sameFieldsExcept(previous, next, isUpdatedAtOrMessagesKey)) return false;
+  const previousMessages = previous.messages;
+  const nextMessages = next.messages;
+  if (previousMessages === nextMessages) return true;
+  if (previousMessages.length !== nextMessages.length) return false;
+  for (let index = 0; index < nextMessages.length; index += 1) {
+    const previousMessage = previousMessages[index]!;
+    const nextMessage = nextMessages[index]!;
+    if (
+      previousMessage !== nextMessage &&
+      !sameMessageApartFromStreamedText(previousMessage, nextMessage)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The thread as `createThreadSelectorByRef` composes it, except that it keeps
+ * returning the previous value while only streamed text grows or only the
+ * shell's `updatedAt` moves (see `threadDiffersOnlyInStreamedText`). A
+ * streaming message in the returned thread carries the text of the thread's
+ * last structural change: read the text it shows through
+ * `selectThreadMessageText`. Use it only where message text and the thread's
+ * `updatedAt` are not read; the moment anything else changes it returns the
+ * newest thread, current text included.
+ */
+export function createThreadStructureSelectorByRef(
+  ref: ScopedThreadRef | null | undefined,
+): (state: AppState) => Thread | undefined {
+  return holdWhileEquivalent(createThreadSelectorByRef(ref), threadDiffersOnlyInStreamedText);
+}
+
+/**
+ * `selectLive`, except that it keeps returning the value it last returned
+ * while `isEquivalent(held, live)` holds. It compares with the held value, not
+ * the previous live one: after many small changes the held value is still what
+ * subscribers last rendered. A missing value (undefined) drops the hold, so a
+ * value that comes back is returned as it is.
+ */
+function holdWhileEquivalent<T extends object>(
+  selectLive: (state: AppState) => T | undefined,
+  isEquivalent: (held: T, live: T) => boolean,
+): (state: AppState) => T | undefined {
+  let held: T | undefined;
+  return (state) => {
+    const live = selectLive(state);
+    if (live === undefined) {
+      held = undefined;
+      return undefined;
+    }
+    if (held !== undefined && held !== live && isEquivalent(held, live)) {
+      return held;
+    }
+    held = live;
+    return live;
+  };
+}
+
+/**
+ * The live text of one loaded message of a thread, or undefined when the
+ * thread or message is not loaded. A string, so a subscriber re-renders only
+ * when the text changes.
+ */
+export function selectThreadMessageText(
+  state: AppState,
+  ref: ScopedThreadRef,
+  messageId: MessageId,
+): string | undefined {
+  return selectEnvironmentState(state, ref.environmentId).messageByThreadId[ref.threadId]?.[
+    messageId
+  ]?.text;
+}
+
+/**
+ * A thread's full sidebar summary (undefined for none or an archived stub),
+ * kept while a newer one differs only in `updatedAt`. The shell stream rewrites
+ * the summary after every event of the thread, each streamed delta included,
+ * and nearly always only its `updatedAt` moves. Use it where `updatedAt` is not
+ * shown; a value read from it (the inbox's day-scale settle age) can lag by the
+ * length of the reply.
+ */
+export function createThreadSummaryStructureSelectorByRef(
+  ref: ScopedThreadRef | null | undefined,
+): (state: AppState) => SidebarThreadSummary | undefined {
+  return holdWhileEquivalent(
+    (state) => fullThreadEntry(selectSidebarThreadSummaryByRef(state, ref)),
+    (held, live) => sameFieldsExcept(held, live, isUpdatedAtKey),
+  );
 }
 
 type FallbackThreadCandidate = Pick<SidebarThreadSummary, "id"> & ThreadSortInput;

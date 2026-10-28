@@ -59,6 +59,16 @@ off. The gradual character reveal stays for token mode only, without the fade; p
 whole-message releases appear as finished blocks. Live chapters show their streamed paragraphs
 the same way.
 
+On web and desktop, streamed text re-renders only the message that shows it. The chat view and
+the panels beside it read the thread through `createThreadStructureSelectorByRef`
+(`@ryco/client-runtime/state/threads`), which keeps the thread it last returned while only the
+text of a streaming reply grows or only the thread's `updatedAt` moves; the reply's markdown reads
+its live text with `selectThreadMessageText`. The shell stream's re-read of the thread row after
+each delta changes nothing those selectors compare, because the store keeps the nested values it
+already holds when an upsert brings the same data. Thread search follows the live thread while its
+bar is open, so match counts include the reply as it streams. `ChatView.renders.browser.tsx`
+guards the render counts.
+
 ## Compatibility
 
 - `responseStreamingMode` replaces `enableLegacyTokenStreaming`. A node that reads a settings
