@@ -322,7 +322,7 @@ describe("live feed flushing", () => {
     const live = yield* PubSub.unbounded<OrchestrationEvent>();
     const helpers = makeOrchestrationStreamHelpers({
       orchestrationEngine: {
-        subscribeDomainEvents: PubSub.subscribe(live),
+        subscribeDomainEvents: Effect.map(PubSub.subscribe(live), Stream.fromSubscription),
         readEventsPage: (fromSequenceExclusive: number) =>
           Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
       } as unknown as OrchestrationEngineShape,
