@@ -80,6 +80,11 @@ const HOT_COMPONENTS: ReadonlyArray<{ readonly file: string; readonly functions:
     file: "src/components/chat/MessagesTimeline.tsx",
     functions: ["MessagesTimeline", "useStableRows"],
   },
+  // The one part of the chat that re-renders for each streamed delta.
+  {
+    file: "src/components/chat/StreamedMessageMarkdown.tsx",
+    functions: ["StreamedMessageMarkdown", "useStreamedMessageText"],
+  },
   // Mounted wherever a thread offers source control actions; it re-renders on
   // each git status update.
   { file: "src/components/GitActionsControl.tsx", functions: ["GitActionsControl"] },

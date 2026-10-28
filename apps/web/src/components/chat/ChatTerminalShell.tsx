@@ -6,7 +6,10 @@ import { useComposerDraftStore } from "../../composerDraftStore";
 import { type TerminalContextSelection } from "../../lib/terminalContext";
 import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
 import { useStore } from "../../store";
-import { createProjectSelectorByRef, createThreadSelectorByRef } from "../../storeSelectors";
+import {
+  createProjectSelectorByRef,
+  createThreadStructureSelectorByRef,
+} from "../../storeSelectors";
 import { closeThreadTerminal } from "../../terminalClose";
 import { prepareThreadTerminal, resolveThreadTerminalLaunch } from "../../terminalPrepare";
 import { useLazyComponentReady } from "../../lib/preloadableLazy";
@@ -42,7 +45,9 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
   keybindings,
   onAddTerminalContext,
 }: PersistentThreadTerminalDrawerProps) {
-  const serverThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
+  const serverThread = useStore(
+    useMemo(() => createThreadStructureSelectorByRef(threadRef), [threadRef]),
+  );
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
   const projectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)

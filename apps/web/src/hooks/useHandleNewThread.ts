@@ -44,7 +44,7 @@ import { useChatsAvailability } from "./useChatsAvailability";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import { deriveLogicalProjectKeyFromSettings, getProjectOrderKey } from "../logicalProject";
 import { selectProjectsAcrossEnvironments, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
+import { createThreadStructureSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import { useProjectGroupingSettings } from "./useProjectGroupingSettings";
@@ -651,7 +651,7 @@ export function useHandleNewThread() {
   });
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
   const activeThread = useStore(
-    useMemo(() => createThreadSelectorByRef(routeThreadRef), [routeThreadRef]),
+    useMemo(() => createThreadStructureSelectorByRef(routeThreadRef), [routeThreadRef]),
   );
   const getDraftThread = useComposerDraftStore((store) => store.getDraftThread);
   const activeDraftThread = useComposerDraftStore(() =>

@@ -174,6 +174,7 @@ import {
   workEntryRawCommand,
 } from "./workChapters.logic";
 import { WorkChapterRow } from "./WorkChapterRow";
+import { StreamedMessageMarkdown } from "./StreamedMessageMarkdown";
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
 import {
@@ -1633,7 +1634,9 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     assistantResponseStillInProgress ? undefined : row.message.id
                   }
                 >
-                  <ChatMarkdown
+                  <StreamedMessageMarkdown
+                    routeThreadKey={ctx.routeThreadKey}
+                    streamingMessageId={row.message.streaming ? row.message.id : null}
                     allowTerminalInsertion
                     text={messageText}
                     cwd={ctx.markdownCwd}

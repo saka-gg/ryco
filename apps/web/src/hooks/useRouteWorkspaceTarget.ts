@@ -3,7 +3,7 @@ import { useMemo } from "react";
 
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { selectProjectByRef, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
+import { createThreadStructureSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import type { Project, Thread, TurnDiffSummary } from "../types";
 
@@ -40,7 +40,7 @@ export function useRouteWorkspaceTarget(): RouteWorkspaceTarget {
     select: (params) => (typeof params.draftId === "string" ? DraftId.make(params.draftId) : null),
   });
   const serverThread = useStore(
-    useMemo(() => createThreadSelectorByRef(routeThreadRef), [routeThreadRef]),
+    useMemo(() => createThreadStructureSelectorByRef(routeThreadRef), [routeThreadRef]),
   );
   const draftThread = useComposerDraftStore((store) => {
     if (serverThread) return null;

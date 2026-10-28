@@ -242,7 +242,7 @@ vi.mock("../hooks/useSettings", () => ({
 }));
 
 vi.mock("../storeSelectors", () => ({
-  createThreadSelectorByRef: (ref: { threadId: string } | null) => () =>
+  createThreadStructureSelectorByRef: (ref: { threadId: string } | null) => () =>
     previewHarness.serverThreadEnabled
       ? {
           id: ThreadId.make(ref?.threadId ?? "thread-1"),
