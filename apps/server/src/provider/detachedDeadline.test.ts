@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import { Deferred, Duration, Effect, Exit, Fiber, Option, Scope } from "effect";
 import { TestClock } from "effect/testing";
 
+import { stallEventLoopSoon, timerThenIo } from "../testing/eventLoopStall.ts";
 import { runDetachedWithDeadline, runDetachedWithDeadlineOption } from "./detachedDeadline.ts";
 
 class DeadlineError {
@@ -189,5 +190,43 @@ it.effect("the option variant yields None at the deadline", () =>
       yield* runDetachedWithDeadlineOption(Effect.succeed(1), { scope, timeoutMs: 20 }),
       Option.some(1),
     );
+  }),
+);
+
+it.live("a server stall does not fail an operation that finishes after it", () =>
+  Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    let timeouts = 0;
+    const caller = yield* runDetachedWithDeadline(timerThenIo(250).pipe(Effect.as("done")), {
+      scope,
+      timeoutMs: 300,
+      onTimeout: () => {
+        timeouts += 1;
+        return new DeadlineError();
+      },
+    }).pipe(Effect.forkChild({ startImmediately: true }));
+    // The loop is blocked past the whole budget; the operation still needs its
+    // timer and an I/O round trip afterwards. A plain timer expired meanwhile
+    // and would fire before that I/O is read.
+    yield* stallEventLoopSoon(600);
+    assert.equal(yield* Fiber.join(caller), "done");
+    assert.equal(timeouts, 0);
+  }),
+);
+
+it.live("a hung operation on a responsive loop still fails on time", () =>
+  Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    const startedAt = performance.now();
+    const error = yield* runDetachedWithDeadline(Effect.never, {
+      scope,
+      timeoutMs: 300,
+      onTimeout: () => new DeadlineError(),
+    }).pipe(Effect.flip);
+    const elapsedMs = performance.now() - startedAt;
+    assert.instanceOf(error, DeadlineError);
+    assert.isAtLeast(elapsedMs, 295);
+    // At most one tick (here 75 ms) late, plus timer slack under load.
+    assert.isBelow(elapsedMs, 300 + 1_000);
   }),
 );

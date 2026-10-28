@@ -1,6 +1,8 @@
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import { dual } from "effect/Function";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -17,6 +19,33 @@ import { makeInMemoryStdio } from "./_internal/stdio.ts";
 const encoder = new TextEncoder();
 
 const encodeJsonl = (value: unknown) => encoder.encode(`${JSON.stringify(value)}\n`);
+
+/**
+ * A `timeoutOrElse` whose deadlines expire only once `fire` completes, as a
+ * stall-aware one does while the loop is not free. Records each budget when
+ * its deadline starts waiting.
+ */
+const timeoutOrElseOnSignal = (
+  fire: Deferred.Deferred<void>,
+  durations: Array<number> = [],
+): typeof Effect.timeoutOrElse =>
+  dual(
+    2,
+    <A, E, R, A2, E2, R2>(
+      self: Effect.Effect<A, E, R>,
+      options: {
+        readonly duration: Duration.Input;
+        readonly orElse: () => Effect.Effect<A2, E2, R2>;
+      },
+    ): Effect.Effect<A | A2, E | E2, R | R2> =>
+      Effect.raceFirst(
+        self,
+        Effect.sync(() => durations.push(Duration.toMillis(options.duration))).pipe(
+          Effect.andThen(Deferred.await(fire)),
+          Effect.andThen(options.orElse),
+        ),
+      ),
+  );
 
 it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
   it.effect(
@@ -165,6 +194,74 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       assert.equal(request.method, "thread/read");
       yield* Queue.offer(input, encodeJsonl({ id: request.id, result: "ok" }));
       assert.equal(yield* Fiber.join(next), "ok");
+    }),
+  );
+  it.effect("runs request deadlines through the injected timeoutOrElse", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const durations: Array<number> = [];
+      const fire = yield* Deferred.make<void>();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        requestTimeoutMs: 1_000,
+        timeoutOrElse: timeoutOrElseOnSignal(fire, durations),
+      });
+      const pending = yield* transport.request("turn/start", {}).pipe(Effect.forkScoped);
+      const sent = JSON.parse(yield* Queue.take(output));
+      assert.deepStrictEqual(durations, [1_000]);
+      // A stall-aware deadline that has not fired keeps the request alive past the plain timer.
+      yield* TestClock.adjust("1 second");
+      assert.isUndefined(pending.pollUnsafe());
+      yield* Queue.offer(input, encodeJsonl({ id: sent.id, result: "late" }));
+      assert.equal(yield* Fiber.join(pending), "late");
+
+      // When the deadline fires, the request fails exactly as on a plain one.
+      const expiring = yield* transport
+        .request("thread/read", {})
+        .pipe(Effect.asVoid, Effect.flip, Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Deferred.succeed(fire, undefined);
+      const error = yield* Fiber.join(expiring);
+      assert.instanceOf(error, CodexError.CodexAppServerTransportError);
+      assert.include(error.message, "thread/read request timed out");
+    }),
+  );
+  it.effect("runs the outgoing enqueue deadline through the injected timeoutOrElse", () =>
+    Effect.gen(function* () {
+      const memory = yield* makeInMemoryStdio();
+      const fire = yield* Deferred.make<void>();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio: Stdio.make({
+          args: Effect.succeed([]),
+          stdin: memory.stdio.stdin,
+          // A writer that never drains: the outgoing queue fills up.
+          stdout: () => Sink.forEach(() => Effect.never),
+          stderr: () => Sink.drain,
+        }),
+        timeoutOrElse: timeoutOrElseOnSignal(fire),
+      });
+      const progress = { sent: 0 };
+      const flood = yield* Effect.forEach(
+        Array.from({ length: 1_000 }),
+        () =>
+          transport.notify("initialized").pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                progress.sent += 1;
+              }),
+            ),
+          ),
+        { discard: true },
+      ).pipe(Effect.flip, Effect.forkScoped);
+      // Let the flood fill the queue (capacity 256) and block on the next offer.
+      for (let i = 0; i < 10_000 && progress.sent < 256; i++) yield* Effect.yieldNow;
+      assert.isAtLeast(progress.sent, 256);
+      for (let i = 0; i < 10; i++) yield* Effect.yieldNow;
+      yield* TestClock.adjust("2 seconds");
+      assert.isUndefined(flood.pollUnsafe());
+      yield* Deferred.succeed(fire, undefined);
+      const error = yield* Fiber.join(flood);
+      assert.instanceOf(error, CodexError.CodexAppServerProtocolOverloadedError);
     }),
   );
   it.effect(
