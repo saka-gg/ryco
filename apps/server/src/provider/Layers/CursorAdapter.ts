@@ -93,6 +93,7 @@ import {
 import { type CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import {
   agentControlHostContext,
   installAgentControlAcp,
@@ -129,6 +130,8 @@ export interface CursorAdapterLiveOptions {
   readonly resolveSettings?: Effect.Effect<CursorSettings>;
   readonly agentControl?: AgentControlProviderBridge;
   readonly stdioProxy?: { readonly command: string; readonly entryPoint: string };
+  /** Lowers each session's agent process; undefined spawns it unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 interface PendingApproval {
@@ -577,6 +580,7 @@ export function makeCursorAdapter(
           const acp = yield* makeCursorAcpRuntime({
             cursorSettings: effectiveCursorSettings,
             ...(options?.environment ? { environment: options.environment } : {}),
+            ...(options?.processPriority ? { processPriority: options.processPriority } : {}),
             childProcessSpawner,
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),

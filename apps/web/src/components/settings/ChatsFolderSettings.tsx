@@ -11,6 +11,7 @@ import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureLocalApi } from "../../localApi";
 import { applySettingsUpdated, useServerConfig } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
+import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import { DraftInput } from "../ui/draft-input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SETTINGS_CONTROL_WIDTH, SettingResetButton, SettingsRow } from "./settingsLayout";
@@ -27,13 +28,7 @@ export function ChatsFolderSettings() {
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
-  const disabled =
-    scope === "client" ||
-    !config ||
-    (scope === "node" && !target) ||
-    Boolean(
-      target && (!target.connected || target.canManage === false || target.canMutate === false),
-    );
+  const disabled = !config || isNodeSettingsTargetReadOnly(scope, target);
   // Remount the editors on node changes so in-flight errors and drafts never cross environments.
   return (
     <>

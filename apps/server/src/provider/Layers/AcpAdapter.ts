@@ -77,6 +77,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 type AcpAdapterShape = ProviderAdapterShape<ProviderAdapterError>;
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
@@ -110,6 +111,8 @@ export interface AcpAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  /** Lowers each session's agent process; undefined spawns it unchanged. */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 interface PendingApproval {
@@ -442,6 +445,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           const acp = yield* options
             .makeRuntime({
               ...(options?.environment ? { environment: options.environment } : {}),
+              ...(options.processPriority ? { processPriority: options.processPriority } : {}),
               childProcessSpawner,
               cwd,
               ...(resumeSessionId ? { resumeSessionId } : {}),

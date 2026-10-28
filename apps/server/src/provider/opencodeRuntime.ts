@@ -41,6 +41,7 @@ import {
   OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
 } from "./openCodeVersion.ts";
 import { collectStreamAsString, parseGenericCliVersion } from "./providerSnapshot.ts";
+import { type AgentProcessPriorityShape, spawnAgentProcess } from "./agentProcessPriority.ts";
 import { NetService } from "@ryco/shared/Net";
 
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
@@ -248,6 +249,8 @@ export interface OpenCodeRuntimeShape {
     readonly port?: number;
     readonly hostname?: string;
     readonly timeoutMs?: number;
+    /** Lowers the server (it runs the agent work); probes leave it unset. */
+    readonly processPriority?: AgentProcessPriorityShape | undefined;
   }) => Effect.Effect<OpenCodeServerProcess, OpenCodeRuntimeError, Scope.Scope>;
   /**
    * Returns a handle to either an externally-managed OpenCode server (when
@@ -263,6 +266,8 @@ export interface OpenCodeRuntimeShape {
     readonly port?: number;
     readonly hostname?: string;
     readonly timeoutMs?: number;
+    /** Lowers a server this call starts; ignored for an external `serverUrl`. */
+    readonly processPriority?: AgentProcessPriorityShape | undefined;
   }) => Effect.Effect<OpenCodeServerConnection, OpenCodeRuntimeError, Scope.Scope>;
   readonly runOpenCodeCommand: (input: {
     readonly binaryPath: string;
@@ -525,29 +530,29 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         ...(input.environment !== undefined ? { environment: input.environment } : {}),
       });
 
-      const child = yield* spawner
-        .spawn(
-          ChildProcess.make(input.binaryPath, args, {
-            detached: process.platform !== "win32",
-            shell: process.platform === "win32",
-            env: {
-              ...(input.environment ?? process.env),
-              ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
-              OPENCODE_CONFIG_CONTENT: JSON.stringify({}),
-            },
-          }),
-        )
-        .pipe(
-          Effect.provideService(Scope.Scope, runtimeScope),
-          Effect.mapError(
-            (cause) =>
-              new OpenCodeRuntimeError({
-                operation: "startOpenCodeServerProcess",
-                detail: `Failed to spawn OpenCode server process: ${openCodeRuntimeErrorDetail(cause)}`,
-                cause,
-              }),
-          ),
-        );
+      const child = yield* spawnAgentProcess(
+        spawner,
+        input.processPriority,
+        ChildProcess.make(input.binaryPath, args, {
+          detached: process.platform !== "win32",
+          shell: process.platform === "win32",
+          env: {
+            ...(input.environment ?? process.env),
+            ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({}),
+          },
+        }),
+      ).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.mapError(
+          (cause) =>
+            new OpenCodeRuntimeError({
+              operation: "startOpenCodeServerProcess",
+              detail: `Failed to spawn OpenCode server process: ${openCodeRuntimeErrorDetail(cause)}`,
+              cause,
+            }),
+        ),
+      );
 
       // The direct child may already have exited after starting the server, so
       // the whole process group is terminated: the spawner's kill signals the
@@ -680,6 +685,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ...(input.port !== undefined ? { port: input.port } : {}),
       ...(input.hostname !== undefined ? { hostname: input.hostname } : {}),
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.processPriority !== undefined ? { processPriority: input.processPriority } : {}),
     }).pipe(
       Effect.map((server) => ({
         url: server.url,

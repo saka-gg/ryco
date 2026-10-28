@@ -28,6 +28,32 @@ describe("diagnostic text redaction", () => {
     expect(redactDiagnosticText("Checkpoint took 240 ms")).toBe("Checkpoint took 240 ms");
   });
 
+  // Every token shape the Claude Agent SDK hides in Claude Code's stderr. Joined at runtime so
+  // secret scanners do not flag this file.
+  it.each([
+    ["an AWS access key id", ["AKIA", "ABCDEFGHIJKLMNOP"]],
+    ["an AWS session key id", ["ASIA", "ABCDEFGHIJKLMNOP"]],
+    ["a Google API key", ["AIza", "SyA1234567890abcdefghijklmnopqrstuv"]],
+    ["a Google OAuth client secret", ["GOCSPX-", "abcdefghijklmnopqrstuvwxyz12"]],
+    ["a Stripe secret key", ["sk_", "live_", "abcdefghijklmnopqrstuvwx1234"]],
+    ["a Stripe restricted key", ["rk_", "test_", "abcdefghijklmnopqrstuvwx1234"]],
+    ["a Slack bot token", ["xoxb-", "1234567890-abcdefghij"]],
+    ["a Slack app token", ["xapp-", "1-A0123456789-abcdef"]],
+    ["a GitLab token", ["glpat-", "abcdefghij1234567890"]],
+    ["a Square token", ["sq0atp-", "abcdefghijklmnopqrstuv"]],
+    ["a Meta token", ["EAAA", "abcdefghij".repeat(3), "1234567890".repeat(3)]],
+  ])("redacts %s in free text", (_shape, parts) => {
+    const input = `request failed with ${parts.join("")}, retrying`;
+    expect(redactDiagnosticText(input)).toBe("request failed with [redacted], retrying");
+  });
+
+  it("redacts the path of a Slack webhook URL", () => {
+    const webhook = ["https://hooks.slack.com/", "services/T0000000/B0000000/", "abcdefghij"];
+    expect(redactDiagnosticText(`POST ${webhook.join("")} failed`)).toBe(
+      "POST https://hooks.slack.com/[redacted] failed",
+    );
+  });
+
   it.each([
     // Environment names that end in a credential word.
     ["ANTHROPIC_AUTH_TOKEN=abc123def456", "ANTHROPIC_AUTH_TOKEN=[redacted]"],
@@ -161,6 +187,7 @@ describe("diagnostic text redaction", () => {
     "Refresh the token:\n\n```sh\ngh auth refresh\n```\nDone",
     "API_KEY=\nNODE_ENV=production",
     '{"message":"token=","code":1}',
+    "Slack signs off with xoxo-hugs-and-kisses; Stripe keys start with sk_live_ or rk_test_",
   ])("keeps %j", (input) => {
     expect(redactDiagnosticText(input)).toBe(input);
   });
@@ -192,6 +219,10 @@ describe("diagnostic text redaction", () => {
       "token=>".repeat(size / 7),
       "token=<".repeat(size / 7),
       `postgres://${"a".repeat(size)}`,
+      "xoxb-".repeat(size / 5),
+      `sk_live_${"a".repeat(size)}`,
+      "_EAAA".repeat(size / 5),
+      `hooks.slack.com/services/${"a/".repeat(size / 2)}`,
     ];
     // This thread's CPU time, not wall time, so a loaded machine cannot fail the budget. The
     // whole set takes tens of milliseconds; rescanning from each match would take minutes.
