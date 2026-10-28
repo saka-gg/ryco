@@ -19,6 +19,7 @@ import { usePaneEffect, usePaneThreadRef, usePaneCloseGuard } from "./PaneFocus"
 import { THREAD_MENTION_DROP_ZONE_PROPS } from "./ComposerMentionDrop";
 import { CHAT_PANES_STORAGE_KEY, startPaneDrag, useChatPanesStore } from "../../chatPanesStore";
 import { PANE_DRAG_TYPE, decodePaneLayout, paneLeaves, type PaneNode } from "../../chatPanes.logic";
+import { resetClosedViewsForTests, takeClosedView } from "../../closedViews";
 vi.mock("../previewFileSessions", () => ({ flushPreviewFiles: vi.fn(async () => true) }));
 let preventClose = false;
 const a = { environmentId: EnvironmentId.make("pane-test"), threadId: ThreadId.make("a") };
@@ -46,6 +47,7 @@ function ThreadContent({ threadRef }: { threadRef: typeof a }) {
       </button>
       <textarea
         aria-label={`Draft ${ref.threadId}`}
+        data-testid="composer-editor"
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
       />
@@ -112,6 +114,7 @@ afterEach(async () => {
   useChatPanesStore.setState({ root: null, activeRef: null });
   calls.length = 0;
   preventClose = false;
+  resetClosedViewsForTests();
   vi.mocked(flushPreviewFiles).mockResolvedValue(true);
 });
 it("drops a neighbor, transfers the only global listener, preserves drafts and closes", async () => {
@@ -398,4 +401,121 @@ it("reuses the lone pane's content across thread navigation and keeps splits per
   await expect.element(page.getByRole("textbox", { name: "Draft a" })).toBeVisible();
   expect(document.querySelectorAll("[data-pane-thread]")).toHaveLength(2);
   expect(page.getByRole("textbox", { name: "Draft b" }).element()).toBe(firstPane);
+});
+
+const controller = () => useChatPanesStore.getState().controller!;
+const closedPane = () => takeClosedView(() => "reopen");
+function nudgeDivider() {
+  page
+    .getByRole("separator")
+    .element()
+    .dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+}
+
+it("reopens a closed pane where it was and moves typing into it", async () => {
+  const router = await mount();
+  useChatPanesStore.getState().open(b, "right", a);
+  await expect.element(page.getByRole("separator")).toBeVisible();
+  nudgeDivider();
+  await expect.poll(() => useChatPanesStore.getState().root).toMatchObject({ ratio: 0.55 });
+  const layout = useChatPanesStore.getState().root!;
+  await page.getByRole("button", { name: "Close pane 2" }).click();
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(1);
+
+  const closed = closedPane();
+  expect(closed).toEqual({ kind: "pane", ref: b, layout });
+  expect(controller().reopen(b, layout)).toBe(true);
+  expect(useChatPanesStore.getState().root).toEqual(layout);
+  await expect.poll(() => router.state.location.pathname).toBe("/pane-test/b");
+  await expect
+    .poll(() => document.activeElement)
+    .toBe(page.getByRole("textbox", { name: "Draft b" }).element());
+  // Back in the split: there is nothing left to reopen.
+  expect(controller().reopen(b, layout)).toBe(false);
+});
+
+it("remembers only panes that really closed", async () => {
+  await mount();
+  useChatPanesStore.getState().open(b, "right", a);
+  await expect.element(page.getByRole("button", { name: "Close pane 2" })).toBeVisible();
+  preventClose = true;
+  await page.getByRole("button", { name: "Close pane 2" }).click();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(paneLeaves(useChatPanesStore.getState().root!)).toHaveLength(2);
+  expect(closedPane()).toBeNull();
+
+  preventClose = false;
+  await page.getByRole("button", { name: "Close pane 2" }).click();
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(1);
+  expect(closedPane()).toMatchObject({ kind: "pane", ref: b });
+});
+
+it("reopens a pane beside the focused one once the split has changed", async () => {
+  const router = await mount();
+  const store = useChatPanesStore.getState();
+  store.open(b, "right", a);
+  store.open(threadC, "bottom", a);
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(3);
+  await page.getByRole("button", { name: "Close pane 2" }).click();
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(2);
+  nudgeDivider();
+  await expect.poll(() => useChatPanesStore.getState().root).toMatchObject({ ratio: 0.55 });
+
+  const closed = closedPane();
+  expect(closed?.kind === "pane" && controller().reopen(closed.ref, closed.layout)).toBe(true);
+  // The resize made since stays; the pane splits under the focused one.
+  expect(useChatPanesStore.getState().root).toEqual({
+    kind: "split",
+    axis: "horizontal",
+    ratio: 0.55,
+    first: {
+      kind: "split",
+      axis: "vertical",
+      ratio: 0.5,
+      first: { kind: "thread", ref: a },
+      second: { kind: "thread", ref: threadC },
+    },
+    second: { kind: "thread", ref: b },
+  });
+  await expect.poll(() => router.state.location.pathname).toBe("/pane-test/c");
+});
+
+it("leaves a closed pane the full split has no room for", async () => {
+  await mount();
+  const store = useChatPanesStore.getState();
+  store.open(b, "right", a);
+  store.open(threadC, "bottom", a);
+  store.open(threadD, "bottom", b);
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(4);
+  const full = useChatPanesStore.getState().root!;
+  const threadE = { ...a, threadId: ThreadId.make("e") };
+  const layout: PaneNode = {
+    kind: "split",
+    axis: "horizontal",
+    ratio: 0.5,
+    first: { kind: "thread", ref: a },
+    second: { kind: "thread", ref: threadE },
+  };
+
+  expect(controller().reopen(threadE, layout)).toBe(false);
+  expect(useChatPanesStore.getState().root).toBe(full);
+});
+
+it("reports itself busy while a pane close waits for its save", async () => {
+  await mount();
+  useChatPanesStore.getState().open(b, "right", a);
+  await expect.element(page.getByRole("button", { name: "Close pane 2" })).toBeVisible();
+  let finishSave!: (saved: boolean) => void;
+  vi.mocked(flushPreviewFiles).mockReturnValueOnce(
+    new Promise<boolean>((resolve) => {
+      finishSave = resolve;
+    }),
+  );
+  expect(controller().busy()).toBe(false);
+
+  await page.getByRole("button", { name: "Close pane 2" }).click();
+  await expect.poll(() => controller().busy()).toBe(true);
+  finishSave(true);
+  await expect.poll(() => document.querySelectorAll("[data-pane-thread]").length).toBe(1);
+  expect(controller().busy()).toBe(false);
 });

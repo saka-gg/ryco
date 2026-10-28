@@ -1584,6 +1584,7 @@ export default function ThreadWorkspacePanel(props: {
       </div>
       <div
         className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        data-slot="workspace-tabpanel"
         id={workspaceTabPanelId(activeTabKey)}
         role="tabpanel"
         aria-labelledby={activeTabKey ? workspaceTabId(activeTabKey) : undefined}

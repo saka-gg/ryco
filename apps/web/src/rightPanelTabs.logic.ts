@@ -71,6 +71,22 @@ export type RightPanelTarget =
   | { readonly kind: "render"; readonly renderKey: string }
   | { readonly kind: "launcher" };
 
+/** A target that shows a tab rather than the launcher: what a closed tab reopens to. */
+export type RightPanelTabTarget = Exclude<RightPanelTarget, { readonly kind: "launcher" }>;
+
+/** One tab in the strip, as its close button names it. */
+export interface RightPanelTabRef {
+  readonly mode: RightPanelMode;
+  readonly agentKey?: string | undefined;
+}
+
+/** The tab strip: tab modes in fallback order, agent transcripts, and the page tab. */
+export interface RightPanelVisibleTabs {
+  readonly modes: RightPanelTabMode[];
+  readonly agentKeys: ReadonlyArray<string>;
+  readonly renderKey: string | null;
+}
+
 export function isRightPanelTabMode(mode: RightPanelMode | null): mode is RightPanelTabMode {
   return mode !== null && mode !== "agent" && mode !== "render";
 }
@@ -117,11 +133,7 @@ export function resolveOpenedTabs(
 export function visibleRightPanelTabs(
   opened: RightPanelOpenedTabs,
   route: RightPanelRouteTabs,
-): {
-  readonly modes: RightPanelTabMode[];
-  readonly agentKeys: ReadonlyArray<string>;
-  readonly renderKey: string | null;
-} {
+): RightPanelVisibleTabs {
   const modes = orderTabModes([
     ...opened.modes,
     ...(isRightPanelTabMode(route.mode) ? [route.mode] : []),
@@ -180,7 +192,7 @@ function firstOpenedTab(modes: ReadonlyArray<RightPanelTabMode>): RightPanelTarg
 export function closeRightPanelTab(
   state: RightPanelOpenedTabs,
   route: RightPanelRouteTabs,
-  input: { readonly mode: RightPanelMode; readonly agentKey?: string | undefined },
+  input: RightPanelTabRef,
 ): { readonly next: RightPanelOpenedTabs; readonly target: RightPanelTarget | null } {
   const base = resolveOpenedTabs(state, route);
   const visible = visibleRightPanelTabs(base, route);
@@ -229,6 +241,50 @@ export function closeRightPanelTab(
     next: sameOpenedTabs(state, next) ? state : next,
     target: route.mode === input.mode ? (firstOpenedTab(modes) ?? { kind: "launcher" }) : null,
   };
+}
+
+/**
+ * What closing the panel's active view closes: the tab the route shows, or
+ * the panel itself while it shows only the launcher. Null while it is closed.
+ */
+export function resolveActiveRightPanelClose(input: {
+  readonly open: boolean;
+  readonly route: RightPanelRouteTabs;
+}): { readonly kind: "tab"; readonly tab: RightPanelTabRef } | { readonly kind: "panel" } | null {
+  if (!input.open) return null;
+  const { mode, activeAgentKey } = input.route;
+  if (mode === null) return { kind: "panel" };
+  return {
+    kind: "tab",
+    tab: mode === "agent" && activeAgentKey ? { mode, agentKey: activeAgentKey } : { mode },
+  };
+}
+
+/** Where a closed tab reopens; null for an agent or page tab that names nothing to show. */
+export function closedRightPanelTarget(
+  visible: RightPanelVisibleTabs,
+  tab: RightPanelTabRef,
+): RightPanelTabTarget | null {
+  if (tab.mode === "agent") return tab.agentKey ? { kind: "agent", agentKey: tab.agentKey } : null;
+  if (tab.mode === "render") {
+    return visible.renderKey ? { kind: "render", renderKey: visible.renderKey } : null;
+  }
+  return { kind: "tab", mode: tab.mode };
+}
+
+/** Whether the tab strip already shows `target`. */
+export function isRightPanelTargetVisible(
+  visible: RightPanelVisibleTabs,
+  target: RightPanelTabTarget,
+): boolean {
+  switch (target.kind) {
+    case "tab":
+      return visible.modes.includes(target.mode);
+    case "agent":
+      return visible.agentKeys.includes(target.agentKey);
+    case "render":
+      return visible.renderKey === target.renderKey;
+  }
 }
 
 /** Reopening the panel: the last tab if it is still open, else the first open tab. */

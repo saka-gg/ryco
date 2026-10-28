@@ -82,7 +82,7 @@ export const NAVIGATION_KEYBINDING_COMMANDS = [
 ] as const;
 
 // Close and reopen views and tabs.
-export const VIEW_KEYBINDING_COMMANDS = [] as const;
+export const VIEW_KEYBINDING_COMMANDS = ["view.close", "view.reopenClosed"] as const;
 
 /**
  * Every built-in command a key can be bound to. Some ship without a default
