@@ -137,6 +137,14 @@ export const NODE_CONFIG_KEYS: Readonly<Record<string, ConfigKey>> = {
     set: (value) => ({ preventSleep: parseBoolean("prevent-sleep", value) }),
     unset: (config) => without(config, "preventSleep"),
   },
+  "keep-awake-while-working": {
+    description: "Keep the machine from idle-sleeping while agents work (on AC power)",
+    read: (config) => formatBoolean(config.keepAwakeWhileWorking),
+    set: (value) => ({
+      keepAwakeWhileWorking: parseBoolean("keep-awake-while-working", value),
+    }),
+    unset: (config) => without(config, "keepAwakeWhileWorking"),
+  },
   "restrict-to-workspace": {
     description: "Limit Ryco-managed paths to the workspace folder",
     read: (config) => formatBoolean(config.restrictToWorkspace),
