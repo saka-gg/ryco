@@ -263,7 +263,12 @@ const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
+  /** Where pre-upgrade backups of this database live, named in the schema-too-new error. */
+  readonly backupsDir?: string | undefined;
 }
+
+/** The highest migration id this binary knows. */
+export const SUPPORTED_MIGRATION_ID = Math.max(...migrationEntries.map(([id]) => id));
 
 export const repairProjectionWorktreeTitleColumn = Effect.fn("repairProjectionWorktreeTitleColumn")(
   function* () {
@@ -668,6 +673,219 @@ export const repairProjectionThreadReadModelMigrations = Effect.fn(
 });
 
 /**
+ * Idempotent repairs that run after every ledger pass, in this order, each once migrations
+ * through `since` are applied. Repairs ship the schema changes the numbered ledger cannot
+ * deliver reliably (see `repairProjectionWorktreePrTerminalAtColumn`), so a new repair is an
+ * upgrade like a new migration: {@link inspectMigrationLedger} reports the ones this database
+ * has never completed, and a pre-upgrade backup is taken for them too.
+ *
+ * `key` is recorded in `ryco_compatibility_repairs` once the repair has run; never rename one
+ * (a renamed key only costs one extra backup). A repair that covers several migrations names the
+ * last in `through`: a pass bounded below it runs part of the repair and records nothing.
+ */
+const compatibilityRepairs = [
+  { key: "projection-worktree-title", since: 31, run: () => repairProjectionWorktreeTitleColumn() },
+  {
+    key: "projection-project-avatar",
+    since: 34,
+    run: () => repairProjectionProjectAvatarColumns(),
+  },
+  { key: "projection-token-mode", since: 35, run: () => repairProjectionTokenModeColumns() },
+  // 037 introduced pr_state, which the backfill reads.
+  {
+    key: "projection-worktree-pr-terminal-at",
+    since: 37,
+    run: () => repairProjectionWorktreePrTerminalAtColumn(),
+  },
+  {
+    key: "projection-thread-subagent-nesting",
+    since: 41,
+    run: () => repairProjectionThreadSubagentNestingColumns(),
+  },
+  {
+    key: "context-handoff-runtime-sessions",
+    since: 42,
+    run: () => repairContextHandoffRuntimeSessions(),
+  },
+  {
+    key: "projection-thread-read-model",
+    since: 44,
+    through: 47,
+    run: (toMigrationInclusive: number | undefined) =>
+      repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47),
+  },
+  // 072-074 are skipped by the migrator when a later number was recorded first.
+  { key: "projection-thread-lineage", since: 72, run: () => ensureProjectionThreadLineageColumns },
+  { key: "provider-effect-intents", since: 73, run: () => ensureProviderEffectIntentsTable },
+  { key: "restart-continuations", since: 74, run: () => ensureRestartContinuationTables },
+  {
+    key: "projection-thread-usage-limit",
+    since: 75,
+    run: () => repairProjectionThreadUsageLimitColumn(),
+  },
+  { key: "auth-session-rotation", since: 76, run: () => repairAuthSessionRotationColumns() },
+  {
+    key: "thread-workspace-lifecycle",
+    since: 77,
+    run: () => repairThreadWorkspaceLifecycleColumns(),
+  },
+  { key: "managed-worktree-naming", since: 78, run: () => ensureManagedWorktreeNaming },
+  // 079 is skipped by the migrator when a later number was recorded first, including development
+  // databases that recorded projectless chats' schema as 079 before it moved to 080.
+  { key: "worktree-notes", since: 79, run: () => ensureWorktreeNotesTable },
+  {
+    key: "project-kind-and-relocations",
+    since: 80,
+    run: () => repairProjectKindAndRelocations(),
+  },
+  { key: "notes-documents", since: 81, run: () => ensureNotesDocumentsTable },
+  {
+    key: "worktree-pull-request-links",
+    since: 82,
+    run: () => repairWorktreePullRequestLinksColumn(),
+  },
+  {
+    key: "projection-thread-lineage-fork",
+    since: 83,
+    run: () => repairProjectionThreadLineageForkColumns(),
+  },
+  // 084 is skipped by the migrator when a later number was recorded first.
+  { key: "thread-forks", since: 84, run: () => ensureThreadForksTable },
+  {
+    key: "projection-thread-activity-kind-index",
+    since: 85,
+    run: () => repairProjectionThreadActivityKindIndex(),
+  },
+  {
+    key: "projection-project-repository-identity",
+    since: 86,
+    run: () => repairProjectionProjectRepositoryIdentityColumns(),
+  },
+  {
+    key: "projection-thread-anchors-and-statistics",
+    since: 87,
+    run: () => repairProjectionThreadAnchorsAndStatisticsPartials(),
+  },
+  { key: "legacy-activity-payloads", since: 88, run: () => repairLegacyActivityPayloads() },
+  { key: "lifecycle-markers", since: 89, run: () => repairLifecycleMarkersTable() },
+  { key: "auth-access-links", since: 90, run: () => repairAuthAccessLinkColumns() },
+  {
+    key: "guarded-latest-completed-turn-trigger",
+    since: 91,
+    run: () => repairGuardedLatestCompletedTurnTrigger(),
+  },
+  { key: "local-task-delegations", since: 92, run: () => repairLocalTaskDelegationsTable() },
+  { key: "unused-orchestration-indexes", since: 93, run: () => repairUnusedOrchestrationIndexes() },
+] as const;
+
+/** The repairs a pass through `toMigrationInclusive` (all when undefined) runs, in order. */
+const repairsThrough = (toMigrationInclusive: number | undefined) =>
+  compatibilityRepairs.filter(
+    (repair) => toMigrationInclusive === undefined || toMigrationInclusive >= repair.since,
+  );
+
+/** `ryco_compatibility_repairs` key recording that a compatibility repair has run. */
+export const compatibilityRepairMarker = (key: string) => `schema-repair:${key}`;
+
+/** What the next {@link runMigrations} would do to this database, read without changing it. */
+export interface MigrationLedgerInspection {
+  /** The `effect_sql_migrations` ledger table exists. */
+  readonly hasLedger: boolean;
+  /** Any table besides the ledger and SQLite's own exists. */
+  readonly hasUserTables: boolean;
+  /** Highest recorded migration id, 0 when none. */
+  readonly latestApplied: number;
+  /** Highest migration id this binary knows. */
+  readonly supported: number;
+  /** Migration ids the ledger pass would apply. */
+  readonly pending: ReadonlyArray<number>;
+  /** Keys of compatibility repairs this binary runs that never completed on this database. */
+  readonly repairsPending: ReadonlyArray<string>;
+  /** An empty database: nothing to upgrade or back up. */
+  readonly fresh: boolean;
+  /** The recorded schema is newer than this binary supports; migrating is refused. */
+  readonly tooNew: boolean;
+}
+
+export const inspectMigrationLedger = Effect.fn("inspectMigrationLedger")(function* ({
+  toMigrationInclusive,
+}: Pick<RunMigrationsOptions, "toMigrationInclusive"> = {}) {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = new Set(
+    (yield* sql<{ readonly name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 7) != 'sqlite_'
+    `).map((row) => row.name),
+  );
+  const hasLedger = tables.has("effect_sql_migrations");
+  const hasUserTables = [...tables].some((name) => name !== "effect_sql_migrations");
+  const latestApplied = hasLedger
+    ? ((yield* sql<{
+        readonly id: number | null;
+      }>`SELECT max(migration_id) AS id FROM effect_sql_migrations`)[0]?.id ?? 0)
+    : 0;
+  const recordedRepairs = tables.has("ryco_compatibility_repairs")
+    ? new Set(
+        (yield* sql<{ readonly repair_key: string }>`
+          SELECT repair_key FROM ryco_compatibility_repairs
+          WHERE repair_key LIKE ${compatibilityRepairMarker("%")}
+        `).map((row) => row.repair_key),
+      )
+    : new Set<string>();
+  return {
+    hasLedger,
+    hasUserTables,
+    latestApplied,
+    supported: SUPPORTED_MIGRATION_ID,
+    pending: migrationEntries
+      .map(([id]) => id)
+      .filter(
+        (id) =>
+          id > latestApplied && (toMigrationInclusive === undefined || id <= toMigrationInclusive),
+      ),
+    repairsPending: repairsThrough(toMigrationInclusive)
+      .map((repair) => repair.key)
+      .filter((key) => !recordedRepairs.has(compatibilityRepairMarker(key))),
+    fresh: !hasUserTables && latestApplied === 0,
+    tooNew: latestApplied > SUPPORTED_MIGRATION_ID,
+  } satisfies MigrationLedgerInspection;
+});
+
+/** Records that `keys` have run, in one write, and only when one is new. */
+const recordCompatibilityRepairs = Effect.fn("recordCompatibilityRepairs")(function* (
+  keys: ReadonlyArray<string>,
+) {
+  if (keys.length === 0) return;
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS ryco_compatibility_repairs (
+      repair_key TEXT PRIMARY KEY
+    )
+  `;
+  const markers = keys.map(compatibilityRepairMarker);
+  const recorded = new Set(
+    (yield* sql<{ readonly repair_key: string }>`
+      SELECT repair_key FROM ryco_compatibility_repairs WHERE ${sql.in("repair_key", markers)}
+    `).map((row) => row.repair_key),
+  );
+  const missing = markers.filter((marker) => !recorded.has(marker));
+  if (missing.length === 0) return;
+  yield* sql`INSERT OR IGNORE INTO ryco_compatibility_repairs ${sql.insert(
+    missing.map((repair_key) => ({ repair_key })),
+  )}`;
+});
+
+/** The refusal for a database whose schema is newer than this binary supports. */
+export const describeSchemaTooNew = (input: {
+  readonly latest: number;
+  readonly supported: number;
+  readonly backupsDir?: string | undefined;
+}) =>
+  `Database schema ${input.latest} is newer than this binary supports (${input.supported}). ` +
+  `Use a Ryco build that supports schema ${input.latest}. To keep using this build, restore a ` +
+  `backup taken before the upgrade into a separate data directory` +
+  (input.backupsDir ? `; backups are in ${input.backupsDir}.` : ".");
+
+/**
  * Run all pending migrations.
  *
  * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
@@ -679,6 +897,7 @@ export const repairProjectionThreadReadModelMigrations = Effect.fn(
  */
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
+  backupsDir,
 }: RunMigrationsOptions = {}) {
   yield* Effect.log(
     toMigrationInclusive === undefined
@@ -687,22 +906,18 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   );
   // Future binaries can fail closed on downgrade. This cannot retrofit a check
   // into already shipped binaries that ignore newer migration records.
-  const sql = yield* SqlClient.SqlClient;
-  const tracking =
-    yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
-  if (tracking.length > 0) {
-    const latest = yield* sql<{
-      id: number | null;
-    }>`SELECT max(migration_id) AS id FROM effect_sql_migrations`;
-    const supported = Math.max(...migrationEntries.map(([id]) => id));
-    if (latest[0]?.id !== null && latest[0]?.id !== undefined && latest[0].id > supported) {
-      return yield* Effect.fail(
-        new Migrator.MigrationError({
-          kind: "BadState",
-          message: `Database schema ${latest[0].id} is newer than this binary supports (${supported}). Use the newer binary or restore a pre-upgrade backup into a separate data directory.`,
+  const ledger = yield* inspectMigrationLedger({ toMigrationInclusive });
+  if (ledger.tooNew) {
+    return yield* Effect.fail(
+      new Migrator.MigrationError({
+        kind: "BadState",
+        message: describeSchemaTooNew({
+          latest: ledger.latestApplied,
+          supported: ledger.supported,
+          backupsDir,
         }),
-      );
-    }
+      }),
+    );
   }
   // Named separately for the startup stall monitor: the ledger pass and the post-ledger repairs
   // (some backfill whole tables once) are the two places a slow boot stalls in here.
@@ -713,100 +928,20 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   yield* trackStartupPhase(
     "persistence.migrations.repairs",
     Effect.gen(function* () {
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 31) {
-        yield* repairProjectionWorktreeTitleColumn();
+      const repairs = repairsThrough(toMigrationInclusive);
+      for (const repair of repairs) {
+        yield* repair.run(toMigrationInclusive);
       }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 34) {
-        yield* repairProjectionProjectAvatarColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 35) {
-        yield* repairProjectionTokenModeColumns();
-      }
-      // 037 introduced pr_state, which the backfill reads.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 37) {
-        yield* repairProjectionWorktreePrTerminalAtColumn();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 41) {
-        yield* repairProjectionThreadSubagentNestingColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 42) {
-        yield* repairContextHandoffRuntimeSessions();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 44) {
-        yield* repairProjectionThreadReadModelMigrations(toMigrationInclusive ?? 47);
-      }
-      // Repair: 072 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 72) {
-        yield* ensureProjectionThreadLineageColumns;
-      }
-      // Repair: 073 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 73) {
-        yield* ensureProviderEffectIntentsTable;
-      }
-      // Repair: 074 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 74) {
-        yield* ensureRestartContinuationTables;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 75) {
-        yield* repairProjectionThreadUsageLimitColumn();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 76) {
-        yield* repairAuthSessionRotationColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 77) {
-        yield* repairThreadWorkspaceLifecycleColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 78) {
-        yield* ensureManagedWorktreeNaming;
-      }
-      // Repair: 079 is skipped by the migrator when a later number was recorded first, including
-      // development databases that recorded projectless chats' schema as 079 before it moved to 080.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 79) {
-        yield* ensureWorktreeNotesTable;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 80) {
-        yield* repairProjectKindAndRelocations();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 81) {
-        yield* ensureNotesDocumentsTable;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 82) {
-        yield* repairWorktreePullRequestLinksColumn();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 83) {
-        yield* repairProjectionThreadLineageForkColumns();
-      }
-      // Repair: 084 is skipped by the migrator when a later number was recorded first.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 84) {
-        yield* ensureThreadForksTable;
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 85) {
-        yield* repairProjectionThreadActivityKindIndex();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 86) {
-        yield* repairProjectionProjectRepositoryIdentityColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 87) {
-        yield* repairProjectionThreadAnchorsAndStatisticsPartials();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 88) {
-        yield* repairLegacyActivityPayloads();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 89) {
-        yield* repairLifecycleMarkersTable();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 90) {
-        yield* repairAuthAccessLinkColumns();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 91) {
-        yield* repairGuardedLatestCompletedTurnTrigger();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 92) {
-        yield* repairLocalTaskDelegationsTable();
-      }
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 93) {
-        yield* repairUnusedOrchestrationIndexes();
-      }
+      yield* recordCompatibilityRepairs(
+        repairs
+          .filter(
+            (repair) =>
+              toMigrationInclusive === undefined ||
+              !("through" in repair) ||
+              toMigrationInclusive >= repair.through,
+          )
+          .map((repair) => repair.key),
+      );
     }),
   );
   yield* Effect.log("Migrations ran successfully").pipe(
