@@ -10,6 +10,29 @@ a newer action on the same thread replaces its older notice. A failed original a
 its notice. A failed Undo reports the error and keeps the authoritative state. There is no
 automatic retry of a mutation whose delivery might be uncertain.
 
+A bulk Settle or Snooze shows one notice for all its threads, which counts as one of the five. It
+changes at most 100 threads, sending four commands at a time. Threads whose node is not ready, or
+reconnects before their command goes out, are skipped and reported; nothing is sent for them. The
+five seconds start once every command has finished. A notice still applying after 25 seconds closes
+without Undo, so Undo stays within the node's receipts. Undo restores every thread whose node is
+still on the same connection. A failed command, a newer action on one of the threads, or that
+thread's node reconnecting takes only that thread out of the notice. A newer action on a thread
+whose command has not gone out yet, a later bulk action's included, also means nothing is sent
+for it: the newer action stands. A node keeps its 256 newest Undo receipts, so once the notices
+cover more of one node's threads, the oldest notices give up their oldest threads and their counts
+shrink. A partly failed Undo is reported once, with how many threads it could not restore. Move to
+Active and Unsnooze have no Undo, in bulk or for one thread.
+
+In the Inbox, Cmd-click (Ctrl-click off Mac) adds or removes a row and Shift-click selects the
+displayed range, as in the project sidebar. The context or ... menu of a selected row offers
+Settle, Move to Active, Snooze, Unsnooze, Mark unread and Delete for every selected row that
+allows it, with the count in each item. Rows the list stops showing leave the selection. The
+Recent header's Settle finished button, shown on hover or focus, settles every finished thread
+there whose result you have seen, oldest first, folded delegated threads included; unseen
+results stay. Bulk Settle and Snooze, Settle finished included, use the notice above; Delete
+keeps its confirmation. The frozen web phone presentation offers neither selection nor Settle
+finished.
+
 Undo restores the prior settlement override, settlement time, snooze deadline and time, and
 sorting timestamp. Existing manual positions, local pins, and priority rankings are preserved.
 Unpin restores the local pin using the existing sorter. Archive Undo also reopens the thread

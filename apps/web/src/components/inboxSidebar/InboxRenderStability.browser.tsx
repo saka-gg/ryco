@@ -14,7 +14,9 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
+import { isMacPlatform } from "../../lib/utils";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
+import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { ConnectedInboxSidebar } from "./ConnectedInboxSidebar";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 import type { InboxSidebarEnvironment } from "./inboxSidebarModel";
@@ -148,6 +150,7 @@ describe("Inbox row render stability", () => {
   afterEach(() => {
     rowRenders.count = 0;
     modelBuilds.count = 0;
+    useThreadSelectionStore.getState().clearSelection();
     document.body.innerHTML = "";
   });
 
@@ -228,6 +231,42 @@ describe("Inbox row render stability", () => {
       await mounted.unmount();
     }
   });
+
+  it("renders only the row a selection click toggles", async () => {
+    await page.viewport(1280, 900);
+    const inbox = mountInbox(baseProps());
+    const mounted = await inbox.mount();
+    try {
+      await waitForQuietRows();
+      const toggle = (environmentIndex: number, index: number) => {
+        const row = document.querySelector<HTMLElement>(
+          `[data-inbox-row-key="${rowKey(environmentIndex, index)}"] [data-testid="inbox-thread-row"]`,
+        )!;
+        const rendersBefore = rowRenders.count;
+        act(() => {
+          row.dispatchEvent(
+            new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              ...(isMacPlatform(navigator.platform) ? { metaKey: true } : { ctrlKey: true }),
+            }),
+          );
+        });
+        return { row, renders: rowRenders.count - rendersBefore };
+      };
+
+      const first = toggle(1, 5);
+      expect(first.row.hasAttribute("data-selected")).toBe(true);
+      expect(first.renders).toBe(1);
+      expect(toggle(0, 40).renders).toBe(1);
+      const again = toggle(1, 5);
+      expect(again.row.hasAttribute("data-selected")).toBe(false);
+      expect(again.renders).toBe(1);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
   it("keeps the menu actions of the connected inbox stable while the open thread moves", async () => {
     await page.viewport(1280, 900);
     const initial = baseProps();
