@@ -6,7 +6,7 @@ import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
 import { BootstrapCredentialService } from "../Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
-import { layerConfig as SqlitePersistenceLayerLive } from "../../persistence/Layers/Sqlite.ts";
+import { layerConfigCli as SqlitePersistenceCliLayerLive } from "../../persistence/Layers/Sqlite.ts";
 import {
   AuthControlPlane,
   AuthControlPlaneError,
@@ -167,7 +167,7 @@ export const AuthCoreLive = Layer.mergeAll(
   SessionCredentialServiceLive,
 );
 
-export const AuthStorageLive = Layer.mergeAll(ServerSecretStoreLive, SqlitePersistenceLayerLive);
+export const AuthStorageLive = Layer.mergeAll(ServerSecretStoreLive, SqlitePersistenceCliLayerLive);
 
 export const AuthRuntimeLive = AuthCoreLive.pipe(Layer.provideMerge(AuthStorageLive));
 
