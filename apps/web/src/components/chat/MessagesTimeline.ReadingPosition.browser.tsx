@@ -350,15 +350,21 @@ function reloadFromSavedAnchors() {
   threadReadingPositions.restore(saved);
 }
 
+/**
+ * A wheel gesture up, repeated until the timeline hears it: a list laid out at remembered
+ * heights is ready before the timeline attaches its input listeners (one frame after mount).
+ */
+async function wheelUpUntilFollowStops(node: HTMLElement) {
+  await vi.waitFor(() => {
+    node.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
+    expect(harnessAttribute("data-live-follow")).toBe("false");
+  });
+}
+
 /** Scrolls up the way a reader does: a wheel gesture leaves live follow, then the list moves. */
 async function readAt(listRef: React.RefObject<LegendListRef | null>, scrollTop: number) {
   const node = scroller(listRef);
-  node.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
-  await vi.waitFor(() =>
-    expect(
-      document.querySelector('[data-testid="harness"]')?.getAttribute("data-live-follow"),
-    ).toBe("false"),
-  );
+  await wheelUpUntilFollowStops(node);
   await vi.waitFor(async () => {
     node.scrollTop = scrollTop;
     await nextFrame();
@@ -381,8 +387,7 @@ async function readAt(listRef: React.RefObject<LegendListRef | null>, scrollTop:
  */
 async function readAtRow(listRef: React.RefObject<LegendListRef | null>, rowId: string) {
   const node = scroller(listRef);
-  node.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
-  await vi.waitFor(() => expect(harnessAttribute("data-live-follow")).toBe("false"));
+  await wheelUpUntilFollowStops(node);
   await vi.waitFor(
     async () => {
       const state = listRef.current!.getState();
@@ -675,6 +680,10 @@ describe("MessagesTimeline reading position", () => {
     const back = await mountNow(THREAD_A, entries);
     expect(readingHold()).toBe("restoring");
     const node = scroller(back.listRef);
+    // The timeline listens for input from its first frame; a list laid out at remembered
+    // heights can settle a restore within two more, so the reader scrolls in that frame.
+    await nextFrame();
+    expect(readingHold()).toBe("restoring");
     // The reader scrolls toward the top before the row has settled.
     node.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
     node.scrollTop = 0;
