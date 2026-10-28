@@ -116,6 +116,20 @@ describe("keybindingCategories", () => {
     expect(getCommandMeta("pane.focusPrevious").category).toBe(KEYBINDING_CATEGORIES.pane);
   });
 
+  it("maps close and reopen to the Tabs and panes category, before Split view", () => {
+    expect(getCommandMeta("view.close")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.view,
+      title: "Close tab or pane",
+    });
+    expect(getCommandMeta("view.reopenClosed")).toMatchObject({
+      category: KEYBINDING_CATEGORIES.view,
+      title: "Reopen closed tab or pane",
+    });
+    expect(KEYBINDING_CATEGORIES.view.sortWeight).toBeLessThan(
+      KEYBINDING_CATEGORIES.pane.sortWeight,
+    );
+  });
+
   it("maps model-picker commands to the Model picker category", () => {
     expect(getCommandMeta("modelPicker.toggle").category).toBe(KEYBINDING_CATEGORIES.modelPicker);
     expect(getCommandMeta("modelPicker.jump.5").category).toBe(KEYBINDING_CATEGORIES.modelPicker);

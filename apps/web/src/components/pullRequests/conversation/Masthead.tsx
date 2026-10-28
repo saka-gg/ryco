@@ -161,11 +161,13 @@ function TitleEditor(props: {
     input.select();
   }, []);
 
+  // Titles are one line; pasted newlines collapse to spaces.
+  const next = value.replace(/\s+/gu, " ").trim();
+  const changed = next.length > 0 && next !== props.initialValue.trim();
+
   const commit = async () => {
     if (pending || settledRef.current) return;
-    // Titles are one line; pasted newlines collapse to spaces.
-    const next = value.replace(/\s+/gu, " ").trim();
-    if (next.length === 0 || next === props.initialValue.trim()) {
+    if (!changed) {
       settledRef.current = true;
       props.onCancel();
       return;
@@ -182,7 +184,8 @@ function TitleEditor(props: {
   };
 
   return (
-    <div className="min-w-0">
+    // A rename not saved yet keeps the workspace tab from closing by keyboard.
+    <div className="min-w-0" data-unsent-draft={changed ? "" : undefined}>
       <textarea
         ref={inputRef}
         aria-label="Pull request title"

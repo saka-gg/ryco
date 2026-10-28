@@ -835,6 +835,26 @@ describe("resolveShortcutCommand", () => {
     );
   });
 
+  it("resolves the default close and reopen view shortcuts outside the terminal", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, terminalFocus = false) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus },
+      });
+    assert.strictEqual(resolve({ key: "w", metaKey: true }), "view.close");
+    // The focused terminal keeps mod+w for closing itself.
+    assert.strictEqual(resolve({ key: "w", metaKey: true }, true), "terminal.close");
+    assert.strictEqual(
+      resolve({ key: "T", code: "KeyT", metaKey: true, shiftKey: true }),
+      "view.reopenClosed",
+    );
+    assert.isNull(resolve({ key: "T", code: "KeyT", metaKey: true, shiftKey: true }, true));
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "view.reopenClosed", "MacIntel"),
+      "⇧⌘T",
+    );
+  });
+
   it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
     // The default is client-only: a node sends every default to clients that may predate the command.
     assert.isFalse(

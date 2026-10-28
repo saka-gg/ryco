@@ -29,6 +29,15 @@ existing store. Missing server data is **not** treated as proof of deletion:
 closed/unavailable threads stay represented until explicitly closed. Local and
 detached drafts remain available even when absent from a server snapshot.
 
+`view.close` (Cmd/Ctrl+W) closes the focused pane once the workspace panel has
+no tab or launcher left to close, through the same barriers as the close
+button. `view.reopenClosed` (Cmd/Ctrl+Shift+T) brings a closed pane back and
+focuses its composer: in its old place while the split is unchanged since the
+close, otherwise beside the focused pane. When the split has no room for it
+(four panes, another environment, a draft route), its thread opens on its own.
+Closed panes are remembered in memory only, as a thread reference and the
+layout they left; a reload forgets them.
+
 The versioned layout stores only scoped thread references, split axes and
 ratios. It rejects duplicate references, cross-environment trees, excessive
 nesting, oversized documents and unknown versions. Storage failure does not
