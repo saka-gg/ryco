@@ -24,6 +24,7 @@ import {
   type AgentControlProposal,
   type AgentControlResultEnvelope,
   type ClientOrchestrationCommand,
+  type OrchestrationThreadShell,
   type ThreadDelegatedCreateCommand,
   type ThreadTurnStartCommand,
 } from "@ryco/contracts";
@@ -34,6 +35,7 @@ import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitW
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import { isThreadSessionWakeEvent } from "../../orchestration/threadWaitWakeEvents.ts";
 import {
   ProjectionSnapshotQuery,
   readProjectShells,
@@ -46,6 +48,7 @@ import {
   type WorkspaceAccessPolicyShape,
 } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { ignoreAlreadyMissingGitResource } from "../../ws/context/gitErrors.ts";
+import { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { legacyTokenStreamingEnabled } from "../settingsControl.ts";
 import { copyArtifactsToThread, resolveThreadArtifacts } from "../artifactHandoff.ts";
@@ -71,7 +74,8 @@ import { AgentControlProposalEvents } from "../Services/AgentControlProposalEven
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
 
 const TARGET_WAIT_TIMEOUT_MS = 60_000;
-const TARGET_POLL_INTERVAL_MS = 100;
+/** Minimum spacing of woken target checks: the interval of the poll the waits replaced. */
+const TARGET_WAKE_SPACING_MS = 100;
 const RECOVERY_SCAN_LIMIT = 100;
 
 export interface AgentControlExecutionLiveOptions {
@@ -280,23 +284,40 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         ),
       );
 
-    const waitForIdle = (threadId: ThreadId) =>
-      Effect.gen(function* () {
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < TARGET_WAIT_TIMEOUT_MS) {
+    /**
+     * Waits until `settled` accepts the target thread, re-reading it whenever its session or
+     * archive state changes (or it is deleted), and at least every 5 s otherwise.
+     */
+    const waitForThread = (
+      threadId: ThreadId,
+      settled: (thread: OrchestrationThreadShell) => Effect.Effect<boolean, Error>,
+      timeoutMessage: string,
+    ) =>
+      waitUntil({
+        sources: [threadWakeSource(engine, [threadId], isThreadSessionWakeEvent)],
+        timeoutMs: TARGET_WAIT_TIMEOUT_MS,
+        wakeSpacingMs: TARGET_WAKE_SPACING_MS,
+        check: Effect.gen(function* () {
           const thread = yield* loadThread(threadId);
-          if (thread.archivedAt !== null) {
-            return yield* Effect.fail(new Error("Target thread became archived."));
-          }
-          if (thread.session?.status !== "running" || thread.session.activeTurnId === null) {
-            return thread;
-          }
-          yield* Effect.sleep(Duration.millis(TARGET_POLL_INTERVAL_MS));
-        }
-        return yield* Effect.fail(
-          new Error("Timed out waiting for the target thread to become idle."),
-        );
-      });
+          return { done: yield* settled(thread), value: thread };
+        }),
+      }).pipe(
+        Effect.flatMap(({ value, timedOut }) =>
+          timedOut ? Effect.fail(new Error(timeoutMessage)) : Effect.succeed(value),
+        ),
+      );
+
+    const waitForIdle = (threadId: ThreadId) =>
+      waitForThread(
+        threadId,
+        (thread) =>
+          thread.archivedAt !== null
+            ? Effect.fail(new Error("Target thread became archived."))
+            : Effect.succeed(
+                thread.session?.status !== "running" || thread.session.activeTurnId === null,
+              ),
+        "Timed out waiting for the target thread to become idle.",
+      );
 
     const settleProposalFailure = (
       proposal: AgentControlProposal,
@@ -1420,18 +1441,15 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             ...(requestedTurnId === null ? {} : { turnId: requestedTurnId }),
             createdAt: new Date().toISOString(),
           });
-          const settled = yield* Effect.gen(function* () {
-            const startedAt = Date.now();
-            while (Date.now() - startedAt < TARGET_WAIT_TIMEOUT_MS) {
-              const current = yield* loadThread(plan.threadId);
-              const activeTurnId = current.session?.activeTurnId ?? null;
-              if (current.session?.status !== "running" || activeTurnId !== requestedTurnId) {
-                return current;
-              }
-              yield* Effect.sleep(Duration.millis(TARGET_POLL_INTERVAL_MS));
-            }
-            return yield* Effect.fail(new Error("Timed out waiting for interrupt settlement."));
-          });
+          const settled = yield* waitForThread(
+            plan.threadId,
+            (current) =>
+              Effect.succeed(
+                current.session?.status !== "running" ||
+                  (current.session.activeTurnId ?? null) !== requestedTurnId,
+              ),
+            "Timed out waiting for interrupt settlement.",
+          );
           yield* checkpoint({
             ...operation.state,
             interrupt: {

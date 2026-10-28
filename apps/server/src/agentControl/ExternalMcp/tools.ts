@@ -66,6 +66,7 @@ import { projectKindOf } from "@ryco/shared/projectKind";
 import { Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
+import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   type ProjectionSnapshotQueryShape,
   readProjectShells,
@@ -79,6 +80,7 @@ import {
   updateThreadPlan,
 } from "../Mcp/controlPlans.ts";
 import { INSPECTION_TOOL_DESCRIPTORS } from "../Mcp/inspectionTools.ts";
+import { wakeOnSubscription } from "../eventDrivenWait.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import {
   agentControlPromptSummaryForPlan,
@@ -508,6 +510,8 @@ export const makeExternalMcpTools = (deps: {
   readonly integrations: AgentControlExternalIntegrationServiceShape;
   readonly tasks: AgentControlExternalTaskServiceShape;
   readonly projections: ProjectionSnapshotQueryShape;
+  /** Wakes `ryco_wait_threads` when a waited thread settles. */
+  readonly domainEvents: Pick<OrchestrationEngineShape, "subscribeDomainEvents">;
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
   readonly validator?: AgentControlActionValidatorShape;
   readonly proposals?: Pick<AgentControlProposalServiceShape, "submit"> &
@@ -650,8 +654,9 @@ export const makeExternalMcpTools = (deps: {
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.waitThreads: {
           const input = yield* decode(AgentControlWaitThreadsInput, args);
-          // Re-check the integration on every poll: revocation, expiry, a
-          // disabled policy, or a narrowed scope ends visibility immediately.
+          // Re-check the integration before every check. Revocation, rotation and a
+          // narrowed scope publish an integration change, which wakes the wait at
+          // once; expiry and a disabled policy end it at the next 5 s re-check.
           const access = Effect.suspend(() => deps.integrations.revalidate(integrationId)).pipe(
             Effect.flatMap((current) =>
               current.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalReadThreads)
@@ -659,7 +664,17 @@ export const makeExternalMcpTools = (deps: {
                 : failTool("Thread access was revoked."),
             ),
           );
-          return sanitizeInspection(yield* waitThreads(deps.projections, input, access));
+          return sanitizeInspection(
+            yield* waitThreads(deps.projections, input, access, {
+              domainEvents: deps.domainEvents,
+              extra: [
+                wakeOnSubscription(
+                  deps.integrations.subscribeChanges,
+                  (changed) => changed === integrationId,
+                ),
+              ],
+            }),
+          );
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.inspectThread: {
           const input = yield* decode(AgentControlInspectThreadInput, args);

@@ -53,6 +53,7 @@ import {
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import { Clock, Deferred, Effect, Layer, Option, Schema, type Scope, Struct } from "effect";
 import { backgroundWorkCheckpoint } from "@ryco/shared/backgroundWork";
+import { PENDING_REQUEST_ACTIVITY_KINDS } from "@ryco/shared/threadActivity";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
@@ -382,16 +383,6 @@ const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   workspaceRoot: Schema.String,
   worktreePath: Schema.NullOr(Schema.String),
 });
-
-/** The lifecycle kinds `derivePendingThreadRequests` reads (a subset of COMMAND_READ_MODEL_ACTIVITY_KINDS). */
-const PENDING_REQUEST_ACTIVITY_KINDS = [
-  "approval.requested",
-  "approval.resolved",
-  "provider.approval.respond.failed",
-  "user-input.requested",
-  "user-input.resolved",
-  "provider.user-input.respond.failed",
-] as const;
 
 const ThreadHistoryActivityKeyDbRowSchema = Schema.Struct({
   activityId: Schema.String,
@@ -2241,6 +2232,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     `,
   });
 
+  // The kinds `derivePendingThreadRequests` reads (a subset of COMMAND_READ_MODEL_ACTIVITY_KINDS).
   const listThreadPendingRequestActivityRows = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,

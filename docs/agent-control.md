@@ -26,7 +26,10 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   turn, rename/archive/restore, select models and options, set runtime/interaction/token modes,
   and set or clear a persistent goal.
 - `ryco_read_thread`, `ryco_search_threads`, `ryco_wait_threads`: paginated messages, content search,
-  and bounded waiting for completion or user attention. Background agents count as active work.
+  and bounded waiting for completion or user attention. Background agents count as active work. A
+  wait returns as soon as a waited thread settles or asks for attention: it wakes on the thread's
+  session, turn, pending-request and background-work events instead of polling, and re-checks at
+  least every 5 seconds.
 - `ryco_inspect_thread`: model/goal/status details, native subagents and their messages, activities,
   plans, review checkpoints, and retained terminal output. History cursors expose older pages;
   partial subagent coverage is reported explicitly.
@@ -186,7 +189,10 @@ configuration, logs, and child-process environment never receive the raw credent
 
 The default connection can list allowed projects, request one task at a time, and read or wait for
 tasks created by that integration. It covers current and future projects, allows 60 control calls
-per minute, and has no expiry. Every requested Ryco mutation still needs approval.
+per minute, and has no expiry. Every requested Ryco mutation still needs approval. `ryco_wait_for_task`
+returns as soon as the task's request is decided or finished. It re-checks the integration whenever
+it changes and at least every 5 seconds, so revoking the integration ends a wait in progress at
+once, and an expired integration or disabled Agent Control ends it within 5 seconds.
 
 ### Standalone read grants
 
@@ -205,8 +211,9 @@ exist.
 These tools return the same bounded, redacted results as the private-session tools, with two
 differences. Standalone inspection never returns terminal output, because that is where secrets
 most often appear. Workspace reads have no calling thread, so no workspace is reported as
-`current`. `ryco_wait_threads` re-checks the integration on every poll, so revoking a grant, narrowing
-the scope, or disabling Agent Control ends a wait in progress. Workspace files can include local
+`current`. `ryco_wait_threads` re-checks the integration whenever it changes and at least every 5
+seconds, so revoking a grant or narrowing the scope ends a wait in progress at once, and disabling
+Agent Control ends it within 5 seconds. Workspace files can include local
 configuration such as `.env`, so grant `external.files.read` only to clients you would also let
 read the checkout directly.
 
