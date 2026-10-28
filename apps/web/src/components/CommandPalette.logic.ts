@@ -24,6 +24,8 @@ export interface CommandPaletteItem {
   readonly kind: "action" | "submenu";
   readonly value: string;
   readonly searchTerms: ReadonlyArray<string>;
+  /** IDs that find the item when the query is an ID or ID fragment; such matches list last. */
+  readonly idSearchTerms?: ReadonlyArray<string>;
   readonly title: ReactNode;
   readonly description?: string;
   readonly timestamp?: string;
@@ -185,6 +187,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
         kind: "action" as const,
         value: `thread:${thread.id}`,
         searchTerms: [thread.title, projectTitle ?? ``, thread.branch ?? ``],
+        idSearchTerms: [thread.id],
         title: thread.title,
         description: descriptionParts.join(` · `),
         timestamp: formatRelativeTimeLabel(
@@ -234,6 +237,27 @@ function rankCommandPaletteItemMatch(
   }
 
   return 0;
+}
+
+const ID_FRAGMENT_MIN_LENGTH = 6;
+/** Below every search term match, including one that spans two terms (rank 0). */
+const ID_ONLY_MATCH_RANK = -1;
+
+/**
+ * Matches the whole ID, or a fragment of at least six characters that contains
+ * a digit. Thread IDs come in several shapes (UUIDs, `thread-…`, `fork-…`,
+ * `import-…`), so the digit rule, not a format, keeps words like "face",
+ * "decade" or "thread" from listing every thread.
+ */
+function createIdSearchMatcher(normalizedQuery: string): (id: string) => boolean {
+  const fragmentQuery =
+    normalizedQuery.length >= ID_FRAGMENT_MIN_LENGTH && /\d/.test(normalizedQuery);
+  return (id) => {
+    const normalizedId = id.toLowerCase();
+    return (
+      normalizedId === normalizedQuery || (fragmentQuery && normalizedId.includes(normalizedQuery))
+    );
+  };
 }
 
 export type CommandPaletteMessageSearchResult = OrchestrationThreadMessageSearchResult & {
@@ -473,12 +497,15 @@ export function filterCommandPaletteGroups(input: {
     }
   }
 
+  const matchesId = createIdSearchMatcher(normalizedQuery);
   return searchableGroups.flatMap((group) => {
     const items = group.items
       .map((item, index) => {
         const haystack = normalizeSearchText(item.searchTerms.join(" "));
         if (!haystack.includes(normalizedQuery)) {
-          return null;
+          return item.idSearchTerms?.some(matchesId)
+            ? { item, index, rank: ID_ONLY_MATCH_RANK }
+            : null;
         }
 
         return {

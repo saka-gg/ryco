@@ -797,6 +797,77 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("goes back and forward through visited pages from the keyboard", async () => {
+    const other = "history-other-thread" as ThreadId;
+    const firstPath = serverThreadPath(THREAD_ID);
+    const otherPath = serverThreadPath(other);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(selectionSnapshot(), other),
+    });
+    // Returns whether the app consumed the key.
+    const press = (key: "[" | "]", target: EventTarget = window, repeat = false) => {
+      const useMetaForMod = isMacPlatform(navigator.platform);
+      const event = new KeyboardEvent("keydown", {
+        key,
+        code: key === "[" ? "BracketLeft" : "BracketRight",
+        metaKey: useMetaForMod,
+        ctrlKey: !useMetaForMod,
+        repeat,
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const expectPath = async (path: string) => {
+      await waitForLayout();
+      expect(mounted.router.state.location.pathname).toBe(path);
+    };
+
+    try {
+      await waitForComposerEditor();
+      // Nothing is behind the first page, and the key never reaches the
+      // browser's own Back.
+      expect(press("[")).toBe(true);
+      await expectPath(firstPath);
+
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: other },
+      });
+      await waitForURL(mounted.router, (path) => path === otherPath, "The thread should open.");
+
+      expect(press("[", window, true)).toBe(true);
+      await expectPath(otherPath);
+
+      const field = document.createElement("textarea");
+      document.body.append(field);
+      try {
+        field.focus();
+        expect(press("[", field)).toBe(false);
+      } finally {
+        field.remove();
+      }
+      await expectPath(otherPath);
+
+      useCommandPaletteStore.getState().setOpen(true);
+      expect(press("[")).toBe(false);
+      useCommandPaletteStore.getState().setOpen(false);
+      await expectPath(otherPath);
+
+      const composer = await waitForComposerEditor();
+      composer.focus();
+      expect(press("[", composer)).toBe(true);
+      await waitForURL(mounted.router, (path) => path === firstPath, "Back should return.");
+
+      expect(press("]")).toBe(true);
+      await waitForURL(mounted.router, (path) => path === otherPath, "Forward should return.");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("turns is: picks in the sidebar field into status tokens that Backspace removes", async () => {
     useUiStateStore.setState({ sidebarMode: "inbox" });
     const mounted = await mountChatView({
@@ -832,6 +903,37 @@ describe("ChatView Navigation (full app)", () => {
       expect(menu?.dataset.open).toBe("true");
       await userEvent.keyboard("{Tab}");
       await vi.waitFor(() => expect(menu?.dataset.open).toBe("false"));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows a row menu's project filter as a token before the status token", async () => {
+    useUiStateStore.setState({ sidebarMode: "inbox" });
+    useInboxFilterStore.setState({
+      project: { logicalKey: "github.com/example/ryco", label: "Ryco" },
+      status: "active",
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-omnifield-project" as MessageId,
+        targetText: "omnifield project",
+      }),
+    });
+
+    try {
+      const token = page.getByRole("button", { name: "Remove project filter Ryco" });
+      await expect.element(token).toBeInTheDocument();
+      expect(
+        [...document.querySelectorAll<HTMLElement>(".sidebar-omnifield-token")].map(
+          (element) => element.dataset.kind,
+        ),
+      ).toEqual(["project", "status"]);
+
+      await token.click();
+      await vi.waitFor(() => expect(useInboxFilterStore.getState().project).toBeNull());
+      expect(useInboxFilterStore.getState().status).toBe("active");
     } finally {
       await mounted.cleanup();
     }

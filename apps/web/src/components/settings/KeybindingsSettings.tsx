@@ -24,6 +24,7 @@ import { cn, isMacPlatform } from "../../lib/utils";
 import {
   KEYBINDING_CATEGORIES,
   getCommandMeta,
+  keybindingRowId,
   type KeybindingCategory,
 } from "../../lib/keybindingCategories";
 import {
@@ -60,6 +61,7 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
+  flashSettingsTarget,
   SettingsEmpty,
   SettingsNotice,
   SettingsPageContainer,
@@ -397,10 +399,7 @@ export function KeybindingsSettingsPanel() {
     const node = rowRefs.current.get(command);
     if (!node) return;
     node.scrollIntoView({ behavior: "smooth", block: "center" });
-    node.dataset.flash = "true";
-    window.setTimeout(() => {
-      delete node.dataset.flash;
-    }, 1100);
+    flashSettingsTarget(node);
   }, []);
 
   const [searchInput, setSearchInput] = useState("");
@@ -734,6 +733,7 @@ const CommandRow = memo(function CommandRow({
 
   return (
     <div
+      id={keybindingRowId(row.command)}
       data-keybinding-command={row.command}
       ref={(node) => {
         context.rowRefs.current.set(row.command, node);

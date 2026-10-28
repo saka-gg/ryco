@@ -164,7 +164,25 @@ Their defaults live in the app, not on the node, so older apps have no keys for 
 
 <!-- Attention commands -->
 
-<!-- History and navigation commands -->
+#### History and navigation
+
+- `navigation.back` / `navigation.forward`: go back or forward through the pages you opened in this
+  window (`mod+[` / `mod+]` outside the terminal). Back stops at the first page you opened, so it
+  never leaves Ryco. Forward goes where the browser's own Forward would: in a browser tab, that can
+  be a site you left Ryco for in the same tab. They also work while you type in the composer; other
+  text fields keep the keys. In the desktop app, a mouse's back and forward buttons and a trackpad
+  swipe between pages do the same. Over the browser panel, a mouse button moves its page instead,
+  and so does a swipe while the panel has focus.
+- `thread.interrupt`: stop the running turn in the focused chat, like the stop button (`mod+.`
+  outside the terminal).
+- `thread.copyReference`: copy the thread's pull request link, or its thread ID when it has none
+  (`mod+shift+c` outside the terminal). Browsers on Windows and Linux may keep Ctrl+Shift+C for
+  their developer tools.
+
+Stop and copy also work while you type. With nothing to stop or copy (no running turn, or a draft),
+they leave the key alone.
+
+These defaults live in the app, not on the node, so older apps have no keys for them.
 
 <!-- View and tab commands -->
 

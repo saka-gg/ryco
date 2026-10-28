@@ -212,6 +212,72 @@ describe("buildThreadActionItems", () => {
   });
 });
 
+describe("thread ID search", () => {
+  const UUID_THREAD_ID = "3f2a9b1c-7d4e-4a0b-9c3d-5e6f7a8b9c0d";
+  const ID_SHAPED_THREADS = [
+    makeThread({ id: ThreadId.make(UUID_THREAD_ID), title: "Fix navbar spacing" }),
+    makeThread({
+      id: ThreadId.make("thread-agent-control-op-7c1d2e3f-1"),
+      title: "Port batch review",
+    }),
+    makeThread({ id: ThreadId.make("fork-0a1b2c3d4e5f60718293a4b5c6d7e8f9"), title: "Forked run" }),
+    makeThread({
+      id: ThreadId.make("thread-9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b"),
+      title: "Worktree cleanup",
+    }),
+    makeThread({ id: ThreadId.make("import-claude-session-42"), title: "Session recap" }),
+  ];
+
+  function searchThreads(query: string, threads: ReadonlyArray<Thread> = ID_SHAPED_THREADS) {
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query,
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: buildThreadActionItems({
+        threads,
+        projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+        sortOrder: "updated_at",
+        icon: null,
+        runThread: async (_thread) => undefined,
+      }),
+    });
+    return groups.flatMap((group) => group.items.map((item) => item.value));
+  }
+
+  it("finds a thread by its full ID or an ID prefix", () => {
+    expect(searchThreads(UUID_THREAD_ID)).toEqual([`thread:${UUID_THREAD_ID}`]);
+    expect(searchThreads("  3F2A9B1C ")).toEqual([`thread:${UUID_THREAD_ID}`]);
+  });
+
+  it("finds threads whose IDs are not UUIDs", () => {
+    for (const thread of ID_SHAPED_THREADS) {
+      expect(searchThreads(thread.id)).toEqual([`thread:${thread.id}`]);
+    }
+    expect(searchThreads("op-7c1d2e3f")).toEqual(["thread:thread-agent-control-op-7c1d2e3f-1"]);
+    expect(searchThreads("session-42")).toEqual(["thread:import-claude-session-42"]);
+  });
+
+  it("lists a title match before an ID match", () => {
+    const titleMatch = makeThread({
+      id: ThreadId.make("thread-title-match"),
+      title: "Investigate 3f2a9b1c regression",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+    });
+
+    expect(searchThreads("3f2a9b1c", [...ID_SHAPED_THREADS, titleMatch])).toEqual([
+      "thread:thread-title-match",
+      `thread:${UUID_THREAD_ID}`,
+    ]);
+  });
+
+  it("does not match words or short fragments by ID", () => {
+    for (const query of ["add", "face", "decade", "thread", "import", "ab12", "3f2a9"]) {
+      expect(searchThreads(query), query).toEqual([]);
+    }
+  });
+});
+
 describe("buildMessageSearchItems", () => {
   it("adds message search results to the Messages group with thread context", async () => {
     const result = {

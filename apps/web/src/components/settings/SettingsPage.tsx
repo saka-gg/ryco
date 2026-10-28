@@ -68,10 +68,12 @@ import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ArchivedThreadsPanel, GeneralSettingsPanel, useSettingsRestore } from "./SettingsPanels";
+import { KEYBINDING_SEARCH_ENTRIES } from "./keybindingSearchEntries";
 import {
   filterSettingsSearchEntries,
   readSettingsSearchScope,
   SETTINGS_LINK_SECTIONS,
+  SETTINGS_SEARCH_INDEX,
   SETTINGS_SECTION_TITLES,
   settingsSectionListed,
   type SettingsDestination,
@@ -614,6 +616,9 @@ function CompactSectionPicker({
   );
 }
 
+// Shortcuts list after the settings themselves, so a word like "new" shows settings first.
+const SEARCH_ENTRIES = [...SETTINGS_SEARCH_INDEX, ...KEYBINDING_SEARCH_ENTRIES];
+
 function SearchResults({
   query,
   results,
@@ -788,7 +793,7 @@ export function SettingsPage() {
   }, [revealRequest]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const normalizedQuery = searchQuery.trim().toLowerCase();
-  const searchResults = filterSettingsSearchEntries(searchQuery, searchScope);
+  const searchResults = filterSettingsSearchEntries(searchQuery, searchScope, SEARCH_ENTRIES);
 
   const [restoreSignal, setRestoreSignal] = useState(0);
   const handleRestored = useCallback(() => setRestoreSignal((value) => value + 1), []);
