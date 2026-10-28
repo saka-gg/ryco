@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-const COLUMNS = [
+export const COLUMNS = [
   // The last resolved `RepositoryIdentity` as JSON; NULL when the root is not a repository
   // (or was never resolved, see `repository_identity_checked_at`).
   "repository_identity_json",

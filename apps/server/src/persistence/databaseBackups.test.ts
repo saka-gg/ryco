@@ -34,6 +34,7 @@ import {
   type OpenSqlite,
   type PremigrationBackupMode,
 } from "./databaseBackups.ts";
+import { acquireDatabaseServer, DatabaseOwnerLease } from "./databaseOwnerLock.ts";
 import { makeRuntimeSqliteLayer, makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
 import {
   compatibilityRepairMarker,
@@ -78,8 +79,17 @@ const buildDatabase = (dbPath: string, through: number | undefined) =>
     yield* sql`INSERT INTO backup_marker (note) VALUES ('before-upgrade')`;
   }).pipe(Effect.provide(Layer.provideMerge(NodeSqliteClient.layer({ filename: dbPath }), quiet)));
 
+/**
+ * A server's persistence layer: it owns the database (databaseOwnerLock.ts), so it migrates,
+ * backs up and finalizes. A CLI's backups are covered in migrationOwnershipPolicy.test.ts.
+ */
 const livePersistence = (dbPath: string) =>
-  makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer));
+  makeSqlitePersistenceLive(dbPath).pipe(
+    Layer.provide(
+      Layer.effect(DatabaseOwnerLease, acquireDatabaseServer(dbPath, { launcher: "serve" })),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
 
 /** Builds the server's persistence layer once, as a server start does. */
 const startServer = (dbPath: string) =>
