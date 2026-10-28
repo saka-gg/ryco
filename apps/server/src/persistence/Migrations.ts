@@ -968,6 +968,10 @@ export const isUpgradePending = (
   ledger: Pick<MigrationLedgerInspection, "pending" | "repairsPending">,
 ): boolean => ledger.pending.length > 0 || ledger.repairsPending.length > 0;
 
+/** At most three repair keys, then how many more. */
+export const describeRepairKeys = (keys: ReadonlyArray<string>): string =>
+  keys.length <= 3 ? keys.join(", ") : `${keys.slice(0, 3).join(", ")} and ${keys.length - 3} more`;
+
 /**
  * Future binaries can fail closed on downgrade. This cannot retrofit a check into already
  * shipped binaries that ignore newer migration records. `backupsDir` is named in the message.

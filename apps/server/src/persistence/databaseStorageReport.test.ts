@@ -10,7 +10,8 @@ import { DatabaseStorageReport } from "@ryco/contracts";
 import { ServerConfig } from "../config.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";
 import { estimateCompactableBytes, readDatabaseStorageReport } from "./databaseStorageReport.ts";
-import { EVENT_COMPACTION_STATE_KEY, EventLogCompactionLive } from "./Layers/EventLogCompaction.ts";
+import { EventLogCompactionLive } from "./Layers/EventLogCompaction.ts";
+import { EVENT_COMPACTION_STATE_KEY } from "./Layers/EventLogCompactionDeferred.ts";
 import { layerConfig as SqlitePersistenceLayerConfig } from "./Layers/Sqlite.ts";
 import { writeLifecycleMarker } from "./lifecycleMarkers.ts";
 import { CompactionState, EMPTY_COMPACTION_STATE } from "./Services/EventLogCompaction.ts";
@@ -122,6 +123,40 @@ it.layer(TestLayer)("databaseStorageReport", (it) => {
     }),
   );
 
+  it.effect("never suggests the doctor for a database that shrinks by itself, and names it", () =>
+    Effect.gen(function* () {
+      const { baseDir } = yield* ServerConfig;
+      const head = yield* appendEvents("thread-report-doctor", 30);
+      // Far more than 1 GiB still to remove, by the estimate.
+      yield* writeLifecycleMarker(
+        EVENT_COMPACTION_STATE_KEY,
+        encodeState({
+          ...EMPTY_COMPACTION_STATE,
+          compactedThroughSequence: 1,
+          totals: {
+            scannedSequences: 1,
+            deletedEvents: 1,
+            deletedBytes: 2 ** 31,
+            deletedReceipts: 0,
+          },
+        }),
+      );
+      const report = yield* readDatabaseStorageReport({
+        compactionSetting: "on",
+        version: "9.9.9",
+        defaultBaseDir: baseDir,
+      });
+      assert.isAbove(report.reclaimableBytes, 2 ** 31 * (head - 2));
+      assert.equal(report.autoVacuum, "incremental");
+      assert.deepEqual(report.doctor, { recommended: false, command: "ryco doctor --apply" });
+      const elsewhere = yield* readDatabaseStorageReport({
+        compactionSetting: "on",
+        defaultBaseDir: "/nowhere/.ryco",
+      });
+      assert.equal(elsewhere.doctor?.command, `ryco doctor --apply --base-dir ${baseDir}`);
+    }),
+  );
+
   it.effect("counts free pages left by deleted rows", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -190,6 +225,8 @@ it.effect("reads a missing WAL as empty and degrades parts it cannot read", () =
     assert.equal(report.compaction.headSequence, 0);
     assert.isNull(report.compaction.estimatedCompactableBytes);
     assert.isNull(report.compaction.lastPassCompletedAt);
+    // Pre-shrinking, but nothing worth an offline run.
+    assert.equal(report.doctor?.recommended, false);
   }).pipe(
     Effect.provide(
       EventLogCompactionLive.pipe(

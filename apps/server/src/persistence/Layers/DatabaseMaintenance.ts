@@ -38,10 +38,10 @@ import {
   type EventLogCompactionPassOptions,
 } from "../Services/EventLogCompaction.ts";
 import {
-  EventLogCompactionLive,
+  EventLogCompactionDeferredLive,
   hasCompactionBacklog,
   ONLINE_COMPACTION_PASS_OPTIONS,
-} from "./EventLogCompaction.ts";
+} from "./EventLogCompactionDeferred.ts";
 
 export type EventCompactionSetting = "on" | "off" | "dry-run";
 
@@ -352,4 +352,4 @@ export const DatabaseMaintenanceLive = Layer.effectDiscard(
       ]),
     ),
   ),
-).pipe(Layer.provide(EventLogCompactionLive));
+).pipe(Layer.provide(EventLogCompactionDeferredLive));

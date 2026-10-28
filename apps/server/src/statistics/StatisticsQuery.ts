@@ -42,7 +42,7 @@ import {
   toPersistenceSqlError,
   type ProjectionRepositoryError,
 } from "../persistence/Errors.ts";
-import { ORCHESTRATION_PROJECTOR_NAMES } from "../orchestration/Layers/ProjectionPipeline.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../orchestration/projectorNames.ts";
 import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import {
   assembleStatisticsSnapshot,

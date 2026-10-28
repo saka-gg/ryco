@@ -203,10 +203,13 @@ export const expandHomePath = Effect.fn(function* (input: string) {
   return input;
 });
 
+/** The data directory when neither `--base-dir` nor `RYCO_HOME` names one: `~/.ryco`. */
+export const defaultBaseDir = (): string => NodePath.join(OS.homedir(), ".ryco");
+
 export const resolveBaseDir = Effect.fn(function* (raw: string | undefined) {
-  const { join, resolve } = yield* Path.Path;
+  const { resolve } = yield* Path.Path;
   if (!raw || raw.trim().length === 0) {
-    return join(OS.homedir(), ".ryco");
+    return defaultBaseDir();
   }
   return resolve(yield* expandHomePath(raw.trim()));
 });
