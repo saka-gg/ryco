@@ -25,10 +25,18 @@
  * Locks and permits taken *inside* the operation are released only when its
  * fiber exits, so "one adapter start per thread at a time" still holds.
  *
+ * Both the deadline and the abandon grace count only time the event loop was
+ * free to run (`timeoutWhileResponsiveOption`): a server stall or machine
+ * sleep costs at most one tick (1 s) of the budget, so a provider whose answer
+ * is already in the pipe when the loop resumes is not failed by a timer that
+ * expired during the stall. A provider that hangs while the loop is responsive
+ * still fails on time.
+ *
  * @module detachedDeadline
  */
-import { Cause, Duration, Effect, Exit, Fiber, Option } from "effect";
+import { Cause, Effect, Exit, Fiber, Option } from "effect";
 import type { Scope } from "effect";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 
 export interface DetachedDeadlineOptions<A, E, E2> {
   /** Outlives callers; the operation and its cleanup run here. */
@@ -54,7 +62,7 @@ const abandonIn = <A, E>(
   Effect.forkIn(
     (options.abandonGraceMs === undefined
       ? Effect.succeed(Option.none<Exit.Exit<A, E>>())
-      : Fiber.await(fiber).pipe(Effect.timeoutOption(Duration.millis(options.abandonGraceMs)))
+      : Fiber.await(fiber).pipe(timeoutWhileResponsiveOption(options.abandonGraceMs))
     ).pipe(
       Effect.flatMap((settled) =>
         Option.isSome(settled)
@@ -82,7 +90,7 @@ const awaitDetached = <A, E, R>(
       const fiber = yield* Effect.forkIn(effect, options.scope, { startImmediately: true });
       const abandon = abandonIn(fiber, options);
       const waited = yield* restore(
-        Fiber.await(fiber).pipe(Effect.timeoutOption(Duration.millis(options.timeoutMs))),
+        Fiber.await(fiber).pipe(timeoutWhileResponsiveOption(options.timeoutMs)),
       ).pipe(Effect.onInterrupt(() => abandon));
       if (Option.isNone(waited)) {
         yield* abandon;

@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Sink, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
+import { stallingChildSpawner } from "../testing/eventLoopStall.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
 const encoder = new TextEncoder();
@@ -60,6 +61,24 @@ describe("VcsProcess", () => {
       }).pipe(Effect.provide(layer));
     });
   }
+
+  it.live("a server stall does not time out a child that exited during it", () => {
+    // The child exits 250 ms in, while the loop is blocked for 600 ms; its exit
+    // is read only after the stall, past the 300 ms budget's plain timer.
+    const { kills, spawner } = stallingChildSpawner({ exitAfterMs: 250, stallMs: 600 });
+    return Effect.gen(function* () {
+      const output = yield* (yield* VcsProcess.VcsProcess).run({ ...input, timeoutMs: 300 });
+      assert.equal(output.exitCode, 0);
+      assert.equal(output.stdout, "out");
+      assert.equal(kills.count, 0);
+    }).pipe(
+      Effect.provide(
+        VcsProcess.layer.pipe(
+          Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        ),
+      ),
+    );
+  });
 
   it.live("kills a child that is still running when it times out", () => {
     const { kills, layer } = stubSpawner("never");

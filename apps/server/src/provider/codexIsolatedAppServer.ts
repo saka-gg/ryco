@@ -16,6 +16,7 @@ import { realpath } from "node:fs/promises";
 import { Effect, Layer, Schema } from "effect";
 import type * as CodexClient from "effect-codex-app-server/client";
 import { ChildProcessSpawner } from "effect/process";
+import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 
 import { loadCodexAppServerModule } from "./codexAppServerModule.ts";
 import { codexProcessEnvironment, type CodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
@@ -76,6 +77,7 @@ export const withIsolatedCodexAppServer = <A, E, R>(
           args: ["app-server"],
           cwd: input.cwd,
           env: { ...codexProcessEnvironment(input.layout, input.environment), CODEX_HOME: home },
+          timeoutOrElse: timeoutWhileResponsiveOrElse,
         }),
       ).pipe(Effect.mapError(unavailable("Codex could not start.")));
       const client = yield* Effect.service(codexAppServer.CodexClient.CodexAppServerClient).pipe(
@@ -104,7 +106,7 @@ export const withIsolatedCodexAppServer = <A, E, R>(
       return yield* use(client);
     }),
   ).pipe(
-    Effect.timeoutOrElse({
+    timeoutWhileResponsiveOrElse({
       duration: CODEX_ISOLATED_APP_SERVER_TIMEOUT,
       orElse: () =>
         Effect.fail(

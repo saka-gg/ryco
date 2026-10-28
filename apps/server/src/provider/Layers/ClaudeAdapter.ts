@@ -115,6 +115,7 @@ import {
 } from "@ryco/shared/model";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
+import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
 import {
   resolveHtmlRenderToolKind,
@@ -6469,7 +6470,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // Invoke through the query object: SDK methods rely on `this`.
       try: () => context.query.initializationResult!(),
       catch: (cause) => toSessionRequestError(context, threadId, "initialize", cause),
-    }).pipe(Effect.timeoutOption(Duration.millis(CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS)));
+    }).pipe(timeoutWhileResponsiveOption(CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS));
     if (Option.isSome(initialized)) {
       context.cliInitialized = true;
       return;
