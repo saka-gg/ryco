@@ -227,6 +227,7 @@
   "devDependencies": {
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
+    "fast-check": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"

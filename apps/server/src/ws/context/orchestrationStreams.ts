@@ -724,14 +724,17 @@ export const makeOrchestrationStreamHelpers = (deps: {
   /**
    * Can a client that last applied `fromSequence` catch up from the event log
    * rather than a snapshot — of the shell or of one thread? Only when that
-   * sequence names an event this log still holds — a reset or foreign log
-   * restarts below it — and no more than one replay page of what the
-   * subscription delivers has happened since, beyond which a snapshot is the
-   * cheaper send. A thread is judged on its own backlog, so an idle retained
-   * thread still resumes while other threads stream. Its replay reads the
-   * thread's own stream when the store offers that; otherwise it scans global
-   * pages, so that scan is bounded as well. The log is never pruned today;
-   * pruning must keep this answer truthful.
+   * sequence lies within this log — a reset or foreign log restarts below it —
+   * and no more than one replay page of what the subscription delivers has
+   * happened since, beyond which a snapshot is the cheaper send. A thread is
+   * judged on its own backlog, so an idle retained thread still resumes while
+   * other threads stream. Its replay reads the thread's own stream when the
+   * store offers that; otherwise it scans global pages, so that scan is bounded
+   * as well. Compaction removes superseded progress events older than a day,
+   * leaving holes; the store's probe anchors on the log's range because replay
+   * from a hole reaches the same state (`EventLogCompaction`). The fallback
+   * below, for stores without a probe, still requires the exact event: a hole
+   * there costs a snapshot, never a wrong resume.
    */
   const canResumeAfter = (fromSequence: number, scope?: { readonly threadId: ThreadId }) =>
     Effect.gen(function* () {

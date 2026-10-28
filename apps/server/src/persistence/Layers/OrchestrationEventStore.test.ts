@@ -262,6 +262,60 @@ layer("OrchestrationEventStore", (it) => {
     }),
   );
 
+  it.effect("anchors a resume inside a compacted hole of the log", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appended: Array<number> = [];
+      for (const key of ["1", "2", "3", "4", "5"]) {
+        const event = yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.make(`evt-hole-${key}`),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make(`project-hole-${key}`),
+          occurredAt: "2026-10-01T00:00:00.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make(`project-hole-${key}`),
+            title: `Hole ${key}`,
+            workspaceRoot: `/tmp/hole-${key}`,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-01T00:00:00.000Z",
+            updatedAt: "2026-10-01T00:00:00.000Z",
+          },
+        });
+        appended.push(event.sequence);
+      }
+      const middle = appended[2]!;
+      // Compaction removes superseded events: the client's cursor may name one of them.
+      yield* sql`DELETE FROM orchestration_events WHERE sequence = ${middle}`;
+
+      const probe = eventStore.probeResume!;
+      assert.deepEqual(yield* probe({ sequence: middle, limit: 10 }), {
+        anchored: true,
+        eventsAfter: 2,
+        streamEventsAfter: null,
+      });
+      // Outside the log's range stays unanchored.
+      assert.equal((yield* probe({ sequence: appended[4]! + 1, limit: 10 })).anchored, false);
+      assert.equal((yield* probe({ sequence: 0, limit: 10 })).anchored, false);
+      // The range is two seeks at the ends of the sequence key, never a scan.
+      const plan = yield* sql<{ readonly detail: string }>`
+        EXPLAIN QUERY PLAN SELECT
+          (3 >= (SELECT MIN(sequence) FROM orchestration_events)
+            AND 3 <= (SELECT MAX(sequence) FROM orchestration_events)) AS anchored
+      `;
+      assert.isFalse(
+        plan.some((row) => row.detail.startsWith("SCAN orchestration_events")),
+        JSON.stringify(plan),
+      );
+    }),
+  );
+
   it.effect("pages one aggregate stream through the stream index", () =>
     Effect.gen(function* () {
       const eventStore = yield* OrchestrationEventStore;
