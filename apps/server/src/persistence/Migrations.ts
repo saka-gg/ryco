@@ -691,10 +691,12 @@ const compatibilityRepairs = [
     run: () => repairProjectionProjectAvatarColumns(),
   },
   { key: "projection-token-mode", since: 35, run: () => repairProjectionTokenModeColumns() },
-  // 037 introduced pr_state, which the backfill reads.
+  // 037 introduced pr_state, which the backfill reads. The column is not a numbered migration, so
+  // this repair does not redo 037.
   {
     key: "projection-worktree-pr-terminal-at",
     since: 37,
+    unnumbered: true,
     run: () => repairProjectionWorktreePrTerminalAtColumn(),
   },
   {
@@ -783,6 +785,19 @@ const repairsThrough = (toMigrationInclusive: number | undefined) =>
   compatibilityRepairs.filter(
     (repair) => toMigrationInclusive === undefined || toMigrationInclusive >= repair.since,
   );
+
+/**
+ * The migrations a compatibility repair applies again (`since` through `through`). When another
+ * branch recorded its own migration under one of these ids, the migrator skips this build's, and
+ * the repair still gives the database this build's schema there.
+ */
+export const repairedMigrationIds: ReadonlySet<number> = new Set(
+  compatibilityRepairs.flatMap((repair) => {
+    if ("unnumbered" in repair) return [];
+    const last = "through" in repair ? repair.through : repair.since;
+    return Array.from({ length: last - repair.since + 1 }, (_, index) => repair.since + index);
+  }),
+);
 
 /** `ryco_compatibility_repairs` key recording that a compatibility repair has run. */
 export const compatibilityRepairMarker = (key: string) => `schema-repair:${key}`;
@@ -883,7 +898,12 @@ export const describeSchemaTooNew = (input: {
   `Database schema ${input.latest} is newer than this binary supports (${input.supported}). ` +
   `Use a Ryco build that supports schema ${input.latest}. To keep using this build, restore a ` +
   `backup taken before the upgrade into a separate data directory` +
-  (input.backupsDir ? `; backups are in ${input.backupsDir}.` : ".");
+  (input.backupsDir
+    ? `; backups are in ${input.backupsDir}. \`ryco db list\` shows them`
+    : `. \`ryco db list\` shows the backups`) +
+  // Without them, the command looks in the default data directory, not this server's.
+  ` (pass the server's \`--base-dir\` or \`--dev-url\`, if it uses one), and ` +
+  `\`ryco db restore <file> --into <new directory>\` restores one without touching this database.`;
 
 /**
  * Run all pending migrations.

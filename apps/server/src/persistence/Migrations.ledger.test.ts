@@ -4,6 +4,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import {
   compatibilityRepairMarker,
+  describeSchemaTooNew,
   inspectMigrationLedger,
   runMigrations,
   SUPPORTED_MIGRATION_ID,
@@ -95,5 +96,16 @@ it.effect("names the backups directory when it refuses a newer schema", () =>
     assert.include(message, `Use a Ryco build that supports schema ${future}`);
     assert.include(message, "backups are in /home/me/.ryco/userdata/backups");
     assert.include(message, "separate data directory");
+    // The commands that list and restore them.
+    assert.include(message, "`ryco db list` shows them");
+    // A dev or custom-directory server's backups are not in the default data directory.
+    assert.include(message, "pass the server's `--base-dir` or `--dev-url`, if it uses one");
+    assert.include(message, "`ryco db restore <file> --into <new directory>`");
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );
+
+it("names the restore commands without a backups directory too", () => {
+  const message = describeSchemaTooNew({ latest: 95, supported: 93 });
+  assert.include(message, "separate data directory. `ryco db list` shows the backups");
+  assert.include(message, "`ryco db restore <file> --into <new directory>` restores one");
+});
