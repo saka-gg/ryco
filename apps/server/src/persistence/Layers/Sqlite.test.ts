@@ -10,6 +10,8 @@ import { assert, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { databaseBackupsDirectory } from "../databaseBackups.ts";
+import { runMigrations, SUPPORTED_MIGRATION_ID } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import { checkpointWorkerUnavailableReason } from "../SqliteCheckpointWorker.ts";
 import { MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
@@ -26,20 +28,34 @@ db.exec("BEGIN IMMEDIATE");
 process.stdout.write("locked\\n");
 setTimeout(() => {
   db.exec("COMMIT");
+  process.stdout.write("released " + Date.now() + "\\n");
   db.close();
 }, Number(process.argv[2]));
 `;
 
+/** Resolves once the child holds the write lock; `released` gives its wall-clock release time. */
 const spawnWriteLockHolder = (dbPath: string, holdMs: number) =>
   Effect.promise(
     () =>
-      new Promise<void>((resolve, reject) => {
+      new Promise<{ readonly released: Promise<number> }>((resolve, reject) => {
         const holder = NodeChildProcess.spawn(
           process.execPath,
           ["-e", lockHolderSource, dbPath, String(holdMs)],
           { stdio: ["ignore", "pipe", "ignore"] },
         );
-        holder.stdout.once("data", () => resolve());
+        let output = "";
+        const released = new Promise<number>((resolveReleased, rejectReleased) => {
+          holder.stdout.on("data", (chunk: Buffer) => {
+            output += chunk.toString("utf8");
+            if (output.includes("locked\n")) resolve({ released });
+            const match = /released (\d+)\n/.exec(output);
+            if (match) resolveReleased(Number(match[1]));
+          });
+          // "close", not "exit": the last output can arrive after the process exited.
+          holder.on("close", () => rejectReleased(new Error("lock holder exited unreleased")));
+        });
+        // Callers that only need the lock never await the release.
+        released.catch(() => undefined);
         holder.on("error", reject);
         holder.on("exit", () =>
           reject(new Error("lock holder exited before acquiring the write lock")),
@@ -89,6 +105,47 @@ it.effect("keeps the event loop running while it waits for another process's wri
     assert.isBelow(maxGapMs, 250);
   }).pipe(
     Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+it.effect("backs up before migrating while another process holds the write lock", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ryco-sqlite-backup-busy-"));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+
+  return Effect.gen(function* () {
+    // A database one migration behind, as an upgrade finds it.
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`PRAGMA journal_mode = WAL`;
+      yield* runMigrations({ toMigrationInclusive: SUPPORTED_MIGRATION_ID - 1 });
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+    const holder = yield* spawnWriteLockHolder(dbPath, 600);
+    // Wall-clock time, comparable with the holder's release time.
+    let lastTick = Date.now();
+    const gaps: Array<{ readonly startedAt: number; readonly ms: number }> = [];
+    const interval = setInterval(() => {
+      const now = Date.now();
+      gaps.push({ startedAt: lastTick, ms: now - lastTick });
+      lastTick = now;
+    }, 5);
+    const startedAt = performance.now();
+    yield* Effect.void.pipe(
+      Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+      Effect.ensuring(Effect.sync(() => clearInterval(interval))),
+    );
+    // The snapshot waited for the writer's lock and still produced a backup...
+    assert.isAbove(performance.now() - startedAt, 300);
+    const backups = NodeFS.readdirSync(databaseBackupsDirectory(dbPath));
+    assert.equal(backups.length, 1, backups.join(", "));
+    assert.match(backups[0]!, /^state-v\d{3}-before-v\d{3}-\d{8}T\d{9}Z\.sqlite$/);
+    // ...without blocking the event loop while it waited. Only gaps that began while the lock
+    // was held count: the migration after the release runs synchronously by design.
+    const releasedAt = yield* Effect.promise(() => holder.released);
+    const waitingGaps = gaps.filter((gap) => gap.startedAt < releasedAt - 50);
+    assert.isAbove(waitingGaps.length, 0);
+    assert.isBelow(Math.max(...waitingGaps.map((gap) => gap.ms)), 250);
+  }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });

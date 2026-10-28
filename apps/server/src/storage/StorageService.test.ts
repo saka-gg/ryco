@@ -319,6 +319,29 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
           }),
         ),
     );
+    it.effect("lists the database backups as protected history with their size", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const backupsDir = path.join(f.root, "backups");
+          yield* io(async () => {
+            await fs.mkdir(backupsDir);
+            await fs.writeFile(
+              path.join(backupsDir, "node-v092-before-v093-20261023T151230123Z.sqlite.zst"),
+              "x".repeat(4096),
+            );
+          });
+          const entry = (yield* f.service.scan()).entries.find(
+            (item) => item.id === "database-backups",
+          );
+          assert.isDefined(entry);
+          assert.strictEqual(entry?.category, "history");
+          assert.strictEqual(entry?.path, backupsDir);
+          assert.isFalse(entry?.eligible);
+          assert.isAtLeast(entry?.bytes ?? 0, 4096);
+        }),
+      ),
+    );
     it.effect("refuses dirty/untracked work introduced after preview", () =>
       Effect.scoped(
         Effect.gen(function* () {
