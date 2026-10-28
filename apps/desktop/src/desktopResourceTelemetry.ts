@@ -3,11 +3,13 @@ import { app, powerMonitor } from "electron";
 import type { DesktopUpdateState } from "@ryco/contracts";
 import {
   createTelemetryLineReader,
+  type DesktopAgentWorkFrame,
   type DesktopAppUpdateRequestFrame,
   type DesktopAppUpdateSnapshot,
   type DesktopAppUpdateStateFrame,
   type DesktopBackendLifecycleFrame,
   type DesktopResourceTelemetrySnapshot,
+  parseDesktopAgentWorkFrame,
   parseDesktopAppUpdateRequestFrame,
   parseDesktopBackendLifecycleFrame,
 } from "@ryco/shared/desktopResourceTelemetry";
@@ -19,6 +21,8 @@ export interface DesktopBackendPipeHandlers {
   readonly onAppUpdateRequest?: (frame: DesktopAppUpdateRequestFrame) => void;
   /** The updater's state now; reported once when the pipe attaches. */
   readonly appUpdateState?: () => DesktopUpdateState;
+  /** Whether agents are working on this backend; reported on every change. */
+  readonly onAgentWork?: (frame: DesktopAgentWorkFrame) => void;
 }
 
 export interface DesktopBackendPipe {
@@ -60,8 +64,8 @@ export function toDesktopAppUpdateSnapshot(state: DesktopUpdateState): DesktopAp
 /**
  * Attached to one backend generation; closed pipes remove all listeners.
  * Besides answering `sample` requests, the pipe carries the backend's lifecycle
- * frames (readiness, startup phases, fatal errors) and relayed app update
- * requests. Both are validated with the shared protocol parsers the backend
+ * frames (readiness, startup phases, fatal errors), its agent-work reports and
+ * relayed app update requests. All are validated with the shared protocol parsers the backend
  * writes against and handed to their handler; anything else is ignored. In the
  * other direction the app reports its updater state (`app-update-state`) on
  * attach and through {@link DesktopBackendPipe.sendAppUpdateState}.
@@ -190,6 +194,16 @@ export function attachDesktopResourceTelemetry(
             handlers.onAppUpdateRequest?.(request);
           } catch {
             // The updater owns its failures; a throw here would tear down the pipe.
+          }
+          return;
+        }
+        if (value.type === "agent-work") {
+          const frame = parseDesktopAgentWorkFrame(value);
+          if (frame === null) return;
+          try {
+            handlers.onAgentWork?.(frame);
+          } catch {
+            // The keep-awake owner handles its own failures; see onAppUpdateRequest.
           }
           return;
         }
