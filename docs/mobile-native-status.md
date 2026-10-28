@@ -116,6 +116,7 @@ only shell metadata. It is separate from the hosted browser client's opt-in stor
 | Agent notifications      | Local only               | Thread alerts post local notifications while the app runs. Background delivery needs Hub push-token support and device QA, under the contentless-push constraint above. |
 | Live Activity            | Not on `main`            | Native lifecycle, Hub push-token support, device QA — under the contentless-push constraint above.                                                                      |
 | Tablet inspector         | Delivered for files only | Generalize the regular-width split layout across workspace tools. Home surfaces are width-neutral single columns.                                                       |
+| Find in files            | Web only                 | The node's `projects.searchContent` and the client runtime's `createWorkspaceContentSearch` are shared; a native screen remains.                                        |
 | Android                  | Unqualified              | Exercise image/SVG/HTML preview, WebView isolation, navigation, native modules, and relay lifecycle on Android.                                                         |
 | Store distribution       | Not complete             | Apple Developer/App Store Connect/TestFlight work remains separate from simulator and Personal Team development.                                                        |
 

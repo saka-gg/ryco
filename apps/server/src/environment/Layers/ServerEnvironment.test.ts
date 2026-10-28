@@ -75,6 +75,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.terminalWriteRequireIdle).toBe(true);
       expect(second.capabilities.threadFork).toBe(true);
       expect(second.capabilities.projectSearchEmptyQuery).toBe(true);
+      expect(second.capabilities.projectContentSearch).toBe(true);
       expect(second.capabilities.cliProxyHubs).toBe(true);
       expect(second.capabilities.cliProxyCloudflareAccess).toBe(true);
       expect(second.capabilities.stagedOnlyCommit).toBe(true);

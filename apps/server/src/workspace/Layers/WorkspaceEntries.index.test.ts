@@ -404,6 +404,61 @@ describe("WorkspaceEntries index store", () => {
     ),
   );
 
+  it.effect("lists every indexed file for content search in UTF-8 byte order", () => {
+    const paths = Array.from({ length: 30_000 }, (_, index) => `pkg/file-${index}.ts`);
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      const files = yield* workspaceEntries.readSearchFiles(cwd);
+      // The whole index, not the capped listEntries payload; files only.
+      expect(files.paths).toHaveLength(30_005);
+      expect(files.paths.slice(0, 3)).toEqual(["README.md", "a.ts", "a/b.ts"]);
+      expect(files.paths.slice(-2)).toEqual(["\uE000.ts", "😀.ts"]);
+      expect(files.paths).not.toContain("dist/out.js");
+      expect(files.partial).toBe(false);
+      // Memoized until the index changes.
+      expect((yield* workspaceEntries.readSearchFiles(cwd)).paths).toBe(files.paths);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.succeed(
+            listing(["😀.ts", "a.ts", "\uE000.ts", "a/b.ts", "README.md", "dist/out.js", ...paths]),
+          ),
+        ),
+      ),
+    );
+  });
+
+  it.effect("answers content search from the current index without waiting for a rebuild", () => {
+    let paths = ["src/old.ts"];
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      expect((yield* workspaceEntries.readSearchFiles(cwd)).paths).toEqual(["src/old.ts"]);
+
+      yield* workspaceEntries.recordFileWrite(cwd, "docs/new.md");
+      expect((yield* workspaceEntries.readSearchFiles(cwd)).paths).toEqual([
+        "docs/new.md",
+        "src/old.ts",
+      ]);
+
+      paths = ["src/old.ts", "src/new.ts"];
+      yield* workspaceEntries.invalidate(cwd);
+      // Unlike listEntries, it never waits for the pending rebuild.
+      expect((yield* workspaceEntries.readSearchFiles(cwd)).paths).not.toContain("src/new.ts");
+    }).pipe(
+      Effect.provide(
+        // Rebuilds never finish, so a read that waited for one would hang.
+        makeLayer(
+          (() => {
+            let calls = 0;
+            return () => (calls++ === 0 ? Effect.sync(() => listing(paths)) : Effect.never);
+          })(),
+        ),
+      ),
+    );
+  });
+
   it.effect("runs one build for concurrent cold reads of a root", () => {
     let calls = 0;
     return Effect.gen(function* () {

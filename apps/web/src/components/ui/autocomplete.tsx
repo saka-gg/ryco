@@ -189,9 +189,16 @@ function AutocompleteValue({ ...props }: AutocompletePrimitive.Value.Props) {
   return <AutocompletePrimitive.Value data-slot="autocomplete-value" {...props} />;
 }
 
-function AutocompleteList({ className, ...props }: AutocompletePrimitive.List.Props) {
+function AutocompleteList({
+  className,
+  scrollFade = true,
+  ...props
+}: AutocompletePrimitive.List.Props & {
+  /** Off for lists with sticky headers, which the fade would wash out. */
+  scrollFade?: boolean;
+}) {
   return (
-    <ScrollArea scrollbarGutter scrollFade>
+    <ScrollArea scrollbarGutter scrollFade={scrollFade}>
       <AutocompletePrimitive.List
         className={cn("not-empty:scroll-py-1 not-empty:p-1", className)}
         data-slot="autocomplete-list"

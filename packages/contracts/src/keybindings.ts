@@ -56,7 +56,10 @@ export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMA
  */
 
 // Quick open and find in files.
-export const FILE_SEARCH_KEYBINDING_COMMANDS = [] as const;
+export const FILE_SEARCH_KEYBINDING_COMMANDS = [
+  "workspace.quickOpen",
+  "workspace.findInFiles",
+] as const;
 
 // Settle, snooze, archive, mark unread and undo for threads.
 export const THREAD_LIFECYCLE_KEYBINDING_COMMANDS = [

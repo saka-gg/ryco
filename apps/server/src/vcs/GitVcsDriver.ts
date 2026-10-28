@@ -1,12 +1,13 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { Context, DateTime, Effect, Layer, Option } from "effect";
+import { Context, DateTime, Effect, Layer, Option, Queue, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
   GitCommandError,
   VcsProcessExitError,
+  type VcsError,
   type GitStagedIndexChangedError,
   type VcsSwitchRefInput,
   type VcsSwitchRefResult,
@@ -25,7 +26,9 @@ import {
   type VcsStatusInput,
   type VcsStatusResult,
 } from "@ryco/contracts";
+import { governChildProcess } from "../processGovernor.ts";
 import type { VerifiedWorktreeCleanup } from "../storage/filesystem.ts";
+import { makeGitGrepOutputParser } from "./gitGrepOutput.ts";
 import * as GitVcsDriverCore from "./GitVcsDriverCore.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -433,6 +436,14 @@ const WORKSPACE_GIT_HARDENED_CONFIG_ARGS = [
   "-c",
   "core.untrackedCache=false",
 ] as const;
+const WORKSPACE_GREP_ENV = Object.freeze({
+  ...READ_ONLY_GIT_ENV,
+  // Unicode case folding for -i, as the workspace's own scanner folds; where
+  // the locale is missing git falls back to C and folds ASCII only.
+  LC_ALL: "C.UTF-8",
+} satisfies NodeJS.ProcessEnv);
+/** Matching files parsed ahead of the reader; git pauses on a full pipe after that. */
+const WORKSPACE_GREP_BUFFERED_FILES = 16;
 
 const nowFreshness = Effect.fn("GitVcsDriver.nowFreshness")(function* () {
   const now = yield* DateTime.now;
@@ -841,6 +852,82 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     };
   });
 
+  // `--untracked` searches the files `listWorkspaceFiles` lists, ignore rules
+  // applied, sorted by path. The query goes to stdin, never into the arguments
+  // (process lists, error text), and every option the user's config could
+  // change (`grep.fullName`, `grep.patternType`, `color.grep`,
+  // `submodule.recurse`) is set explicitly.
+  const streamWorkspaceContentMatches: NonNullable<
+    VcsDriver.VcsDriverShape["streamWorkspaceContentMatches"]
+  > = (cwd, options) =>
+    Stream.callback<VcsDriver.VcsWorkspaceContentFile, VcsError>(
+      (queue) =>
+        governChildProcess(
+          "git",
+          process.withProcess(
+            {
+              operation: "GitVcsDriver.streamWorkspaceContentMatches",
+              command: "git",
+              args: [
+                ...WORKSPACE_GIT_HARDENED_CONFIG_ARGS,
+                "-c",
+                "grep.fullName=false",
+                "grep",
+                "--untracked",
+                "--no-recurse-submodules",
+                "--threads=4",
+                "-I",
+                "-n",
+                "--column",
+                "-z",
+                "--no-color",
+                "-F",
+                ...(options.caseSensitive ? [] : ["-i"]),
+                ...(options.wholeWord ? ["-w"] : []),
+                "-f",
+                "-",
+                "--",
+                ".",
+                ...options.excludedTopLevelNames.map((name) => `:(exclude,literal)${name}`),
+              ],
+              cwd,
+              env: WORKSPACE_GREP_ENV,
+            },
+            (child) => {
+              const parser = makeGitGrepOutputParser(options);
+              return Effect.all(
+                [
+                  child.writeStdin(options.query),
+                  // Warnings (an unreadable folder) are dropped; an undrained pipe would stall git.
+                  Stream.runDrain(child.stderr),
+                  Stream.runForEach(child.stdout, (chunk) =>
+                    Queue.offerAll(queue, parser.push(chunk)),
+                  ).pipe(
+                    Effect.andThen(child.exitCode),
+                    Effect.flatMap((exitCode) =>
+                      // 1: nothing matched.
+                      exitCode === 0 || exitCode === 1
+                        ? Queue.offerAll(queue, parser.end())
+                        : Effect.fail(
+                            new VcsProcessExitError({
+                              operation: "GitVcsDriver.streamWorkspaceContentMatches",
+                              command: "git grep",
+                              cwd,
+                              exitCode,
+                              detail: `git grep exited with code ${exitCode}.`,
+                            }),
+                          ),
+                    ),
+                  ),
+                ],
+                { concurrency: "unbounded", discard: true },
+              );
+            },
+          ),
+        ).pipe(Effect.andThen(Queue.end(queue))),
+      { bufferSize: WORKSPACE_GREP_BUFFERED_FILES, strategy: "suspend" },
+    );
+
   const listRemotes: VcsDriver.VcsDriverShape["listRemotes"] = Effect.fn("listRemotes")(
     function* (cwd) {
       const remotes = yield* memoizeByRepositoryMetadata(
@@ -954,6 +1041,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     detectRepository,
     isInsideWorkTree,
     listWorkspaceFiles,
+    streamWorkspaceContentMatches,
     listRemotes,
     filterIgnoredPaths,
     initRepository,

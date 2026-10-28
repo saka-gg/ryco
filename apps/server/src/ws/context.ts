@@ -84,6 +84,7 @@ import { redactServerSettingsForClient, ServerSettingsService } from "../serverS
 import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 import { TerminalManager } from "../terminal/Services/Manager.ts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
+import { WorkspaceContentSearch } from "../workspace/Services/WorkspaceContentSearch.ts";
 import { WorkspaceEntries } from "../workspace/Services/WorkspaceEntries.ts";
 import { WorkspaceFileSystem } from "../workspace/Services/WorkspaceFileSystem.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
@@ -309,6 +310,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
     const projectAvatarStore = yield* Effect.serviceOption(ProjectAvatarStore);
     const workspaceEntries = yield* WorkspaceEntries;
+    const workspaceContentSearch = yield* WorkspaceContentSearch;
     const workspaceFileSystem = yield* WorkspaceFileSystem;
     const fileSystem = yield* FileSystem.FileSystem;
     const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
@@ -1437,6 +1439,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectFaviconResolver,
       projectAvatarStore,
       workspaceEntries,
+      workspaceContentSearch,
       workspaceFileSystem,
       clientWorkspaceUse,
       fileSystem,

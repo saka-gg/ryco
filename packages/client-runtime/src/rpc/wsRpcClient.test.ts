@@ -250,6 +250,26 @@ it("turns response version decoding failures into an update instruction without 
   ).rejects.toThrow("Update Ryco");
 });
 
+it("routes content search to its wire method with the caller's abort signal", async () => {
+  const searchContent = vi.fn(() => Effect.succeed({ matches: [] }));
+  const requestOptions: unknown[] = [];
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>, options?: unknown) => {
+      requestOptions.push(options);
+      return Effect.runPromise(invoke({ [WS_METHODS.projectsSearchContent]: searchContent }));
+    },
+  } as unknown as WsTransport;
+  const client = createWsRpcClient(transport);
+  const input = { cwd: "/repo", query: "needle", limit: 200, cursor: "v1:a.ts" };
+  const controller = new AbortController();
+  await expect(
+    client.projects.searchContent(input, { signal: controller.signal }),
+  ).resolves.toEqual({ matches: [] });
+  await client.projects.searchContent(input);
+  expect(searchContent).toHaveBeenCalledWith(input);
+  expect(requestOptions).toEqual([{ signal: controller.signal }, undefined]);
+});
+
 it("routes import source selection and reconciliation through the shared transport", async () => {
   const sources = vi.fn(() => Effect.succeed([]));
   const reconcile = vi.fn(() => Effect.succeed({ state: "unknown" }));

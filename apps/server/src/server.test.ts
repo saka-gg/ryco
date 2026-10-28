@@ -159,6 +159,7 @@ import {
   ServerEnvironment,
   type ServerEnvironmentShape,
 } from "./environment/Services/ServerEnvironment.ts";
+import { WorkspaceContentSearchLive } from "./workspace/Layers/WorkspaceContentSearch.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
@@ -711,6 +712,10 @@ const buildAppUnderTest = (options?: {
       WorkspaceAccessPolicyLayer(config.workspaceAccessRoot),
       WorkspacePathsLive,
       workspaceEntriesLayer,
+      WorkspaceContentSearchLive.pipe(
+        Layer.provide(WorkspacePathsLive),
+        Layer.provide(workspaceEntriesLayer),
+      ),
       WorkspaceFileSystemLive.pipe(
         Layer.provide(WorkspacePathsLive),
         Layer.provide(workspaceEntriesLayer),
@@ -3959,6 +3964,57 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         result.failure.message,
         "Workspace root does not exist: /definitely/not/a/real/workspace/path",
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc projects.searchContent", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "ryco-ws-project-content-search-",
+      });
+      yield* fs.writeFileString(
+        path.join(workspaceDir, "needle-file.ts"),
+        "const a = 1;\nexport const needle = a;\n",
+      );
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsSearchContent]({
+            cwd: workspaceDir,
+            query: "needle",
+            limit: 10,
+          }),
+        ),
+      );
+      assert.deepEqual(response, {
+        matches: [
+          {
+            path: "needle-file.ts",
+            lineNumber: 2,
+            preview: "export const needle = a;",
+            ranges: [{ start: 13, end: 19 }],
+          },
+        ],
+      });
+
+      const stale = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsSearchContent]({
+            cwd: workspaceDir,
+            query: "needle",
+            limit: 10,
+            cursor: "not-issued-here",
+          }),
+        ).pipe(Effect.result),
+      );
+      assertTrue(stale._tag === "Failure");
+      assertTrue(stale.failure._tag === "ProjectSearchContentError");
+      assert.equal(stale.failure.reason, "cursor");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

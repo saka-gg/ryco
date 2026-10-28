@@ -34,6 +34,7 @@ import {
 
 import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
 import type { VcsDriverShape } from "../../vcs/VcsDriver.ts";
+import { sortPathsByUtf8 } from "../pathOrder.ts";
 import {
   WorkspaceEntries,
   WorkspaceEntriesBrowseError,
@@ -83,7 +84,11 @@ const WORKSPACE_LIST_ENTRIES_MAX = 25_000;
 /** Index construction yields to the event loop between chunks of this many paths. */
 const WORKSPACE_INDEX_BUILD_CHUNK = 20_000;
 const WORKSPACE_SCAN_READDIR_CONCURRENCY = 32;
-const IGNORED_DIRECTORY_NAMES = new Set([
+/**
+ * Folders the index leaves out: at the top of a VCS listing, at any depth of a
+ * folder walk. Content search leaves out the same ones.
+ */
+export const IGNORED_DIRECTORY_NAMES: ReadonlySet<string> = new Set([
   ".git",
   ".convex",
   "node_modules",
@@ -105,6 +110,8 @@ interface WorkspaceIndex {
   readonly partial: boolean;
   /** The listEntries payload, built on first request and dropped when `entries` change. */
   listing: ProjectListEntriesResult | null;
+  /** Its files in UTF-8 byte order for content search, built and dropped like `listing`. */
+  searchFiles: ReadonlyArray<string> | null;
 }
 
 interface WorkspaceIndexSlot {
@@ -150,7 +157,7 @@ function toProjectEntry(entry: IndexedWorkspaceEntry): ProjectEntry {
     : { path: entry.path, kind: entry.kind, parentPath };
 }
 
-function isPathInIgnoredDirectory(relativePath: string): boolean {
+export function isPathInIgnoredDirectory(relativePath: string): boolean {
   const separatorIndex = relativePath.indexOf("/");
   const firstSegment = separatorIndex === -1 ? relativePath : relativePath.slice(0, separatorIndex);
   return IGNORED_DIRECTORY_NAMES.has(firstSegment);
@@ -535,6 +542,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       entries,
       partial,
       listing: null,
+      searchFiles: null,
     } satisfies WorkspaceIndex;
   });
 
@@ -670,6 +678,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       entries,
       partial: truncated,
       listing: null,
+      searchFiles: null,
     } satisfies WorkspaceIndex;
   });
 
@@ -1068,6 +1077,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
       }
       index.entries.push(toIndexedEntry(filePath, "file"));
       index.listing = null;
+      index.searchFiles = null;
       // Visible immediately; a background rebuild settles its ignore status.
       yield* markRootChanged(slot);
     }
@@ -1295,6 +1305,16 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     },
   );
 
+  const readSearchFiles: WorkspaceEntriesShape["readSearchFiles"] = Effect.fn(
+    "WorkspaceEntries.readSearchFiles",
+  )(function* (cwd) {
+    const { index } = yield* readIndex(yield* normalizeWorkspaceRoot(cwd));
+    index.searchFiles ??= sortPathsByUtf8(
+      index.entries.flatMap((entry) => (entry.kind === "file" ? [entry.path] : [])),
+    );
+    return { paths: index.searchFiles, partial: index.partial };
+  });
+
   const listEntries: WorkspaceEntriesShape["listEntries"] = Effect.fn(
     "WorkspaceEntries.listEntries",
   )(function* (input) {
@@ -1316,6 +1336,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     recordFileWrite,
     listEntries,
     search,
+    readSearchFiles,
   } satisfies WorkspaceEntriesShape;
 });
 

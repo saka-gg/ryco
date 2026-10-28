@@ -140,7 +140,16 @@ focused control.
 - `pullRequests.open`: open the pull requests page (no default key)
 - `projects.open`: open the projects page (no default key)
 
-<!-- File search commands -->
+#### File search
+
+- `workspace.quickOpen`: find a file of the current thread's project by name and open it in the
+  Files panel. It defaults to `mod+p` outside the terminal and also works while typing in the
+  composer. That key used to open the Files panel: this app moves `workspace.files` to
+  `mod+shift+e`, while older apps keep `mod+p` for it. Both defaults live in the app, not on the
+  node.
+- `workspace.findInFiles`: search the contents of the current thread's project and open a match at
+  its line in the Files panel. It defaults to `mod+shift+f` outside the terminal, in the app only,
+  and also works while typing in the composer.
 
 #### Thread lifecycle
 

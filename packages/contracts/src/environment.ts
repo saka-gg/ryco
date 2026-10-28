@@ -91,6 +91,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * which also warms the workspace index); absent on older servers.
    */
   projectSearchEmptyQuery: Schema.optionalKey(Schema.Boolean),
+  /** `projects.searchContent` (find in files); absent on older servers. */
+  projectContentSearch: Schema.optionalKey(Schema.Boolean),
   /**
    * CLIProxyAPI hub settings and reads (`server.readCliProxyHubs` / `server.testCliProxyHub`);
    * absent on older servers, which drop `cliProxyHubs` from settings patches.

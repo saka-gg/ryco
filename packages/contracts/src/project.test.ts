@@ -3,6 +3,9 @@ import { Schema } from "effect";
 
 import {
   ProjectReadFileResult,
+  ProjectSearchContentError,
+  ProjectSearchContentInput,
+  ProjectSearchContentResult,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
   ProjectWriteFileError,
@@ -103,5 +106,66 @@ describe("workspace entry search contracts", () => {
     expect(
       decodeSearchResult({ entries: [], truncated: true, partial: true, refreshing: true }),
     ).toEqual({ entries: [], truncated: true, partial: true, refreshing: true });
+  });
+});
+
+describe("workspace content search contracts", () => {
+  const decodeSearchInput = Schema.decodeUnknownSync(ProjectSearchContentInput);
+  const decodeSearchResult = Schema.decodeUnknownSync(ProjectSearchContentResult);
+
+  it("keeps the query as typed and leaves the toggles optional", () => {
+    expect(decodeSearchInput({ cwd: "/repo", query: "  needle ", limit: 200 })).toEqual({
+      cwd: "/repo",
+      query: "  needle ",
+      limit: 200,
+    });
+    expect(
+      decodeSearchInput({
+        cwd: "/repo",
+        query: "needle",
+        limit: 200,
+        caseSensitive: true,
+        wholeWord: true,
+        cursor: "v1:src/a.ts",
+      }),
+    ).toMatchObject({ caseSensitive: true, wholeWord: true, cursor: "v1:src/a.ts" });
+  });
+
+  it.each([
+    ["an empty query", { query: "" }],
+    ["a query over 256 characters", { query: "x".repeat(257) }],
+    ["a newline", { query: "two\nlines" }],
+    ["a carriage return", { query: "two\rlines" }],
+    ["a NUL", { query: "nee\0dle" }],
+    ["limit 0", { limit: 0 }],
+    ["limit 501", { limit: 501 }],
+    ["an empty cursor", { cursor: "" }],
+  ])("rejects %s", (_label, override) => {
+    expect(() =>
+      decodeSearchInput({ cwd: "/repo", query: "needle", limit: 200, ...override }),
+    ).toThrow();
+  });
+
+  it("decodes pages and ignores keys from newer nodes", () => {
+    const match = { path: "src/a.ts", lineNumber: 3, preview: "a needle", ranges: [] };
+    expect(decodeSearchResult({ matches: [match], extra: true })).toEqual({ matches: [match] });
+    expect(
+      decodeSearchResult({ matches: [], nextCursor: "v1:src/a.ts", timedOut: true, partial: true }),
+    ).toEqual({ matches: [], nextCursor: "v1:src/a.ts", timedOut: true, partial: true });
+  });
+
+  it("carries an optional failure reason", () => {
+    const error = Schema.decodeUnknownSync(ProjectSearchContentError)({
+      _tag: "ProjectSearchContentError",
+      message: "This search can't continue. Search again.",
+      reason: "cursor",
+    });
+    expect(error.reason).toBe("cursor");
+    expect(
+      Schema.decodeUnknownSync(ProjectSearchContentError)({
+        _tag: "ProjectSearchContentError",
+        message: "Failed to search workspace contents.",
+      }).reason,
+    ).toBeUndefined();
   });
 });

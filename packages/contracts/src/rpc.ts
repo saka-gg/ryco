@@ -268,6 +268,9 @@ import {
   ProjectReadFileError,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectSearchContentError,
+  ProjectSearchContentInput,
+  ProjectSearchContentResult,
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
@@ -437,6 +440,7 @@ export const WS_METHODS = {
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
   projectsSearchEntries: "projects.searchEntries",
+  projectsSearchContent: "projects.searchContent",
   projectsReadFile: "projects.readFile",
   projectsReadIcon: "projects.readIcon",
   projectsReadFileBinary: "projects.readFileBinary",
@@ -1688,6 +1692,12 @@ export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntr
   error: Schema.Union([ProjectSearchEntriesError, AuthRpcError]),
 });
 
+export const WsProjectsSearchContentRpc = Rpc.make(WS_METHODS.projectsSearchContent, {
+  payload: ProjectSearchContentInput,
+  success: ProjectSearchContentResult,
+  error: Schema.Union([ProjectSearchContentError, AuthRpcError]),
+});
+
 export const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries, {
   payload: ProjectListEntriesInput,
   success: ProjectListEntriesResult,
@@ -2592,6 +2602,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsWorkItemsTransitionRpc
   | typeof WsProjectsListEntriesRpc
   | typeof WsProjectsSearchEntriesRpc
+  | typeof WsProjectsSearchContentRpc
   | typeof WsProjectsReadFileRpc
   | typeof WsProjectsReadIconRpc
   | typeof WsProjectsReadFileBinaryRpc
@@ -2813,6 +2824,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsWorkItemsTransitionRpc,
   WsProjectsListEntriesRpc,
   WsProjectsSearchEntriesRpc,
+  WsProjectsSearchContentRpc,
   WsProjectsReadFileRpc,
   WsProjectsReadIconRpc,
   WsProjectsReadFileBinaryRpc,

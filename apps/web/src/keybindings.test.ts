@@ -6,7 +6,10 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { APP_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/client-runtime/state/settings";
+import {
+  APP_DEFAULT_RESOLVED_KEYBINDINGS,
+  resolveAppKeybindings,
+} from "@ryco/client-runtime/state/settings";
 import { NODE_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import {
   formatShortcutLabel,
@@ -852,6 +855,44 @@ describe("resolveShortcutCommand", () => {
     assert.strictEqual(
       shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "view.reopenClosed", "MacIntel"),
       "⇧⌘T",
+    );
+  });
+
+  it("opens quick open on mod+p, find in files on mod+shift+f and the Files panel on mod+shift+e by default", () => {
+    const resolve = (
+      overrides: Partial<ShortcutEventLike>,
+      keybindings = APP_DEFAULT_RESOLVED_KEYBINDINGS,
+      context = {},
+    ) => resolveShortcutCommand(event(overrides), keybindings, { platform: "MacIntel", context });
+    assert.strictEqual(resolve({ key: "p", code: "KeyP", metaKey: true }), "workspace.quickOpen");
+    assert.strictEqual(
+      resolve({ key: "F", code: "KeyF", metaKey: true, shiftKey: true }),
+      "workspace.findInFiles",
+    );
+    // Thread search keeps mod+f.
+    assert.strictEqual(resolve({ key: "f", code: "KeyF", metaKey: true }), "thread.find");
+    assert.strictEqual(
+      resolve({ key: "E", code: "KeyE", metaKey: true, shiftKey: true }),
+      "workspace.files",
+    );
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "workspace.files", "MacIntel"),
+      "⇧⌘E",
+    );
+    // Terminal input keeps the key.
+    assert.isNull(
+      resolve({ key: "p", code: "KeyP", metaKey: true }, APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        terminalFocus: true,
+      }),
+    );
+    // A user's own mod+p rule for the Files panel still wins.
+    const filesOnModP = resolveAppKeybindings({
+      rules: [{ key: "mod+p", command: "workspace.files", when: "!terminalFocus" }],
+      disabledCommands: [],
+    });
+    assert.strictEqual(
+      resolve({ key: "p", code: "KeyP", metaKey: true }, filesOnModP),
+      "workspace.files",
     );
   });
 

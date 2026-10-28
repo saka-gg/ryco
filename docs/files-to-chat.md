@@ -24,6 +24,56 @@ The panel opens through a one-shot route key (`workspaceFile`, with
 `workspaceFileLine`), consumed like the pull request tab's reveal: a repeat link
 opens again, and history, reload and returning to the thread never replay it.
 
+## Quick open
+
+**Cmd/Ctrl+P** opens quick open for the current thread's project (its worktree
+when it has one). Type part of a file's name or path and press Enter: the file
+opens in the thread's **Files** panel. It also opens while you type in the
+composer, but not in the terminal or in other fields. It uses the node's file
+index and the cache of the composer's `@` picker, so the ranking is the same and
+a warm index answers at once. It lists files only: the Files panel tells a folder
+from a file by its own listing, which is often not loaded yet. On a node that
+lists a workspace for an empty query, quick open shows its shallowest files before
+you type.
+
+Cmd/Ctrl+P used to open the Files panel. In this app the Files panel moves to
+**Cmd/Ctrl+Shift+E**; older apps keep Cmd/Ctrl+P for it, because the node keeps
+serving its own defaults (see [KEYBINDINGS.md](../KEYBINDINGS.md)). Quick open and
+find in files are also in the Cmd/Ctrl+K palette as **Go to file** and **Find in
+files**. Inside either search, Cmd/Ctrl+P and Cmd/Ctrl+Shift+F switch between them
+(each keeps its query), the key of the one shown closes it, and Cmd/Ctrl+K goes back
+to the palette's commands. The frozen web phone tier has neither.
+
+## Find in files
+
+**Cmd/Ctrl+Shift+F** searches the contents of the same workspace on the thread's
+own node, so it works on hosted web and on remote nodes too. Results are grouped
+by file and highlighted; Enter or a click opens the file in the Files panel at
+that line, marked as for a file link. **Aa** matches case and **ab** matches whole
+words (letters, digits and `_`, as git counts them). The search is literal text of
+at least two characters on one line; there are no regular expressions.
+
+What is searched:
+
+- In a git checkout, `git grep` reads tracked and untracked files. Ignored files
+  are skipped, and so are the folders the file index leaves out at the top level
+  (`node_modules`, `dist`, `build`, `out`, `.next`, `.turbo`, `.cache`, `.convex`).
+  Elsewhere, or when git fails, the node scans its file index, which can cover only
+  part of a very large folder; the results then say so.
+- Binary files, files over 512 KiB (the Files panel cannot open them either) and
+  links are skipped.
+
+Results arrive in pages of whole files, at most 100 lines per file, and more load
+as you scroll, up to 2,000. Each page has a one-second budget on the node. A page
+that runs out of time before it finds anything stops with **Search stopped
+early.** and a **Keep searching** button, instead of searching on by itself. Typing
+cancels the search in flight, and the search text never appears in the node's
+process list or logs. The last search of each workspace, with its options, is kept
+in memory for the session and comes back selected when find in files opens again.
+
+A node from before this feature shows "Update Ryco on this node to search file
+contents." Quick open still works there.
+
 ## Lines from the Review and Files panels
 
 The Review diff and the Files viewer and editor share a gutter **+** on desktop:
