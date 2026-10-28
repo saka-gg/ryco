@@ -330,6 +330,54 @@ export const DiagnosticsSignalProcessResult = Schema.Struct({
 });
 export type DiagnosticsSignalProcessResult = typeof DiagnosticsSignalProcessResult.Type;
 
+/**
+ * One record of the server's event-loop stall history (`event-loop-stalls.ndjson`). `kind` is an
+ * open set (`event-loop`, `threadpool`, `threadpool-pending` today) so a newer server's kinds never
+ * break an older reader. Optional fields are absent where the platform has no value.
+ */
+export const DiagnosticsEventLoopStall = Schema.Struct({
+  time: IsoDateTime,
+  kind: TrimmedNonEmptyString,
+  /** The longest stall the record covers. */
+  durationMs: NonNegativeInt,
+  startedAt: Schema.optional(IsoDateTime),
+  count: NonNegativeInt,
+  totalMs: NonNegativeInt,
+  suspendedMs: Schema.optional(NonNegativeInt),
+  /** `elu` or `cpu`: how busy time was measured. Open set. */
+  busySource: Schema.optional(TrimmedNonEmptyString),
+  cpuUserMs: Schema.optional(NonNegativeInt),
+  cpuSystemMs: Schema.optional(NonNegativeInt),
+  majorPageFaults: Schema.optional(NonNegativeInt),
+  minorPageFaults: Schema.optional(NonNegativeInt),
+  involuntaryContextSwitches: Schema.optional(NonNegativeInt),
+  rssBytes: Schema.optional(NonNegativeInt),
+  heapUsedBytes: Schema.optional(NonNegativeInt),
+  loadAverage1m: Schema.optional(Schema.Number),
+  cpuCount: Schema.optional(NonNegativeInt),
+  phases: Schema.optional(Schema.Array(Schema.String)),
+  pid: Schema.optional(NonNegativeInt),
+  uptimeMs: Schema.optional(NonNegativeInt),
+});
+export type DiagnosticsEventLoopStall = typeof DiagnosticsEventLoopStall.Type;
+
+export const DiagnosticsEventLoopHistory = Schema.Struct({
+  thresholdMs: NonNegativeInt,
+  windowMs: NonNegativeInt,
+  historyFilePaths: Schema.Array(TrimmedNonEmptyString),
+  /** Newest first, at most 50. */
+  recent: Schema.Array(DiagnosticsEventLoopStall),
+  last24h: Schema.Struct({
+    records: NonNegativeInt,
+    /** Event-loop stalls (summed record counts). */
+    stalls: NonNegativeInt,
+    longestMs: NonNegativeInt,
+    /** Threadpool stalls of every threadpool kind (summed record counts). */
+    threadpoolStalls: NonNegativeInt,
+  }),
+});
+export type DiagnosticsEventLoopHistory = typeof DiagnosticsEventLoopHistory.Type;
+
 export const DiagnosticsSnapshot = Schema.Struct({
   generatedAt: IsoDateTime,
   serverStartedAt: IsoDateTime,
@@ -344,6 +392,8 @@ export const DiagnosticsSnapshot = Schema.Struct({
   failures: DiagnosticsFailures,
   client: DiagnosticsClient,
   performance: Schema.optional(DiagnosticsOperationalPerformance),
+  /** Absent from servers that do not record stalls yet. */
+  eventLoop: Schema.optional(DiagnosticsEventLoopHistory),
   warnings: Schema.Array(DiagnosticsWarning),
 });
 export type DiagnosticsSnapshot = typeof DiagnosticsSnapshot.Type;
