@@ -21,6 +21,8 @@ import { CopilotClient, type SessionConfig } from "@github/copilot-sdk";
 import { Effect, Option, Schema } from "effect";
 
 import { makeCopilotClientOptions } from "../provider/Layers/CopilotAdapter.ts";
+import { withCopilotAgentPriority } from "../provider/Layers/CopilotAdapter.types.ts";
+import type { AgentProcessPriorityShape } from "../provider/agentProcessPriority.ts";
 import {
   COPILOT_CLIENT_STOP_TIMEOUT_MS,
   stopCopilotClient,
@@ -128,21 +130,28 @@ function gitTextGenerationSelection(): ModelSelection {
 export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(function* (
   copilotSettings: CopilotSettings,
   environment: NodeJS.ProcessEnv = process.env,
-  clientFactory: (cwd: string, sideQuestion?: boolean) => Effect.Effect<CopilotClient> = (
-    cwd,
-    sideQuestion,
-  ) =>
-    Effect.promise(() =>
-      makeCopilotClientOptions(
-        copilotSettings,
-        sideQuestion ? sideQuestionEnvironment(environment) : environment,
-        cwd,
-      ),
-    ).pipe(Effect.map((options) => new CopilotClient(options))),
+  /** Test seam; the default runs the configured CLI (through `nice` per `processPriority`). */
+  clientFactoryOverride?: (cwd: string, sideQuestion?: boolean) => Effect.Effect<CopilotClient>,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
+  const processPriority = options?.processPriority;
+  const clientFactory =
+    clientFactoryOverride ??
+    ((cwd: string, sideQuestion?: boolean) =>
+      Effect.promise(() =>
+        makeCopilotClientOptions(
+          copilotSettings,
+          sideQuestion ? sideQuestionEnvironment(environment) : environment,
+          cwd,
+        ),
+      ).pipe(
+        Effect.flatMap((clientOptions) => withCopilotAgentPriority(processPriority, clientOptions)),
+        Effect.map((clientOptions) => new CopilotClient(clientOptions)),
+      ));
   const codexFallback = yield* makeCodexTextGeneration(
     Schema.decodeSync(CodexSettings)({}),
     environment,
+    { processPriority },
   );
 
   const withGitFallbackSelection = <T extends { readonly modelSelection: ModelSelection }>(

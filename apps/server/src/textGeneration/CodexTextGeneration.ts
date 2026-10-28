@@ -42,6 +42,10 @@ import {
 } from "./TextGenerationUtils.ts";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 import { codexServiceTierForSelection } from "../provider/CodexServiceTier.ts";
+import {
+  type AgentProcessPriorityShape,
+  spawnAgentProcess,
+} from "../provider/agentProcessPriority.ts";
 
 const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
@@ -90,6 +94,7 @@ const CODEX_LIGHTWEIGHT_ARGS: ReadonlyArray<string> = [
 export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(function* (
   codexConfig: CodexSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  options?: { readonly processPriority?: AgentProcessPriorityShape | undefined },
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -255,13 +260,15 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         },
       );
 
-      const child = yield* commandSpawner
-        .spawn(command)
-        .pipe(
-          Effect.mapError((cause) =>
-            normalizeCliError("codex", operation, cause, "Failed to spawn Codex CLI process"),
-          ),
-        );
+      const child = yield* spawnAgentProcess(
+        commandSpawner,
+        options?.processPriority,
+        command,
+      ).pipe(
+        Effect.mapError((cause) =>
+          normalizeCliError("codex", operation, cause, "Failed to spawn Codex CLI process"),
+        ),
+      );
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [

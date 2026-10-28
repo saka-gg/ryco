@@ -4,11 +4,13 @@ import { Effect, Layer } from "effect";
 import { ProviderInstanceId } from "@ryco/contracts";
 import { ServerConfig } from "../../config.ts";
 import { ProviderEventLoggers, NoOpProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
+import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
 import { AcpRegistryDriver, projectAcpRegistrySession } from "./AcpRegistryDriver.ts";
 
 const layer = ServerConfig.layerTest(process.cwd(), { prefix: "ryco-registry-driver-test-" }).pipe(
   Layer.provideMerge(NodeServices.layer),
   Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+  Layer.provideMerge(AgentProcessPriorityOffLive),
 );
 const makeDriver = (enabled = true) =>
   AcpRegistryDriver.create({

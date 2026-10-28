@@ -5,7 +5,15 @@ import { Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
 import { createModelSelection } from "@ryco/shared/model";
 import { expect } from "vite-plus/test";
 
+import os from "node:os";
+
+import { agentCommandResolves, resolveNiceExecutable } from "@ryco/shared/processPriority";
+
 import { ServerConfig } from "../config.ts";
+import {
+  type AgentProcessPriorityShape,
+  makeAgentProcessPriority,
+} from "../provider/agentProcessPriority.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { sanitizeThreadTitle } from "./TextGenerationUtils.ts";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
@@ -51,6 +59,9 @@ function makeFakeClaudeBinary(dir: string) {
         '  printf "%s\\n" "HOME was $HOME" >&2',
         "  exit 5",
         "fi",
+        'if [ -n "$RYCO_FAKE_CLAUDE_NICE_FILE" ]; then',
+        '  ps -o nice= -p $$ > "$RYCO_FAKE_CLAUDE_NICE_FILE"',
+        "fi",
         'if [ -n "$RYCO_FAKE_CLAUDE_STDERR" ]; then',
         '  printf "%s\\n" "$RYCO_FAKE_CLAUDE_STDERR" >&2',
         "fi",
@@ -74,6 +85,8 @@ function withFakeClaudeEnv<A, E, R>(
     stdinMustContain?: string;
     homeMustBe?: string;
     claudeConfig?: Partial<ClaudeSettings>;
+    niceFile?: string;
+    processPriority?: AgentProcessPriorityShape;
   },
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
 ) {
@@ -89,6 +102,7 @@ function withFakeClaudeEnv<A, E, R>(
     const previousArgsMustNotContain = process.env.RYCO_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
     const previousStdinMustContain = process.env.RYCO_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
     const previousHomeMustBe = process.env.RYCO_FAKE_CLAUDE_HOME_MUST_BE;
+    const previousNiceFile = process.env.RYCO_FAKE_CLAUDE_NICE_FILE;
 
     yield* Effect.acquireRelease(
       Effect.sync(() => {
@@ -129,6 +143,12 @@ function withFakeClaudeEnv<A, E, R>(
           process.env.RYCO_FAKE_CLAUDE_HOME_MUST_BE = input.homeMustBe;
         } else {
           delete process.env.RYCO_FAKE_CLAUDE_HOME_MUST_BE;
+        }
+
+        if (input.niceFile !== undefined) {
+          process.env.RYCO_FAKE_CLAUDE_NICE_FILE = input.niceFile;
+        } else {
+          delete process.env.RYCO_FAKE_CLAUDE_NICE_FILE;
         }
       }),
       () =>
@@ -176,11 +196,21 @@ function withFakeClaudeEnv<A, E, R>(
           } else {
             process.env.RYCO_FAKE_CLAUDE_HOME_MUST_BE = previousHomeMustBe;
           }
+
+          if (previousNiceFile === undefined) {
+            delete process.env.RYCO_FAKE_CLAUDE_NICE_FILE;
+          } else {
+            process.env.RYCO_FAKE_CLAUDE_NICE_FILE = previousNiceFile;
+          }
         }),
     );
 
     const config = Schema.decodeSync(ClaudeSettings)(input.claudeConfig ?? {});
-    const textGeneration = yield* makeClaudeTextGeneration(config);
+    const textGeneration = yield* makeClaudeTextGeneration(
+      config,
+      undefined,
+      input.processPriority ? { processPriority: input.processPriority } : undefined,
+    );
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
@@ -406,6 +436,47 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
           }),
       );
     }),
+  );
+
+  const fakeClaudeNiceness = (processPriority: AgentProcessPriorityShape | undefined) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-claude-nice-" });
+      const niceFile = path.join(dir, "nice");
+      yield* withFakeClaudeEnv(
+        {
+          output: JSON.stringify({ structured_output: { title: "Lower priority" } }),
+          niceFile,
+          ...(processPriority ? { processPriority } : {}),
+        },
+        (textGeneration) =>
+          textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Run agents at a lower priority",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-sonnet-4-6",
+            },
+          }),
+      );
+      return Number((yield* fs.readFileString(niceFile)).trim());
+    }).pipe(Effect.scoped);
+
+  it.effect.skipIf(process.platform === "win32" || resolveNiceExecutable() === null)(
+    "runs the Claude CLI at the server's niceness + 5 with agent priority",
+    () =>
+      Effect.gen(function* () {
+        const priority = makeAgentProcessPriority({
+          enabled: Effect.succeed(true),
+          platform: process.platform,
+          niceExecutable: resolveNiceExecutable,
+          commandResolves: agentCommandResolves,
+          lowerChild: () => "unchanged",
+        });
+        expect(yield* fakeClaudeNiceness(priority)).toBe(Math.min(19, os.getPriority() + 5));
+        expect(yield* fakeClaudeNiceness(undefined)).toBe(os.getPriority());
+      }),
   );
 
   it.effect("falls back when Claude thread title normalization becomes whitespace-only", () =>

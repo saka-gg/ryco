@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
+import { type AgentProcessPriorityShape, spawnAgentProcess } from "../agentProcessPriority.ts";
 import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
   collectSessionConfigOptionValues,
@@ -140,6 +141,11 @@ export interface AcpSessionRuntimeOptions {
     readonly logOutgoing?: boolean;
     readonly logger?: (event: EffectAcpProtocol.AcpProtocolLogEvent) => Effect.Effect<void, never>;
   };
+  /**
+   * Lowers the agent process (and everything it starts). Opt-in per call site: sessions and
+   * text generation pass it, provider probes and registry authentication do not.
+   */
+  readonly processPriority?: AgentProcessPriorityShape | undefined;
 }
 
 export interface AcpSessionRequestLogEvent {
@@ -327,24 +333,24 @@ const makeAcpSessionRuntime = (
         ),
       );
 
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(options.spawn.command, [...options.spawn.args], {
-          ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: { ...process.env, ...options.spawn.env } } : {}),
-          shell: options.spawn.shell ?? process.platform === "win32",
-        }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new EffectAcpErrors.AcpSpawnError({
-              command: options.spawn.command,
-              cause,
-            }),
-        ),
-      );
+    const child = yield* spawnAgentProcess(
+      spawner,
+      options.processPriority,
+      ChildProcess.make(options.spawn.command, [...options.spawn.args], {
+        ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
+        ...(options.spawn.env ? { env: { ...process.env, ...options.spawn.env } } : {}),
+        shell: options.spawn.shell ?? process.platform === "win32",
+      }),
+    ).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+      Effect.mapError(
+        (cause) =>
+          new EffectAcpErrors.AcpSpawnError({
+            command: options.spawn.command,
+            cause,
+          }),
+      ),
+    );
 
     if (options.onProcessExit) {
       yield* child.exitCode.pipe(

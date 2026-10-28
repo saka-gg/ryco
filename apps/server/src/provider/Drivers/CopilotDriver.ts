@@ -12,6 +12,7 @@ import {
   checkCopilotProviderStatus,
   makePendingCopilotProvider,
 } from "../Layers/CopilotProvider.ts";
+import { AgentProcessPriority } from "../agentProcessPriority.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -52,6 +53,7 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
 });
 
 export type CopilotDriverEnv =
+  | AgentProcessPriority
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | HttpClient.HttpClient
@@ -89,6 +91,7 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const processPriority = yield* AgentProcessPriority;
       const agentControl = yield* Effect.serviceOption(AgentControlSessionRegistry);
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
@@ -106,10 +109,16 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
       const adapter = yield* makeCopilotAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        processPriority,
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCopilotTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeCopilotTextGeneration(
+        effectiveConfig,
+        processEnv,
+        undefined,
+        { processPriority },
+      );
 
       const checkProvider = checkCopilotProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),

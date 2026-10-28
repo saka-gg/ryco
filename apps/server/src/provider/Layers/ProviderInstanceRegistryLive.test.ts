@@ -44,6 +44,7 @@ import { CursorDriver } from "../Drivers/CursorDriver.ts";
 import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
+import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
 import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 
@@ -101,6 +102,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(AgentProcessPriorityOffLive),
     Layer.provideMerge(ServerSettingsService.layerTest()),
   );
 
@@ -239,6 +241,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(infraLayer),
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(AgentProcessPriorityOffLive),
     Layer.provideMerge(ServerSettingsService.layerTest()),
   );
 

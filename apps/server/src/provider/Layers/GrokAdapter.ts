@@ -5,7 +5,7 @@ import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSup
 
 export type GrokAdapterLiveOptions = Pick<
   AcpAdapterLiveOptions,
-  "environment" | "nativeEventLogPath" | "nativeEventLogger" | "instanceId"
+  "environment" | "nativeEventLogPath" | "nativeEventLogger" | "instanceId" | "processPriority"
 >;
 
 export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapterLiveOptions) {

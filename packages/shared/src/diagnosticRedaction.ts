@@ -4,6 +4,27 @@ export const DIAGNOSTIC_SECRET_KEY_PATTERN =
 const REDACTED = "[redacted]";
 
 /**
+ * Provider tokens known by their prefix: AWS key ids, Google API keys and OAuth client secrets,
+ * Stripe, Slack, GitLab, Square and Meta tokens. These are the token shapes, besides `sk-`, GitHub
+ * and JWTs, that the Claude Agent SDK hides in Claude Code's stderr, with the SDK's boundaries and
+ * lengths, so the stderr tail Ryco keeps for its own Claude spawn hides them too.
+ */
+const PROVIDER_TOKEN = new RegExp(
+  [
+    String.raw`(?<![A-Za-z\d+])(?:AKIA|ASIA|ABIA|ACCA|A3T[A-Z\d])[A-Z\d]{16}(?![A-Za-z\d+=])`,
+    String.raw`(?<![\w+-])(?:AIza[\w-]{35}|GOCSPX-[\w-]{28})(?![\w+=-])`,
+    String.raw`(?<![\w+-])[rs]k_(?:live|test|prod)_(?=[A-Za-z\d]{0,64}\d)[A-Za-z\d]{24,}(?![\w+=-])`,
+    String.raw`\b(?:(?:xox[a-z](?:\.xox[a-z])?|xapp|xwfp)-(?=[\w+/=%-]{0,64}\d)|xox[cd]-)[\w+/=%-]{10,}`,
+    String.raw`\bgl(?:pat|dt|rt|ft|soat|oas|agent|ptt|cbt|imt|ffct)-[\w=-]{20,}(?:\.[a-z\d]{9})?`,
+    String.raw`\bsq0(?:atp|csp)-[\w-]{22,}`,
+    String.raw`(?<![A-Za-z\d+/])EAAA[\w+/=%-]{56,}`,
+  ].join("|"),
+  "gu",
+);
+/** A Slack webhook's path is its credential. */
+const SLACK_WEBHOOK_PATH = /\bhooks\.slack\.com\/(?:services|workflows|triggers)\/[\w/-]+/giu;
+
+/**
  * The start of a `key=value`, `key: value` or `key => value` assignment, the key optionally quoted
  * (`"apiKey":`, `\"apiKey\":`, Markdown code). A key begins after a non-key character, so no key
  * run is rescanned, and `==`, `:=` and `::` are not assignments. The spacing never crosses a line.
@@ -309,6 +330,8 @@ export function redactDiagnosticText(value: string): string {
       /\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]+)\b/gu,
       "[redacted]",
     )
+    .replace(PROVIDER_TOKEN, REDACTED)
+    .replace(SLACK_WEBHOOK_PATH, `hooks.slack.com/${REDACTED}`)
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, "[redacted]")
     .replace(/https?:\/\/[^\s<>"']+/giu, (match) => {
       try {

@@ -9,6 +9,7 @@ import { createStorageManagementController } from "@ryco/client-runtime/state/st
 import { formatStorageSize, resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
 import { useServerConfig } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
+import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import {
   readEnvironmentConnection,
   updateEnvironmentServerSettings,
@@ -44,13 +45,9 @@ export function StorageSettings() {
       key={environmentId ?? "offline"}
       environmentId={environmentId}
       disabled={
-        scope === "client" ||
         !config ||
         config.environment.capabilities.storageManagement !== true ||
-        (scope === "node" && !target) ||
-        Boolean(
-          target && (!target.connected || target.canManage === false || target.canMutate === false),
-        )
+        isNodeSettingsTargetReadOnly(scope, target)
       }
     />
   );

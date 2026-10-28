@@ -1,4 +1,5 @@
 import type { SettingsSectionId } from "../../settingsDialogStore";
+import type { SettingsEditingScope, SettingsTarget } from "../../settingsTarget";
 
 /**
  * Which settings sections a reader can actually open, as one predicate.
@@ -192,4 +193,22 @@ export function settingsSectionInDestination(
     "updates",
     "diagnostics",
   ].includes(section);
+}
+
+/**
+ * Whether this settings surface cannot change a node-owned setting: client-only editing, node
+ * editing without a target node, or a target node that is disconnected or that this client may
+ * not manage or mutate. Feature checks (capabilities, a loaded config) stay with each caller.
+ */
+export function isNodeSettingsTargetReadOnly(
+  scope: SettingsEditingScope,
+  target: SettingsTarget | null,
+): boolean {
+  return (
+    scope === "client" ||
+    (scope === "node" && !target) ||
+    Boolean(
+      target && (!target.connected || target.canManage === false || target.canMutate === false),
+    )
+  );
 }

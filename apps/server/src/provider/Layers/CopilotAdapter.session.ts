@@ -54,6 +54,7 @@ import {
   makeCopilotClientOptions,
   selectionTargetsCopilotInstance,
   toMessage,
+  withCopilotAgentPriority,
 } from "./CopilotAdapter.types.ts";
 import {
   installAgentControlNativeHttp,
@@ -204,6 +205,10 @@ export const makeStartSession =
 
       const clientOptions: CopilotClientOptions = yield* Effect.promise(() =>
         makeCopilotClientOptions(deps.copilotSettings, deps.environment, input.cwd),
+      ).pipe(
+        Effect.flatMap((options) =>
+          withCopilotAgentPriority(deps.options?.processPriority, options),
+        ),
       );
       const client =
         deps.options?.clientFactory?.(clientOptions) ?? new CopilotClient(clientOptions);

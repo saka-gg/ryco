@@ -48,6 +48,7 @@ import {
   makeOpenCodeServerOwner,
   type OpenCodeServerOwner,
 } from "../provider/OpenCodeServerOwner.ts";
+import type { AgentProcessPriorityShape } from "../provider/agentProcessPriority.ts";
 
 /**
  * Titles, branch names and workspace change summaries are short; each has a fallback (the
@@ -102,14 +103,20 @@ function getOpenCodeTextResponse(parts: ReadonlyArray<unknown> | undefined): str
 export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration")(function* (
   openCodeSettings: OpenCodeSettings,
   environment: NodeJS.ProcessEnv = process.env,
-  options?: { readonly serverOwner?: OpenCodeServerOwner },
+  options?: {
+    readonly serverOwner?: OpenCodeServerOwner;
+    /** Lowers a server this text generation starts itself; undefined spawns it unchanged. */
+    readonly processPriority?: AgentProcessPriorityShape | undefined;
+  },
 ) {
   const serverConfig = yield* ServerConfig;
   const openCodeRuntime = yield* OpenCodeRuntime;
   const serverOwner =
     options?.serverOwner ??
     (openCodeSettings.serverUrl.trim().length === 0
-      ? yield* makeOpenCodeServerOwner(openCodeSettings, environment)
+      ? yield* makeOpenCodeServerOwner(openCodeSettings, environment, {
+          processPriority: options?.processPriority,
+        })
       : undefined);
 
   const runOpenCodeJson = Effect.fn("runOpenCodeJson")(function* <S extends Schema.Top>(input: {
