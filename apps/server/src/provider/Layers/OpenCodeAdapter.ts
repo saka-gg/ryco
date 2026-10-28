@@ -82,11 +82,6 @@ import { OpenCodePartIndex } from "../openCodePartIndex.ts";
 const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_RESUME_VERSION = 1;
 
-interface OpenCodeTurnSnapshot {
-  readonly id: TurnId;
-  readonly items: Array<unknown>;
-}
-
 type OpenCodeSubscribedEvent =
   Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>> extends {
     readonly stream: AsyncIterable<infer TEvent>;
@@ -122,7 +117,6 @@ interface OpenCodeSessionContext {
   readonly startedSubagentIds: Set<string>;
   readonly completedSubagentIds: Set<string>;
   readonly tasks: OpenCodeTaskLifecycle;
-  readonly turns: Array<OpenCodeTurnSnapshot>;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -530,31 +524,6 @@ function planStepsFromOpenCodeTodos(
     });
   }
   return steps;
-}
-
-function resolveTurnSnapshot(
-  context: OpenCodeSessionContext,
-  turnId: TurnId,
-): OpenCodeTurnSnapshot {
-  const existing = context.turns.find((turn) => turn.id === turnId);
-  if (existing) {
-    return existing;
-  }
-
-  const created: OpenCodeTurnSnapshot = { id: turnId, items: [] };
-  context.turns.push(created);
-  return created;
-}
-
-function appendTurnItem(
-  context: OpenCodeSessionContext,
-  turnId: TurnId | undefined,
-  item: unknown,
-): void {
-  if (!turnId) {
-    return;
-  }
-  resolveTurnSnapshot(context, turnId).items.push(item);
 }
 
 function ensureSessionContext(
@@ -1739,7 +1708,6 @@ export function makeOpenCodeAdapter(
                     : "item.updated",
               payload,
             };
-            if (!childSubagent) appendTurnItem(context, turnId, part);
             yield* emitForContext(context, runtimeEvent);
           }
           break;
@@ -2352,7 +2320,6 @@ export function makeOpenCodeAdapter(
           startedSubagentIds: new Set(),
           completedSubagentIds: new Set(),
           tasks: new OpenCodeTaskLifecycle(),
-          turns: [],
           activeTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
@@ -2912,7 +2879,6 @@ export function makeOpenCodeAdapter(
           context.openCodeSessionId = fork.id;
           context.forgottenTurnIds = [...droppedTurnIds];
           context.childSessionIds.clear();
-          context.turns.splice(Math.max(0, context.turns.length - remainingTurns));
           // The host context rides on the first prompt; a fork before it loses it.
           if (boundaryIndex === 0) context.agentControlHostContextDelivered = false;
           context.session = {

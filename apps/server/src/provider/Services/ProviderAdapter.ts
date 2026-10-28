@@ -93,6 +93,18 @@ export interface ProviderRollbackInput {
   readonly droppedTurnIds: ReadonlyArray<TurnId>;
 }
 
+/**
+ * One turn of a provider thread snapshot. Codex and OpenCode read `items` from the provider's own
+ * store on demand. Claude, Copilot, Cursor and ACP have no store to read, so they report only turn
+ * ids, with empty `items` (`providerThreadSnapshotFromTurnIds`): completed turns for Claude, Cursor
+ * and ACP; one id per started assistant round for Copilot.
+ *
+ * An adapter session may keep ids, counters and working state that is bounded per item (or per
+ * segment, for streamed text), but never an append-only list of message bodies, tool input or
+ * output, prompts or stream deltas: nothing in production reads snapshot items, and such a list
+ * grows with every event for as long as the session lives. Each adapter's `retention:` test cases
+ * check this with `testUtils/adapterRetention.ts`.
+ */
 export interface ProviderThreadTurnSnapshot {
   readonly id: TurnId;
   readonly items: ReadonlyArray<unknown>;

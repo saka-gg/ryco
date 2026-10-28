@@ -36,6 +36,7 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import type { CopilotAdapterShape } from "../Services/CopilotAdapter.ts";
+import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
 import { requireRuntimeSessionId } from "../runtimeSession.ts";
 import {
   COPILOT_CLIENT_STOP_TIMEOUT_MS,
@@ -49,7 +50,6 @@ import {
   type PendingApprovalRequest,
   type PendingTurnStartRequest,
   type PendingUserInputRequest,
-  buildThreadSnapshot,
   isSessionNotFoundError,
   makeCopilotClientOptions,
   selectionTargetsCopilotInstance,
@@ -322,7 +322,7 @@ export const makeStartSession =
         pendingTurnStarts: new Set(),
         htmlRenderToolCalls: new Map(),
         deviceToolBinding,
-        turns: [],
+        turnIds: [],
         renewSession: () => client.createSession(sessionConfig),
         attachSession: (nextSession) => {
           record.unsubscribe();
@@ -706,7 +706,7 @@ export const makeReadThread =
   (threadId) =>
     Effect.gen(function* () {
       const record = yield* deps.requireSession(threadId);
-      return buildThreadSnapshot(threadId, record.turns);
+      return providerThreadSnapshotFromTurnIds(threadId, record.turnIds);
     });
 
 /** Copilot cannot forget turns; ProviderService refuses before reaching this. */
