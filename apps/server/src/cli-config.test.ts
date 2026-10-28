@@ -1148,6 +1148,130 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  const resolveWithObservability = Effect.fn(function* (options: {
+    readonly name: string;
+    readonly env: Record<string, string>;
+    readonly settings?: { readonly otlpTracesUrl?: string; readonly otlpMetricsUrl?: string };
+  }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const baseDir = yield* fs.makeTempDirectoryScoped({
+      prefix: `ryco-cli-config-${options.name}-`,
+    });
+    if (options.settings !== undefined) {
+      const derivedPaths = yield* deriveServerPaths(baseDir, undefined);
+      yield* fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true });
+      yield* fs.writeFileString(
+        derivedPaths.settingsPath,
+        `${JSON.stringify({ observability: options.settings })}\n`,
+      );
+    }
+    return yield* resolveServerConfig(makeServerFlags(baseDir), Option.none()).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ConfigProvider.layer(ConfigProvider.fromEnv({ env: options.env })),
+          NetService.layer,
+        ),
+      ),
+    );
+  });
+
+  it.effect("exports to the standard OTEL endpoint when nothing in Ryco configures OTLP", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveWithObservability({
+        name: "otel-endpoint",
+        env: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" },
+      });
+
+      expect(resolved.otlpTracesUrl).toBe("http://collector:4318/v1/traces");
+      expect(resolved.otlpMetricsUrl).toBe("http://collector:4318/v1/metrics");
+      expect(resolved.otlpLogsUrl).toBe("http://collector:4318/v1/logs");
+      expect(resolved.otlpExports).toEqual({
+        traces: { protocol: "http/protobuf", endpointVariable: "OTEL_EXPORTER_OTLP_ENDPOINT" },
+        metrics: { protocol: "http/protobuf", endpointVariable: "OTEL_EXPORTER_OTLP_ENDPOINT" },
+        logs: { protocol: "http/protobuf", endpointVariable: "OTEL_EXPORTER_OTLP_ENDPOINT" },
+      });
+      expect(resolved.observabilityWarnings).toBeUndefined();
+    }),
+  );
+
+  it.effect("turns off Settings exports for OTEL_SDK_DISABLED=true with one warning each", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveWithObservability({
+        name: "otel-disabled",
+        env: { OTEL_SDK_DISABLED: "true" },
+        settings: {
+          otlpTracesUrl: "http://localhost:4318/v1/traces",
+          otlpMetricsUrl: "http://localhost:4318/v1/metrics",
+        },
+      });
+
+      expect(resolved.otlpTracesUrl).toBeUndefined();
+      expect(resolved.otlpMetricsUrl).toBeUndefined();
+      expect(resolved.observabilityWarnings).toEqual([
+        "OTEL_SDK_DISABLED=true turned off the OTLP traces export set by Settings.",
+        "OTEL_SDK_DISABLED=true turned off the OTLP metrics export set by Settings.",
+      ]);
+    }),
+  );
+
+  it.effect("keeps Settings URLs ahead of an inherited OTEL endpoint, usable or not", () =>
+    Effect.gen(function* () {
+      const settings = {
+        otlpTracesUrl: "http://localhost:4318/v1/traces",
+        otlpMetricsUrl: "http://localhost:4318/v1/metrics",
+      };
+      // Claude Code's documented telemetry setup, inherited from the shell.
+      const grpc = yield* resolveWithObservability({
+        name: "otel-grpc",
+        env: {
+          OTEL_EXPORTER_OTLP_PROTOCOL: "grpc",
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4317",
+          OTEL_LOGS_EXPORTER: "otlp",
+        },
+        settings,
+      });
+      expect(grpc.otlpTracesUrl).toBe(settings.otlpTracesUrl);
+      expect(grpc.otlpMetricsUrl).toBe(settings.otlpMetricsUrl);
+      expect(grpc.otlpExports).toBeUndefined();
+      expect(grpc.otlpLogsUrl).toBeUndefined();
+      expect(grpc.observabilityWarnings).toEqual([
+        "OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not supported (Ryco sends OTLP over HTTP only), so logs are not sent to OTEL_EXPORTER_OTLP_ENDPOINT.",
+      ]);
+
+      const http = yield* resolveWithObservability({
+        name: "otel-http",
+        env: {
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://other-collector:4318",
+          OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=secret",
+        },
+        settings,
+      });
+      expect(http.otlpTracesUrl).toBe(settings.otlpTracesUrl);
+      expect(http.otlpMetricsUrl).toBe(settings.otlpMetricsUrl);
+      expect(http.otlpLogsUrl).toBe("http://other-collector:4318/v1/logs");
+      expect(Object.keys(http.otlpExports ?? {})).toEqual(["logs"]);
+    }),
+  );
+
+  it.effect("keeps a validated OTEL_RESOURCE_ATTRIBUTES and warns about an invalid one", () =>
+    Effect.gen(function* () {
+      const valid = yield* resolveWithObservability({
+        name: "otel-resource",
+        env: { OTEL_RESOURCE_ATTRIBUTES: "team=core,service.name=other" },
+      });
+      expect(valid.otlpResourceAttributes).toEqual({ team: "core" });
+
+      const invalid = yield* resolveWithObservability({
+        name: "otel-resource-invalid",
+        env: { OTEL_RESOURCE_ATTRIBUTES: "a=%zz", RYCO_OTLP_TRACES_URL: "http://x/v1/traces" },
+      });
+      expect(invalid.otlpTracesUrl).toBe("http://x/v1/traces");
+      expect(invalid.otlpResourceAttributes).toBeUndefined();
+      expect(invalid.observabilityWarnings).toHaveLength(1);
+    }),
+  );
+
   it.effect("forces noBrowser and disables auto-bootstrap for headless startup presentation", () =>
     Effect.gen(function* () {
       const { join } = yield* Path.Path;

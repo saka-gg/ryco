@@ -109,6 +109,15 @@ import {
 } from "./cliSetup/setupFlow.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
 import { makeDbCommand } from "./cliDb/dbCommand.ts";
+import {
+  makeTraceCommand,
+  type TraceLocation,
+  type TraceLocationFlags,
+} from "./cliTrace/traceCommand.ts";
+import {
+  OtelEnvironmentConfig,
+  resolveServerOtlpExports,
+} from "./observability/OtelEnvironment.ts";
 import packageJson from "../package.json" with { type: "json" };
 import type { CliRemoteError } from "./cliRemote/remotes.ts";
 import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
@@ -303,16 +312,23 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
   Flag.optional,
 );
 
-const EnvServerConfig = Config.all({
-  logLevel: Config.LogLevel("RYCO_LOG_LEVEL").pipe(Config.withDefault("Info")),
-  traceMinLevel: Config.LogLevel("RYCO_TRACE_MIN_LEVEL").pipe(Config.withDefault("Info")),
-  traceTimingEnabled: Config.Boolean("RYCO_TRACE_TIMING_ENABLED").pipe(Config.withDefault(true)),
+/** Where the data directory and the trace file are; `ryco trace` reads only these variables. */
+const traceLocationEnvFields = {
+  rycoHome: Config.String("RYCO_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  devUrl: Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   traceFile: Config.String("RYCO_TRACE_FILE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  traceMaxBytes: Config.Int("RYCO_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
   traceMaxFiles: Config.Int("RYCO_TRACE_MAX_FILES").pipe(Config.withDefault(10)),
+};
+
+const EnvServerConfig = Config.all({
+  ...traceLocationEnvFields,
+  logLevel: Config.LogLevel("RYCO_LOG_LEVEL").pipe(Config.withDefault("Info")),
+  traceMinLevel: Config.LogLevel("RYCO_TRACE_MIN_LEVEL").pipe(Config.withDefault("Info")),
+  traceTimingEnabled: Config.Boolean("RYCO_TRACE_TIMING_ENABLED").pipe(Config.withDefault(true)),
+  traceMaxBytes: Config.Int("RYCO_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
   traceBatchWindowMs: Config.Int("RYCO_TRACE_BATCH_WINDOW_MS").pipe(Config.withDefault(200)),
   otlpTracesUrl: Config.String("RYCO_OTLP_TRACES_URL").pipe(
     Config.option,
@@ -322,6 +338,11 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  otlpLogsUrl: Config.String("RYCO_OTLP_LOGS_URL").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  otel: OtelEnvironmentConfig,
   otlpExportIntervalMs: Config.Int("RYCO_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
   browserTracesEnabled: Config.Boolean("RYCO_BROWSER_TRACES").pipe(Config.withDefault(false)),
   otlpServiceName: Config.String("RYCO_OTLP_SERVICE_NAME").pipe(Config.withDefault("ryco-server")),
@@ -331,8 +352,6 @@ const EnvServerConfig = Config.all({
   ),
   port: Config.Port("RYCO_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
   host: Config.String("RYCO_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  rycoHome: Config.String("RYCO_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  devUrl: Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   noBrowser: Config.Boolean("RYCO_NO_BROWSER").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -779,6 +798,20 @@ export const resolveServerConfig = (
       ),
     });
 
+    const otlp = yield* resolveServerOtlpExports(env.otel, {
+      traces: {
+        rycoEnvUrl: env.otlpTracesUrl,
+        bootstrapUrl: bootstrap?.otlpTracesUrl,
+        settingsUrl: persistedObservabilitySettings.otlpTracesUrl,
+      },
+      metrics: {
+        rycoEnvUrl: env.otlpMetricsUrl,
+        bootstrapUrl: bootstrap?.otlpMetricsUrl,
+        settingsUrl: persistedObservabilitySettings.otlpMetricsUrl,
+      },
+      logs: { rycoEnvUrl: env.otlpLogsUrl },
+    });
+
     const config: ServerConfigShape = {
       logLevel,
       traceMinLevel: env.traceMinLevel,
@@ -786,14 +819,14 @@ export const resolveServerConfig = (
       traceBatchWindowMs: env.traceBatchWindowMs,
       traceMaxBytes: env.traceMaxBytes,
       traceMaxFiles: env.traceMaxFiles,
-      otlpTracesUrl:
-        env.otlpTracesUrl ??
-        bootstrap?.otlpTracesUrl ??
-        persistedObservabilitySettings.otlpTracesUrl,
-      otlpMetricsUrl:
-        env.otlpMetricsUrl ??
-        bootstrap?.otlpMetricsUrl ??
-        persistedObservabilitySettings.otlpMetricsUrl,
+      otlpTracesUrl: otlp.traces.url,
+      otlpMetricsUrl: otlp.metrics.url,
+      ...(otlp.logs.url !== undefined ? { otlpLogsUrl: otlp.logs.url } : {}),
+      ...(otlp.exports !== undefined ? { otlpExports: otlp.exports } : {}),
+      ...(otlp.resourceAttributes !== undefined
+        ? { otlpResourceAttributes: otlp.resourceAttributes }
+        : {}),
+      ...(otlp.warnings.length > 0 ? { observabilityWarnings: otlp.warnings } : {}),
       otlpExportIntervalMs: env.otlpExportIntervalMs,
       ...(env.browserTracesEnabled ? { browserTracesEnabled: true } : {}),
       otlpServiceName: env.otlpServiceName,
@@ -875,6 +908,31 @@ const resolveCliAuthConfig = (
     },
     cliLogLevel,
   );
+
+/**
+ * The trace file the server writes, found the way `resolveServerConfig` finds it, but without
+ * creating the data directory's folders: `ryco trace` only reads.
+ */
+const resolveTraceLocation = (flags: TraceLocationFlags) =>
+  Effect.gen(function* () {
+    const env = yield* Config.all(traceLocationEnvFields);
+    const devUrl = Option.getOrUndefined(
+      resolveOptionPrecedence(flags.devUrl, Option.fromUndefinedOr(env.devUrl)),
+    );
+    const baseDir = yield* resolveBaseDir(
+      Option.getOrUndefined(
+        resolveOptionPrecedence(flags.baseDir, Option.fromUndefinedOr(env.rycoHome)),
+      ),
+    );
+    const { stateDir, serverTracePath } = yield* deriveServerPaths(baseDir, devUrl);
+    return {
+      baseDir,
+      stateDir,
+      traceFilePath: env.traceFile ?? serverTracePath,
+      traceFileFromEnv: env.traceFile !== undefined,
+      maxBackups: env.traceMaxFiles,
+    } satisfies TraceLocation;
+  });
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;
 
@@ -4259,6 +4317,14 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
       resolveConfig: resolveCliAuthConfig,
       quietly,
       adminCommandLogLevel,
+    }),
+    makeTraceCommand({
+      locationFlags: sharedServerLocationFlags,
+      jsonFlag,
+      emitJson,
+      durationSchema: DurationFromString,
+      resolveTraceLocation,
+      quietly,
     }),
   ]),
 );
