@@ -13,7 +13,8 @@ import {
   type AgentControlProposalStreamProposalEvent,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
-import { Context, Effect, Layer, Option, PubSub, Ref, Stream } from "effect";
+import { Clock, Context, Effect, Fiber, Layer, Option, PubSub, Ref, Stream } from "effect";
+import { TestClock } from "effect/testing";
 
 import { AgentControlExternalRepositoryLive } from "../../persistence/Layers/AgentControlExternal.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -100,12 +101,24 @@ const withHarness = <A, E>(
     readonly integrationRef: Ref.Ref<AgentControlExternalIntegration>;
     readonly proposals: Map<string, AgentControlProposal>;
     readonly submittedPlans: Array<AgentControlProposal["plan"]>;
+    /** Publishes an integration change, as the integration service does on every grant change. */
+    readonly publishChange: (id: AgentControlIntegrationId) => Effect.Effect<boolean>;
+    /** Stores a proposal transition and publishes it, as the proposal store does. */
+    readonly transitionProposal: (
+      proposalId: string,
+      status: AgentControlProposal["status"],
+    ) => Effect.Effect<boolean>;
+    /** Publishes a proposal event without storing it. */
+    readonly publishProposal: (proposal: AgentControlProposal) => Effect.Effect<boolean>;
+    readonly revalidations: () => number;
   }) => Effect.Effect<A, E>,
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
       const integrationRef = yield* Ref.make(integration());
       const proposalEvents = yield* PubSub.unbounded<AgentControlProposalStreamProposalEvent>();
+      const integrationChanges = yield* PubSub.unbounded<AgentControlIntegrationId>();
+      let revalidations = 0;
       const proposals = new Map<string, AgentControlProposal>();
       const submittedPlans: Array<AgentControlProposal["plan"]> = [];
       let proposalSequence = 0;
@@ -138,13 +151,17 @@ const withHarness = <A, E>(
           }),
         revalidate: () =>
           Ref.get(integrationRef).pipe(
+            Effect.tap(() => Effect.sync(() => revalidations++)),
             Effect.flatMap((current) =>
-              current.revokedAt === null
-                ? Effect.succeed(current)
-                : Effect.fail(new AgentControlExternalIntegrationError({ reason: "revoked" })),
+              current.revokedAt !== null
+                ? Effect.fail(new AgentControlExternalIntegrationError({ reason: "revoked" }))
+                : current.expiresAt !== null
+                  ? Effect.fail(new AgentControlExternalIntegrationError({ reason: "expired" }))
+                  : Effect.succeed(current),
             ),
           ),
         appendAudit: () => Effect.void,
+        subscribeChanges: PubSub.subscribe(integrationChanges),
       } as unknown as AgentControlExternalIntegrationServiceShape;
       const integrationLayer = Layer.succeed(
         AgentControlExternalIntegrationService,
@@ -230,12 +247,33 @@ const withHarness = <A, E>(
         credentialAudience: "external-mcp",
         credentialHash: "a".repeat(64),
       });
+      let revision = 0;
+      const publishProposal = (proposal: AgentControlProposal) =>
+        Effect.suspend(() => {
+          revision += 1;
+          const event: AgentControlProposalStreamProposalEvent = {
+            version: 1,
+            type: "proposal",
+            revision,
+            proposal,
+          };
+          return PubSub.publish(proposalEvents, event);
+        });
       return yield* run({
         tasks: Context.get(context, AgentControlExternalTaskService),
         repository,
         integrationRef,
         proposals,
         submittedPlans,
+        publishChange: (id) => PubSub.publish(integrationChanges, id),
+        transitionProposal: (proposalId, status) =>
+          Effect.suspend(() => {
+            const next = { ...proposals.get(proposalId)!, status };
+            proposals.set(proposalId, next);
+            return publishProposal(next);
+          }),
+        publishProposal,
+        revalidations: () => revalidations,
       });
     }),
   );
@@ -354,7 +392,7 @@ it.effect("external tasks enforce elevated grants and task ownership", () =>
 );
 
 it.live("revocation interrupts a long external task wait", () =>
-  withHarness(({ tasks, integrationRef }) =>
+  withHarness(({ tasks, integrationRef, publishChange }) =>
     Effect.gen(function* () {
       const created = yield* tasks.create({ integrationId, request: request("request-wait") });
       const [revoked] = yield* Effect.all(
@@ -372,11 +410,165 @@ it.live("revocation interrupts a long external task wait", () =>
                 revokedAt: new Date().toISOString(),
               })),
             ),
+            Effect.andThen(publishChange(integrationId)),
           ),
         ] as const,
         { concurrency: "unbounded" },
       );
       assert.strictEqual(reasonOf(revoked), "revoked");
+    }),
+  ),
+);
+
+/** Lets forked fibers run without advancing the test clock; true once `fiber` has ended. */
+const awaitDone = (fiber: Fiber.Fiber<unknown, unknown>) =>
+  Effect.gen(function* () {
+    for (let turn = 0; turn < 50 && fiber.pollUnsafe() === undefined; turn += 1) {
+      yield* Effect.yieldNow;
+    }
+    return fiber.pollUnsafe() !== undefined;
+  });
+
+it.effect("an external task wait wakes on its proposal decision", () =>
+  withHarness(({ tasks, transitionProposal, revalidations }) =>
+    Effect.gen(function* () {
+      const created = yield* tasks.create({ integrationId, request: request("request-decided") });
+      const fiber = yield* Effect.forkChild(
+        tasks.wait({
+          integrationId,
+          request: { taskId: created.task.taskId, waitFor: "decided", timeoutMs: 25_000 },
+        }),
+      );
+      // Fails on the 250 ms poll: virtual time never advances here.
+      assert.isFalse(yield* awaitDone(fiber));
+      const before = revalidations();
+      yield* transitionProposal(created.receipt.proposalId, "approved");
+      assert.isTrue(yield* awaitDone(fiber));
+      const result = yield* Fiber.join(fiber);
+      assert.isFalse(result.timedOut);
+      assert.strictEqual(result.receipt.status, "approved");
+      assert.strictEqual(revalidations(), before + 1);
+      assert.strictEqual(yield* Clock.currentTimeMillis, 0);
+    }),
+  ),
+);
+
+it.effect(
+  "an external task wait re-checks a burst of decisions within 250 ms, as the poll did",
+  () =>
+    withHarness(({ tasks, transitionProposal, revalidations }) =>
+      Effect.gen(function* () {
+        const created = yield* tasks.create({ integrationId, request: request("request-burst") });
+        const fiber = yield* Effect.forkChild(
+          tasks.wait({
+            integrationId,
+            request: { taskId: created.task.taskId, waitFor: "terminal", timeoutMs: 25_000 },
+          }),
+        );
+        assert.isFalse(yield* awaitDone(fiber));
+        const before = revalidations();
+        // Approval is not terminal: checked at once.
+        yield* transitionProposal(created.receipt.proposalId, "approved");
+        assert.isFalse(yield* awaitDone(fiber));
+        assert.strictEqual(revalidations(), before + 1);
+        // The completion right behind it waits for the trailing check, at most one old poll
+        // interval later.
+        yield* transitionProposal(created.receipt.proposalId, "completed");
+        assert.isFalse(yield* awaitDone(fiber));
+        yield* TestClock.adjust(249);
+        assert.isFalse(yield* awaitDone(fiber));
+        yield* TestClock.adjust(1);
+        assert.isTrue(yield* awaitDone(fiber));
+        const result = yield* Fiber.join(fiber);
+        assert.isFalse(result.timedOut);
+        assert.strictEqual(result.receipt.status, "completed");
+        assert.strictEqual(revalidations(), before + 2);
+      }),
+    ),
+);
+
+it.effect("an external task wait ignores other proposals and integrations", () =>
+  withHarness(({ tasks, proposals, publishProposal, publishChange, revalidations }) =>
+    Effect.gen(function* () {
+      const created = yield* tasks.create({ integrationId, request: request("request-mine") });
+      const fiber = yield* Effect.forkChild(
+        tasks.wait({ integrationId, request: { taskId: created.task.taskId, timeoutMs: 25_000 } }),
+      );
+      assert.isFalse(yield* awaitDone(fiber));
+      const before = revalidations();
+      yield* publishProposal({
+        ...proposals.get(created.receipt.proposalId)!,
+        proposalId: AgentControlProposalId.make("proposal-someone-else"),
+        status: "rejected",
+      });
+      yield* publishChange(AgentControlIntegrationId.make("integration-someone-else"));
+      assert.isFalse(yield* awaitDone(fiber));
+      assert.strictEqual(revalidations(), before);
+      yield* Fiber.interrupt(fiber);
+    }),
+  ),
+);
+
+it.effect("an integration change revalidates an external task wait at once", () =>
+  withHarness(({ tasks, integrationRef, publishChange }) =>
+    Effect.gen(function* () {
+      const created = yield* tasks.create({ integrationId, request: request("request-revoke") });
+      const fiber = yield* Effect.forkChild(
+        Effect.flip(
+          tasks.wait({
+            integrationId,
+            request: { taskId: created.task.taskId, timeoutMs: 25_000 },
+          }),
+        ),
+      );
+      assert.isFalse(yield* awaitDone(fiber));
+      yield* Ref.update(integrationRef, (current) => ({ ...current, revokedAt: "2026-10-23" }));
+      yield* publishChange(integrationId);
+      assert.isTrue(yield* awaitDone(fiber));
+      assert.strictEqual(reasonOf(yield* Fiber.join(fiber)), "revoked");
+      assert.strictEqual(yield* Clock.currentTimeMillis, 0);
+    }),
+  ),
+);
+
+it.effect("an expired integration ends an external task wait at the next re-check", () =>
+  withHarness(({ tasks, integrationRef }) =>
+    Effect.gen(function* () {
+      const created = yield* tasks.create({ integrationId, request: request("request-expire") });
+      const fiber = yield* Effect.forkChild(
+        Effect.flip(
+          tasks.wait({
+            integrationId,
+            request: { taskId: created.task.taskId, timeoutMs: 25_000 },
+          }),
+        ),
+      );
+      assert.isFalse(yield* awaitDone(fiber));
+      // Expiry publishes no change event.
+      yield* Ref.update(integrationRef, (current) => ({ ...current, expiresAt: "2026-10-23" }));
+      yield* TestClock.adjust(4_999);
+      assert.isFalse(yield* awaitDone(fiber));
+      yield* TestClock.adjust(1);
+      assert.isTrue(yield* awaitDone(fiber));
+      assert.strictEqual(reasonOf(yield* Fiber.join(fiber)), "expired");
+    }),
+  ),
+);
+
+it.effect("a quiet external task wait re-checks 6 times over 25 s instead of 101", () =>
+  withHarness(({ tasks, revalidations }) =>
+    Effect.gen(function* () {
+      const created = yield* tasks.create({ integrationId, request: request("request-quiet") });
+      const before = revalidations();
+      const fiber = yield* Effect.forkChild(
+        tasks.wait({ integrationId, request: { taskId: created.task.taskId, timeoutMs: 25_000 } }),
+      );
+      assert.isFalse(yield* awaitDone(fiber));
+      yield* TestClock.adjust(25_000);
+      assert.isTrue(yield* awaitDone(fiber));
+      assert.isTrue((yield* Fiber.join(fiber)).timedOut);
+      // Checks at 0, 5, 10, 15, 20 and 25 s.
+      assert.strictEqual(revalidations() - before, 6);
     }),
   ),
 );

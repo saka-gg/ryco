@@ -20,6 +20,24 @@ export const MONITOR_TASK_TYPES: ReadonlySet<string> = new Set([
 /** Task types that are neither agents nor watch loops (plan-mode bookkeeping). */
 export const INERT_TASK_TYPES: ReadonlySet<string> = new Set(["plan", "dream"]);
 
+/** Task and subagent statuses after which the work never runs again without a new attempt. */
+export const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "stopped",
+  "cancelled",
+  "interrupted",
+]);
+
+/**
+ * Whether a reported status takes a task out of the live set: a terminal status, or `idle` (a
+ * resting, resumable Codex child does nothing, and an all-idle fleet must not keep a thread
+ * working). The server liveness registry and the Agent Control wait wake filter both use it.
+ */
+export function endsTaskLiveness(status: string | undefined): boolean {
+  return status !== undefined && (status === "idle" || TERMINAL_TASK_STATUSES.has(status));
+}
+
 /**
  * Agent-vs-background classification, stamped by ingestion as `agentKind` so
  * persisted rows are self-describing. A deliberate denylist: the SDK's

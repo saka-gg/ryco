@@ -10,7 +10,7 @@ import {
   type AgentControlProposal,
   type AgentControlProposalStatus,
 } from "@ryco/contracts";
-import { Duration, Effect, Layer, Option, PubSub } from "effect";
+import { Effect, Layer, Option, PubSub } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import {
@@ -18,6 +18,7 @@ import {
   type StoredAgentControlExternalTask,
 } from "../../persistence/Services/AgentControlExternal.ts";
 import { AgentControlExternalIntegrationError } from "../Errors.ts";
+import { wakeOnSubscription, waitUntil } from "../eventDrivenWait.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
@@ -34,6 +35,9 @@ import {
 const fail = (
   reason: ConstructorParameters<typeof AgentControlExternalIntegrationError>[0]["reason"],
 ) => Effect.fail(new AgentControlExternalIntegrationError({ reason }));
+
+/** Minimum spacing of woken task-wait checks: the interval of the poll the wait replaced. */
+const TASK_WAIT_WAKE_SPACING_MS = 250;
 
 const waitConditionMet = (
   status: AgentControlProposalStatus,
@@ -337,19 +341,29 @@ export const makeAgentControlExternalTask = (options?: AgentControlExternalTaskL
             Math.max(1, requestedTimeout),
             AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
           );
-          const deadline = Date.now() + timeoutMs;
-          while (true) {
-            // Revalidation every bounded wait slice makes revocation and expiry
-            // interrupt a long wait without relying on another proposal event.
-            yield* integrations.revalidate(input.integrationId);
-            const current = yield* resultFor(task);
-            if (waitConditionMet(current.receipt.status, waitFor)) {
-              return { ...current, timedOut: false };
-            }
-            const remaining = deadline - Date.now();
-            if (remaining <= 0) return { ...current, timedOut: true };
-            yield* Effect.sleep(Duration.millis(Math.min(250, remaining)));
-          }
+          const { value, timedOut } = yield* waitUntil({
+            sources: [
+              wakeOnSubscription(
+                proposalEvents.subscribe,
+                (event) => event.proposal.proposalId === task.proposalId,
+              ),
+              wakeOnSubscription(
+                integrations.subscribeChanges,
+                (changed) => changed === input.integrationId,
+              ),
+            ],
+            timeoutMs,
+            wakeSpacingMs: TASK_WAIT_WAKE_SPACING_MS,
+            // Revalidate before every read, so a revoked or expired integration never gets a
+            // receipt. Revocation and grant changes wake the wait through the integration feed;
+            // expiry and a disabled policy end it at the next 5 s re-check.
+            check: Effect.gen(function* () {
+              yield* integrations.revalidate(input.integrationId);
+              const current = yield* resultFor(task);
+              return { done: waitConditionMet(current.receipt.status, waitFor), value: current };
+            }),
+          });
+          return { ...value, timedOut };
         }),
       );
 
