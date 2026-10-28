@@ -1,14 +1,11 @@
-import { useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import {
-  getWsConnectionStatusForEnvironment,
-  getWsConnectionUiState,
-} from "@ryco/client-runtime/rpc";
+import { getWsConnectionUiState } from "@ryco/client-runtime/rpc";
 import type { SavedEnvironmentConnectionState } from "@ryco/client-runtime/connection";
 
-import { useConnectionRegistry } from "../providers/ConnectionRegistryProvider";
-import { useWsConnectionStatus, wsUiStateForEnvironment } from "../rpc/wsConnectionState";
+import { useWsConnectionStatus } from "../rpc/wsConnectionState";
+import { savedEnvironmentUiState } from "../features/connection/connectionRows";
+import { useSavedEnvironmentSnapshots } from "../features/connection/useSavedEnvironmentSnapshots";
 import {
   hostedState,
   selectShellCurrentByEnvironmentId,
@@ -46,17 +43,7 @@ function mapConnectionPhase(state: SavedEnvironmentConnectionState): Environment
 }
 
 export function useWorkspaceState(): WorkspaceState {
-  const { catalog } = useConnectionRegistry();
-  const registryState = useSyncExternalStore(
-    catalog.registryStore.subscribe,
-    catalog.registryStore.getState,
-    catalog.registryStore.getState,
-  );
-  const runtimeState = useSyncExternalStore(
-    catalog.runtimeStore.subscribe,
-    catalog.runtimeStore.getState,
-    catalog.runtimeStore.getState,
-  );
+  const { records, runtimeById, statuses, hydrated: isReady } = useSavedEnvironmentSnapshots();
   const wsStatus = useWsConnectionStatus();
   // A flat per-environment flag compared shallowly: `environmentStateById`
   // gets a new identity on every streamed shell or orchestration event, and
@@ -68,20 +55,15 @@ export function useWorkspaceState(): WorkspaceState {
 
   const wsUiState = getWsConnectionUiState(wsStatus);
   const networkStatus: NetworkStatus = wsUiState === "offline" ? "offline" : "online";
-  const isReady = catalog.hasHydrated();
 
-  const environments: WorkspaceEnvironment[] = Object.values(registryState.byId).map((record) => {
-    const runtime = runtimeState.byId[record.environmentId];
+  const environments: WorkspaceEnvironment[] = Object.values(records).map((record) => {
+    const runtime = runtimeById[record.environmentId];
     const basePhase: EnvironmentConnectionPhase = runtime
       ? mapConnectionPhase(runtime.connectionState)
       : "available";
     // Each environment's own socket drives its reconnecting overlay — one
-    // flapping node must not mark every other node as reconnecting. (The global
-    // wsStatus hook above stays subscribed as the re-render trigger; every
-    // keyed write also writes the global.)
-    const environmentUiState = wsUiStateForEnvironment(
-      getWsConnectionStatusForEnvironment(record.environmentId),
-    );
+    // flapping node must not mark every other node as reconnecting.
+    const environmentUiState = savedEnvironmentUiState(statuses, record.environmentId);
     const phase: EnvironmentConnectionPhase =
       environmentUiState === "reconnecting" && basePhase !== "connected"
         ? "reconnecting"

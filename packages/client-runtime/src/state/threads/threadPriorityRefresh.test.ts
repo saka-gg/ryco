@@ -7,6 +7,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   getThreadPriorityRefreshCoordinator,
+  sameThreadPriorityRefreshEnvironments,
   THREAD_PRIORITY_CHANGE_QUIET_MS,
   THREAD_PRIORITY_DEFAULT_REFRESH_INTERVAL_MS,
   type ThreadPriorityRefreshEnvironment,
@@ -215,5 +216,31 @@ describe("thread priority refresh coordinator", () => {
     expect(manual.attempted).toEqual([failing.environmentId]);
     expect(manual.succeeded).toEqual([]);
     expect(manual.failures[0]).toMatchObject({ environmentId: failing.environmentId });
+  });
+});
+
+describe("sameThreadPriorityRefreshEnvironments", () => {
+  // The mobile bridge rebuilds the list on every socket status write; only a
+  // change in a field the coordinator reads may wake it.
+  it("compares the fields the coordinator decides on, in order", () => {
+    const list = [environment("a"), environment("b", { supported: false })];
+    expect(
+      sameThreadPriorityRefreshEnvironments(list, [
+        environment("a"),
+        environment("b", { supported: false }),
+      ]),
+    ).toBe(true);
+    expect(sameThreadPriorityRefreshEnvironments([], [])).toBe(true);
+
+    for (const changed of [
+      [environment("a", { generation: 2 }), list[1]!],
+      [environment("a", { connected: false }), list[1]!],
+      [environment("a"), environment("b")],
+      [environment("a", { lastSuccessfulCheckAtMs: 5 }), list[1]!],
+      [list[1]!, list[0]!],
+      [list[0]!],
+    ]) {
+      expect(sameThreadPriorityRefreshEnvironments(list, changed)).toBe(false);
+    }
   });
 });

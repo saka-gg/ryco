@@ -81,7 +81,8 @@ export interface SavedEnvironmentRuntimeStoreState {
   readonly reset: () => void;
 }
 
-const DEFAULT_RUNTIME_STATE: SavedEnvironmentRuntimeState = Object.freeze({
+/** What `getRuntime` answers for an environment the runtime store has no entry for. */
+export const DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE: SavedEnvironmentRuntimeState = Object.freeze({
   connectionState: "disconnected",
   authState: "unknown",
   lastError: null,
@@ -105,6 +106,14 @@ export function createSavedEnvironmentCatalog(input: {
 }) {
   let hydrated = false;
   let hydration: Promise<void> | null = null;
+  // Its own channel, not a registry notification: the connection supervisor
+  // starts a saved-environment sync on every registry notification once
+  // hydrated, and already starts one when hydration resolves.
+  const hydrationListeners = new Set<() => void>();
+  const setHydrated = (next: boolean) => {
+    hydrated = next;
+    hydrationListeners.forEach((listener) => listener());
+  };
   const registryStore = createStore<SavedEnvironmentRegistryState>(
     {} as SavedEnvironmentRegistryState,
   );
@@ -165,13 +174,21 @@ export function createSavedEnvironmentCatalog(input: {
       runtimeStore.setState((state) =>
         state.byId[environmentId]
           ? {}
-          : { byId: { ...state.byId, [environmentId]: { ...DEFAULT_RUNTIME_STATE } } },
+          : {
+              byId: {
+                ...state.byId,
+                [environmentId]: { ...DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE },
+              },
+            },
       ),
     patch: (environmentId, patch) =>
       runtimeStore.setState((state) => ({
         byId: {
           ...state.byId,
-          [environmentId]: { ...(state.byId[environmentId] ?? DEFAULT_RUNTIME_STATE), ...patch },
+          [environmentId]: {
+            ...(state.byId[environmentId] ?? DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE),
+            ...patch,
+          },
         },
       })),
     clear: (environmentId) =>
@@ -185,6 +202,15 @@ export function createSavedEnvironmentCatalog(input: {
     registryStore,
     runtimeStore,
     hasHydrated: () => hydrated,
+    /**
+     * Notifies when `hasHydrated` changes, so a view can read it as a
+     * `useSyncExternalStore` snapshot. It flips after the stored records have
+     * landed in the registry (also when reading them failed).
+     */
+    subscribeHydration: (listener: () => void): (() => void) => {
+      hydrationListeners.add(listener);
+      return () => hydrationListeners.delete(listener);
+    },
     waitForHydration: () => {
       if (hydrated) return Promise.resolve();
       if (hydration) return hydration;
@@ -199,8 +225,8 @@ export function createSavedEnvironmentCatalog(input: {
         })
         .catch((error) => console.error("[SAVED_ENVIRONMENTS] hydrate failed", error))
         .finally(() => {
-          hydrated = true;
           hydration = null;
+          setHydrated(true);
         });
       return hydration;
     },
@@ -218,12 +244,12 @@ export function createSavedEnvironmentCatalog(input: {
       input.secretKV.set(environmentId, token),
     removeBearerToken: (environmentId: EnvironmentId) => input.secretKV.remove(environmentId),
     resetForTests: () => {
-      hydrated = false;
       hydration = null;
+      setHydrated(false);
       registryStore.setState({ byId: {} });
     },
     resetRuntimeForTests: () => runtimeStore.getState().reset(),
     getRuntime: (environmentId: EnvironmentId) =>
-      runtimeStore.getState().byId[environmentId] ?? DEFAULT_RUNTIME_STATE,
+      runtimeStore.getState().byId[environmentId] ?? DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE,
   };
 }
