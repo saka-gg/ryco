@@ -4,13 +4,19 @@ import {
   type FilesystemBrowseEntry,
   type OrchestrationThreadMessageSearchResult,
 } from "@ryco/contracts";
+import type { ThreadLifecycleAction } from "@ryco/client-runtime/state/threads";
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { type ReactNode } from "react";
+import type { CurrentThreadLifecycle, ThreadSnoozeOption } from "../commandPaletteStore";
 import { sortThreads } from "../lib/threadSort";
+import type { SettingsSectionId } from "../settingsDialogStore";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
+import type { SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
 export const RECENT_THREAD_LIMIT = 12;
+/** Settings results show only while typing, under Threads, at most this many. */
+export const SETTINGS_SEARCH_RESULT_LIMIT = 8;
 export const ITEM_ICON_CLASS = "size-4 text-muted-foreground/80";
 export const ADDON_ICON_CLASS = "size-4";
 
@@ -261,12 +267,160 @@ export function buildMessageSearchItems(input: {
   });
 }
 
+export function buildSettingsSearchItems(input: {
+  entries: ReadonlyArray<SettingsSearchEntry>;
+  sectionTitles: Readonly<Record<SettingsSectionId, string>>;
+  icon: ReactNode;
+  runEntry: (entry: SettingsSearchEntry) => void;
+}): CommandPaletteActionItem[] {
+  return input.entries.map((entry) => ({
+    kind: "action" as const,
+    value: `settings:${entry.owner}:${entry.section}:${entry.title}`,
+    searchTerms: [entry.title, entry.description, entry.keywords ?? ""],
+    title: entry.title,
+    description: input.sectionTitles[entry.section],
+    icon: input.icon,
+    run: async () => {
+      input.runEntry(entry);
+    },
+  }));
+}
+
+/** The open thread's "Snooze until" view: each time, with when it wakes the thread. */
+export function buildSnoozeUntilGroups(input: {
+  options: ReadonlyArray<ThreadSnoozeOption>;
+  icon: ReactNode;
+  snooze: (snoozedUntil: string) => void;
+}): CommandPaletteGroup[] {
+  return [
+    {
+      value: "snooze-until",
+      label: "Snooze until",
+      items: input.options.map((option) => ({
+        kind: "action" as const,
+        value: `snooze-until:${option.id}`,
+        searchTerms: [option.label, option.timeLabel],
+        title: option.label,
+        description: option.timeLabel,
+        icon: input.icon,
+        run: async () => {
+          input.snooze(option.snoozedUntil);
+        },
+      })),
+    },
+  ];
+}
+
+export interface CurrentThreadLifecycleIcons {
+  readonly settle: ReactNode;
+  readonly moveToActive: ReactNode;
+  readonly snooze: ReactNode;
+  readonly snoozeAddon: ReactNode;
+  readonly archive: ReactNode;
+  readonly markUnread: ReactNode;
+}
+
+/**
+ * Settle, snooze, archive and mark unread for the open thread, disabled with
+ * the Inbox's reason when they cannot run (and all but mark unread while one
+ * is pending). Settle and snooze toggle like the Inbox row's buttons.
+ * `snoozeUntil` is the view of snooze times, null while the thread is snoozed.
+ */
+export function buildCurrentThreadLifecycleActions(input: {
+  lifecycle: CurrentThreadLifecycle;
+  icons: CurrentThreadLifecycleIcons;
+}): {
+  items: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
+  snoozeUntil: CommandPaletteView | null;
+} {
+  const { lifecycle, icons } = input;
+  const unavailable = (action: ThreadLifecycleAction) => {
+    const reason = lifecycle.disabledReasons[action];
+    if (reason !== null) return { description: reason, disabled: true };
+    return lifecycle.pending && action !== "markUnread" ? { disabled: true } : {};
+  };
+  const snoozeUntil: CommandPaletteView | null = lifecycle.snoozed
+    ? null
+    : {
+        addonIcon: icons.snoozeAddon,
+        groups: buildSnoozeUntilGroups({
+          options: lifecycle.snoozeOptions(),
+          icon: icons.snooze,
+          snooze: lifecycle.snooze,
+        }),
+      };
+  const snoozeSearchTerms = ["snooze", "unsnooze", "later", "remind", "wake", "current thread"];
+  const items: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [
+    {
+      kind: "action",
+      value: "action:current-thread-settle",
+      searchTerms: ["settle", "done", "move to active", "unsettle", "active", "current thread"],
+      title: lifecycle.settled ? "Move current thread to Active" : "Settle current thread",
+      icon: lifecycle.settled ? icons.moveToActive : icons.settle,
+      shortcutCommand: "thread.settle",
+      ...unavailable("settle"),
+      run: async () => {
+        lifecycle.setSettled(!lifecycle.settled);
+      },
+    },
+    snoozeUntil === null
+      ? {
+          kind: "action",
+          value: "action:current-thread-snooze",
+          searchTerms: snoozeSearchTerms,
+          title: "Unsnooze current thread",
+          icon: icons.snooze,
+          shortcutCommand: "thread.snooze",
+          ...unavailable("snooze"),
+          run: async () => {
+            lifecycle.snooze(null);
+          },
+        }
+      : {
+          kind: "submenu",
+          value: "action:current-thread-snooze",
+          searchTerms: snoozeSearchTerms,
+          title: "Snooze current thread…",
+          icon: icons.snooze,
+          shortcutCommand: "thread.snooze",
+          ...unavailable("snooze"),
+          ...snoozeUntil,
+        },
+    {
+      kind: "action",
+      value: "action:current-thread-archive",
+      searchTerms: ["archive", "hide", "current thread"],
+      title: "Archive current thread",
+      icon: icons.archive,
+      shortcutCommand: "thread.archive",
+      ...unavailable("archive"),
+      run: async () => {
+        lifecycle.archive();
+      },
+    },
+    {
+      kind: "action",
+      value: "action:current-thread-mark-unread",
+      searchTerms: ["mark unread", "unread", "unseen", "current thread"],
+      title: "Mark current thread unread",
+      icon: icons.markUnread,
+      shortcutCommand: "thread.markUnread",
+      ...unavailable("markUnread"),
+      run: async () => {
+        lifecycle.markUnread();
+      },
+    },
+  ];
+  return { items, snoozeUntil };
+}
+
 export function filterCommandPaletteGroups(input: {
   activeGroups: ReadonlyArray<CommandPaletteGroup>;
   query: string;
   isInSubmenu: boolean;
   projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
   threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
+  settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
   messageSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
   const isActionsFilter = input.query.startsWith(">");
@@ -303,6 +457,13 @@ export function filterCommandPaletteGroups(input: {
         items: input.threadSearchItems,
       });
     }
+    if (input.settingsSearchItems && input.settingsSearchItems.length > 0) {
+      searchableGroups.push({
+        value: "settings-search",
+        label: "Settings",
+        items: input.settingsSearchItems,
+      });
+    }
     if (input.messageSearchItems && input.messageSearchItems.length > 0) {
       searchableGroups.push({
         value: "messages-search",
@@ -331,6 +492,7 @@ export function filterCommandPaletteGroups(input: {
           entry !== null,
       )
       .toSorted((left, right) => right.rank - left.rank || left.index - right.index)
+      .slice(0, group.value === "settings-search" ? SETTINGS_SEARCH_RESULT_LIMIT : undefined)
       .map((entry) => entry.item);
 
     if (items.length === 0) {

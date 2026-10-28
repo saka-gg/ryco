@@ -4,18 +4,19 @@ import { expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { SettingsSection } from "./settingsLayout";
+import type { SettingsSearchTarget } from "./settingsSearchReveal";
 import { useSettingsSubsections } from "./useSettingsSubsections";
 
 function Harness() {
   const [open, setOpen] = useState(false);
   const [extra, setExtra] = useState(false);
-  const [target, setTarget] = useState<string | null>(null);
+  const [target, setTarget] = useState<SettingsSearchTarget | null>(null);
   const { contentRef, sections, active } = useSettingsSubsections("general", false, target);
   return (
     <>
       <button onClick={() => setOpen(!open)}>Toggle settings</button>
       <button onClick={() => setExtra(!extra)}>Toggle notifications</button>
-      <button onClick={() => setTarget("Quit shortcut")}>Search quit</button>
+      <button onClick={() => setTarget({ targetId: "Quit shortcut" })}>Search quit</button>
       <nav>
         {sections.map(({ id, title, element }) => (
           <button
@@ -65,6 +66,10 @@ it("discovers late-mounted sections, tracks scroll, reveals search targets, and 
   await expect
     .element(page.getByRole("button", { name: "Notifications", exact: true }))
     .not.toBeInTheDocument();
+  await behavior.click();
+  await page.getByRole("button", { name: "Search quit" }).click();
+  await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Quit shortcut"));
+  // The same result picked again reveals its row again.
   await behavior.click();
   await page.getByRole("button", { name: "Search quit" }).click();
   await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Quit shortcut"));

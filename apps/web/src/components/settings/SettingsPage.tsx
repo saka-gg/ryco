@@ -1,5 +1,5 @@
 import { EnvironmentId } from "@ryco/contracts";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { useRouter } from "@tanstack/react-router";
 import {
   ActivityIcon,
   AppWindowIcon,
@@ -45,7 +45,7 @@ import { isElectron, isHostedHubMode } from "../../env";
 import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
 import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
-import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
+import { useSettingsPageTarget } from "../../hooks/useSettingsPageTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
 import { useHostedHubStore } from "../../hostedHub/state";
 import { useHostedNodePageDemand } from "../../hostedHub/useHostedNodePageDemand";
@@ -56,17 +56,10 @@ import {
   useDesktopWorkspaceState,
 } from "../../platform/desktopWorkspace";
 import { type SettingsSectionId, useSettingsDialogStore } from "../../settingsDialogStore";
-import {
-  resolveSettingsTargetEnvironmentId,
-  SettingsEditingScopeProvider,
-  SettingsTargetProvider,
-} from "../../settingsTarget";
-import { useStore } from "../../store";
-import { resolveThreadRouteRef } from "../../threadRoutes";
+import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import { DeviceIcon } from "../DeviceIcon";
 import { useHostedConnectionActions } from "../hostedHub/HostedConnectionControls";
 import { nodeSelectionBlocked, selectableNodes } from "../hostedHub/HostedNodeDisplay.logic";
-import { isLocalOnboardingClient } from "../onboarding/localOnboarding";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -75,18 +68,27 @@ import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ArchivedThreadsPanel, GeneralSettingsPanel, useSettingsRestore } from "./SettingsPanels";
-import { SETTINGS_SEARCH_INDEX, type SettingsSearchEntry } from "./settingsSearchIndex";
-import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
+import {
+  filterSettingsSearchEntries,
+  readSettingsSearchScope,
+  SETTINGS_LINK_SECTIONS,
+  SETTINGS_SECTION_TITLES,
+  settingsSectionListed,
+  type SettingsDestination,
+  type SettingsSearchEntry,
+} from "./settingsSearchIndex";
+import {
+  takeSettingsReveal,
+  useSettingsSearchRevealStore,
+  type SettingsSearchTarget,
+} from "./settingsSearchReveal";
 import { SettingsCard, SettingsEmpty } from "./settingsLayout";
 import { useSettingsSubsections } from "./useSettingsSubsections";
 import { preloadWindowCaptureSettings } from "./WindowCaptureSettings";
 import { useActiveIndicator } from "../ui/useActiveIndicator";
 
-type SettingsDestination = "client" | "node";
-
 interface NavItem {
   readonly id: SettingsSectionId;
-  readonly label: string;
   readonly icon: ComponentType<{ className?: string }>;
   /** One line under the page title. A pair when the two destinations differ. */
   readonly description: string | { readonly client: string; readonly node: string };
@@ -95,13 +97,11 @@ interface NavItem {
 const NAV_ITEMS: ReadonlyArray<NavItem> = [
   {
     id: "account",
-    label: "Account",
     icon: UserRoundIcon,
     description: "Your Hub identity, sign-in methods, and recovery.",
   },
   {
     id: "general",
-    label: "General",
     icon: Settings2Icon,
     description: {
       client: "Behavior, notifications, and defaults for this app.",
@@ -110,37 +110,31 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "inbox",
-    label: "Inbox",
     icon: SparklesIcon,
     description: "What the inbox surfaces and the models that summarize it.",
   },
   {
     id: "appearance",
-    label: "Appearance",
     icon: PaletteIcon,
     description: "Theme, typography, and interface details for this app.",
   },
   {
     id: "providers",
-    label: "Providers",
     icon: BlocksIcon,
     description: "Coding agents on this device and the models they offer.",
   },
   {
     id: "opinionated-plugins",
-    label: "Plugins",
     icon: PuzzleIcon,
     description: "Ryco plugins installed into each agent on this device.",
   },
   {
     id: "mcp-servers",
-    label: "MCP",
     icon: ServerIcon,
     description: "Model Context Protocol servers each agent can reach.",
   },
   {
     id: "integrations",
-    label: "Integrations",
     icon: PlugIcon,
     description: {
       client: "Desktop permissions, computer use, and the browser bridge.",
@@ -149,13 +143,11 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "keybindings",
-    label: "Keybindings",
     icon: KeyboardIcon,
     description: "Keyboard shortcuts saved in this app or browser profile.",
   },
   {
     id: "source-control",
-    label: "Source control",
     icon: GitBranchIcon,
     description: {
       client: "How this app presents commits, branches, and pull requests.",
@@ -164,25 +156,21 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "connections",
-    label: "Connections",
     icon: Link2Icon,
     description: "The devices this app can reach and how it reaches them.",
   },
   {
     id: "updates",
-    label: "Updates",
     icon: ArrowUpCircleIcon,
     description: "Ryco and its providers on every device this app reaches, in one click.",
   },
   {
     id: "security",
-    label: "Security",
     icon: ShieldIcon,
     description: "Who can reach this device, live sessions, and pairing policy.",
   },
   {
     id: "diagnostics",
-    label: "Diagnostics",
     icon: ActivityIcon,
     description: {
       client: "Performance and presentation checks for this app.",
@@ -191,20 +179,15 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   },
   {
     id: "statistics",
-    label: "Statistics",
     icon: BarChart3Icon,
     description: "Usage and activity for this device.",
   },
   {
     id: "archived",
-    label: "Archive",
     icon: ArchiveIcon,
     description: "Archived threads on this device. Unarchive or delete them.",
   },
 ];
-
-/** Sections that open another page instead of rendering a panel here. */
-const LINK_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["statistics"]);
 
 /**
  * Every section the settings page can navigate to.
@@ -227,7 +210,7 @@ export const SETTINGS_SECTION_IDS: ReadonlyArray<SettingsSectionId> = NAV_ITEMS.
  * that pointer if the section is ever renamed underneath it.
  */
 export const SETTINGS_SECTION_LABELS: ReadonlyMap<SettingsSectionId, string> = new Map(
-  NAV_ITEMS.map((item) => [item.id, item.label] as const),
+  NAV_ITEMS.map((item) => [item.id, SETTINGS_SECTION_TITLES[item.id]] as const),
 );
 
 // The gates themselves live in `settingsSections.logic.ts`, because
@@ -501,7 +484,7 @@ function SettingsNav({
               const key = `${group.destination}:${item.id}`;
               const active = key === activeKey;
               const Icon = item.icon;
-              const isLink = LINK_SECTIONS.has(item.id);
+              const isLink = SETTINGS_LINK_SECTIONS.has(item.id);
               return (
                 <div key={key} className="flex flex-col">
                   <button
@@ -524,7 +507,9 @@ function SettingsNav({
                         active ? "text-foreground" : "text-muted-foreground/70",
                       )}
                     />
-                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {SETTINGS_SECTION_TITLES[item.id]}
+                    </span>
                     {isLink ? (
                       <ArrowUpRightIcon className="size-3.5 shrink-0 opacity-0 transition-opacity group-hover/nav:opacity-60" />
                     ) : null}
@@ -595,7 +580,9 @@ function CompactSectionPicker({
       <MenuTrigger
         render={
           <Button variant="outline" size="sm" className="mb-6 w-full justify-between md:hidden">
-            <span className="truncate">{active?.label ?? "Sections"}</span>
+            <span className="truncate">
+              {active ? SETTINGS_SECTION_TITLES[active.id] : "Sections"}
+            </span>
             <ChevronsUpDownIcon className="size-3.5 opacity-60" />
           </Button>
         }
@@ -617,7 +604,7 @@ function CompactSectionPicker({
                 onPointerEnter={() => void preloadSettingsSection(item.id)}
                 onFocus={() => void preloadSettingsSection(item.id)}
               >
-                {item.label}
+                {SETTINGS_SECTION_TITLES[item.id]}
               </MenuRadioItem>
             ))}
           </MenuRadioGroup>
@@ -630,13 +617,11 @@ function CompactSectionPicker({
 function SearchResults({
   query,
   results,
-  sectionLabel,
   destinationLabel,
   onPick,
 }: {
   query: string;
   results: ReadonlyArray<SettingsSearchEntry>;
-  sectionLabel: (entry: SettingsSearchEntry) => string | undefined;
   destinationLabel: (destination: SettingsDestination) => string;
   onPick: (entry: SettingsSearchEntry) => void;
 }) {
@@ -672,8 +657,7 @@ function SearchResults({
             </span>
           </span>
           <span className="mt-0.5 shrink-0 text-[11px] text-muted-foreground/80">
-            {destinationLabel(entry.owner)}
-            {sectionLabel(entry) ? ` · ${sectionLabel(entry)}` : ""}
+            {destinationLabel(entry.owner)} · {SETTINGS_SECTION_TITLES[entry.section]}
           </span>
         </button>
       ))}
@@ -682,44 +666,30 @@ function SearchResults({
 }
 
 export function SettingsPage() {
-  const routedEnvironmentId = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteRef(params)?.environmentId ?? null,
-  });
   const leaveSettings = useLeaveSettings();
   const router = useRouter();
   const appSidebarCollapsed = useAppSidebarCollapsed();
   const primaryEnvironment = usePrimaryEnvironmentDescriptor();
-  const activeEnvironmentId = useStore((state) => state.activeEnvironmentId);
   const desktopWorkspace = useDesktopWorkspaceState();
   const section = useSettingsDialogStore((s) => s.section);
   const editingScope = useSettingsDialogStore((s) => s.editingScope);
   const showSection = useSettingsDialogStore((s) => s.showSection);
   const setTargetEnvironmentId = useSettingsDialogStore((s) => s.setTargetEnvironmentId);
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
-  const requestedEnvironmentId = useSettingsDialogStore((s) => s.targetEnvironmentId);
   const allSavedEnvironments = useSavedEnvironmentRegistryStore((state) => state.byId);
   const hostedNodes = useHostedHubStore((state) => state.nodes);
   const hostedDirectoryStatus = useHostedHubStore((state) => state.directoryStatus);
   const hostedBrowserStatus = useHostedHubStore((state) => state.browserStatus);
   const { switchNodeInPlace } = useHostedConnectionActions();
   const hosted = isHostedHubMode();
-  const targetEnvironmentId = hosted
-    ? (primaryEnvironment?.environmentId ?? null)
-    : resolveSettingsTargetEnvironmentId({
-        requestedEnvironmentId,
-        routedEnvironmentId,
-        activeEnvironmentId,
-        primaryEnvironmentId: primaryEnvironment?.environmentId ?? null,
-        desktopLocalEnvironmentId: isElectron ? desktopWorkspace.localEnvironmentId : null,
-      });
+  const pageTarget = useSettingsPageTarget();
   const {
+    environmentId: targetEnvironmentId,
     target: authorizedTarget,
     isPrimary: targetIsPrimary,
-    nodeRole,
     roleFresh,
     desktopWorkspaceMachine,
-  } = useEnvironmentSettingsTarget(targetEnvironmentId);
+  } = pageTarget;
   const settingsTarget = authorizedTarget;
   const primaryDeviceName = useDeviceName();
   const appPreferencesLabel = useAppPreferencesLabel();
@@ -773,26 +743,11 @@ export function SettingsPage() {
     );
   };
 
-  const desktopComputerUse = isElectron && Boolean(window.desktopBridge?.computerUse);
-  const clientItems = NAV_ITEMS.filter(
-    (item) =>
-      settingsSectionInDestination(item.id, "client", desktopComputerUse) &&
-      (item.id !== "connections" || !hosted),
+  const searchScope = readSettingsSearchScope(pageTarget);
+  const clientItems = NAV_ITEMS.filter((item) =>
+    settingsSectionListed(searchScope, "client", item.id),
   );
-  // The device's own connection settings live under Security; "Connections"
-  // belongs to the app, which is what reaches devices.
-  const nodeItems = settingsTarget
-    ? NAV_ITEMS.filter(
-        (item) =>
-          item.id !== "connections" &&
-          settingsSectionInDestination(item.id, "node", desktopComputerUse) &&
-          settingsSectionReachable(item.id, {
-            hosted: hosted || !targetIsPrimary,
-            role: settingsTarget.connected ? nodeRole : null,
-            desktop: false,
-          }),
-      )
-    : [];
+  const nodeItems = NAV_ITEMS.filter((item) => settingsSectionListed(searchScope, "node", item.id));
   const groups: NavGroup[] = [{ destination: "client", items: clientItems }];
   if (showNodeGroup) groups.push({ destination: "node", items: nodeItems });
 
@@ -806,10 +761,10 @@ export function SettingsPage() {
         ? "security"
         : section;
   const effectiveSection = visibleItems.some(
-    (item) => item.id === requestedSection && !LINK_SECTIONS.has(item.id),
+    (item) => item.id === requestedSection && !SETTINGS_LINK_SECTIONS.has(item.id),
   )
     ? requestedSection
-    : (visibleItems.find((item) => !LINK_SECTIONS.has(item.id))?.id ?? "appearance");
+    : (visibleItems.find((item) => !SETTINGS_LINK_SECTIONS.has(item.id))?.id ?? "appearance");
   const activeItem = NAV_ITEMS.find((item) => item.id === effectiveSection);
 
   useEffect(() => {
@@ -820,31 +775,26 @@ export function SettingsPage() {
   }, [destination, editingScope, effectiveSection, hosted, roleFresh, section, showSection]);
 
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchTargetId, setSearchTargetId] = useState<string | null>(null);
+  // The command palette can ask for a row before this page mounts; a request
+  // that arrives while it shows replaces any search in progress.
+  const revealRequest = useSettingsSearchRevealStore((state) => state.request);
+  const [searchTarget, setSearchTarget] = useState<SettingsSearchTarget | null>(revealRequest);
+  if (revealRequest !== null && revealRequest !== searchTarget) {
+    setSearchTarget(revealRequest);
+    setSearchQuery("");
+  }
+  useEffect(() => {
+    if (revealRequest) takeSettingsReveal(revealRequest);
+  }, [revealRequest]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const normalizedQuery = searchQuery.trim().toLowerCase();
-  const reachable = new Set(
-    groups.flatMap((group) => group.items.map((item) => `${group.destination}:${item.id}`)),
-  );
-  const searchResults =
-    normalizedQuery.length === 0
-      ? []
-      : SETTINGS_SEARCH_INDEX.filter(
-          (entry) =>
-            reachable.has(`${entry.owner}:${entry.section}`) &&
-            (!entry.localOnboardingOnly || isLocalOnboardingClient()) &&
-            (!entry.desktopCapability ||
-              Boolean(window.desktopBridge?.[entry.desktopCapability])) &&
-            `${entry.title} ${entry.description} ${entry.keywords ?? ""}`
-              .toLowerCase()
-              .includes(normalizedQuery),
-        );
+  const searchResults = filterSettingsSearchEntries(searchQuery, searchScope);
 
   const [restoreSignal, setRestoreSignal] = useState(0);
   const handleRestored = useCallback(() => setRestoreSignal((value) => value + 1), []);
 
   const panelKey = `${destination}:${effectiveSection}:${targetEnvironmentId ?? ""}`;
-  const subsections = useSettingsSubsections(panelKey, normalizedQuery.length > 0, searchTargetId);
+  const subsections = useSettingsSubsections(panelKey, normalizedQuery.length > 0, searchTarget);
   const { contentRef: setSubsectionRoot } = subsections;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const setScrollRef = useCallback(
@@ -859,12 +809,12 @@ export function SettingsPage() {
   useLayoutEffect(() => {
     if (scrolledPanelKey.current === panelKey) return;
     scrolledPanelKey.current = panelKey;
-    if (!searchTargetId) scrollRef.current?.scrollTo({ top: 0 });
-  }, [panelKey, searchTargetId]);
+    if (!searchTarget) scrollRef.current?.scrollTo({ top: 0 });
+  }, [panelKey, searchTarget]);
 
   const selectSection = useCallback(
     (nextDestination: SettingsDestination, item: NavItem) => {
-      if (LINK_SECTIONS.has(item.id)) {
+      if (SETTINGS_LINK_SECTIONS.has(item.id)) {
         closeSettings();
         void router.navigate({
           to: "/statistics",
@@ -876,7 +826,7 @@ export function SettingsPage() {
         });
         return;
       }
-      setSearchTargetId(null);
+      setSearchTarget(null);
       setSearchQuery("");
       showSection(nextDestination, item.id);
     },
@@ -1030,7 +980,7 @@ export function SettingsPage() {
                   type="search"
                   value={searchQuery}
                   onChange={(event) => {
-                    setSearchTargetId(null);
+                    setSearchTarget(null);
                     setSearchQuery(event.target.value);
                   }}
                   placeholder="Search settings"
@@ -1105,10 +1055,9 @@ export function SettingsPage() {
                     <SearchResults
                       query={searchQuery.trim()}
                       results={searchResults}
-                      sectionLabel={(entry) => SETTINGS_SECTION_LABELS.get(entry.section)}
                       destinationLabel={destinationLabel}
                       onPick={(entry) => {
-                        setSearchTargetId(entry.targetId ?? entry.title);
+                        setSearchTarget({ targetId: entry.targetId ?? entry.title });
                         showSection(entry.owner, entry.section);
                         setSearchQuery("");
                       }}
@@ -1132,7 +1081,7 @@ export function SettingsPage() {
                             </span>
                           </p>
                           <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
-                            {activeItem?.label ?? "Settings"}
+                            {activeItem ? SETTINGS_SECTION_TITLES[activeItem.id] : "Settings"}
                           </h2>
                           {activeItem ? (
                             <p

@@ -3,6 +3,7 @@
 import { useAppKeybindings } from "../appKeybindings";
 
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import { useSettingsPageTarget } from "../hooks/useSettingsPageTarget";
 import { useThreadExportAction } from "../hooks/useThreadExportAction";
 
 import { DeviceIcon } from "./DeviceIcon";
@@ -33,14 +34,17 @@ import { prefetchFilesystemBrowse, useFilesystemBrowse } from "~/rpc/useProject"
 import { useServerConfig } from "~/rpc/serverState";
 import { useSourceControlRepositorySearch } from "~/rpc/useSourceControl";
 import {
+  ArchiveIcon,
   ArrowDownIcon,
   ArrowLeftIcon,
   ArrowUpIcon,
   BarChart3Icon,
   CalendarClockIcon,
+  CheckIcon,
   GitPullRequestCreateIcon,
   GitPullRequestIcon,
   CircleAlertIcon,
+  CircleDotIcon,
   Columns2Icon,
   CornerLeftUpIcon,
   FolderGit2Icon,
@@ -57,6 +61,7 @@ import {
   PinOffIcon,
   Settings2Icon,
   SettingsIcon,
+  SquareCheckBigIcon,
   SquarePenIcon,
 } from "lucide-react";
 import {
@@ -126,9 +131,11 @@ import { useUiStateStore } from "../uiStateStore";
 import {
   ADDON_ICON_CLASS,
   buildBrowseGroups,
+  buildCurrentThreadLifecycleActions,
   buildMessageSearchItems,
   buildProjectActionItems,
   buildRootGroups,
+  buildSettingsSearchItems,
   buildThreadActionItems,
   type CommandPaletteMessageSearchResult,
   type CommandPaletteActionItem,
@@ -145,6 +152,13 @@ import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
+import {
+  filterSettingsSearchEntries,
+  readSettingsSearchScope,
+  SETTINGS_LINK_SECTIONS,
+  SETTINGS_SECTION_TITLES,
+} from "./settings/settingsSearchIndex";
+import { requestSettingsReveal } from "./settings/settingsSearchReveal";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
 import { LazyCreatePullRequestDialogHost } from "./pullRequests/create/lazyCreatePullRequestDialogHost";
 import {
@@ -492,6 +506,12 @@ function OpenCommandPaletteDialog() {
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const openIntent = useCommandPaletteStore((store) => store.openIntent);
   const clearOpenIntent = useCommandPaletteStore((store) => store.clearOpenIntent);
+  // Read once per open. Only the desktop sidebar registers the reader, so the
+  // frozen phone tier gets no lifecycle actions.
+  const [currentThreadLifecycle] = useState(
+    () => useCommandPaletteStore.getState().readCurrentThreadLifecycle?.() ?? null,
+  );
+  const tasksAvailable = useCommandPaletteStore((store) => store.tasksAvailable);
   const composerHandleRef = useComposerHandleContext();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -1191,6 +1211,8 @@ function OpenCommandPaletteDialog() {
   );
 
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
+  const showSettingsSection = useSettingsDialogStore((s) => s.showSection);
+  const settingsPageTarget = useSettingsPageTarget();
   const openSourceControlSettings = useCallback(() => {
     setOpen(false);
     openSettings("source-control");
@@ -1443,6 +1465,44 @@ function OpenCommandPaletteDialog() {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [openIntent]);
 
+  // Built once per open, like the state it shows: the snooze times count from
+  // when the palette opened, in the submenu and the snooze shortcut's view alike.
+  const currentThreadActions = useMemo(
+    () =>
+      currentThreadLifecycle
+        ? buildCurrentThreadLifecycleActions({
+            lifecycle: currentThreadLifecycle,
+            // Checked against the bundle budget: some icons, such as the Inbox
+            // menu's ClockIcon, regroup the shell's icon chunks into one more file.
+            icons: {
+              settle: <CheckIcon className={ITEM_ICON_CLASS} />,
+              moveToActive: <InboxIcon className={ITEM_ICON_CLASS} />,
+              snooze: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+              snoozeAddon: <CalendarClockIcon className={ADDON_ICON_CLASS} />,
+              archive: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+              markUnread: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+            },
+          })
+        : null,
+    [currentThreadLifecycle],
+  );
+  useLayoutEffect(() => {
+    if (openIntent?.kind !== "snooze-thread") {
+      return;
+    }
+    clearOpenIntent();
+    const reason = currentThreadLifecycle?.disabledReasons.snooze ?? null;
+    const snoozeUntil = currentThreadActions?.snoozeUntil ?? null;
+    if (snoozeUntil === null || reason !== null) {
+      setOpen(false);
+      if (reason !== null) toastManager.add(stackedThreadToast({ type: "info", title: reason }));
+      return;
+    }
+    pushPaletteView(snoozeUntil);
+    // Runs once per intent; the view captures the times from now.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [openIntent]);
+
   const exportAction = useThreadExportAction(
     activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
   );
@@ -1515,6 +1575,9 @@ function OpenCommandPaletteDialog() {
       });
     },
   });
+  if (currentThreadActions) {
+    actionItems.push(...currentThreadActions.items);
+  }
 
   if (chatTarget) {
     actionItems.push({
@@ -1642,6 +1705,23 @@ function OpenCommandPaletteDialog() {
         await navigate({ to: "/statistics" });
       },
     });
+    if (tasksAvailable) {
+      actionItems.push({
+        kind: "action",
+        value: "action:tasks",
+        searchTerms: ["tasks", "to-do", "todo", "task list"],
+        title: "Open tasks",
+        // Not the sidebar's ListTodoIcon: imported here, it regroups the shell's
+        // icon chunks into one more file.
+        icon: <SquareCheckBigIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          setOpen(false);
+          // The page's path, not buildTasksPageLocation: that module would become
+          // a chunk of its own, shared with the sidebar.
+          await navigate({ to: "/tasks", search: {} });
+        },
+      });
+    }
     actionItems.push({
       kind: "action",
       value: "action:pull-requests",
@@ -1823,12 +1903,35 @@ function OpenCommandPaletteDialog() {
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   const activeGroups = currentView ? currentView.groups : rootGroups;
 
+  // The rows the settings page would list for this query, for the device it
+  // would open. Statistics opens its own page, which the action above offers.
+  // The frozen phone tier keeps its own settings sheet.
+  const settingsSearchItems =
+    presentationTier === "phone"
+      ? []
+      : buildSettingsSearchItems({
+          entries: filterSettingsSearchEntries(
+            deferredQuery,
+            readSettingsSearchScope(settingsPageTarget),
+          ).filter((entry) => !SETTINGS_LINK_SECTIONS.has(entry.section)),
+          sectionTitles: SETTINGS_SECTION_TITLES,
+          icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
+          runEntry: (entry) => {
+            setOpen(false);
+            // Open on the device the results were checked against.
+            openSettings(entry.section, settingsPageTarget.environmentId);
+            showSettingsSection(entry.owner, entry.section);
+            requestSettingsReveal(entry.targetId ?? entry.title);
+          },
+        });
+
   const filteredGroups = filterCommandPaletteGroups({
     activeGroups,
     query: deferredQuery,
     isInSubmenu: currentView !== null,
     projectSearchItems: projectSearchItems,
     threadSearchItems: allThreadItems,
+    settingsSearchItems,
     messageSearchItems,
   });
 

@@ -53,6 +53,22 @@ describe("app default keybindings", () => {
     });
   });
 
+  it("gives the open thread's lifecycle commands and their Undo client-only defaults", () => {
+    const lifecycleRules = [
+      { key: "mod+alt+shift+d", command: "thread.settle", when: "!terminalFocus" },
+      { key: "mod+alt+shift+s", command: "thread.snooze", when: "!terminalFocus" },
+      { key: "mod+alt+shift+a", command: "thread.archive", when: "!terminalFocus" },
+      { key: "mod+alt+shift+u", command: "thread.markUnread", when: "!terminalFocus" },
+      { key: "mod+z", command: "thread.undo", when: "!terminalFocus" },
+    ] as const;
+    for (const rule of lifecycleRules) {
+      expect(NODE_DEFAULT_KEYBINDINGS.some((nodeRule) => nodeRule.command === rule.command)).toBe(
+        false,
+      );
+      expect(APP_DEFAULT_KEYBINDINGS).toContainEqual(rule);
+    }
+  });
+
   it("resolves the app defaults and stores nothing for an untouched editor", () => {
     expect(resolveAppKeybindings()).toEqual(APP_DEFAULT_RESOLVED_KEYBINDINGS);
     expect(appKeybindingsFromRules(APP_DEFAULT_KEYBINDINGS)).toEqual(DEFAULT_APP_KEYBINDINGS);

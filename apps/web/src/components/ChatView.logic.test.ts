@@ -28,6 +28,7 @@ import {
   resolveChatSendWorktreePlan,
   shouldShowNewThreadSurface,
   isServerThreadHistoryPending,
+  resolveThreadVisit,
   createThreadSendFlags,
   createThreadSubmitGuard,
   buildChatSendTitleSeed,
@@ -1178,6 +1179,44 @@ describe("isServerThreadHistoryPending", () => {
 
   it("never applies to drafts", () => {
     expect(isServerThreadHistoryPending({ ...base, isServerThread: false })).toBe(false);
+  });
+});
+
+describe("resolveThreadVisit", () => {
+  const completedAt = "2026-03-04T12:00:00.000Z";
+  // What Mark unread writes: just before the turn completed.
+  const markedUnread = "2026-03-04T11:59:59.999Z";
+
+  it("marks an unread turn read, and leaves a read one alone", () => {
+    expect(
+      resolveThreadVisit({ completedAt, lastVisitedAt: undefined, seenCompletedAt: null }),
+    ).toBe("visit");
+    expect(
+      resolveThreadVisit({ completedAt, lastVisitedAt: markedUnread, seenCompletedAt: null }),
+    ).toBe("visit");
+    expect(
+      resolveThreadVisit({ completedAt, lastVisitedAt: completedAt, seenCompletedAt: null }),
+    ).toBe("read");
+  });
+
+  it("holds a Mark unread made after this focus showed the turn as read", () => {
+    expect(
+      resolveThreadVisit({
+        completedAt,
+        lastVisitedAt: markedUnread,
+        seenCompletedAt: completedAt,
+      }),
+    ).toBe("hold");
+  });
+
+  it("reads a turn that completes after the thread was marked unread", () => {
+    expect(
+      resolveThreadVisit({
+        completedAt: "2026-03-04T12:05:00.000Z",
+        lastVisitedAt: markedUnread,
+        seenCompletedAt: completedAt,
+      }),
+    ).toBe("visit");
   });
 });
 

@@ -7,16 +7,24 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@ryco/contracts";
+import type { CurrentThreadLifecycle } from "../commandPaletteStore";
 import type { Thread } from "../types";
 import {
   buildBrowseGroups,
   buildBrowseItemValue,
+  buildCurrentThreadLifecycleActions,
   buildMessageSearchItems,
+  buildSettingsSearchItems,
+  buildSnoozeUntilGroups,
   buildThreadActionItems,
   filterBrowseEntries,
   filterCommandPaletteGroups,
+  SETTINGS_SEARCH_RESULT_LIMIT,
+  type CommandPaletteActionItem,
   type CommandPaletteGroup,
+  type CommandPaletteSubmenuItem,
 } from "./CommandPalette.logic";
+import { SETTINGS_SECTION_TITLES, type SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const PROJECT_ID = ProjectId.make("project-1");
@@ -240,6 +248,282 @@ describe("buildMessageSearchItems", () => {
     if (item?.kind !== "action") throw new Error("expected action item");
     await item.run();
     expect(runMessage).toHaveBeenCalledWith(result);
+  });
+});
+
+describe("buildSnoozeUntilGroups", () => {
+  it("lists each snooze time with when it wakes the thread, and snoozes until it", async () => {
+    const snooze = vi.fn();
+    const groups = buildSnoozeUntilGroups({
+      options: [
+        {
+          id: "hour",
+          label: "In 1 hour",
+          snoozedUntil: "2026-03-04T13:00:00.000Z",
+          timeLabel: "Wed 14:00",
+        },
+        {
+          id: "tomorrow",
+          label: "Tomorrow morning",
+          snoozedUntil: "2026-03-05T08:00:00.000Z",
+          timeLabel: "Thu 09:00",
+        },
+      ],
+      icon: null,
+      snooze,
+    });
+
+    expect(groups.map((group) => group.label)).toEqual(["Snooze until"]);
+    const items = groups[0]?.items ?? [];
+    expect(items.map((item) => [item.title, item.description])).toEqual([
+      ["In 1 hour", "Wed 14:00"],
+      ["Tomorrow morning", "Thu 09:00"],
+    ]);
+    const tomorrow = items[1];
+    if (tomorrow?.kind !== "action") throw new Error("expected action item");
+    await tomorrow.run();
+    expect(snooze).toHaveBeenCalledWith("2026-03-05T08:00:00.000Z");
+  });
+});
+
+describe("buildCurrentThreadLifecycleActions", () => {
+  const icons = {
+    settle: "settle-icon",
+    moveToActive: "move-to-active-icon",
+    snooze: "snooze-icon",
+    snoozeAddon: "snooze-addon-icon",
+    archive: "archive-icon",
+    markUnread: "mark-unread-icon",
+  };
+
+  function makeLifecycle(overrides: Partial<CurrentThreadLifecycle> = {}): CurrentThreadLifecycle {
+    return {
+      title: "Fix the relay",
+      settled: false,
+      snoozed: false,
+      pending: false,
+      disabledReasons: { settle: null, snooze: null, archive: null, markUnread: null },
+      snoozeOptions: () => [
+        {
+          id: "tomorrow",
+          label: "Tomorrow morning",
+          snoozedUntil: "2026-03-05T08:00:00.000Z",
+          timeLabel: "Thu 09:00",
+        },
+      ],
+      setSettled: vi.fn(),
+      snooze: vi.fn(),
+      archive: vi.fn(),
+      markUnread: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  function itemByValue(
+    items: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>,
+    value: string,
+  ) {
+    const item = items.find((candidate) => candidate.value === value);
+    if (!item) throw new Error(`expected ${value}`);
+    return item;
+  }
+
+  it("offers each action with its shortcut and runs it on the open thread", async () => {
+    const lifecycle = makeLifecycle();
+    const { items, snoozeUntil } = buildCurrentThreadLifecycleActions({ lifecycle, icons });
+
+    expect(
+      items.map((item) => [item.kind, item.title, item.icon, item.shortcutCommand, item.disabled]),
+    ).toEqual([
+      ["action", "Settle current thread", "settle-icon", "thread.settle", undefined],
+      ["submenu", "Snooze current thread…", "snooze-icon", "thread.snooze", undefined],
+      ["action", "Archive current thread", "archive-icon", "thread.archive", undefined],
+      ["action", "Mark current thread unread", "mark-unread-icon", "thread.markUnread", undefined],
+    ]);
+    for (const item of items) {
+      if (item.kind === "action") await item.run();
+    }
+    expect(lifecycle.setSettled).toHaveBeenCalledWith(true);
+    expect(lifecycle.archive).toHaveBeenCalledOnce();
+    expect(lifecycle.markUnread).toHaveBeenCalledOnce();
+
+    // The submenu is the view of snooze times.
+    const snoozeItem = itemByValue(items, "action:current-thread-snooze");
+    if (snoozeItem.kind !== "submenu") throw new Error("expected submenu item");
+    expect(snoozeItem.addonIcon).toBe("snooze-addon-icon");
+    expect(snoozeItem.groups).toBe(snoozeUntil?.groups);
+    const tomorrow = snoozeUntil?.groups[0]?.items[0];
+    expect([tomorrow?.title, tomorrow?.description]).toEqual(["Tomorrow morning", "Thu 09:00"]);
+    if (tomorrow?.kind !== "action") throw new Error("expected action item");
+    await tomorrow.run();
+    expect(lifecycle.snooze).toHaveBeenCalledWith("2026-03-05T08:00:00.000Z");
+  });
+
+  it("moves a settled thread back to Active and wakes a snoozed one", async () => {
+    const lifecycle = makeLifecycle({ settled: true, snoozed: true });
+    const { items, snoozeUntil } = buildCurrentThreadLifecycleActions({ lifecycle, icons });
+
+    const settle = itemByValue(items, "action:current-thread-settle");
+    expect([settle.title, settle.icon]).toEqual([
+      "Move current thread to Active",
+      "move-to-active-icon",
+    ]);
+    const unsnooze = itemByValue(items, "action:current-thread-snooze");
+    expect([unsnooze.kind, unsnooze.title, unsnooze.shortcutCommand]).toEqual([
+      "action",
+      "Unsnooze current thread",
+      "thread.snooze",
+    ]);
+    expect(snoozeUntil).toBeNull();
+
+    if (settle.kind !== "action" || unsnooze.kind !== "action") {
+      throw new Error("expected action items");
+    }
+    await settle.run();
+    await unsnooze.run();
+    expect(lifecycle.setSettled).toHaveBeenCalledWith(false);
+    expect(lifecycle.snooze).toHaveBeenCalledWith(null);
+  });
+
+  it("disables an action that cannot run and says why", () => {
+    const { items } = buildCurrentThreadLifecycleActions({
+      lifecycle: makeLifecycle({
+        disabledReasons: {
+          settle: "Wait for the running work to finish.",
+          snooze: "Wait for the running work to finish.",
+          archive: null,
+          markUnread: "Nothing to mark unread yet.",
+        },
+      }),
+      icons,
+    });
+
+    expect(items.map((item) => [item.title, item.disabled, item.description])).toEqual([
+      ["Settle current thread", true, "Wait for the running work to finish."],
+      ["Snooze current thread…", true, "Wait for the running work to finish."],
+      ["Archive current thread", undefined, undefined],
+      ["Mark current thread unread", true, "Nothing to mark unread yet."],
+    ]);
+  });
+
+  it("disables all but mark unread while an action awaits the node", () => {
+    for (const snoozed of [false, true]) {
+      const { items } = buildCurrentThreadLifecycleActions({
+        lifecycle: makeLifecycle({ pending: true, snoozed }),
+        icons,
+      });
+      expect(items.map((item) => [item.value, item.disabled])).toEqual([
+        ["action:current-thread-settle", true],
+        ["action:current-thread-snooze", true],
+        ["action:current-thread-archive", true],
+        ["action:current-thread-mark-unread", undefined],
+      ]);
+    }
+  });
+
+  it("is found by what each action does", () => {
+    const { items } = buildCurrentThreadLifecycleActions({ lifecycle: makeLifecycle(), icons });
+    const titlesFor = (query: string) =>
+      filterCommandPaletteGroups({
+        activeGroups: [{ value: "actions", label: "Actions", items }],
+        query,
+        isInSubmenu: false,
+        projectSearchItems: [],
+        threadSearchItems: [],
+      }).flatMap((group) => group.items.map((item) => item.title));
+
+    expect(titlesFor("settle")).toEqual(["Settle current thread"]);
+    expect(titlesFor("snooze")).toEqual(["Snooze current thread…"]);
+    expect(titlesFor("archive")).toEqual(["Archive current thread"]);
+    expect(titlesFor("unread")).toEqual(["Mark current thread unread"]);
+  });
+});
+
+describe("buildSettingsSearchItems", () => {
+  function settingsEntry(
+    title: string,
+    overrides: Partial<SettingsSearchEntry> = {},
+  ): SettingsSearchEntry {
+    return { section: "appearance", owner: "client", title, description: "", ...overrides };
+  }
+
+  function actionItem(value: string, title: string): CommandPaletteActionItem {
+    return { kind: "action", value, searchTerms: [title], title, icon: null, run: async () => {} };
+  }
+
+  function settingsItems(entries: ReadonlyArray<SettingsSearchEntry>, runEntry = vi.fn()) {
+    return buildSettingsSearchItems({
+      entries,
+      sectionTitles: SETTINGS_SECTION_TITLES,
+      icon: null,
+      runEntry,
+    });
+  }
+
+  it("lists settings between threads and messages, described by their section", async () => {
+    const diffStyle = settingsEntry("Diff style", {
+      description: "Preview unified and split layouts for code changes.",
+      keywords: "side by side",
+    });
+    const runEntry = vi.fn();
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "diff",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [actionItem("thread:diff", "Diff review")],
+      settingsSearchItems: settingsItems([diffStyle], runEntry),
+      messageSearchItems: [actionItem("message:diff", "the diff looks right")],
+    });
+
+    expect(groups.map((group) => [group.value, group.label])).toEqual([
+      ["threads-search", "Threads"],
+      ["settings-search", "Settings"],
+      ["messages-search", "Messages"],
+    ]);
+    const item = groups[1]?.items[0];
+    expect(item).toMatchObject({ title: "Diff style", description: "Appearance" });
+    if (item?.kind !== "action") throw new Error("expected action item");
+    await item.run();
+    expect(runEntry).toHaveBeenCalledWith(diffStyle);
+  });
+
+  it("shows settings only while typing at the root, never under the actions filter", () => {
+    const settingsSearchItems = settingsItems([settingsEntry("Diff style")]);
+    const groupsFor = (query: string, isInSubmenu = false) =>
+      filterCommandPaletteGroups({
+        activeGroups: [],
+        query,
+        isInSubmenu,
+        projectSearchItems: [],
+        threadSearchItems: [],
+        settingsSearchItems,
+      }).map((group) => group.value);
+
+    expect(groupsFor("diff")).toEqual(["settings-search"]);
+    expect(groupsFor("")).toEqual([]);
+    expect(groupsFor(">diff")).toEqual([]);
+    expect(groupsFor("diff", true)).toEqual([]);
+  });
+
+  it("keeps the best matches, at most the limit", () => {
+    const entries = [
+      ...Array.from({ length: SETTINGS_SEARCH_RESULT_LIMIT + 1 }, (_, index) =>
+        settingsEntry(`Option ${index}`, { description: "Changes the font." }),
+      ),
+      settingsEntry("Font"),
+    ];
+    const [group] = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "font",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [],
+      settingsSearchItems: settingsItems(entries),
+    });
+
+    expect(group?.items).toHaveLength(SETTINGS_SEARCH_RESULT_LIMIT);
+    expect(group?.items[0]?.title).toBe("Font");
   });
 });
 

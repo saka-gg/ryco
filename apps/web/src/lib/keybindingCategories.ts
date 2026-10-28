@@ -90,7 +90,13 @@ const CORE_COMMAND_META = {
 const FILE_SEARCH_COMMAND_META = {} satisfies StaticCommandMetaGroup;
 
 // Settle, snooze, archive, mark unread and undo for threads (Threads, sort weights from 20).
-const THREAD_LIFECYCLE_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+const THREAD_LIFECYCLE_COMMAND_META = {
+  "thread.settle": { title: "Settle current thread or move it to Active", sortWeight: 20 },
+  "thread.snooze": { title: "Snooze or unsnooze current thread", sortWeight: 21 },
+  "thread.archive": { title: "Archive current thread", sortWeight: 22 },
+  "thread.markUnread": { title: "Mark current thread unread", sortWeight: 23 },
+  "thread.undo": { title: "Undo last thread action", sortWeight: 24 },
+} satisfies StaticCommandMetaGroup;
 
 // The next thread that needs attention (Threads, sort weights from 30).
 const THREAD_ATTENTION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
