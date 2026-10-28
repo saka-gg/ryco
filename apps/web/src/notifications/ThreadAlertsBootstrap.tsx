@@ -25,6 +25,9 @@ import type { ThreadAlerts } from "./threadAlerts";
 
 const THREAD_ALERTS_IDLE_TIMEOUT_MS = 2_000;
 
+// At module scope: the React Compiler cannot compile a component that calls import() itself.
+const loadThreadAlerts = () => import("./threadAlerts");
+
 /**
  * Starts thread alerts once the shell is idle. The alerts load lazily; this
  * only hands them the app's singletons, and they wait for client settings to
@@ -61,7 +64,7 @@ export function ThreadAlertsBootstrap() {
   useEffect(() => {
     let disposed = false;
     const cancelIdleStart = scheduleIdleTask(() => {
-      void import("./threadAlerts")
+      void loadThreadAlerts()
         .then(({ startThreadAlerts }) => {
           if (disposed) return;
           alertsRef.current = startThreadAlerts({
