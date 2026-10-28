@@ -7,6 +7,7 @@ import React, {
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -27,6 +28,7 @@ import {
 } from "@dnd-kit/core";
 import {
   type EnvironmentId,
+  type KeybindingCommand,
   ProjectId,
   type ScopedThreadRef,
   type ServerConfig,
@@ -76,6 +78,7 @@ import {
   resolveShortcutCommand,
   hasOpenDialogShortcutTarget,
   shouldIgnoreGlobalNavigationShortcut,
+  shouldIgnoreSplitViewShortcut,
   shortcutLabelForCommand,
   shouldShowThreadJumpHintsForModifiers,
   threadJumpCommandForIndex,
@@ -92,6 +95,7 @@ import { useThreadActions } from "../hooks/useThreadActions";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { SidebarSeparator, useSidebar } from "./ui/sidebar";
+import { toastManager } from "./ui/toast";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
@@ -119,6 +123,7 @@ import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
 import { ThreadLifecycleShortcuts } from "./sidebar/ThreadLifecycleShortcuts";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
+import type { InboxAttentionInput, InboxAttentionPress } from "./inboxSidebar/inboxAttention";
 import {
   buildInboxSidebarEnvironments,
   sameInboxProviderCatalogs,
@@ -257,6 +262,36 @@ function readRouteTerminalOpen(routeThreadRef: ScopedThreadRef | null): boolean 
 
 function hasSelectedThreads(): boolean {
   return useThreadSelectionStore.getState().selectedThreadKeys.size > 0;
+}
+
+function threadAttentionDirectionFromCommand(
+  command: KeybindingCommand | null,
+): "previous" | "next" | null {
+  if (command === "thread.attention.previous") return "previous";
+  if (command === "thread.attention.next") return "next";
+  return null;
+}
+
+type InboxAttention = typeof import("./inboxSidebar/inboxAttention");
+let inboxAttention: InboxAttention | null = null;
+
+/**
+ * Runs `step` with the "next thread that needs you" walk. It loads on the
+ * first press, outside the shell's bundle; later presses step at once. Outside
+ * the component: the React Compiler cannot lower `import()`.
+ */
+function withInboxAttention(step: (attention: InboxAttention) => void): void {
+  if (inboxAttention !== null) {
+    step(inboxAttention);
+    return;
+  }
+  void import("./inboxSidebar/inboxAttention").then(
+    (loaded) => {
+      inboxAttention = loaded;
+      step(loaded);
+    },
+    () => undefined,
+  );
 }
 
 /**
@@ -1207,6 +1242,50 @@ export default function Sidebar() {
     routeThreadKey,
   );
 
+  // The last "next thread that needs you" press: the next one walks on from it.
+  const attentionPressRef = useRef<InboxAttentionPress | null>(null);
+  useEffect(() => {
+    const press = attentionPressRef.current;
+    if (press?.navigating) attentionPressRef.current = { ...press, navigating: false };
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- a new route means the press's navigation landed or was replaced
+  }, [routeThreadKey]);
+  // Reads the inbox's live inputs at the press, so the window listener does
+  // not rebind on every thread update.
+  const openThreadNeedingAttention = useEffectEvent((direction: "previous" | "next") => {
+    const inbox: InboxAttentionInput = {
+      projects,
+      worktrees: sidebarWorktrees,
+      threads: sidebarThreads,
+      environments: inboxEnvironments,
+      deliveryUnknownThreadKeys,
+      localQueuedThreadKeys,
+      pinnedThreadKeys,
+      aiFocusEnabled,
+      autoSettleAfterDays: sidebarAutoSettleAfterDays,
+      lastVisitedAtByKey: threadLastVisitedAtById,
+    };
+    withInboxAttention((attention) => {
+      const walk = attention.stepInboxAttention(inbox, {
+        routeThreadKey,
+        direction,
+        previous: attentionPressRef.current,
+      });
+      if (walk === null) {
+        // Repeated presses replace the note instead of stacking copies.
+        toastManager.add({
+          id: "thread-attention-none",
+          type: "info",
+          title: "No other thread needs you right now",
+        });
+        return;
+      }
+      const targetRef = parseScopedThreadKey(walk.targetKey);
+      if (!targetRef) return;
+      attentionPressRef.current = { walk, navigating: true };
+      navigateToThread(targetRef);
+    });
+  });
+
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
       const shortcutContext = getCurrentSidebarShortcutContext();
@@ -1214,7 +1293,9 @@ export default function Sidebar() {
       if (event.defaultPrevented || event.repeat) {
         return;
       }
-      if (shouldIgnoreGlobalNavigationShortcut(event)) {
+      // Like the split-view chords, the attention walk also runs while typing.
+      const ignoreNavigation = shouldIgnoreGlobalNavigationShortcut(event);
+      if (ignoreNavigation && shouldIgnoreSplitViewShortcut(event)) {
         return;
       }
 
@@ -1222,6 +1303,16 @@ export default function Sidebar() {
         platform,
         context: shortcutContext,
       });
+      const attentionDirection = threadAttentionDirectionFromCommand(command);
+      if (attentionDirection !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        openThreadNeedingAttention(attentionDirection);
+        return;
+      }
+      if (ignoreNavigation) {
+        return;
+      }
       if (command === "sidebar.showInbox" || command === "sidebar.showProjects") {
         event.preventDefault();
         event.stopPropagation();

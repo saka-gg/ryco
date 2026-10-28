@@ -33,6 +33,7 @@ import {
   resetServerStateForTests,
   setServerConfigSnapshot,
 } from "../rpc/serverState";
+import { useSavedEnvironmentRuntimeStore } from "../environments/runtime";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
@@ -41,6 +42,7 @@ import Sidebar from "./Sidebar";
 import { preloadSidebarUpdateEverythingPill } from "./sidebar/SidebarChrome";
 import { CommandDialog } from "./ui/command";
 import { SidebarProvider } from "./ui/sidebar";
+import { toastManager } from "./ui/toast";
 
 // Counts the project-tree traversal derivations (see the inbox-mode test).
 const traversalCalls = vi.hoisted(() => ({ collect: 0, sort: 0 }));
@@ -217,6 +219,30 @@ function makeServerConfig(providers: ReadonlyArray<ServerProvider>): ServerConfi
   } as unknown as ServerConfig;
 }
 
+/** Rows on a machine that is not connected are not current, so nothing on it needs you. */
+function connectEnvironment() {
+  useSavedEnvironmentRuntimeStore
+    .getState()
+    .patch(environmentId, { connectionState: "connected", role: "owner" });
+}
+
+/** ⌥⌘A, or Ctrl+Alt+A off macOS: the next thread that needs you. */
+function pressAttentionShortcut(target: EventTarget): boolean {
+  const mac = /Mac|iPhone|iPad/u.test(navigator.platform);
+  return target.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      // Option+A types "å" on macOS; the binding matches the physical key.
+      key: mac ? "å" : "a",
+      code: "KeyA",
+      metaKey: mac,
+      ctrlKey: !mac,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
 describe("Sidebar render cost", () => {
   // The footer's update pill arrives in an idle slot after the first mount; loaded up
   // front it mounts with the sidebar, so its one-time arrival is not counted as a re-render.
@@ -228,6 +254,7 @@ describe("Sidebar render cost", () => {
     traversalCalls.sort = 0;
     inboxModelBuilds.count = 0;
     resetServerStateForTests();
+    useSavedEnvironmentRuntimeStore.getState().reset();
     useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
     setModelPickerOpen(false);
     document.body.innerHTML = "";
@@ -326,6 +353,86 @@ describe("Sidebar render cost", () => {
       );
       expect(traversalCalls.collect).toBe(1);
     } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("opens the threads that need you in turn while typing", async () => {
+    await page.viewport(1280, 900);
+    useUiStateStore.getState().setSidebarMode("inbox");
+    const snapshot = makeSnapshot();
+    const threads = snapshot.threads as unknown as Array<Record<string, unknown>>;
+    // One thread waits for an approval, another just finished a turn nobody has seen.
+    const finishedAt = new Date(Date.now() - 60_000).toISOString();
+    threads[5] = { ...threads[5], hasPendingApprovals: true };
+    threads[6] = {
+      ...threads[6],
+      latestTurn: {
+        turnId: TurnId.make("turn-done"),
+        state: "completed",
+        requestedAt: finishedAt,
+        startedAt: finishedAt,
+        completedAt: finishedAt,
+        assistantMessageId: null,
+      },
+    };
+    useStore.getState().syncServerShellSnapshot(snapshot, environmentId);
+    connectEnvironment();
+    const addToast = vi.spyOn(toastManager, "add");
+
+    const mounted = await mountSidebar();
+    const composer = document.createElement("textarea");
+    try {
+      await expect.element(page.getByText("Thread 1999", { exact: true })).toBeInTheDocument();
+      await waitForQuiescence(() => renderCounts.get("Sidebar") ?? 0);
+      // The walk builds its own inbox model when pressed.
+      const buildsBeforePress = inboxModelBuilds.count;
+
+      document.body.append(composer);
+      composer.focus();
+      const anchorOf = (id: string) =>
+        scopedThreadKey(scopeThreadRef(environmentId, ThreadId.make(id)));
+      const expectAnchor = (id: string) =>
+        vi.waitFor(() =>
+          expect(useThreadSelectionStore.getState().anchorThreadKey).toBe(anchorOf(id)),
+        );
+
+      expect(pressAttentionShortcut(composer)).toBe(false);
+      await expectAnchor("thread-5");
+      expect(inboxModelBuilds.count).toBeGreaterThan(buildsBeforePress);
+      // The route here never commits: each press goes on from the last target.
+      pressAttentionShortcut(composer);
+      await expectAnchor("thread-6");
+      pressAttentionShortcut(composer);
+      await expectAnchor("thread-5");
+      expect(addToast).not.toHaveBeenCalled();
+    } finally {
+      composer.remove();
+      addToast.mockRestore();
+      await mounted.unmount();
+    }
+  });
+
+  it("says so when no thread needs you", async () => {
+    await page.viewport(1280, 900);
+    useUiStateStore.getState().setSidebarMode("inbox");
+    useStore.getState().syncServerShellSnapshot(makeSnapshot(), environmentId);
+    connectEnvironment();
+    const addToast = vi.spyOn(toastManager, "add");
+
+    const mounted = await mountSidebar();
+    try {
+      await expect.element(page.getByText("Thread 1999", { exact: true })).toBeInTheDocument();
+      const anchorBeforePress = useThreadSelectionStore.getState().anchorThreadKey;
+      pressAttentionShortcut(window);
+      await vi.waitFor(() =>
+        expect(addToast).toHaveBeenCalledWith(
+          expect.objectContaining({ type: "info", title: "No other thread needs you right now" }),
+        ),
+      );
+      expect(useThreadSelectionStore.getState().anchorThreadKey).toBe(anchorBeforePress);
+    } finally {
+      addToast.mockRestore();
       await mounted.unmount();
     }
   });

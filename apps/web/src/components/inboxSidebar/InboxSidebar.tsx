@@ -27,6 +27,7 @@ import { TooltipCreateHandle } from "../ui/tooltip";
 import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
+import type { InboxOrderSnapshot } from "./inboxOrderHold";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
 import type { InboxSettleFinishedProps } from "./InboxSettleFinished";
 import {
@@ -38,6 +39,7 @@ import {
 } from "./inboxSidebarModel";
 import { InboxThreadRow, type InboxThreadActions } from "./InboxThreadRow";
 import { InboxMotionContext, useInboxListMotion } from "./useInboxListMotion";
+import { useInboxOrderHold } from "./useInboxOrderHold";
 import { useInboxRowSelection } from "./useInboxRowSelection";
 
 // Settle finished is optional and shown on hover, so its code loads in an idle
@@ -129,7 +131,9 @@ export function InboxSidebar(props: InboxSidebarProps) {
   // Keeps rows that did not change identical across model runs, so memoized
   // rows skip rendering when only a few threads moved.
   const [modelSharing] = useState(() => createInboxSidebarModelSharing());
-  const model = useMemo(
+  // Every section: the status filter applies after the order hold, so a row
+  // that leaves the filtered section keeps its place too.
+  const liveModel = useMemo(
     () =>
       modelSharing.share(
         buildInboxSidebarModel({
@@ -137,7 +141,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
           worktrees: props.worktrees,
           threads: props.threads,
           environments: props.environments,
-          filters: { query, environmentId, projectKeys, status },
+          filters: { query, environmentId, projectKeys, status: "all" },
           deliveryUnknownThreadKeys: props.deliveryUnknownThreadKeys,
           localQueuedThreadKeys: props.localQueuedThreadKeys,
           activeThreadKey: props.activeThreadKey,
@@ -167,19 +171,56 @@ export function InboxSidebar(props: InboxSidebarProps) {
       props.worktrees,
       query,
       settlementNowMs,
-      status,
     ],
   );
+  // While the user aims at the list, rows keep their places and show live
+  // data; once the pointer leaves, they glide to their live order. Changing
+  // what the list shows starts a new hold.
+  const [holdElement, setHoldElement] = useState<HTMLElement | null>(null);
+  const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
+  const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
+  // Rows that move as a hold ends drop the card's pending close, so the card
+  // would stay open after the pointer left. The user stopped aiming: close it.
+  const orderHold = useInboxOrderHold(holdElement, () => {
+    previewHandle.close();
+    hintHandle.close();
+  });
+  const holdLogic = orderHold.hold;
+  const holdKey = JSON.stringify([
+    query,
+    environmentId,
+    project?.logicalKey ?? null,
+    nestDelegated,
+    props.aiFocusEnabled,
+  ]);
+  const [heldOrder, setHeldOrder] = useState<InboxOrderSnapshot | null>(null);
+  if (holdLogic ? heldOrder?.holdKey !== holdKey : heldOrder !== null) {
+    setHeldOrder(holdLogic ? holdLogic.captureInboxOrder(liveModel, holdKey) : null);
+  }
+  const model = useMemo(
+    () =>
+      heldOrder && holdLogic
+        ? holdLogic.applyInboxOrderHold(liveModel, heldOrder, status)
+        : liveModel,
+    [heldOrder, holdLogic, liveModel, status],
+  );
+  const sections = useMemo(
+    () =>
+      status === "all"
+        ? model.sections
+        : model.sections.filter((section) => section.key === status),
+    [model.sections, status],
+  );
   useEffect(() => {
-    if (model.nextSettlementEvaluationAtMs === null) return;
+    if (liveModel.nextSettlementEvaluationAtMs === null) return;
     const maxTimeoutMs = 2_147_483_647;
     const delayMs = Math.min(
       maxTimeoutMs,
-      Math.max(1, model.nextSettlementEvaluationAtMs - Date.now() + 1),
+      Math.max(1, liveModel.nextSettlementEvaluationAtMs - Date.now() + 1),
     );
     const timer = window.setTimeout(() => setSettlementNowMs(Date.now()), delayMs);
     return () => window.clearTimeout(timer);
-  }, [model.nextSettlementEvaluationAtMs]);
+  }, [liveModel.nextSettlementEvaluationAtMs]);
   useEffect(() => {
     const refresh = () => setSettlementNowMs(Date.now());
     window.addEventListener("focus", refresh);
@@ -189,7 +230,6 @@ export function InboxSidebar(props: InboxSidebarProps) {
       document.removeEventListener("visibilitychange", refresh);
     };
   }, []);
-  const sections = model.sections;
   useEffect(() => {
     const counts: Partial<Record<InboxSidebarSectionKey, number>> = {};
     let total = 0;
@@ -247,8 +287,6 @@ export function InboxSidebar(props: InboxSidebarProps) {
     enabled: motionEnabled,
     orderSignature,
   });
-  const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
-  const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
   const { onOpenThread } = props;
   // One callback for every row: a per-row closure would defeat the row's memo.
   const openRow = useCallback(
@@ -270,8 +308,10 @@ export function InboxSidebar(props: InboxSidebarProps) {
   return (
     <InboxMotionContext value={gateRef}>
       <SidebarContent
+        ref={setHoldElement}
         className="gap-0 px-2 pt-1 pb-2"
         data-testid="inbox-sidebar"
+        onPointerOverCapture={orderHold.onPointerOverCapture}
         onViewportScroll={handleSidebarListScroll}
       >
         <InboxHoverLayer hintHandle={hintHandle} previewHandle={previewHandle}>

@@ -99,7 +99,10 @@ const THREAD_LIFECYCLE_COMMAND_META = {
 } satisfies StaticCommandMetaGroup;
 
 // The next thread that needs attention (Threads, sort weights from 30).
-const THREAD_ATTENTION_COMMAND_META = {} satisfies StaticCommandMetaGroup;
+const THREAD_ATTENTION_COMMAND_META = {
+  "thread.attention.next": { title: "Next thread that needs you", sortWeight: 30 },
+  "thread.attention.previous": { title: "Previous thread that needs you", sortWeight: 31 },
+} satisfies StaticCommandMetaGroup;
 
 // Back and forward (Navigation), and the thread commands that ship with them (Threads, sort
 // weights from 40).
