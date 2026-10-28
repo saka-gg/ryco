@@ -18,10 +18,10 @@ import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import {
   BOOTSTRAP_REPLAY_BATCH_SIZE,
   ORCHESTRATION_EVENT_PROJECTORS,
-  ORCHESTRATION_PROJECTOR_NAMES,
   OrchestrationProjectionPipelineLive,
   projectorEventTypes,
 } from "./ProjectionPipeline.ts";

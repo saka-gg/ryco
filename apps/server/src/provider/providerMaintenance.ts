@@ -27,6 +27,7 @@ import { ServerConfig } from "../config.ts";
 import { fetchNpmDistTagVersion } from "../npmRegistry.ts";
 import { quoteWindowsShellArgument } from "../processRunner.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { quoteShellWord } from "../shellQuote.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 import { compareCliVersions, satisfiesCliVersionRange } from "./cliVersion.ts";
 
@@ -174,14 +175,6 @@ export function clearLatestProviderVersionCacheForTests(): void {
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function quoteShellWord(word: string, platform: NodeJS.Platform): string {
-  const safeWord = platform === "win32" ? /^[\w./:\\@=-]+$/ : /^[\w./:@=-]+$/;
-  if (safeWord.test(word)) return word;
-  return platform === "win32"
-    ? `'${word.replace(/['‘’]/g, "$&$&")}'`
-    : `'${word.replaceAll("'", "'\\''")}'`;
 }
 
 function quoteUpdateExecutable(executable: string, platform: NodeJS.Platform): string {

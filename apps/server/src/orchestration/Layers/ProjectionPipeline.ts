@@ -89,22 +89,7 @@ import {
 } from "../forkInheritance.ts";
 import { turnStartEndedMessageId } from "../providerEffectIntents.ts";
 import { isAttachmentOnlyMessage } from "@ryco/shared/turnReply";
-
-export const ORCHESTRATION_PROJECTOR_NAMES = {
-  projects: "projection.projects",
-  threads: "projection.threads",
-  threadMessages: "projection.thread-messages",
-  threadProposedPlans: "projection.thread-proposed-plans",
-  threadActivities: "projection.thread-activities",
-  threadSessions: "projection.thread-sessions",
-  threadTurns: "projection.thread-turns",
-  checkpoints: "projection.checkpoints",
-  pendingApprovals: "projection.pending-approvals",
-  worktrees: "projection.worktrees",
-} as const;
-
-export type ProjectorName =
-  (typeof ORCHESTRATION_PROJECTOR_NAMES)[keyof typeof ORCHESTRATION_PROJECTOR_NAMES];
+import { ORCHESTRATION_PROJECTOR_NAMES, type ProjectorName } from "../projectorNames.ts";
 
 /**
  * Exhaustive routing table for durable orchestration events. Adding an event

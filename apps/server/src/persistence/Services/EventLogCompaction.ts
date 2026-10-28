@@ -56,9 +56,15 @@ export interface EventLogCompactionPassOptions {
   readonly maxWallMs: number;
   /**
    * Sequences per selection window (one read, then that window's deletes). Capped at 500 when
-   * selection runs on the main connection (no read worker), where it blocks the event loop.
+   * selection runs on the main connection (no read worker), where it blocks the event loop, unless
+   * the pass is `exclusive`.
    */
   readonly selectionPageSequences: number;
+  /**
+   * The pass has the process and the database to itself (`ryco doctor`): nothing else waits on
+   * the event loop, so main-connection selection windows are not capped.
+   */
+  readonly exclusive?: boolean;
   readonly deleteBatch: EventLogCompactionDeleteBatch;
   /** Shortest pause between delete transactions, so other work on the event loop runs. */
   readonly interBatchPauseMs: number;

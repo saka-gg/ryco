@@ -10,10 +10,8 @@ import { ProjectionWorktreeRepository } from "../../persistence/Services/Project
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { ServerConfig } from "../../config.ts";
-import {
-  ORCHESTRATION_PROJECTOR_NAMES,
-  OrchestrationProjectionPipelineLive,
-} from "./ProjectionPipeline.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
+import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 
 const MockProjectAvatarStoreLive = Layer.succeed(ProjectAvatarStore, {

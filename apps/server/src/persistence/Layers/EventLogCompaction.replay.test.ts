@@ -45,7 +45,8 @@ import { OrchestrationProjectionPipeline } from "../../orchestration/Services/Pr
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { EventLogCompaction } from "../Services/EventLogCompaction.ts";
 import { OrchestrationEventStore } from "../Services/OrchestrationEventStore.ts";
-import { EventLogCompactionLive, ONLINE_COMPACTION_PASS_OPTIONS } from "./EventLogCompaction.ts";
+import { EventLogCompactionLive } from "./EventLogCompaction.ts";
+import { ONLINE_COMPACTION_PASS_OPTIONS } from "./EventLogCompactionDeferred.ts";
 import { OrchestrationEventStoreLive } from "./OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 

@@ -40,7 +40,9 @@
  * deleted. Receipts wait until the event phase of a pass has caught up.
  *
  * State lives in `lifecycle_markers` (`orchestration_event_compaction`; dry runs keep their own
- * key so switching a dry run to deleting never skips what it only counted).
+ * key so switching a dry run to deleting never skips what it only counted). Reading it, the online
+ * defaults and the server's layer live in `EventLogCompactionDeferred.ts`, which loads this module
+ * only when the first pass runs.
  *
  * @module EventLogCompaction
  */
@@ -55,7 +57,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { toPersistenceSqlError } from "../Errors.ts";
-import { readLifecycleMarker, writeLifecycleMarker } from "../lifecycleMarkers.ts";
+import { writeLifecycleMarker } from "../lifecycleMarkers.ts";
 import {
   type CompactionPassResult,
   CompactionState,
@@ -67,44 +69,17 @@ import {
   type EventLogCompactionShape,
 } from "../Services/EventLogCompaction.ts";
 import { SqliteReadClient } from "../SqliteReadClient.ts";
-
-export const EVENT_COMPACTION_STATE_KEY = "orchestration_event_compaction";
-export const EVENT_COMPACTION_DRY_RUN_STATE_KEY = "orchestration_event_compaction_dry_run";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** Online defaults: a bounded slice every few minutes, never competing with live streaming. */
-export const ONLINE_COMPACTION_PASS_OPTIONS: EventLogCompactionPassOptions = {
-  horizon: "settled",
-  settleAgeMs: DAY_MS,
-  maxScanSequences: 250_000,
-  maxWallMs: 120_000,
-  selectionPageSequences: 2_000,
-  // Deleting costs ~75 µs per event on the main connection (indexes, the statistics partial
-  // index reads each payload, overflow pages): 200 events stay near 15 ms even when a batch of
-  // large payloads follows a fast one.
-  deleteBatch: { initial: 100, min: 20, max: 200, targetMs: 8 },
-  interBatchPauseMs: 8,
-  idleRatio: 3,
-  carryCapacity: 50_000,
-  receipts: { cutoffMs: 7 * DAY_MS, pageRows: 1_000, deleteBatch: 500, maxScanRows: 250_000 },
-  mode: "delete",
-};
+import { compactionStateKey, readCompactionState } from "./EventLogCompactionDeferred.ts";
 
 /**
  * The largest selection window when selection runs on the main connection (no read worker):
- * there it blocks the event loop, so `runPass` caps `selectionPageSequences` at this.
+ * there it blocks the event loop, so `runPass` caps `selectionPageSequences` at this unless the
+ * pass is `exclusive`.
  */
 const MAIN_CONNECTION_SELECTION_PAGE_SEQUENCES = 500;
 
 /** Without deletions, the cursor is still saved this often (sequences scanned). */
 const CURSOR_SAVE_INTERVAL_SEQUENCES = 50_000;
-
-/** Whether a pass left work behind: settled history or old receipts still to examine. */
-export const hasCompactionBacklog = (pass: {
-  readonly backlogSequences: number;
-  readonly receiptBacklog: boolean;
-}): boolean => pass.backlogSequences > 0 || pass.receiptBacklog;
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const PRUNABLE_RECEIPT_COMMAND_ID = new RegExp(`^(?:provider:${UUID}:|history:${UUID}$)`, "i");
@@ -116,11 +91,7 @@ const PRUNABLE_RECEIPT_COMMAND_ID = new RegExp(`^(?:provider:${UUID}:|history:${
 export const isPrunableReceiptCommandId = (commandId: string): boolean =>
   PRUNABLE_RECEIPT_COMMAND_ID.test(commandId);
 
-const decodeState = Schema.decodeUnknownOption(Schema.fromJsonString(CompactionState));
 const encodeState = Schema.encodeSync(Schema.fromJsonString(CompactionState));
-
-const stateKeyOf = (mode: EventLogCompactionMode) =>
-  mode === "delete" ? EVENT_COMPACTION_STATE_KEY : EVENT_COMPACTION_DRY_RUN_STATE_KEY;
 
 const isOlderThan = (timestamp: string | null, cutoffMs: number) => {
   if (timestamp === null) return false;
@@ -194,18 +165,10 @@ export const makeEventLogCompaction = Effect.gen(function* () {
   const passLock = yield* Semaphore.make(1);
 
   const readState = (mode: EventLogCompactionMode) =>
-    readLifecycleMarker(stateKeyOf(mode)).pipe(
-      Effect.map((stored) =>
-        Option.isNone(stored)
-          ? EMPTY_COMPACTION_STATE
-          : Option.getOrElse(decodeState(stored.value), () => EMPTY_COMPACTION_STATE),
-      ),
-      Effect.provideService(SqlClient.SqlClient, sql),
-      Effect.mapError(toPersistenceSqlError("EventLogCompaction.readState")),
-    );
+    readCompactionState(mode).pipe(Effect.provideService(SqlClient.SqlClient, sql));
 
   const writeState = (mode: EventLogCompactionMode, state: CompactionState) =>
-    writeLifecycleMarker(stateKeyOf(mode), encodeState(state)).pipe(
+    writeLifecycleMarker(compactionStateKey(mode), encodeState(state)).pipe(
       Effect.provideService(SqlClient.SqlClient, sql),
     );
 
@@ -292,7 +255,7 @@ export const makeEventLogCompaction = Effect.gen(function* () {
           const carry: LatestStateCarry = new Map();
           const pageSequences = Math.max(
             1,
-            selectionOnMain
+            selectionOnMain && options.exclusive !== true
               ? Math.min(options.selectionPageSequences, MAIN_CONNECTION_SELECTION_PAGE_SEQUENCES)
               : options.selectionPageSequences,
           );
@@ -594,4 +557,8 @@ export const makeEventLogCompaction = Effect.gen(function* () {
   return { runPass, readState } satisfies EventLogCompactionShape;
 });
 
+/**
+ * The pass built at once (tests, scripts). The server provides `EventLogCompactionDeferredLive`,
+ * which loads this module when the first pass runs.
+ */
 export const EventLogCompactionLive = Layer.effect(EventLogCompaction, makeEventLogCompaction);

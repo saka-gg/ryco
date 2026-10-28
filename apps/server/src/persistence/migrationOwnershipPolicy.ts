@@ -39,6 +39,7 @@ import {
   probeDatabaseOwnerSettled,
 } from "./databaseOwnerLock.ts";
 import {
+  describeRepairKeys,
   failIfSchemaTooNew,
   inspectMigrationLedger,
   isUpgradePending,
@@ -69,16 +70,12 @@ export const inspectSchemaUpgrade = (dbPath: string) =>
     return { ledger, needed: isUpgradePending(ledger) } satisfies SchemaUpgrade;
   });
 
-/** At most three repair keys, then how many more. */
-const describeRepairs = (keys: ReadonlyArray<string>) =>
-  keys.length <= 3 ? keys.join(", ") : `${keys.slice(0, 3).join(", ")} and ${keys.length - 3} more`;
-
 const describeUpgrade = (upgrade: SchemaUpgrade) =>
   upgrade.ledger.pending.length > 0
     ? upgrade.ledger.latestApplied === 0
       ? `create the database schema (${upgrade.ledger.supported})`
       : `upgrade the database from schema ${upgrade.ledger.latestApplied} to ${upgrade.ledger.supported}`
-    : `repair the database schema (${describeRepairs(upgrade.ledger.repairsPending)})`;
+    : `repair the database schema (${describeRepairKeys(upgrade.ledger.repairsPending)})`;
 
 const restartHint = (owner: DatabaseOwner) => {
   if (owner.legacy) return "quit it and start the updated Ryco";
