@@ -26,6 +26,8 @@ type RuntimeSqliteLayerConfig = {
    * choose `auto_vacuum` first. Node's client sets no pragmas at open and ignores it.
    */
   readonly disableWAL?: boolean;
+  /** Bun's client creates a missing file unless this is false; Node's client ignores it. */
+  readonly create?: boolean;
 };
 
 type Loader = {

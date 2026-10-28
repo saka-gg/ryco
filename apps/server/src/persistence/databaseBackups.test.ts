@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -9,20 +10,28 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ConfigProvider, Effect, Fiber, Layer, Logger } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
+import { ConnectionError, SqlError } from "effect/sql/SqlError";
 import { TestClock } from "effect/testing";
 
 import {
   BACKUP_NAME_PATTERN,
   BackupEnvironment,
   cleanStaleBackupPartials,
+  createManualBackup,
   databaseBackupsDirectory,
+  describeDatabaseBackups,
+  detectBackupCodec,
   finalizeDatabaseBackups,
   formatBackupName,
+  formatBytes,
   listDatabaseBackups,
   parseBackupName,
   pruneDatabaseBackups,
+  RESTORE_MIN_HEADROOM_BYTES,
+  restoreDatabaseBackup,
   snapshotBeforeMigration,
   type BackupEnvironment as BackupEnvironmentShape,
+  type OpenSqlite,
   type PremigrationBackupMode,
 } from "./databaseBackups.ts";
 import { makeRuntimeSqliteLayer, makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
@@ -839,5 +848,832 @@ describe("finalizing backups", () => {
         assert.isTrue(compressed, backupFiles(home.backupsDir).join(", "));
       }).pipe(Effect.provide(Layer.provideMerge(livePersistence(home.dbPath), quiet)));
     }).pipe(Effect.ensuring(home.cleanup));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// ryco db backup | list | restore
+// ---------------------------------------------------------------------------------------------
+
+const manualBackup = (dbPath: string) =>
+  createManualBackup({ dbPath, openSqlite: makeRuntimeSqliteLayer }).pipe(Effect.provide(quiet));
+
+/** The error Bun's SQLite gives for a database it cannot open, wrapped as the client wraps it. */
+const unableToOpen = (message = "unable to open database file") =>
+  new SqlError({
+    reason: new ConnectionError({
+      cause: new Error(message),
+      message: "Failed to execute statement",
+    }),
+  });
+
+/** `connection`, with the statements `fails` picks failing as {@link unableToOpen}. */
+const failingStatements = (
+  connection: Layer.Layer<SqlClient.SqlClient, SqlError>,
+  fails: (statement: string) => boolean,
+  message?: string,
+) =>
+  Layer.effect(
+    SqlClient.SqlClient,
+    Effect.gen(function* () {
+      const client = yield* SqlClient.SqlClient;
+      return new Proxy(client, {
+        get: (target, property, receiver) =>
+          property === "unsafe"
+            ? (statement: string, params?: ReadonlyArray<unknown>) =>
+                fails(statement)
+                  ? Effect.fail(unableToOpen(message))
+                  : target.unsafe(statement, params as never)
+            : Reflect.get(target, property, receiver),
+      });
+    }),
+  ).pipe(Layer.provide(connection));
+
+/** Writes `count` random 64 KiB blobs, so copying the database takes a measurable time. */
+const addNoise = (dbPath: string, count: number) => {
+  const db = new DatabaseSync(dbPath);
+  db.exec(`CREATE TABLE IF NOT EXISTS noise (data BLOB);
+    WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${count})
+    INSERT INTO noise (data) SELECT randomblob(65536) FROM n;`);
+  db.close();
+};
+
+const writerSource = `
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.argv[1]);
+// No busy handler: any wait for a lock shows up as an error instead of a delay.
+db.exec("PRAGMA busy_timeout = 0");
+const insert = db.prepare("INSERT INTO backup_marker (note) VALUES ('writer')");
+let writes = 0;
+let busy = 0;
+const errors = [];
+const times = [];
+const timer = setInterval(() => {
+  try {
+    insert.run();
+    writes += 1;
+    times.push(Date.now());
+    if (writes === 3) process.stdout.write("writing\\n");
+  } catch (error) {
+    if (/busy|locked/i.test(String(error && error.message))) busy += 1;
+    else errors.push(String(error && error.message));
+  }
+}, 20);
+process.stdin.once("data", () => {
+  clearInterval(timer);
+  const rows = db.prepare("SELECT count(*) AS n FROM backup_marker").get().n;
+  db.close();
+  process.stdout.write(JSON.stringify({ writes, busy, errors, rows, times }) + "\\n", () => process.exit(0));
+});
+`;
+
+interface WriterReport {
+  readonly writes: number;
+  readonly busy: number;
+  readonly errors: ReadonlyArray<string>;
+  readonly rows: number;
+  /** When each write committed (epoch ms). */
+  readonly times: ReadonlyArray<number>;
+}
+
+/** A process that inserts a row every 20 ms until stopped; resolves once it has written. */
+const spawnWriter = (dbPath: string) =>
+  Effect.promise(
+    () =>
+      new Promise<{ readonly stop: () => Promise<WriterReport> }>((resolve, reject) => {
+        const child = NodeChildProcess.spawn(process.execPath, ["-e", writerSource, dbPath], {
+          stdio: ["pipe", "pipe", "inherit"],
+        });
+        let output = "";
+        let onReport: (report: WriterReport) => void = () => {};
+        child.stdout.on("data", (chunk: Buffer) => {
+          output += chunk.toString("utf8");
+          if (output.includes("writing\n")) resolve({ stop });
+          const line = output.split("\n").find((candidate) => candidate.startsWith("{"));
+          if (line !== undefined) onReport(JSON.parse(line) as WriterReport);
+        });
+        const stop = () =>
+          new Promise<WriterReport>((resolveReport) => {
+            onReport = resolveReport;
+            child.stdin.write("stop\n");
+          });
+        child.on("error", reject);
+        child.on("exit", () => reject(new Error("writer exited before writing")));
+      }),
+  );
+
+const readZstDatabase = (path: string, into: string) => {
+  NodeFS.writeFileSync(into, NodeZlib.zstdDecompressSync(NodeFS.readFileSync(path)));
+  return into;
+};
+
+describe("manual backups", () => {
+  it.live("backs up while another process writes every 20 ms, without ever blocking it", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      addNoise(home.dbPath, 512);
+      const writer = yield* spawnWriter(home.dbPath);
+      let report: WriterReport = {
+        writes: 0,
+        busy: 0,
+        errors: ["not stopped"],
+        rows: 0,
+        times: [],
+      };
+      const copyWindow = { from: 0, to: 0 };
+      const result = yield* createManualBackup({
+        dbPath: home.dbPath,
+        openSqlite: makeRuntimeSqliteLayer,
+        onStep: (step) =>
+          Effect.sync(() => {
+            if (step === "copy") copyWindow.from = Date.now();
+            if (step === "check") copyWindow.to = Date.now();
+          }),
+      }).pipe(
+        Effect.provide(quiet),
+        Effect.ensuring(
+          Effect.promise(async () => {
+            report = await writer.stop();
+          }),
+        ),
+      );
+
+      assert.equal(report.busy, 0, "the writer waited for a lock");
+      assert.deepEqual(report.errors, []);
+      assert.isAbove(report.writes, 2);
+      // The writer committed while VACUUM INTO was copying.
+      assert.isTrue(
+        report.times.some((time) => time >= copyWindow.from && time <= copyWindow.to),
+        `no write between ${copyWindow.from} and ${copyWindow.to}: ${report.times.join(", ")}`,
+      );
+      assert.match(
+        NodePath.basename(result.path),
+        new RegExp(`^state-v0${LATEST}-manual-\\d{8}T\\d{9}Z\\.sqlite\\.zst$`),
+      );
+      assert.equal(result.schema, LATEST);
+      assert.equal(result.codec, "zst");
+      // A consistent snapshot: the writer's rows up to some point, without a gap.
+      const restored = readZstDatabase(result.path, NodePath.join(home.root, "copy.sqlite"));
+      const db = new DatabaseSync(restored, { readOnly: true });
+      const rows = db.prepare("SELECT count(*) AS n, max(id) AS last FROM backup_marker").get() as {
+        n: number;
+        last: number;
+      };
+      const journal = db.prepare("PRAGMA journal_mode").get() as { journal_mode: string };
+      db.close();
+      assert.equal(rows.n, rows.last);
+      assert.isAtLeast(rows.n, 1);
+      assert.isAtMost(rows.n, report.rows);
+      assert.equal(journal.journal_mode, "delete");
+      assert.equal(readDatabase(restored).quickCheck, "ok");
+      // Only the finished backup: no partials.
+      assert.deepEqual(backupFiles(home.backupsDir), [NodePath.basename(result.path)]);
+      if (process.platform !== "win32") {
+        assert.equal(NodeFS.statSync(result.path).mode & 0o777, 0o600);
+      }
+      // The live database was read, not changed.
+      assert.equal(readDatabase(home.dbPath).ledger, LATEST);
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("fails without a database, and on low disk space, writing nothing", () => {
+    const missing = makeHome();
+    const full = makeHome();
+    return Effect.gen(function* () {
+      const none = yield* Effect.flip(manualBackup(missing.dbPath));
+      assert.equal(none.reason, "no-database");
+      assert.include(none.message, `No Ryco database at ${missing.dbPath}`);
+      assert.isFalse(NodeFS.existsSync(missing.backupsDir));
+
+      yield* buildDatabase(full.dbPath, undefined);
+      const lowSpace = yield* Effect.flip(
+        manualBackup(full.dbPath).pipe(
+          withEnvironment({ statfs: async () => ({ type: 1, bavail: 10, bsize: 4096 }) }),
+        ),
+      );
+      assert.equal(lowSpace.reason, "insufficient-space");
+      assert.include(lowSpace.message, "needed for a");
+      assert.deepEqual(backupFiles(full.backupsDir), []);
+    }).pipe(Effect.ensuring(missing.cleanup), Effect.ensuring(full.cleanup));
+  });
+
+  it.effect("keeps the newest three manual backups and leaves pre-upgrade backups alone", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      NodeFS.mkdirSync(home.backupsDir, { recursive: true });
+      const at = (day: number) => Date.UTC(2026, 9, day, 12);
+      const seeded = [1, 2, 3].map((day) =>
+        formatBackupName({ stem: "state", from: LATEST, to: "manual", at: at(day), codec: "zst" }),
+      );
+      const before = [1, 2, 3, 4].map((day) =>
+        formatBackupName({ stem: "state", from: 92, to: LATEST, at: at(day), codec: "zst" }),
+      );
+      for (const name of [...seeded, ...before]) {
+        NodeFS.writeFileSync(NodePath.join(home.backupsDir, name), "x");
+      }
+      yield* TestClock.setTime(at(10));
+      const result = yield* manualBackup(home.dbPath);
+      assert.deepEqual(result.pruned, [seeded[0]]);
+      assert.deepEqual(
+        backupFiles(home.backupsDir),
+        [...seeded.slice(1), ...before, NodePath.basename(result.path)].toSorted(),
+      );
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("reads through a read-write connection only where read-only cannot open (Bun)", () => {
+    const home = makeHome();
+    const opened: Array<string> = [];
+    // What Bun's SQLite does with a read-only WAL database whose -shm file does not exist yet: the
+    // open succeeds, and every statement fails.
+    const failReadOnly =
+      (message: string): OpenSqlite =>
+      (config) => {
+        opened.push(`${NodePath.basename(config.filename)}:${config.readonly ? "ro" : "rw"}`);
+        return config.readonly
+          ? failingStatements(makeRuntimeSqliteLayer(config), () => true, message)
+          : makeRuntimeSqliteLayer(config);
+      };
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      const result = yield* createManualBackup({
+        dbPath: home.dbPath,
+        openSqlite: failReadOnly("unable to open database file"),
+      }).pipe(Effect.provide(quiet));
+      assert.equal(result.schema, LATEST);
+      assert.deepEqual(opened.slice(0, 2), ["state.sqlite:ro", "state.sqlite:rw"]);
+      // Any other failure is not retried.
+      opened.length = 0;
+      const error = yield* Effect.flip(
+        createManualBackup({
+          dbPath: home.dbPath,
+          openSqlite: failReadOnly("disk I/O error"),
+        }).pipe(Effect.provide(quiet)),
+      );
+      assert.equal(error.reason, "io");
+      assert.deepEqual(opened, ["state.sqlite:ro"]);
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("never turns a database file that went away into a new, empty one (Bun)", () => {
+    const home = makeHome();
+    const opened: Array<string> = [];
+    // Bun's SQLite fails a read-only open of a missing file at once, with the message it gives
+    // for a WAL database it cannot read; a read-write open would create the file.
+    const bunLike =
+      (before: (filename: string, readonly: boolean) => void): OpenSqlite =>
+      (config) => {
+        before(config.filename, config.readonly === true);
+        opened.push(`${NodePath.basename(config.filename)}:${config.readonly ? "ro" : "rw"}`);
+        return config.readonly && !NodeFS.existsSync(config.filename)
+          ? Layer.effect(SqlClient.SqlClient, Effect.fail(unableToOpen()))
+          : makeRuntimeSqliteLayer(config);
+      };
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      const first = yield* manualBackup(home.dbPath);
+
+      // Something removes the plain copy before it is checked (another process's clean-up).
+      const copyRemoved = yield* Effect.flip(
+        createManualBackup({
+          dbPath: home.dbPath,
+          openSqlite: bunLike((filename, readonly) => {
+            if (readonly && filename.endsWith(".partial")) NodeFS.rmSync(filename, { force: true });
+          }),
+        }).pipe(Effect.provide(quiet)),
+      );
+      assert.equal(copyRemoved.reason, "io", copyRemoved.message);
+      assert.isFalse(
+        opened.some((entry) => entry.endsWith(":rw")),
+        opened.join(", "),
+      );
+      assert.deepEqual(backupFiles(home.backupsDir), [NodePath.basename(first.path)]);
+
+      // The database is moved aside as the backup starts.
+      opened.length = 0;
+      const aside = `${home.dbPath}.aside`;
+      const moved = yield* Effect.flip(
+        createManualBackup({
+          dbPath: home.dbPath,
+          openSqlite: bunLike((filename) => {
+            if (filename === home.dbPath && NodeFS.existsSync(filename)) {
+              NodeFS.renameSync(filename, aside);
+            }
+          }),
+        }).pipe(Effect.provide(quiet)),
+      );
+      assert.equal(moved.reason, "io", moved.message);
+      assert.isFalse(
+        opened.some((entry) => entry.endsWith(":rw")),
+        opened.join(", "),
+      );
+      assert.isFalse(NodeFS.existsSync(home.dbPath), "an empty database took its place");
+      assert.deepEqual(backupFiles(home.backupsDir), [NodePath.basename(first.path)]);
+      NodeFS.renameSync(aside, home.dbPath);
+
+      // A copy whose ledger is behind the database it was taken from is not published.
+      const behind = NodePath.join(home.root, "behind.sqlite");
+      const stale = yield* Effect.flip(
+        createManualBackup({
+          dbPath: home.dbPath,
+          openSqlite: (config) => {
+            if (!config.readonly || !config.filename.endsWith(".partial")) {
+              return makeRuntimeSqliteLayer(config);
+            }
+            // The same pages, with the newest migrations missing from the ledger.
+            NodeFS.copyFileSync(config.filename, behind);
+            const db = new DatabaseSync(behind);
+            db.exec("DELETE FROM effect_sql_migrations WHERE migration_id > 50");
+            db.close();
+            return makeRuntimeSqliteLayer({ ...config, filename: behind });
+          },
+        }).pipe(Effect.provide(quiet)),
+      );
+      assert.equal(stale.reason, "check-failed", stale.message);
+      assert.include(stale.message, `schema 50`);
+      assert.deepEqual(backupFiles(home.backupsDir), [NodePath.basename(first.path)]);
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("never repeats a failed backup on a read-write connection", () => {
+    const home = makeHome();
+    const opened: Array<string> = [];
+    // A read-only connection that opens and reads, but whose VACUUM INTO fails with the message
+    // Bun gives for a read-only connection that cannot read.
+    const failVacuum: OpenSqlite = (config) => {
+      opened.push(`${NodePath.basename(config.filename)}:${config.readonly ? "ro" : "rw"}`);
+      if (!config.readonly) return makeRuntimeSqliteLayer(config);
+      return failingStatements(makeRuntimeSqliteLayer(config), (statement) =>
+        statement.startsWith("VACUUM INTO"),
+      );
+    };
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      const error = yield* Effect.flip(
+        createManualBackup({ dbPath: home.dbPath, openSqlite: failVacuum }).pipe(
+          Effect.provide(quiet),
+        ),
+      );
+      assert.equal(error.reason, "io");
+      assert.deepEqual(opened, ["state.sqlite:ro"]);
+      assert.deepEqual(backupFiles(home.backupsDir), []);
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("refuses to back up a damaged database and leaves no partial", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      addNoise(home.dbPath, 8);
+      const handle = NodeFS.openSync(home.dbPath, "r+");
+      const size = NodeFS.fstatSync(handle).size;
+      for (let offset = 4096; offset < size; offset += 4096) {
+        NodeFS.writeSync(handle, Buffer.alloc(16, 0xff), 0, 16, offset);
+      }
+      NodeFS.closeSync(handle);
+      const error = yield* Effect.flip(manualBackup(home.dbPath));
+      assert.oneOf(error.reason, ["check-failed", "io"]);
+      assert.deepEqual(backupFiles(home.backupsDir), []);
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+});
+
+describe("listing backups", () => {
+  it.effect("marks backups with a newer schema as not openable by this build", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      NodeFS.mkdirSync(home.backupsDir, { recursive: true });
+      const at = Date.UTC(2026, 9, 23, 12);
+      const current = formatBackupName({ stem: "state", from: 92, to: 93, at, codec: "zst" });
+      const newer = formatBackupName({
+        stem: "state",
+        from: SUPPORTED_MIGRATION_ID + 5,
+        to: "manual",
+        at: at + 1,
+        codec: "zst",
+      });
+      for (const name of [current, newer, "notes.txt"]) {
+        NodeFS.writeFileSync(NodePath.join(home.backupsDir, name), "x");
+      }
+      const listing = yield* describeDatabaseBackups(home.dbPath);
+      assert.equal(listing.directory, home.backupsDir);
+      assert.equal(listing.supportedSchema, SUPPORTED_MIGRATION_ID);
+      assert.deepEqual(
+        listing.backups.map((backup) => [backup.name, backup.opensWithThisBuild]),
+        [
+          [newer, false],
+          [current, true],
+        ],
+      );
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("tells the format from the first bytes, not the name", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      const write = (name: string, content: Buffer | string) => {
+        const path = NodePath.join(home.root, name);
+        NodeFS.writeFileSync(path, content);
+        return path;
+      };
+      yield* buildDatabase(home.dbPath, undefined);
+      const sqlite = NodeFS.readFileSync(home.dbPath);
+      assert.equal(yield* detectBackupCodec(write("a.sqlite.zst", sqlite)), "sqlite");
+      assert.equal(
+        yield* detectBackupCodec(write("b.sqlite.zst", NodeZlib.gzipSync(sqlite))),
+        "gz",
+      );
+      assert.equal(
+        yield* detectBackupCodec(write("c.sqlite", NodeZlib.zstdCompressSync(sqlite))),
+        "zst",
+      );
+      assert.isUndefined(yield* detectBackupCodec(write("d.sqlite", "hello")));
+      assert.isUndefined(yield* detectBackupCodec(write("e.sqlite", "")));
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+});
+
+/** Every entry under `root` with its size, to show that a refused restore changed nothing. */
+const listTree = (root: string) =>
+  NodeFS.existsSync(root)
+    ? NodeFS.readdirSync(root, { recursive: true })
+        .map(String)
+        .toSorted()
+        .map((entry) => {
+          const info = NodeFS.lstatSync(NodePath.join(root, entry));
+          return `${entry}:${info.isDirectory() ? "dir" : info.size}`;
+        })
+    : null;
+
+const makeRestoreTarget = () => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ryco-db-restore-"));
+  return {
+    root,
+    cleanup: Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+  };
+};
+
+const restoreInto = (
+  home: ReturnType<typeof makeHome>,
+  file: string,
+  intoBaseDir: string,
+  options: { readonly fullCheck?: boolean } = {},
+) =>
+  restoreDatabaseBackup({
+    file,
+    target: {
+      baseDir: intoBaseDir,
+      dbPath: NodePath.join(intoBaseDir, "userdata", "state.sqlite"),
+    },
+    live: { baseDir: home.root, stateDir: NodePath.dirname(home.dbPath), dbPath: home.dbPath },
+    openSqlite: makeRuntimeSqliteLayer,
+    fullCheck: options.fullCheck,
+  }).pipe(Effect.provide(quiet));
+
+describe("restoring a backup", () => {
+  it.effect("restores zstd, gzip and plain backups into a new data directory", () => {
+    const home = makeHome();
+    const target = makeRestoreTarget();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, BEFORE_LATEST);
+      const raw = yield* snapshot(home.dbPath);
+      if (raw._tag !== "Written") return assert.fail(raw._tag);
+      const manual = yield* manualBackup(home.dbPath);
+      // gzip content behind a .zst name: the first bytes decide.
+      const mislabelled = NodePath.join(target.root, "mislabelled.sqlite.zst");
+      NodeFS.writeFileSync(mislabelled, NodeZlib.gzipSync(NodeFS.readFileSync(raw.path)));
+
+      const cases = [
+        { file: manual.path, format: "zst", ledger: BEFORE_LATEST },
+        { file: raw.path, format: "sqlite", ledger: BEFORE_LATEST },
+        { file: mislabelled, format: "gz", ledger: BEFORE_LATEST },
+      ] as const;
+      for (const [index, testCase] of cases.entries()) {
+        const into = NodePath.join(target.root, `restored-${index}`);
+        const result = yield* restoreInto(home, testCase.file, into, { fullCheck: index === 0 });
+        assert.equal(result.format, testCase.format);
+        assert.equal(result.schema, testCase.ledger);
+        assert.isTrue(result.opensWithThisBuild);
+        assert.deepEqual(result.warnings, []);
+        assert.equal(result.check, index === 0 ? "integrity_check" : "quick_check");
+        assert.equal(result.path, NodePath.join(into, "userdata", "state.sqlite"));
+        assert.deepEqual(readDatabase(result.path), {
+          ledger: testCase.ledger,
+          markers: 1,
+          journal: "delete",
+          quickCheck: "ok",
+        });
+        // Only the database: no partial, no sidecar.
+        assert.deepEqual(NodeFS.readdirSync(NodePath.dirname(result.path)), ["state.sqlite"]);
+        if (process.platform !== "win32") {
+          assert.equal(NodeFS.statSync(result.path).mode & 0o777, 0o600);
+          assert.equal(NodeFS.statSync(NodePath.dirname(result.path)).mode & 0o777, 0o700);
+        }
+      }
+      // An empty directory is fine too.
+      const empty = NodePath.join(target.root, "empty");
+      NodeFS.mkdirSync(empty);
+      yield* restoreInto(home, manual.path, empty);
+      assert.isTrue(NodeFS.existsSync(NodePath.join(empty, "userdata", "state.sqlite")));
+    }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
+  });
+
+  it.effect("refuses targets that touch the data directory in use, or are not empty", () => {
+    const home = makeHome();
+    const target = makeRestoreTarget();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      const manual = yield* manualBackup(home.dbPath);
+      const symlinkToLive = NodePath.join(target.root, "link-to-live");
+      NodeFS.symlinkSync(home.root, symlinkToLive, "dir");
+      const nonEmpty = NodePath.join(target.root, "non-empty");
+      NodeFS.mkdirSync(nonEmpty);
+      NodeFS.writeFileSync(NodePath.join(nonEmpty, "notes.txt"), "keep me");
+      const withDatabase = NodePath.join(target.root, "with-database");
+      NodeFS.mkdirSync(NodePath.join(withDatabase, "userdata"), { recursive: true });
+      NodeFS.copyFileSync(home.dbPath, NodePath.join(withDatabase, "userdata", "state.sqlite"));
+      const aFile = NodePath.join(target.root, "a-file");
+      NodeFS.writeFileSync(aFile, "x");
+
+      const cases = [
+        { into: home.root, reason: "unsafe-target" },
+        { into: NodePath.join(home.root, "userdata", "restored"), reason: "unsafe-target" },
+        { into: NodePath.join(home.root, "elsewhere"), reason: "unsafe-target" },
+        { into: symlinkToLive, reason: "unsafe-target" },
+        { into: NodePath.join(symlinkToLive, "userdata", "x"), reason: "unsafe-target" },
+        // A parent of the data directory in use.
+        { into: NodePath.dirname(home.root), reason: "unsafe-target" },
+        { into: nonEmpty, reason: "target-not-empty" },
+        { into: withDatabase, reason: "target-not-empty" },
+        { into: aFile, reason: "target-not-empty" },
+      ] as const;
+      for (const testCase of cases) {
+        const liveBefore = listTree(home.root);
+        const targetBefore = listTree(target.root);
+        const error = yield* Effect.flip(restoreInto(home, manual.path, testCase.into));
+        assert.equal(error.reason, testCase.reason, `${testCase.into}: ${error.message}`);
+        assert.deepEqual(listTree(home.root), liveBefore, testCase.into);
+        assert.deepEqual(listTree(target.root), targetBefore, testCase.into);
+      }
+    }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
+  });
+
+  it.effect("fails on truncated, corrupted or foreign input and removes what it created", () => {
+    const home = makeHome();
+    const target = makeRestoreTarget();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      addNoise(home.dbPath, 4);
+      const manual = yield* manualBackup(home.dbPath);
+      const compressed = NodeFS.readFileSync(manual.path);
+      const write = (name: string, content: Buffer | string) => {
+        const path = NodePath.join(target.root, name);
+        NodeFS.writeFileSync(path, content);
+        return path;
+      };
+      const flipped = Buffer.from(compressed);
+      flipped[Math.floor(flipped.length / 2)]! ^= 0xff;
+      const plain = NodeZlib.zstdDecompressSync(compressed);
+      const damagedPlain = Buffer.from(plain);
+      for (let offset = 4096; offset < damagedPlain.length; offset += 4096) {
+        damagedPlain.fill(0xff, offset, offset + 16);
+      }
+      const noLedger = NodePath.join(target.root, "no-ledger.sqlite");
+      const other = new DatabaseSync(noLedger);
+      other.exec("CREATE TABLE t (x); INSERT INTO t VALUES (1)");
+      other.close();
+      const hardLink = NodePath.join(target.root, "linked.sqlite");
+      NodeFS.linkSync(home.dbPath, hardLink);
+
+      const cases = [
+        {
+          file: write("truncated.zst", compressed.subarray(0, compressed.length - 100)),
+          reason: "damaged",
+        },
+        { file: write("flipped.zst", flipped), reason: "damaged" },
+        {
+          file: write("truncated.gz", NodeZlib.gzipSync(plain).subarray(0, 1000)),
+          reason: "damaged",
+        },
+        { file: write("damaged.sqlite", damagedPlain), reason: "damaged" },
+        { file: write("text.gz", NodeZlib.gzipSync("not a database")), reason: "unknown-format" },
+        {
+          file: write("empty.zst", NodeZlib.zstdCompressSync(Buffer.alloc(0))),
+          reason: "unknown-format",
+        },
+        { file: write("notes.txt", "hello"), reason: "unknown-format" },
+        { file: noLedger, reason: "not-a-ryco-database" },
+        { file: NodePath.join(target.root, "missing.zst"), reason: "not-a-file" },
+        { file: target.root, reason: "not-a-file" },
+        // The database in use itself, and under another name.
+        { file: home.dbPath, reason: "live-database" },
+        { file: hardLink, reason: "live-database" },
+      ] as const;
+      for (const testCase of cases) {
+        const into = NodePath.join(target.root, "restored");
+        const error = yield* Effect.flip(restoreInto(home, testCase.file, into));
+        assert.equal(error.reason, testCase.reason, `${testCase.file}: ${error.message}`);
+        assert.isFalse(NodeFS.existsSync(into), `${testCase.file} left ${into} behind`);
+      }
+      // A file with a live WAL next to it is a database in use, not a backup.
+      const copy = NodePath.join(target.root, "in-use.sqlite");
+      NodeFS.copyFileSync(home.dbPath, copy);
+      const open = new DatabaseSync(copy);
+      open.exec(
+        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; INSERT INTO backup_marker (note) VALUES ('x')",
+      );
+      const inUse = yield* Effect.flip(
+        restoreInto(home, copy, NodePath.join(target.root, "restored")),
+      ).pipe(Effect.ensuring(Effect.sync(() => open.close())));
+      assert.equal(inUse.reason, "live-database");
+    }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
+  });
+
+  it.effect(
+    "needs free space for the restored database, not just for the compressed backup",
+    () => {
+      const home = makeHome();
+      const target = makeRestoreTarget();
+      return Effect.gen(function* () {
+        yield* buildDatabase(home.dbPath, undefined);
+        const manual = yield* manualBackup(home.dbPath);
+        const plain = NodeZlib.zstdDecompressSync(NodeFS.readFileSync(manual.path));
+        const gz = NodePath.join(target.root, "backup.sqlite.gz");
+        NodeFS.writeFileSync(gz, NodeZlib.gzipSync(plain));
+        for (const file of [manual.path, gz]) {
+          const compressedBytes = NodeFS.statSync(file).size;
+          assert.isAbove(plain.length, compressedBytes + 1);
+          const into = NodePath.join(target.root, `restored-${NodePath.extname(file)}`);
+          // Room for the backup, not for what it decompresses to.
+          const error = yield* Effect.flip(
+            restoreInto(home, file, into).pipe(
+              withEnvironment({
+                statfs: async () => ({ type: 1, bavail: compressedBytes + 1, bsize: 1 }),
+              }),
+            ),
+          );
+          assert.equal(error.reason, "insufficient-space", error.message);
+          assert.include(error.message, `${formatBytes(plain.length)} for the restored database`);
+          assert.isFalse(NodeFS.existsSync(into));
+          // Room for the restored database only would leave the volume, which can be the one the
+          // database in use writes to, full.
+          const headroom = Math.max(plain.length, RESTORE_MIN_HEADROOM_BYTES);
+          const full = yield* Effect.flip(
+            restoreInto(home, file, into).pipe(
+              withEnvironment({
+                statfs: async () => ({ type: 1, bavail: plain.length, bsize: 1 }),
+              }),
+            ),
+          );
+          assert.equal(full.reason, "insufficient-space", full.message);
+          assert.include(full.message, `${formatBytes(headroom)} left free`);
+          assert.isFalse(NodeFS.existsSync(into));
+          // Exactly enough is enough.
+          const result = yield* restoreInto(home, file, into).pipe(
+            withEnvironment({
+              statfs: async () => ({ type: 1, bavail: plain.length + headroom, bsize: 1 }),
+            }),
+          );
+          assert.equal(result.bytes, plain.length);
+        }
+      }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
+    },
+  );
+
+  it.effect("never decompresses more than the checks allowed", () => {
+    const home = makeHome();
+    const target = makeRestoreTarget();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      const manual = yield* manualBackup(home.dbPath);
+      const plain = NodeZlib.zstdDecompressSync(NodeFS.readFileSync(manual.path));
+      const write = (name: string, content: Buffer) => {
+        const path = NodePath.join(target.root, name);
+        NodeFS.writeFileSync(path, content);
+        return path;
+      };
+      const zeros = Buffer.alloc(16 * 1024 * 1024);
+      const restore = (file: string, bavail?: number) =>
+        Effect.flip(
+          restoreInto(home, file, NodePath.join(target.root, "restored")).pipe(
+            withEnvironment({
+              statfs: async () => ({ type: 1, bavail: bavail ?? 1e12, bsize: 1 }),
+            }),
+          ),
+        );
+
+      // An archive that is not a database is refused before it is decompressed.
+      const archive = yield* restore(
+        write(
+          "logs.tar.gz",
+          NodeZlib.gzipSync(Buffer.concat([Buffer.from("NOT A DATABASE"), zeros])),
+        ),
+      );
+      assert.equal(archive.reason, "unknown-format", archive.message);
+
+      // A backup that decompresses to more than its SQLite header states stops there.
+      const padded = yield* restore(
+        write("padded.sqlite.gz", NodeZlib.gzipSync(Buffer.concat([plain, zeros]))),
+      );
+      assert.equal(padded.reason, "damaged", padded.message);
+      assert.include(padded.message, formatBytes(plain.length));
+      assert.isFalse(NodeFS.existsSync(NodePath.join(target.root, "restored")));
+
+      // A header that does not state the size (version-valid-for differs from the change
+      // counter): the compressed size passes the check, and decompression stops where it would
+      // eat into the margin that must stay free.
+      const noSize = Buffer.from(plain);
+      noSize.writeUInt32BE(noSize.readUInt32BE(24) + 1, 92);
+      const unsized = write("unsized.sqlite.gz", NodeZlib.gzipSync(noSize));
+      const compressed = NodeFS.statSync(unsized).size;
+      const margin = Math.max(compressed, RESTORE_MIN_HEADROOM_BYTES);
+      const overflow = yield* restore(unsized, compressed + margin);
+      assert.equal(overflow.reason, "insufficient-space", overflow.message);
+      assert.isFalse(NodeFS.existsSync(NodePath.join(target.root, "restored")));
+      // With room for all of it, the same file restores.
+      const fits = yield* restoreInto(home, unsized, NodePath.join(target.root, "restored")).pipe(
+        withEnvironment({
+          statfs: async () => ({ type: 1, bavail: margin + plain.length, bsize: 1 }),
+        }),
+      );
+      assert.equal(fits.bytes, plain.length);
+    }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
+  });
+
+  it.effect("warns about another branch's ledger and a newer schema, and restores anyway", () => {
+    const home = makeHome();
+    const target = makeRestoreTarget();
+    return Effect.gen(function* () {
+      yield* buildDatabase(home.dbPath, undefined);
+      const foreign = NodePath.join(target.root, "foreign.sqlite");
+      NodeFS.copyFileSync(home.dbPath, foreign);
+      const db = new DatabaseSync(foreign);
+      db.exec("PRAGMA journal_mode = DELETE");
+      // 50 has no compatibility repair; 93 has one.
+      for (const id of [50, LATEST]) {
+        db.prepare("UPDATE effect_sql_migrations SET name = ? WHERE migration_id = ?").run(
+          "SomethingElse",
+          id,
+        );
+      }
+      db.prepare(
+        "INSERT INTO effect_sql_migrations (migration_id, created_at, name) VALUES (?, 'now', 'FutureSchema')",
+      ).run(SUPPORTED_MIGRATION_ID + 2);
+      db.close();
+
+      const result = yield* restoreInto(home, foreign, NodePath.join(target.root, "restored"));
+      assert.equal(result.schema, SUPPORTED_MIGRATION_ID + 2);
+      assert.isFalse(result.opensWithThisBuild);
+      assert.equal(result.warnings.length, 2, result.warnings.join(" | "));
+      assert.include(result.warnings[0], "migration 50 is SomethingElse there");
+      assert.include(result.warnings[0], `migration ${LATEST} is SomethingElse there`);
+      assert.include(
+        result.warnings[0],
+        "This build would skip its own migration 50, so open it with the build that wrote it.",
+      );
+      assert.include(result.warnings[1], "newer than this build supports");
+      assert.isTrue(NodeFS.existsSync(result.path));
+    }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
+  });
+
+  it.effect("does not send a database this build repairs to the branch that wrote it", () => {
+    const home = makeHome();
+    const target = makeRestoreTarget();
+    return Effect.gen(function* () {
+      // Another branch recorded its own migration 92 first; this build then migrated the
+      // database, which ran its compatibility repair for 92.
+      yield* buildDatabase(home.dbPath, 91);
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, created_at, name)
+          VALUES (92, 'now', 'SomeOtherBranch')`;
+        yield* runMigrations();
+      }).pipe(
+        Effect.provide(
+          Layer.provideMerge(NodeSqliteClient.layer({ filename: home.dbPath }), quiet),
+        ),
+      );
+      const manual = yield* manualBackup(home.dbPath);
+
+      const result = yield* restoreInto(home, manual.path, NodePath.join(target.root, "restored"));
+      assert.isTrue(result.opensWithThisBuild);
+      assert.equal(result.warnings.length, 1, result.warnings.join(" | "));
+      assert.include(
+        result.warnings[0],
+        "migration 92 is SomeOtherBranch there but LocalTaskDelegations here",
+      );
+      assert.include(result.warnings[0], "This build still gets its own schema there");
+      assert.notInclude(result.warnings[0], "build that wrote it");
+      // It does open with this build, with this build's table for 92.
+      yield* startServer(result.path);
+      const db = new DatabaseSync(result.path, { readOnly: true });
+      const table = db
+        .prepare("SELECT name FROM sqlite_master WHERE name = 'local_task_delegations'")
+        .get();
+      db.close();
+      assert.isDefined(table);
+    }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
   });
 });
