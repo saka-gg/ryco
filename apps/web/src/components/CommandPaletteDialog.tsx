@@ -149,6 +149,7 @@ import {
   RECENT_THREAD_LIMIT,
 } from "./CommandPalette.logic";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
+import { useAppearancePaletteItems } from "./CommandPaletteAppearance";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -1506,6 +1507,7 @@ function OpenCommandPaletteDialog() {
   const exportAction = useThreadExportAction(
     activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
   );
+  const appearanceItems = useAppearancePaletteItems();
   const presentationTier = usePresentationTier();
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> =
     presentationTier === "phone" ? [] : [exportAction];
@@ -1888,6 +1890,9 @@ function OpenCommandPaletteDialog() {
     }
   }
 
+  if (presentationTier !== "phone") {
+    actionItems.push(...appearanceItems);
+  }
   actionItems.push({
     kind: "action",
     value: "action:settings",

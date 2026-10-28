@@ -794,6 +794,47 @@ describe("resolveShortcutCommand", () => {
     );
   });
 
+  it("resolves the default history, interrupt and copy shortcuts outside the terminal", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel", context = {}) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context,
+      });
+    const back = { key: "[", code: "BracketLeft", metaKey: true };
+    const forward = { key: "]", code: "BracketRight", metaKey: true };
+    const interrupt = { key: ".", code: "Period", metaKey: true };
+    const copyReference = { key: "c", code: "KeyC", metaKey: true, shiftKey: true };
+    assert.strictEqual(resolve(back), "navigation.back");
+    assert.strictEqual(resolve(forward), "navigation.forward");
+    assert.strictEqual(resolve(interrupt), "thread.interrupt");
+    assert.strictEqual(resolve(copyReference), "thread.copyReference");
+    assert.strictEqual(
+      resolve({ key: "]", code: "BracketRight", ctrlKey: true }, "Linux"),
+      "navigation.forward",
+    );
+    assert.strictEqual(
+      resolve({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }, "Linux"),
+      "thread.copyReference",
+    );
+    // German layouts type "ü" on the physical [ key.
+    assert.strictEqual(
+      resolve({ key: "ü", code: "BracketLeft", metaKey: true }),
+      "navigation.back",
+    );
+    for (const overrides of [back, forward, interrupt, copyReference]) {
+      assert.isNull(resolve(overrides, "MacIntel", { terminalFocus: true }));
+    }
+    // Shift and Option keep the bracket keys' thread and pane commands.
+    assert.strictEqual(
+      resolve({ key: "{", code: "BracketLeft", metaKey: true, shiftKey: true }),
+      "thread.previous",
+    );
+    assert.strictEqual(
+      resolve({ key: "“", code: "BracketLeft", metaKey: true, altKey: true }),
+      "pane.focusPrevious",
+    );
+  });
+
   it("matches alt+letter bindings through macOS Option dead keys and rewritten characters", () => {
     // The default is client-only: a node sends every default to clients that may predate the command.
     assert.isFalse(

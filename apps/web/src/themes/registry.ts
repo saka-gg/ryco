@@ -187,12 +187,14 @@ export { isValidTheme };
 // every theme application and snapshot read, and the stored JSON rarely
 // changes. Keying by the raw value keeps cross-tab writes correct.
 let customThemesCache: { readonly raw: string; readonly themes: ThemeDefinition[] } | null = null;
+const NO_CUSTOM_THEMES: readonly ThemeDefinition[] = [];
 
-export function getCustomThemes(): ThemeDefinition[] {
-  if (typeof localStorage === "undefined") return [];
+/** The cached custom themes; the same array until the stored JSON changes. */
+function readCustomThemes(): readonly ThemeDefinition[] {
+  if (typeof localStorage === "undefined") return NO_CUSTOM_THEMES;
   const raw = localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY);
-  if (!raw) return [];
-  if (customThemesCache?.raw === raw) return [...customThemesCache.themes];
+  if (!raw) return NO_CUSTOM_THEMES;
+  if (customThemesCache?.raw === raw) return customThemesCache.themes;
   let themes: ThemeDefinition[];
   try {
     const parsed = JSON.parse(raw);
@@ -201,7 +203,11 @@ export function getCustomThemes(): ThemeDefinition[] {
     themes = [];
   }
   customThemesCache = { raw, themes };
-  return [...themes];
+  return themes;
+}
+
+export function getCustomThemes(): ThemeDefinition[] {
+  return [...readCustomThemes()];
 }
 
 export function setCustomThemes(themes: ThemeDefinition[]): void {
@@ -229,6 +235,24 @@ function notifyThemeRegistryChange(): void {
 
 export function getAllThemes(): ThemeDefinition[] {
   return [...BUILT_IN_THEMES, ...getCustomThemes()];
+}
+
+let themeListCache: {
+  readonly customThemes: readonly ThemeDefinition[];
+  readonly themes: readonly ThemeDefinition[];
+} | null = null;
+
+/**
+ * Every theme, as the same array until the custom themes change: a
+ * `useSyncExternalStore` snapshot for {@link subscribeThemeRegistry}, where
+ * {@link getAllThemes}' fresh copy per call would re-render forever.
+ */
+export function getThemeListSnapshot(): readonly ThemeDefinition[] {
+  const customThemes = readCustomThemes();
+  if (themeListCache?.customThemes !== customThemes) {
+    themeListCache = { customThemes, themes: [...BUILT_IN_THEMES, ...customThemes] };
+  }
+  return themeListCache.themes;
 }
 
 export function findTheme(id: string | null | undefined): ThemeDefinition {

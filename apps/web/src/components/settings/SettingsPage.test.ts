@@ -13,6 +13,7 @@ import {
   SETTINGS_SECTION_IDS,
   SETTINGS_SECTION_LABELS,
 } from "./SettingsPage";
+import { KEYBINDING_SEARCH_ENTRIES } from "./keybindingSearchEntries";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
 import {
   DESKTOP_ONLY_SETTINGS_SECTIONS,
@@ -48,7 +49,7 @@ describe("settings destinations", () => {
     expect(settingsSectionInDestination("integrations", "client", true)).toBe(true);
   });
   it("assigns every search result to exactly one destination", () => {
-    for (const entry of SETTINGS_SEARCH_INDEX) {
+    for (const entry of [...SETTINGS_SEARCH_INDEX, ...KEYBINDING_SEARCH_ENTRIES]) {
       expect(["client", "node"]).toContain(entry.owner);
       expect(settingsSectionInDestination(entry.section, entry.owner, true)).toBe(true);
     }

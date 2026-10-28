@@ -2854,7 +2854,7 @@ export function setupChatViewBrowserSuite() {
       open: false,
       openIntent: null,
     });
-    useInboxFilterStore.setState({ draft: "", environmentId: null, status: "all" });
+    useInboxFilterStore.setState({ draft: "", environmentId: null, project: null, status: "all" });
     // A notice left by an earlier test would take this test's Undo key.
     sidebarUndo.dispose();
     // A reveal the palette asked for, left untaken by an earlier test, would

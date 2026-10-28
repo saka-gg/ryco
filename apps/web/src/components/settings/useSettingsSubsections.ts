@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { flashSettingsTarget } from "./settingsLayout";
 import type { SettingsSearchTarget } from "./settingsSearchReveal";
 
 /**
@@ -64,6 +65,7 @@ export function useSettingsSubsections(
           match.scrollIntoView({ block: "center" });
           match.tabIndex = -1;
           match.focus({ preventScroll: true });
+          flashSettingsTarget(match);
         }
       }
       track();
