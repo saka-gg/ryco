@@ -1,5 +1,5 @@
 import tailwindcss from "@tailwindcss/vite";
-import react, { reactCompilerPreset } from "@vitejs/plugin-react";
+import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { parseOptInSourcemapEnv, readEnv } from "@ryco/shared/runtimeEnv";
 import { availableParallelism } from "node:os";
@@ -21,13 +21,8 @@ import {
   resolveWebModulePreloadDependencies,
 } from "./src/viteBuild/modulePreload";
 import { createPrecompressedAssetsPlugin } from "./src/viteBuild/precompressAssets";
-import { resolveReactCompilerCacheDir } from "./src/viteBuild/reactCompilerCache";
-import {
-  createReactCompilerPoolPlugin,
-  type ReactCompilerPoolOptions,
-} from "./src/viteBuild/reactCompilerPool";
+import { REACT_COMPILER_EXCLUDE, REACT_COMPILER_INCLUDE } from "./src/viteBuild/reactCompilerScope";
 
-const webRoot = fileURLToPath(new URL(".", import.meta.url));
 const resolveWebModule = (module: string) => fileURLToPath(new URL(`./${module}`, import.meta.url));
 const port = Number(process.env.PORT ?? 5733);
 const host = process.env.HOST?.trim() || "localhost";
@@ -56,41 +51,6 @@ const buildSourcemap = parseOptInSourcemapEnv(readEnv("RYCO_WEB_SOURCEMAP"), {
  * workspace dependency renders every hook call it owns unusable.
  */
 export const REACT_DEDUPE_PACKAGES = ["react", "react-dom"] as const;
-export const REACT_COMPILER_INCLUDE = /[\\/]apps[\\/]web[\\/]src[\\/].*\.[jt]sx?(?:$|\?)/;
-export const REACT_COMPILER_EXCLUDE = [
-  /[\\/]node_modules[\\/]/,
-  /\0rolldown[\\/]runtime\.js/,
-  /[\\/]routeTree\.gen\.ts(?:$|\?)/,
-  /\.(?:test|browser)\.[jt]sx?(?:$|\?)/,
-  /\.worker\.[jt]s(?:$|\?)/,
-  /\.logic\.ts(?:$|\?)/,
-  /[\\/]src[\\/]perf[\\/]/,
-  /[\\/]src[\\/]pwa[\\/]/,
-] as const;
-
-/**
- * The React Compiler's Babel options, in `@rolldown/plugin-babel`'s shape so
- * the pool's test can run them through both plugins.
- */
-export function createReactCompilerOptions(): ReactCompilerPoolOptions {
-  return {
-    // The compiler used to visit every TS module pulled from every
-    // workspace package. Keep it on web React source while excluding
-    // generated, worker, test, and deliberately pure logic modules.
-    include: REACT_COMPILER_INCLUDE,
-    exclude: [...REACT_COMPILER_EXCLUDE],
-    // Root-level `vp build` executes from the repository root; keep Babel plugin
-    // resolution anchored to the package that declares the React Compiler plugin.
-    cwd: webRoot,
-    // We need to be explicit about the parser options after moving to @vitejs/plugin-react v6.0.0
-    // This is because the babel plugin only automatically parses typescript and jsx based on relative paths (e.g. "**/*.ts")
-    // whereas the previous version of the plugin parsed all files with a .ts extension.
-    // This is causing our packages/ directory to fail to parse, as they are not relative to the CWD.
-    parserOpts: { plugins: ["typescript", "jsx"] },
-    presets: [reactCompilerPreset()],
-  };
-}
-
 export function shouldEnableHostedPwaBuild(input: {
   readonly clientMode: "hosted-hub" | "standard";
   readonly command: string;
@@ -136,9 +96,16 @@ export function createWebViteConfig(
         srcRoot: fileURLToPath(new URL("./src", import.meta.url)),
       }),
       tanstackRouter(),
-      react(),
-      createReactCompilerPoolPlugin(createReactCompilerOptions(), {
-        cacheDir: resolveReactCompilerCacheDir(process.env, webRoot),
+      // The React Compiler runs through Oxc (oxc-transform-react) in dev,
+      // build and the browser tests alike, so they never memoize differently.
+      // It compiles the modules `reactCompilerScope.ts` selects; with
+      // `compiler` on, Fast Refresh is limited to the same modules. Build
+      // logs stay quiet about recoverable bailouts:
+      // `src/perf/reactCompilerCoverage.test.ts` tracks them instead.
+      react({
+        compiler: true,
+        include: REACT_COMPILER_INCLUDE,
+        exclude: [...REACT_COMPILER_EXCLUDE],
       }),
       tailwindcss(),
       createBootPreloadPlugin(),
