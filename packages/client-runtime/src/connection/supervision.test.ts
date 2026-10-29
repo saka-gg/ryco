@@ -77,6 +77,7 @@ function makeSupervisor(
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
+  let networkChange: (() => void) | null = null;
   let registryListener: (() => void) | null = null;
   const input = {
     isHostedMode: () => overrides.isHostedMode ?? false,
@@ -113,6 +114,12 @@ function makeSupervisor(
         resume = null;
       };
     },
+    subscribeNetworkChange: (listener: () => void) => {
+      networkChange = listener;
+      return () => {
+        networkChange = null;
+      };
+    },
     stateSink: overrides.stateSink ?? {
       applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<unknown>) =>
         events.map(() => undefined),
@@ -133,6 +140,8 @@ function makeSupervisor(
   return {
     supervisor,
     resume: (reason: string) => resume?.(reason),
+    networkChanged: () => networkChange?.(),
+    hasNetworkChangeListener: () => networkChange !== null,
     notifyRegistry: () => registryListener?.(),
   };
 }
@@ -273,6 +282,69 @@ describe("saved environment retry", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts).toBe(3);
     stop();
+  });
+
+  it("reconnects every direct connection when the network path changes, but not Hub relays", async () => {
+    const reconnected: string[] = [];
+    const { supervisor, networkChanged } = makeSupervisor(async (record) => connectionFor(record), {
+      records: [],
+    });
+    const stop = supervisor.start();
+    const fakeConnection = (environmentId: string, source: string) =>
+      ({
+        environmentId: environmentId as EnvironmentId,
+        kind: "saved",
+        knownEnvironment: { source },
+        // A heartbeat answered just before the move still reads as fresh.
+        client: { isHeartbeatFresh: () => true },
+        reconnect: async () => void reconnected.push(environmentId),
+      }) as unknown as EnvironmentConnection;
+    supervisor.register(fakeConnection("env-lan", "manual"));
+    supervisor.register(fakeConnection("env-hub-relay", "hub-hosted"));
+
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reconnected).toEqual(["env-lan"]);
+
+    // One move often arrives as several path updates.
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reconnected).toEqual(["env-lan"]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reconnected).toEqual(["env-lan", "env-lan"]);
+    stop();
+  });
+
+  it("retries an unreachable environment at once on a network path change", async () => {
+    let attempts = 0;
+    const { supervisor, networkChanged } = makeSupervisor(async () => {
+      attempts += 1;
+      throw new Error("offline");
+    });
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(2);
+    stop();
+  });
+
+  it("does not follow network path changes in hosted mode or after supervision stops", () => {
+    const hosted = makeSupervisor(async (record) => connectionFor(record), { isHostedMode: true });
+    const stopHosted = hosted.supervisor.start();
+    expect(hosted.hasNetworkChangeListener()).toBe(false);
+    stopHosted();
+
+    const direct = makeSupervisor(async (record) => connectionFor(record), { records: [] });
+    const stop = direct.supervisor.start();
+    expect(direct.hasNetworkChangeListener()).toBe(true);
+    stop();
+    expect(direct.hasNetworkChangeListener()).toBe(false);
   });
 
   it("does not let connects that never settle stall the other saved environments", async () => {

@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { AppLifecycleEvent } from "@ryco/client-runtime/platform";
 
+type FakeNetworkState = { isConnected?: boolean; type?: string };
+
 const native = vi.hoisted(() => ({
   appState: "active",
   appListeners: new Set<(state: string) => void>(),
-  networkListeners: new Set<(state: { isConnected?: boolean }) => void>(),
-  getNetworkState: vi.fn<() => Promise<{ isConnected?: boolean }>>(),
+  networkListeners: new Set<(state: FakeNetworkState) => void>(),
+  getNetworkState: vi.fn<() => Promise<FakeNetworkState>>(),
 }));
 
 vi.mock("react-native", () => ({
@@ -21,23 +23,26 @@ vi.mock("react-native", () => ({
   },
 }));
 vi.mock("expo-network", () => ({
+  NetworkStateType: { NONE: "NONE", UNKNOWN: "UNKNOWN", CELLULAR: "CELLULAR", WIFI: "WIFI" },
   getNetworkStateAsync: native.getNetworkState,
-  addNetworkStateListener: (listener: (state: { isConnected?: boolean }) => void) => {
+  addNetworkStateListener: (listener: (state: FakeNetworkState) => void) => {
     native.networkListeners.add(listener);
     return { remove: () => native.networkListeners.delete(listener) };
   },
 }));
 
-const network = (isConnected: boolean) => {
-  for (const listener of native.networkListeners) listener({ isConnected });
+const network = (isConnected: boolean, type?: string) => {
+  for (const listener of native.networkListeners) {
+    listener(type === undefined ? { isConnected } : { isConnected, type });
+  }
 };
 const appState = (state: string) => {
   native.appState = state;
   for (const listener of native.appListeners) listener(state);
 };
 const deferredNetwork = () => {
-  let resolve!: (state: { isConnected?: boolean }) => void;
-  const promise = new Promise<{ isConnected?: boolean }>((done) => {
+  let resolve!: (state: FakeNetworkState) => void;
+  const promise = new Promise<FakeNetworkState>((done) => {
     resolve = done;
   });
   return { promise, resolve };
@@ -218,5 +223,47 @@ describe("mobile lifecycle connectivity", () => {
     await Promise.resolve();
     appState("active");
     expect(events).toEqual(["foreground", "resume"]);
+  });
+});
+
+describe("mobile lifecycle network path", () => {
+  it("announces a move between two networks while online, seeded silently", async () => {
+    native.getNetworkState.mockResolvedValue({ isConnected: true, type: "WIFI" });
+    const { mobileAppLifecycle } = await import("./appLifecycle");
+    const events: AppLifecycleEvent[] = [];
+    mobileAppLifecycle.subscribe((event) => events.push(event));
+    await Promise.resolve();
+    network(true, "WIFI");
+    network(true, "CELLULAR");
+    network(true, "CELLULAR");
+    network(true, "WIFI");
+    expect(events).toEqual(["network-changed", "network-changed"]);
+  });
+
+  it("reports going offline and back as connectivity, not as a path change", async () => {
+    native.getNetworkState.mockResolvedValue({ isConnected: true, type: "WIFI" });
+    const { mobileAppLifecycle } = await import("./appLifecycle");
+    const events: AppLifecycleEvent[] = [];
+    mobileAppLifecycle.subscribe((event) => events.push(event));
+    await Promise.resolve();
+    network(false, "NONE");
+    network(true, "CELLULAR");
+    network(true, "UNKNOWN");
+    network(true, "CELLULAR");
+    expect(events).toEqual(["offline", "online"]);
+  });
+
+  it("forgets the path type when the last subscriber leaves", async () => {
+    native.getNetworkState.mockResolvedValue({ isConnected: true, type: "WIFI" });
+    const { mobileAppLifecycle } = await import("./appLifecycle");
+    const stop = mobileAppLifecycle.subscribe(() => undefined);
+    await Promise.resolve();
+    stop();
+    native.getNetworkState.mockResolvedValue({ isConnected: true, type: "CELLULAR" });
+    const events: AppLifecycleEvent[] = [];
+    mobileAppLifecycle.subscribe((event) => events.push(event));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events).toEqual([]);
   });
 });

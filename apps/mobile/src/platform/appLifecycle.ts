@@ -19,6 +19,9 @@ import { AppState, type AppStateStatus } from "react-native";
 // Cached connectivity so the synchronous `isOnline()` contract can be answered
 // without awaiting a network probe. Optimistically online until proven offline.
 let cachedOnline = true;
+// The path type while online (wifi, cellular, ...), or null while offline or
+// unknown. A change between two known types while online is `network-changed`.
+let cachedPathType: Network.NetworkStateType | null = null;
 const listeners = new Set<(event: AppLifecycleEvent) => void>();
 let stopNativeSubscriptions: (() => void) | undefined;
 
@@ -36,6 +39,19 @@ function isBackground(state: AppStateStatus): boolean {
   return state === "background";
 }
 
+/** A path type that tells two networks apart; `unknown` and `none` do not. */
+function knownPathType(state: Network.NetworkState): Network.NetworkStateType | null {
+  const type = state.type;
+  if (
+    type === undefined ||
+    type === Network.NetworkStateType.UNKNOWN ||
+    type === Network.NetworkStateType.NONE
+  ) {
+    return null;
+  }
+  return type;
+}
+
 function subscribeNative(): () => void {
   let backgrounded = isBackground(AppState.currentState);
   let disposed = false;
@@ -43,9 +59,23 @@ function subscribeNative(): () => void {
 
   const publishNetworkState = (state: Network.NetworkState) => {
     const online = isConnected(state);
-    if (online === cachedOnline) return;
-    cachedOnline = online;
-    emit(online ? "online" : "offline");
+    const previousPathType = cachedPathType;
+    cachedPathType = online ? knownPathType(state) : null;
+    if (online !== cachedOnline) {
+      cachedOnline = online;
+      emit(online ? "online" : "offline");
+      return;
+    }
+    // Seeded silently: the first known type after subscribe, or after a stretch
+    // of unknown, is not a change.
+    if (
+      online &&
+      previousPathType !== null &&
+      cachedPathType !== null &&
+      cachedPathType !== previousPathType
+    ) {
+      emit("network-changed");
+    }
   };
 
   const refreshNetworkState = () => {
@@ -82,6 +112,7 @@ function subscribeNative(): () => void {
 
   return () => {
     disposed = true;
+    cachedPathType = null;
     appStateSubscription.remove();
     networkSubscription.remove();
   };

@@ -1,0 +1,32 @@
+diff --git a/ios/NetworkModule.swift b/ios/NetworkModule.swift
+--- a/ios/NetworkModule.swift
++++ b/ios/NetworkModule.swift
+@@ -92,10 +92,19 @@ public final class NetworkModule: Module {
+     // since we want to wait for the result to be updated once:
+     let tempMonitor = NWPathMonitor()
+     var tempPath: NWPath?
++    // Ryco: the handler runs on monitorQueue while this thread reads the path,
++    // and cancel() does not drop updates already queued. Keep only the first
++    // path and guard it, or two queries in flight race on tempPath.
++    let pathLock = NSLock()
+ 
+     let semaphore = DispatchSemaphore(value: 0)
+ 
+     tempMonitor.pathUpdateHandler = { updatedPath in
++      pathLock.lock()
++      defer { pathLock.unlock() }
++      guard tempPath == nil else {
++        return
++      }
+       tempPath = updatedPath
+       semaphore.signal() // Notify that we got the path
+     }
+@@ -113,6 +122,8 @@ public final class NetworkModule: Module {
+       return nil
+     }
+ 
++    pathLock.lock()
++    defer { pathLock.unlock() }
+     return tempPath
+   }
+ 
