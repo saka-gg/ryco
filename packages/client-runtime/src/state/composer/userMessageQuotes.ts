@@ -2,8 +2,8 @@
  * Quotes in a sent user message, next to its context blocks. A send expands
  * quote tokens into a quote block before it appends the context blocks
  * (`composeOutgoingPrompt`), so a message ends `…[Quote 1]…`, the
- * `<assistant_quotes>` block, then any `<file_context>` and
- * `<terminal_context>` blocks. Every surface reads that order here: the
+ * `<assistant_quotes>` block, then any `<browser_context>`, `<file_context>`
+ * and `<terminal_context>` blocks. Every surface reads that order here: the
  * context blocks come off first, then the quote block.
  *
  * @module userMessageQuotes

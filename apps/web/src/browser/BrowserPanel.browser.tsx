@@ -1,13 +1,24 @@
 import { page } from "vite-plus/test/browser";
 import "../index.css";
-import { afterEach, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { act } from "react";
 import { render } from "vitest-browser-react";
-import type {
-  DesktopBridge,
-  ProjectBrowserState,
-  ProjectBrowserTab,
-  ProjectBrowserSurface,
+import {
+  EnvironmentId,
+  ThreadId,
+  type DesktopBridge,
+  type ProjectBrowserPickResult,
+  type ProjectBrowserState,
+  type ProjectBrowserTab,
+  type ProjectBrowserSurface,
 } from "@ryco/contracts";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import type {
+  ComposerContextDelivery,
+  ComposerContextItem,
+} from "@ryco/client-runtime/state/composer";
+import { composerContextIntake } from "../composerContextIntake";
+import { BROWSER_PICK_NOTICE_MS } from "./BrowserElementPicker";
 import { BrowserPanel } from "./BrowserPanel";
 import { ProjectBrowserPreview } from "./ProjectBrowserPreview";
 import { BackgroundBrowserPreview } from "./BackgroundBrowserPreview";
@@ -18,7 +29,7 @@ afterEach(() => {
   else delete window.desktopBridge;
   useBrowserUi.setState({ native: { tabs: [] }, fallback: [], selected: {} });
 });
-function setup() {
+function setup(options: { readonly pick?: boolean } = {}) {
   let state: ProjectBrowserState = { tabs: [] };
   const listeners = new Set<(state: ProjectBrowserState) => void>();
   const open = vi.fn(async ({ url, project }: { url: string; project: string }) => {
@@ -52,8 +63,12 @@ function setup() {
     command: vi.fn(async () => {}),
     surface: vi.fn(async (_input: ProjectBrowserSurface) => {}),
     capture: vi.fn(async () => ""),
+    // Pending until a test settles it, like a pick waiting for the user's click.
+    pick: vi.fn((_tab: string) => new Promise<ProjectBrowserPickResult>(() => {})),
   };
-  window.desktopBridge = { browser: api } as unknown as DesktopBridge;
+  window.desktopBridge = {
+    browser: options.pick === false ? { ...api, pick: undefined } : api,
+  } as unknown as DesktopBridge;
   return api;
 }
 
@@ -275,4 +290,290 @@ it("marks suspended tabs and reloads them by showing them", async () => {
   // Showing it is what reloads it: the desktop revives a tab when it is surfaced.
   await suspended.click();
   await expect.poll(() => api.surface.mock.calls.at(-1)?.[0].tab).toBe("tab-2");
+});
+
+const PICK_THREAD = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("thread"));
+const pickedElement = {
+  url: "http://localhost:3000/settings",
+  pageTitle: "Settings",
+  selector: "#save",
+  tagName: "button",
+  role: "button",
+  name: "Save changes",
+  text: "Save changes",
+  box: { x: 10, y: 20, width: 120, height: 32 },
+} as const;
+
+/** A composer for `PICK_THREAD` that answers with `result` and records what it got. */
+function listen(result: ComposerContextDelivery = "added") {
+  const received: ComposerContextItem[] = [];
+  const release = composerContextIntake.register(PICK_THREAD, (item) => {
+    received.push(item);
+    return result;
+  });
+  return { received, release };
+}
+
+/** Opens a tab through the address bar of a thread's Browser panel. */
+async function renderThreadPanel(thread: typeof PICK_THREAD | null = PICK_THREAD) {
+  await page.viewport(1200, 900);
+  const view = await render(
+    <div style={{ display: "flex", height: 600, width: 800 }}>
+      <BrowserPanel environmentId={null} cwd="/project" thread={thread} />
+    </div>,
+  );
+  await view.getByRole("textbox", { name: "Browser address" }).fill("localhost:3000");
+  await view.getByRole("button", { name: "Go", exact: true }).click();
+  await expect.element(view.getByRole("tab", { name: "Fixture" })).toBeVisible();
+  return view;
+}
+
+function setPicker(picker: ProjectBrowserTab["picker"] | undefined) {
+  updateTabs({ picker });
+}
+
+function updateTabs(patch: {
+  readonly [Key in keyof ProjectBrowserTab]?: ProjectBrowserTab[Key] | undefined;
+}) {
+  const native = useBrowserUi.getState().native;
+  useBrowserUi.setState({
+    native: { tabs: native.tabs.map((tab) => Object.assign({}, tab, patch)) },
+  });
+}
+
+/** Starts a pick whose result the test decides. */
+async function startPick(
+  api: ReturnType<typeof setup>,
+  view: Awaited<ReturnType<typeof renderThreadPanel>>,
+) {
+  let settle: (result: ProjectBrowserPickResult) => void = () => {};
+  api.pick.mockImplementationOnce(
+    () =>
+      new Promise<ProjectBrowserPickResult>((resolve) => {
+        settle = resolve;
+      }),
+  );
+  await view.getByRole("button", { name: "Pick element" }).click();
+  expect(api.pick).toHaveBeenCalledWith("tab-1");
+  setPicker("picking");
+  return (result: ProjectBrowserPickResult) => {
+    setPicker(result.kind === "picked" ? "picked" : undefined);
+    settle(result);
+  };
+}
+
+describe("picking page elements", () => {
+  let composer: ReturnType<typeof listen> | null = null;
+  afterEach(() => {
+    composer?.release();
+    composer = null;
+  });
+
+  it("is offered only in a thread's panel, with a composer, on a docked tab of the desktop app", async () => {
+    setup({ pick: false });
+    composer = listen();
+    const withoutPicker = await renderThreadPanel();
+    await expect.element(withoutPicker.getByRole("button", { name: "DevTools" })).toBeVisible();
+    expect(withoutPicker.getByRole("button", { name: "Pick element" }).query()).toBeNull();
+    await withoutPicker.unmount();
+    useBrowserUi.setState({ native: { tabs: [] }, fallback: [], selected: {} });
+
+    setup();
+    const withoutThread = await renderThreadPanel(null);
+    await expect.element(withoutThread.getByRole("button", { name: "DevTools" })).toBeVisible();
+    expect(withoutThread.getByRole("button", { name: "Pick element" }).query()).toBeNull();
+    await withoutThread.unmount();
+    useBrowserUi.setState({ native: { tabs: [] }, fallback: [], selected: {} });
+
+    composer.release();
+    setup();
+    const view = await renderThreadPanel();
+    await expect.element(view.getByRole("button", { name: "DevTools" })).toBeVisible();
+    expect(view.getByRole("button", { name: "Pick element" }).query()).toBeNull();
+    // A composer for the thread registers: now it is offered.
+    composer = listen();
+    await expect.element(view.getByRole("button", { name: "Pick element" })).toBeVisible();
+    // A popped-out tab is not in the panel.
+    const native = useBrowserUi.getState().native;
+    useBrowserUi.setState({
+      native: {
+        tabs: native.tabs.map((tab) => Object.assign({}, tab, { presentation: "window" as const })),
+      },
+    });
+    await expect.element(view.getByText("This tab is open in a separate window.")).toBeVisible();
+    expect(view.getByRole("button", { name: "Pick element" }).query()).toBeNull();
+  });
+
+  it("shows a hint while picking, and Escape or Cancel picking ends the pick", async () => {
+    const api = setup();
+    composer = listen();
+    const view = await renderThreadPanel();
+    await startPick(api, view);
+    await expect
+      .element(view.getByRole("status"))
+      .toHaveTextContent("Click an element on the page to add it to the chat. Esc cancels.");
+    await expect
+      .element(view.getByRole("button", { name: "Cancel picking" }))
+      .toHaveAttribute("aria-pressed", "true");
+
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(escape);
+    expect(escape.defaultPrevented).toBe(true);
+    expect(api.command).toHaveBeenLastCalledWith({ action: "end-pick", tab: "tab-1" });
+
+    api.command.mockClear();
+    await view.getByRole("button", { name: "Cancel picking" }).click();
+    expect(api.command).toHaveBeenLastCalledWith({ action: "end-pick", tab: "tab-1" });
+  });
+
+  it("opens the note above the page without moving the page, and adds the element to the chat", async () => {
+    const api = setup();
+    composer = listen();
+    const view = await renderThreadPanel();
+    await expect.poll(() => api.surface.mock.calls.at(-1)?.[0].tab).toBe("tab-1");
+    const owner = api.surface.mock.calls.at(-1)?.[0].owner;
+    const settle = await startPick(api, view);
+    settle({ kind: "picked", element: pickedElement });
+
+    const note = view.getByRole("textbox", {
+      name: 'Note on button "Save changes" on localhost:3000/settings',
+    });
+    await expect.element(note).toBeVisible();
+    await expect.element(note).toHaveFocus();
+    // The page keeps its surface: no detach, the same owner, only a smaller slot.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(api.surface.mock.calls.some(([input]) => input.tab === null)).toBe(false);
+    expect(new Set(api.surface.mock.calls.map(([input]) => input.owner))).toEqual(new Set([owner]));
+
+    await note.fill("Make this the primary button");
+    await view.getByRole("button", { name: /Add to chat/u }).click();
+    expect(composer.received).toEqual([
+      {
+        kind: "browser-element",
+        element: {
+          kind: "browser-element",
+          ...pickedElement,
+          comment: "Make this the primary button",
+        },
+      },
+    ]);
+    expect(api.command).toHaveBeenLastCalledWith({ action: "end-pick", tab: "tab-1" });
+    await expect.element(note).not.toBeInTheDocument();
+  });
+
+  it("keeps the note when the message is full, and says so", async () => {
+    const api = setup();
+    composer = listen("full");
+    const view = await renderThreadPanel();
+    const settle = await startPick(api, view);
+    settle({ kind: "picked", element: pickedElement });
+    const note = view.getByRole("textbox", { name: /^Note on button/u });
+    await note.fill("Keep me");
+    await view.getByRole("button", { name: /Add to chat/u }).click();
+    await expect
+      .element(view.getByText("This message already has 32 page elements. Remove one to add more."))
+      .toBeVisible();
+    await expect.element(note).toHaveValue("Keep me");
+    expect(api.command).not.toHaveBeenCalledWith({ action: "end-pick", tab: "tab-1" });
+
+    // Cancel drops the pick and ends the highlight.
+    await view.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect.element(note).not.toBeInTheDocument();
+    expect(api.command).toHaveBeenLastCalledWith({ action: "end-pick", tab: "tab-1" });
+  });
+
+  it("ends its pick when the thread's composer goes away or the panel closes", async () => {
+    const api = setup();
+    composer = listen();
+    const view = await renderThreadPanel();
+    const settle = await startPick(api, view);
+    settle({ kind: "picked", element: pickedElement });
+    await expect.element(view.getByRole("textbox", { name: /^Note on button/u })).toBeVisible();
+    api.command.mockClear();
+    // No composer takes context any more: the note goes, and so does the highlight.
+    composer.release();
+    composer = null;
+    await expect
+      .poll(() => api.command.mock.calls)
+      .toEqual([[{ action: "end-pick", tab: "tab-1" }]]);
+    expect(view.getByRole("textbox", { name: /^Note on button/u }).query()).toBeNull();
+
+    // The composer coming back does not bring back a note whose highlight ended.
+    composer = listen();
+    await expect.element(view.getByRole("button", { name: "Pick element" })).toBeVisible();
+    expect(view.getByRole("textbox", { name: /^Note on button/u }).query()).toBeNull();
+
+    await startPick(api, view);
+    api.command.mockClear();
+    await view.unmount();
+    expect(api.command).toHaveBeenCalledWith({ action: "end-pick", tab: "tab-1" });
+  });
+
+  it("drops the note when its tab pops out, so docking it again shows no stale note", async () => {
+    const api = setup();
+    composer = listen();
+    const view = await renderThreadPanel();
+    const settle = await startPick(api, view);
+    settle({ kind: "picked", element: pickedElement });
+    await expect.element(view.getByRole("textbox", { name: /^Note on button/u })).toBeVisible();
+    api.command.mockClear();
+
+    updateTabs({ presentation: "window", picker: undefined });
+    await expect.element(view.getByText("This tab is open in a separate window.")).toBeVisible();
+    expect(api.command).toHaveBeenCalledWith({ action: "end-pick", tab: "tab-1" });
+    updateTabs({ presentation: "panel" });
+    await expect.element(view.getByRole("button", { name: "Pick element" })).toBeVisible();
+    expect(view.getByRole("textbox", { name: /^Note on button/u }).query()).toBeNull();
+  });
+
+  it("says why picking stopped when the agent took the tab, and nothing when the user did", async () => {
+    const api = setup();
+    composer = listen();
+    const view = await renderThreadPanel();
+    let settle = await startPick(api, view);
+    settle({ kind: "cancelled", reason: "agent" });
+    await expect
+      .element(view.getByRole("status"))
+      .toHaveTextContent("The agent used this tab, so picking stopped.");
+    await expect.element(view.getByRole("button", { name: "Pick element" })).toBeVisible();
+
+    settle = await startPick(api, view);
+    settle({ kind: "cancelled", reason: "user" });
+    await expect.element(view.getByRole("button", { name: "Pick element" })).toBeVisible();
+    expect(view.getByRole("status").query()).toBeNull();
+
+    // A refused start reports the desktop's reason in the panel.
+    api.pick.mockRejectedValueOnce(new Error("Load a page before picking an element."));
+    await view.getByRole("button", { name: "Pick element" }).click();
+    await expect
+      .element(view.getByRole("alert"))
+      .toHaveTextContent("Load a page before picking an element.");
+  });
+
+  it("says why picking stopped for a while, then gives the page its room back", async () => {
+    const api = setup();
+    composer = listen();
+    const view = await renderThreadPanel();
+    const settle = await startPick(api, view);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await act(async () => {
+        settle({ kind: "cancelled", reason: "navigation" });
+      });
+      expect(view.getByRole("status").query()).toHaveTextContent(
+        "The page changed, so picking stopped.",
+      );
+      await act(async () => {
+        vi.advanceTimersByTime(BROWSER_PICK_NOTICE_MS - 1);
+      });
+      expect(view.getByRole("status").query()).not.toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(view.getByRole("status").query()).toBeNull();
+      expect(view.getByRole("button", { name: "Pick element" }).query()).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

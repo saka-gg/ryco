@@ -146,6 +146,11 @@
       "import": "./src/orchestration.ts",
       "require": "./src/orchestration.ts"
     },
+    "./browser-element-limits": {
+      "types": "./src/browserElementLimits.ts",
+      "import": "./src/browserElementLimits.ts",
+      "require": "./src/browserElementLimits.ts"
+    },
     "./project-browser": {
       "types": "./src/projectBrowser.ts",
       "import": "./src/projectBrowser.ts",

@@ -40,6 +40,7 @@ declare class URL {
   constructor(url: string, base?: string | URL);
   host: string;
   hostname: string;
+  href: string;
   password: string;
   pathname: string;
   port: string;

@@ -316,6 +316,8 @@ export interface QueuedMessageSummaryInput {
   readonly imageCount: number;
   readonly terminalContextCount: number;
   readonly fileReferenceCount?: number;
+  /** Page elements picked in the project browser. */
+  readonly browserElementCount?: number;
 }
 
 export function getQueuedThreadKeys<Composer, Settings>(
@@ -348,6 +350,10 @@ export function summarizeQueuedMessage(input: QueuedMessageSummaryInput): string
   const fileReferenceCount = input.fileReferenceCount ?? 0;
   if (fileReferenceCount > 0) {
     return fileReferenceCount === 1 ? "1 file reference" : `${fileReferenceCount} file references`;
+  }
+  const browserElementCount = input.browserElementCount ?? 0;
+  if (browserElementCount > 0) {
+    return browserElementCount === 1 ? "1 page element" : `${browserElementCount} page elements`;
   }
   return "Queued message";
 }

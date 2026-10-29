@@ -1,5 +1,15 @@
 import * as Schema from "effect/Schema";
 
+import {
+  BROWSER_ELEMENT_MAX_NAME_LENGTH,
+  BROWSER_ELEMENT_MAX_PAGE_TITLE_LENGTH,
+  BROWSER_ELEMENT_MAX_ROLE_LENGTH,
+  BROWSER_ELEMENT_MAX_SELECTOR_LENGTH,
+  BROWSER_ELEMENT_MAX_TAG_LENGTH,
+  BROWSER_ELEMENT_MAX_TEXT_LENGTH,
+  BROWSER_ELEMENT_MAX_URL_LENGTH,
+} from "./browserElementLimits.ts";
+
 const text = Schema.String.check(Schema.isMaxLength(8192));
 export const ProjectBrowserTab = Schema.Struct({
   id: Schema.String,
@@ -52,20 +62,8 @@ export const ProjectBrowserSurface = Schema.Struct({
 });
 export type ProjectBrowserSurface = typeof ProjectBrowserSurface.Type;
 
-// Field limits of a page element the user picked in the Ryco browser. They are Synara's browser
-// annotation limits (packages/contracts/src/browserAnnotations.ts at Synara commit
-// 299fd573b1d6520c323a87c78d30be74e87e53e1, MIT; see THIRD_PARTY_NOTICES.md).
-/** Picked elements one prompt may carry. */
-export const BROWSER_ELEMENT_MAX_PER_PROMPT = 32;
-export const BROWSER_ELEMENT_MAX_URL_LENGTH = 2_048;
-export const BROWSER_ELEMENT_MAX_PAGE_TITLE_LENGTH = 256;
-export const BROWSER_ELEMENT_MAX_SELECTOR_LENGTH = 1_024;
-export const BROWSER_ELEMENT_MAX_TAG_LENGTH = 64;
-export const BROWSER_ELEMENT_MAX_ROLE_LENGTH = 64;
-export const BROWSER_ELEMENT_MAX_NAME_LENGTH = 256;
-export const BROWSER_ELEMENT_MAX_TEXT_LENGTH = 280;
-/** The user's note on a picked element. */
-export const BROWSER_ELEMENT_MAX_COMMENT_LENGTH = 4_000;
+// The field limits of a picked page element (Synara's) live in `browserElementLimits.ts`.
+export * from "./browserElementLimits.ts";
 
 const boundedText = (minimum: number, maximum: number) =>
   Schema.String.check(Schema.isBetweenLength(minimum, maximum));

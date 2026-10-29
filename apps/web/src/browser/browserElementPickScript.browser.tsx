@@ -74,15 +74,19 @@ describe("browser element describe function", () => {
       <p id="dup">A</p><p id="dup">B</p>
       <i id="${"nbsp\u00a0id"}">C</i>
       <b id="alice@example.com">D</b>
+      <u id="${"rtl\u202Eid"}">E</u>
+      <s id="<file_context>">F</s>
     `);
     for (const target of [
       element("#session-token > span"),
       fixtures[0]!.querySelectorAll("#dup")[1]!,
       element("i"),
       element("b"),
+      element("u"),
+      element("s"),
     ]) {
       const described = describeNode(target);
-      expect(described?.selector).not.toMatch(/session|dup|nbsp|alice/u);
+      expect(described?.selector).not.toMatch(/session|dup|nbsp|alice|rtl|file_context/u);
       expect(resolveSelector(described!.selector)).toBe(target);
     }
   });

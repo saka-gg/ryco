@@ -241,7 +241,7 @@ import {
   type DraftId,
 } from "../composerDraftStore";
 import {
-  type FileReferenceDraft,
+  type ComposerReferenceDraft,
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
@@ -872,7 +872,7 @@ export default function ChatView(props: ChatViewProps) {
   const promptRef = useRef("");
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
-  const composerFileReferencesRef = useRef<FileReferenceDraft[]>([]);
+  const composerFileReferencesRef = useRef<ComposerReferenceDraft[]>([]);
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const readComposer = useCallback(() => composerRef.current, [composerRef]);
@@ -5057,7 +5057,7 @@ export default function ChatView(props: ChatViewProps) {
           type: "info",
           title: "Side questions accept text only",
           description:
-            "Remove attached images, terminal selections, file references, and source-control references before using /btw.",
+            "Remove attached images, terminal selections, file references, page elements, and source-control references before using /btw.",
         });
         return;
       }

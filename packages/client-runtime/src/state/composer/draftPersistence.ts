@@ -34,7 +34,10 @@ import {
   DEFAULT_RUNTIME_MODE,
 } from "../threads/types.ts";
 import { ensureInlineTerminalContextPlaceholders } from "./terminalContext.ts";
-import { decodeFileReferenceDraft, normalizeFileReferenceDrafts } from "./fileReference.ts";
+import {
+  decodeComposerReferenceDraft,
+  normalizeComposerReferenceDrafts,
+} from "./composerReference.ts";
 import { chatDraftLogicalProjectKey, isChatDraftLogicalProjectKey } from "./chatDrafts.ts";
 import type {
   ComposerDraftImage,
@@ -102,7 +105,7 @@ type PersistedTerminalContextDraft = typeof PersistedTerminalContextDraft.Type;
 /**
  * A file reference as a draft keeps it: unlike a terminal context it carries
  * its excerpt, which is bounded, so it survives a reload. Read back through
- * `decodeFileReferenceDraft`, which checks it like a fresh one.
+ * `decodeComposerReferenceDraft`, which checks it like a fresh one.
  */
 const PersistedFileReferenceDraft = Schema.Struct({
   id: Schema.String,
@@ -116,13 +119,44 @@ const PersistedFileReferenceDraft = Schema.Struct({
   comment: Schema.optionalKey(Schema.String),
 });
 
+/**
+ * A page element picked in the project browser as a draft keeps it: bounded,
+ * redacted page data and the note. Read back through
+ * `decodeComposerReferenceDraft`, which normalizes it like a fresh pick.
+ */
+const PersistedBrowserElementDraft = Schema.Struct({
+  id: Schema.String,
+  createdAt: Schema.String,
+  kind: Schema.Literal("browser-element"),
+  url: Schema.String,
+  pageTitle: Schema.String,
+  selector: Schema.String,
+  tagName: Schema.String,
+  role: Schema.NullOr(Schema.String),
+  name: Schema.NullOr(Schema.String),
+  text: Schema.NullOr(Schema.String),
+  box: Schema.NullOr(
+    Schema.Struct({
+      x: Schema.Number,
+      y: Schema.Number,
+      width: Schema.Number,
+      height: Schema.Number,
+    }),
+  ),
+  comment: Schema.optionalKey(Schema.String),
+});
+
 const PersistedComposerThreadDraftState = Schema.Struct({
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
   terminalContexts: Schema.optionalKey(Schema.Array(PersistedTerminalContextDraft)),
   // Optional, so drafts written before references existed decode unchanged;
-  // an older client reading a newer draft keeps its text and drops the chips.
-  fileReferences: Schema.optionalKey(Schema.Array(PersistedFileReferenceDraft)),
+  // an older client reading a newer draft keeps its text and drops the chips
+  // it cannot read (each entry is decoded on its own: a page element has no
+  // `path`, so a client from before page elements drops just those).
+  fileReferences: Schema.optionalKey(
+    Schema.Array(Schema.Union([PersistedFileReferenceDraft, PersistedBrowserElementDraft])),
+  ),
   // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
   // instances (e.g. `codex_personal`) round-trip alongside the built-in
   // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
@@ -970,9 +1004,9 @@ function normalizePersistedDraftsByThreadId(
         })
       : [];
     const fileReferences = Array.isArray(draftCandidate.fileReferences)
-      ? normalizeFileReferenceDrafts(
+      ? normalizeComposerReferenceDrafts(
           draftCandidate.fileReferences.flatMap((entry: unknown) => {
-            const decoded = decodeFileReferenceDraft(entry);
+            const decoded = decodeComposerReferenceDraft(entry);
             return decoded ? [decoded] : [];
           }),
         )

@@ -36,7 +36,9 @@ import { expandQuoteCitations } from "@ryco/shared/quoteCitations";
 import type { ComposerAttachment } from "../../platform/index.ts";
 import { startTurnPastBackgroundWork } from "./backgroundWorkModelSwitch.ts";
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
-import { buildFileReferenceBlock, type FileReference } from "./fileReference.ts";
+import { buildBrowserElementBlock } from "./browserElementReference.ts";
+import { type ComposerReference, splitComposerReferences } from "./composerReference.ts";
+import { buildFileReferenceBlock } from "./fileReference.ts";
 import {
   buildTerminalContextBlock,
   materializeInlineTerminalContextPrompt,
@@ -202,27 +204,35 @@ export const IMAGE_ONLY_BOOTSTRAP_PROMPT = ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
 
 export interface OutgoingPromptInput {
   readonly prompt: string;
-  readonly fileReferences?: ReadonlyArray<FileReference> | undefined;
+  /**
+   * The draft's reference chips: file lines and picked page elements. The
+   * name predates page elements.
+   */
+  readonly fileReferences?: ReadonlyArray<ComposerReference> | undefined;
   readonly terminalContexts?: ReadonlyArray<TerminalContextSelection> | undefined;
 }
 
 /**
  * The text a prompt is sent as: the user's text with its quote tokens
- * expanded into the `<assistant_quotes>` block, then the `<file_context>`
- * block, then the `<terminal_context>` block, which stays last. It travels in
- * the ordinary text payload so every provider, the queue and send retries see
- * the same context; `extractTrailingPromptContexts` reads it back. Inline
- * terminal placeholders are resolved in the user's own text only: a file
- * excerpt or a quote keeps a U+FFFC it contains. Every send composes here,
- * once: web, desktop and mobile alike.
+ * expanded into the `<assistant_quotes>` block, then the `<browser_context>`
+ * block, then the `<file_context>` block, then the `<terminal_context>` block,
+ * which stays last. The page-element block goes first so a client from before
+ * it still reads the file and terminal blocks after it (and shows only it as
+ * text). It travels in the ordinary text payload so every provider, the queue
+ * and send retries see the same context; `extractTrailingPromptContexts` reads
+ * it back. Inline terminal placeholders are resolved in the user's own text
+ * only: a file excerpt, a page element or a quote keeps a U+FFFC it contains.
+ * Every send composes here, once: web, desktop and mobile alike.
  */
 export function composeOutgoingPrompt(input: OutgoingPromptInput): string {
   const terminalContexts = input.terminalContexts ?? [];
+  const references = splitComposerReferences(input.fileReferences ?? []);
   return [
     expandQuoteCitations(
       materializeInlineTerminalContextPrompt(input.prompt, terminalContexts).trim(),
     ),
-    buildFileReferenceBlock(input.fileReferences ?? []),
+    buildBrowserElementBlock(references.browserElements),
+    buildFileReferenceBlock(references.fileReferences),
     buildTerminalContextBlock(terminalContexts),
   ]
     .filter((part) => part.length > 0)

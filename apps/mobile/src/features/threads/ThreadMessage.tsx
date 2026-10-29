@@ -1,7 +1,11 @@
 import {
+  type BrowserElementReference,
+  browserElementReferenceKey,
   deriveDisplayedUserMessageContext,
   type FileReference,
   fileReferenceKey,
+  formatBrowserElementLabel,
+  formatBrowserElementTitle,
   formatFileReferenceLabel,
   formatFileReferenceTitle,
   type ParsedTerminalContextEntry,
@@ -187,11 +191,13 @@ function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttac
 }
 
 /**
- * What a sent prompt carried besides its text: lines of workspace files (with
- * the user's note) and terminal output, read back from the blocks the send
- * wrote, the same way web shows them.
+ * What a sent prompt carried besides its text: page elements picked in the
+ * project browser and lines of workspace files (each with the user's note) and
+ * terminal output, read back from the blocks the send wrote, the same way web
+ * shows them.
  */
 function SentMessageContexts(props: {
+  readonly browserElements: ReadonlyArray<BrowserElementReference>;
   readonly fileReferences: ReadonlyArray<FileReference>;
   readonly terminalContexts: ReadonlyArray<ParsedTerminalContextEntry>;
   readonly spaced: boolean;
@@ -199,6 +205,30 @@ function SentMessageContexts(props: {
   const subtle = String(useThemeColor("--color-icon-subtle"));
   return (
     <View className={`gap-1.5 ${props.spaced ? "mt-2" : ""}`}>
+      {props.browserElements.map((element) => (
+        <View
+          key={browserElementReferenceKey(element)}
+          accessibilityRole="text"
+          accessibilityLabel={
+            element.comment
+              ? `${formatBrowserElementTitle(element)}: ${element.comment}`
+              : formatBrowserElementTitle(element)
+          }
+          className="gap-0.5"
+        >
+          <View className="flex-row items-center gap-1 self-start rounded-full border border-border bg-card-translucent px-2 py-1">
+            <SymbolView name="globe" size={11} tintColor={subtle} type="monochrome" />
+            <Text className="text-[11px] font-ryco-medium text-foreground-muted" numberOfLines={1}>
+              {formatBrowserElementLabel(element)}
+            </Text>
+          </View>
+          {element.comment ? (
+            <Text className="pl-1 text-xs text-foreground-muted" numberOfLines={3}>
+              {element.comment}
+            </Text>
+          ) : null}
+        </View>
+      ))}
       {props.fileReferences.map((reference) => (
         <View
           key={fileReferenceKey(reference)}
@@ -299,7 +329,9 @@ export function ThreadMessage(props: {
   // quotes read as plain quoted lines; copying keeps the text as sent.
   const sentContexts = isUser ? deriveDisplayedUserMessageContext(props.message.text) : null;
   const sentContextCount =
-    (sentContexts?.fileReferences.length ?? 0) + (sentContexts?.contexts.length ?? 0);
+    (sentContexts?.browserElements.length ?? 0) +
+    (sentContexts?.fileReferences.length ?? 0) +
+    (sentContexts?.contexts.length ?? 0);
   const text =
     (sentContexts ? quoteCitationsToPlainText(sentContexts.visibleText) : props.message.text) ||
     (props.message.streaming ? "…" : "");
@@ -377,6 +409,7 @@ export function ThreadMessage(props: {
         )}
         {sentContexts && sentContextCount > 0 ? (
           <SentMessageContexts
+            browserElements={sentContexts.browserElements}
             fileReferences={sentContexts.fileReferences}
             terminalContexts={sentContexts.contexts}
             spaced={showText}

@@ -1,3 +1,4 @@
+import { splitComposerReferences } from "@ryco/client-runtime/state/composer";
 import {
   moveQueuedMessage as move,
   removeQueuedMessage as remove,
@@ -34,10 +35,12 @@ export function moveQueuedMessage(
 
 /** Short, single-line label for a queued message chip. */
 export function summarizeQueuedMessage(message: QueuedMessage): string {
+  const references = splitComposerReferences(message.composer.fileReferences ?? []);
   return summarize({
     trimmedPrompt: message.composer.trimmedPrompt,
     imageCount: message.composer.images.length,
     terminalContextCount: message.composer.sendableTerminalContexts.length,
-    fileReferenceCount: message.composer.fileReferences?.length ?? 0,
+    fileReferenceCount: references.fileReferences.length,
+    browserElementCount: references.browserElements.length,
   });
 }

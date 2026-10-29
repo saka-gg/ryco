@@ -60,7 +60,7 @@ import {
   PROMPT_STASH_MAX_ENTRIES,
   buildPromptHistoryEntries,
   composerTargetKey,
-  type FileReferenceDraft,
+  type ComposerReferenceDraft,
   readProjectProviderCommands,
   resolveApprovalRedirect,
   stepPromptHistory,
@@ -301,7 +301,7 @@ export interface ChatComposerHandle {
     prompt: string;
     images: ComposerImageAttachment[];
     terminalContexts: TerminalContextDraft[];
-    fileReferences: FileReferenceDraft[];
+    fileReferences: ComposerReferenceDraft[];
     sourceControlContexts: ComposerSourceControlContext[];
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
@@ -455,7 +455,7 @@ export interface ChatComposerProps {
   promptRef: React.MutableRefObject<string>;
   composerImagesRef: React.MutableRefObject<ComposerImageAttachment[]>;
   composerTerminalContextsRef: React.MutableRefObject<TerminalContextDraft[]>;
-  composerFileReferencesRef: React.MutableRefObject<FileReferenceDraft[]>;
+  composerFileReferencesRef: React.MutableRefObject<ComposerReferenceDraft[]>;
 
   // Scroll
   shouldAutoScrollRef: React.MutableRefObject<boolean>;
@@ -1268,7 +1268,8 @@ export const ChatComposer = memo(
         (isConnecting || (environmentUnavailable !== null && activePendingProgress === null)));
 
     const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
-    // Refine or Implement: file references refine the plan as typed text does.
+    // Refine or Implement: reference chips (file lines, page elements) refine
+    // the plan as typed text does.
     // The send reads the same prompt, inline terminal placeholders stripped.
     const planFollowUpHasRefinement = planFollowUpRefines({
       draftText: composerSendState.trimmedPrompt,
@@ -2352,10 +2353,11 @@ export const ChatComposer = memo(
       [composerDraftTarget, removeFileReferenceFromDraft],
     );
 
-    // Lines from the Review and Files panels arrive through the composer
-    // context intake. The composer registers once per thread it shows and
-    // refuses while it cannot take them, so the panels' gutter `+` does not
-    // flicker around every send; what it may take is read when one arrives.
+    // Lines from the Review and Files panels, and page elements picked in the
+    // Browser panel, arrive through the composer context intake. The composer
+    // registers once per thread it shows and refuses while it cannot take them,
+    // so the panels' "Add to chat" does not flicker around every send; what it
+    // may take is read when one arrives.
     const fileReferenceIntakeRef = useRef({
       target: composerDraftTarget,
       accepts: false,
@@ -2380,9 +2382,15 @@ export const ChatComposer = memo(
         scopeThreadRef(environmentId, activeThreadId),
         (item) => {
           const intake = fileReferenceIntakeRef.current;
-          if (item.kind !== "file-reference" || !intake.accepts) return "unavailable";
+          const reference =
+            item.kind === "file-reference"
+              ? item.reference
+              : item.kind === "browser-element"
+                ? item.element
+                : null;
+          if (reference === null || !intake.accepts) return "unavailable";
           const outcome = useComposerDraftStore.getState().addFileReference(intake.target, {
-            ...item.reference,
+            ...reference,
             id: randomUUID(),
             createdAt: new Date().toISOString(),
           });

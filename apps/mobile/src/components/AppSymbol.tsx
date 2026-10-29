@@ -124,6 +124,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "folder.badge.plus": IconFolderPlus,
   "folder.fill": IconFolder,
   gearshape: IconSettings,
+  globe: IconWorld,
   hammer: IconHammer,
   "info.circle": IconInfoCircle,
   link: IconLink,

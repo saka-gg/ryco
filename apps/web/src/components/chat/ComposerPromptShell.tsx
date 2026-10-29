@@ -7,7 +7,7 @@ import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { formatAttachmentBytes } from "./attachmentPreview";
 import { memo } from "react";
 import {
-  type FileReferenceDraft,
+  type ComposerReferenceDraft,
   isPastedTextAttachment,
 } from "@ryco/client-runtime/state/composer";
 import {
@@ -35,7 +35,7 @@ import type { ComposerMenuEmptyState } from "./composerPathMenu";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
-import { FileReferenceChip } from "./FileReferenceChip";
+import { ComposerReferenceChip } from "./FileReferenceChip";
 import { SourceControlContextChip } from "./SourceControlContextChip";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -89,8 +89,8 @@ export interface ComposerPromptShellProps {
   /** Chips shown before the source-control contexts (a task draft's task). */
   leadingContextChips?: React.ReactNode;
 
-  // File reference chips (lines from the Review and Files panels)
-  composerFileReferences: ReadonlyArray<FileReferenceDraft>;
+  // Reference chips: lines from the Review and Files panels, page elements from the Browser panel
+  composerFileReferences: ReadonlyArray<ComposerReferenceDraft>;
   onRemoveFileReference: (id: string) => void;
 
   // Image attachments
@@ -262,7 +262,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
               />
             ))}
             {composerFileReferences.map((reference) => (
-              <FileReferenceChip
+              <ComposerReferenceChip
                 key={reference.id}
                 reference={reference}
                 theme={resolvedTheme}

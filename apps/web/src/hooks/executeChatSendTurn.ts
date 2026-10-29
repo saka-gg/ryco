@@ -31,8 +31,8 @@ import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   buildSendTurnBootstrap,
   composeOutgoingPrompt,
-  type FileReferenceDraft,
-  formatFileReferenceTitle,
+  type ComposerReferenceDraft,
+  formatComposerReferenceTitle,
   buildSendTurnDispatchAttachment,
   buildSendTurnUploadTokenDispatchAttachment,
   CHAT_PROJECT_LABEL,
@@ -87,7 +87,7 @@ export interface SendTurnComposerSnapshot {
   images: ComposerImageAttachment[];
   sendableTerminalContexts: TerminalContextDraft[];
   /** Lines from the Review and Files panels; absent for sends composed without the composer. */
-  fileReferences?: FileReferenceDraft[];
+  fileReferences?: ComposerReferenceDraft[];
   sourceControlContexts: ComposerSourceControlContext[];
   selectedProvider: ProviderDriverKind;
   selectedModel: string;
@@ -179,7 +179,7 @@ export interface SendTurnComposerDraftDeps {
   ) => void;
   setComposerDraftFileReferences: (
     target: ComposerThreadTarget,
-    references: ReadonlyArray<FileReferenceDraft>,
+    references: ReadonlyArray<ComposerReferenceDraft>,
   ) => void;
   setDraftThreadContext: (
     target: ComposerThreadTarget,
@@ -194,7 +194,7 @@ export interface ComposerDraftContent {
   readonly prompt: string;
   readonly images: ReadonlyArray<ComposerImageAttachment>;
   readonly terminalContexts: ReadonlyArray<TerminalContextDraft>;
-  readonly fileReferences: ReadonlyArray<FileReferenceDraft>;
+  readonly fileReferences: ReadonlyArray<ComposerReferenceDraft>;
 }
 
 export interface SendTurnDispatchDeps {
@@ -209,7 +209,7 @@ export interface SendTurnRollbackRefs {
   promptRef: { current: string };
   composerImagesRef: { current: ComposerImageAttachment[] };
   composerTerminalContextsRef: { current: TerminalContextDraft[] };
-  composerFileReferencesRef: { current: FileReferenceDraft[] };
+  composerFileReferencesRef: { current: ComposerReferenceDraft[] };
   sendInFlightRef: { current: boolean };
 }
 
@@ -393,7 +393,7 @@ export function restoreComposerContent(
     | {
         append?: false;
         terminalContexts: TerminalContextDraft[];
-        fileReferences: FileReferenceDraft[];
+        fileReferences: ComposerReferenceDraft[];
       }
     | { append: true; terminalContexts?: never; fileReferences?: never }
   ),
@@ -436,7 +436,7 @@ export function rollbackSendTurn(input: {
   promptSnapshot: string;
   imagesSnapshot: ComposerImageAttachment[];
   terminalContextsSnapshot: TerminalContextDraft[];
-  fileReferencesSnapshot: FileReferenceDraft[];
+  fileReferencesSnapshot: ComposerReferenceDraft[];
 }): void {
   const { composerHandle, dispatch, messageId } = input;
   const live = composerHandle.showsSendThread?.() ?? true;
@@ -471,7 +471,7 @@ export function restoreUnsentComposerContent(input: {
   prompt: string;
   images: ComposerImageAttachment[];
   terminalContexts: TerminalContextDraft[];
-  fileReferences: FileReferenceDraft[];
+  fileReferences: ComposerReferenceDraft[];
 }): boolean {
   const { refs, composerHandle, draft } = input;
   // The live refs belong to whichever thread the view shows: once that is
@@ -753,7 +753,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
           : null,
       firstFileReferenceTitle:
         fileReferencesSnapshot.length > 0
-          ? formatFileReferenceTitle(fileReferencesSnapshot[0]!)
+          ? formatComposerReferenceTitle(fileReferencesSnapshot[0]!)
           : null,
     });
     const title = truncate(titleSeedText);

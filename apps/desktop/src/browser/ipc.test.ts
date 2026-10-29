@@ -70,3 +70,35 @@ it("lets only the trusted shell main frame start an element pick", async () => {
   });
   expect(pick).toHaveBeenCalledWith("tab-1");
 });
+
+it("hands the keyboard back to Ryco after a pick, so the note box takes typing", async () => {
+  const frame = {};
+  const focus = vi.fn();
+  const contents = { mainFrame: frame, focus };
+  let focused = true;
+  let result: unknown = { kind: "picked", element: { selector: "#save" } };
+  const pick = vi.fn(async () => result);
+  registerProjectBrowserIpc(
+    { pick, onState: vi.fn(), onFocusAddress: vi.fn() } as unknown as EmbeddedComputerBrowser,
+    () =>
+      ({
+        isDestroyed: () => false,
+        isFocused: () => focused,
+        webContents: contents,
+      }) as unknown as BrowserWindow,
+  );
+  const handler = handlers.get("desktop:browser:pick")!;
+  const event = { sender: contents, senderFrame: frame };
+
+  // The picking click focused the page's own view; the note box opens in Ryco's.
+  await expect(handler(event, "tab-1")).resolves.toEqual(result);
+  expect(focus).toHaveBeenCalledTimes(1);
+
+  // A cancelled pick opens nothing, and a window in the background is never focused.
+  result = { kind: "cancelled", reason: "user" };
+  await handler(event, "tab-1");
+  result = { kind: "picked", element: { selector: "#save" } };
+  focused = false;
+  await handler(event, "tab-1");
+  expect(focus).toHaveBeenCalledTimes(1);
+});

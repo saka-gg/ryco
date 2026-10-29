@@ -1,13 +1,22 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
 
 import { scopedThreadKey } from "../../scoped.ts";
+import type { BrowserElementReference } from "./browserElementReference.ts";
 import type { FileReference } from "./fileReference.ts";
 
-/** Context another surface (a diff, the Files panel) hands to a thread's composer. */
-export type ComposerContextItem = {
-  readonly kind: "file-reference";
-  readonly reference: FileReference;
-};
+/**
+ * Context another surface (a diff, the Files panel, the browser) hands to a
+ * thread's composer: lines of a file, or a page element the user picked.
+ */
+export type ComposerContextItem =
+  | {
+      readonly kind: "file-reference";
+      readonly reference: FileReference;
+    }
+  | {
+      readonly kind: "browser-element";
+      readonly element: BrowserElementReference;
+    };
 
 /**
  * What became of an item handed to a composer: `added` (a repeat that
