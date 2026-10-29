@@ -10,6 +10,7 @@ import {
   derivePendingThreadRequestState,
   derivePendingThreadRequests,
   isContextCompactionActivity,
+  isNativeCompactionCommand,
   isTerminalContextHandoffActivity,
   isThreadActivityMilestone,
   latestCheckpointRevertActivity,
@@ -74,6 +75,15 @@ describe("threadActivity", () => {
   it("identifies context compaction activities", () => {
     expect(isContextCompactionActivity(activity("compaction", "context-compaction"))).toBe(true);
     expect(isContextCompactionActivity(activity("tool"))).toBe(false);
+  });
+
+  it("asks for native compaction only with the exact command and no attachments", () => {
+    expect(isNativeCompactionCommand({ input: "/compact" })).toBe(true);
+    expect(isNativeCompactionCommand({ input: " /compact\n", attachments: [] })).toBe(true);
+    expect(isNativeCompactionCommand({ input: "/compact", attachments: [{}] })).toBe(false);
+    expect(isNativeCompactionCommand({ input: "/compact now" })).toBe(false);
+    expect(isNativeCompactionCommand({ input: "please /compact" })).toBe(false);
+    expect(isNativeCompactionCommand({})).toBe(false);
   });
 
   it("identifies only terminal, schema-valid context handoffs as milestones", () => {

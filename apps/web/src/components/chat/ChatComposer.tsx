@@ -86,7 +86,7 @@ import {
   shouldBlurComposerOnSubmit,
 } from "./ComposerSendPipeline";
 import { ComposerFooter } from "./ComposerFooter";
-import type { ContextWindowAccount } from "./ContextWindowMeter";
+import type { ContextWindowAccount, ContextWindowCompactNow } from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import {
   type ComposerImageAttachment,
@@ -420,6 +420,8 @@ export interface ChatComposerProps {
 
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
+  /** Compact now in the context meter; absent when the thread's provider cannot compact on request. */
+  compactNow?: ContextWindowCompactNow | undefined;
 
   /**
    * The phone thread dock, rendered inside the composer surface beneath the
@@ -622,6 +624,7 @@ export const ChatComposer = memo(
       activeThreadModelSelection,
       cliProxyHubsEnabled,
       activeThreadActivities,
+      compactNow,
       phoneThreadDock,
       delegationDock,
       resolvedTheme,
@@ -3466,6 +3469,7 @@ export const ChatComposer = memo(
                 }
                 contextWindowAccount={contextWindowAccount}
                 claudeCacheObservation={claudeCacheObservation}
+                compactNow={compactNow}
                 pendingAction={pendingPrimaryAction}
                 isRunning={phase === "running" || isWorktreeSetupRunning}
                 showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

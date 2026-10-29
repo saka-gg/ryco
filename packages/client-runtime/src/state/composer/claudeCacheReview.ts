@@ -5,6 +5,7 @@ import {
   claudeCompactUnavailableReason,
 } from "@ryco/shared/claudeCacheReview";
 import type { ClaudeCacheReview, ClaudeCacheReviewThread } from "@ryco/shared/claudeCacheReview";
+import { dispatchNativeCompaction } from "./nativeCompaction.ts";
 import type { CommitSendTurnDispatchInput } from "./sendEngine.ts";
 
 export {
@@ -133,16 +134,16 @@ export async function reviewClaudeResumeBeforeSend(
   });
   try {
     input.assertMutationReady?.();
-    await input.api.orchestration.dispatchCommand({
-      type: "thread.turn.start",
-      claudeResumeGuard: guardFor(current),
-      commandId: CommandId.make(`claude-resume-compact:${input.messageId}`),
+    await dispatchNativeCompaction({
+      api: input.api,
       threadId: input.threadId,
-      message: { messageId: compactMessageId, role: "user", text: "/compact", attachments: [] },
+      messageId: compactMessageId,
+      commandId: CommandId.make(`claude-resume-compact:${input.messageId}`),
       modelSelection: input.modelSelection,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       tokenMode: input.tokenMode,
+      claudeResumeGuard: guardFor(current),
       createdAt: new Date().toISOString(),
     });
     const deadline = Date.now() + 120_000;

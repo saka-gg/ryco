@@ -19,7 +19,7 @@ import type {
 } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon } from "lucide-react";
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contextWindow";
@@ -28,6 +28,7 @@ import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { describeRateLimitWindow } from "../settings/codexUsageLimits";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
+import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 // The hub's provider slug for the accounts serving a routed Claude instance.
@@ -45,6 +46,17 @@ export interface ContextWindowAccount {
   readonly checkCliProxyRoute: boolean;
 }
 
+/** Compact now for the thread the composer sends to. */
+export interface ContextWindowCompactNow {
+  /**
+   * Why it cannot run now, or null when it can. Once the node took a request, the caller keeps
+   * this set until the thread's session reports the turn: the meter is pending only until then.
+   */
+  readonly blocker: string | null;
+  /** Settles once the node took the request or its failure was reported. */
+  readonly onCompact: () => Promise<void>;
+}
+
 interface ContextWindowMeterProps {
   usage: ContextWindowUsage;
   checkedAt?: string | undefined;
@@ -52,6 +64,7 @@ interface ContextWindowMeterProps {
   rateLimits?: ServerProviderRateLimits | undefined;
   claudeCache?: ClaudeCacheObservation | null | undefined;
   account?: ContextWindowAccount | undefined;
+  compactNow?: ContextWindowCompactNow | undefined;
 }
 
 function formatPercentage(value: number | null): string | null {
@@ -124,6 +137,33 @@ function AccountSection(props: { readonly account: ContextWindowAccount }) {
           <AccountEmail email={account.email} />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Asks the provider to compact now; the transcript and this meter show the result. */
+function CompactNowAction(props: {
+  readonly blocker: string | null;
+  readonly compacting: boolean;
+  readonly onCompact: () => void;
+}) {
+  return (
+    <div className="space-y-1 pt-1">
+      <Button
+        variant="outline"
+        size="xs"
+        className="w-full"
+        disabled={props.compacting || props.blocker !== null}
+        onClick={props.onCompact}
+      >
+        {props.compacting ? "Compacting…" : "Compact now"}
+      </Button>
+      {props.blocker !== null && !props.compacting ? (
+        <div className="text-xs text-muted-foreground">{props.blocker}</div>
+      ) : null}
+      <div className="text-[11px] text-muted-foreground">
+        Summarizes older context. The summary request itself uses tokens.
+      </div>
     </div>
   );
 }
@@ -290,6 +330,8 @@ function ContextWindowDetails(
   props: ContextWindowMeterProps & {
     readonly usedPercentage: string | null;
     readonly normalizedPercentage: number;
+    readonly compacting: boolean;
+    readonly onCompactNow: () => void;
   },
 ) {
   const { usage, rateLimits, account, usedPercentage, normalizedPercentage } = props;
@@ -346,6 +388,14 @@ function ContextWindowDetails(
           <div className="text-xs text-muted-foreground">
             Automatically compacts its context when needed.
           </div>
+        ) : null}
+        {/* A provider that compacts on its own can be asked to now. Not on the frozen phone tier. */}
+        {props.compactNow && usage.compactsAutomatically && !phone ? (
+          <CompactNowAction
+            blocker={props.compactNow.blocker}
+            compacting={props.compacting}
+            onCompact={props.onCompactNow}
+          />
         ) : null}
       </div>
       {props.claudeCache ? <PromptCacheSection observation={props.claudeCache} now={now} /> : null}
@@ -420,6 +470,14 @@ export function ContextWindowMeter(props: ContextWindowMeterProps) {
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference - (normalizedPercentage / 100) * circumference;
   const wide = hasAccountDetails(account) || account?.checkCliProxyRoute === true;
+  // Held here, not in the popup body, so closing and reopening the popup keeps it.
+  const [compacting, setCompacting] = useState(false);
+  const onCompactNow = () => {
+    const onCompact = props.compactNow?.onCompact;
+    if (!onCompact || compacting) return;
+    setCompacting(true);
+    void onCompact().finally(() => setCompacting(false));
+  };
 
   return (
     <Popover>
@@ -492,6 +550,8 @@ export function ContextWindowMeter(props: ContextWindowMeterProps) {
           {...props}
           usedPercentage={usedPercentage}
           normalizedPercentage={normalizedPercentage}
+          compacting={compacting}
+          onCompactNow={onCompactNow}
         />
       </PopoverPopup>
     </Popover>

@@ -37,6 +37,8 @@ import {
   type ApprovalRedirectRefusal,
   type ApprovalSightings,
   type SubscribedClaudeReviewState,
+  describeNativeCompactionBlocker,
+  nativeCompactionBlockerForSession,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
@@ -1181,6 +1183,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const {
     interruptTurn,
+    compactThreadNow,
     respondToApproval: onRespondToApproval,
     submitApprovalDecision,
     respondToUserInput,
@@ -2283,6 +2286,59 @@ export default function ChatView(props: ChatViewProps) {
       activePendingUserInput: activePendingUserInput?.requestId ?? null,
       threadError: activeThread?.error,
     });
+  // Compact now starts a turn as a send does, and holds the thread busy the same way: from the
+  // click until its session reports the turn. The node takes a second turn start in that gap.
+  const onCompactNow = useCallback(async () => {
+    if (mutationUnavailableReason !== null) {
+      notifyMutationUnavailable(mutationUnavailableReason);
+      return;
+    }
+    if (isSendBusy || threadSendsInFlight.has(routeThreadKey)) return;
+    const compactInFlight = threadSendsInFlight.ref(routeThreadKey);
+    const compactDispatch = bindLocalDispatch();
+    compactInFlight.current = true;
+    compactDispatch.beginLocalDispatch({ preparingWorktree: false });
+    // A thread error left from before would count as the node's reply and end the hold at once.
+    setThreadError(activeThreadId, null);
+    try {
+      await compactThreadNow();
+    } catch (error) {
+      compactDispatch.resetLocalDispatch();
+      setThreadError(
+        activeThreadId,
+        error instanceof Error ? error.message : "Failed to compact the conversation.",
+      );
+    } finally {
+      compactInFlight.current = false;
+    }
+  }, [
+    activeThreadId,
+    bindLocalDispatch,
+    compactThreadNow,
+    isSendBusy,
+    mutationUnavailableReason,
+    notifyMutationUnavailable,
+    routeThreadKey,
+    setThreadError,
+    threadSendsInFlight,
+  ]);
+  // Gated on the thread's session, not the composer's selection: after a handoff they differ.
+  const compactNowBlocker = isServerThread
+    ? nativeCompactionBlockerForSession(activeThread?.session, { turnStartPending: isSendBusy })
+    : "unsupported";
+  const compactNow = useMemo(
+    () =>
+      compactNowBlocker === "unsupported"
+        ? undefined
+        : {
+            blocker:
+              compactNowBlocker === null
+                ? null
+                : describeNativeCompactionBlocker(compactNowBlocker),
+            onCompact: onCompactNow,
+          },
+    [compactNowBlocker, onCompactNow],
+  );
   const canonicalProvider = useMemo(
     () =>
       activeThread?.session?.provider ??
@@ -7032,6 +7088,7 @@ export default function ChatView(props: ChatViewProps) {
                   activeThreadModelSelection={activeThread?.modelSelection}
                   cliProxyHubsEnabled={cliProxyHubsEnabled}
                   activeThreadActivities={threadActivities}
+                  compactNow={compactNow}
                   phoneThreadDock={phoneThreadDock}
                   delegationDock={delegationDock}
                   resolvedTheme={resolvedTheme}

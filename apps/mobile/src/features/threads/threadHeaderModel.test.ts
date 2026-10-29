@@ -21,6 +21,7 @@ function thread(
       | "archivedAt"
       | "latestTurn"
       | "session"
+      | "activities"
       | "turnDiffSummaries"
       | "branch"
       | "worktreePath"
@@ -34,6 +35,7 @@ function thread(
     archivedAt: null,
     latestTurn: null,
     session: null,
+    activities: [],
     turnDiffSummaries: [],
     branch: "feat/mobile",
     worktreePath: "/repo/.worktrees/mobile",
@@ -44,6 +46,7 @@ function thread(
     | "archivedAt"
     | "latestTurn"
     | "session"
+    | "activities"
     | "turnDiffSummaries"
     | "branch"
     | "worktreePath"
@@ -581,5 +584,105 @@ describe("thread header pull request watch", () => {
       number: 42,
       url: null,
     });
+  });
+});
+
+describe("thread header compact action", () => {
+  const readyClaude = {
+    provider: "claudeAgent",
+    orchestrationStatus: "ready",
+    status: "ready",
+    runtimeSessionId: "runtime-1",
+    createdAt: "2026-10-28T10:00:00.000Z",
+    updatedAt: "2026-10-28T10:00:00.000Z",
+  } as NonNullable<Thread["session"]>;
+  const usage = (compactsAutomatically: boolean) =>
+    [
+      {
+        kind: "context-window.updated",
+        payload: { usedTokens: 150_000, maxTokens: 200_000, compactsAutomatically },
+      },
+    ] as unknown as Thread["activities"];
+
+  function compactAction(
+    session: Partial<NonNullable<Thread["session"]>> | null,
+    advertised = true,
+  ) {
+    return buildThreadHeaderModel({
+      thread: thread({
+        session: session === null ? null : { ...readyClaude, ...session },
+        activities: usage(advertised),
+      }),
+      project: { name: "Ryco", cwd: "/repo" },
+      worktree: null,
+      nodeLabel: "Studio",
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+    }).compactAction;
+  }
+
+  it("offers it on a ready, idle Claude session whose CLI lists /compact", () => {
+    expect(compactAction({})).toEqual({
+      label: "Compact conversation",
+      detail: "Summarize older context. The summary request itself uses tokens.",
+      disabled: false,
+    });
+  });
+
+  it.each([
+    [
+      "a running turn",
+      { orchestrationStatus: "running", activeTurnId: "turn-2" },
+      "Wait until the current turn finishes and the session is ready.",
+    ],
+    // A pending approval or question keeps the turn active on a ready session.
+    [
+      "a turn waiting on the user",
+      { activeTurnId: "turn-2" },
+      "Wait until the current turn finishes and the session is ready.",
+    ],
+    [
+      "a stopped session",
+      { orchestrationStatus: "stopped" },
+      "The session is stopped. Send a message to start it, then compact.",
+    ],
+    [
+      "a session without a runtime",
+      { runtimeSessionId: undefined },
+      "No session is running yet. Send a message first, then compact.",
+    ],
+    // A failed turn leaves nothing running: waiting would never enable it.
+    [
+      "a session whose last turn failed",
+      { orchestrationStatus: "error", status: "error", lastError: "Turn failed" },
+      "The session is not ready. Send a message to resume it, then compact.",
+    ],
+  ] as const)("disables it with the reason for %s", (_name, session, detail) => {
+    expect(compactAction(session as Partial<NonNullable<Thread["session"]>>)).toEqual({
+      label: "Compact conversation",
+      detail,
+      disabled: true,
+    });
+  });
+
+  it("withholds it from another provider's session, live or stopped", () => {
+    // Codex reports compactsAutomatically too, but cannot be asked to compact yet.
+    expect(compactAction({ provider: "codex" } as never)).toBeNull();
+    expect(
+      compactAction({ provider: "codex", orchestrationStatus: "stopped" } as never),
+    ).toBeNull();
+  });
+
+  it("withholds it until the latest context usage says the CLI lists /compact", () => {
+    expect(compactAction({}, false)).toBeNull();
+    const model = buildThreadHeaderModel({
+      thread: thread({ session: readyClaude, activities: [] }),
+      project: null,
+      worktree: null,
+      nodeLabel: null,
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+    });
+    expect(model.compactAction).toBeNull();
   });
 });
