@@ -20,7 +20,13 @@ import type {
 import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import { create } from "zustand";
 
-import { selectEnvironmentState, type AppState } from "../threads/store.ts";
+import { isDefiniteDispatchFailure } from "../../rpc/protocol.ts";
+import {
+  selectEnvironmentState,
+  selectSidebarThreadSummaryByRef,
+  type AppState,
+} from "../threads/store.ts";
+import { selectThreadLiveDetailLoaded } from "../threads/storeSelectors.ts";
 import { queueHoldInputOf, type QueueHold } from "./hold.ts";
 import { summarizeQueuedMessage } from "./logic.ts";
 
@@ -45,6 +51,51 @@ export function selectThreadFollowUpQueue(
   return (
     selectEnvironmentState(state, ref.environmentId).followUpQueueByThreadId?.[ref.threadId] ?? null
   );
+}
+
+/**
+ * Whether the node is about to send its queue's head: the queue holds an entry, is not held,
+ * and its head waits as `queued`. Neither a held queue nor a head waiting for Retry or being
+ * steered goes out by itself.
+ */
+export function isFollowUpQueueWaiting(
+  queue: Pick<ThreadFollowUpQueue, "entries" | "hold"> | null | undefined,
+): boolean {
+  const head = queue?.entries[0];
+  return head !== undefined && queue!.hold === null && head.status === "queued";
+}
+
+/**
+ * {@link isFollowUpQueueWaiting} for a thread: from its live detail once loaded (the queue
+ * follows the node's events there), else from its shell's summary.
+ */
+export function selectServerFollowUpQueueWaiting(
+  state: AppState,
+  ref: ScopedThreadRef | null | undefined,
+): boolean {
+  if (!ref) return false;
+  if (selectThreadLiveDetailLoaded(state, ref)) {
+    return isFollowUpQueueWaiting(selectThreadFollowUpQueue(state, ref));
+  }
+  const summary = selectSidebarThreadSummaryByRef(state, ref);
+  const queue = summary && "followUpQueueSummary" in summary ? summary.followUpQueueSummary : null;
+  return queue != null && queue.hold === null && queue.headStatus === "queued";
+}
+
+/**
+ * Whether a send must queue behind the node's follow-up queue although no turn runs: the node
+ * is about to send its head, or an add of this device is still on its way ("Queuing…"). The
+ * node's dispatch does not change the session's status, so the thread reads idle while it
+ * starts; a turn start now would jump ahead of the queue, or land in its start window.
+ */
+export function followUpSendWaitsForServerQueue(input: {
+  readonly serverQueueSupported: boolean;
+  /** {@link selectServerFollowUpQueueWaiting}. */
+  readonly queueWaiting: boolean;
+  /** Adds of this device the thread does not show yet. */
+  readonly pendingAdds: number;
+}): boolean {
+  return input.serverQueueSupported && (input.queueWaiting || input.pendingAdds > 0);
 }
 
 /** Whether the node keeps follow-up queues itself (`thread.queue.*`). */
@@ -122,6 +173,54 @@ export const MOVED_FAILED_ENTRY_FAILURE: FollowUpQueueEntryFailure = {
   reason: "start-failed",
   detail: "Its send failed on this device, so it may have been delivered. Retry or remove it.",
 };
+
+/** `FollowUpQueueEntryFailure.detail`'s limit. */
+const FOLLOW_UP_FAILURE_DETAIL_MAX_CHARS = 1_000;
+
+/**
+ * The failure a device's entry moves over with when the device knows why it must not be sent
+ * on its own (a steer the provider may have, a send stopped at a choice the user did not
+ * confirm). It waits for Retry; the detail is cut to the contract's limit.
+ */
+export function movedFollowUpQueueFailure(
+  reason: FollowUpQueueEntryFailure["reason"],
+  detail: string | null,
+): FollowUpQueueEntryFailure {
+  return {
+    reason,
+    detail: detail === null ? null : detail.slice(0, FOLLOW_UP_FAILURE_DETAIL_MAX_CHARS),
+  };
+}
+
+/**
+ * Whether a send made while the thread is busy goes to the node's queue (`thread.queue.add`)
+ * instead of this device's queue: the node keeps queues, the thread is one the node has, its
+ * environment takes mutations now, and nothing of this device's own queue for the thread is
+ * left or still waiting for its turn to start. Those go first, in order, so the send queues
+ * behind them on the device and moves to the node with them. A send the node's queue cannot
+ * carry stays on the device.
+ */
+export function shouldQueueFollowUpOnServer(input: {
+  readonly serverQueueSupported: boolean;
+  /** A thread the node has, not a local draft. */
+  readonly serverThread: boolean;
+  readonly mutationReady: boolean;
+  /** Entries this device still holds for the thread. */
+  readonly deviceQueueLength: number;
+  /** A queued send of this device whose turn has not started yet. */
+  readonly deviceDispatchPending: boolean;
+  /** Whether the node's queue can carry the send (absent: it can). */
+  readonly movable?: boolean | undefined;
+}): boolean {
+  return (
+    input.serverQueueSupported &&
+    input.serverThread &&
+    input.mutationReady &&
+    input.deviceQueueLength === 0 &&
+    !input.deviceDispatchPending &&
+    input.movable !== false
+  );
+}
 
 export function buildFollowUpQueueAddCommand(
   input: CommandBase & {
@@ -274,10 +373,30 @@ export function buildFollowUpQueueRetryCommand(
 // ---------------------------------------------------------------------------
 
 /**
- * `queuing`: added on this device, not yet in the thread detail. `sending`: a device entry
- * being sent as a turn. `steering`: being sent into the running turn.
+ * `queuing`: added on this device, not yet in the thread detail. `moving`: a device entry whose
+ * add to the node's queue is on its way. `sending`: a device entry being sent as a turn.
+ * `steering`: being sent into the running turn.
  */
-export type FollowUpQueueRowStatus = "queued" | "queuing" | "sending" | "steering" | "failed";
+export type FollowUpQueueRowStatus =
+  | "queued"
+  | "queuing"
+  | "moving"
+  | "sending"
+  | "steering"
+  | "failed";
+
+/** Why a message on its way to the node's queue cannot be edited or steered yet. */
+export const FOLLOW_UP_ON_ITS_WAY_REASON = "This message is on its way to the node's queue.";
+
+/**
+ * Why the row cannot be edited or steered now because its add to the node's queue is on its
+ * way, else null. The add can still land: an edited copy or a steer would make a second message.
+ */
+export function followUpQueueRowOnItsWayReason(
+  row: Pick<FollowUpQueueRow, "status">,
+): string | null {
+  return row.status === "queuing" || row.status === "moving" ? FOLLOW_UP_ON_ITS_WAY_REASON : null;
+}
 
 /** One row of the queue a thread shows, whoever keeps it. */
 export interface FollowUpQueueRow {
@@ -313,6 +432,8 @@ export interface LocalFollowUpRowInput {
   readonly summary: string;
   readonly deliveryStatus?: "sending" | "failed" | undefined;
   readonly steering: boolean;
+  /** Its add to the node's queue is on its way (the device queue is moving there). */
+  readonly moving?: boolean | undefined;
 }
 
 const IMAGE_ATTACHMENT = "image";
@@ -393,9 +514,11 @@ export function deriveFollowUpQueueView(input: {
         ? "steering"
         : entry.deliveryStatus === "sending"
           ? "sending"
-          : entry.deliveryStatus === "failed"
-            ? "failed"
-            : "queued",
+          : entry.moving === true
+            ? "moving"
+            : entry.deliveryStatus === "failed"
+              ? "failed"
+              : "queued",
       failureDetail: null,
       author: "user",
     });
@@ -407,6 +530,50 @@ export function deriveFollowUpQueueView(input: {
     hold: serverHold ?? localHold,
     holdSource: serverHold ? "server" : localHold ? "local" : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Editing a node's entry
+// ---------------------------------------------------------------------------
+
+/**
+ * Where an edit of a node's entry stands. `gone`: the entry left the queue (sent, or removed
+ * elsewhere). `changed`: it is still queued at another revision (an edit on another device, a
+ * Retry, a steer that came back), so a save at the edited revision would be refused. Either way
+ * the edit is over and the composer keeps its text.
+ */
+export type FollowUpQueueEditState = "editing" | "gone" | "changed";
+
+export function resolveFollowUpQueueEditState(input: {
+  readonly queue: ThreadFollowUpQueue | null;
+  /** Without the thread's detail the queue is not known: the edit goes on. */
+  readonly detailLoaded: boolean;
+  readonly messageId: string;
+  readonly revision: number;
+  /** This edit's own save is on its way: the revision it raises is not someone else's change. */
+  readonly saving: boolean;
+}): FollowUpQueueEditState {
+  if (!input.detailLoaded) return "editing";
+  const entry = input.queue?.entries.find((candidate) => candidate.messageId === input.messageId);
+  if (!entry) return "gone";
+  return entry.revision !== input.revision && !input.saving ? "changed" : "editing";
+}
+
+/** What the user is told when an edit ended without saving; the text stays in the composer. */
+export function describeEndedFollowUpQueueEdit(state: "gone" | "changed"): {
+  readonly title: string;
+  readonly description: string;
+} {
+  return state === "gone"
+    ? {
+        title: "The queued message left the queue before your edit",
+        description: "Your edit stays in the composer. Send it as a new message or clear it.",
+      }
+    : {
+        title: "The queued message changed before your edit was saved",
+        description:
+          "Your edit stays in the composer. Send it as a new message, or clear the composer and edit the message again.",
+      };
 }
 
 // ---------------------------------------------------------------------------
@@ -451,10 +618,25 @@ export type FollowUpQueuePendingStore = ReturnType<typeof createFollowUpQueuePen
 /** How long an accepted add shows as "Queuing…" at most while its entry is on its way. */
 export const PENDING_FOLLOW_UP_VISIBLE_TIMEOUT_MS = 10_000;
 
+/** How a `thread.queue.add` of a send ended. */
+export type FollowUpQueueAddOutcome =
+  | { readonly kind: "queued" }
+  /** A definite refusal (the node's answer, or this client's before sending): not queued. */
+  | { readonly kind: "refused"; readonly error: unknown }
+  /**
+   * No answer (a lost reply): the node may have queued it. The caller keeps the message on the
+   * device under the same message id; moving it re-adds it, and the node's no-op on a known id
+   * keeps a single copy.
+   */
+  | { readonly kind: "unknown"; readonly error: unknown };
+
+const QUEUED: FollowUpQueueAddOutcome = { kind: "queued" };
+
 /**
- * Sends `thread.queue.add` with an optimistic "Queuing…" row. A rejected add drops the row and
- * returns the error, so the caller can give the text back to the composer. An accepted one
- * keeps the row until `isVisible` (the entry, or its message, is in the thread) or a timeout.
+ * Sends `thread.queue.add` with an optimistic "Queuing…" row. Only a definite refusal
+ * (`isDefiniteDispatchFailure`) gives the message back to the caller; any other failure may
+ * have reached the node. A failed add drops the row. An accepted one keeps it until
+ * `isVisible` (the entry, or its message, is in the thread) or a timeout.
  */
 export async function addFollowUpToServerQueue(input: {
   readonly pendingStore: Pick<FollowUpQueuePendingStore, "getState">;
@@ -468,7 +650,7 @@ export async function addFollowUpToServerQueue(input: {
     setTimeout: (callback: () => void, ms: number) => unknown;
     clearTimeout: (handle: unknown) => void;
   };
-}): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: unknown }> {
+}): Promise<FollowUpQueueAddOutcome> {
   const messageId = input.command.entry.messageId;
   input.pendingStore.getState().begin(input.threadKey, {
     messageId,
@@ -480,11 +662,13 @@ export async function addFollowUpToServerQueue(input: {
     await input.dispatch(input.command);
   } catch (error) {
     end();
-    return { ok: false, error };
+    return isDefiniteDispatchFailure(error)
+      ? { kind: "refused", error }
+      : { kind: "unknown", error };
   }
   if (input.isVisible()) {
     end();
-    return { ok: true };
+    return QUEUED;
   }
   const timers = input.timers ?? {
     setTimeout: (callback: () => void, ms: number) => setTimeout(callback, ms),
@@ -501,5 +685,5 @@ export async function addFollowUpToServerQueue(input: {
     unsubscribe?.();
     end();
   });
-  return { ok: true };
+  return QUEUED;
 }

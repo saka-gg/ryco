@@ -1,15 +1,19 @@
 import { isTransportConnectionErrorMessage } from "@ryco/client-runtime/errors";
 import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
+import { movedFollowUpQueueFailure } from "@ryco/client-runtime/state/message-queue";
 import type {
   CommandId,
   AgentTokenMode,
   EnvironmentId,
+  FollowUpQueueEntryFailure,
   MessageId,
   ModelSelection,
   ProviderInteractionMode,
   RuntimeMode,
   ThreadId,
 } from "@ryco/contracts";
+import { quoteCitationsToInlineText } from "@ryco/shared/quoteCitations";
+import { hasRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 
 import type { DraftComposerAttachment } from "../lib/composerFiles";
 
@@ -153,6 +157,55 @@ export function normalizePersistedQueuedThreadMessageAttachments(
     });
   }
   return out;
+}
+
+/**
+ * Whether the message waits for an explicit retry instead of draining: a send stopped at a
+ * choice the user did not confirm, a steer the provider may have, or a saved request that can
+ * no longer be sent.
+ */
+export function isQueuedThreadMessageHeld(message: QueuedThreadMessage): boolean {
+  return (
+    Boolean(message.resumeReviewError) ||
+    Boolean(message.uncertainSteerError) ||
+    hasRetiredProjectMemory(message)
+  );
+}
+
+/**
+ * Whether the node's follow-up queue can carry the message. A saved request with the retired
+ * project memory can never be sent, so it stays here until the user removes it.
+ */
+export function isQueuedThreadMessageMovable(message: QueuedThreadMessage): boolean {
+  return !hasRetiredProjectMemory(message);
+}
+
+/**
+ * The failure a held message moves to the node's queue with, so it waits for Retry there too
+ * and is never sent twice. Undefined for a message that may simply be sent.
+ */
+export function queuedThreadMessageFollowUpFailure(
+  message: QueuedThreadMessage,
+): FollowUpQueueEntryFailure | undefined {
+  if (message.uncertainSteerError) {
+    return movedFollowUpQueueFailure("steer-uncertain", message.uncertainSteerError);
+  }
+  if (message.resumeReviewError) {
+    return movedFollowUpQueueFailure("start-failed", message.resumeReviewError);
+  }
+  return undefined;
+}
+
+/** A one-line label for a queued message. */
+export function summarizeQueuedThreadMessage(
+  message: Pick<QueuedThreadMessage, "text" | "attachments">,
+): string {
+  // A quote reads as its quoted preview, not as its token.
+  const text = quoteCitationsToInlineText(message.text).trim();
+  if (text.length > 0) return text.length > 90 ? `${text.slice(0, 89)}…` : text;
+  if (message.attachments.length === 1) return "1 image";
+  if (message.attachments.length > 1) return `${message.attachments.length} images`;
+  return "Queued message";
 }
 
 export function groupQueuedThreadMessages(

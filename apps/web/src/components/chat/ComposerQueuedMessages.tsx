@@ -188,7 +188,8 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
           const summary = row.summary;
           // Include position + summary so screen readers can tell rows apart.
           const rowLabel = `queued message ${index + 1} of ${rows.length}: ${summary}`;
-          const queuing = row.status === "queuing";
+          // On its way to the node's queue: an add of this tab, or a tab entry moving there.
+          const queuing = row.status === "queuing" || row.status === "moving";
           const editing = editingId !== null && row.id === editingId;
           const busy = queuing || editing || row.status === "sending";
           const steerUnavailableReason = busy ? null : getSteerUnavailableReason(row);

@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  OrchestrationDispatchCommandError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -21,6 +22,7 @@ import {
   makeQueueAppState,
   QUEUE_ENV,
   queueKey,
+  queueRef,
   type ThreadFixture,
 } from "../../../test/queueThreadFixtures.ts";
 import {
@@ -34,7 +36,11 @@ import {
   type MessageQueueSender,
   type QueueEntryMoveContext,
 } from "./coordinator.ts";
-import { QUEUE_MIGRATION_FAILED_CAUSE_PREFIX, resolveQueueDrainStep } from "./drain.ts";
+import {
+  QUEUE_MIGRATION_FAILED_CAUSE_PREFIX,
+  resolveQueueDrainStep,
+  type QueueDrainInput,
+} from "./drain.ts";
 import { createInterruptQueueHold, type QueueHold } from "./hold.ts";
 import type { QueuedMessage } from "./logic.ts";
 import {
@@ -49,10 +55,19 @@ import {
   buildFollowUpQueueSteerCommand,
   createFollowUpQueuePendingStore,
   deriveFollowUpQueueView,
+  describeEndedFollowUpQueueEdit,
+  FOLLOW_UP_ON_ITS_WAY_REASON,
+  followUpQueueRowOnItsWayReason,
+  followUpSendWaitsForServerQueue,
+  isFollowUpQueueWaiting,
   MOVED_FAILED_ENTRY_FAILURE,
+  movedFollowUpQueueFailure,
   PENDING_FOLLOW_UP_VISIBLE_TIMEOUT_MS,
+  resolveFollowUpQueueEditState,
   selectServerFollowUpQueueSupported,
+  selectServerFollowUpQueueWaiting,
   selectThreadFollowUpQueue,
+  shouldQueueFollowUpOnServer,
   summarizeQueuedFollowUp,
   toFollowUpQueueHoldInput,
   type FollowUpQueueAddCommand,
@@ -166,6 +181,37 @@ describe("server follow-up queue commands", () => {
     expect(command.entry.failure).toEqual(MOVED_FAILED_ENTRY_FAILURE);
   });
 
+  it("moves a device's known failure with its reason, the detail cut to the contract", () => {
+    expect(movedFollowUpQueueFailure("steer-uncertain", "The provider may have it.")).toEqual({
+      reason: "steer-uncertain",
+      detail: "The provider may have it.",
+    });
+    const long = movedFollowUpQueueFailure("start-failed", "x".repeat(1_500));
+    expect(long.detail).toHaveLength(1_000);
+    expect(movedFollowUpQueueFailure("start-failed", null).detail).toBeNull();
+  });
+
+  it("queues a busy send on the node only when nothing of the device's queue goes first", () => {
+    const ready = {
+      serverQueueSupported: true,
+      serverThread: true,
+      mutationReady: true,
+      deviceQueueLength: 0,
+      deviceDispatchPending: false,
+    };
+    expect(shouldQueueFollowUpOnServer(ready)).toBe(true);
+    expect(shouldQueueFollowUpOnServer({ ...ready, movable: true })).toBe(true);
+    // An older node, a local draft, an environment that is not ready.
+    expect(shouldQueueFollowUpOnServer({ ...ready, serverQueueSupported: false })).toBe(false);
+    expect(shouldQueueFollowUpOnServer({ ...ready, serverThread: false })).toBe(false);
+    expect(shouldQueueFollowUpOnServer({ ...ready, mutationReady: false })).toBe(false);
+    // The device's own entries, or its send whose turn has not started, go first.
+    expect(shouldQueueFollowUpOnServer({ ...ready, deviceQueueLength: 1 })).toBe(false);
+    expect(shouldQueueFollowUpOnServer({ ...ready, deviceDispatchPending: true })).toBe(false);
+    // A send the node's queue cannot carry.
+    expect(shouldQueueFollowUpOnServer({ ...ready, movable: false })).toBe(false);
+  });
+
   it("bounds a hold's cause keys and detail for the contract", () => {
     const hold: QueueHold = {
       reason: "error",
@@ -271,6 +317,37 @@ describe("server follow-up queue commands", () => {
 });
 
 describe("server follow-up queue view", () => {
+  it("shows a device entry whose add is on its way as moving, which refuses Edit and Steer", () => {
+    const view = deriveFollowUpQueueView({
+      server: null,
+      pending: [{ messageId: "p-1", summary: "Sent while busy", createdAt: AT }],
+      local: [
+        { id: "q-1", summary: "Moving", steering: false, moving: true },
+        {
+          id: "q-2",
+          summary: "Failed, moving",
+          deliveryStatus: "failed",
+          steering: false,
+          moving: true,
+        },
+        { id: "q-3", summary: "Waiting", steering: false },
+      ],
+      localHold: null,
+    });
+    expect(view.rows.map((row) => [row.id, row.status])).toEqual([
+      ["p-1", "queuing"],
+      ["q-1", "moving"],
+      ["q-2", "moving"],
+      ["q-3", "queued"],
+    ]);
+    expect(view.rows.map(followUpQueueRowOnItsWayReason)).toEqual([
+      FOLLOW_UP_ON_ITS_WAY_REASON,
+      FOLLOW_UP_ON_ITS_WAY_REASON,
+      FOLLOW_UP_ON_ITS_WAY_REASON,
+      null,
+    ]);
+  });
+
   it("shows the node's entries and hold, head first, with their status", () => {
     const view = deriveFollowUpQueueView({
       server: {
@@ -411,7 +488,7 @@ describe("optimistic follow-up adds", () => {
       { messageId: "m-1", summary: "Run the tests", createdAt: AT },
     ]);
     accept();
-    await expect(result).resolves.toEqual({ ok: true });
+    await expect(result).resolves.toEqual({ kind: "queued" });
     expect(pendingStore.getState().pendingByThreadKey.k).toHaveLength(1);
     visible = true;
     for (const listener of listeners) listener();
@@ -435,22 +512,37 @@ describe("optimistic follow-up adds", () => {
     expect(pendingStore.getState().pendingByThreadKey.k).toBeUndefined();
   });
 
-  it("returns a rejected add's error and drops its row", async () => {
+  async function addFailingWith(error: unknown) {
     const pendingStore = createFollowUpQueuePendingStore();
-    const rejection = new Error("The queue is full (20 follow-ups).");
     const result = await addFollowUpToServerQueue({
       pendingStore,
       threadKey: "k",
       command: addCommand(),
       summary: "Run the tests",
       dispatch: async () => {
-        throw rejection;
+        throw error;
       },
       isVisible: () => false,
       subscribe: () => () => undefined,
     });
-    expect(result).toEqual({ ok: false, error: rejection });
-    expect(pendingStore.getState().pendingByThreadKey.k).toBeUndefined();
+    return { result, pending: pendingStore.getState().pendingByThreadKey.k };
+  }
+
+  it("returns the node's refusal and drops its row", async () => {
+    const refusal = new OrchestrationDispatchCommandError({
+      message: "The queue is full (20 follow-ups).",
+    });
+    const { result, pending } = await addFailingWith(refusal);
+    expect(result).toEqual({ kind: "refused", error: refusal });
+    expect(pending).toBeUndefined();
+  });
+
+  it("reports an add whose reply was lost as unknown, never as refused", async () => {
+    // A direct connection without dispatch replay: the node may have committed the add.
+    const lost = new Error("The connection closed before the node answered.");
+    const { result, pending } = await addFailingWith(lost);
+    expect(result).toEqual({ kind: "unknown", error: lost });
+    expect(pending).toBeUndefined();
   });
 });
 
@@ -635,9 +727,17 @@ function setupMove(
     node?: ReturnType<typeof fakeNode>;
     serverQueue?: boolean;
     mutationReady?: boolean;
+    /** The node's queue in the thread's detail. */
+    nodeQueue?: ThreadFollowUpQueue;
+    addPending?: () => boolean;
   } = {},
 ) {
-  const threads = createStore<AppState>(() => makeQueueAppState([options.thread ?? RUNNING]));
+  const threads = createStore<AppState>(() =>
+    makeQueueAppState(
+      [options.thread ?? RUNNING],
+      options.nodeQueue ? { followUpQueueByThreadId: { [THREAD_ID]: options.nodeQueue } } : {},
+    ),
+  );
   const queue = createMessageQueueStore<Entry["composer"], Record<string, never>>();
   const node = options.node ?? fakeNode();
   let serverQueue = options.serverQueue ?? true;
@@ -676,6 +776,7 @@ function setupMove(
     }),
     isEntryMovable: (candidate: Entry) => candidate.composer.computerUse !== true,
     onServerQueueMigrated: vi.fn(),
+    isServerQueueAddPending: () => options.addPending?.() ?? false,
   } satisfies MessageQueueDrainPlatform<Entry["composer"], Record<string, never>>;
   const coordinator = createMessageQueueDrainCoordinator(queue, platform);
   const release = coordinator.retain();
@@ -863,6 +964,60 @@ describe("moving a device queue to the node", () => {
     expect(f.sent).toEqual(["q-1"]);
   });
 
+  it("marks each entry while its add is on its way, entry by entry", async () => {
+    const f = setupMove();
+    const marks: Array<string | null> = [];
+    f.coordinator.subscribeMoving(() => marks.push(f.coordinator.inspect(KEY).movingMessageId));
+    const openGate = f.holdGate();
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    f.queue.getState().enqueue(KEY, entry("q-2"));
+    await flush();
+    // q-1's add is on its way: it must not be edited or steered; q-2 may still be.
+    expect(f.coordinator.inspect(KEY).movingMessageId).toBe("q-1");
+    openGate();
+    await flush();
+    expect(marks).toEqual(["q-1", null, "q-2", null]);
+    expect(f.coordinator.inspect(KEY).movingMessageId).toBeNull();
+    expect(f.node.ids()).toEqual(["q-1", "q-2"]);
+  });
+
+  it("clears the mark of an entry the node refused", async () => {
+    const f = setupMove();
+    f.node.rejectWith(new Error("Refused."));
+    f.queue.getState().enqueue(KEY, entry("q-1"));
+    await flush();
+    expect(f.coordinator.inspect(KEY).movingMessageId).toBeNull();
+    expect(f.localIds()).toEqual(["q-1"]);
+  });
+
+  it("keeps a head the node cannot carry behind the node's own queue", async () => {
+    const f = setupMove({
+      thread: IDLE,
+      nodeQueue: { entries: [queued("node-head")], hold: null },
+    });
+    f.queue.getState().enqueue(KEY, entry("q-1", { composer: { text: "q-1", computerUse: true } }));
+    await flush();
+    // The node is about to send its head; a turn of the device's own would jump ahead of it.
+    expect(f.sent).toEqual([]);
+    expect(f.coordinator.inspect(KEY).lastStep).toEqual({ kind: "wait", reason: "server-queue" });
+
+    f.threads.setState(() => makeQueueAppState([IDLE]));
+    await flush();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
+  it("keeps a head the node cannot carry behind an add still on its way", async () => {
+    let pending = true;
+    const f = setupMove({ thread: IDLE, addPending: () => pending });
+    f.queue.getState().enqueue(KEY, entry("q-1", { composer: { text: "q-1", computerUse: true } }));
+    await flush();
+    expect(f.sent).toEqual([]);
+    pending = false;
+    f.coordinator.evaluate(KEY);
+    await flush();
+    expect(f.sent).toEqual(["q-1"]);
+  });
+
   it("sends from the device what the node's queue cannot carry, then moves the rest", async () => {
     const f = setupMove({ thread: IDLE });
     f.queue.getState().enqueue(KEY, entry("q-1", { composer: { text: "q-1", computerUse: true } }));
@@ -912,5 +1067,134 @@ describe("moving a device queue to the node", () => {
     expect(f.sent).toEqual(["q-1"]);
     expect(f.moves).toEqual([]);
     expect(f.platform.onServerQueueMigrated).not.toHaveBeenCalled();
+  });
+});
+
+describe("sends while the node is about to send its queue", () => {
+  const REF = queueRef("t");
+  const queue = (entries: QueuedFollowUp[], hold: FollowUpQueueHold | null = null) => ({
+    entries,
+    hold,
+  });
+
+  it("waits for a queue with an unheld head that can go", () => {
+    expect(isFollowUpQueueWaiting(queue([queued("a")]))).toBe(true);
+    expect(isFollowUpQueueWaiting(queue([queued("a")], HOLD))).toBe(false);
+    expect(isFollowUpQueueWaiting(queue([queued("a", { status: "failed" })]))).toBe(false);
+    expect(isFollowUpQueueWaiting(queue([queued("a", { status: "steering" })]))).toBe(false);
+    expect(isFollowUpQueueWaiting(queue([]))).toBe(false);
+    expect(isFollowUpQueueWaiting(null)).toBe(false);
+  });
+
+  it("reads the thread's live queue once its detail is loaded, else its shell summary", () => {
+    const withDetail = (followUpQueue?: ThreadFollowUpQueue) =>
+      makeQueueAppState(
+        [{ id: "t", session: { status: "ready" }, messageIds: ["m-0"] }],
+        followUpQueue ? { followUpQueueByThreadId: { [THREAD_ID]: followUpQueue } } : {},
+      );
+    expect(selectServerFollowUpQueueWaiting(withDetail(queue([queued("a")])), REF)).toBe(true);
+    expect(selectServerFollowUpQueueWaiting(withDetail(queue([queued("a")], HOLD)), REF)).toBe(
+      false,
+    );
+    expect(selectServerFollowUpQueueWaiting(withDetail(), REF)).toBe(false);
+
+    const shellOnly = (summary: object) =>
+      makeQueueAppState([
+        {
+          id: "t",
+          session: { status: "ready" },
+          summary: { followUpQueueSummary: summary } as never,
+        },
+      ]);
+    const summary = { count: 1, hold: null, headStatus: "queued", headPreview: "a" };
+    expect(selectServerFollowUpQueueWaiting(shellOnly(summary), REF)).toBe(true);
+    expect(selectServerFollowUpQueueWaiting(shellOnly({ ...summary, hold: HOLD }), REF)).toBe(
+      false,
+    );
+    expect(
+      selectServerFollowUpQueueWaiting(shellOnly({ ...summary, headStatus: "failed" }), REF),
+    ).toBe(false);
+    expect(selectServerFollowUpQueueWaiting(makeQueueAppState([{ id: "t" }]), REF)).toBe(false);
+  });
+
+  it("queues a send behind the node's queue or an add still on its way", () => {
+    const supported = { serverQueueSupported: true, queueWaiting: false, pendingAdds: 0 };
+    expect(followUpSendWaitsForServerQueue(supported)).toBe(false);
+    expect(followUpSendWaitsForServerQueue({ ...supported, queueWaiting: true })).toBe(true);
+    expect(followUpSendWaitsForServerQueue({ ...supported, pendingAdds: 1 })).toBe(true);
+    expect(
+      followUpSendWaitsForServerQueue({
+        ...supported,
+        serverQueueSupported: false,
+        pendingAdds: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps a head the node cannot carry waiting behind the node's queue", () => {
+    const input: QueueDrainInput = {
+      nowIso: AT,
+      queue: [{ id: "q-1" }],
+      steerAttempts: {},
+      hold: null,
+      acknowledgedCauseKeys: [],
+      headProviderInstanceId: "codex",
+      view: {
+        ref: REF,
+        started: true,
+        archived: false,
+        detailLoaded: true,
+        running: false,
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        session: null,
+        latestTurn: null,
+        latestTurnPlaceholderCheckpoint: false,
+        projectedMessageIds: new Set(),
+        turnStartFailures: [],
+        steerRejectionsByActivityId: new Map(),
+        turnStartCancelledMessageIds: new Set(),
+      },
+      draft: false,
+      environment: { shellLive: true, mutationReady: true, serverQueue: true },
+      headMigratable: false,
+      pendingDispatch: null,
+      dispatchedMessageIds: new Set(),
+      sender: "foreground",
+    };
+    expect(resolveQueueDrainStep({ ...input, serverQueueWaiting: true })).toEqual({
+      kind: "wait",
+      reason: "server-queue",
+    });
+    expect(resolveQueueDrainStep(input)).toEqual({
+      kind: "send",
+      messageId: "q-1",
+      sender: "foreground",
+    });
+  });
+});
+
+describe("editing the node's entry", () => {
+  const entries = [queued("a", { revision: 2 })];
+
+  it("ends an edit whose entry left the queue or changed meanwhile", () => {
+    const base = {
+      queue: { entries, hold: null },
+      detailLoaded: true,
+      messageId: "a",
+      revision: 2,
+      saving: false,
+    };
+    expect(resolveFollowUpQueueEditState(base)).toBe("editing");
+    // Another device's edit, a Retry, or a steer that came back raised its revision.
+    expect(resolveFollowUpQueueEditState({ ...base, revision: 1 })).toBe("changed");
+    // This edit's own save raises it too: not a change by someone else.
+    expect(resolveFollowUpQueueEditState({ ...base, revision: 1, saving: true })).toBe("editing");
+    expect(resolveFollowUpQueueEditState({ ...base, queue: null })).toBe("gone");
+    expect(resolveFollowUpQueueEditState({ ...base, queue: null, detailLoaded: false })).toBe(
+      "editing",
+    );
+    expect(describeEndedFollowUpQueueEdit("changed").description).toMatch(/stays in the composer/);
+    expect(describeEndedFollowUpQueueEdit("gone").description).toMatch(/stays in the composer/);
   });
 });

@@ -101,6 +101,19 @@ describe("sessionActions", () => {
     expect(dispatchCommand).not.toHaveBeenCalled();
   });
 
+  it("holds the node's follow-up queue with a person's Stop only when asked", async () => {
+    const { api, dispatchCommand } = fakeApi();
+    await interruptThreadTurn(api, THREAD_ID, { holdQueue: true });
+    await interruptThreadTurn(api, THREAD_ID, { holdQueue: false });
+    await interruptThreadTurn(api, THREAD_ID);
+    const commands = dispatchCommand.mock.calls.map(
+      ([command]) => command as { readonly holdQueue?: true },
+    );
+    expect(commands[0]?.holdQueue).toBe(true);
+    expect("holdQueue" in commands[1]!).toBe(false);
+    expect("holdQueue" in commands[2]!).toBe(false);
+  });
+
   it("renames and archives through bounded thread commands", async () => {
     const { api, dispatchCommand } = fakeApi();
 

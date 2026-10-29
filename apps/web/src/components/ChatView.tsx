@@ -102,10 +102,17 @@ import {
   buildFollowUpQueueSteerCommand,
   buildQueuedMessageSteerCommand,
   deriveFollowUpQueueView,
+  describeEndedFollowUpQueueEdit,
+  followUpQueueRowOnItsWayReason,
+  followUpSendWaitsForServerQueue,
+  FOLLOW_UP_ON_ITS_WAY_REASON,
   resolveComposerFollowUpAction,
+  resolveFollowUpQueueEditState,
   resolveQueuedMessageEditUnavailableReason,
   resolveQueuedMessageSteerEligibility,
+  selectServerFollowUpQueueWaiting,
   selectThreadFollowUpQueue,
+  shouldQueueFollowUpOnServer,
   type FollowUpQueueCommand,
   type FollowUpQueueRow,
   type PendingFollowUpAdd,
@@ -393,15 +400,18 @@ import { useMessageQueueStore } from "../messageQueueStore";
 import { TIMELINE_REVEAL_SETTLE_MS, useTimelineRevealStore } from "../timelineRevealStore";
 import {
   buildWebFollowUpContent,
+  countPendingFollowUpAdds,
   createForegroundQueueSender,
   dispatchFollowUpQueueCommand,
   hasOutstandingQueuedDispatch,
+  isQueuedMessageMoving,
   isWebFollowUpMovable,
   queueFollowUpOnServer,
   resumeMessageQueue,
   retryQueuedMessage,
   useFollowUpQueuePendingStore,
   useForegroundQueueSender,
+  useMovingQueuedMessageId,
   type ForegroundQueueTarget,
 } from "../messageQueueDrain";
 import { useServerFollowUpQueueSupported } from "../messageQueueEnvironment";
@@ -1424,22 +1434,33 @@ export default function ChatView(props: ChatViewProps) {
       ? (store.pendingByThreadKey[activeThreadKey] ?? EMPTY_PENDING_FOLLOW_UPS)
       : EMPTY_PENDING_FOLLOW_UPS,
   );
+  // The tab entry whose add to the node's queue is on its way: no Edit or Steer until it landed.
+  const movingQueuedMessageId = useMovingQueuedMessageId(activeThreadKey);
   const [serverQueueEdit, setServerQueueEdit] = useState<ServerQueueEdit | null>(null);
+  const [savingServerQueueEdit, setSavingServerQueueEdit] = useState<ServerQueueEdit | null>(null);
   const shownServerQueueEdit =
     serverQueueEdit !== null && serverQueueEdit.threadKey === activeThreadKey
       ? serverQueueEdit
       : null;
-  // An edit whose entry left the queue (sent, or removed elsewhere) is over; the composer
-  // keeps the text, which a send then sends as a new message.
-  const goneServerQueueEdit =
-    shownServerQueueEdit !== null &&
-    activeThreadDetailLoaded &&
-    serverFollowUpQueue?.entries.some(
-      (entry) => entry.messageId === shownServerQueueEdit.messageId,
-    ) !== true
-      ? shownServerQueueEdit
+  // An edit whose entry left the queue (sent, or removed elsewhere), or changed meanwhile (an
+  // edit elsewhere, a Retry, a steer that came back), is over: the composer keeps the text,
+  // which a send then sends as a new message.
+  const serverQueueEditState =
+    shownServerQueueEdit === null
+      ? null
+      : resolveFollowUpQueueEditState({
+          queue: serverFollowUpQueue,
+          detailLoaded: activeThreadDetailLoaded,
+          messageId: shownServerQueueEdit.messageId,
+          revision: shownServerQueueEdit.revision,
+          saving: savingServerQueueEdit === shownServerQueueEdit,
+        });
+  const endedServerQueueEditState =
+    serverQueueEditState === "gone" || serverQueueEditState === "changed"
+      ? serverQueueEditState
       : null;
-  const activeServerQueueEdit = goneServerQueueEdit === null ? shownServerQueueEdit : null;
+  const endedServerQueueEdit = endedServerQueueEditState === null ? null : shownServerQueueEdit;
+  const activeServerQueueEdit = serverQueueEditState === "editing" ? shownServerQueueEdit : null;
   const queueView = useMemo(
     () =>
       deriveFollowUpQueueView({
@@ -1450,10 +1471,18 @@ export default function ChatView(props: ChatViewProps) {
           summary: summarizeQueuedMessage(message),
           deliveryStatus: message.deliveryStatus,
           steering: steeringQueuedMessageIds.includes(message.id),
+          moving: message.id === movingQueuedMessageId,
         })),
         localHold: queueHold,
       }),
-    [pendingFollowUps, queueHold, queuedMessages, serverFollowUpQueue, steeringQueuedMessageIds],
+    [
+      movingQueuedMessageId,
+      pendingFollowUps,
+      queueHold,
+      queuedMessages,
+      serverFollowUpQueue,
+      steeringQueuedMessageIds,
+    ],
   );
   /** Sends one `thread.queue.*` change; the node's refusal shows as a toast. */
   const runServerQueueCommand = useCallback(
@@ -3451,6 +3480,8 @@ export default function ChatView(props: ChatViewProps) {
       if (row.source === "server" && activeServerQueueEdit !== null) {
         return "Save or cancel the message you are editing first.";
       }
+      const onItsWay = followUpQueueRowOnItsWayReason(row);
+      if (onItsWay !== null) return onItsWay;
       return resolveQueuedMessageEditUnavailableReason({
         deliveryStatus:
           row.status === "sending" ? "sending" : row.status === "failed" ? "failed" : undefined,
@@ -3518,15 +3549,16 @@ export default function ChatView(props: ChatViewProps) {
     readComposer()?.resetCursorState();
   }, [clearComposerDraftContent, composerDraftTarget, readComposer]);
   useEffect(() => {
-    if (goneServerQueueEdit === null) return;
+    if (endedServerQueueEdit === null || endedServerQueueEditState === null) return;
+    // Over: the entry can be edited again (once the composer is clear), and a send is a new message.
+    setServerQueueEdit((current) => (current === endedServerQueueEdit ? null : current));
     toastManager.add(
       stackedThreadToast({
         type: "info",
-        title: "The queued message left the queue before your edit",
-        description: "Your edit stays in the composer. Send it as a new message or clear it.",
+        ...describeEndedFollowUpQueueEdit(endedServerQueueEditState),
       }),
     );
-  }, [goneServerQueueEdit]);
+  }, [endedServerQueueEdit, endedServerQueueEditState]);
   // Edit = take the message out of the queue and put its content back into the
   // composer. Sending it again re-queues it (at the end) while the turn runs.
   // The queued image copies own their preview URLs, so they move over as-is.
@@ -3548,6 +3580,9 @@ export default function ChatView(props: ChatViewProps) {
         composerTerminalContextsRef,
         composerFileReferencesRef,
       };
+      // Its add to the node's queue is on its way: it can still land, so an edited copy would be
+      // a second message.
+      if (isQueuedMessageMoving(activeThreadKey, id)) return;
       const unavailableReason = resolveQueuedMessageEditUnavailableReason({
         deliveryStatus: message.deliveryStatus,
         steering: queueState.steerAttemptsByThreadKey[activeThreadKey]?.[id] !== undefined,
@@ -4936,7 +4971,8 @@ export default function ChatView(props: ChatViewProps) {
 
   const getQueuedSteerUnavailableReason = useCallback(
     (row: FollowUpQueueRow): string | null => {
-      if (row.source === "pending") return null;
+      const onItsWay = followUpQueueRowOnItsWayReason(row);
+      if (onItsWay !== null || row.source === "pending") return onItsWay;
       if (row.source === "server") {
         if (row.status === "failed") return "Retry this message before steering it.";
         const eligibility = getServerQueuedSteerEligibility(row.id);
@@ -4988,7 +5024,11 @@ export default function ChatView(props: ChatViewProps) {
       options: { readonly explicit: boolean; readonly prepareEditors: boolean },
     ) => {
       if (!activeThreadKey || !activeThread) return;
-      const eligibility = getQueuedSteerEligibility(message);
+      // Its add to the node's queue is on its way: the node may send it, so a steer would be a
+      // second copy.
+      const eligibility = isQueuedMessageMoving(activeThreadKey, message.id)
+        ? { allowed: false as const, reason: FOLLOW_UP_ON_ITS_WAY_REASON }
+        : getQueuedSteerEligibility(message);
       if (!eligibility.allowed) {
         if (options.explicit) {
           toastManager.add(
@@ -5824,6 +5864,8 @@ export default function ChatView(props: ChatViewProps) {
         );
         return;
       }
+      // The revision this save raises is not someone else's change.
+      setSavingServerQueueEdit(edit);
       const saved = await runServerQueueCommand("Could not save the queued message", (base) =>
         buildFollowUpQueueEditCommand({
           ...base,
@@ -5832,6 +5874,7 @@ export default function ChatView(props: ChatViewProps) {
           keptAttachmentIds: edit.keptAttachmentIds,
         }),
       );
+      setSavingServerQueueEdit((current) => (current === edit ? null : current));
       if (!saved) return;
       setServerQueueEdit((current) => (current === edit ? null : current));
       if (!composerChangedDuringSave()) {
@@ -5851,12 +5894,19 @@ export default function ChatView(props: ChatViewProps) {
     // rows): the queue only drains once its shell is live and it takes
     // mutations. A draft's first send queues under the draft and goes out from
     // this view, the draft's own, which creates its thread; nothing is sent
-    // for a draft that is not open.
+    // for a draft that is not open. So does a node about to send its own queue's
+    // head (its dispatch leaves the session "ready" while it starts) or an add of
+    // this tab still on its way: a turn start would jump ahead of them.
     if (
       activeThreadKey &&
       (phase === "running" ||
         hasOutstandingQueuedDispatch(activeThreadKey) ||
-        sendWaitsForEnvironment)
+        sendWaitsForEnvironment ||
+        followUpSendWaitsForServerQueue({
+          serverQueueSupported: serverFollowUpQueueSupported && isServerThread,
+          queueWaiting: selectServerFollowUpQueueWaiting(useStore.getState(), activeThreadRef),
+          pendingAdds: countPendingFollowUpAdds(activeThreadKey),
+        }))
     ) {
       // Steer = enqueue, then start a steer attempt at once: every failure falls back to the
       // queue. The phone tier is frozen and always queues; slash input never steers.
@@ -5940,16 +5990,30 @@ export default function ChatView(props: ChatViewProps) {
         noteApprovalRedirectEnd(turns, activeThreadKey, redirect, null),
       );
       const queuedMessageId = newMessageId();
+      const tabQueueEntry = (): QueuedMessage => ({
+        id: queuedMessageId,
+        createdAt: new Date().toISOString(),
+        composer: {
+          ...composerSnapshot,
+          // Clearing the composer revokes the live blob preview URLs, so clone the
+          // image previews to keep the queued copies independent.
+          images: composerSnapshot.images.map(cloneComposerImageForRetry),
+        },
+        settings: settingsSnapshot,
+      });
       // The node keeps this thread's queue: the message is queued there. Not while this
       // tab still holds entries for it (they move first, in order), nor while the node is
       // not ready (this tab's queue holds it until it is, then moves it).
       if (
-        serverFollowUpQueueSupported &&
-        isServerThread &&
-        !sendWaitsForEnvironment &&
-        !hasOutstandingQueuedDispatch(activeThreadKey) &&
-        (useMessageQueueStore.getState().queuesByThreadKey[activeThreadKey]?.length ?? 0) === 0 &&
-        isWebFollowUpMovable(composerSnapshot, settingsSnapshot) &&
+        shouldQueueFollowUpOnServer({
+          serverQueueSupported: serverFollowUpQueueSupported,
+          serverThread: isServerThread,
+          mutationReady: !sendWaitsForEnvironment,
+          deviceQueueLength:
+            useMessageQueueStore.getState().queuesByThreadKey[activeThreadKey]?.length ?? 0,
+          deviceDispatchPending: hasOutstandingQueuedDispatch(activeThreadKey),
+          movable: isWebFollowUpMovable(composerSnapshot, settingsSnapshot),
+        }) &&
         activeThreadRef !== null
       ) {
         const steerEligibility =
@@ -6017,12 +6081,14 @@ export default function ChatView(props: ChatViewProps) {
             composer: composerSnapshot,
             settings: settingsSnapshot,
           }),
+          // No answer: the node may have it. This tab keeps it under the same id and moves it.
+          keepInTab: tabQueueEntry,
         });
-        if (!queued.ok) {
+        if (queued.kind === "refused") {
           giveBack(queued.error);
           return;
         }
-        if (steerEligibility?.allowed) {
+        if (queued.kind === "queued" && steerEligibility?.allowed) {
           await runServerQueueCommand("Could not steer message", (base) =>
             buildFollowUpQueueSteerCommand({
               ...base,
@@ -6030,7 +6096,7 @@ export default function ChatView(props: ChatViewProps) {
               expectedTurnId: steerEligibility.expectedTurnId,
             }),
           );
-        } else if (steerEligibility && invertFollowUp) {
+        } else if (steerEligibility && !steerEligibility.allowed && invertFollowUp) {
           toastManager.add(
             stackedThreadToast({
               type: "warning",
@@ -6041,17 +6107,7 @@ export default function ChatView(props: ChatViewProps) {
         }
         return;
       }
-      const queuedEntry: QueuedMessage = {
-        id: queuedMessageId,
-        createdAt: new Date().toISOString(),
-        composer: {
-          ...composerSnapshot,
-          // Clearing the composer revokes the live blob preview URLs, so clone the
-          // image previews to keep the queued copies independent.
-          images: composerSnapshot.images.map(cloneComposerImageForRetry),
-        },
-        settings: settingsSnapshot,
-      };
+      const queuedEntry = tabQueueEntry();
       enqueueMessage(activeThreadKey, queuedEntry);
       if (followUpAction === "steer") {
         const eligibility = getQueuedSteerEligibility(queuedEntry);

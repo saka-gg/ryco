@@ -1,4 +1,7 @@
-import { readEnvironmentServerConfig } from "./environmentServerConfigs";
+import {
+  readEnvironmentServerConfig,
+  subscribeEnvironmentServerConfigs,
+} from "./environmentServerConfigs";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { useEffect } from "react";
 
@@ -19,7 +22,9 @@ import {
   captureReviewedSendReadiness,
 } from "@ryco/client-runtime/state/composer";
 import {
+  followUpSendWaitsForServerQueue,
   readQueueThreadView,
+  selectServerFollowUpQueueWaiting,
   type QueueEnvironmentReadiness,
   type QueueSendHooks,
 } from "@ryco/client-runtime/state/message-queue";
@@ -36,6 +41,12 @@ import {
   trackThreadOutboxLiveCauses,
   type ThreadOutboxDrainState,
 } from "./threadOutbox";
+import {
+  countPendingFollowUpAdds,
+  moveQueuedThreadMessageToServer,
+  readServerFollowUpQueueSupported,
+  recordServerQueueMigrated,
+} from "./followUpQueue";
 import { isClaudeResumeReviewEnabled } from "./preferencesStore";
 import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
@@ -130,7 +141,25 @@ export function readThreadOutboxEnvironment(
   const shellLive = selectEnvironmentShellLive(state, environmentId);
   const connected =
     getWsConnectionUiState(getWsConnectionStatusForEnvironment(environmentId)) === "connected";
-  return { shellLive, mutationReady: shellLive && connected };
+  return {
+    shellLive,
+    mutationReady: shellLive && connected,
+    // A node that keeps follow-up queues itself takes the outbox's messages into its queue.
+    ...(readServerFollowUpQueueSupported(environmentId) ? { serverQueue: true } : {}),
+  };
+}
+
+/**
+ * Whether a message for the thread must wait behind the node's follow-up queue: the node is
+ * about to send its head (its dispatch leaves the session ready while it starts), or an add of
+ * this device is still on its way. A turn start now would jump ahead of them.
+ */
+export function readServerFollowUpQueueWaiting(ref: ScopedThreadRef): boolean {
+  return followUpSendWaitsForServerQueue({
+    serverQueueSupported: readServerFollowUpQueueSupported(ref.environmentId),
+    queueWaiting: selectServerFollowUpQueueWaiting(useStore.getState(), ref),
+    pendingAdds: countPendingFollowUpAdds(scopedThreadKey(ref)),
+  });
 }
 
 // Exported for testing: the drain gate's per-thread snapshot.
@@ -138,6 +167,7 @@ export function readThreadDrainState(ref: ScopedThreadRef): ThreadOutboxDrainSta
   return {
     view: readQueueThreadView(useStore.getState(), ref),
     environment: readThreadOutboxEnvironment(ref.environmentId),
+    ...(readServerFollowUpQueueWaiting(ref) ? { serverQueueWaiting: true } : {}),
   };
 }
 
@@ -183,6 +213,8 @@ export function runOutboxDrain(): void {
   void drainThreadOutbox({
     readThreadDrainState,
     sendQueuedMessage: sendQueuedThreadMessage,
+    moveQueuedMessageToServer: moveQueuedThreadMessageToServer,
+    onServerQueueMigrated: recordServerQueueMigrated,
   }).then(() => {
     const nowMs = Date.now();
     outboxLimitWake.sync(
@@ -299,6 +331,10 @@ export function useThreadOutboxDrain(): void {
 
   // Settle-edge: drain when a thread's turn settles while queued messages wait.
   useEffect(() => subscribeOutboxSettleDrain(runOutboxDrain), []);
+
+  // A node's config can land after its socket opened: one that keeps follow-up queues takes
+  // the outbox's messages into its queue as soon as it says so.
+  useEffect(() => subscribeEnvironmentServerConfigs(runOutboxDrain), []);
 
   // The failures each thread showed live baseline a message composed later
   // against cached rows.

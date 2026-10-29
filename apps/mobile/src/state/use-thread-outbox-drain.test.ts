@@ -1,4 +1,10 @@
-import type { CommandId, EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import {
+  OrchestrationDispatchCommandError,
+  type CommandId,
+  type EnvironmentId,
+  type MessageId,
+  type ThreadId,
+} from "@ryco/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("react-native", () => ({
@@ -44,13 +50,20 @@ import type { QueueSendHooks } from "@ryco/client-runtime/state/message-queue";
 import {
   drainThreadOutbox,
   enqueueThreadOutboxMessage,
+  getThreadOutboxHold,
   listThreadOutboxMessages,
   resetThreadOutboxForTests,
 } from "./threadOutbox";
+import {
+  moveQueuedThreadMessageToServer,
+  queueThreadMessageOnServer,
+  useFollowUpQueuePendingStore,
+} from "./followUpQueue";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
 import {
   createOutboxLimitWake,
   createThreadOutboxDetailRetention,
+  readServerFollowUpQueueWaiting,
   readThreadDrainState,
   sendQueuedThreadMessage,
 } from "./use-thread-outbox-drain";
@@ -599,5 +612,300 @@ describe("queued Claude send", () => {
       message: { messageId: message.messageId, text: message.text },
     });
     expect(fakeApi.dispatchCommand.mock.calls[0]?.[0]).not.toHaveProperty("claudeResumeGuard");
+  });
+});
+
+describe("outbox on a node that keeps the follow-up queue", () => {
+  const environmentId = "env-server-queue" as EnvironmentId;
+  const threadId = "t-queue" as ThreadId;
+  const ref = { environmentId, threadId };
+  const AT = "2026-10-01T10:00:00.000Z";
+  const wireThread = {
+    id: threadId,
+    projectId: "p1",
+    title: "Queue",
+    modelSelection: { instanceId: "codex", model: "gpt-5" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    manualStatusBucket: null,
+    manualPosition: 0,
+    latestTurn: null,
+    createdAt: AT,
+    updatedAt: AT,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: AT,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+  };
+  const message: QueuedThreadMessage = {
+    environmentId,
+    threadId,
+    messageId: "m-offline" as MessageId,
+    commandId: "c-offline" as CommandId,
+    text: "Run the tests",
+    attachments: [
+      {
+        type: "image",
+        id: "img-1",
+        name: "shot.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+        dataUrl: "data:image/png;base64,AA",
+        previewUri: "data:image/png;base64,AA",
+      },
+    ],
+    modelSelection: { instanceId: "codex", model: "gpt-5" } as never,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    createdAt: AT,
+  };
+
+  async function connectNode(capabilities: Record<string, unknown>) {
+    const { useStore } = await import("./threadsRuntime");
+    writeEnvironmentServerConfig(environmentId, {
+      environment: { capabilities },
+      providers: [],
+    } as never);
+    useStore.getState().syncServerShellSnapshot(
+      {
+        snapshotSequence: 1,
+        projects: [],
+        worktrees: [],
+        threads: [wireThread],
+        updatedAt: AT,
+      } as never,
+      environmentId,
+    );
+    useStore.getState().syncServerThreadDetail(
+      {
+        ...wireThread,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+      } as never,
+      environmentId,
+    );
+    connectEnvironment(environmentId, "ws://node-queue.local:13776/ws");
+    resetThreadOutboxForTests();
+    fakeApi.dispatchCommand.mockClear();
+    const sendQueuedMessage = vi.fn(async () => {});
+    const onServerQueueMigrated = vi.fn();
+    return {
+      sendQueuedMessage,
+      onServerQueueMigrated,
+      drain: () =>
+        drainThreadOutbox({
+          readThreadDrainState,
+          sendQueuedMessage,
+          moveQueuedMessageToServer: moveQueuedThreadMessageToServer,
+          onServerQueueMigrated,
+        }),
+      cleanup: () => {
+        resetThreadOutboxForTests();
+        useStore.getState().removeEnvironmentState(environmentId);
+        useFollowUpQueuePendingStore.getState().reset();
+      },
+    };
+  }
+
+  it("reads the capability from the node's own config", async () => {
+    const node = await connectNode({ serverFollowUpQueue: true });
+    try {
+      expect(readThreadDrainState(ref).environment).toEqual({
+        shellLive: true,
+        mutationReady: true,
+        serverQueue: true,
+      });
+    } finally {
+      node.cleanup();
+    }
+  });
+
+  it("takes a message queued offline as `thread.queue.add` under its own id, attached like a turn", async () => {
+    const node = await connectNode({ serverFollowUpQueue: true });
+    try {
+      enqueueThreadOutboxMessage(message);
+      await node.drain();
+      expect(node.sendQueuedMessage).not.toHaveBeenCalled();
+      expect(fakeApi.dispatchCommand).toHaveBeenCalledTimes(1);
+      expect(fakeApi.dispatchCommand.mock.calls[0]![0]).toMatchObject({
+        type: "thread.queue.add",
+        threadId,
+        entry: {
+          messageId: "m-offline",
+          text: "Run the tests",
+          attachments: [
+            {
+              type: "image",
+              name: "shot.png",
+              mimeType: "image/png",
+              sizeBytes: 4,
+              dataUrl: "data:image/png;base64,AA",
+            },
+          ],
+          modelSelection: { instanceId: "codex", model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          tokenMode: "off",
+        },
+        createdAt: AT,
+      });
+      expect(listThreadOutboxMessages()).toEqual([]);
+      expect(node.onServerQueueMigrated).toHaveBeenCalledWith(environmentId);
+    } finally {
+      node.cleanup();
+    }
+  });
+
+  it("keeps sending it as a turn start on an older node", async () => {
+    const node = await connectNode({});
+    try {
+      expect(readThreadDrainState(ref).environment).toEqual({
+        shellLive: true,
+        mutationReady: true,
+      });
+      enqueueThreadOutboxMessage(message);
+      await node.drain();
+      expect(node.sendQueuedMessage).toHaveBeenCalledTimes(1);
+      expect(fakeApi.dispatchCommand).not.toHaveBeenCalled();
+    } finally {
+      node.cleanup();
+    }
+  });
+
+  it("holds the thread with the reason when a file has to be attached again", async () => {
+    const node = await connectNode({ serverFollowUpQueue: true });
+    try {
+      enqueueThreadOutboxMessage({
+        ...message,
+        attachments: [
+          {
+            type: "file",
+            id: "file-1",
+            name: "report.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 2048,
+            readUri: "",
+            uploadState: "needsReattach",
+          },
+        ],
+      });
+      await node.drain();
+      expect(fakeApi.dispatchCommand).not.toHaveBeenCalled();
+      expect(listThreadOutboxMessages()).toHaveLength(1);
+      expect(getThreadOutboxHold(`${environmentId}:${threadId}`)).toMatchObject({
+        reason: "error",
+        detail: "Attach 'report.pdf' again to send this message.",
+      });
+    } finally {
+      node.cleanup();
+    }
+  });
+
+  it("shows a busy send as queuing until the node's entry arrives, and drops a refused one", async () => {
+    const node = await connectNode({ serverFollowUpQueue: true });
+    const threadKey = `${environmentId}:${threadId}`;
+    try {
+      await expect(queueThreadMessageOnServer(message)).resolves.toEqual({ kind: "queued" });
+      expect(fakeApi.dispatchCommand.mock.calls[0]![0]).toMatchObject({
+        type: "thread.queue.add",
+        entry: { messageId: "m-offline" },
+      });
+      expect(useFollowUpQueuePendingStore.getState().pendingByThreadKey[threadKey]).toEqual([
+        { messageId: "m-offline", summary: "Run the tests", createdAt: AT },
+      ]);
+
+      const refusal = new OrchestrationDispatchCommandError({
+        message: "The queue is full (20 follow-ups).",
+      });
+      fakeApi.dispatchCommand.mockRejectedValueOnce(refusal);
+      await expect(
+        queueThreadMessageOnServer({ ...message, messageId: "m-refused" as MessageId }),
+      ).resolves.toEqual({ kind: "refused", error: refusal });
+      expect(
+        useFollowUpQueuePendingStore
+          .getState()
+          .pendingByThreadKey[threadKey]?.map((pending) => pending.messageId),
+      ).toEqual(["m-offline"]);
+      // A refused send is given back, never kept on the device.
+      expect(listThreadOutboxMessages()).toEqual([]);
+    } finally {
+      node.cleanup();
+    }
+  });
+
+  it("keeps a busy send whose reply was lost in the outbox, and moves it under the same id", async () => {
+    const node = await connectNode({ serverFollowUpQueue: true });
+    try {
+      const lost = new Error("The connection closed before the node answered.");
+      fakeApi.dispatchCommand.mockRejectedValueOnce(lost);
+      await expect(queueThreadMessageOnServer(message)).resolves.toEqual({
+        kind: "unknown",
+        error: lost,
+      });
+      // The node may have queued it: no "Not queued", and the outbox holds the same message.
+      expect(listThreadOutboxMessages().map((queued) => queued.messageId)).toEqual(["m-offline"]);
+
+      await node.drain();
+      const adds = fakeApi.dispatchCommand.mock.calls
+        .map(([command]) => command as { type: string; entry?: { messageId: string } })
+        .filter((command) => command.type === "thread.queue.add");
+      // Re-added under its own id: the node's no-op on a known id keeps one copy.
+      expect(adds.map((command) => command.entry?.messageId)).toEqual(["m-offline", "m-offline"]);
+      expect(listThreadOutboxMessages()).toEqual([]);
+    } finally {
+      node.cleanup();
+    }
+  });
+
+  it("tells the drain and a send when the node's queue goes first", async () => {
+    const node = await connectNode({ serverFollowUpQueue: true });
+    const { useStore } = await import("./threadsRuntime");
+    try {
+      expect(readThreadDrainState(ref).serverQueueWaiting).toBeUndefined();
+      // The node's queue holds an unheld head that can go: it is about to be sent.
+      useStore.getState().syncServerThreadDetail(
+        {
+          ...wireThread,
+          deletedAt: null,
+          messages: [],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+          followUpQueue: {
+            entries: [
+              {
+                messageId: "node-head",
+                text: "Next",
+                attachments: [],
+                modelSelection: { instanceId: "codex", model: "gpt-5" },
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                createdAt: AT,
+                updatedAt: AT,
+                revision: 1,
+                status: "queued",
+                author: "user",
+              },
+            ],
+            hold: null,
+          },
+        } as never,
+        environmentId,
+      );
+      expect(readServerFollowUpQueueWaiting(ref)).toBe(true);
+      expect(readThreadDrainState(ref).serverQueueWaiting).toBe(true);
+    } finally {
+      node.cleanup();
+    }
   });
 });

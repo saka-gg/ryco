@@ -6,6 +6,7 @@ import {
   createInterruptQueueHold,
   createMessageQueueDrainCoordinator,
   MOVED_FAILED_ENTRY_FAILURE,
+  type FollowUpQueueAddOutcome,
   type FollowUpQueueCommand,
   type FollowUpQueueEntryContent,
   type MessageQueueDrainCoordinator,
@@ -24,7 +25,7 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
-import { useEffect } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 import {
   buildOutgoingMessageText,
@@ -136,6 +137,11 @@ useMessageQueueStore.subscribe((state, previous) => {
   if (state.epoch !== previous.epoch) useFollowUpQueuePendingStore.getState().reset();
 });
 
+/** The number of this tab's adds for the thread that the thread does not show yet. */
+export function countPendingFollowUpAdds(threadKey: string): number {
+  return useFollowUpQueuePendingStore.getState().pendingByThreadKey[threadKey]?.length ?? 0;
+}
+
 /** What a composer snapshot sends, as a queued follow-up: composed as a direct send would. */
 export async function buildWebFollowUpContent(
   composer: SendTurnComposerSnapshot,
@@ -224,16 +230,21 @@ function followUpVisible(ref: ScopedThreadRef, messageId: string): boolean {
 
 /**
  * Queues a composer send on the node (`thread.queue.add`), shown as "Queuing…"
- * until its entry arrives. Resolves with the node's refusal, if any, so the
- * caller can give the message back to the composer.
+ * until its entry arrives. A definite refusal comes back so the caller can give
+ * the message back to the composer. When the reply was lost, the node may have
+ * queued it: the message stays in this tab's queue under the same id
+ * (`keepInTab`), so moving it re-adds it and the node's no-op on a known id
+ * keeps one copy.
  */
 export async function queueFollowUpOnServer(input: {
   readonly ref: ScopedThreadRef;
   readonly messageId: MessageId;
   readonly content: FollowUpQueueEntryContent;
   readonly summary: string;
-}): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: unknown }> {
-  return addFollowUpToServerQueue({
+  /** The tab's own entry for the message, under `messageId`. */
+  readonly keepInTab: () => WebQueuedMessage;
+}): Promise<FollowUpQueueAddOutcome> {
+  const outcome = await addFollowUpToServerQueue({
     pendingStore: useFollowUpQueuePendingStore,
     threadKey: scopedThreadKey(input.ref),
     command: buildFollowUpQueueAddCommand({
@@ -248,6 +259,10 @@ export async function queueFollowUpOnServer(input: {
     isVisible: () => followUpVisible(input.ref, input.messageId),
     subscribe: (listener) => useStore.subscribe(listener),
   });
+  if (outcome.kind === "unknown") {
+    useMessageQueueStore.getState().enqueue(scopedThreadKey(input.ref), input.keepInTab());
+  }
+  return outcome;
 }
 
 const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnSettings> = {
@@ -266,6 +281,7 @@ const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnS
   moveEntryToServer,
   isEntryMovable: (entry) => isWebFollowUpMovable(entry.composer, entry.settings),
   onServerQueueMigrated: recordServerQueueMigrated,
+  isServerQueueAddPending: (threadKey) => countPendingFollowUpAdds(threadKey) > 0,
 };
 
 let coordinator: MessageQueueDrainCoordinator | null = null;
@@ -274,6 +290,9 @@ function getCoordinator(): MessageQueueDrainCoordinator {
   coordinator ??= createMessageQueueDrainCoordinator(useMessageQueueStore, webPlatform);
   return coordinator;
 }
+
+// A tab head the node cannot carry waits behind adds on their way: look again once they land.
+useFollowUpQueuePendingStore.subscribe(() => coordinator?.evaluate());
 
 /** Ref-counted; the final release stops the drain and clears its bookkeeping. */
 export function retainMessageQueueDrain(): () => void {
@@ -290,6 +309,20 @@ export function retryQueuedMessage(threadKey: string, messageId: string): void {
 
 export function inspectMessageQueueDrain(threadKey: string) {
   return getCoordinator().inspect(threadKey);
+}
+
+/**
+ * Whether the tab entry's add to the node's queue is on its way. It cannot be edited or steered
+ * meanwhile: the add can still land, so an edited copy or a steer would make a second message.
+ */
+export function isQueuedMessageMoving(threadKey: string, messageId: string): boolean {
+  return getCoordinator().inspect(threadKey).movingMessageId === messageId;
+}
+
+/** The thread's tab entry whose add to the node's queue is on its way, if any. */
+export function useMovingQueuedMessageId(threadKey: string | null): string | null {
+  const read = () => (threadKey ? getCoordinator().inspect(threadKey).movingMessageId : null);
+  return useSyncExternalStore((listener) => getCoordinator().subscribeMoving(listener), read, read);
 }
 
 /**

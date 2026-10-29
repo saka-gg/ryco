@@ -8,7 +8,9 @@ import {
   createInterruptQueueHold,
   deriveQueueFailureCauses,
   MAX_ACKNOWLEDGED_CAUSE_KEYS,
+  moveDeviceQueueToServer,
   QUEUE_HOLD_RANK,
+  queueMigrationFailedHold,
   readQueueThreadView,
   releaseQueueHoldKeys,
   removeQueueHoldCauses,
@@ -26,7 +28,6 @@ import {
   type QueuedDispatchSnapshot,
 } from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
-import { hasRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import { usageLimitHoldReleaseAtMs } from "@ryco/shared/usageLimit";
 import { mobileKV } from "../platform/kv";
 import type { DraftComposerFileAttachment } from "../lib/composerFiles";
@@ -37,6 +38,8 @@ import { useMessageQueueStore } from "./messageQueueStore";
 import { selectEnvironmentShellLive, useStore } from "@ryco/client-runtime/state/threads";
 import {
   groupQueuedThreadMessages,
+  isQueuedThreadMessageHeld,
+  isQueuedThreadMessageMovable,
   normalizePersistedQueuedThreadMessageAttachments,
   resolveThreadOutboxFailureAction,
   type QueuedThreadMessage,
@@ -50,7 +53,10 @@ import {
 // persistence (messages, queue holds, their acknowledged-cause baselines and the
 // causes each thread last showed live) and the drain loop, which sends at most
 // one message per thread per pass and waits for that message's own turn to
-// start before the next (a bound wrapper, no import-time side effects).
+// start before the next (a bound wrapper, no import-time side effects). On a
+// node that keeps follow-up queues itself (`capabilities.serverFollowUpQueue`)
+// the outbox is only the offline intake: its messages move to the node's queue
+// (`thread.queue.add`, design §3.7) instead of being sent as turns from here.
 
 const OUTBOX_STORAGE_KEY = "ryco.threadOutbox.v1";
 const HOLDS_STORAGE_KEY = "ryco.threadOutboxHolds.v1";
@@ -84,6 +90,13 @@ const pendingDispatchByThreadKey = new Map<string, QueuedDispatchSnapshot>();
 const dispatchedByThreadKey = new Map<string, Set<string>>();
 const failedSnapshots = new Map<string, QueuedDispatchSnapshot>();
 const inFlightThreadKeys = new Set<string>();
+/**
+ * Per thread, the message whose add to the node's queue is on its way. It must not be edited or
+ * steered meanwhile: the add can still land, so an edited copy or a steer would be a second one.
+ */
+const movingMessageIdByThreadKey = new Map<string, string>();
+/** Bumped by the test reset: a move from before it leaves everything alone. */
+let outboxEpoch = 0;
 /**
  * Messages with a live steer attempt, by message id. In memory only: an app kill ends every
  * attempt, and the message is then sent as a normal turn. The drain never sends one as a turn.
@@ -495,6 +508,20 @@ export function getThreadOutboxHold(threadKey: string): QueueHold | null {
   return holds[threadKey] ?? null;
 }
 
+/**
+ * A queued message of the thread is being sent from here, or the turn of the last one sent
+ * has not started yet (and the queue is not held): a new message has to queue behind it.
+ */
+export function isThreadOutboxDispatchPending(threadKey: string): boolean {
+  if (inFlightThreadKeys.has(threadKey)) return true;
+  return pendingDispatchByThreadKey.has(threadKey) && holds[threadKey] === undefined;
+}
+
+/** The thread's message whose add to the node's queue is on its way, if any. */
+export function getThreadOutboxMovingMessageId(threadKey: string): string | null {
+  return movingMessageIdByThreadKey.get(threadKey) ?? null;
+}
+
 function setHold(threadKey: string, hold: QueueHold | null): void {
   if (hold) holds[threadKey] = hold;
   else delete holds[threadKey];
@@ -559,13 +586,20 @@ export function resetThreadOutboxForTests(): void {
   dispatchedByThreadKey.clear();
   failedSnapshots.clear();
   inFlightThreadKeys.clear();
+  movingMessageIdByThreadKey.clear();
   steeringOutboxAttempts.clear();
+  outboxEpoch += 1;
   notifyListeners();
 }
 
 export interface ThreadOutboxDrainState {
   readonly view: QueueThreadView | null;
   readonly environment: QueueEnvironmentReadiness;
+  /**
+   * The node is about to send its follow-up queue's head, or an add to it is still on its way:
+   * a message the node's queue cannot carry waits behind them.
+   */
+  readonly serverQueueWaiting?: boolean | undefined;
 }
 
 // The per-thread context the drain needs from live state, and the send seam.
@@ -578,6 +612,18 @@ export interface ThreadOutboxDrainDeps {
     hooks: QueueSendHooks,
   ) => Promise<void>;
   readonly onInterrupted?: () => boolean;
+  /**
+   * Sends one message to the node's follow-up queue (`thread.queue.add` under its own message
+   * id, with the thread's hold on this device). Resolves once the node acknowledged it, a
+   * no-op for an id it already has included; rejects otherwise. Without it, messages are
+   * always sent from here as turns.
+   */
+  readonly moveQueuedMessageToServer?: (
+    message: QueuedThreadMessage,
+    context: { readonly hold: QueueHold | null },
+  ) => Promise<void>;
+  /** Every message queued for the environment moved to its node. */
+  readonly onServerQueueMigrated?: (environmentId: EnvironmentId) => void;
   /** Test seam for the ack timeout. */
   readonly now?: () => number;
 }
@@ -626,7 +672,7 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
       const head = queue[0];
       if (!head) break;
       const ref = scopeThreadRef(head.environmentId, head.threadId);
-      const { view, environment } = deps.readThreadDrainState(ref);
+      const { view, environment, serverQueueWaiting } = deps.readThreadDrainState(ref);
       const nowMs = now();
       const nowIso = new Date(nowMs).toISOString();
       const pending = pendingDispatchByThreadKey.get(key) ?? null;
@@ -649,9 +695,7 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
       const drainStep = resolveQueueDrainStep({
         nowIso,
         queue: queue.map((message) =>
-          message.resumeReviewError ||
-          message.uncertainSteerError ||
-          hasRetiredProjectMemory(message)
+          isQueuedThreadMessageHeld(message)
             ? { id: message.messageId, deliveryStatus: "failed" as const }
             : { id: message.messageId },
         ),
@@ -662,11 +706,18 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
         headProviderInstanceId: head.modelSelection?.instanceId ?? null,
         view,
         draft: false,
-        environment,
+        environment: {
+          shellLive: environment.shellLive,
+          mutationReady: environment.mutationReady,
+          serverQueue:
+            environment.serverQueue === true && deps.moveQueuedMessageToServer !== undefined,
+        },
+        headMigratable: isQueuedThreadMessageMovable(head),
         pendingDispatch: pending,
         dispatchedMessageIds: dispatchedFor(key),
         // The mobile sender reaches any existing server thread.
         sender: view !== null ? "background" : null,
+        serverQueueWaiting,
       });
       if (drainStep.kind === "idle" || drainStep.kind === "wait") break;
       if (drainStep.kind === "thread-gone") {
@@ -719,9 +770,82 @@ export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<vo
         }
         continue;
       }
+      if (drainStep.kind === "migrate") {
+        await moveThreadOutboxToServer(key, ref, deps);
+        break;
+      }
       // send: one message per thread per pass.
       await sendHead(key, head, view, nowIso, deps);
       break;
+    }
+  }
+}
+
+/**
+ * Moves the thread's outbox messages to the node's follow-up queue, head first, through the
+ * shared `moveDeviceQueueToServer`: each leaves the outbox (and its persisted copy) only once the
+ * node acknowledged its add, so an interrupted move, even by an app kill, resumes from the
+ * message it stopped at, and the node's no-op for a known id keeps a retried add from becoming
+ * a second message. A held message moves as failed and waits for Retry there. The thread's hold
+ * rides on each add; once its last message has moved, the hold and its baselines are deleted
+ * with the thread's empty group. Holds the thread's in-flight slot, so nothing is sent from here
+ * meanwhile.
+ */
+async function moveThreadOutboxToServer(
+  key: string,
+  ref: ScopedThreadRef,
+  deps: ThreadOutboxDrainDeps,
+): Promise<void> {
+  const move = deps.moveQueuedMessageToServer;
+  if (!move || inFlightThreadKeys.has(key)) return;
+  const epoch = outboxEpoch;
+  const current = () => outboxEpoch === epoch;
+  inFlightThreadKeys.add(key);
+  try {
+    const outcome = await moveDeviceQueueToServer({
+      nextEntry: () => {
+        const head = queueOf(key)[0];
+        return head &&
+          isQueuedThreadMessageMovable(head) &&
+          !steeringOutboxAttempts.has(head.messageId)
+          ? head
+          : null;
+      },
+      move: (message) => move(message, { hold: holds[key] ?? null }),
+      isQueued: (message) => messages.some((entry) => entry.messageId === message.messageId),
+      drop: (message) => removeThreadOutboxMessage(message.messageId),
+      current,
+      onMoving: (message) => {
+        if (!current()) return;
+        if (message === null) movingMessageIdByThreadKey.delete(key);
+        else movingMessageIdByThreadKey.set(key, message.messageId);
+        notifyListeners();
+      },
+    });
+    if (outcome.kind === "failed") {
+      // A connection that went away is not a refusal: the move resumes once it is back.
+      if (deps.readThreadDrainState(ref).environment.mutationReady) {
+        const nowIso = new Date((deps.now ?? Date.now)()).toISOString();
+        setHold(
+          key,
+          mergeQueueHold(
+            holds[key] ?? null,
+            queueMigrationFailedHold(outcome.entry.messageId, outcome.error, nowIso),
+            nowIso,
+          ),
+        );
+      }
+    } else if (
+      outcome.kind === "moved" &&
+      !messages.some((message) => message.environmentId === ref.environmentId)
+    ) {
+      deps.onServerQueueMigrated?.(ref.environmentId);
+    }
+  } finally {
+    if (current()) {
+      inFlightThreadKeys.delete(key);
+      movingMessageIdByThreadKey.delete(key);
+      notifyListeners();
     }
   }
 }

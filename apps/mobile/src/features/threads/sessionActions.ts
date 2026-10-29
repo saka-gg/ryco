@@ -23,11 +23,17 @@ import { uuidv4 } from "../../lib/uuid";
 // checkpoint revert is shared with web: `runCheckpointRevert`
 // in `@ryco/client-runtime/state/session` ("Edit from here", `editFromHere.ts`).
 
-export async function interruptThreadTurn(api: EnvironmentApi, threadId: ThreadId): Promise<void> {
+export async function interruptThreadTurn(
+  api: EnvironmentApi,
+  threadId: ThreadId,
+  options?: { readonly holdQueue?: boolean },
+): Promise<void> {
   await api.orchestration.dispatchCommand({
     type: "thread.turn.interrupt",
     commandId: newCommandId(),
     threadId,
+    // A person's Stop also holds the node's follow-up queue, in the same batch.
+    ...(options?.holdQueue ? { holdQueue: true as const } : {}),
     createdAt: new Date().toISOString(),
   });
 }
