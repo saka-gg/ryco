@@ -28,6 +28,7 @@ const RESTORABLE_SETTINGS = {
   textGenerationModelSelection: "Git writing model",
   commitMessageInstructions: "Commit message instructions",
   pullRequestInstructions: "Pull request instructions",
+  gitWritingStyle: "Writing style",
 } as const satisfies Partial<Record<keyof UnifiedSettings, string>>;
 
 export function settingsRestorePlan(

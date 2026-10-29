@@ -10,6 +10,7 @@
       "import": "./src/hubSessionCodec.ts"
     },
     "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
+    "./gitWritingStyle": "./src/gitWritingStyle.ts",
     "./terminalPaste": "./src/terminalPaste.ts",
     "./terminalReports": "./src/terminalReports.ts",
     "./cliProxyHubUrl": "./src/cliProxyHubUrl.ts",

@@ -75,6 +75,19 @@ describe("settings reset ownership", () => {
     });
     expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
   });
+  it("restores the writing style as a node setting and keeps project overrides", () => {
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      gitWritingStyle: "conventional" as const,
+      projectGitWritingStyle: { p1: "default" as const },
+    };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Writing style"],
+      resetTheme: false,
+      patch: { gitWritingStyle: "repository" },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
   });

@@ -513,6 +513,9 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
   });
 
   return {
+    // Every session denies every tool call. Plugins from the user's OpenCode configuration still
+    // load (the side chat's stricter isolation refuses OpenCode for that reason).
+    gitWritingToolFree: true,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,

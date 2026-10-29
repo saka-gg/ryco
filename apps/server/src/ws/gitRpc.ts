@@ -16,6 +16,7 @@ import {
 import type { GitActionPublish } from "../git/GitActionRunner.ts";
 
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
+import { resolveCheckoutProject } from "../project/checkoutProject.ts";
 import { selectConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
 import { resolveProjectWorktreesDir } from "../project/projectMetadataPaths.ts";
@@ -54,6 +55,14 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
     gitActionRunner,
     gitActionOwner,
   } = ctx;
+
+  /** The checkout's project, from the server's records of project roots and workspaces. */
+  const checkoutProjectId = (cwd: string) =>
+    resolveCheckoutProject({
+      cwd,
+      projects: projectionSnapshotQuery,
+      worktrees: projectionWorktrees,
+    }).pipe(Effect.map((project) => project?.projectId ?? null));
 
   /** A pull request a worktree's action opened becomes the worktree's linked pull request. */
   const linkWorktreePullRequest = (
@@ -127,6 +136,7 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         Effect.flatMap((runInput) =>
           gitWorkflow.runStackedAction(runInput, {
             actionId: input.actionId,
+            checkoutProjectId: checkoutProjectId(input.cwd),
             progressReporter: {
               publish: (event) =>
                 Effect.suspend(() => {

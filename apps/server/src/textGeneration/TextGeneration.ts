@@ -150,6 +150,13 @@ export interface TextGenerationService {
  * TextGenerationShape - Service API for commit/PR text generation.
  */
 export interface TextGenerationShape {
+  /**
+   * Commit messages and pull request text run without tools here, so their policy may carry
+   * text from the repository and its forge (`TextGenerationPolicy.repositoryExamples`). Absent
+   * means they may have tools: the router then drops that text before calling.
+   */
+  readonly gitWritingToolFree?: boolean | undefined;
+
   /** Answer from a frozen completed-context snapshot in an isolated, tool-free request. */
   readonly answerSideQuestion: (
     input: SideQuestionInput,
@@ -233,6 +240,20 @@ const resolveInstance = (
     ),
   );
 
+/**
+ * Repository and forge text in a Git writing policy reaches only instances that write commit
+ * messages and pull request text without tools; any other instance gets the style without it.
+ */
+export const gitWritingPolicyForInstance = (
+  textGeneration: Pick<TextGenerationShape, "gitWritingToolFree">,
+  policy: TextGenerationPolicy | undefined,
+): TextGenerationPolicy | undefined => {
+  if (policy?.repositoryExamples === undefined || textGeneration.gitWritingToolFree === true)
+    return policy;
+  const { repositoryExamples: _untrusted, ...withoutRepositoryText } = policy;
+  return withoutRepositoryText;
+};
+
 export const makeTextGenerationFromRegistry = (
   registry: ProviderInstanceRegistryShape,
 ): TextGenerationShape => ({
@@ -242,11 +263,21 @@ export const makeTextGenerationFromRegistry = (
     ),
   generateCommitMessage: (input) =>
     resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
-      Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
+      Effect.flatMap((textGeneration) =>
+        textGeneration.generateCommitMessage({
+          ...input,
+          policy: gitWritingPolicyForInstance(textGeneration, input.policy),
+        }),
+      ),
     ),
   generatePrContent: (input) =>
     resolveInstance(registry, "generatePrContent", input.modelSelection.instanceId).pipe(
-      Effect.flatMap((textGeneration) => textGeneration.generatePrContent(input)),
+      Effect.flatMap((textGeneration) =>
+        textGeneration.generatePrContent({
+          ...input,
+          policy: gitWritingPolicyForInstance(textGeneration, input.policy),
+        }),
+      ),
     ),
   generateBranchName: (input) =>
     resolveInstance(registry, "generateBranchName", input.modelSelection.instanceId).pipe(

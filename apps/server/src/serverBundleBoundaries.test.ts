@@ -406,6 +406,18 @@ describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", ()
       );
     }
   });
+
+  it("loads the Git writing style code with the first generated commit message", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      const source = readFileSync(chunk, "utf8");
+      expect(source).not.toMatch(/^\/\/#region src\/git\/gitWritingPolicy\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/textGeneration\/TextGenerationPresets\.ts$/mu);
+      // The example reader's output carries no region marker of its own; its log line is unique.
+      expect(source).not.toContain("repository writing examples: commit subjects unavailable");
+    }
+  });
 });
 
 describe.skipIf(!hasCurrentBuild)("built server bundle imports", () => {

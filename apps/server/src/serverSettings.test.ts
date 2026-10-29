@@ -1720,6 +1720,34 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
   });
 
+  it.effect("keeps the valid project writing styles of a hand-edited settings file", () => {
+    const fake = syntheticSecretStore();
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      yield* (yield* ServerSettingsService).updateSettings({
+        gitWritingStyle: "conventional",
+        projectGitWritingStyle: { a: "default" },
+      });
+      const saved = JSON.parse(yield* fs.readFileString(settingsPath));
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({
+          ...saved,
+          projectGitWritingStyle: {
+            ...saved.projectGitWritingStyle,
+            b: "shouting",
+            c: "repository",
+          },
+        }),
+      );
+
+      const recovered = yield* loadSettingsInFreshService(fake.store);
+      assert.equal(recovered.gitWritingStyle, "conventional");
+      assert.deepEqual(recovered.projectGitWritingStyle, { a: "default", c: "repository" });
+    }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+  });
+
   it.effect("stores hand-edited plaintext hub secrets once a client saves its hub", () => {
     const fake = syntheticSecretStore();
     return Effect.gen(function* () {

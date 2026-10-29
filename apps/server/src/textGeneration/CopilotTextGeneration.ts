@@ -293,6 +293,8 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
     );
 
   return {
+    // Commit messages and pull request text run through the Codex fallback.
+    gitWritingToolFree: codexFallback.gitWritingToolFree,
     generateCommitMessage: (input) =>
       codexFallback.generateCommitMessage(withGitFallbackSelection(input)),
     generatePrContent: (input) => codexFallback.generatePrContent(withGitFallbackSelection(input)),

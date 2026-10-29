@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, realpath, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { Effect, Option } from "effect";
+import { Effect, Option, Stream } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { DEFAULT_SERVER_SETTINGS, ProjectId, WS_METHODS } from "@ryco/contracts";
 import { selectWorktreeSubmodules } from "@ryco/shared/worktreeSubmodules";
@@ -184,5 +184,64 @@ describe("PR worktree project binding", () => {
     await expect(h.run({ cwd: cwdB })).rejects.toThrow("denied");
     expect(h.getProject).not.toHaveBeenCalled();
     expect(h.prepare).not.toHaveBeenCalled();
+  });
+});
+
+// A git action learns its checkout's project from the server's records, so a workspace in its
+// own worktree writes in its project's style. The client sends only the path.
+describe("git action checkout project", () => {
+  it.each([
+    ["/work/main", "project-root"],
+    ["/work/feature", "worktree-project"],
+    ["/elsewhere", null],
+  ] as const)("resolves %s to %s", async (cwd, expected) => {
+    const runStackedAction = vi.fn(
+      (
+        _input: Parameters<GitWorkflowServiceShape["runStackedAction"]>[0],
+        _options: Parameters<GitWorkflowServiceShape["runStackedAction"]>[1],
+      ) =>
+        Effect.succeed({
+          action: "commit",
+          branch: { status: "skipped_not_requested" },
+          commit: { status: "skipped_no_changes" },
+          push: { status: "skipped_not_requested" },
+          pr: { status: "skipped_not_requested" },
+        }),
+    );
+    const ctx = {
+      ownerStream: (_method: string, stream: unknown) => stream,
+      attachLinkedIssuesToPrAction: (input: unknown) => Effect.succeed(input),
+      gitWorkflow: { runStackedAction },
+      refreshGitStatus: () => Effect.void,
+      projectionSnapshotQuery: {
+        getActiveProjectByWorkspaceRoot: (root: string) =>
+          Effect.succeed(
+            root === "/work/main"
+              ? Option.some({ id: ProjectId.make("project-root"), workspaceRoot: root })
+              : Option.none(),
+          ),
+      },
+      projectionWorktrees: {
+        findActiveByWorktreePath: ({ worktreePath }: { readonly worktreePath: string }) =>
+          Effect.succeed(
+            worktreePath === "/work/feature"
+              ? Option.some({ projectId: ProjectId.make("worktree-project"), worktreePath })
+              : Option.none(),
+          ),
+      },
+    } as unknown as WsRpcContext;
+    const handlers = makeGitHandlers(ctx);
+    await Effect.runPromise(
+      Stream.runDrain(
+        handlers[WS_METHODS.gitRunStackedAction]({
+          actionId: "action-1",
+          cwd,
+          action: "commit",
+        }),
+      ),
+    );
+    const options = runStackedAction.mock.calls[0]?.[1];
+    expect(options?.checkoutProjectId).toBeDefined();
+    expect(await Effect.runPromise(options!.checkoutProjectId!)).toBe(expected);
   });
 });

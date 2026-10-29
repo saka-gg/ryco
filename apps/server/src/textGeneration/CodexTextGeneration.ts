@@ -558,6 +558,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
   });
 
   return {
+    // Commit and pull request runs append `CODEX_TOOL_FREE_ARGS`.
+    gitWritingToolFree: true,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,

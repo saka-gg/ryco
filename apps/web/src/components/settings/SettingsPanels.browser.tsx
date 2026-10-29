@@ -2418,6 +2418,14 @@ describe("SourceControlSettingsPanel discovery states", () => {
       .element(page.getByRole("button", { name: "Rescan server environment" }))
       .toBeDisabled();
     await expect.element(page.getByText("Nothing detected yet")).not.toBeInTheDocument();
+    // Writing settings are node settings, not scan results: they never wait for the scan.
+    await expect
+      .element(page.getByText("Commit & pull request writing", { exact: true }))
+      .toBeInTheDocument();
+    await expect.element(page.getByRole("combobox", { name: "Writing style" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("textbox", { name: "Commit message instructions" }))
+      .toBeInTheDocument();
   });
 
   it("uses the shared empty state when discovery completes without tools", async () => {

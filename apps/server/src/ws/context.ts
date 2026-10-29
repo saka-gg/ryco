@@ -99,6 +99,7 @@ import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdenti
 import { resolveConfiguredWorktreeRoot } from "../project/worktreeRoot.ts";
 import { ChatFolders, sameChatsCapability } from "../project/chatFolders.ts";
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
+import { resolveCheckoutProject } from "../project/checkoutProject.ts";
 import { resolveBootstrapPreferences } from "./context/bootstrapPreferences.ts";
 import {
   type ChatBootstrapDependencies,
@@ -388,19 +389,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
      * project when it is the project root, or exactly the one checked out there.
      */
     const resolveSourceControlRefreshScope = (cwd: string) =>
-      Effect.gen(function* () {
-        const projectOpt = yield* projectionSnapshotQuery
-          .getActiveProjectByWorkspaceRoot(cwd)
-          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-        if (Option.isSome(projectOpt)) {
-          return { projectId: projectOpt.value.id, checkout: null } as const;
-        }
-        const checkoutOpt = yield* projectionWorktrees
-          .findActiveByWorktreePath({ worktreePath: cwd })
-          .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-        return Option.isSome(checkoutOpt)
-          ? ({ projectId: checkoutOpt.value.projectId, checkout: checkoutOpt.value } as const)
-          : null;
+      resolveCheckoutProject({
+        cwd,
+        projects: projectionSnapshotQuery,
+        worktrees: projectionWorktrees,
       });
 
     /**

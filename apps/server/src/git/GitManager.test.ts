@@ -21,6 +21,7 @@ import {
   GitCommandError,
   GitStagedIndexChangedError,
   ProjectId,
+  ProviderInstanceId,
   TextGenerationError,
 } from "@ryco/contracts";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
@@ -34,7 +35,12 @@ import {
   GitHubCli,
   formatGitHubJsonFields,
 } from "../sourceControl/GitHubCli.ts";
-import { type TextGenerationShape, TextGeneration } from "../textGeneration/TextGeneration.ts";
+import {
+  makeTextGenerationFromRegistry,
+  type TextGenerationShape,
+  TextGeneration,
+} from "../textGeneration/TextGeneration.ts";
+import type { ProviderInstanceRegistryShape } from "../provider/Services/ProviderInstanceRegistry.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeGitVcsDriverCore } from "../vcs/GitVcsDriverCore.ts";
 import { readGitLocalChanges } from "../vcs/GitIndexReview.ts";
@@ -44,7 +50,7 @@ import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceContr
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { githubDiscovery } from "../sourceControl/SourceControlProviderDiscoveryCatalog.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
-import { makeGitManager } from "./GitManager.ts";
+import { makeGitManager, type MakeGitManagerOptions } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
@@ -783,6 +789,8 @@ function makeManager(input?: {
   worktreeBranchPrefix?: string;
   ghScenario?: FakeGhScenario;
   textGeneration?: Partial<FakeGitTextGeneration>;
+  /** Replaces the fake text generation service whole (e.g. with the real router). */
+  textGenerationService?: TextGenerationShape;
   setupScriptRunner?: ProjectSetupScriptRunnerShape;
   settingsPatch?: ServerSettingsPatch;
   project?: OrchestrationProjectShell;
@@ -793,13 +801,15 @@ function makeManager(input?: {
     input: GitVcsDriver.ExecuteGitInput,
     execute: GitVcsDriver.GitVcsDriverShape["execute"],
   ) => ReturnType<GitVcsDriver.GitVcsDriverShape["execute"]>;
+  importGitWritingPolicy?: MakeGitManagerOptions["importGitWritingPolicy"];
 }) {
   const {
     service: gitHubCli,
     ghCalls,
     createdPrBodies,
   } = createGitHubCliWithFakeGh(input?.ghScenario);
-  const textGeneration = createTextGeneration(input?.textGeneration);
+  const textGeneration =
+    input?.textGenerationService ?? createTextGeneration(input?.textGeneration);
   const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "ryco-git-manager-test-",
   });
@@ -900,7 +910,9 @@ function makeManager(input?: {
     projectLayer,
   ).pipe(Layer.provideMerge(sourceControlRegistryLayer), Layer.provideMerge(NodeServices.layer));
 
-  return makeGitManager().pipe(
+  return makeGitManager(
+    input?.importGitWritingPolicy ? { importGitWritingPolicy: input.importGitWritingPolicy } : {},
+  ).pipe(
     Effect.provide(managerLayer),
     Effect.map((manager) => ({
       manager,
@@ -3554,6 +3566,339 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(prPolicies.map((policy) => policy?.changeRequestInstructions)).toEqual([
         "Add a Before / After section when the UI changed.",
       ]);
+    }),
+  );
+
+  /** Commits "Add login page" and "Fix logout redirect" on main; an uncommitted change on a branch. */
+  const makeWritingStyleFixture = Effect.gen(function* () {
+    const repoDir = yield* makeTempDir("ryco-git-manager-");
+    yield* initRepo(repoDir);
+    for (const [file, subject] of [
+      ["login.txt", "Add login page"],
+      ["logout.txt", "Fix logout redirect"],
+    ] as const) {
+      fs.writeFileSync(path.join(repoDir, file), `${file}\n`);
+      yield* runGit(repoDir, ["add", file]);
+      yield* runGit(repoDir, ["commit", "-m", subject]);
+    }
+    yield* runGit(repoDir, ["checkout", "-b", "feature/writing"]);
+    fs.writeFileSync(path.join(repoDir, "feature.txt"), "feature change\n");
+    return repoDir;
+  });
+
+  const recordCommitPolicies = () => {
+    const policies: Array<TextGenerationPolicy | undefined> = [];
+    return {
+      policies,
+      textGeneration: {
+        generateCommitMessage: (input: { policy?: TextGenerationPolicy | undefined }) => {
+          policies.push(input.policy);
+          return Effect.succeed({ subject: "Add feature", body: "" });
+        },
+      },
+    };
+  };
+
+  const isExampleRead = (input: GitVcsDriver.ExecuteGitInput) =>
+    input.operation.startsWith("repositoryWritingExamples.");
+
+  it.effect("feeds the default branch's recent subjects to repository-style commits", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      const { manager } = yield* makeManager({
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(result.commit.status).toBe("created");
+      expect(recorded.policies).toHaveLength(1);
+      expect(recorded.policies[0]).toMatchObject({
+        kind: "repo_conventions",
+        repositoryExamples: {
+          commitSubjects: ["Fix logout redirect", "Add login page", "Initial commit"],
+          pullRequestTitles: [],
+        },
+      });
+      // One ref listing and one log: three subjects are enough, so no merge-workflow fallback.
+      expect(exampleReads).toEqual([
+        "repositoryWritingExamples.refs",
+        "repositoryWritingExamples.firstParentLog",
+      ]);
+    }),
+  );
+
+  it.effect("writes a worktree checkout's commits in its project's style", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const worktreeDir = path.join(yield* makeTempDir("ryco-git-manager-wt-"), "workspace");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "feature/workspace", worktreeDir, "main"]);
+      fs.writeFileSync(path.join(worktreeDir, "workspace.txt"), "workspace change\n");
+      const projectId = ProjectId.make("writing-project");
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      const { manager } = yield* makeManager({
+        settingsPatch: {
+          gitWritingStyle: "repository",
+          projectGitWritingStyle: { [projectId]: "conventional", other: "default" },
+        },
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+      });
+
+      yield* runStackedAction(
+        manager,
+        { cwd: worktreeDir, action: "commit" },
+        { checkoutProjectId: Effect.succeed(projectId) },
+      );
+
+      expect(recorded.policies).toHaveLength(1);
+      expect(recorded.policies[0]?.kind).toBe("conventional_commits");
+      expect(recorded.policies[0]?.commitStyle).toContain("Conventional Commits");
+      expect(recorded.policies[0]).not.toHaveProperty("repositoryExamples");
+      // Conventional Commits reads nothing from the repository.
+      expect(exampleReads).toEqual([]);
+    }),
+  );
+
+  it.effect("reads no examples for a custom commit message", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      let projectReads = 0;
+      const { manager } = yield* makeManager({
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+      });
+
+      const result = yield* runStackedAction(
+        manager,
+        { cwd: repoDir, action: "commit", commitMessage: "Write my own message" },
+        {
+          checkoutProjectId: Effect.sync(() => {
+            projectReads++;
+            return null;
+          }),
+        },
+      );
+
+      expect(result.commit).toMatchObject({ status: "created", subject: "Write my own message" });
+      expect(recorded.policies).toEqual([]);
+      expect(exampleReads).toEqual([]);
+      expect(projectReads).toBe(0);
+    }),
+  );
+
+  it.effect("still commits when the example read fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const { manager } = yield* makeManager({
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) =>
+          input.operation === "repositoryWritingExamples.firstParentLog"
+            ? Effect.fail(
+                new GitCommandError({
+                  operation: input.operation,
+                  command: "git log",
+                  cwd: input.cwd,
+                  detail: "simulated failure",
+                }),
+              )
+            : execute(input),
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(result.commit.status).toBe("created");
+      expect(recorded.policies[0]).toMatchObject({
+        kind: "repo_conventions",
+        repositoryExamples: { commitSubjects: [], pullRequestTitles: [] },
+      });
+    }),
+  );
+
+  it.effect("still commits with the user's instructions when the writing style fails to load", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const recorded = recordCommitPolicies();
+      const exampleReads: string[] = [];
+      let loads = 0;
+      const { manager } = yield* makeManager({
+        settingsPatch: { commitMessageInstructions: "  Mention the ticket.  " },
+        textGeneration: recorded.textGeneration,
+        gitExecute: (input, execute) => {
+          if (isExampleRead(input)) exampleReads.push(input.operation);
+          return execute(input);
+        },
+        // An update replaced the running server's files, so the lazy chunk is gone.
+        importGitWritingPolicy: () => {
+          loads++;
+          return Promise.reject(new Error("Cannot find module './gitWritingPolicy-abc123.mjs'"));
+        },
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(result.commit.status).toBe("created");
+      expect(recorded.policies).toEqual([
+        {
+          kind: "custom",
+          inferRepositoryConventions: false,
+          commitInstructions: "Mention the ticket.",
+        },
+      ]);
+      expect(exampleReads).toEqual([]);
+      expect(loads).toBe(1);
+    }),
+  );
+
+  it.effect("takes only merged pull request titles from the index a status read loaded", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/writing"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+      const listed = (number: number, title: string, state: "OPEN" | "MERGED" | "CLOSED") => ({
+        number,
+        title,
+        url: `https://github.com/acme/app/pull/${number}`,
+        baseRefName: "main",
+        headRefName: `other/${number}`,
+        state,
+        updatedAt: `2026-10-${String(number).padStart(2, "0")}T07:00:00Z`,
+        isCrossRepository: false,
+      });
+      const recorded = recordCommitPolicies();
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify([
+              listed(14, "Open from a stranger", "OPEN"),
+              listed(13, "Remember the reading position", "MERGED"),
+              listed(12, "Closed attempt", "CLOSED"),
+              listed(11, "Hide credentials in diagnostics", "MERGED"),
+            ]),
+          ],
+        },
+        textGeneration: recorded.textGeneration,
+      });
+
+      yield* manager.remoteStatus({ cwd: repoDir });
+      const listingCalls = ghCalls.length;
+      yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+
+      expect(recorded.policies[0]?.repositoryExamples).toEqual({
+        commitSubjects: ["Fix logout redirect", "Add login page", "Initial commit"],
+        pullRequestTitles: ["Remember the reading position", "Hide credentials in diagnostics"],
+      });
+      // The titles came from the loaded index: generation asked the forge nothing.
+      expect(ghCalls.slice(listingCalls).filter((call) => call.startsWith("pr list "))).toEqual([]);
+    }),
+  );
+
+  it.effect("gives the pull request its writing policy when there was nothing to commit", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeWritingStyleFixture;
+      yield* runGit(repoDir, ["add", "feature.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Add feature"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/writing"]);
+      const prPolicies: Array<TextGenerationPolicy | undefined> = [];
+      let commitGenerations = 0;
+      const { manager } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", "[]"] },
+        textGeneration: {
+          generateCommitMessage: () => {
+            commitGenerations++;
+            return Effect.succeed({ subject: "Unused", body: "" });
+          },
+          generatePrContent: (input) => {
+            prPolicies.push(input.policy);
+            return Effect.succeed({ title: "Add feature", body: "Feature body" });
+          },
+        },
+      });
+
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit_push_pr",
+      });
+
+      // The commit step did not wait for the policy it started; the pull request step used it.
+      expect(result.commit.status).toBe("skipped_no_changes");
+      expect(result.pr.status).toBe("created");
+      expect(commitGenerations).toBe(0);
+      expect(prPolicies).toHaveLength(1);
+      expect(prPolicies[0]).toMatchObject({
+        kind: "repo_conventions",
+        repositoryExamples: {
+          commitSubjects: ["Fix logout redirect", "Add login page", "Initial commit"],
+          pullRequestTitles: [],
+        },
+      });
+    }),
+  );
+
+  it.effect("keeps repository text from providers that cannot write without tools", () =>
+    Effect.gen(function* () {
+      const received = new Map<string, TextGenerationPolicy | undefined>();
+      const instance = (id: string, gitWritingToolFree: boolean) => ({
+        instanceId: ProviderInstanceId.make(id),
+        textGeneration: {
+          ...createTextGeneration(),
+          gitWritingToolFree,
+          generateCommitMessage: (input: { policy?: TextGenerationPolicy | undefined }) => {
+            received.set(id, input.policy);
+            return Effect.succeed({ subject: "Add feature", body: "" });
+          },
+        },
+      });
+      const instances = new Map(
+        [instance("claudeAgent", true), instance("cursor", false)].map(
+          (entry) => [entry.instanceId, entry] as const,
+        ),
+      );
+      const router = makeTextGenerationFromRegistry({
+        getInstance: (id: ProviderInstanceId) => Effect.succeed(instances.get(id)),
+      } as unknown as ProviderInstanceRegistryShape);
+
+      for (const id of ["claudeAgent", "cursor"]) {
+        const repoDir = yield* makeWritingStyleFixture;
+        const { manager } = yield* makeManager({
+          settingsPatch: {
+            textGenerationModelSelection: { instanceId: ProviderInstanceId.make(id), model: "m" },
+          },
+          textGenerationService: router,
+        });
+        yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+      }
+
+      expect(received.get("claudeAgent")?.repositoryExamples?.commitSubjects).toEqual([
+        "Fix logout redirect",
+        "Add login page",
+        "Initial commit",
+      ]);
+      expect(received.get("cursor")).toMatchObject({ kind: "repo_conventions" });
+      expect(received.get("cursor")).not.toHaveProperty("repositoryExamples");
     }),
   );
 
