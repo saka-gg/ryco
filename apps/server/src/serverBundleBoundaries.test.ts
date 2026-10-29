@@ -252,7 +252,9 @@ describe("server boot import boundaries", () => {
       "apps/server/src/provider/signIn/ProviderSignIn.ts",
     ]);
     // Agent-advertised slash commands are normalized in the driver chunks that receive them.
-    expect(reached(/^apps\/server\/src\/provider\/providerSlashCommands\.ts$/u)).toEqual([]);
+    expect(
+      reached(/^apps\/server\/src\/provider\/(?:providerSlashCommands|openCodeCommands)\.ts$/u),
+    ).toEqual([]);
     // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
     // with the first Diagnostics snapshot.
     expect(

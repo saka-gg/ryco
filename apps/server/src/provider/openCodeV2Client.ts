@@ -660,6 +660,15 @@ export function makeOpenCodeV2Api(input: OpenCodeV2ApiInput): OpenCodeApi {
           ),
         ),
       ),
+      // Unreachable while `command.list` lists nothing; refused rather than sent as a prompt.
+      command: v1<OpenCodeApi["session"]["command"]>(async () => {
+        throw new Error("OpenCode 2 commands are not available in Ryco yet.");
+      }),
+    },
+    // OpenCode 2's own commands are not mapped yet: none are listed, so a `/name` line goes out
+    // as an ordinary prompt and the composer offers no OpenCode commands for a 2.x server.
+    command: {
+      list: v1<OpenCodeApi["command"]["list"]>(async () => []),
     },
     permission: {
       list: v1<OpenCodeApi["permission"]["list"]>(async (_params, options) =>
