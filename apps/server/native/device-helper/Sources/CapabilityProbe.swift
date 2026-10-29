@@ -27,6 +27,11 @@ enum CapabilityProbe {
           missing: missingSymbols(for: capability, simulatorKitHandle: simulatorKitHandle),
           failure: nil)
       case .hid:
+        // The Indigo symbols still resolve on CoreSimulator 1155.4+, but the
+        // guest drops what they build; a name lookup would pass a dead path.
+        if let refusal = RycoIndigoInputUnsupportedReason() {
+          return CapabilityReport(capability: capability, missing: [], failure: refusal)
+        }
         guard simulatorKitHandle != nil else {
           return CapabilityReport(
             capability: capability, missing: [],
@@ -163,6 +168,11 @@ enum CapabilityProbe {
       if let build = firstMatch(#"Build version\s+(\S+)"#, in: version) {
         info["xcodeBuild"] = build
       }
+    }
+    // System-wide and installed by the newest Xcode on the machine, so it can
+    // be newer than the selected Xcode; it decides how input must travel.
+    if let coreSimulator = RycoCoreSimulatorVersion() {
+      info["coreSimulatorVersion"] = coreSimulator
     }
     return info
   }

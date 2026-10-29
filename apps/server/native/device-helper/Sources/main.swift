@@ -143,6 +143,10 @@ final class HelperSession {
 
   private(set) var device: SimulatorDevice?
   private(set) var hid: RycoHIDBridge?
+  /// Why the current attachment has no HID client, so input calls name the
+  /// cause (CoreSimulator 1155.4+, SimulatorKit missing) instead of a bare
+  /// "unavailable". nil while input works.
+  private var hidUnavailableReason: String?
   private(set) var accessibility: RycoAXBridge?
   private var stream: FrameStream?
   private var displayDescriptor: NSObject?
@@ -192,6 +196,7 @@ final class HelperSession {
     self.device = device
     self.displayDescriptor = descriptor
     self.hid = hidReady ? hidBridge : nil
+    self.hidUnavailableReason = hidReady ? nil : hidFailure
     self.accessibility = axReady ? axBridge : nil
     self.attachedBootSession = device.bootIdentity
 
@@ -234,7 +239,8 @@ final class HelperSession {
     // the guard must read the post-verification client, not the old one.
     try verifyBootSession()
     guard let hid else {
-      throw RPCError(.notAttached, "HID input is unavailable for this simulator")
+      let reason = hidUnavailableReason.map { ": \($0)" } ?? ""
+      throw RPCError(.notAttached, "HID input is unavailable for this simulator\(reason)")
     }
     return hid
   }
