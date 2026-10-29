@@ -45,7 +45,10 @@ import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
-import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+import {
+  makeProviderInstanceRegistry,
+  resolveConfiguredProviderIdentities,
+} from "./ProviderInstanceRegistryLive.ts";
 import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 
 const TestHttpClientLive = Layer.succeed(
@@ -90,6 +93,34 @@ const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSetti
   serverPassword: "",
   customModels: [],
   ...overrides,
+});
+
+describe("resolveConfiguredProviderIdentities", () => {
+  it.effect("resolves enabled state with the envelope, config and driver default rule", () =>
+    Effect.gen(function* () {
+      const identities = yield* resolveConfiguredProviderIdentities({
+        drivers: [CodexDriver, CursorDriver],
+        configMap: {
+          [ProviderInstanceId.make("cursor_x")]: {
+            driver: ProviderDriverKind.make("cursor"),
+            config: {},
+          },
+          [ProviderInstanceId.make("codex_x")]: {
+            driver: ProviderDriverKind.make("codex"),
+            config: { enabled: false },
+          },
+          [ProviderInstanceId.make("codex_y")]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            config: { enabled: false },
+          },
+        },
+      });
+      expect(
+        Object.fromEntries(identities.map((identity) => [identity.instanceId, identity.enabled])),
+      ).toEqual({ cursor_x: false, codex_x: false, codex_y: true });
+    }),
+  );
 });
 
 describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {

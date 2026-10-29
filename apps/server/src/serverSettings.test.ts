@@ -640,6 +640,104 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("falls back from a disabled default instance whose legacy mirror stays enabled", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const codex = ProviderInstanceId.make("codex");
+      // The settings panel's disable patch: the explicit entry is off, the legacy slot is reset.
+      const next = yield* serverSettings.updateSettings({
+        providers: { codex: DEFAULT_SERVER_SETTINGS.providers.codex },
+        providerInstances: {
+          [codex]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: false,
+            config: DEFAULT_SERVER_SETTINGS.providers.codex,
+          },
+        },
+        textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+      });
+
+      const fallback = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-haiku-4-5",
+      };
+      assert.deepEqual(next.textGenerationModelSelection, fallback);
+      assert.deepEqual((yield* serverSettings.getSettings).textGenerationModelSelection, fallback);
+      assert.deepEqual(
+        (yield* loadSettingsInFreshService()).textGenerationModelSelection,
+        fallback,
+      );
+      const { settingsPath } = yield* ServerConfig;
+      const persisted = decodeSettingsFile(
+        yield* (yield* FileSystem.FileSystem).readFileString(settingsPath),
+      );
+      assert.equal(persisted.textGenerationModelSelection.instanceId, codex);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("falls back to an enabled custom instance when every default slot is off", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const next = yield* serverSettings.updateSettings({
+        providers: Object.fromEntries(
+          Object.keys(DEFAULT_SERVER_SETTINGS.providers).map((kind) => [kind, { enabled: false }]),
+        ),
+        providerInstances: {
+          [ProviderInstanceId.make("claude_hub")]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: true,
+          },
+        },
+      });
+
+      assert.deepEqual(next.textGenerationModelSelection, {
+        instanceId: ProviderInstanceId.make("claude_hub"),
+        model: "claude-haiku-4-5",
+      });
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("keeps the text generation selection when no instance is enabled", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const next = yield* serverSettings.updateSettings({
+        providers: Object.fromEntries(
+          Object.keys(DEFAULT_SERVER_SETTINGS.providers).map((kind) => [kind, { enabled: false }]),
+        ),
+        providerInstances: {
+          [ProviderInstanceId.make("claude_hub")]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: false,
+          },
+        },
+      });
+
+      assert.deepEqual(
+        next.textGenerationModelSelection,
+        DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+      );
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("treats an explicit Cursor entry without a flag as disabled, like the registry", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const cursor = ProviderInstanceId.make("cursor");
+      const next = yield* serverSettings.updateSettings({
+        providers: { cursor: { enabled: true } },
+        providerInstances: {
+          [cursor]: { driver: ProviderDriverKind.make("cursor"), config: {} },
+        },
+        textGenerationModelSelection: { instanceId: cursor, model: "composer-2" },
+      });
+
+      assert.deepEqual(
+        next.textGenerationModelSelection,
+        DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+      );
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("preserves enabled text generation selections for non-built-in drivers", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsService;

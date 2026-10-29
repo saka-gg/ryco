@@ -143,7 +143,7 @@ export const pullRequestWatchUpdateCommandId = (input: {
     `server:pr-watch:${input.threadId}:${input.watchId}:${input.revision}:${crypto.randomUUID()}`,
   );
 
-/** A wake's message id, with the reserved prefix AI Focus leaves out of the user's latest request. */
+/** A wake's message id, under the reserved prefix that tells it apart from the user's messages. */
 export const pullRequestWatchWakeMessageId = (threadId: ThreadId): MessageId =>
   MessageId.make(`${PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX}${threadId}:${crypto.randomUUID()}`);
 

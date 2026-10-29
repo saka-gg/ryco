@@ -4137,6 +4137,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const received = new Map<string, TextGenerationPolicy | undefined>();
       const instance = (id: string, gitWritingToolFree: boolean) => ({
         instanceId: ProviderInstanceId.make(id),
+        // The router runs enabled instances only (#904).
+        enabled: true,
         textGeneration: {
           ...createTextGeneration(),
           gitWritingToolFree,

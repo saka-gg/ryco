@@ -40,6 +40,7 @@ import {
   type ProviderDriverKind,
   type ServerProvider,
 } from "@ryco/contracts";
+import { providerInstanceEnvelopeEnabled } from "@ryco/shared/providerInstanceEnablement";
 import { Effect, Equal, Exit, PubSub, Ref, Schema, Scope, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
@@ -172,7 +173,7 @@ export const resolveConfiguredProviderIdentities = <R>(input: {
         driverKind: entry.driver,
         displayName: entry.displayName,
         accentColor: entry.accentColor,
-        enabled: resolveInstanceEnabled(entry, decoded.success),
+        enabled: providerInstanceEnvelopeEnabled(entry),
       });
     }
     return identities;
@@ -250,7 +251,7 @@ const buildEntry = <R>(input: {
     // from the parent, so replaced instances leave no finalizer behind.
     const childScope = yield* Scope.fork(parentScope);
 
-    const enabled = resolveInstanceEnabled(entry, typedConfig);
+    const enabled = providerInstanceEnvelopeEnabled(entry);
     const createResult = yield* trackStartupPhase(
       `provider.instance.create:${rawInstanceId}`,
       driver.create({

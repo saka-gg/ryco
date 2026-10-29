@@ -573,6 +573,67 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", () 
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("ProviderServiceLive refuses to recover a session on a disabled provider", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registryBase = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    let enabled = true;
+    const registry: ProviderAdapterRegistryShape = {
+      ...registryBase,
+      getInstanceInfo: (instanceId) =>
+        registryBase.getInstanceInfo(instanceId).pipe(Effect.map((info) => ({ ...info, enabled }))),
+    };
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    );
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-recover-disabled");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      enabled = false;
+      // A runtime that is still live keeps serving; only starting one is refused.
+      yield* provider.sendTurn({ threadId, input: "still live", attachments: [] });
+      yield* codex.stopSession(threadId);
+      codex.sendTurn.mockClear();
+
+      const rollback = yield* Effect.flip(
+        provider.rollbackConversation({
+          threadId,
+          numTurns: 1,
+          targetTurnId: null,
+          droppedTurnIds: [asTurnId("turn-1")],
+        }),
+      );
+      const send = yield* Effect.flip(
+        provider.sendTurn({ threadId, input: "resume", attachments: [] }),
+      );
+
+      for (const failure of [rollback, send]) {
+        assert.instanceOf(failure, ProviderValidationError);
+        assert.include(failure.issue, "Provider instance 'codex' is disabled");
+      }
+      assert.equal(codex.startSession.mock.calls.length, 1);
+      assert.equal(codex.rollbackThread.mock.calls.length, 0);
+      assert.equal(codex.sendTurn.mock.calls.length, 0);
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect(
   "ProviderServiceLive rejects provider starts beyond per-instance admission capacity",
   () =>

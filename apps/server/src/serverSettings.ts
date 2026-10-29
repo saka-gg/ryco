@@ -20,16 +20,14 @@ import {
  */
 import {
   type CliProxyHubConfig,
-  DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_GIT_TEXT_GENERATION_OPTIONS_BY_PROVIDER,
   DEFAULT_SERVER_SETTINGS,
-  isProviderDriverKind,
   type ModelSelection,
+  type ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
-  ProviderDriverKind,
-  ProviderInstanceId,
+  type ProviderInstanceId,
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
@@ -64,6 +62,10 @@ import { ServerConfig } from "./config.ts";
 import { type DeepPartial } from "@ryco/shared/Struct";
 import { formatSchemaError, fromLenientJson } from "@ryco/shared/schemaJson";
 import { applyServerSettingsPatch, migrateLegacyServerSettings } from "@ryco/shared/serverSettings";
+import {
+  listEnabledProviderInstances,
+  resolveProviderInstanceEnabled,
+} from "@ryco/shared/providerInstanceEnablement";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore.ts";
 import { hubKeyAddress } from "@ryco/shared/cliProxyHubUrl";
@@ -449,50 +451,28 @@ function decodePersistedServerSettings(raw: string) {
   return decodeServerSettings(migrateLegacyServerSettings(parsed.value));
 }
 
-type LegacyProviderSettings = ServerSettings["providers"][keyof ServerSettings["providers"]];
-
-const getLegacyProviderSettings = (
-  settings: ServerSettings,
-  provider: ProviderDriverKind,
-): LegacyProviderSettings | undefined =>
-  (settings.providers as Record<string, LegacyProviderSettings | undefined>)[provider];
-
 /**
- * Ensure the `textGenerationModelSelection` points to an enabled provider.
- * If the selected provider is disabled, fall back to the first enabled
- * provider with its default model.  This is applied at read-time so the
- * persisted preference is preserved for when a provider is re-enabled.
+ * Point the text model at an enabled instance. A text model on a disabled or missing instance
+ * falls back to the first enabled one with a default text model (kept when none has one). Applied
+ * at read time, so the persisted preference returns when the instance is enabled again.
  */
-function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings {
-  const selection = settings.textGenerationModelSelection;
-  const instanceConfig = settings.providerInstances[selection.instanceId];
-  if (instanceConfig !== undefined) {
-    return (instanceConfig.enabled ?? true) ? settings : fallbackTextGenerationProvider(settings);
-  }
-
-  if (
-    isProviderDriverKind(selection.instanceId) &&
-    getLegacyProviderSettings(settings, selection.instanceId)?.enabled
-  ) {
-    return settings;
-  }
-
-  return fallbackTextGenerationProvider(settings);
-}
-
-function fallbackTextGenerationProvider(settings: ServerSettings): ServerSettings {
-  const fallbackEntry = Object.entries(settings.providers).find(([, provider]) => provider.enabled);
-  const fallback = fallbackEntry ? ProviderDriverKind.make(fallbackEntry[0]) : undefined;
-  if (!fallback) {
-    return settings;
-  }
+function resolveModelSelections(settings: ServerSettings): ServerSettings {
+  const fallback =
+    resolveProviderInstanceEnabled(settings, settings.textGenerationModelSelection.instanceId) ===
+    true
+      ? undefined
+      : listEnabledProviderInstances(settings).find(
+          ({ driver }) => DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[driver] !== undefined,
+        );
+  if (!fallback) return settings;
+  const options = DEFAULT_GIT_TEXT_GENERATION_OPTIONS_BY_PROVIDER[fallback.driver];
   return {
     ...settings,
-    textGenerationModelSelection: defaultTextGenerationSelection(
-      ProviderInstanceId.make(fallback),
-      fallback,
-      DEFAULT_GIT_TEXT_GENERATION_MODEL,
-    ),
+    textGenerationModelSelection: {
+      instanceId: fallback.instanceId,
+      model: DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[fallback.driver]!,
+      ...(options ? { options } : {}),
+    },
   };
 }
 
@@ -1207,7 +1187,7 @@ export const makeServerSettings = Effect.gen(function* () {
     ready: Deferred.await(startedDeferred),
     getSettings: getSettingsFromCache.pipe(
       Effect.flatMap(materializeSecrets),
-      Effect.map(resolveTextGenerationProvider),
+      Effect.map(resolveModelSelections),
     ),
     updateSettings: (patch) =>
       writeSemaphore.withPermits(1)(
@@ -1317,7 +1297,7 @@ export const makeServerSettings = Effect.gen(function* () {
           );
           yield* secrets.removeStale;
           const materialized = yield* materializeSecrets(next);
-          return resolveTextGenerationProvider(materialized);
+          return resolveModelSelections(materialized);
         }).pipe(Effect.scoped, Effect.uninterruptible),
       ),
     get streamChanges() {
@@ -1331,7 +1311,7 @@ export const makeServerSettings = Effect.gen(function* () {
             ),
           ),
         ),
-        Stream.map(resolveTextGenerationProvider),
+        Stream.map(resolveModelSelections),
       );
     },
   } satisfies ServerSettingsShape;

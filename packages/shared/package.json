@@ -292,6 +292,10 @@
       "types": "./src/serverSettings.ts",
       "import": "./src/serverSettings.ts"
     },
+    "./providerInstanceEnablement": {
+      "types": "./src/providerInstanceEnablement.ts",
+      "import": "./src/providerInstanceEnablement.ts"
+    },
     "./assistantStreaming": {
       "types": "./src/assistantStreaming.ts",
       "import": "./src/assistantStreaming.ts"
