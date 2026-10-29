@@ -14,7 +14,11 @@ import {
 } from "../../closedViews";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { useComposerDraftStore } from "../../composerDraftStore";
-import { resolveShortcutCommand, shouldIgnoreSplitViewShortcut } from "../../keybindings";
+import {
+  matchesExactModShortcut,
+  resolveShortcutCommand,
+  shouldIgnoreSplitViewShortcut,
+} from "../../keybindings";
 import { isComposerFocused } from "../../lib/composerFocus";
 import { isTerminalFocused } from "../../lib/terminalFocus";
 import { getModelPickerOpen } from "../../modelPickerOpenState";
@@ -195,7 +199,10 @@ function handleViewShortcut(
     }
     const closed =
       input.closeActiveView() || useChatPanesStore.getState().controller?.closeFocused() === true;
-    if (closed) consume(event);
+    // With nothing to close, only the window's own Close key goes on to the
+    // window. Another key is used up: a browser may have a command of its own
+    // on it (Safari's ⌥⌘W closes its other tabs).
+    if (closed || !matchesExactModShortcut(event, "w")) consume(event);
     return;
   }
   const view = takeClosedView((entry) => reopenVerdict(input, owner, entry));
@@ -208,7 +215,7 @@ function handleViewShortcut(
  * Close and reopen views from the keyboard on a thread or draft route.
  * `view.close` closes the workspace panel's active tab, else the panel while
  * it shows only the launcher, else the focused split pane; with nothing to
- * close, the key goes on to the window (or the browser). `view.reopenClosed`
+ * close, `mod+w` goes on to the window. `view.reopenClosed`
  * brings back the newest closed view that can still be shown: a tab in its
  * thread or draft, opening that when it is another one, and a pane in the
  * split. Holding either key acts once.

@@ -852,9 +852,36 @@ describe("resolveShortcutCommand", () => {
       "view.reopenClosed",
     );
     assert.isNull(resolve({ key: "T", code: "KeyT", metaKey: true, shiftKey: true }, true));
+  });
+
+  it("also closes and reopens views with keys a browser tab passes to the page", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform: string) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context: { terminalFocus: false },
+      });
+    // A browser tab never passes ctrl+w and ctrl+shift+t to the page.
+    assert.strictEqual(
+      resolve({ key: "w", code: "KeyW", ctrlKey: true, altKey: true }, "Linux x86_64"),
+      "view.close",
+    );
+    assert.strictEqual(
+      resolve({ key: "T", code: "KeyT", ctrlKey: true, altKey: true, shiftKey: true }, "Win32"),
+      "view.reopenClosed",
+    );
+    // Option changes the letter on macOS; the physical key still matches.
+    assert.strictEqual(
+      resolve({ key: "∑", code: "KeyW", metaKey: true, altKey: true }, "MacIntel"),
+      "view.close",
+    );
+    // Labels show the keys that work in a browser tab too.
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "view.close", "Linux x86_64"),
+      "Ctrl+Alt+W",
+    );
     assert.strictEqual(
       shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "view.reopenClosed", "MacIntel"),
-      "⇧⌘T",
+      "⌥⇧⌘T",
     );
   });
 
