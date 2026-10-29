@@ -558,8 +558,11 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       // Rows for lists (the page, overview, explorer and pickers share one
       // superset): one GraphQL request with comment counts, not bodies, and
       // stack summaries in the same request instead of a second round trip.
+      // The summary view (the change request index, branch lookups, pickers)
+      // is the same list with only identity, branches, state and timestamps.
       // Free-text search keeps `gh`'s own search (its advanced-search syntax).
-      if (input.fields !== "summary" && query.length === 0) {
+      if (query.length === 0) {
+        const summary = input.fields === "summary";
         return github
           .listPullRequests({
             cwd: input.cwd,
@@ -567,12 +570,18 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
             ...(headSelector.length > 0 ? { headSelector } : {}),
             ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
             ...(input.limit !== undefined ? { limit: input.limit } : {}),
-            ...(input.includeStackSummary === false ? { includeStackSummary: false } : {}),
+            ...(summary ? { fields: "summary" as const } : {}),
+            ...(summary || input.includeStackSummary === false
+              ? { includeStackSummary: false }
+              : {}),
           })
           .pipe(
             Effect.map((items) =>
               items.map((item) => toChangeRequest(item.summary, item.stackSummary ?? undefined)),
             ),
+            // Summary rows carry no stacks; a caller that wants them anyway
+            // gets the separate lookup, as before.
+            Effect.flatMap((items) => (summary ? enrich(items) : Effect.succeed(items))),
             Effect.mapError((error) => providerError("listChangeRequests", error)),
           );
       }
@@ -581,26 +590,14 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       const executeListChangeRequests = (jsonFields: ReadonlyArray<string>) =>
         github.execute({
           cwd: input.cwd,
-          args: searchScoped
-            ? GitHubPullRequestMutations.buildGitHubPullRequestSearchListArgs({
-                involvement: input.involvement,
-                query,
-                state: stateArg,
-                headSelector,
-                limit: input.limit ?? 20,
-                jsonFields: GitHubCli.formatGitHubJsonFields(jsonFields),
-              })
-            : [
-                "pr",
-                "list",
-                ...(headSelector.length > 0 ? ["--head", headSelector] : []),
-                "--state",
-                stateArg,
-                "--limit",
-                String(input.limit ?? 20),
-                "--json",
-                GitHubCli.formatGitHubJsonFields(jsonFields),
-              ],
+          args: GitHubPullRequestMutations.buildGitHubPullRequestSearchListArgs({
+            involvement: input.involvement,
+            query,
+            state: stateArg,
+            headSelector,
+            limit: input.limit ?? 20,
+            jsonFields: GitHubCli.formatGitHubJsonFields(jsonFields),
+          }),
         });
 
       const listed =

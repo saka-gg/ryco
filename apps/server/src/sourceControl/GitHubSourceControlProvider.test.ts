@@ -366,62 +366,141 @@ it.effect("lists rows through the GraphQL list with counts and inline stack summ
   }),
 );
 
-it.effect("lists only summary fields, without stack lookups, when asked for the summary view", () =>
-  Effect.gen(function* () {
-    const executeArgs: ReadonlyArray<string>[] = [];
-    let stackLookups = 0;
-    const provider = yield* makeProvider({
-      execute: (input) => {
-        executeArgs.push(input.args);
-        return Effect.succeed(processResult("[]"));
-      },
-      getPullRequestStackSummaries: () =>
-        Effect.sync(() => {
-          stackLookups += 1;
-          return new Map();
-        }),
-    });
+it.effect(
+  "reads the change request index and branch lookups through the GraphQL summary list",
+  () =>
+    Effect.gen(function* () {
+      const requests: Array<Parameters<GitHubCli.GitHubCliShape["listPullRequests"]>[0]> = [];
+      const executeArgs: ReadonlyArray<string>[] = [];
+      let stackLookups = 0;
+      const provider = yield* makeProvider({
+        listPullRequests: (input) =>
+          Effect.sync(() => {
+            requests.push(input);
+            return [
+              {
+                summary: {
+                  number: 7,
+                  title: "Fix the index",
+                  url: "https://github.com/pingdotgg/ryco/pull/7",
+                  baseRefName: "main",
+                  headRefName: "feature/x",
+                  state: "open" as const,
+                  isDraft: false,
+                  isCrossRepository: false,
+                  author: "octocat",
+                  assignees: [],
+                  labels: [],
+                  commentsCount: null,
+                  headRepositoryNameWithOwner: "pingdotgg/ryco",
+                  headRepositoryOwnerLogin: "pingdotgg",
+                  updatedAt: Option.some(DateTime.makeUnsafe("2026-10-20T00:00:00.000Z")),
+                },
+                stackSummary: null,
+              },
+            ];
+          }),
+        execute: (input) => {
+          executeArgs.push(input.args);
+          return Effect.succeed(processResult("[]"));
+        },
+        getPullRequestStackSummaries: () =>
+          Effect.sync(() => {
+            stackLookups += 1;
+            return new Map();
+          }),
+      });
 
-    yield* provider.listChangeRequests({
-      cwd: "/repo",
-      headSelector: "",
-      state: "all",
-      limit: 100,
-      includeStackSummary: false,
-      fields: "summary",
-    });
-    yield* provider.listChangeRequests({
-      cwd: "/repo",
-      headSelector: "feature/x",
-      state: "open",
-      limit: 1,
-      includeStackSummary: false,
-      fields: "summary",
-    });
+      const indexed = yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "all",
+        limit: 100,
+        includeStackSummary: false,
+        fields: "summary",
+      });
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "feature/x",
+        state: "open",
+        limit: 1,
+        includeStackSummary: false,
+        fields: "summary",
+      });
 
-    const summaryFields = GitHubCli.formatGitHubJsonFields(
-      GitHubCli.GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS,
-    );
-    assert.deepStrictEqual(executeArgs, [
-      ["pr", "list", "--state", "all", "--limit", "100", "--json", summaryFields],
-      [
-        "pr",
-        "list",
-        "--head",
-        "feature/x",
-        "--state",
-        "open",
-        "--limit",
-        "1",
-        "--json",
-        summaryFields,
-      ],
-    ]);
-    assert.strictEqual(stackLookups, 0);
-    for (const field of ["comments", "statusCheckRollup", "mergeable", "reviewDecision"]) {
-      assert.notInclude(summaryFields.split(","), field);
-    }
-  }),
+      assert.deepStrictEqual(requests, [
+        { cwd: "/repo", state: "all", limit: 100, fields: "summary", includeStackSummary: false },
+        {
+          cwd: "/repo",
+          state: "open",
+          headSelector: "feature/x",
+          limit: 1,
+          fields: "summary",
+          includeStackSummary: false,
+        },
+      ]);
+      // No `gh pr list`, and no stack lookup the caller did not ask for.
+      assert.deepStrictEqual(executeArgs, []);
+      assert.strictEqual(stackLookups, 0);
+      assert.deepStrictEqual(indexed, [
+        {
+          provider: "github",
+          number: 7,
+          title: "Fix the index",
+          url: "https://github.com/pingdotgg/ryco/pull/7",
+          baseRefName: "main",
+          headRefName: "feature/x",
+          state: "open",
+          updatedAt: Option.some(DateTime.makeUnsafe("2026-10-20T00:00:00.000Z")),
+          isCrossRepository: false,
+          isDraft: false,
+          author: "octocat",
+          headRepositoryNameWithOwner: "pingdotgg/ryco",
+          headRepositoryOwnerLogin: "pingdotgg",
+        },
+      ]);
+
+      // A summary read that wants stacks still gets the separate lookup.
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "open",
+        fields: "summary",
+      });
+      assert.deepStrictEqual(requests.at(-1), {
+        cwd: "/repo",
+        state: "open",
+        fields: "summary",
+        includeStackSummary: false,
+      });
+      assert.strictEqual(stackLookups, 1);
+
+      // Free-text search keeps gh's own search syntax.
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "open",
+        query: "fix",
+        limit: 5,
+        includeStackSummary: false,
+        fields: "summary",
+      });
+      assert.lengthOf(requests, 3);
+      assert.deepStrictEqual(executeArgs, [
+        [
+          "pr",
+          "list",
+          "--search",
+          "fix",
+          "--state",
+          "open",
+          "--limit",
+          "5",
+          "--json",
+          GitHubCli.formatGitHubJsonFields(GitHubCli.GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS),
+        ],
+      ]);
+    }),
 );
 
 it.effect("reads one pull request's state through the batched link read, not gh pr view", () =>

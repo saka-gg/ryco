@@ -121,10 +121,16 @@ That's it—you can now clone, publish, and create pull requests.
 
 #### How Ryco talks to GitHub
 
-Ryco reads pull request and issue states (the sidebar, linked pull requests and issues) straight
-from GitHub's API over HTTPS, with the same token the GitHub CLI uses, instead of starting `gh` for
-each read. Everything else (lists, pull request details, reviews, comments, creating pull requests,
-checkouts, GitHub Actions) still runs through `gh`.
+Ryco reads these straight from GitHub's API over HTTPS, with the same token the GitHub CLI uses,
+instead of starting `gh` for each read:
+
+- pull request and issue states (the sidebar, linked pull requests and issues);
+- pull request and issue lists, and the background lookups of which pull request belongs to a
+  branch.
+
+Everything else (free-text pull request and issue search, pull request details, reviews,
+comments, creating pull requests, checkouts, GitHub Actions) still runs through `gh`, and so does
+finding which GitHub repository a checkout belongs to (`gh repo view`, cached).
 
 - The token is the one `gh` would use: `GH_TOKEN` or `GITHUB_TOKEN` for github.com and GHE.com, and
   `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` for the GitHub Enterprise Server host that
