@@ -558,4 +558,46 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
         }),
     ),
   );
+
+  it.effect("shows the error result of a failed run's JSON envelope, not the envelope", () =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          duration_ms: 412,
+          duration_api_ms: 0,
+          num_turns: 1,
+          result: "Not logged in · Please run /login",
+          session_id: "5b7c1c2e-0f3a-4f0e-9a51-3f1f2f9c4e11",
+          total_cost_usd: 0,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        }),
+        exitCode: 1,
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration
+            .generateCommitMessage({
+              cwd: process.cwd(),
+              branch: "main",
+              stagedSummary: "M src/app.ts",
+              stagedPatch: "diff --git a/src/app.ts b/src/app.ts",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                model: "claude-sonnet-4-6",
+              },
+            })
+            .pipe(Effect.result);
+
+          expect(Result.isFailure(result)).toBe(true);
+          if (Result.isFailure(result)) {
+            expect(result.failure.detail).toBe(
+              "Claude CLI command failed: Not logged in · Please run /login",
+            );
+          }
+        }),
+    ),
+  );
 });

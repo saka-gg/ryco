@@ -460,6 +460,7 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   });
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
   const [localScope, setLocalScope] = useState<GitLocalChangesScope | null>(null);
+  const [stagedCommitMessage, setStagedCommitMessage] = useState("");
   const reviewingLocal =
     localScope !== null && !isPhonePresentation && diffSearch.diffTurnId == null;
   const localChanges = useLocalChanges(
@@ -1390,25 +1391,41 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               </button>
             )}
             {reviewingLocal && localScope === "staged" && localChanges.commitStaged && (
-              <button
-                type="button"
-                className="rounded border px-2 py-1 font-medium"
-                disabled={
-                  localChanges.isLoading ||
-                  localChanges.isApplying ||
-                  localChanges.isCommitting ||
-                  !localChanges.data?.stagedRevision ||
-                  localChanges.data.staged.files.length === 0
-                }
-                title="Commit exactly these staged changes; unstaged edits stay in your working files."
-                onClick={() =>
-                  void localChanges.commitStaged?.({
-                    threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
-                  })
-                }
-              >
-                Commit staged
-              </button>
+              <>
+                <input
+                  type="text"
+                  className="min-w-40 flex-1 rounded border bg-transparent px-2 py-1"
+                  aria-label="Commit message"
+                  placeholder="Commit message (blank: generate)"
+                  value={stagedCommitMessage}
+                  disabled={localChanges.isCommitting}
+                  onChange={(event) => setStagedCommitMessage(event.target.value)}
+                />
+                <button
+                  type="button"
+                  className="rounded border px-2 py-1 font-medium"
+                  disabled={
+                    localChanges.isLoading ||
+                    localChanges.isApplying ||
+                    localChanges.isCommitting ||
+                    !localChanges.data?.stagedRevision ||
+                    localChanges.data.staged.files.length === 0
+                  }
+                  title="Commit exactly these staged changes; unstaged edits stay in your working files."
+                  onClick={() =>
+                    void localChanges
+                      .commitStaged?.(
+                        { threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id) },
+                        stagedCommitMessage,
+                      )
+                      .then((committed) => {
+                        if (committed) setStagedCommitMessage("");
+                      })
+                  }
+                >
+                  Commit staged
+                </button>
+              </>
             )}
           </div>
           {reviewingLocal && (
@@ -1422,6 +1439,11 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               {localChanges.isApplying && <span role="status"> Updating index…</span>}
               {localChanges.isCommitting && <span role="status"> Committing staged changes…</span>}
               {localChanges.isLoading && <span role="status"> Refreshing local changes…</span>}
+            </p>
+          )}
+          {reviewingLocal && localScope === "staged" && localChanges.commitError && (
+            <p role="alert" className="mt-1 text-destructive">
+              {localChanges.commitError}
             </p>
           )}
         </section>
