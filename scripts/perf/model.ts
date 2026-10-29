@@ -342,9 +342,10 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 750 KiB on 2026-10-24 with the navigation and long-running-health batches,
  * 757 KiB with the transcript's row height estimates (6 KiB that every thread
  * open and switch uses before its first paint). 761 KiB on 2026-10-29 with the
- * composer's view of the node's follow-up queue.
+ * composer's view of the node's follow-up queue, 763 KiB with its moving
+ * marks, queue-waiting signal, add outcome and edit state.
  */
-const CHAT_ROUTE_GZIP_BUDGET = 761 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 763 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of

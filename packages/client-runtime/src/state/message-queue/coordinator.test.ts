@@ -628,6 +628,7 @@ describe("message queue drain coordinator", () => {
     expect(f.coordinator.inspect(KEY)).toEqual({
       pendingDispatch: null,
       inFlightMessageId: null,
+      movingMessageId: null,
       lastStep: null,
     });
     expect(f.releaseDetail).toHaveBeenCalled();

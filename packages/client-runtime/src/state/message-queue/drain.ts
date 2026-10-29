@@ -25,7 +25,9 @@ export type QueueDrainWaitReason =
   | "detail"
   | "failed-head"
   | "in-flight"
-  | "steering";
+  | "steering"
+  /** The node is about to send its own queue's head, which goes first. */
+  | "server-queue";
 
 /**
  * A device hold recorded because moving an entry to the node failed. It waits for Resume
@@ -66,6 +68,12 @@ export interface QueueDrainInput {
   readonly pendingDispatch: QueuedDispatchSnapshot | null;
   readonly dispatchedMessageIds: ReadonlySet<string>;
   readonly sender: "foreground" | "background" | null;
+  /**
+   * The node is about to send its follow-up queue's head, or an add of this device to it is
+   * still on its way (`selectServerFollowUpQueueWaiting`). A head the node cannot carry waits
+   * behind them instead of starting a turn ahead of them.
+   */
+  readonly serverQueueWaiting?: boolean | undefined;
 }
 
 export type QueueDrainStep =
@@ -233,17 +241,18 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     return MIGRATE;
   }
 
-  // 11–18. Waits, in order.
+  // 11–19. Waits, in order.
   if (input.hold !== null) return wait("held");
   if (input.pendingDispatch !== null) return wait("awaiting-ack");
   if (view.archived) return wait("archived");
   if (view.running || view.hasPendingApproval || view.hasPendingUserInput) return wait("busy");
+  if (input.serverQueueWaiting === true) return wait("server-queue");
   if (!environment.mutationReady) return wait("environment");
   if (input.sender === null) return wait("no-sender");
   if (!view.detailLoaded) return wait("detail");
   const headWait = headWaitReason(head, input.steerAttempts);
   if (headWait !== null) return wait(headWait);
 
-  // 19.
+  // 20.
   return { kind: "send", messageId: head.id, sender: input.sender };
 }

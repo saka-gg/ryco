@@ -2,6 +2,7 @@ import {
   CommandId,
   EventId,
   MessageId,
+  OrchestrationDispatchCommandError,
   ProviderInstanceId,
   type EnvironmentApi,
   type FollowUpQueueHold,
@@ -93,13 +94,17 @@ function emitQueueEvent(type: OrchestrationEvent["type"], payload: object): void
 }
 
 /**
- * A running, steerable thread. `serverQueue`: its node keeps follow-up queues and starts with
- * `followUpQueue`. Commands are recorded; the node's answer to a queue add is its event.
+ * A running, steerable thread (`idle`: its turn just ended). `serverQueue`: its node keeps
+ * follow-up queues and starts with `followUpQueue`. Commands are recorded; the node's answer to
+ * a queue add is its event. `refuseAdd`: the node refuses adds. `onAdd`: what happens to the
+ * nth add before the node takes it; `"lost"` loses the request before it reached the node.
  */
 async function mountBusyThread(options: {
   readonly serverQueue: boolean;
+  readonly idle?: boolean;
   readonly followUpQueue?: ThreadFollowUpQueue;
   readonly refuseAdd?: string;
+  readonly onAdd?: (attempt: number) => Promise<"lost" | void> | "lost" | void;
 }) {
   localStorage.setItem(
     "ryco:client-settings:v1",
@@ -112,7 +117,7 @@ async function mountBusyThread(options: {
   const base = createSnapshotForTargetUser({
     targetMessageId: "msg-server-queue-existing" as MessageId,
     targetText: "Existing turn",
-    sessionStatus: "running",
+    sessionStatus: options.idle ? "ready" : "running",
   });
   const snapshot: OrchestrationReadModel = {
     ...base,
@@ -121,7 +126,7 @@ async function mountBusyThread(options: {
       session: {
         ...thread.session!,
         providerInstanceId: ProviderInstanceId.make("codex"),
-        activeTurnId: RUNNING_TURN,
+        activeTurnId: options.idle ? null : RUNNING_TURN,
       },
       ...(options.followUpQueue ? { followUpQueue: options.followUpQueue } : {}),
     })),
@@ -149,10 +154,17 @@ async function mountBusyThread(options: {
   await waitForComposerEditor();
   const commands: RecordedCommand[] = [];
   const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+  let addAttempts = 0;
   const dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"] = async (command) => {
     commands.push(command as unknown as RecordedCommand);
     if (command.type === "thread.queue.add") {
-      if (options.refuseAdd) throw new Error(options.refuseAdd);
+      if (options.refuseAdd) {
+        throw new OrchestrationDispatchCommandError({ message: options.refuseAdd });
+      }
+      addAttempts += 1;
+      if ((await options.onAdd?.(addAttempts)) === "lost") {
+        throw new Error("The connection closed before the node answered.");
+      }
       emitQueueEvent("thread.queue-entry-added", {
         entry: nodeEntry(command.entry.messageId, { text: command.entry.text }),
         beforeMessageId: null,
@@ -351,6 +363,110 @@ describe("ChatView with a node that keeps the follow-up queue", () => {
       await page.getByRole("button", { name: "Stop generation" }).click();
       await vi.waitFor(() => expect(harness.ofType("thread.turn.interrupt")).toHaveLength(1));
       expect(harness.ofType("thread.turn.interrupt")[0]).not.toHaveProperty("holdQueue");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("queues a send behind the node's queue the moment the turn ended, not as a turn", async () => {
+    const harness = await mountBusyThread({
+      serverQueue: true,
+      idle: true,
+      followUpQueue: { entries: [nodeEntry("goes-next")], hold: null },
+    });
+    try {
+      // The node is about to send its head; the session still reads ready.
+      await submit("After the queued one");
+      await vi.waitFor(() => expect(harness.ofType("thread.queue.add")).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      expect(harness.ofType("thread.queue.add")[0]).toMatchObject({
+        entry: { text: "After the queued one" },
+      });
+      expect(harness.ofType("thread.turn.start")).toEqual([]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps a send whose reply was lost, unchangeable while it moves to the node", async () => {
+    let releaseMove!: () => void;
+    const moveGate = new Promise<void>((resolve) => (releaseMove = resolve));
+    const harness = await mountBusyThread({
+      serverQueue: true,
+      // The first add never reached the node; the second (the tab's move) waits on the gate.
+      onAdd: async (attempt) => {
+        if (attempt === 1) return "lost";
+        await moveGate;
+      },
+    });
+    try {
+      await submit("Lost reply");
+      await vi.waitFor(() => expect(harness.ofType("thread.queue.add")).toHaveLength(2), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      const [first, second] = harness.ofType("thread.queue.add") as unknown as Array<{
+        entry: { messageId: string };
+      }>;
+      expect(second!.entry.messageId).toBe(first!.entry.messageId);
+      // Not given back to the composer, and no "Not queued".
+      await waitForComposerText("");
+      expect(document.body.textContent).not.toContain("Not queued");
+      // While its add is on its way it cannot be edited or steered: either could make a copy.
+      await expect.element(page.getByText("Queuing…")).toBeVisible();
+      await expect
+        .element(page.getByRole("button", { name: /^Edit queued message 1 of 1: Lost reply/ }))
+        .toBeDisabled();
+      expect(
+        document.querySelector('button[aria-label^="Steer queued message 1 of 1"]'),
+      ).toBeNull();
+
+      releaseMove();
+      await vi.waitFor(() =>
+        expect(nodeQueue()?.entries.map((entry) => entry.messageId)).toEqual([
+          first!.entry.messageId,
+        ]),
+      );
+      await vi.waitFor(() =>
+        expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY] ?? []).toEqual([]),
+      );
+      expect(harness.ofType("thread.turn.start")).toEqual([]);
+    } finally {
+      releaseMove();
+      await harness.cleanup();
+    }
+  });
+
+  it("ends an edit when the entry changes elsewhere, keeping the text in the composer", async () => {
+    const harness = await mountBusyThread({
+      serverQueue: true,
+      followUpQueue: { entries: [nodeEntry("node-entry", { revision: 2 })], hold: null },
+    });
+    try {
+      await page.getByRole("button", { name: /^Edit queued message 1 of 1/ }).click();
+      await waitForComposerText("Queued on the node: node-entry");
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "My edit");
+      await waitForComposerText("My edit");
+
+      // Another device edits it: a save at revision 2 would be refused forever.
+      emitQueueEvent("thread.queue-entry-edited", {
+        entry: nodeEntry("node-entry", { revision: 3, text: "Their edit" }),
+      });
+      await expect
+        .element(page.getByText("The queued message changed before your edit was saved"))
+        .toBeVisible();
+      await vi.waitFor(() => expect(document.body.textContent).not.toContain("Editing"));
+      await waitForComposerText("My edit");
+
+      // The text now goes out as a new message, not as a stale edit.
+      await submit("My edit");
+      await vi.waitFor(() => expect(harness.ofType("thread.queue.add")).toHaveLength(1), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      expect(harness.ofType("thread.queue.edit")).toEqual([]);
     } finally {
       await harness.cleanup();
     }

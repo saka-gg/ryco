@@ -47,6 +47,34 @@ describe("resolveThreadSendAction", () => {
     expect(resolveThreadSendAction({ threadBusy: false, connected: false })).toBe("enqueue");
     expect(resolveThreadSendAction({ threadBusy: false, connected: true })).toBe("dispatch");
   });
+
+  it("queues a busy send on a node that keeps the queue; offline sends stay in the outbox", () => {
+    expect(resolveThreadSendAction({ threadBusy: true, connected: true, serverQueue: true })).toBe(
+      "queue-on-server",
+    );
+    expect(resolveThreadSendAction({ threadBusy: true, connected: false, serverQueue: true })).toBe(
+      "enqueue",
+    );
+    expect(resolveThreadSendAction({ threadBusy: false, connected: true, serverQueue: true })).toBe(
+      "dispatch",
+    );
+  });
+
+  it("queues behind the node's queue when it is about to send, though no turn runs", () => {
+    // The node's dispatch leaves the session ready while its head's turn starts.
+    expect(
+      resolveThreadSendAction({
+        threadBusy: false,
+        connected: true,
+        serverQueue: true,
+        serverQueueWaiting: true,
+      }),
+    ).toBe("queue-on-server");
+    // This device's outbox still holds messages for the thread: behind them, in the outbox.
+    expect(
+      resolveThreadSendAction({ threadBusy: false, connected: true, serverQueueWaiting: true }),
+    ).toBe("enqueue");
+  });
 });
 
 describe("sendThreadTurn", () => {
@@ -123,5 +151,75 @@ describe("sendThreadTurn", () => {
     });
     expect(d.enqueue).toHaveBeenCalledTimes(1);
     expect(steer).not.toHaveBeenCalled();
+  });
+
+  it("queues a busy send on the node instead of the outbox, under its own message id", async () => {
+    const d = deps();
+    const queueOnServer = vi.fn(async (_message: QueuedThreadMessage) => true);
+    const result = await sendThreadTurn(context({ threadBusy: true, serverQueue: true }), {
+      ...d.seams,
+      queueOnServer,
+    });
+    expect(result).toBe(true);
+    expect(d.enqueue).not.toHaveBeenCalled();
+    expect(d.dispatch).not.toHaveBeenCalled();
+    expect(queueOnServer).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "msg-1", text: "hi", modelSelection }),
+      { steer: false },
+    );
+  });
+
+  it("keeps the draft when the node refuses the queued send", async () => {
+    const d = deps();
+    const result = await sendThreadTurn(context({ threadBusy: true, serverQueue: true }), {
+      ...d.seams,
+      queueOnServer: async () => false,
+    });
+    expect(result).toBe(false);
+    expect(d.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("steers a redirect's message on the node after queueing it there", async () => {
+    const d = deps();
+    const steer = vi.fn();
+    const queueOnServer = vi.fn(async () => true);
+    await sendThreadTurn(context({ threadBusy: true, serverQueue: true }), {
+      ...d.seams,
+      beforeEnqueue: async () => "steer",
+      steer,
+      queueOnServer,
+    });
+    expect(queueOnServer).toHaveBeenCalledWith(expect.anything(), { steer: true });
+    expect(steer).not.toHaveBeenCalled();
+    expect(d.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("still uses the outbox offline, or where the node keeps no queue", async () => {
+    const offline = deps();
+    const queueOnServer = vi.fn(async () => true);
+    await sendThreadTurn(context({ threadBusy: true, connected: false, serverQueue: true }), {
+      ...offline.seams,
+      queueOnServer,
+    });
+    expect(offline.enqueue).toHaveBeenCalledTimes(1);
+
+    const olderNode = deps();
+    await sendThreadTurn(context({ threadBusy: true, serverQueue: false }), {
+      ...olderNode.seams,
+      queueOnServer,
+    });
+    expect(olderNode.enqueue).toHaveBeenCalledTimes(1);
+    expect(queueOnServer).not.toHaveBeenCalled();
+  });
+
+  it("does not start a turn ahead of the node's queue", async () => {
+    const d = deps();
+    const queueOnServer = vi.fn(async () => true);
+    await sendThreadTurn(
+      context({ threadBusy: false, serverQueue: true, serverQueueWaiting: true }),
+      { ...d.seams, queueOnServer },
+    );
+    expect(queueOnServer).toHaveBeenCalledTimes(1);
+    expect(d.dispatch).not.toHaveBeenCalled();
   });
 });

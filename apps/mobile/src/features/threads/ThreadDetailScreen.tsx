@@ -3,7 +3,11 @@ import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
 import { mobileConfirmStopBackgroundWork } from "./stopBackgroundWork";
 import { prewarmThreadProviderSession } from "./threadSessionPrewarm";
-import { runOutboxDrain } from "../../state/use-thread-outbox-drain";
+import {
+  readServerFollowUpQueueWaiting,
+  readThreadOutboxEnvironment,
+  runOutboxDrain,
+} from "../../state/use-thread-outbox-drain";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { captureReviewedSendReadiness } from "@ryco/client-runtime/state/composer";
 import {
@@ -73,12 +77,30 @@ import {
   type TimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import {
+  buildFollowUpQueueEditCommand,
+  buildFollowUpQueueMoveCommand,
+  buildFollowUpQueuePauseCommand,
+  buildFollowUpQueueRemoveCommand,
+  buildFollowUpQueueResumeCommand,
+  buildFollowUpQueueRetryCommand,
+  buildFollowUpQueueSteerCommand,
   buildQueuedMessageSteerCommand,
   collectQueuedMessageSteerOutcomes,
+  deriveFollowUpQueueView,
+  describeEndedFollowUpQueueEdit,
+  FOLLOW_UP_ON_ITS_WAY_REASON,
+  followUpQueueRowOnItsWayReason,
   getQueuedThreadKeys,
   indexTurnSteerRejections,
   resolveQueuedMessageEditUnavailableReason,
+  resolveFollowUpQueueEditState,
   resolveQueuedMessageSteerEligibility,
+  selectServerFollowUpQueueSupported,
+  selectThreadFollowUpQueue,
+  shouldQueueFollowUpOnServer,
+  type FollowUpQueueCommand,
+  type FollowUpQueueRow,
+  type PendingFollowUpAdd,
   type QueuedMessageSteerAttempt,
 } from "@ryco/client-runtime/state/message-queue";
 import {
@@ -98,7 +120,7 @@ import {
   type ChatMessage,
 } from "@ryco/client-runtime/state/threads";
 import { isChatProject } from "@ryco/shared/projectKind";
-import type { ThreadForkResult } from "@ryco/contracts";
+import type { CommandId, ThreadForkResult } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import { DEFAULT_AGENT_TOKEN_MODE, type ModelSelection } from "@ryco/contracts/orchestration";
 import {
@@ -149,7 +171,9 @@ import {
   endThreadOutboxSteer,
   enqueueThreadOutboxMessage,
   getThreadOutboxHold,
+  getThreadOutboxMovingMessageId,
   holdThreadOutboxForInterrupt,
+  isThreadOutboxDispatchPending,
   listThreadOutboxMessages,
   markThreadOutboxSteering,
   releaseThreadOutboxHold,
@@ -158,9 +182,20 @@ import {
   retryThreadOutboxReview,
   subscribeThreadOutbox,
 } from "../../state/threadOutbox";
+import {
+  buildQueuedThreadMessageFollowUpContent,
+  dispatchFollowUpQueueCommand,
+  queueThreadMessageOnServer,
+  readServerFollowUpQueueSupported,
+  useFollowUpQueuePendingStore,
+} from "../../state/followUpQueue";
 import { buildQueuedThreadMessageAttachments } from "../../state/queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "../../state/threadOutboxModel";
-import { modelSelectionsEqual } from "../../state/threadOutboxModel";
+import {
+  isQueuedThreadMessageHeld,
+  modelSelectionsEqual,
+  summarizeQueuedThreadMessage,
+} from "../../state/threadOutboxModel";
 import { useThreadTimeline } from "../../state/threadTimeline";
 import {
   selectEnvironmentHydratedFromCacheAt,
@@ -218,6 +253,11 @@ import {
   selectThreadDeliveryRecord,
 } from "./threadDeliveryNoticeModel";
 import { ThreadQueuedMessages } from "./ThreadQueuedMessages";
+import {
+  clearCancelledServerQueueEdit,
+  serverQueueEditOf,
+  type ServerQueueEdit,
+} from "./serverQueueEdit";
 import type { ThreadComposerHandle } from "./ThreadComposer";
 import { ThreadContextBar } from "./ThreadContextBar";
 import {
@@ -248,6 +288,8 @@ import {
 const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
 const NO_PENDING_APPROVALS: PendingApproval[] = [];
 const NO_REVERT_TARGETS: ReadonlyMap<MessageId, number> = new Map();
+const NO_PENDING_FOLLOW_UPS: ReadonlyArray<PendingFollowUpAdd> = [];
+const SERVER_QUEUE_EDIT_IN_PROGRESS = "Save or cancel the message you are editing first.";
 /** How long the message a link opened the thread at stays highlighted. */
 const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
 
@@ -596,6 +638,114 @@ export function ThreadDetailScreen(props: {
     () => getThreadOutboxHold(outboxThreadKey),
     () => getThreadOutboxHold(outboxThreadKey),
   );
+  // The outbox message whose add to the node's queue is on its way: no Edit or Steer until it
+  // landed.
+  const movingOutboxMessageId = useSyncExternalStore(
+    subscribeThreadOutbox,
+    () => getThreadOutboxMovingMessageId(outboxThreadKey),
+    () => getThreadOutboxMovingMessageId(outboxThreadKey),
+  );
+  // A node that keeps follow-up queues itself (`capabilities.serverFollowUpQueue`): a send while
+  // the thread is busy is queued there, and the queue shown is the node's, with adds on their
+  // way and then this device's outbox (messages still moving there, or ones it cannot carry).
+  const serverFollowUpQueue = useStore((state) =>
+    selectThreadFollowUpQueue(state, scopeThreadRef(environmentId, threadId)),
+  );
+  const pendingFollowUps = useFollowUpQueuePendingStore(
+    (state) => state.pendingByThreadKey[outboxThreadKey] ?? NO_PENDING_FOLLOW_UPS,
+  );
+  const localQueuedMessages = useMemo(
+    () => new Map(queuedMessages.map((message) => [String(message.messageId), message])),
+    [queuedMessages],
+  );
+  const queueView = useMemo(
+    () =>
+      deriveFollowUpQueueView({
+        server: serverFollowUpQueue,
+        pending: pendingFollowUps,
+        local: queuedMessages.map((message) => ({
+          id: message.messageId,
+          summary: hasRetiredProjectMemory(message)
+            ? REMOVED_PROJECT_MEMORY_MESSAGE
+            : summarizeQueuedThreadMessage(message),
+          deliveryStatus: isQueuedThreadMessageHeld(message) ? ("failed" as const) : undefined,
+          steering: steeringMessageIds.has(message.messageId),
+          moving: message.messageId === movingOutboxMessageId,
+        })),
+        localHold: queueHold,
+      }),
+    [
+      movingOutboxMessageId,
+      pendingFollowUps,
+      queueHold,
+      queuedMessages,
+      serverFollowUpQueue,
+      steeringMessageIds,
+    ],
+  );
+  const [serverQueueEdit, setServerQueueEdit] = useState<ServerQueueEdit | null>(null);
+  const [savingServerQueueEdit, setSavingServerQueueEdit] = useState<ServerQueueEdit | null>(null);
+  const shownServerQueueEdit =
+    serverQueueEdit !== null && serverQueueEdit.threadKey === outboxThreadKey
+      ? serverQueueEdit
+      : null;
+  // An edit whose entry left the queue (sent, or removed elsewhere), or changed meanwhile (an
+  // edit elsewhere, a Retry, a steer that came back), is over: the composer keeps the text,
+  // which a send then sends as a new message.
+  const serverQueueEditState =
+    shownServerQueueEdit === null
+      ? null
+      : resolveFollowUpQueueEditState({
+          queue: serverFollowUpQueue,
+          detailLoaded: threadDetailLoaded,
+          messageId: shownServerQueueEdit.messageId,
+          revision: shownServerQueueEdit.revision,
+          saving: savingServerQueueEdit === shownServerQueueEdit,
+        });
+  const endedServerQueueEditState =
+    serverQueueEditState === "gone" || serverQueueEditState === "changed"
+      ? serverQueueEditState
+      : null;
+  const endedServerQueueEdit = endedServerQueueEditState === null ? null : shownServerQueueEdit;
+  const activeServerQueueEdit = serverQueueEditState === "editing" ? shownServerQueueEdit : null;
+  useEffect(() => {
+    if (endedServerQueueEdit === null || endedServerQueueEditState === null) return;
+    setServerQueueEdit((current) => (current === endedServerQueueEdit ? null : current));
+    const notice = describeEndedFollowUpQueueEdit(endedServerQueueEditState);
+    setSendError(`${notice.title}. ${notice.description}`);
+  }, [endedServerQueueEdit, endedServerQueueEditState]);
+  /** Sends one `thread.queue.*` change; the node's refusal shows in the error banner. */
+  const runServerQueueCommand = useCallback(
+    async (
+      build: (base: {
+        readonly commandId: CommandId;
+        readonly threadId: ThreadId;
+        readonly createdAt: string;
+      }) => FollowUpQueueCommand | null,
+    ): Promise<boolean> => {
+      if (!readThreadOutboxEnvironment(environmentId).mutationReady) {
+        setSendError("Reconnect to change queued messages.");
+        return false;
+      }
+      const command = build({
+        commandId: newCommandId(),
+        threadId,
+        createdAt: new Date().toISOString(),
+      });
+      if (command === null) return false;
+      setSendError(null);
+      return dispatchFollowUpQueueCommand(environmentId, command).then(
+        () => true,
+        (error: unknown) => {
+          setSendError(
+            error instanceof Error ? error.message : "The node did not take the change.",
+          );
+          return false;
+        },
+      );
+    },
+    [environmentId, threadId],
+  );
   const messageHistory = useStore(
     (state) =>
       state.environmentStateById[environmentId]?.threadHistoryByThreadId?.[threadId]?.messages,
@@ -837,7 +987,7 @@ export function ThreadDetailScreen(props: {
     isPreparingWorktree: false,
     hasPendingApproval: pendingApprovals.length > 0,
     hasPendingUserInput: pendingUserInputs.length > 0,
-    hasQueuedMessage: queuedMessages.length > 0,
+    hasQueuedMessage: queueView.rows.length > 0,
     isRevertingCheckpoint: actionBusy || revertBusy,
     mutationAllowed: !cachedView.actionsDisabled,
     environmentAvailable: connectionUiState === "connected" && hydratedFromCacheAt === null,
@@ -943,7 +1093,8 @@ export function ThreadDetailScreen(props: {
 
   // "Fork from here": offered on the terminal reply of a completed turn while this node can fork
   // right now. Capability and chats availability come from THIS environment's config, not the
-  // active-environment atom, which nulls on switch.
+  // active-environment atom, which nulls on switch. So does the node's follow-up queue.
+  const serverFollowUpQueueSupported = selectServerFollowUpQueueSupported(environmentServerConfig);
   // Subscribed, not read in render: a screen opened before its node connected
   // offers the fork as soon as the connection registers.
   const environmentApi = useEnvironmentApi(environmentId);
@@ -1194,7 +1345,14 @@ export function ThreadDetailScreen(props: {
   const steerQueuedMessage = useCallback(
     async (message: QueuedThreadMessage) => {
       if (steerAttemptsRef.current.has(message.messageId)) return;
-      const eligibility = getSteerEligibility(message);
+      // Its add to the node's queue is on its way: the node may send it, so a steer would be a
+      // second copy.
+      const eligibility =
+        getThreadOutboxMovingMessageId(
+          scopedThreadKey(scopeThreadRef(message.environmentId, message.threadId)),
+        ) === message.messageId
+          ? { allowed: false as const, reason: FOLLOW_UP_ON_ITS_WAY_REASON }
+          : getSteerEligibility(message);
       if (!eligibility.allowed) {
         setSendError(eligibility.reason);
         return;
@@ -1259,6 +1417,64 @@ export function ThreadDetailScreen(props: {
     const failed = outcomes.rejected.findLast((rejection) => rejection.reason === "failed");
     if (failed) setSendError(failed.error);
   }, [endSteerAttempt, steerAttempts, thread]);
+
+  /** A node's entry steers with the modes it was queued with, like an outbox message. */
+  const getServerQueuedSteerEligibility = useCallback(
+    (messageId: string) => {
+      const entry = selectThreadFollowUpQueue(
+        useStore.getState(),
+        scopeThreadRef(environmentId, threadId),
+      )?.entries.find((candidate) => candidate.messageId === messageId);
+      if (!entry) return { allowed: false as const, reason: "This message is no longer queued." };
+      return getSteerEligibility({
+        modelSelection: entry.modelSelection,
+        runtimeMode: entry.runtimeMode,
+        interactionMode: entry.interactionMode,
+        tokenMode: entry.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+      });
+    },
+    [environmentId, getSteerEligibility, threadId],
+  );
+
+  /** `thread.queue.steer`: the node sends the entry into the running turn, or keeps it queued. */
+  const steerServerQueuedMessage = useCallback(
+    async (messageId: MessageId) => {
+      const eligibility = getServerQueuedSteerEligibility(messageId);
+      if (!eligibility.allowed) {
+        setSendError(eligibility.reason);
+        return;
+      }
+      await runServerQueueCommand((base) =>
+        buildFollowUpQueueSteerCommand({
+          ...base,
+          messageId,
+          expectedTurnId: eligibility.expectedTurnId,
+        }),
+      );
+    },
+    [getServerQueuedSteerEligibility, runServerQueueCommand],
+  );
+
+  const getQueuedRowSteerUnavailableReason = (row: FollowUpQueueRow): string | null => {
+    const onItsWay = followUpQueueRowOnItsWayReason(row);
+    if (onItsWay !== null || row.source === "pending") return onItsWay;
+    if (row.source === "server") {
+      if (row.status === "failed") return "Retry this message before steering it.";
+      const eligibility = getServerQueuedSteerEligibility(row.id);
+      return eligibility.allowed ? null : eligibility.reason;
+    }
+    const message = localQueuedMessages.get(row.id);
+    return message ? getSteerUnavailableReason(message) : null;
+  };
+
+  const steerQueuedRow = (row: FollowUpQueueRow) => {
+    if (row.source === "server") {
+      void steerServerQueuedMessage(MessageId.make(row.id));
+      return;
+    }
+    const message = localQueuedMessages.get(row.id);
+    if (message) void steerQueuedMessage(message);
+  };
 
   const applyPolicy = useCallback((apply: () => Promise<void>) => {
     setSendError(null);
@@ -1615,11 +1831,15 @@ export function ThreadDetailScreen(props: {
   const editQueuedMessage = (messageId: string) => {
     const message = queuedMessages.find((entry) => entry.messageId === messageId);
     if (!message) return;
-    const unavailableReason = resolveQueuedMessageEditUnavailableReason({
-      deliveryStatus: undefined,
-      steering: steerAttemptsRef.current.has(messageId),
-      composerHasContent: attachments.length > 0 || composerRef.current?.hasText() === true,
-    });
+    // An add on its way to the node would come back as a second copy of the edited message.
+    const unavailableReason =
+      getThreadOutboxMovingMessageId(outboxThreadKey) === messageId
+        ? FOLLOW_UP_ON_ITS_WAY_REASON
+        : resolveQueuedMessageEditUnavailableReason({
+            deliveryStatus: undefined,
+            steering: steerAttemptsRef.current.has(messageId),
+            composerHasContent: attachments.length > 0 || composerRef.current?.hasText() === true,
+          });
     if (unavailableReason !== null) {
       setSendError(unavailableReason);
       return;
@@ -1629,6 +1849,73 @@ export function ThreadDetailScreen(props: {
     setAttachments([...message.attachments]);
     composerRef.current?.setText(message.text);
     composerRef.current?.focus();
+  };
+
+  // The node's entry: its text goes into the composer, and the next send saves it in place
+  // (`thread.queue.edit` at the revision shown) instead of sending it. Its stored attachments
+  // stay with it; ones added in the composer are added to it.
+  const editServerQueuedEntry = (messageId: string) => {
+    const entry = serverFollowUpQueue?.entries.find(
+      (candidate) => candidate.messageId === messageId,
+    );
+    if (!entry) return;
+    const unavailableReason =
+      activeServerQueueEdit !== null
+        ? SERVER_QUEUE_EDIT_IN_PROGRESS
+        : resolveQueuedMessageEditUnavailableReason({
+            deliveryStatus: undefined,
+            steering: entry.status === "steering",
+            composerHasContent: attachments.length > 0 || composerRef.current?.hasText() === true,
+          });
+    if (unavailableReason !== null) {
+      setSendError(unavailableReason);
+      return;
+    }
+    setServerQueueEdit(serverQueueEditOf(outboxThreadKey, entry));
+    setSendError(null);
+    composerRef.current?.setText(entry.text);
+    composerRef.current?.focus();
+  };
+
+  const cancelServerQueueEdit = () => {
+    setServerQueueEdit(null);
+    clearCancelledServerQueueEdit({
+      setText: (text) => composerRef.current?.setText(text),
+      setAttachments,
+      setAttachmentError,
+    });
+  };
+
+  const editQueuedRow = (row: FollowUpQueueRow) => {
+    if (row.source === "server") editServerQueuedEntry(row.id);
+    else if (row.source === "local") editQueuedMessage(row.id);
+  };
+
+  const getQueuedRowEditUnavailableReason = (row: FollowUpQueueRow): string | null => {
+    if (row.source === "server" && activeServerQueueEdit !== null) {
+      return SERVER_QUEUE_EDIT_IN_PROGRESS;
+    }
+    const onItsWay = followUpQueueRowOnItsWayReason(row);
+    if (onItsWay !== null) return onItsWay;
+    return resolveQueuedMessageEditUnavailableReason({
+      deliveryStatus: undefined,
+      steering: row.status === "steering",
+      // The typed text is only known at press time (`editQueuedMessage`).
+      composerHasContent: attachments.length > 0,
+    });
+  };
+
+  const removeQueuedRow = (row: FollowUpQueueRow) => {
+    if (row.source === "server") {
+      void runServerQueueCommand((base) =>
+        buildFollowUpQueueRemoveCommand({ ...base, messageIds: [MessageId.make(row.id)] }),
+      );
+      return;
+    }
+    if (row.source !== "local") return;
+    removeThreadOutboxMessage(row.id);
+    const attempt = steerAttempts.get(row.id);
+    if (attempt) endSteerAttempt(row.id, attempt.commandId);
   };
 
   const onSend = async (
@@ -1703,6 +1990,52 @@ export function ThreadDetailScreen(props: {
     }
 
     const tokenMode = currentThread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
+
+    // Editing the node's queued entry: the send saves it in place, busy or not.
+    if (activeServerQueueEdit !== null) {
+      const edit = activeServerQueueEdit;
+      return runWhileBusy(setSendBusy, async () => {
+        const edited: QueuedThreadMessage = {
+          environmentId,
+          threadId,
+          messageId: edit.messageId,
+          commandId: newCommandId(),
+          text,
+          attachments,
+          modelSelection,
+          runtimeMode: currentThread.runtimeMode,
+          interactionMode: currentThread.interactionMode,
+          tokenMode,
+          createdAt: new Date().toISOString(),
+        };
+        const content = await buildQueuedThreadMessageFollowUpContent(edited).catch(
+          (error: unknown) => {
+            setSendError(
+              error instanceof Error ? error.message : "Could not save the queued message.",
+            );
+            return null;
+          },
+        );
+        if (content === null) return false;
+        // The revision this save raises is not someone else's change.
+        setSavingServerQueueEdit(edit);
+        const saved = await runServerQueueCommand((base) =>
+          buildFollowUpQueueEditCommand({
+            ...base,
+            entry: { messageId: edit.messageId, revision: edit.revision },
+            content,
+            keptAttachmentIds: edit.keptAttachmentIds,
+          }),
+        );
+        setSavingServerQueueEdit((current) => (current === edit ? null : current));
+        if (!saved) return false;
+        setServerQueueEdit((current) => (current === edit ? null : current));
+        setAttachments([]);
+        setAttachmentError(null);
+        return true;
+      });
+    }
+
     const threadBusy = currentThread.latestTurn?.state === "running";
     // Wave 3a: the socket opens one RTT before the live shell snapshot lands,
     // and until it does `threadBusy` is read from a CACHED latestTurn — the
@@ -1712,6 +2045,23 @@ export function ThreadDetailScreen(props: {
     const deliveryReconciled =
       selectEnvironmentHydratedFromCacheAt(useStore.getState(), environmentId) === null;
     const connected = connectionUiState === "connected" && deliveryReconciled;
+    // The node keeps this thread's queue: a busy send is queued there. Not while this device
+    // still holds messages for it (they move first, in order), nor while the node is not ready
+    // (the outbox holds it until it is, then moves it).
+    const serverQueue = shouldQueueFollowUpOnServer({
+      serverQueueSupported: readServerFollowUpQueueSupported(environmentId),
+      serverThread: true,
+      mutationReady: connected && readThreadOutboxEnvironment(environmentId).mutationReady,
+      deviceQueueLength: listThreadOutboxMessages().filter(
+        (message) => message.environmentId === environmentId && message.threadId === threadId,
+      ).length,
+      deviceDispatchPending: isThreadOutboxDispatchPending(outboxThreadKey),
+    });
+    // The node is about to send its own queue's head (its session still reads ready while that
+    // turn starts), or an add of this device is on its way: the send queues behind them.
+    const serverQueueWaiting = readServerFollowUpQueueWaiting(
+      scopeThreadRef(environmentId, threadId),
+    );
     // A message sent while approvals wait declines the ones on screen and steers the turn
     // (`resolveApprovalRedirect`, the decision the placeholder shows). Any other message queues
     // behind them as before.
@@ -1785,6 +2135,8 @@ export function ThreadDetailScreen(props: {
           tokenMode,
           threadBusy,
           connected,
+          serverQueue,
+          serverQueueWaiting,
         },
         {
           newMessageId,
@@ -1793,6 +2145,36 @@ export function ThreadDetailScreen(props: {
           enqueue: enqueueThreadOutboxMessage,
           beforeEnqueue: redirectApprovals,
           steer: (message) => void steerQueuedMessage(message),
+          queueOnServer: async (message, options) => {
+            const queued = await queueThreadMessageOnServer(message);
+            if (queued.kind === "refused") {
+              setSendError(
+                `Not queued. ${
+                  queued.error instanceof Error
+                    ? queued.error.message
+                    : "The node did not queue the message."
+                }`,
+              );
+              return false;
+            }
+            if (queued.kind === "unknown") {
+              // No answer: the outbox keeps it under the same id and moves it to the node.
+              runOutboxDrain();
+              return true;
+            }
+            // A redirect that declined the waiting approvals steers the turn with it.
+            const eligibility = options.steer ? getSteerEligibility(message) : null;
+            if (eligibility?.allowed) {
+              await runServerQueueCommand((base) =>
+                buildFollowUpQueueSteerCommand({
+                  ...base,
+                  messageId: message.messageId,
+                  expectedTurnId: eligibility.expectedTurnId,
+                }),
+              );
+            }
+            return true;
+          },
           dispatch: () =>
             executeSendTurn({
               providerDriver: threadProviderDriver,
@@ -2214,12 +2596,26 @@ export function ThreadDetailScreen(props: {
       )}
 
       <ThreadQueuedMessages
-        messages={queuedMessages}
-        hold={queueHold}
+        rows={queueView.rows}
+        localMessages={localQueuedMessages}
+        hold={queueView.hold}
         onResume={() => {
+          const hold = queueView.hold;
+          if (queueView.holdSource === "server" && hold) {
+            void runServerQueueCommand((base) =>
+              buildFollowUpQueueResumeCommand({ ...base, hold }),
+            );
+            return;
+          }
           releaseThreadOutboxHold(outboxThreadKey);
           runOutboxDrain();
         }}
+        {...(queueView.rows.some((row) => row.source === "server")
+          ? {
+              onPause: () =>
+                void runServerQueueCommand((base) => buildFollowUpQueuePauseCommand(base)),
+            }
+          : {})}
         onRetryReview={(messageId) => {
           retryThreadOutboxReview(messageId);
           runOutboxDrain();
@@ -2228,23 +2624,35 @@ export function ThreadDetailScreen(props: {
           retryThreadOutboxMessage(messageId);
           runOutboxDrain();
         }}
-        steeringIds={steeringMessageIds}
-        getSteerUnavailableReason={getSteerUnavailableReason}
-        onSteer={(message) => void steerQueuedMessage(message)}
-        onRemove={(messageId) => {
-          removeThreadOutboxMessage(messageId);
-          const attempt = steerAttempts.get(messageId);
-          if (attempt) endSteerAttempt(messageId, attempt.commandId);
-        }}
-        getEditUnavailableReason={(message) =>
-          resolveQueuedMessageEditUnavailableReason({
-            deliveryStatus: undefined,
-            steering: steeringMessageIds.has(message.messageId),
-            // The typed text is only known at press time (`editQueuedMessage`).
-            composerHasContent: attachments.length > 0,
-          })
+        onRetry={(row) =>
+          void runServerQueueCommand((base) =>
+            buildFollowUpQueueRetryCommand({ ...base, messageId: MessageId.make(row.id) }),
+          )
         }
-        onEdit={editQueuedMessage}
+        getSteerUnavailableReason={getQueuedRowSteerUnavailableReason}
+        onSteer={steerQueuedRow}
+        onRemove={removeQueuedRow}
+        getEditUnavailableReason={getQueuedRowEditUnavailableReason}
+        onEdit={editQueuedRow}
+        {...(serverFollowUpQueueSupported
+          ? {
+              onMove: (row: FollowUpQueueRow, direction: "up" | "down") =>
+                void runServerQueueCommand((base) =>
+                  buildFollowUpQueueMoveCommand({
+                    ...base,
+                    entries:
+                      selectThreadFollowUpQueue(
+                        useStore.getState(),
+                        scopeThreadRef(environmentId, threadId),
+                      )?.entries ?? [],
+                    messageId: MessageId.make(row.id),
+                    direction,
+                  }),
+                ),
+            }
+          : {})}
+        editingId={activeServerQueueEdit?.messageId ?? null}
+        onCancelEdit={cancelServerQueueEdit}
       />
 
       {sideChat ? (
@@ -2350,15 +2758,19 @@ export function ThreadDetailScreen(props: {
           }
           onStop={() => {
             // Stop means stop: hold the queue before the turn can settle, and
-            // undo only if the interrupt never reached the server.
+            // undo only if the interrupt never reached the server. A node that
+            // keeps the follow-up queue holds its own in the same batch.
             const held = holdThreadOutboxForInterrupt(
               outboxThreadKey,
               selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))
                 ?.session?.activeTurnId ?? null,
             );
+            const holdQueue = serverFollowUpQueueSupported;
             void runAction(async () => {
               try {
-                await interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId);
+                await interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId, {
+                  holdQueue,
+                });
               } catch (error) {
                 held.undo();
                 throw error;
