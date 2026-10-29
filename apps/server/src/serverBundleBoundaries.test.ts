@@ -301,6 +301,17 @@ describe("server boot import boundaries", () => {
       "apps/server/src/sourceControl/involvedChangeRequests.ts",
     );
   });
+
+  it("keeps the direct GitHub API transport behind the GitHub client's import()", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        /^apps\/server\/src\/sourceControl\/gitHub(?:Api|ApiTestServer|Credentials)\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
+  });
 });
 
 /** Static imports of a built ES chunk (rolldown output keeps them at top level). */
