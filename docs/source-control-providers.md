@@ -48,6 +48,13 @@ Ryco works with the platforms your team already uses:
 - Check out a teammate's branch to review code locally
 - Inspect PR details, comments, changed files, and workflow/check status from the project explorer where supported
 
+**Open pull request links from chat in Ryco**
+
+- Click a pull request or merge request link in a chat message and it opens on the **Pull requests** page when its repository is one of your projects, on a machine that is connected. A link to the Files, Checks or Commits view opens that tab.
+- Cmd-click or Ctrl-click (or any click with a modifier), a link to one comment, and a link to a repository you have not added open in the browser as before.
+- To always open links in the browser, set **Settings → Source control → Pull request links in chat** to **Browser**. The setting belongs to this browser or app.
+- Ryco matches the link with the remote your project's pull request numbers come from (`upstream`, else `origin`, else the first remote by name), so a fork opens only the links of the repository it tracks.
+
 **Keep your place in a GitHub review**
 
 - In a pull request's **Files** tab, check **Viewed** beside a file. Progress is saved to GitHub using the account authenticated by `gh` in the connected environment, and survives reopening Ryco or using another machine with that account.

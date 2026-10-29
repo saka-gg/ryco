@@ -1741,6 +1741,36 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(refreshMode).toMatchTextContent("Reduced");
   });
 
+  it("chooses where pull request links in chat open", async () => {
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SourceControlPreferences />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByText("Pull request links in chat", { exact: true }))
+      .toBeInTheDocument();
+    const linkTarget = page.getByLabelText("Where pull request links open");
+    await expect.element(linkTarget).toMatchTextContent("Ryco");
+    await linkTarget.click();
+    await page.getByRole("option", { name: "Browser", exact: true }).click();
+
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        changeRequestLinkTarget: "browser",
+      });
+    });
+    await expect.element(linkTarget).toMatchTextContent("Browser");
+  });
+
   it("creates and shows a pairing link when network access is enabled", async () => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {

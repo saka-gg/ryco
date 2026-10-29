@@ -3,7 +3,16 @@ import "../index.css";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import { EnvironmentId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
 
 const {
   codeToHtmlMock,
@@ -76,6 +85,10 @@ vi.mock("../workspaceFileNavigation", () => ({
 import ChatMarkdown from "./ChatMarkdown";
 import { resetCodeHighlightQueueForTests } from "./chat/codeHighlightQueue";
 import { syncDocumentPresentationTier } from "../lib/presentationTier";
+import { replaceClientSettingsSnapshot } from "../hooks/clientSettingsStore";
+import { selectEnvironmentState, useStore } from "../store";
+import { getProjectOrderKey } from "../logicalProject";
+import { useUiStateStore } from "../uiStateStore";
 
 /** The running opacity transitions of an element (the streaming fade-in). */
 function opacityTransitions(element: Element) {
@@ -975,6 +988,229 @@ describe("document mode", () => {
         .toHaveAttribute("href", "/local/abc");
     } finally {
       await screen.unmount();
+    }
+  });
+});
+
+describe("pull request links open on the Pull requests page", () => {
+  const environmentId = EnvironmentId.make("links-env");
+  const projectId = ProjectId.make("links-project");
+  let stopTier: () => void;
+  let initialStore: ReturnType<typeof useStore.getState>;
+  /** `defaultPrevented` of each link click once React handled it; the guard keeps tabs closed. */
+  let clicks: boolean[];
+  const recordClick = (event: MouseEvent) => {
+    if (!(event.target instanceof Element) || !event.target.closest("a")) return;
+    clicks.push(event.defaultPrevented);
+    event.preventDefault();
+  };
+
+  beforeEach(async () => {
+    await page.viewport(1024, 768);
+    stopTier = syncDocumentPresentationTier();
+    clicks = [];
+    window.addEventListener("click", recordClick);
+    initialStore = useStore.getState();
+    useStore.setState({
+      environmentStateById: {
+        [environmentId]: {
+          ...selectEnvironmentState(initialStore, environmentId),
+          projectIds: [projectId],
+          projectById: {
+            [projectId]: {
+              id: projectId,
+              environmentId,
+              name: "app",
+              cwd: "/repo/app",
+              defaultModelSelection: null,
+              scripts: [],
+              repositoryIdentity: {
+                canonicalKey: "github.com/acme/app",
+                locator: {
+                  source: "git-remote",
+                  remoteName: "origin",
+                  remoteUrl: "git@github.com:acme/app.git",
+                },
+                remotes: [],
+              },
+            },
+          },
+          bootstrapComplete: true,
+        },
+      },
+    });
+  });
+  afterEach(() => {
+    window.removeEventListener("click", recordClick);
+    stopTier();
+    useStore.setState(initialStore, true);
+    replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
+    document.body.innerHTML = "";
+  });
+
+  async function mountInRouter(text: string) {
+    const root = createRootRoute({
+      component: () => (
+        <>
+          <ChatMarkdown text={text} cwd="/repo/app" environmentId={environmentId} />
+          <Outlet />
+        </>
+      ),
+    });
+    const home = createRoute({ getParentRoute: () => root, path: "/", component: () => null });
+    const pullRequests = createRoute({
+      getParentRoute: () => root,
+      path: "/pull-requests",
+      component: () => <div data-testid="pull-requests-route" />,
+    });
+    const router = createRouter({
+      routeTree: root.addChildren([home, pullRequests]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const mounted = await render(<RouterProvider router={router} />);
+    await vi.waitFor(() => expect(router.state.status).toBe("idle"));
+    return { router, mounted };
+  }
+
+  it("opens a plain click on the Pull requests page and keeps the host link", async () => {
+    const { router, mounted } = await mountInRouter(
+      "See [the PR](https://github.com/acme/app/pull/12/files).",
+    );
+    try {
+      const link = page.getByRole("link", { name: "the PR" });
+      await expect
+        .element(link)
+        .toHaveAttribute("href", "https://github.com/acme/app/pull/12/files");
+      await expect.element(link).toHaveAttribute("target", "_blank");
+      await link.click();
+      await vi.waitFor(() => expect(router.state.location.pathname).toBe("/pull-requests"));
+      expect(router.state.location.search).toEqual({
+        env: environmentId,
+        project: projectId,
+        pr: 12,
+        tab: "files",
+      });
+      expect(clicks).toEqual([true]);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("opens through the checkout the sidebar lists first", async () => {
+    const cloneId = ProjectId.make("links-clone");
+    const state = selectEnvironmentState(useStore.getState(), environmentId);
+    const original = state.projectById[projectId]!;
+    const clone = { ...original, id: cloneId, name: "app-clone", cwd: "/repo/app-clone" };
+    useStore.setState({
+      environmentStateById: {
+        [environmentId]: {
+          ...state,
+          projectIds: [projectId, cloneId],
+          projectById: { [projectId]: original, [cloneId]: clone },
+        },
+      },
+    });
+    const initialUiState = useUiStateStore.getState();
+    useUiStateStore.setState({
+      projectOrder: [getProjectOrderKey(clone), getProjectOrderKey(original)],
+    });
+    const { router, mounted } = await mountInRouter("[ours](https://github.com/acme/app/pull/12)");
+    try {
+      await page.getByRole("link", { name: "ours" }).click();
+      await vi.waitFor(() => expect(router.state.location.pathname).toBe("/pull-requests"));
+      expect(router.state.location.search).toEqual({
+        env: environmentId,
+        project: cloneId,
+        pr: 12,
+      });
+    } finally {
+      await mounted.unmount();
+      useUiStateStore.setState(initialUiState, true);
+    }
+  });
+
+  it("keeps modifier clicks, other repositories and comment links in the browser", async () => {
+    const { router, mounted } = await mountInRouter(
+      [
+        "[ours](https://github.com/acme/app/pull/12)",
+        "[theirs](https://github.com/other/repo/pull/1)",
+        "[comment](https://github.com/acme/app/pull/12#issuecomment-5)",
+      ].join(" "),
+    );
+    try {
+      await page.getByRole("link", { name: "ours" }).click({ modifiers: ["ControlOrMeta"] });
+      await page.getByRole("link", { name: "ours" }).click({ modifiers: ["Shift"] });
+      await page.getByRole("link", { name: "theirs" }).click();
+      await page.getByRole("link", { name: "comment" }).click();
+      await vi.waitFor(() => expect(clicks).toEqual([false, false, false, false]));
+      expect(router.state.location.pathname).toBe("/");
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("keeps every link in the browser with the Browser setting", async () => {
+    replaceClientSettingsSnapshot({
+      ...DEFAULT_CLIENT_SETTINGS,
+      changeRequestLinkTarget: "browser",
+    });
+    const { router, mounted } = await mountInRouter("[ours](https://github.com/acme/app/pull/12)");
+    try {
+      await page.getByRole("link", { name: "ours" }).click();
+      await vi.waitFor(() => expect(clicks).toEqual([false]));
+      expect(router.state.location.pathname).toBe("/");
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("keeps the link in the browser while the project's environment is not connected", async () => {
+    useStore.setState({
+      environmentStateById: {
+        [environmentId]: {
+          ...selectEnvironmentState(useStore.getState(), environmentId),
+          bootstrapComplete: false,
+        },
+      },
+    });
+    const { router, mounted } = await mountInRouter("[ours](https://github.com/acme/app/pull/12)");
+    try {
+      await page.getByRole("link", { name: "ours" }).click();
+      await vi.waitFor(() => expect(clicks).toEqual([false]));
+      expect(router.state.location.pathname).toBe("/");
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("keeps the browser outside a router, without a router warning", async () => {
+    const warn = vi.spyOn(console, "warn");
+    const screen = await render(
+      <ChatMarkdown
+        text="[ours](https://github.com/acme/app/pull/12)"
+        cwd="/repo/app"
+        environmentId={environmentId}
+      />,
+    );
+    try {
+      await page.getByRole("link", { name: "ours" }).click();
+      await vi.waitFor(() => expect(clicks).toEqual([false]));
+      expect(warn.mock.calls.flat().join(" ")).not.toMatch(/useRouter/u);
+    } finally {
+      warn.mockRestore();
+      await screen.unmount();
+    }
+  });
+
+  it("keeps the frozen phone tier in the browser", async () => {
+    await page.viewport(390, 844);
+    const { router, mounted } = await mountInRouter("[ours](https://github.com/acme/app/pull/12)");
+    try {
+      await page.getByRole("link", { name: "ours" }).click();
+      await vi.waitFor(() => expect(clicks).toEqual([false]));
+      expect(router.state.location.pathname).toBe("/");
+    } finally {
+      await mounted.unmount();
     }
   });
 });

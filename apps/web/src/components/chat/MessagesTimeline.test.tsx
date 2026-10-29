@@ -96,6 +96,10 @@ beforeAll(() => {
       classList,
       offsetHeight: 0,
     },
+    // The source-control query registry ChatMarkdown's link handling reads subscribes to
+    // page lifecycle events when it loads.
+    addEventListener: () => {},
+    removeEventListener: () => {},
   });
 });
 

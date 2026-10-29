@@ -210,6 +210,12 @@ vi.mock("@tanstack/react-router", () => ({
   })),
 }));
 
+// Pull request links in rendered Markdown ask whether source control reads are admitted; the
+// atoms behind that answer pull in the whole connection layer.
+vi.mock("../rpc/sourceControlAtoms", () => ({
+  isSourceControlReadAdmitted: () => false,
+}));
+
 vi.mock("../hostedHub/hostedConnectionCoordinator", () => ({
   readHostedNodeMutationLease: () => null,
 }));
@@ -327,6 +333,10 @@ vi.mock("../hooks/useSettings", () => ({
     diffWordWrap: false,
     timestampFormat: "locale",
   }),
+  getClientSettings: () => ({
+    diffWordWrap: false,
+    timestampFormat: "locale",
+  }),
 }));
 
 vi.mock("../storeSelectors", () => ({
@@ -349,6 +359,9 @@ vi.mock("../store", () => ({
   // Rendered Markdown's thread chips and quote links read these.
   selectSidebarThreadSummaryByRef: () => undefined,
   selectThreadAvailabilityByRef: () => undefined,
+  // Pull request links read the projects that could own them.
+  selectBootstrapCompleteForEnvironment: () => false,
+  selectProjectsAcrossEnvironments: () => [],
   useStore: (selector: (store: Record<string, never>) => unknown) => selector({}),
 }));
 
