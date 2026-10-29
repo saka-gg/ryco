@@ -71,15 +71,17 @@ export function useDismissedProviderUpdateNotificationKeys() {
 
   const dismissedKeySet = useMemo(() => new Set(dismissedKeys), [dismissedKeys]);
 
-  const dismissNotificationKey = useCallback(
-    (key: string) => {
-      const trimmedKey = key.trim();
-      if (trimmedKey.length === 0 || dismissedKeySet.has(trimmedKey)) {
+  const dismissNotificationKeys = useCallback(
+    (keys: ReadonlyArray<string>) => {
+      const added = [...new Set(keys.map((key) => key.trim()))].filter(
+        (key) => key.length > 0 && !dismissedKeySet.has(key),
+      );
+      if (added.length === 0) {
         return;
       }
 
       setDismissals({
-        keys: [...dismissedKeys, trimmedKey],
+        keys: [...dismissedKeys, ...added],
       });
     },
     [dismissedKeySet, dismissedKeys, setDismissals],
@@ -87,6 +89,6 @@ export function useDismissedProviderUpdateNotificationKeys() {
 
   return {
     dismissedNotificationKeys: dismissedKeySet,
-    dismissNotificationKey,
+    dismissNotificationKeys,
   };
 }

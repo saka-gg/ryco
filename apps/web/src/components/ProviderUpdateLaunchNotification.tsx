@@ -23,7 +23,9 @@ import {
   getProviderUpdateProgressToastView,
   getProviderUpdateRejectedToastView,
   getProviderUpdateRunningToastView,
+  providerUpdateDismissalKeys,
   providerUpdateNotificationKey,
+  undismissedProviderUpdateCandidates,
   withProviderUpdateOrigin,
   type ProviderUpdateToastView,
 } from "./ProviderUpdateLaunchNotification.logic";
@@ -127,10 +129,18 @@ function ProviderUpdateLaunchNotificationForEnvironment({
 }) {
   const openSettingsDialog = useSettingsDialogStore((s) => s.openSettings);
   const activeToastRef = useRef<ActiveProviderUpdateToast | null>(null);
-  const { dismissedNotificationKeys, dismissNotificationKey } =
+  const { dismissedNotificationKeys, dismissNotificationKeys } =
     useDismissedProviderUpdateNotificationKeys();
 
-  const updateProviders = useMemo(() => collectProviderUpdateCandidates(providers), [providers]);
+  const updateProviders = useMemo(
+    () =>
+      undismissedProviderUpdateCandidates(
+        collectProviderUpdateCandidates(providers),
+        dismissedNotificationKeys,
+        { environmentId: environment.environmentId },
+      ),
+    [dismissedNotificationKeys, environment.environmentId, providers],
+  );
   const notificationKey = useMemo(
     () =>
       providerUpdateNotificationKey(updateProviders, {
@@ -223,7 +233,7 @@ function ProviderUpdateLaunchNotificationForEnvironment({
     let updateStarted = false;
     const openSettings = () => openProviderSettings(toastId);
     const dismissPrompt = () => {
-      dismissNotificationKey(notificationKey);
+      dismissNotificationKeys(providerUpdateDismissalKeys(updateProviders, origin));
     };
 
     const runUpdates = () => {
@@ -338,7 +348,7 @@ function ProviderUpdateLaunchNotificationForEnvironment({
     );
     activeToastRef.current = { kind: "prompt", key: notificationKey, toastId };
   }, [
-    dismissNotificationKey,
+    dismissNotificationKeys,
     dismissedNotificationKeys,
     notificationKey,
     oneClickProviders,

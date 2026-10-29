@@ -342,6 +342,23 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
         }),
       ),
     );
+    it.effect("reports no backups yet as empty, and the database with its write-ahead log", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const dbPath = path.join(f.root, "node.sqlite");
+          yield* io(async () => {
+            await fs.writeFile(dbPath, "d".repeat(1000));
+            await fs.writeFile(`${dbPath}-wal`, "w".repeat(3000));
+          });
+          const entries = (yield* f.service.scan()).entries;
+          const backups = entries.find((item) => item.id === "database-backups");
+          assert.strictEqual(backups?.bytes, 0);
+          assert.strictEqual(backups?.sizeStatus, "complete");
+          assert.strictEqual(entries.find((item) => item.id === "history")?.bytes, 4000);
+        }),
+      ),
+    );
     it.effect("refuses dirty/untracked work introduced after preview", () =>
       Effect.scoped(
         Effect.gen(function* () {
