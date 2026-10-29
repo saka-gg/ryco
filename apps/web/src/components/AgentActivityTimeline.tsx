@@ -5,7 +5,7 @@ import {
   type ThreadSubagentView,
   type WorkLogEntry,
 } from "../threadWorkspaceViewModel";
-import { deriveReadableCommandDisplay } from "../lib/toolCallLabel";
+import { deriveReadableCommandDisplay } from "@ryco/client-runtime/state/session";
 import { resolveWorkEntryStatus, formatWorkEntryElapsed } from "./chat/workEntryActivity";
 import ChatMarkdown from "./ChatMarkdown";
 

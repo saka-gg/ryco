@@ -8,7 +8,7 @@
 //          classifyToolCallSummaryCategory, summarizeToolCallGroup
 
 import type { WorkLogEntry } from "../../session-logic";
-import { deriveReadableCommandDisplay } from "../../lib/toolCallLabel";
+import { deriveReadableCommandDisplay } from "@ryco/client-runtime/state/session";
 import { resolveWorkEntryStatus } from "./workEntryActivity";
 
 // A single tool row collapses into nothing useful; only runs of 2+ fold.

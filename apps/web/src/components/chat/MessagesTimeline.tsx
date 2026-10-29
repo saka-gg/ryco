@@ -162,7 +162,7 @@ import {
   deriveReadableCommandDisplay,
   normalizeToolTextForComparison,
   resolveCommandVisualKind,
-} from "../../lib/toolCallLabel";
+} from "@ryco/client-runtime/state/session";
 import {
   formatWorkEntryElapsed,
   formatWorkEntryStatusLabel,

@@ -10,7 +10,7 @@
 
 import { formatDuration, type WorkLogEntry } from "../../session-logic";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
-import { basenameOfPath, deriveReadableCommandDisplay } from "../../lib/toolCallLabel";
+import { basenameOfPath, deriveReadableCommandDisplay } from "@ryco/client-runtime/state/session";
 import { classifyToolCallSummaryCategory } from "./toolCallGroup.logic";
 import { resolveWorkEntryStatus, type WorkEntryStatus } from "./workEntryActivity";
 

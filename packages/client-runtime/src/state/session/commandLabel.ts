@@ -1,14 +1,14 @@
-// FILE: toolCallLabel.ts
+// FILE: commandLabel.ts
 // Purpose: Humanizes shell commands into the short "verb + target" sentence the
 //          transcript shows on a tool-call row, and classifies which glyph that
 //          row wears.
-// Layer: UI utility
+// Layer: Shared client presentation logic (web, desktop and mobile)
 // Exports: deriveReadableCommandDisplay, resolveCommandVisualKind,
 //          normalizeToolTextForComparison, basenameOfPath
 // Why: A raw command is unreadable at row width. Both the row label and the
 //      collapsed group summary ("Ran 9 commands, Read 1 file") need the same
 //      verb classification, so the unwrapping lives here once rather than being
-//      re-derived per surface.
+//      re-derived per surface or per client.
 
 export interface ReadableCommandDisplay {
   /** Past-tense (or progressive, while running) action word — "Ran", "Read", "Searched". */
@@ -634,13 +634,38 @@ function stripCommandDisplayWrappers(command: string): string {
               ? stripArchCommand(args)
               : tool === "command"
                 ? args
-                : null;
+                : tool === "rtk"
+                  ? stripRtkCommand(args)
+                  : null;
     if (!next || next === current) {
       return current;
     }
     current = next.trim();
   }
   return current;
+}
+
+/**
+ * RTK (a token-saving proxy some setups put in front of every shell command) runs
+ * `rtk <command>` and `rtk proxy <command>`. Its own subcommands and flags are not a
+ * wrapped command, so they keep their label.
+ */
+const RTK_OWN_SUBCOMMANDS = new Set([
+  "gain",
+  "discover",
+  "init",
+  "config",
+  "help",
+  "completions",
+  "version",
+]);
+
+function stripRtkCommand(args: string): string | null {
+  const tokens = tokenizeCommandArgs(args);
+  const start = tokens[0] === "proxy" ? 1 : 0;
+  const first = tokens[start];
+  if (first === undefined || first.startsWith("-") || RTK_OWN_SUBCOMMANDS.has(first)) return null;
+  return tokens.slice(start).join(" ");
 }
 
 function stripEnvCommand(args: string): string | null {
