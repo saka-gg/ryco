@@ -358,6 +358,17 @@ export const CheckpointRevertActivityPayload = Schema.Struct({
    * so startup recovery never restores files the user chose to keep. Absent means restore.
    */
   restoreFiles: Schema.optional(Schema.Boolean),
+  /**
+   * `false` on every phase of a files-only revert (`thread.files.revert`), so startup
+   * recovery never rewinds the conversation the user chose to keep. Absent means rewind.
+   */
+  rollbackConversation: Schema.optional(Schema.Boolean),
+  /**
+   * A files-only revert's `fromTurnCount`, kept under its own key: an older server
+   * ignores `rollbackConversation`, and without `fromTurnCount` its startup recovery
+   * ends the entry instead of finishing it as a full revert.
+   */
+  filesFromTurnCount: Schema.optional(NonNegativeInt),
 });
 export type CheckpointRevertActivityPayload = typeof CheckpointRevertActivityPayload.Type;
 
@@ -2265,6 +2276,16 @@ const ThreadConversationRevertCommand = Schema.Struct({
   type: Schema.Literal("thread.conversation.revert"),
 });
 
+/**
+ * Restores the files of checkpoint `turnCount` and keeps every message and turn, so it
+ * needs no provider rollback. A command of its own for the same reason as
+ * `thread.conversation.revert`: an older server rejects it instead of rewinding the chat.
+ */
+const ThreadFilesRevertCommand = Schema.Struct({
+  ...ThreadCheckpointRevertCommand.fields,
+  type: Schema.Literal("thread.files.revert"),
+});
+
 const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
@@ -2491,6 +2512,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadConversationRevertCommand,
+  ThreadFilesRevertCommand,
   ThreadSessionStopCommand,
   WorktreeCreateCommand,
   WorktreeArchiveCommand,
@@ -2536,6 +2558,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadConversationRevertCommand,
+  ThreadFilesRevertCommand,
   ThreadSessionStopCommand,
   WorktreeCreateCommand,
   WorktreeArchiveCommand,
@@ -3195,6 +3218,11 @@ export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
    * that ignores the field changes no state.
    */
   restoreFiles: Schema.optional(Schema.Boolean),
+  /**
+   * `false` for `thread.files.revert`: restore the files, keep the conversation. Absent
+   * (older events) means rewind it.
+   */
+  rollbackConversation: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 

@@ -83,7 +83,7 @@ function revertCommand(
   overrides: {
     commandId?: string;
     createdAt?: string;
-    type?: "thread.checkpoint.revert" | "thread.conversation.revert";
+    type?: "thread.checkpoint.revert" | "thread.conversation.revert" | "thread.files.revert";
   } = {},
 ) {
   return {
@@ -301,6 +301,36 @@ describe("checkpoint revert admission", () => {
     for (const event of restoringEvents) {
       expect(JSON.stringify(event.payload)).not.toContain("restoreFiles");
     }
+  });
+
+  it("journals a files-only revert as keeping the conversation", async () => {
+    const exit = await decide(revertCommand({ type: "thread.files.revert" }), makeThread());
+    expect(Exit.isSuccess(exit)).toBe(true);
+    if (!Exit.isSuccess(exit)) return;
+    const events = Array.isArray(exit.value) ? exit.value : [exit.value];
+    const [activityEvent, requestEvent] = events;
+    if (activityEvent?.type !== "thread.activity-appended") throw new Error("expected activity");
+    if (requestEvent?.type !== "thread.checkpoint-revert-requested") {
+      throw new Error("expected revert request");
+    }
+    expect(activityEvent.payload.activity).toMatchObject({
+      summary: "Restoring files from checkpoint 1",
+      payload: { status: "requested", rollbackConversation: false },
+    });
+    expect(activityEvent.payload.activity.payload).not.toHaveProperty("restoreFiles");
+    expect(requestEvent.payload).toMatchObject({ turnCount: 1, rollbackConversation: false });
+    expect(requestEvent.payload).not.toHaveProperty("restoreFiles");
+  });
+
+  it("admits a files-only revert by the same rules", async () => {
+    const thread = makeThread({
+      latestTurn: { ...makeThread().latestTurn!, state: "running", completedAt: null },
+    });
+    await expectRejected(
+      revertCommand({ type: "thread.files.revert" }),
+      thread,
+      "This thread is still working",
+    );
   });
 
   it("admits a conversation-only revert by the same rules", async () => {

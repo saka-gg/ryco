@@ -101,6 +101,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   threadBranchAdoption: Schema.optionalKey(Schema.Boolean),
   /**
+   * `thread.files.revert` (restore a checkpoint's files and keep the conversation); absent
+   * on older servers, whose only file restore also rewinds the conversation.
+   */
+  filesRevert: Schema.optionalKey(Schema.Boolean),
+  /**
    * `projects.searchEntries` accepts an empty query (the shallowest entries,
    * which also warms the workspace index); absent on older servers.
    */

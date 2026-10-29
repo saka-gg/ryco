@@ -710,6 +710,29 @@ const makeCheckpointStore = Effect.fn("makeCheckpointStore")(function* (
       );
   };
 
+  const sameCheckpointTree: CheckpointStoreShape["sameCheckpointTree"] = (input) =>
+    /[\r\n]/.test(input.leftRef) || /[\r\n]/.test(input.rightRef)
+      ? Effect.succeed(false)
+      : vcs
+          .execute({
+            operation: "CheckpointStore.sameCheckpointTree",
+            cwd: input.cwd,
+            args: ["cat-file", "--batch-check=%(objectname)"],
+            stdin: `${input.leftRef}^{tree}\n${input.rightRef}^{tree}\n`,
+            allowNonZeroExit: true,
+          })
+          .pipe(
+            Effect.map((result) => {
+              const [left, right] = result.stdout.split("\n").map((line) => line.trim());
+              return (
+                result.exitCode === 0 &&
+                left !== undefined &&
+                FULL_COMMIT_OID.test(left) &&
+                left === right
+              );
+            }),
+          );
+
   const hasCheckpointRef: CheckpointStoreShape["hasCheckpointRef"] = (input) =>
     resolveCheckpointCommit(input.cwd, input.checkpointRef).pipe(
       Effect.map((commit) => commit !== null),
@@ -871,6 +894,7 @@ const makeCheckpointStore = Effect.fn("makeCheckpointStore")(function* (
     hasCheckpointRef,
     resolveCheckpointCommits,
     restoreCheckpoint,
+    sameCheckpointTree,
     diffCheckpoints,
     diffCheckpointCommits,
     deleteCheckpointRefs,

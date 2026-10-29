@@ -53,6 +53,7 @@ describe("pre-auth server environment descriptor", () => {
       "crossRepositoryChangeRequests",
       "environmentIcon",
       "fileAttachments",
+      "filesRevert",
       "gitWritingStyle",
       "localTasks",
       "nodeAutoSettlement",

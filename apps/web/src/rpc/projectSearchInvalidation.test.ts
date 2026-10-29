@@ -37,6 +37,32 @@ describe("createProjectSearchInvalidationQueue", () => {
     ]);
   });
 
+  it("invalidates the checkout a files-only revert restored, once it ends", () => {
+    const { queue, invalidate } = makeQueue({ a: "/repo" });
+    const revertRow = (status: string, rollbackConversation?: false) =>
+      ({
+        type: "thread.activity-appended",
+        payload: {
+          threadId: ThreadId.make("a"),
+          activity: {
+            kind: "checkpoint.revert",
+            payload: {
+              status,
+              ...(rollbackConversation === false ? { rollbackConversation } : {}),
+            },
+          },
+        },
+      }) as unknown as OrchestrationEvent;
+
+    queue.noteEvents(LOCAL, [revertRow("restoring-files", false), revertRow("completed")]);
+    queue.flush();
+    expect(invalidate).not.toHaveBeenCalled();
+
+    queue.noteEvents(LOCAL, [revertRow("completed", false)]);
+    queue.flush();
+    expect(invalidate.mock.calls).toEqual([[{ environmentId: LOCAL, cwd: "/repo" }]]);
+  });
+
   it("falls back to the whole environment when a thread's checkout is unknown", () => {
     const { queue, invalidate } = makeQueue({ a: "/repo" });
 

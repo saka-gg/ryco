@@ -16,6 +16,7 @@ import {
   revertCheckpointGuardFailureMessage,
   revertKeptChangesDiscardedBy,
   runCheckpointRevert,
+  selectFilesRevertSupported,
   subscribeCheckpointReverts,
   waitForCheckpointRevertOutcome,
   type CheckpointRevertThreadView,
@@ -35,6 +36,7 @@ function revertRow(
     readonly commandId?: string;
     readonly turnCount?: number;
     readonly restoreFiles?: false;
+    readonly rollbackConversation?: false;
     readonly createdAt?: string;
   } = {},
 ): OrchestrationThreadActivity {
@@ -51,6 +53,7 @@ function revertRow(
       status,
       ...(options.detail ? { detail: options.detail } : {}),
       ...(options.restoreFiles === false ? { restoreFiles: false } : {}),
+      ...(options.rollbackConversation === false ? { rollbackConversation: false } : {}),
     },
     turnId: null,
     createdAt: options.createdAt ?? "2026-10-22T00:00:00.000Z",
@@ -149,6 +152,22 @@ describe("checkpointRevertCommand", () => {
       ...base,
       type: "thread.checkpoint.revert",
     });
+    expect(checkpointRevertCommand({ ...base, mode: "keep-chat" })).toEqual({
+      ...base,
+      type: "thread.files.revert",
+    });
+  });
+});
+
+describe("selectFilesRevertSupported", () => {
+  const config = (capabilities: Record<string, unknown>) =>
+    ({ environment: { capabilities } }) as unknown as Parameters<
+      typeof selectFilesRevertSupported
+    >[0];
+  it("offers the files-only undo only on a machine that says it takes it", () => {
+    expect(selectFilesRevertSupported(null)).toBe(false);
+    expect(selectFilesRevertSupported(config({ conversationRevert: true }))).toBe(false);
+    expect(selectFilesRevertSupported(config({ filesRevert: true }))).toBe(true);
   });
 });
 
@@ -281,6 +300,75 @@ describe("runCheckpointRevert", () => {
       reason: { type: "missing-api" },
     });
     expect(choose).not.toHaveBeenCalled();
+  });
+
+  it("lets a provider that cannot forget turns still undo only the files", async () => {
+    const choose = vi.fn<() => Promise<"keep-chat" | "restore-files" | null>>(
+      async () => "keep-chat",
+    );
+    const store = threadStore();
+    const { input, dispatchCommand } = revertInput(store, {
+      providerRefusal: "Cursor can't remove turns.",
+      keepChatAvailable: true,
+      choose,
+    });
+    dispatchCommand.mockImplementation(async () => {
+      // The thread is never rewound: the journal row alone gives the verdict.
+      store.update({
+        activities: [
+          revertRow("completed", {
+            rollbackConversation: false,
+            detail: "The chat was kept as it is.",
+          }),
+        ],
+      });
+      return undefined;
+    });
+
+    await expect(runCheckpointRevert(input)).resolves.toEqual({
+      kind: "reverted",
+      mode: "keep-chat",
+      prepared: "prepared",
+      notice: { tone: "info", title: "Revert completed", detail: "The chat was kept as it is." },
+    });
+    expect(dispatchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "thread.files.revert" }),
+    );
+
+    // Any other choice still needs the provider.
+    choose.mockImplementationOnce(async () => "restore-files");
+    const refused = revertInput(threadStore(), {
+      providerRefusal: "Cursor can't remove turns.",
+      keepChatAvailable: true,
+      choose,
+    });
+    await expect(runCheckpointRevert(refused.input)).resolves.toEqual({
+      kind: "refused",
+      reason: { type: "provider-unsupported", message: "Cursor can't remove turns." },
+    });
+    expect(refused.dispatchCommand).not.toHaveBeenCalled();
+    expect(phase()).toBeNull();
+  });
+
+  it("reports a files-only undo the node refused without a rewind", async () => {
+    const store = threadStore();
+    const { input, dispatchCommand } = revertInput(store, { choose: async () => "keep-chat" });
+    dispatchCommand.mockImplementation(async () => {
+      store.update({
+        activities: [
+          revertRow("failed", {
+            rollbackConversation: false,
+            detail: "Files were not restored: disk full. Nothing was changed.",
+          }),
+        ],
+      });
+      return undefined;
+    });
+
+    await expect(runCheckpointRevert(input)).resolves.toEqual({
+      kind: "not-reverted",
+      error: "Files were not restored: disk full. Nothing was changed.",
+    });
   });
 
   it("runs one revert per thread at a time, and leaves other threads alone", async () => {

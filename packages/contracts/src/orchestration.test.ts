@@ -2235,3 +2235,41 @@ it.effect("decodes a conversation-only revert as a command of its own", () =>
     );
   }),
 );
+
+it.effect("decodes a files-only revert as a command of its own", () =>
+  Effect.gen(function* () {
+    const files = yield* decodeClientOrchestrationCommand({
+      type: "thread.files.revert",
+      commandId: "revert-command",
+      threadId: "revert-thread",
+      turnCount: 1,
+      createdAt: "2026-10-28T00:00:00.000Z",
+    });
+    assert.strictEqual(files.type, "thread.files.revert");
+
+    const requested = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "revert-event",
+      aggregateKind: "thread",
+      aggregateId: "revert-thread",
+      type: "thread.checkpoint-revert-requested",
+      occurredAt: "2026-10-28T00:00:00.000Z",
+      commandId: "revert-command",
+      causationEventId: null,
+      correlationId: "revert-command",
+      metadata: {},
+      payload: {
+        threadId: "revert-thread",
+        turnCount: 1,
+        rollbackConversation: false,
+        createdAt: "2026-10-28T00:00:00.000Z",
+      },
+    });
+    assert.strictEqual(
+      requested.type === "thread.checkpoint-revert-requested"
+        ? requested.payload.rollbackConversation
+        : null,
+      false,
+    );
+  }),
+);

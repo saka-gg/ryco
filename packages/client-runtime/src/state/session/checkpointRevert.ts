@@ -20,13 +20,15 @@ import type { TurnDiffSummary } from "../threads/types.ts";
 // sends, the wait for the node's verdict, and which threads have one running.
 
 /**
- * What a revert does to the checkout. Both make the agent forget the newer
- * turns and drop them from the thread. "keep-files" (`thread.conversation.revert`)
- * leaves the files as they are; "restore-files" (`thread.checkpoint.revert`)
- * puts them back to the checkpoint, when no other thread in the checkout would
- * lose work.
+ * What a revert changes. "keep-files" (`thread.conversation.revert`) and
+ * "restore-files" (`thread.checkpoint.revert`) make the agent forget the newer
+ * turns and drop them from the thread; the first leaves the files as they are,
+ * the second puts them back to the checkpoint. "keep-chat" (`thread.files.revert`)
+ * only puts the files back and keeps every message and turn, so it needs no
+ * provider that can forget turns. Files are only restored when no other thread
+ * in the checkout would lose work.
  */
-export type CheckpointRevertMode = "keep-files" | "restore-files";
+export type CheckpointRevertMode = "keep-files" | "restore-files" | "keep-chat";
 
 /** "Edit from here" wording, shared so web, desktop and mobile say the same. */
 export const EDIT_FROM_HERE_COPY = {
@@ -42,6 +44,19 @@ export const EDIT_FROM_HERE_COPY = {
   restoreFiles: "Revert files too",
   /** The only choice on a machine without `thread.conversation.revert`. */
   restoreOnly: "Revert files",
+} as const;
+
+/** "Undo" on a turn's changed files, shared so web, desktop and mobile say the same. */
+export const UNDO_FILE_CHANGES_COPY = {
+  action: "Undo file changes",
+  title: "Undo file changes?",
+  description:
+    "The files in this checkout go back to how they were before this turn. The chat stays as it is.",
+  replacedNote: "Uncommitted edits made since then, including your own, are replaced.",
+  revertThreadNote:
+    "Revert thread too also makes the agent forget this turn and everything after it.",
+  keepChat: "Undo file changes",
+  revertThread: "Revert thread too",
 } as const;
 
 /** Said when restoring files would also discard changes an earlier revert left in place. */
@@ -61,10 +76,15 @@ export function checkpointRevertCommand(input: {
   readonly createdAt: string;
 }): Extract<
   ClientOrchestrationCommand,
-  { type: "thread.checkpoint.revert" | "thread.conversation.revert" }
+  { type: "thread.checkpoint.revert" | "thread.conversation.revert" | "thread.files.revert" }
 > {
   return {
-    type: input.mode === "keep-files" ? "thread.conversation.revert" : "thread.checkpoint.revert",
+    type:
+      input.mode === "keep-files"
+        ? "thread.conversation.revert"
+        : input.mode === "keep-chat"
+          ? "thread.files.revert"
+          : "thread.checkpoint.revert",
     commandId: input.commandId,
     threadId: input.threadId,
     turnCount: input.turnCount,
@@ -374,7 +394,10 @@ function errorMessage(error: unknown, fallback: string): string {
 export type CheckpointRevertResult<TPrepared> =
   /** Refused before anything was sent; `revertCheckpointGuardFailureMessage` says why. */
   | { readonly kind: "refused"; readonly reason: RevertThreadCheckpointGuardFailure }
-  /** The node rewound the thread: `prepared` goes back, `notice` is worth showing. */
+  /**
+   * The node rewound the thread ("keep-chat": restored the files): `prepared` goes
+   * back, `notice` is worth showing.
+   */
   | {
       readonly kind: "reverted";
       readonly mode: CheckpointRevertMode;
@@ -411,6 +434,11 @@ export async function runCheckpointRevert<TPrepared = undefined>(input: {
   readonly turnInProgress: boolean;
   /** Why the thread's provider cannot forget turns (`checkpointRevertUnsupportedMessage`). */
   readonly providerRefusal: string | null;
+  /**
+   * `choose` may offer "keep-chat", which leaves the conversation alone: a provider
+   * that cannot forget turns then only takes the other choices away.
+   */
+  readonly keepChatAvailable?: boolean | undefined;
   /** Asks the user how to revert; null cancels. */
   readonly choose: () => Promise<CheckpointRevertMode | null>;
   readonly prepare?: ((mode: CheckpointRevertMode) => Promise<TPrepared>) | undefined;
@@ -444,11 +472,12 @@ export async function runCheckpointRevert<TPrepared = undefined>(input: {
     return { kind: "refused", reason: { type: "turn-in-progress" } };
   }
   // Refuse before the user chooses anything the provider cannot do.
-  if (input.providerRefusal !== null) {
-    return {
-      kind: "refused",
-      reason: { type: "provider-unsupported", message: input.providerRefusal },
-    };
+  const providerRefusal =
+    input.providerRefusal === null
+      ? null
+      : ({ type: "provider-unsupported", message: input.providerRefusal } as const);
+  if (providerRefusal !== null && input.keepChatAvailable !== true) {
+    return { kind: "refused", reason: providerRefusal };
   }
 
   setCheckpointRevertPhase(threadKey, "choosing");
@@ -461,6 +490,10 @@ export async function runCheckpointRevert<TPrepared = undefined>(input: {
     }
     if (mode === null) {
       return { kind: "refused", reason: { type: "user-cancelled" } };
+    }
+    // Only "keep-chat" leaves the conversation alone.
+    if (providerRefusal !== null && mode !== "keep-chat") {
+      return { kind: "refused", reason: providerRefusal };
     }
     setCheckpointRevertPhase(threadKey, "reverting");
     let prepared: TPrepared;
@@ -528,6 +561,11 @@ export async function runCheckpointRevert<TPrepared = undefined>(input: {
 /** The machine takes `thread.conversation.revert`; an older one only restores files. */
 export function selectConversationRevertSupported(config: ServerConfig | null): boolean {
   return config?.environment.capabilities.conversationRevert === true;
+}
+
+/** The machine takes `thread.files.revert`; an older one also rewinds the conversation. */
+export function selectFilesRevertSupported(config: ServerConfig | null): boolean {
+  return config?.environment.capabilities.filesRevert === true;
 }
 
 /**

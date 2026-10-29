@@ -88,7 +88,7 @@ vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
 
 import { ThreadMessage } from "./ThreadMessage";
-import { EDIT_FROM_HERE_COPY } from "@ryco/client-runtime/state/session";
+import { EDIT_FROM_HERE_COPY, UNDO_FILE_CHANGES_COPY } from "@ryco/client-runtime/state/session";
 import {
   THREAD_FORK_COPY,
   type ChatAttachment,
@@ -895,6 +895,50 @@ describe("ThreadMessage Edit from here", () => {
           threadId,
           message: { ...sent, role: "assistant" } as ChatMessage,
           onEditFromHere: vi.fn(),
+        }),
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+describe("ThreadMessage Undo file changes", () => {
+  const reply = {
+    id: "m-1",
+    role: "assistant",
+    text: "Done: the parser is split.",
+    streaming: false,
+    turnId: "turn-1",
+  } as unknown as ChatMessage;
+
+  function undoButtons(tree: ReactElement): ReactElement[] {
+    return findPressables(tree).filter(
+      (pressable) => pressableLabel(pressable) === UNDO_FILE_CHANGES_COPY.action,
+    );
+  }
+
+  it("shows the button under a reply the screen marked undoable, without a fork button", () => {
+    const onUndoFileChanges = vi.fn();
+    const tree = ThreadMessage({ environmentId, threadId, message: reply, onUndoFileChanges });
+    const buttons = undoButtons(tree);
+    expect(buttons).toHaveLength(1);
+    expect(
+      findPressables(tree).filter(
+        (pressable) => pressableLabel(pressable) === THREAD_FORK_COPY.action,
+      ),
+    ).toHaveLength(0);
+    (buttons[0]!.props as { onPress: () => void }).onPress();
+    expect(onUndoFileChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows nothing otherwise, and never under a sent message", () => {
+    expect(undoButtons(ThreadMessage({ environmentId, threadId, message: reply }))).toHaveLength(0);
+    expect(
+      undoButtons(
+        ThreadMessage({
+          environmentId,
+          threadId,
+          message: { ...reply, role: "user", createdAt: "2026-10-22T10:00:00.000Z" } as ChatMessage,
+          onUndoFileChanges: vi.fn(),
         }),
       ),
     ).toHaveLength(0);
