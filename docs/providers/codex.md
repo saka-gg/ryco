@@ -38,6 +38,36 @@ messages, with no automatic continuation or goal usage tracking.
 See the [Codex goal workflow](https://learn.chatgpt.com/use-cases/follow-goals) and
 [app-server goal API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal).
 
+## Sign In From Settings
+
+A Codex instance that is not signed in shows **Account sign-in** in its provider settings. Click
+**Sign in** and Ryco runs Codex's device-code login on the machine the instance runs on, which can
+be this computer or a remote node:
+
+1. Ryco shows a short code and the address of the sign-in page.
+2. Click **Open sign-in page** (or open the address on any device), sign in to ChatGPT, and enter
+   the code. **Copy** puts the code on the clipboard.
+3. The node notices the login finished, checks the instance again, and every connected app shows
+   it as signed in.
+
+The code is valid for 15 minutes. The sign-in runs on the node, so closing Settings, switching to
+the browser on your phone, or losing the connection for a while does not stop it; come back to
+Settings to see how it went. **Cancel** stops it. A sign-in that was running when the node
+restarted has to be started again.
+
+Things to know:
+
+- Only owners of a node can sign its providers in. Shared and read-only connections show why the
+  button is unavailable.
+- The sign-in writes the login of the instance's own Codex home: its shadow home when it has one,
+  otherwise its `CODEX_HOME path`. Two instances that write the same login cannot sign in at the
+  same time.
+- A node on an older Ryco shows "Update Ryco on <node> to sign in from here."
+- An instance that uses a custom model provider instead of a ChatGPT login works without this
+  sign-in, so its settings do not offer it.
+- If the node's Codex is too old for device-code login, or device code is turned off for your
+  account, run `codex login --device-auth` on the node instead.
+
 ## I Only Use One Codex Account
 
 Use the default provider.
@@ -50,7 +80,7 @@ CODEX_HOME path: ~/.codex
 Shadow home path: empty
 ```
 
-Log in with Codex normally:
+Sign in from Settings, or log in with Codex normally:
 
 ```bash
 codex login

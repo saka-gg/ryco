@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import {
   CheckIcon,
   FolderOpenIcon,
@@ -6,11 +6,21 @@ import {
   SettingsIcon,
   GitBranchIcon,
 } from "lucide-react";
-import { WS_METHODS, type EnvironmentId, type ServerProvider } from "@ryco/contracts";
+import {
+  WS_METHODS,
+  type EnvironmentId,
+  type ProviderInstanceId,
+  type ServerProvider,
+} from "@ryco/contracts";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import {
+  preloadableLazy,
+  useLazyComponentReady,
+  usePreloadWhenIdle,
+} from "../../lib/preloadableLazy";
 import { getWsConnectionStatusForEnvironment } from "../../rpc/wsConnectionState";
-import { applyProvidersUpdated } from "../../rpc/serverState";
+import { applyProvidersUpdated, usePrimaryServerConfigSelector } from "../../rpc/serverState";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { getProviderSummary } from "../settings/providerStatus";
@@ -25,13 +35,36 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { ONBOARDING_STEPS, type OnboardingOutcome, type OnboardingStep } from "./onboardingState";
+import { canOfferOnboardingSignIn } from "./onboardingSignIn.logic";
 
 const STEP_LABELS = { providers: "Providers", project: "Project", tour: "Quick tour" };
 const PROVIDER_GUIDES: Readonly<Record<string, string>> = {
   codex: "https://github.com/saka-gg/ryco/blob/main/docs/providers/codex.md",
   claudeAgent: "https://github.com/saka-gg/ryco/blob/main/docs/providers/claude.md",
 };
+
+// Loads on the first Sign in: it brings the client-runtime sign-in controller, which setup
+// without a sign-in never needs.
+const ProviderSignInSection = preloadableLazy(() =>
+  import("../settings/ProviderSignInSection").then((module) => module.ProviderSignInSection),
+);
+
+function providerName(provider: ServerProvider): string {
+  return (
+    provider.displayName ??
+    PROVIDER_CLIENT_DEFINITIONS.find((item) => item.value === provider.driver)?.label ??
+    provider.driver
+  );
+}
+
+// A terminal sign-in (xterm) takes Escape for itself; anywhere else Escape still closes setup.
+function keepTerminalEscape(event: KeyboardEvent<HTMLElement>) {
+  if (event.key === "Escape" && event.target instanceof Element && event.target.closest(".xterm")) {
+    event.stopPropagation();
+  }
+}
 
 export interface OnboardingDialogProps {
   environmentId: EnvironmentId;
@@ -63,7 +96,34 @@ export function OnboardingDialog({
   const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings, null);
   // hosted-capability: routed node
   const projectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
+  // hosted-capability: routed node
+  const signInCapability = useHostedRpcCapability(WS_METHODS.providerSignInStart, null);
+  const providerInstances = usePrimaryServerConfigSelector(
+    (config) => config?.settings.providerInstances,
+  );
+  // One provider signs in at a time, below the list; the flow itself is the node's.
+  const [signingIn, setSigningIn] = useState<ProviderInstanceId | null>(null);
+  const signInRegion = useRef<HTMLDivElement>(null);
+  const signInRegionId = useId();
   const stepIndex = ONBOARDING_STEPS.indexOf(step);
+  const offersSignIn = (provider: ServerProvider) =>
+    canOfferOnboardingSignIn({
+      provider,
+      instance: providerInstances?.[provider.instanceId],
+      capabilityAllowed: signInCapability.allowed,
+    });
+  const anySignIn = step === "providers" && providers.some(offersSignIn);
+  const signInProvider =
+    step === "providers" && signingIn !== null
+      ? providers.find((provider) => provider.instanceId === signingIn)
+      : undefined;
+  const signInReady = useLazyComponentReady(ProviderSignInSection, signInProvider !== undefined, {
+    onLoadError: (loadError, retry) =>
+      notifySurfaceLoadFailure("provider sign-in", loadError, retry),
+  });
+  const shownSignIn =
+    signInProvider !== undefined && signInReady ? signInProvider.instanceId : null;
+  usePreloadWhenIdle(ProviderSignInSection, anySignIn);
 
   useEffect(() => {
     generation.current += 1;
@@ -74,6 +134,14 @@ export function OnboardingDialog({
       generation.current += 1;
     };
   }, [connectionGeneration, environmentId, ready]);
+
+  useEffect(() => {
+    if (shownSignIn === null) return;
+    const frame = requestAnimationFrame(() => {
+      signInRegion.current?.scrollIntoView({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [shownSignIn]);
 
   const refresh = async () => {
     if (!ready || !refreshCapability.allowed || refreshingRef.current) return;
@@ -161,11 +229,9 @@ export function OnboardingDialog({
                     provider.availability === "unavailable"
                       ? { headline: "Driver unavailable" }
                       : getProviderSummary(provider);
-                  const definition = PROVIDER_CLIENT_DEFINITIONS.find(
-                    (item) => item.value === provider.driver,
-                  );
-                  const name = provider.displayName ?? definition?.label ?? provider.driver;
+                  const name = providerName(provider);
                   const guide = PROVIDER_GUIDES[provider.driver];
+                  const expanded = signingIn === provider.instanceId;
                   return (
                     <li
                       key={provider.instanceId}
@@ -182,16 +248,42 @@ export function OnboardingDialog({
                             : ""}
                         </p>
                       </div>
-                      {guide && (
-                        <a
-                          href={guide}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="shrink-0 text-xs underline underline-offset-4"
-                        >
-                          Setup guide<span className="sr-only"> for {name}</span>
-                        </a>
-                      )}
+                      <div className="flex shrink-0 items-center gap-3">
+                        {guide && (
+                          <a
+                            href={guide}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs underline underline-offset-4"
+                          >
+                            Setup guide<span className="sr-only"> for {name}</span>
+                          </a>
+                        )}
+                        {offersSignIn(provider) && (
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            disabled={!ready}
+                            aria-expanded={expanded}
+                            aria-controls={expanded ? signInRegionId : undefined}
+                            onClick={() =>
+                              setSigningIn((current) =>
+                                current === provider.instanceId ? null : provider.instanceId,
+                              )
+                            }
+                          >
+                            {expanded ? (
+                              <>
+                                Hide sign-in<span className="sr-only"> for {name}</span>
+                              </>
+                            ) : (
+                              <>
+                                Sign in<span className="sr-only"> to {name}</span>
+                              </>
+                            )}
+                          </Button>
+                        )}
+                      </div>
                     </li>
                   );
                 })}
@@ -202,9 +294,38 @@ export function OnboardingDialog({
                   </li>
                 )}
               </ul>
+              {signInProvider !== undefined && signInReady && (
+                <div
+                  ref={signInRegion}
+                  id={signInRegionId}
+                  className="scroll-my-4 rounded-xl border p-4 empty:hidden"
+                  onKeyDown={keepTerminalEscape}
+                >
+                  <ProviderSignInSection
+                    key={signInProvider.instanceId}
+                    environmentId={environmentId}
+                    nodeLabel="this machine"
+                    connected={ready}
+                    instanceId={signInProvider.instanceId}
+                    instanceEnabled={signInProvider.enabled}
+                    displayName={providerName(signInProvider)}
+                    provider={signInProvider}
+                    variant="inline"
+                    onStateChange={(state) => {
+                      // Done: the providers stream already shows the row signed in. A failure or
+                      // an expired code stays open so its message can be read.
+                      if (state.phase === "succeeded") {
+                        setSigningIn((current) => (current === state.instanceId ? null : current));
+                      }
+                    }}
+                  />
+                </div>
+              )}
               <p className="text-sm text-muted-foreground">
-                Install and sign in with your provider’s own CLI on this machine, then refresh. Use
-                Provider settings for custom binary paths, separate accounts, or API keys.
+                {anySignIn
+                  ? "Sign in here, or install and sign in with your provider’s own CLI on this machine and refresh."
+                  : "Install and sign in with your provider’s own CLI on this machine, then refresh."}{" "}
+                Use Provider settings for custom binary paths, separate accounts, or API keys.
               </p>
               <div className="flex flex-wrap gap-2">
                 <Button

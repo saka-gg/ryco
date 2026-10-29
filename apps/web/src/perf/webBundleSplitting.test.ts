@@ -145,6 +145,18 @@ describe("web bundle splitting boundaries", () => {
     expect(commandPalette).not.toContain("./CommandPalette.logic");
   });
 
+  it("loads setup's provider sign-in, and its controller, only on the first Sign in", async () => {
+    const onboardingDialog = await readSource("../components/onboarding/OnboardingDialog.tsx");
+    const signInSection = await readSource("../components/settings/ProviderSignInSection.tsx");
+
+    expect(onboardingDialog).toContain('import("../settings/ProviderSignInSection")');
+    expect(onboardingDialog).not.toMatch(/from\s+"\.\.\/settings\/ProviderSignInSection"/u);
+    expect(onboardingDialog).not.toContain("@ryco/client-runtime/state/providerSignIn");
+    // A lazy entry that needs `AccountEmail` without the usage rows splits it out of their
+    // shared chunk, one more file on the chat route's way.
+    expect(signInSection).not.toContain("../usage/AccountEmail");
+  });
+
   it("keeps heavy route bodies out of the eager route registration graph", async () => {
     const statisticsRoute = await readSource("../routes/statistics.tsx");
     const pullRequestsRoute = await readSource("../routes/pull-requests.tsx");

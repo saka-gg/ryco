@@ -24,6 +24,10 @@
       "types": "./src/claudeCacheReview.ts",
       "import": "./src/claudeCacheReview.ts"
     },
+    "./claudeCredentialVariables": {
+      "types": "./src/claudeCredentialVariables.ts",
+      "import": "./src/claudeCredentialVariables.ts"
+    },
     "./restartContinuation": {
       "types": "./src/restartContinuation.ts",
       "import": "./src/restartContinuation.ts"
@@ -399,6 +403,10 @@
     "./providerCapabilities": {
       "types": "./src/providerCapabilities.ts",
       "import": "./src/providerCapabilities.ts"
+    },
+    "./providerSignIn": {
+      "types": "./src/providerSignIn.ts",
+      "import": "./src/providerSignIn.ts"
     },
     "./settingsOwnership": {
       "types": "./src/settingsOwnership.ts",

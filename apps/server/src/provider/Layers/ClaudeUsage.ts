@@ -5,6 +5,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import type { ServerProviderRateLimits } from "@ryco/contracts";
+import {
+  CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES,
+  CLAUDE_THIRD_PARTY_PROVIDER_FLAGS,
+} from "@ryco/shared/claudeCredentialVariables";
 import { Cache, type Duration, Effect } from "effect";
 
 import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
@@ -23,29 +27,6 @@ const KEYCHAIN_SERVICE_NAME = "Claude Code-credentials";
 const KEYCHAIN_FALLBACK_ACCOUNT = "claude-code-user";
 const TOKEN_EXPIRY_SKEW_MS = 60_000;
 const USAGE_REQUEST_TIMEOUT_MS = 10_000;
-
-// Claude Code's own credential and provider selection, checked against Claude Code 2.1.296.
-// Each of these makes it authenticate with something other than the local claude.ai login, or
-// send that login to another endpoint, so the login's usage would describe another account.
-const NON_LOGIN_CREDENTIAL_VARIABLES = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_PROFILE",
-  "ANTHROPIC_UNIX_SOCKET",
-  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-] as const;
-const THIRD_PARTY_PROVIDER_FLAGS = [
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
-  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-  "CLAUDE_CODE_USE_MANTLE",
-  "CLAUDE_CODE_USE_GATEWAY",
-] as const;
 
 interface ClaudeCredentials {
   readonly claudeAiOauth?: {
@@ -85,10 +66,11 @@ function usesLocalClaudeLogin(
   // Claude Code reports a subscription, and no token source, only while it authenticates with its
   // claude.ai login; a "claude.ai" token source means a login exists but something else is used.
   // A base URL set only in its settings files is not reported, so it cannot be detected here.
+  // Any other credential or provider would make the login's usage describe another account.
   if (account.subscriptionType === undefined || account.tokenSource !== undefined) return false;
   return (
-    !NON_LOGIN_CREDENTIAL_VARIABLES.some((name) => environment[name]?.trim()) &&
-    !THIRD_PARTY_PROVIDER_FLAGS.some((name) => isClaudeEnvFlagSet(environment[name]))
+    !CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES.some((name) => environment[name]?.trim()) &&
+    !CLAUDE_THIRD_PARTY_PROVIDER_FLAGS.some((name) => isClaudeEnvFlagSet(environment[name]))
   );
 }
 

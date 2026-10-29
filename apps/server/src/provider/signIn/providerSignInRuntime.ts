@@ -25,7 +25,6 @@ import {
   type ProviderSignInMethod,
   type ProviderSignInPhase,
   type ProviderSignInState,
-  type ServerProvider,
   type ServerSettings,
 } from "@ryco/contracts";
 import {
@@ -44,6 +43,7 @@ import {
 } from "effect";
 import type { ChildProcessSpawner } from "effect/process";
 import * as Semaphore from "effect/Semaphore";
+import { providerReportsSignIn } from "@ryco/shared/providerSignIn";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -165,13 +165,6 @@ const idleState = (
 const sameState = (left: ProviderSignInState, right: ProviderSignInState) =>
   JSON.stringify(left) === JSON.stringify(right);
 
-/** Claude reports "authenticated" whenever it starts; only an account shows a login took. */
-const reportsSignIn = (provider: ServerProvider) =>
-  provider.auth.status === "authenticated" &&
-  (provider.driver !== "claudeAgent" ||
-    provider.auth.email !== undefined ||
-    provider.auth.label !== undefined);
-
 export const makeProviderSignInRuntime: Effect.Effect<
   ProviderSignInShape,
   never,
@@ -253,12 +246,12 @@ export const makeProviderSignInRuntime: Effect.Effect<
       const provider = Option.getOrUndefined(
         yield* read.pipe(
           Effect.flatMap((first) =>
-            first !== undefined && reportsSignIn(first) ? Effect.succeed(first) : read,
+            first !== undefined && providerReportsSignIn(first) ? Effect.succeed(first) : read,
           ),
           Effect.timeoutOption(VERIFY_TIMEOUT),
         ),
       );
-      if (provider === undefined || !reportsSignIn(provider)) {
+      if (provider === undefined || !providerReportsSignIn(provider)) {
         return {
           phase: "failed",
           message: `The login finished, but ${flow.name} still reports no sign-in. Refresh providers.`,

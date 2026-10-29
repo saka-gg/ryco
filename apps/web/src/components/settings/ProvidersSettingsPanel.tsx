@@ -1,4 +1,5 @@
 import { CodexResetCredits } from "../usage/CodexResetCredits";
+import { PROVIDER_SIGN_IN_DRIVERS } from "@ryco/shared/providerSignIn";
 import { updateInstanceModelFavorites } from "@ryco/client-runtime/state/composer";
 import { LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useRef, useState, type KeyboardEvent } from "react";
@@ -58,6 +59,7 @@ import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { CliProxyHubSettings } from "./CliProxyHubSettings";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { ProviderInstanceListItem } from "./ProviderInstanceListItem";
+import { ProviderSignInSection } from "./ProviderSignInSection";
 import { getDriverOption } from "./providerDriverMeta";
 import {
   deriveProviderSettingsInstanceRows,
@@ -604,6 +606,22 @@ export function ProvidersSettingsPanel() {
             {selectedRow ? (
               <ProviderInstanceCard
                 usageAvailable={settingsTarget?.connected === true}
+                signInNode={
+                  PROVIDER_SIGN_IN_DRIVERS.has(selectedRow.instance.driver) ? (
+                    <ProviderSignInSection
+                      environmentId={settingsTarget?.environmentId ?? null}
+                      nodeLabel={settingsTarget?.nodeLabel ?? "this computer"}
+                      connected={settingsTarget ? settingsTarget.connected : true}
+                      canManage={
+                        settingsTarget?.canManage !== false && settingsTarget?.canMutate !== false
+                      }
+                      instanceId={selectedRow.instanceId}
+                      instanceEnabled={selectedRow.instance.enabled !== false}
+                      displayName={selectedDisplayName ?? String(selectedRow.instanceId)}
+                      provider={selectedLiveProvider}
+                    />
+                  ) : null
+                }
                 resetCreditsNode={
                   selectedRow.instance.driver === "codex" ? (
                     <CodexResetCredits

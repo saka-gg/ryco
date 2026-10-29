@@ -1,0 +1,371 @@
+import {
+  type EnvironmentId,
+  type ProviderInstanceId,
+  type ProviderSignInState,
+  type ServerProvider,
+  WS_METHODS,
+} from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
+import {
+  getProviderSignInController,
+  isProviderSignInRunning,
+  PROVIDER_SIGN_IN_FORBIDDEN,
+  type ProviderSignInApi,
+  type ProviderSignInController,
+} from "@ryco/client-runtime/state/providerSignIn";
+import { providerNeedsSignIn } from "@ryco/shared/providerSignIn";
+import { CheckIcon, CopyIcon, ExternalLinkIcon, LoaderIcon, LogInIcon } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+
+import { usePrimaryEnvironmentId } from "../../environments/primary";
+import {
+  readEnvironmentConnection,
+  subscribeEnvironmentConnections,
+} from "../../environments/runtime";
+import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { readLocalApi } from "../../localApi";
+import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
+import { stackedThreadToast, toastManager } from "../ui/toast";
+import { RedactedEmail } from "./RedactedSensitiveText";
+import { useRelativeTimeTick } from "./settingsLayout";
+
+export interface ProviderSignInSectionProps {
+  /** The node the instance runs on; `null` is this app's primary node. */
+  readonly environmentId: EnvironmentId | null;
+  readonly nodeLabel: string;
+  /** Whether the app holds a connection to the node now. */
+  readonly connected: boolean;
+  /** Whether this session may change the node's providers (a settings target's role). */
+  readonly canManage?: boolean;
+  readonly instanceId: ProviderInstanceId;
+  /** The instance's own enabled flag, which a toggle changes before the node re-probes. */
+  readonly instanceEnabled: boolean;
+  readonly displayName: string;
+  readonly provider: ServerProvider | undefined;
+  /**
+   * `inline` drops the card's rule and padding and names the instance in its heading, for a
+   * surface that frames the section itself.
+   */
+  readonly variant?: "card" | "inline";
+  /** Every state the node reports, e.g. to close a surface once its sign-in succeeded. */
+  readonly onStateChange?: (state: ProviderSignInState) => void;
+}
+
+const readNoApi = () => null;
+
+/** The sign-in methods of the app's connection to the node, following reconnects. */
+function useConnectionSignInApi(environmentId: EnvironmentId | null): ProviderSignInApi | null {
+  const read =
+    environmentId === null
+      ? readNoApi
+      : () => readEnvironmentConnection(environmentId)?.client.providerSignIn ?? null;
+  return useSyncExternalStore(subscribeEnvironmentConnections, read, read);
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** `m:ss` until `expiresAt`, or `null` once it passed or when it does not parse. */
+export function formatProviderSignInCountdown(expiresAt: string | null, nowMs: number) {
+  const remainingMs = expiresAt === null ? Number.NaN : Date.parse(expiresAt) - nowMs;
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return null;
+  const totalSeconds = Math.ceil(remainingMs / 1_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function Countdown({ expiresAt }: { readonly expiresAt: string | null }) {
+  const nowMs = useRelativeTimeTick(1_000);
+  const remaining = formatProviderSignInCountdown(expiresAt, nowMs);
+  if (remaining === null) return null;
+  return (
+    <span className="text-muted-foreground">
+      Expires in <span className="font-mono tabular-nums">{remaining}</span>
+    </span>
+  );
+}
+
+function DeviceCode({
+  verificationUrl,
+  userCode,
+}: {
+  readonly verificationUrl: string;
+  readonly userCode: string;
+}) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard<void>({
+    onError: (error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not copy the code",
+          description: error.message,
+        }),
+      );
+    },
+  });
+  const opensHere = isHttpsUrl(verificationUrl);
+  return (
+    <div className="space-y-2">
+      <p>
+        Open{" "}
+        <span className="select-all break-all font-mono text-foreground">{verificationUrl}</span>{" "}
+        and enter this code:
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <code
+          aria-label="Sign-in code"
+          className="select-all rounded-md border border-border/70 bg-muted/40 px-2 py-1 font-mono text-base tracking-widest text-foreground"
+        >
+          {userCode}
+        </code>
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          onClick={() => copyToClipboard(userCode, undefined)}
+        >
+          {isCopied ? <CheckIcon /> : <CopyIcon />}
+          {isCopied ? "Copied" : "Copy"}
+        </Button>
+        {opensHere ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => {
+              void readLocalApi()
+                ?.shell.openExternal(verificationUrl)
+                .catch(() => {
+                  toastManager.add(
+                    stackedThreadToast({
+                      type: "error",
+                      title: "Could not open the sign-in page",
+                      description: "Open the address above in a browser and enter the code.",
+                    }),
+                  );
+                });
+            }}
+          >
+            <ExternalLinkIcon />
+            Open sign-in page
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Signs a provider instance in on its node: the node runs the provider's own login, and this
+ * shows what to do with it (a device code for Codex). Shown while the instance reports no
+ * sign-in, and for as long as the node shows a flow this followed. The flow is the node's, so
+ * closing this or the app does not end it.
+ */
+export function ProviderSignInSection({
+  environmentId,
+  nodeLabel,
+  connected,
+  canManage = true,
+  instanceId,
+  instanceEnabled,
+  displayName,
+  provider,
+  variant = "card",
+  onStateChange,
+}: ProviderSignInSectionProps) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const nodeEnvironmentId = environmentId ?? primaryEnvironmentId;
+  const capability = useHostedRpcCapability(WS_METHODS.providerSignInStart, environmentId);
+  const blockedReason = capability.allowed
+    ? null
+    : (hostedCapabilityCopy(capability, nodeLabel) ?? PROVIDER_SIGN_IN_FORBIDDEN);
+  const api = useConnectionSignInApi(nodeEnvironmentId);
+  const controller: ProviderSignInController | null =
+    nodeEnvironmentId === null ? null : getProviderSignInController(nodeEnvironmentId, instanceId);
+
+  const needsSignIn = provider !== undefined && providerNeedsSignIn(provider);
+  // Followed from the first time the instance needs a sign-in, so a success stays visible.
+  const [engaged, setEngaged] = useState(needsSignIn);
+  if (needsSignIn && !engaged) setEngaged(true);
+  const follows = engaged && capability.allowed && connected && canManage && api !== null;
+
+  useEffect(() => {
+    if (!follows || controller === null || api === null) return;
+    return controller.attach(api);
+  }, [api, controller, follows]);
+
+  const snapshot = useSyncExternalStore(
+    controller?.subscribe ?? subscribeToNothing,
+    controller?.getSnapshot ?? readNothing,
+    controller?.getSnapshot ?? readNothing,
+  );
+  const state = follows ? (snapshot?.state ?? null) : null;
+
+  const reported = useRef(onStateChange);
+  useLayoutEffect(() => {
+    reported.current = onStateChange;
+  });
+  useEffect(() => {
+    if (state !== null) reported.current?.(state);
+  }, [state]);
+
+  const shown = needsSignIn || (state !== null && state.phase !== "idle");
+  if (!engaged || !shown) return null;
+
+  const running = isProviderSignInRunning(state);
+  const pending = snapshot?.pending ?? null;
+  const unavailable =
+    blockedReason ??
+    (!connected || api === null
+      ? `Available when ${nodeLabel} is connected`
+      : !canManage || snapshot?.forbidden
+        ? PROVIDER_SIGN_IN_FORBIDDEN
+        : snapshot?.unsupported
+          ? `Update Ryco on ${nodeLabel} to sign in from here.`
+          : !instanceEnabled
+            ? "Enable this provider instance to sign in."
+            : null);
+  // The follow failed before the node reported anything: trying again follows it anew.
+  const followFailed = state === null && (snapshot?.error ?? null) !== null;
+  const canRetryFollow = unavailable === null && followFailed && pending === null;
+  const canStart =
+    unavailable === null &&
+    state !== null &&
+    !running &&
+    pending === null &&
+    (state.phase !== "idle" || state.method !== null);
+  const startLabel =
+    followFailed ||
+    state?.phase === "failed" ||
+    state?.phase === "expired" ||
+    state?.phase === "cancelled"
+      ? "Try again"
+      : "Sign in";
+  const interaction = state?.phase === "waiting" ? state.interaction : null;
+
+  return (
+    <section
+      aria-label={`Sign in to ${displayName}`}
+      className={cn(
+        "phone:hidden space-y-2 text-xs",
+        variant === "card" && "border-t border-border/60 px-4 py-3 sm:px-5",
+      )}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <strong>{variant === "inline" ? `Sign in to ${displayName}` : "Account sign-in"}</strong>
+        {running ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            disabled={pending !== null || state?.phase === "verifying" || unavailable !== null}
+            onClick={() => void controller?.cancel()}
+          >
+            Cancel
+          </Button>
+        ) : state?.phase !== "succeeded" ? (
+          <Button
+            type="button"
+            size="xs"
+            variant={state?.phase === "idle" ? "default" : "outline"}
+            disabled={!canStart && !canRetryFollow}
+            onClick={() => {
+              if (canRetryFollow) controller?.retryFollowing();
+              else void controller?.start();
+            }}
+          >
+            {pending === "start" ? <LoaderIcon className="animate-spin" /> : <LogInIcon />}
+            {startLabel}
+          </Button>
+        ) : null}
+      </div>
+
+      {unavailable !== null ? (
+        <p className="text-muted-foreground">{unavailable}</p>
+      ) : followFailed ? null : state === null ? (
+        <p className="text-muted-foreground" role="status">
+          Checking sign-in on {nodeLabel}…
+        </p>
+      ) : state.phase === "idle" ? (
+        state.method === null ? (
+          <p className="text-muted-foreground">
+            {state.unavailableReason ?? "Sign-in from Ryco is not available for this instance."}
+          </p>
+        ) : (
+          <p className="text-muted-foreground">
+            {snapshot?.interrupted ? "Sign-in was interrupted. Start again. " : null}
+            Runs {displayName}&rsquo;s sign-in on {nodeLabel}. The page opens on this device.
+          </p>
+        )
+      ) : state.phase === "starting" ? (
+        <p className="flex items-center gap-1.5 text-muted-foreground" role="status">
+          <LoaderIcon className="size-3 animate-spin" />
+          Starting the sign-in on {nodeLabel}…
+        </p>
+      ) : state.phase === "waiting" ? (
+        // No live region: the countdown would be announced every second.
+        <div className="space-y-2">
+          {interaction !== null &&
+          !isUnknownUnionMember(interaction) &&
+          interaction.type === "deviceCode" ? (
+            <DeviceCode
+              verificationUrl={interaction.verificationUrl}
+              userCode={interaction.userCode}
+            />
+          ) : (
+            <p className="text-muted-foreground">
+              This sign-in needs a newer Ryco on this device. Update it to continue, or cancel the
+              sign-in.
+            </p>
+          )}
+          <Countdown expiresAt={state.expiresAt} />
+        </div>
+      ) : state.phase === "verifying" ? (
+        <p className="flex items-center gap-1.5 text-muted-foreground" role="status">
+          <LoaderIcon className="size-3 animate-spin" />
+          Checking the account…
+        </p>
+      ) : state.phase === "succeeded" ? (
+        // Not the node's message: it names the account, which stays blurred until clicked.
+        <p role="status">
+          {provider?.auth.email ? (
+            <>
+              Signed in as <RedactedEmail email={provider.auth.email} />
+            </>
+          ) : provider?.auth.label ? (
+            `Signed in as ${provider.auth.label}.`
+          ) : (
+            "Signed in."
+          )}
+        </p>
+      ) : (
+        <p role="status">
+          {state.message ??
+            (state.phase === "expired"
+              ? "The sign-in expired. Start again."
+              : state.phase === "cancelled"
+                ? "Sign-in cancelled."
+                : "The sign-in failed. Try again.")}
+        </p>
+      )}
+
+      {snapshot?.error && unavailable === null ? (
+        <p className="text-destructive-foreground" role="alert">
+          {snapshot.error}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+const subscribeToNothing = () => () => undefined;
+const readNothing = () => null;

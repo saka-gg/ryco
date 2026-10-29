@@ -59,3 +59,24 @@ export function RedactedSensitiveText(props: {
     </Tooltip>
   );
 }
+
+/**
+ * An account email, blurred until clicked. `AccountEmail` lays it out for usage and provider
+ * rows; a surface that only needs the email (provider sign-in) imports it from here, so it does
+ * not split the usage components into a chunk of their own.
+ */
+export function RedactedEmail(props: {
+  readonly email: string | null | undefined;
+  readonly className?: string | undefined;
+}) {
+  return (
+    <RedactedSensitiveText
+      value={props.email}
+      ariaLabel="Toggle account email visibility"
+      revealTooltip="Click to reveal email"
+      hideTooltip="Click to hide email"
+      // A long email wraps inside narrow containers instead of running past them.
+      className={cn("wrap-anywhere", props.className)}
+    />
+  );
+}
