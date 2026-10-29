@@ -201,6 +201,17 @@ describe("web bundle splitting boundaries", () => {
     expect(pairRoute).not.toContain('import("../components/auth/PairingRouteSurface")');
   });
 
+  it("loads a sign-in's terminal, with xterm, only once a terminal sign-in shows", async () => {
+    const signInSection = await readSource("../components/settings/ProviderSignInSection.tsx");
+    const signInTerminal = await readSource("../components/settings/ProviderSignInTerminal.tsx");
+
+    expect(signInSection).toContain('import("./ProviderSignInTerminal")');
+    expect(signInSection).not.toMatch(/from\s+"\.\/ProviderSignInTerminal"/u);
+    expect(signInSection).not.toContain("@xterm/");
+    expect(signInSection).toContain("preloadableLazy(");
+    expect(signInTerminal).toContain('import "@xterm/xterm/css/xterm.css";');
+  });
+
   it("loads xterm css from the terminal drawer chunk instead of the app entry", async () => {
     const mainEntry = await readSource("../main.tsx");
     const terminalDrawer = await readSource("../components/ThreadTerminalDrawer.tsx");

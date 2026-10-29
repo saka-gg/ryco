@@ -30,3 +30,22 @@ export const CLAUDE_THIRD_PARTY_PROVIDER_FLAGS = [
   "CLAUDE_CODE_USE_MANTLE",
   "CLAUDE_CODE_USE_GATEWAY",
 ] as const;
+
+/** Claude Code's reading of its boolean variables. */
+function isClaudeEnvFlagSet(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes(value?.trim().toLowerCase() ?? "");
+}
+
+/**
+ * The first variable in `environment` that keeps Claude Code off its local claude.ai login (a
+ * credential set to a non-empty value or a provider flag set to a true value), or `undefined` when
+ * none does. Only its name: never put its value in a message.
+ */
+export function claudeNonLoginCredentialSource(
+  environment: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  return (
+    CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES.find((name) => environment[name]?.trim()) ??
+    CLAUDE_THIRD_PARTY_PROVIDER_FLAGS.find((name) => isClaudeEnvFlagSet(environment[name]))
+  );
+}

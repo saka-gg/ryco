@@ -1,27 +1,7 @@
 import type { ProviderInstanceConfig, ServerProvider } from "@ryco/contracts";
-import {
-  CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES,
-  CLAUDE_THIRD_PARTY_PROVIDER_FLAGS,
-} from "@ryco/shared/claudeCredentialVariables";
 import { providerNeedsSignIn } from "@ryco/shared/providerSignIn";
 
-const CLAUDE_NON_LOGIN_VARIABLES: ReadonlySet<string> = new Set([
-  ...CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES,
-  ...CLAUDE_THIRD_PARTY_PROVIDER_FLAGS,
-]);
-
-/**
- * Whether the instance's own settings name a variable that keeps Claude Code off the local
- * login, such as a CLIProxyAPI hub's `ANTHROPIC_BASE_URL`. By name alone: a client never sees
- * the values, so a flag set to "0" counts too. The node checks the values, and its own ambient
- * environment, before it starts a sign-in.
- */
-export function claudeInstanceSkipsLogin(instance: ProviderInstanceConfig | undefined): boolean {
-  return (
-    instance?.environment?.some((variable) => CLAUDE_NON_LOGIN_VARIABLES.has(variable.name)) ??
-    false
-  );
-}
+import { instanceOffersSignIn } from "../settings/ProviderSignInOffer.logic";
 
 /**
  * Whether setup offers Sign in for a detected provider: it runs, its driver signs in from Ryco,
@@ -37,6 +17,6 @@ export function canOfferOnboardingSignIn(input: {
   return (
     input.capabilityAllowed &&
     providerNeedsSignIn(input.provider) &&
-    !(input.provider.driver === "claudeAgent" && claudeInstanceSkipsLogin(input.instance))
+    instanceOffersSignIn(input.provider.driver, input.instance)
   );
 }

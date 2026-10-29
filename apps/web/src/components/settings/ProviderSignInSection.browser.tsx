@@ -10,10 +10,11 @@ import {
   type ServerProvider,
 } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
 import { ProviderSignInSection, type ProviderSignInSectionProps } from "./ProviderSignInSection";
+import { providerSignInLinkTarget } from "./ProviderSignInTerminal";
 
 type FailureKind = "unsupported" | "response-too-large" | "failed";
 
@@ -107,6 +108,17 @@ function fakeNode() {
     subscriptions,
     respondCalls,
     emit: (next: ProviderSignInState) => latest()?.listener({ type: "state", state: next }),
+    /** Terminal output of `flow-1`; `reset` is the tail a node sends a new subscription. */
+    output: (offset: number, data: string, reset?: boolean) =>
+      latest()?.listener({
+        type: "output",
+        flowId: "flow-1",
+        offset,
+        data,
+        ...(reset === undefined ? {} : { reset }),
+      }),
+    inputs: () =>
+      respondCalls.flatMap((call) => (call.action.type === "input" ? [call.action.data] : [])),
     fail: (error: unknown) => {
       const subscription = latest()!;
       subscription.active = false;
@@ -129,10 +141,10 @@ function state(patch: Partial<ProviderSignInState> = {}): ProviderSignInState {
   };
 }
 
-function provider(auth: ServerProvider["auth"]): ServerProvider {
+function provider(auth: ServerProvider["auth"], driver = "codex"): ServerProvider {
   return {
     instanceId: INSTANCE,
-    driver: ProviderDriverKind.make("codex"),
+    driver: ProviderDriverKind.make(driver),
     enabled: true,
     installed: true,
     version: "0.130.0",
@@ -165,6 +177,33 @@ function sectionProps(
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** A Claude instance that started without a login, signing in through its terminal. */
+function terminalSectionProps(environmentId: EnvironmentId): ProviderSignInSectionProps {
+  return sectionProps(environmentId, {
+    displayName: "Claude",
+    provider: provider({ status: "authenticated" }, "claudeAgent"),
+  });
+}
+
+const terminalState = (patch: Partial<ProviderSignInState> = {}) =>
+  state({ method: "terminal", flowId: "flow-1", ...patch });
+const terminalWaiting = () =>
+  terminalState({
+    phase: "waiting",
+    interaction: { type: "terminal", cols: 100, rows: 30 },
+    expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+  });
+
+/** The sign-in's terminal box, once its xterm has loaded into it. */
+async function signInTerminal(name = "Claude login terminal") {
+  const box = page.getByRole("group", { name });
+  await expect.element(box).toBeVisible();
+  await vi.waitFor(() => expect(box.element().querySelector(".xterm-rows")).not.toBeNull());
+  return box.element();
+}
+
+const terminalText = (box: Element) => box.querySelector(".xterm-rows")?.textContent ?? "";
 
 afterEach(() => {
   harness.apis.clear();
@@ -225,6 +264,9 @@ describe("ProviderSignInSection", () => {
 
     await page.getByRole("button", { name: "Open sign-in page" }).click();
     expect(open).toHaveBeenCalledWith(VERIFICATION_URL, "_blank", "noopener,noreferrer");
+
+    // A device code needs no terminal.
+    expect(screen.container.querySelector('[role="group"]')).toBeNull();
 
     await page.getByRole("button", { name: "Cancel" }).click();
     expect(node.respondCalls).toEqual([
@@ -383,5 +425,139 @@ describe("ProviderSignInSection", () => {
     node.emit(state());
     await expect.element(page.getByText("Enable this provider instance to sign in.")).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Sign in", exact: true })).toBeDisabled();
+  });
+
+  it("signs in in a terminal: output reaches it, keystrokes go out in order, the size follows it", async () => {
+    const node = fakeNode();
+    node.start.mockResolvedValueOnce(terminalState({ phase: "starting" }));
+    const screen = await render(
+      <ProviderSignInSection {...terminalSectionProps(node.environmentId)} />,
+    );
+    node.emit(state({ method: "terminal" }));
+    await expect
+      .element(
+        page.getByText(
+          "Runs Claude’s login in a terminal on Studio. Its links open on this device.",
+        ),
+      )
+      .toBeVisible();
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    node.emit(terminalState({ phase: "starting" }));
+
+    // The terminal is there before the login prints anything, so it sees all of it live.
+    const box = await signInTerminal();
+    node.output(0, "Opening the sign-in page...\r\n");
+    await vi.waitFor(() => expect(terminalText(box)).toContain("Opening the sign-in page..."));
+
+    node.emit(terminalWaiting());
+    await expect
+      .element(
+        page.getByText(
+          "Answer Claude’s login in the terminal below. Its links open on this device.",
+        ),
+      )
+      .toBeVisible();
+    await expect.element(page.getByText(/Expires in 1[45]:\d\d/u)).toBeVisible();
+    // Typing goes to the terminal once the login asks for it.
+    await vi.waitFor(() =>
+      expect(document.activeElement?.classList.contains("xterm-helper-textarea")).toBe(true),
+    );
+    node.output(29, "Paste code here if prompted > ");
+    await vi.waitFor(() => expect(terminalText(box)).toContain("Paste code here if prompted >"));
+
+    await userEvent.keyboard("ab");
+    await userEvent.keyboard("{Enter}");
+    await vi.waitFor(() => expect(node.inputs().join("")).toBe("ab\r"));
+    expect(node.inputs()).toEqual(["a", "b", "\r"]);
+    for (const call of node.respondCalls) {
+      expect(call).toMatchObject({ instanceId: INSTANCE, flowId: "flow-1" });
+    }
+
+    // The node's terminal takes the size this one fits to, not the size it started with.
+    await vi.waitFor(() =>
+      expect(node.respondCalls.some((call) => call.action.type === "resize")).toBe(true),
+    );
+    const resize = node.respondCalls.find((call) => call.action.type === "resize")?.action;
+    expect(resize).toEqual({ type: "resize", cols: expect.any(Number), rows: expect.any(Number) });
+    // The box holds about 16 rows: far fewer than the 30 the login started with.
+    if (resize?.type === "resize") expect(resize.rows).toBeLessThan(30);
+    await screen.unmount();
+  });
+
+  it("opens an https link the login prints on this device, on a plain click", async () => {
+    const node = fakeNode();
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    await render(<ProviderSignInSection {...terminalSectionProps(node.environmentId)} />);
+    node.emit(terminalWaiting());
+    const box = await signInTerminal();
+    const url = "https://claude.ai/oauth/authorize?code=true";
+    node.output(0, `${url}\r\nhttp://example.com/insecure\r\n`);
+    await vi.waitFor(() => expect(terminalText(box)).toContain(url));
+
+    // xterm takes the pointer on its screen; a click lands on a row's first characters.
+    const screenElement = box.querySelector<HTMLElement>(".xterm-screen")!;
+    const clickRow = async (index: number) => {
+      const row = box.querySelector(".xterm-rows")!.children[index]!.getBoundingClientRect();
+      const top = row.top - screenElement.getBoundingClientRect().top;
+      await userEvent.click(screenElement, { position: { x: 12, y: top + row.height / 2 } });
+    };
+    await clickRow(1);
+    await clickRow(0);
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith(url, "_blank", "noopener,noreferrer"));
+    expect(open).toHaveBeenCalledTimes(1);
+
+    expect(providerSignInLinkTarget(url)).toBe(url);
+    expect(providerSignInLinkTarget("http://example.com/insecure")).toBeNull();
+    expect(providerSignInLinkTarget("javascript:alert(1)")).toBeNull();
+    expect(providerSignInLinkTarget("not a url")).toBeNull();
+  });
+
+  it("answers the login's queries, but not again those of output the node resends", async () => {
+    const node = fakeNode();
+    await render(<ProviderSignInSection {...terminalSectionProps(node.environmentId)} />);
+    node.emit(terminalWaiting());
+    const box = await signInTerminal();
+    // A cursor position report: ESC [ row ; col R.
+    const cursorReports = () =>
+      node.inputs().filter((data) => data.startsWith("\u001b[") && /^.\[\d+;\d+R$/u.test(data));
+
+    // A cursor position query, live: the login waits for the answer.
+    node.output(0, "live\u001b[6n");
+    await vi.waitFor(() => expect(cursorReports()).toHaveLength(1));
+
+    // A new subscription's tail holds the same query, answered back then.
+    node.output(0, "live\u001b[6n\r\nagain", true);
+    node.output(15, "\r\nnext");
+    await vi.waitFor(() => expect(terminalText(box)).toContain("next"));
+    await flush();
+    expect(cursorReports()).toHaveLength(1);
+  });
+
+  it("keeps a failed login's output to read, and takes no more input", async () => {
+    const node = fakeNode();
+    await render(<ProviderSignInSection {...terminalSectionProps(node.environmentId)} />);
+    node.emit(terminalWaiting());
+    const box = await signInTerminal();
+    node.output(0, "Error: could not reach the login server\r\n");
+    await vi.waitFor(() => expect(terminalText(box)).toContain("could not reach the login server"));
+
+    node.emit(terminalState({ phase: "failed", message: "The login command exited with code 1." }));
+    await expect.element(page.getByText("The login command exited with code 1.")).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Try again" })).toBeEnabled();
+    expect(await signInTerminal()).toBe(box);
+    expect(terminalText(box)).toContain("could not reach the login server");
+
+    box.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea")!.focus();
+    await userEvent.keyboard("x{Enter}");
+    await flush();
+    expect(node.inputs()).toEqual([]);
+
+    // A failure before the login printed anything has nothing to show.
+    node.emit(state({ method: "terminal" }));
+    node.emit(
+      terminalState({ flowId: "flow-2", phase: "failed", message: "`claude` was not found." }),
+    );
+    await expect.element(page.getByText("`claude` was not found.")).toBeVisible();
+    expect(page.getByRole("group", { name: "Claude login terminal" }).query()).toBeNull();
   });
 });

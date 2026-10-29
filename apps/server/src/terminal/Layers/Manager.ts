@@ -77,6 +77,7 @@ import {
   utf8ByteLength,
 } from "../historyBuffer.ts";
 import { TerminalHistoryCursorIndex } from "../historyCursorIndex.ts";
+import { createTerminalSpawnEnv } from "../terminalSpawnEnv.ts";
 import {
   PtyAdapter,
   PtySpawnError,
@@ -136,7 +137,6 @@ const DEFAULT_MAX_PENDING_PROCESS_EVENTS = 2_048;
 const DEFAULT_MAX_PENDING_PROCESS_OUTPUT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
-const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
 
 class TerminalSubprocessCheckError extends Schema.TaggedError<TerminalSubprocessCheckError>()(
   "TerminalSubprocessCheckError",
@@ -1147,35 +1147,6 @@ function toSafeTerminalId(terminalId: string): string {
 
 function toSessionKey(threadId: string, terminalId: string): string {
   return `${threadId}\u0000${terminalId}`;
-}
-
-function shouldExcludeTerminalEnvKey(key: string): boolean {
-  const normalizedKey = key.toUpperCase();
-  if (normalizedKey.startsWith("RYCO_")) {
-    return true;
-  }
-  if (normalizedKey.startsWith("VITE_")) {
-    return true;
-  }
-  return TERMINAL_ENV_BLOCKLIST.has(normalizedKey);
-}
-
-function createTerminalSpawnEnv(
-  baseEnv: NodeJS.ProcessEnv,
-  runtimeEnv?: Record<string, string> | null,
-): NodeJS.ProcessEnv {
-  const spawnEnv: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(baseEnv)) {
-    if (value === undefined) continue;
-    if (shouldExcludeTerminalEnvKey(key)) continue;
-    spawnEnv[key] = value;
-  }
-  if (runtimeEnv) {
-    for (const [key, value] of Object.entries(runtimeEnv)) {
-      spawnEnv[key] = value;
-    }
-  }
-  return spawnEnv;
 }
 
 function normalizedRuntimeEnv(

@@ -477,8 +477,9 @@ const CheckpointingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointStoreLive.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
 );
 
+/** Keeps the PTY adapter in the runtime: provider sign-in runs its logins in terminals too. */
 const TerminalLayerLive = TerminalManagerLive.pipe(
-  Layer.provide(PtyAdapterLive),
+  Layer.provideMerge(PtyAdapterLive),
   Layer.provide(WorkspaceAccessPolicyLive),
 );
 

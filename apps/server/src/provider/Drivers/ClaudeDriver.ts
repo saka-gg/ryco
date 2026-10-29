@@ -79,6 +79,31 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
   },
 });
 
+/** What Claude Code reports about its account at initialization, as far as a cache needs it. */
+interface ClaudeAccountReport {
+  readonly email?: string | undefined;
+  readonly subscriptionType?: string | undefined;
+  readonly tokenSource?: string | undefined;
+}
+
+/**
+ * Reads the probed capabilities through `cache`, keeping only a result that names an account. An
+ * instance probed without one (not signed in, or a probe that failed) is probed again at its next
+ * check, so a login made since, from Ryco's sign-in or a terminal, shows at the next refresh
+ * rather than after the cache's five minutes.
+ */
+export const readClaudeCapabilities = <Key, A extends ClaudeAccountReport>(
+  cache: Cache.Cache<Key, A | undefined>,
+  key: Key,
+) =>
+  Cache.get(cache, key).pipe(
+    Effect.tap((capabilities) =>
+      capabilities?.email || capabilities?.subscriptionType || capabilities?.tokenSource
+        ? Effect.void
+        : Cache.invalidate(cache, key),
+    ),
+  );
+
 export type ClaudeDriverEnv =
   | AgentProcessPriority
   | ChildProcessSpawner.ChildProcessSpawner
@@ -192,7 +217,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
 
       const checkProvider = checkClaudeProviderStatus(
         effectiveConfig,
-        () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
+        () => readClaudeCapabilities(capabilitiesProbeCache, capabilitiesCacheKey),
         processEnv,
         probeUsage,
         Option.getOrUndefined(modelManifest),

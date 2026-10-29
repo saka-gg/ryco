@@ -9,6 +9,7 @@ import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 import {
   getProviderSignInController,
   isProviderSignInRunning,
+  isProviderSignInTerminalWaiting,
   PROVIDER_SIGN_IN_FORBIDDEN,
   type ProviderSignInApi,
   type ProviderSignInController,
@@ -26,8 +27,14 @@ import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { readLocalApi } from "../../localApi";
+import {
+  preloadableLazy,
+  useLazyComponentReady,
+  usePreloadWhenIdle,
+} from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { RedactedEmail } from "./RedactedSensitiveText";
 import { useRelativeTimeTick } from "./settingsLayout";
@@ -55,6 +62,11 @@ export interface ProviderSignInSectionProps {
 }
 
 const readNoApi = () => null;
+
+// Loads with the first terminal sign-in: xterm stays out of the settings and setup chunks.
+const ProviderSignInTerminal = preloadableLazy(() =>
+  import("./ProviderSignInTerminal").then((module) => module.ProviderSignInTerminal),
+);
 
 /** The sign-in methods of the app's connection to the node, following reconnects. */
 function useConnectionSignInApi(environmentId: EnvironmentId | null): ProviderSignInApi | null {
@@ -209,6 +221,28 @@ export function ProviderSignInSection({
     controller?.getSnapshot ?? readNothing,
   );
   const state = follows ? (snapshot?.state ?? null) : null;
+  const running = isProviderSignInRunning(state);
+
+  // A terminal flow keeps its terminal from the start, and after a failure while it shows why.
+  const hasOutput = useSyncExternalStore(
+    controller?.onOutput ?? subscribeToNothing,
+    controller === null ? readNoOutput : () => controller.output() !== "",
+    readNoOutput,
+  );
+  const terminalFlowId =
+    state?.method === "terminal" &&
+    state.flowId !== null &&
+    (running || (state.phase === "failed" && hasOutput))
+      ? state.flowId
+      : null;
+  const terminalReady = useLazyComponentReady(ProviderSignInTerminal, terminalFlowId !== null, {
+    onLoadError: (loadError, retry) =>
+      notifySurfaceLoadFailure("sign-in terminal", loadError, retry),
+  });
+  usePreloadWhenIdle(
+    ProviderSignInTerminal,
+    state?.phase === "idle" && state.method === "terminal",
+  );
 
   const reported = useRef(onStateChange);
   useLayoutEffect(() => {
@@ -221,7 +255,6 @@ export function ProviderSignInSection({
   const shown = needsSignIn || (state !== null && state.phase !== "idle");
   if (!engaged || !shown) return null;
 
-  const running = isProviderSignInRunning(state);
   const pending = snapshot?.pending ?? null;
   const unavailable =
     blockedReason ??
@@ -303,7 +336,16 @@ export function ProviderSignInSection({
         ) : (
           <p className="text-muted-foreground">
             {snapshot?.interrupted ? "Sign-in was interrupted. Start again. " : null}
-            Runs {displayName}&rsquo;s sign-in on {nodeLabel}. The page opens on this device.
+            {state.method === "terminal" ? (
+              <>
+                Runs {displayName}&rsquo;s login in a terminal on {nodeLabel}. Its links open on
+                this device.
+              </>
+            ) : (
+              <>
+                Runs {displayName}&rsquo;s sign-in on {nodeLabel}. The page opens on this device.
+              </>
+            )}
           </p>
         )
       ) : state.phase === "starting" ? (
@@ -321,6 +363,11 @@ export function ProviderSignInSection({
               verificationUrl={interaction.verificationUrl}
               userCode={interaction.userCode}
             />
+          ) : isProviderSignInTerminalWaiting(state) ? (
+            <p className="text-muted-foreground">
+              Answer {displayName}&rsquo;s login in the terminal below. Its links open on this
+              device.
+            </p>
           ) : (
             <p className="text-muted-foreground">
               This sign-in needs a newer Ryco on this device. Update it to continue, or cancel the
@@ -358,6 +405,24 @@ export function ProviderSignInSection({
         </p>
       )}
 
+      {terminalFlowId !== null && controller !== null ? (
+        <div
+          key={terminalFlowId}
+          role="group"
+          aria-label={`${displayName} login terminal`}
+          className="h-64 overflow-hidden rounded-md border border-border/70 bg-background p-2"
+        >
+          {terminalReady ? (
+            <ProviderSignInTerminal
+              controller={controller}
+              interactive={isProviderSignInTerminalWaiting(state)}
+            />
+          ) : (
+            <LoaderIcon className="size-3 animate-spin text-muted-foreground" />
+          )}
+        </div>
+      ) : null}
+
       {snapshot?.error && unavailable === null ? (
         <p className="text-destructive-foreground" role="alert">
           {snapshot.error}
@@ -369,3 +434,4 @@ export function ProviderSignInSection({
 
 const subscribeToNothing = () => () => undefined;
 const readNothing = () => null;
+const readNoOutput = () => false;

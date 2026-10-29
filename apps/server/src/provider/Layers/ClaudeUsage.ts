@@ -5,10 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import type { ServerProviderRateLimits } from "@ryco/contracts";
-import {
-  CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES,
-  CLAUDE_THIRD_PARTY_PROVIDER_FLAGS,
-} from "@ryco/shared/claudeCredentialVariables";
+import { claudeNonLoginCredentialSource } from "@ryco/shared/claudeCredentialVariables";
 import { Cache, type Duration, Effect } from "effect";
 
 import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
@@ -54,11 +51,6 @@ export interface ClaudeLoginAccount {
   readonly tokenSource: string | undefined;
 }
 
-// Claude Code's reading of its boolean variables.
-function isClaudeEnvFlagSet(value: string | undefined): boolean {
-  return ["1", "true", "yes", "on"].includes(value?.trim().toLowerCase() ?? "");
-}
-
 function usesLocalClaudeLogin(
   environment: NodeJS.ProcessEnv,
   account: ClaudeLoginAccount,
@@ -68,10 +60,7 @@ function usesLocalClaudeLogin(
   // A base URL set only in its settings files is not reported, so it cannot be detected here.
   // Any other credential or provider would make the login's usage describe another account.
   if (account.subscriptionType === undefined || account.tokenSource !== undefined) return false;
-  return (
-    !CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES.some((name) => environment[name]?.trim()) &&
-    !CLAUDE_THIRD_PARTY_PROVIDER_FLAGS.some((name) => isClaudeEnvFlagSet(environment[name]))
-  );
+  return claudeNonLoginCredentialSource(environment) === undefined;
 }
 
 function keychainService(configDir: string | undefined): string {

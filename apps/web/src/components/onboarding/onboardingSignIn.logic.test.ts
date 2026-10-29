@@ -4,10 +4,9 @@ import {
   type ProviderInstanceConfig,
   type ServerProvider,
 } from "@ryco/contracts";
-import { PROVIDER_SIGN_IN_DRIVERS } from "@ryco/shared/providerSignIn";
 import { describe, expect, it } from "vite-plus/test";
 
-import { canOfferOnboardingSignIn, claudeInstanceSkipsLogin } from "./onboardingSignIn.logic";
+import { canOfferOnboardingSignIn } from "./onboardingSignIn.logic";
 
 function snapshot(
   driver: string,
@@ -47,7 +46,6 @@ function offer(
 }
 
 const SIGNED_OUT = { status: "unauthenticated" } as const;
-const claudeSignsIn = PROVIDER_SIGN_IN_DRIVERS.has("claudeAgent");
 
 describe("canOfferOnboardingSignIn", () => {
   it("offers Codex while it reports no sign-in", () => {
@@ -62,14 +60,14 @@ describe("canOfferOnboardingSignIn", () => {
     expect(offer(snapshot("codex", { status: "unknown" }))).toBe(false);
   });
 
-  it("offers a Claude instance that started without an account, once Claude signs in from Ryco", () => {
-    expect(offer(snapshot("claudeAgent", { status: "authenticated" }))).toBe(claudeSignsIn);
+  it("offers a Claude instance that started without an account", () => {
+    expect(offer(snapshot("claudeAgent", { status: "authenticated" }))).toBe(true);
     expect(
       offer(
         snapshot("claudeAgent", { status: "authenticated" }),
         settings("claudeAgent", ["HOME"]),
       ),
-    ).toBe(claudeSignsIn);
+    ).toBe(true);
     expect(
       offer(snapshot("claudeAgent", { status: "authenticated", email: "a@example.com" })),
     ).toBe(false);
@@ -93,33 +91,18 @@ describe("canOfferOnboardingSignIn", () => {
     expect(offer(snapshot("codex", SIGNED_OUT, { availability: "unavailable" }))).toBe(false);
   });
 
-  it("leaves drivers that do not sign in from Ryco yet to their own CLI", () => {
-    // The terminal method (Claude, Cursor, Grok, OpenCode) widens this when it lands.
-    expect(offer(snapshot("opencode", SIGNED_OUT))).toBe(false);
+  it("offers the drivers that sign in in a terminal, and leaves the rest to their own flow", () => {
+    expect(offer(snapshot("opencode", SIGNED_OUT))).toBe(true);
+    expect(offer(snapshot("cursor", SIGNED_OUT))).toBe(true);
+    // Grok never names its account: one that does not start may need its login.
+    expect(offer(snapshot("grok", { status: "unknown" }, { status: "error" }))).toBe(true);
+    expect(offer(snapshot("grok", { status: "unknown" }))).toBe(false);
+    // ACP Registry keeps its own authentication; Copilot's login is not verified yet.
     expect(offer(snapshot("acpRegistry", SIGNED_OUT))).toBe(false);
+    expect(offer(snapshot("copilot", SIGNED_OUT))).toBe(false);
   });
 
   it("offers nothing when this session may not start a sign-in", () => {
     expect(offer(snapshot("codex", SIGNED_OUT), undefined, false)).toBe(false);
-  });
-});
-
-describe("claudeInstanceSkipsLogin", () => {
-  it("reads the non-login credentials and provider flags by name", () => {
-    expect(claudeInstanceSkipsLogin(settings("claudeAgent", ["ANTHROPIC_BASE_URL"]))).toBe(true);
-    expect(claudeInstanceSkipsLogin(settings("claudeAgent", ["ANTHROPIC_API_KEY"]))).toBe(true);
-    expect(claudeInstanceSkipsLogin(settings("claudeAgent", ["CLAUDE_CODE_USE_VERTEX"]))).toBe(
-      true,
-    );
-    expect(
-      claudeInstanceSkipsLogin(settings("claudeAgent", ["CLAUDE_CONFIG_DIR", "HTTPS_PROXY"])),
-    ).toBe(false);
-  });
-
-  it("finds nothing without settings or variables", () => {
-    expect(claudeInstanceSkipsLogin(undefined)).toBe(false);
-    expect(claudeInstanceSkipsLogin({ driver: ProviderDriverKind.make("claudeAgent") })).toBe(
-      false,
-    );
   });
 });

@@ -17,7 +17,7 @@ import {
   type ServerSettings,
 } from "@ryco/contracts";
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
-import { Deferred, Effect, FileSystem, type Path, Queue, Schema } from "effect";
+import { Deferred, Effect, type FileSystem, type Path, Queue, Schema } from "effect";
 import type * as CodexClient from "effect-codex-app-server/client";
 import type { ChildProcessSpawner } from "effect/process";
 
@@ -25,6 +25,7 @@ import { codexProcessEnvironment, materializeCodexShadowHome } from "../Drivers/
 import { type CodexInstanceRuntime, resolveCodexInstanceRuntime } from "../codexInstanceRuntime.ts";
 import { codexRuntimeBinding } from "../codexRuntimeBinding.ts";
 import { withIsolatedCodexAppServer } from "../codexIsolatedAppServer.ts";
+import { ensurePrivateDirectory } from "./privateDirectory.ts";
 
 /** Outlasts the flow's own 15-minute deadline, which ends the job first. */
 const CODEX_DEVICE_CODE_JOB_TIMEOUT = "16 minutes";
@@ -112,14 +113,6 @@ const readAccount = (client: CodexClient.CodexAppServerClientShape) =>
       ),
     ),
   );
-
-/** Creates a missing directory for this node's user only; an existing one is left as it is. */
-const ensurePrivateDirectory = (path: string) =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    if (yield* fileSystem.exists(path)) return;
-    yield* fileSystem.makeDirectory(path, { recursive: true, mode: 0o700 });
-  });
 
 /**
  * `stopped` completes once the app-server's process is gone. Requests fail on their own then, but
