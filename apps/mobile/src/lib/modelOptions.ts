@@ -16,6 +16,9 @@ export type ModelOption = {
   readonly providerLabel: string;
   readonly providerDriver: string;
   readonly isDefault: boolean;
+  /** The manifest retired it; pickers fold it under "Legacy models". */
+  readonly isLegacy: boolean;
+  readonly isCustom: boolean;
   readonly capabilities: ModelCapabilities | null;
   readonly selection: ModelSelection;
 };
@@ -75,6 +78,8 @@ export function buildModelOptions(
         // Ryco's ServerProviderModel contract carries no per-model default
         // marker (upstream did); no default badge is available here.
         isDefault: false,
+        isLegacy: model.isLegacy === true,
+        isCustom: model.isCustom,
         capabilities: model.capabilities,
         selection: normalizeSelectionOptions(
           {
@@ -105,6 +110,8 @@ export function buildModelOptions(
         providerLabel,
         providerDriver: fallbackModelSelection.instanceId,
         isDefault: false,
+        isLegacy: false,
+        isCustom: false,
         capabilities: null,
         selection: fallbackModelSelection,
       });

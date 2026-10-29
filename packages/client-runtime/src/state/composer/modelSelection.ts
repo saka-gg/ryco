@@ -79,6 +79,8 @@ export interface AppModelOption {
   subProvider?: string;
   isCustom: boolean;
   isUnavailable?: boolean;
+  /** Pickers fold it into a collapsed "Legacy models" section. */
+  isLegacy?: boolean;
 }
 
 function toAppModelOption(model: ServerProvider["models"][number]): AppModelOption {
@@ -89,6 +91,7 @@ function toAppModelOption(model: ServerProvider["models"][number]): AppModelOpti
   };
   if (model.shortName) option.shortName = model.shortName;
   if (model.subProvider) option.subProvider = model.subProvider;
+  if (model.isLegacy) option.isLegacy = true;
   return option;
 }
 

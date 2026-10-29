@@ -68,6 +68,13 @@ Semantics of the Claude adapter payloads:
   context-window suffix today).
 - `contextWindowTokens` / `fixedContextWindowTokens` — kept for upstream
   format parity; Ryco reads live window sizes from runtime usage events.
+- model `status` — `current` or `legacy`. Pickers fold `legacy` models into a
+  collapsed "Legacy models" section under each provider's current models.
+  Favorites, custom models and the model that was active when the picker
+  opened never fold, and a search lists matching legacy models inline. A
+  remote manifest edit reclassifies a model on the next provider check. Never
+  add another value: older releases reject the whole remote manifest on one
+  they don't know.
 - model `adapter.claudeCode.minVersion` / `maxVersionExclusive` — hide the
   model on incompatible Claude Code versions. The provider check surfaces an
   upgrade message naming the model with the lowest unmet minimum. Each

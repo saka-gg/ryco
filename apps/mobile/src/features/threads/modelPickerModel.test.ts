@@ -3,12 +3,15 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildModelPickerModel,
+  buildModelPickerModelFromOptions,
   buildModelOptionControls,
   applyModelOption,
+  listModelPickerEntries,
   resolveModelPickerSelection,
   resolveModelPillFastMode,
   shortChoiceLabel,
 } from "./modelPickerModel";
+import { buildModelOptions } from "../../lib/modelOptions";
 
 function provider(instanceId: string, driver: string, models: ReadonlyArray<string>) {
   return {
@@ -150,6 +153,132 @@ describe("resolveModelPickerSelection", () => {
   it("ignores the already-selected entry and unknown keys", () => {
     expect(resolveModelPickerSelection(model, "codex-1:gpt-5.4")).toBeNull();
     expect(resolveModelPickerSelection(model, "nope")).toBeNull();
+  });
+});
+
+describe("legacy models and update notices", () => {
+  const model = (
+    slug: string,
+    name: string,
+    flags: { isLegacy?: boolean; isCustom?: boolean },
+  ) => ({
+    slug,
+    name,
+    isCustom: flags.isCustom ?? false,
+    ...(flags.isLegacy === undefined ? {} : { isLegacy: flags.isLegacy }),
+    capabilities: null,
+  });
+  const LEGACY_CLAUDE = {
+    ...provider("claude-1", "claudeAgent", []),
+    models: [
+      model("claude-opus-4-6", "Claude Opus 4.6", { isLegacy: true }),
+      model("claude-opus-5", "Claude Opus 5", {}),
+      model("claude-haiku-4-5", "Claude Haiku 4.5", { isLegacy: true }),
+      model("claude-sonnet-5", "Claude Sonnet 5", { isLegacy: false }),
+      // Custom and proxy models never fold, whatever they carry.
+      model("proxy/sonnet-4", "Proxy Sonnet 4", { isLegacy: true, isCustom: true }),
+    ],
+    updateRequiredModels: [
+      { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" },
+    ],
+  };
+  const ALL_LEGACY_CODEX = {
+    ...provider("codex-1", "codex", []),
+    models: [
+      model("gpt-5.2", "GPT-5.2", { isLegacy: true }),
+      model("gpt-5.1", "GPT-5.1", { isLegacy: true }),
+    ],
+  };
+  const keys = (entries: ReadonlyArray<{ readonly key: string }>) =>
+    entries.map((entry) => entry.key);
+  const picker = (
+    query = "",
+    current = selection("claude-1", "claude-opus-5"),
+    lockedProviderKey?: string,
+  ) =>
+    buildModelPickerModel({
+      serverConfig: config(LEGACY_CLAUDE, ALL_LEGACY_CODEX),
+      currentSelection: current,
+      query,
+      ...(lockedProviderKey ? { lockedProviderKey } : {}),
+    });
+  const claudeGroup = (model: ReturnType<typeof picker>) =>
+    model.groups.find((group) => group.providerKey === "claude-1");
+
+  it("folds each group's legacy models after its current ones, in order", () => {
+    const claude = claudeGroup(picker());
+    expect(keys(claude?.entries ?? [])).toEqual([
+      "claude-1:claude-opus-5",
+      "claude-1:claude-sonnet-5",
+      "claude-1:proxy/sonnet-4",
+    ]);
+    expect(keys(claude?.legacyEntries ?? [])).toEqual([
+      "claude-1:claude-opus-4-6",
+      "claude-1:claude-haiku-4-5",
+    ]);
+    // A group whose models are all legacy has nothing to fold them under.
+    const codex = picker().groups.find((group) => group.providerKey === "codex-1");
+    expect(keys(codex?.entries ?? [])).toEqual(["codex-1:gpt-5.2", "codex-1:gpt-5.1"]);
+    expect(codex?.legacyEntries).toEqual([]);
+  });
+
+  it("lists matching legacy models inline while searching", () => {
+    const claude = claudeGroup(picker("4.6"));
+    expect(keys(claude?.entries ?? [])).toEqual(["claude-1:claude-opus-4-6"]);
+    expect(claude?.legacyEntries).toEqual([]);
+  });
+
+  it("keeps a selected legacy model in the current list", () => {
+    const model = picker("", selection("claude-1", "claude-haiku-4-5"));
+    const claude = claudeGroup(model);
+    expect(keys(claude?.entries ?? [])).toContain("claude-1:claude-haiku-4-5");
+    expect(claude?.entries.find((entry) => entry.selected)?.key).toBe("claude-1:claude-haiku-4-5");
+    expect(keys(claude?.legacyEntries ?? [])).toEqual(["claude-1:claude-opus-4-6"]);
+    expect(model.pillLabel).toBe("Haiku 4.5");
+  });
+
+  it("resolves a tap on a folded legacy model, and keeps the provider lock on it", () => {
+    expect(resolveModelPickerSelection(picker(), "claude-1:claude-opus-4-6")).toMatchObject({
+      instanceId: "claude-1",
+      model: "claude-opus-4-6",
+    });
+    expect(keys(listModelPickerEntries(picker()))).toContain("claude-1:claude-haiku-4-5");
+
+    const locked = picker("", selection("codex-1", "gpt-5.1"), "codex-1");
+    expect(claudeGroup(locked)?.legacyEntries.every((entry) => entry.disabled)).toBe(true);
+    expect(resolveModelPickerSelection(locked, "claude-1:claude-opus-4-6")).toBeNull();
+  });
+
+  it("names the update that unlocks a model under its group", () => {
+    expect(claudeGroup(picker())?.updateRequiredNotice).toBe(
+      "Update Claude Code to v2.1.257 or newer to use Claude Fable 5.1.",
+    );
+    expect(
+      picker().groups.find((group) => group.providerKey === "codex-1")?.updateRequiredNotice,
+    ).toBeNull();
+    // Without provider snapshots there is nothing to say.
+    const fromOptions = buildModelPickerModelFromOptions({
+      modelOptions: buildModelOptions(config(LEGACY_CLAUDE), null),
+      currentSelection: null,
+    });
+    expect(fromOptions.groups[0]?.updateRequiredNotice).toBeNull();
+  });
+
+  it("keeps a group for a search only its notice matches", () => {
+    const fable = picker("fable");
+    expect(fable.groups.map((group) => group.providerKey)).toEqual(["claude-1"]);
+    expect(claudeGroup(fable)?.entries).toEqual([]);
+    expect(claudeGroup(fable)?.updateRequiredNotice).toContain("Claude Fable 5.1");
+    expect(fable.emptyForQuery).toBe(true);
+
+    const sonnet = picker("sonnet 5");
+    expect(keys(claudeGroup(sonnet)?.entries ?? [])).toEqual(["claude-1:claude-sonnet-5"]);
+    expect(claudeGroup(sonnet)?.updateRequiredNotice).toBeNull();
+    expect(sonnet.emptyForQuery).toBe(false);
+
+    const none = picker("zzzz");
+    expect(none.groups).toEqual([]);
+    expect(none.emptyForQuery).toBe(true);
   });
 });
 

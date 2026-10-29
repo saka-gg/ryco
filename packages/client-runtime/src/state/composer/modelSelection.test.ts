@@ -171,6 +171,35 @@ describe("instance-scoped model selection", () => {
     ]);
   });
 
+  it("passes the legacy flag through and leaves it off current models", () => {
+    const claude = provider({ instanceId: "claudeAgent" });
+    const model = (slug: string, isLegacy?: boolean) => ({
+      slug,
+      name: slug,
+      isCustom: false,
+      capabilities: {},
+      ...(isLegacy === undefined ? {} : { isLegacy }),
+    });
+    const providers = [
+      {
+        ...claude,
+        models: [
+          model("claude-opus-5"),
+          model("claude-opus-4-6", true),
+          model("claude-sonnet-4-6", false),
+        ],
+      },
+    ];
+    const stock = deriveProviderInstanceEntries(providers)[0]!;
+    const options = getAppModelOptionsForInstance(settingsWithProviderInstances(), stock);
+
+    expect(options.find((option) => option.slug === "claude-opus-4-6")?.isLegacy).toBe(true);
+    expect("isLegacy" in options.find((option) => option.slug === "claude-opus-5")!).toBe(false);
+    expect("isLegacy" in options.find((option) => option.slug === "claude-sonnet-4-6")!).toBe(
+      false,
+    );
+  });
+
   it("applies persisted per-instance model ordering", () => {
     const providers = [
       provider({

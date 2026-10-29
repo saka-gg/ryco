@@ -198,7 +198,7 @@ import {
   useComposerFileUploadMaxBytes,
   useComposerFileUploadRecords,
 } from "../../state/composerFileUpload";
-import { buildModelPickerModel } from "./modelPickerModel";
+import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerModel";
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
 import { ThreadComposer } from "./ThreadComposer";
@@ -2116,13 +2116,11 @@ export function ThreadDetailScreen(props: {
         fastModeNotice={fastModeNotice}
         onSelectModel={(selection) => {
           if (policyBusy || cachedView.actionsDisabled) return;
-          const entry = modelPicker?.groups
-            .flatMap((group) => group.entries)
-            .find(
-              (candidate) =>
-                candidate.selection.instanceId === selection.instanceId &&
-                candidate.selection.model === selection.model,
-            );
+          const entry = (modelPicker ? listModelPickerEntries(modelPicker) : []).find(
+            (candidate) =>
+              candidate.selection.instanceId === selection.instanceId &&
+              candidate.selection.model === selection.model,
+          );
           if (entry && !entry.disabled) stageModelSelection(selection);
         }}
         onSelectRuntimeMode={(value) => {

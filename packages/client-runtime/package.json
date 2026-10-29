@@ -194,6 +194,10 @@
       "types": "./src/state/composer/index.ts",
       "import": "./src/state/composer/index.ts"
     },
+    "./state/composer/legacyModelFold": {
+      "types": "./src/state/composer/legacyModelFold.ts",
+      "import": "./src/state/composer/legacyModelFold.ts"
+    },
     "./state/composer/providerUpdateRequiredNotice": {
       "types": "./src/state/composer/providerUpdateRequiredNotice.ts",
       "import": "./src/state/composer/providerUpdateRequiredNotice.ts"
