@@ -1,4 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
+import { randomUUID } from "node:crypto";
 import { cuaSpaceInventory } from "./cuaSpaceInventory.ts";
 import {
   parseCuaActionDiagnostics,
@@ -55,6 +56,7 @@ import {
   type ComputerBrowserCall,
   type ComputerBrowserCallResult,
   type ComputerCaptureRequest,
+  type ComputerClipboardPayload,
   type ComputerFrameListener,
   type ComputerMenuBackendTarget,
   type ComputerShieldTarget,
@@ -66,6 +68,7 @@ import {
   desktopOperationSignal,
   assertDesktopOperationActive,
   desktopDeliveryMode,
+  withoutDesktopCancellation,
 } from "./DesktopOperationQueue.ts";
 import { StillFramePublisher, resolveStillIntervalMs } from "./stillFramePublisher.ts";
 import { isModelDesktopObservationActive } from "./modelDesktopObservation.ts";
@@ -292,6 +295,18 @@ function cuaKey(value: string): string {
   return aliases[key] ?? key;
 }
 
+/** First native revision whose `clipboard_write` can snapshot and restore every clipboard representation. */
+const CUA_CLIPBOARD_PRESERVATION_REVISION = 40;
+
+interface CuaHostCallOptions {
+  /**
+   * The reply reports an outcome no desktop interruption can make stale, so
+   * a newer desktop generation adopted while it was in flight does not
+   * reject it. Only clipboard cleanup uses this; observations never may.
+   */
+  readonly epochIndependent?: boolean;
+}
+
 /** The Cua backend. Cua owns native actions; Synara owns admission,
  * session authority, explicit delivery policy and the provider result. */
 export class CuaComputerBackend implements ComputerBackend {
@@ -472,6 +487,7 @@ export class CuaComputerBackend implements ComputerBackend {
     request: Record<string, unknown>,
     mutation = false,
     allowModelObservation = true,
+    options: CuaHostCallOptions = {},
   ): Promise<CuaReply> {
     if (this.disposed || !this.endpoint)
       throw new CuaActionError(
@@ -529,23 +545,20 @@ export class CuaComputerBackend implements ComputerBackend {
         this.hostPlatform = reply.hostPlatform;
       const epoch = reply.desktopEpoch;
       if (epoch !== undefined && Number.isSafeInteger(epoch) && epoch >= 0) {
-        if (
+        const stale =
           sendBaseline !== undefined &&
-          this.desktopEpoch !== undefined &&
-          this.desktopEpoch !== sendBaseline
-        )
-          throw new CuaActionError(
-            "The desktop changed while this operation was in flight. Observe again before continuing.",
-            mutation ? "dispatched-unknown" : "not-dispatched",
-            "stale_desktop_epoch",
-          );
-        if (sendBaseline !== undefined && epoch < sendBaseline)
-          throw new CuaActionError(
-            "The desktop changed while this operation was in flight. Observe again before continuing.",
-            mutation ? "dispatched-unknown" : "not-dispatched",
-            "stale_desktop_epoch",
-          );
-        if (epoch !== this.desktopEpoch) {
+          ((this.desktopEpoch !== undefined && this.desktopEpoch !== sendBaseline) ||
+            epoch < sendBaseline);
+        if (stale) {
+          // An epoch-independent reply stays valid, but its older epoch
+          // must not roll back the generation another reply adopted.
+          if (!options.epochIndependent)
+            throw new CuaActionError(
+              "The desktop changed while this operation was in flight. Observe again before continuing.",
+              mutation ? "dispatched-unknown" : "not-dispatched",
+              "stale_desktop_epoch",
+            );
+        } else if (epoch !== this.desktopEpoch) {
           this.desktopEpoch = epoch;
           this.observedGeometry.clear();
           this.snapshotAt = 0;
@@ -593,12 +606,13 @@ export class CuaComputerBackend implements ComputerBackend {
     args: Record<string, unknown> = {},
     mutation = false,
     allowModelObservation = true,
+    options: CuaHostCallOptions = {},
   ): Promise<CuaToolResult> {
     // The native operation itself, on the call's timing record — the name is
     // a fixed driver vocabulary, and nothing from `args` is recorded.
     currentComputerCall()?.timing?.count("native_calls");
     const reply = await timedComputerLeg("call", () =>
-      this.host({ method: "call", name, args }, mutation, allowModelObservation),
+      this.host({ method: "call", name, args }, mutation, allowModelObservation, options),
     );
     const result = reply.result ?? {};
     if (
@@ -2225,6 +2239,57 @@ export class CuaComputerBackend implements ComputerBackend {
   async writeClipboard(value: string) {
     assertComputerClipboardWriteFits(value);
     await this.call("clipboard_write", { text: value }, true);
+  }
+  async prepareClipboardPaste(payload: ComputerClipboardPayload): Promise<() => Promise<boolean>> {
+    // A host probe can be answered before the driver has started. This read
+    // requires its validated handshake, without touching clipboard contents.
+    if (this.driverNativeRevision === undefined)
+      await this.call("get_screen_size", {}, false, false);
+    if (
+      (this.hostPlatform ?? process.platform) !== "darwin" ||
+      (this.driverNativeRevision ?? 0) < CUA_CLIPBOARD_PRESERVATION_REVISION
+    )
+      throw new CuaActionError(
+        "This native driver cannot preserve the clipboard for paste; no clipboard content was changed.",
+        "not-dispatched",
+        "clipboard_preservation_unavailable",
+      );
+    if ("text" in payload) assertComputerClipboardWriteFits(payload.text);
+    const content =
+      "text" in payload
+        ? { text: payload.text }
+        : "imagePath" in payload
+          ? { image_path: payload.imagePath }
+          : { file_path: payload.filePath };
+    // Known before dispatch so a lost write acknowledgement cannot lose the
+    // only handle to the saved clipboard. The token never reaches the model.
+    const token = randomUUID();
+    // Whether the snapshot went back does not depend on the desktop
+    // generation: a lock or Stop while the restore is in flight must not turn
+    // a restore the driver performed into a reported loss.
+    const restore = async () => {
+      const restored = await this.call("clipboard_write", { restore_token: token }, true, true, {
+        epochIndependent: true,
+      });
+      return restored.structuredContent?.clipboard_restored === true;
+    };
+    try {
+      const result = await this.call(
+        "clipboard_write",
+        { ...content, preserve: true, preserve_token: token },
+        true,
+      );
+      if (result.structuredContent?.restore_token !== token)
+        throw new CuaActionError(
+          "The native clipboard write returned no matching restoration receipt. Do not repeat the paste.",
+          "dispatched-unknown",
+          "clipboard_restore_receipt_missing",
+        );
+    } catch (error) {
+      await withoutDesktopCancellation(() => restore().catch(() => false));
+      throw error;
+    }
+    return restore;
   }
   async launchApp(
     app: string,

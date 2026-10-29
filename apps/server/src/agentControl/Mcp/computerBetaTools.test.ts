@@ -44,7 +44,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-function fixture() {
+function fixture(
+  getThreadCheckpointContext: (threadId: ThreadId) => Effect.Effect<Option.Option<unknown>> = () =>
+    Effect.succeed(Option.none()),
+) {
   let current = Option.some(authority);
   const requests: Record<string, unknown>[] = [];
   vi.spyOn(CuaComputerBackend.prototype, "dispose").mockResolvedValue();
@@ -68,7 +71,7 @@ function fixture() {
       authorize: () => Effect.void,
     },
     registry: { getTurnAuthority: () => Effect.sync(() => current) } as never,
-    projections: { getThreadCheckpointContext: () => Effect.succeed(Option.none()) } as never,
+    projections: { getThreadCheckpointContext } as never,
   });
   const stage = (runtimeMode: "full-access" | "approval-required" = "full-access") => {
     stageComputerTurn(session.threadId, {
@@ -105,6 +108,23 @@ it("advertises native tools only on enabled turns with a computer capability", a
         runtime.tools.descriptorsFor({ ...session, grantedCapabilities: [] }),
       ),
     ).toEqual([]);
+  } finally {
+    await runtime.dispose();
+  }
+});
+it("resolves the workspace through thread projections for native file paste", async () => {
+  const getThreadCheckpointContext = vi.fn((_threadId: ThreadId) => Effect.succeed(Option.none()));
+  const runtime = fixture(getThreadCheckpointContext);
+  try {
+    runtime.stage();
+    const result = await Effect.runPromise(
+      runtime.tools.callTool(session, "computer_paste", { image_path: "/tmp/ryco-image.png" }),
+    );
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain(
+      "No canonical workspace is available for native file paste",
+    );
+    expect(getThreadCheckpointContext).toHaveBeenCalledWith(session.threadId);
   } finally {
     await runtime.dispose();
   }
