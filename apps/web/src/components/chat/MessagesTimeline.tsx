@@ -260,6 +260,8 @@ interface MessagesTimelineProps {
   activeTurnInProgress: boolean;
   activeTurnId?: TurnId | null;
   latestTurn?: TimelineLatestTurn | null;
+  /** The session ended in an error: an interrupted latest turn reads "Interrupted". */
+  latestTurnEndedBySession?: boolean;
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   targetMessageId?: MessageId | null;
@@ -348,6 +350,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnInProgress,
   activeTurnId,
   latestTurn = null,
+  latestTurnEndedBySession = false,
   activeTurnStartedAt,
   listRef,
   targetMessageId = null,
@@ -443,6 +446,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       deriveMessagesTimelineRows({
         timelineEntries,
         latestTurn,
+        latestTurnEndedBySession,
         runningTurnId: runningTurnIdForFolds,
         turnFoldExpandedById,
         workGroupExpandedById,
@@ -466,6 +470,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isPhoneTier,
       timelineEntries,
       latestTurn,
+      latestTurnEndedBySession,
       runningTurnIdForFolds,
       turnFoldExpandedById,
       workGroupExpandedById,

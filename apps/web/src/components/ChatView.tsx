@@ -6762,6 +6762,7 @@ export default function ChatView(props: ChatViewProps) {
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnId={activeLatestTurn?.turnId ?? null}
                 latestTurn={activeLatestTurn}
+                latestTurnEndedBySession={activeThread.session?.status === "error"}
                 activeTurnStartedAt={activeWorkStartedAt}
                 worktreeSetup={worktreeSetupTimeline}
                 launchTurnDurationStart={

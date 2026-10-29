@@ -1032,6 +1032,43 @@ describe("deriveMessagesTimelineRows", () => {
     ]);
   });
 
+  it("says Interrupted, not You stopped, when the session ended the turn", () => {
+    const turnId = TurnId.make("turn-released");
+    const input = {
+      timelineEntries: [
+        {
+          id: "work-entry",
+          kind: "work" as const,
+          createdAt: "2026-01-01T00:00:05Z",
+          entry: makeWorkEntry({ id: "work-1", turnId }),
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "interrupted" as const,
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:47Z",
+      },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    };
+    const released = deriveMessagesTimelineRows({ ...input, latestTurnEndedBySession: true });
+    expect(released).toEqual([
+      expect.objectContaining({ kind: "turn-fold", label: "Interrupted after 47s" }),
+    ]);
+    // A completed turn never reads as interrupted, whatever the session did after.
+    const completed = deriveMessagesTimelineRows({
+      ...input,
+      latestTurn: { ...input.latestTurn, state: "completed" as const },
+      latestTurnEndedBySession: true,
+    });
+    expect(completed).toEqual([
+      expect.objectContaining({ kind: "turn-fold", label: "Worked for 47s" }),
+    ]);
+  });
+
   it("keeps the previous turn settled while a newly sent message awaits its turn id", () => {
     const previousTurnId = TurnId.make("turn-previous");
     const rows = deriveMessagesTimelineRows({
