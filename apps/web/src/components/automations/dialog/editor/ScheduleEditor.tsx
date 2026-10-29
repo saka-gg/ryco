@@ -60,6 +60,7 @@ import {
   SAVE_REFUSED,
   saveFailureField,
   sentenceWords,
+  calendarChoiceWeekdays,
   withStart,
   type EditorFocusField,
   type EditorTokenKind,
@@ -298,8 +299,9 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
     }
   };
 
+  /** "Repeats" covers an interval and a calendar schedule; "Once" is the other. */
   const setKind = (kind: ScheduleDraft["kind"]) => {
-    if (draft.kind === kind) return;
+    if (draft.kind === kind || (kind === "fixed-interval" && draft.kind === "calendar")) return;
     setOpen(null);
     update({ ...draft, kind });
   };
@@ -425,7 +427,7 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
               <span className="pk">
                 <PickerRadioRow
                   options={KIND_OPTIONS}
-                  value={draft.kind}
+                  value={draft.kind === "calendar" ? "fixed-interval" : draft.kind}
                   label="How often"
                   className="ae-kind"
                   onSelect={setKind}
@@ -446,7 +448,14 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
             devices={isNew && devices.length > 1 ? devices : null}
             deviceTip={isNew ? null : "A schedule stays on the device it was created on"}
             refSource={refSource}
-            onInterval={(ms) => update({ ...draft, intervalMs: ms })}
+            onInterval={(ms) => update({ ...draft, kind: "fixed-interval", intervalMs: ms })}
+            onCalendar={(choice) =>
+              update({
+                ...draft,
+                kind: "calendar",
+                weekdays: calendarChoiceWeekdays(choice, draft),
+              })
+            }
             onStart={(ms) => update(withStart(draft, ms))}
             onEnd={(ms) => update({ ...draft, endsAt: ms })}
             onDevice={(key) => {

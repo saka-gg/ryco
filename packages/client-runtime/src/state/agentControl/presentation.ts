@@ -19,6 +19,7 @@ import {
   type AgentControlProposalId,
   type AgentControlProposalStatus,
 } from "@ryco/contracts/agent-control";
+import { calendarDaysWords } from "@ryco/shared/automationCalendar";
 
 export type AgentControlStatusTone = "pending" | "info" | "success" | "danger" | "muted";
 
@@ -129,12 +130,20 @@ function planPresentation(proposal: AgentControlProposal): {
   ) =>
     schedule.kind === "once"
       ? [`Schedule: one-shot`, `Next run: ${schedule.runAt}`]
-      : [
-          `Schedule: every ${schedule.intervalMs}ms`,
-          `Next run: ${schedule.startsAt}`,
-          `Ends: ${schedule.endsAt}`,
-          "Missed intervals coalesce into at most one pending run.",
-        ];
+      : schedule.kind === "calendar"
+        ? [
+            `Schedule: ${calendarDaysWords(schedule.weekdays)} at ${schedule.localTime} (${schedule.timeZone})`,
+            `Starts: ${schedule.startsAt}`,
+            `Ends: ${schedule.endsAt}`,
+            "A time a clock change skips is skipped that day; a repeated time runs once.",
+            "Missed times coalesce into at most one pending run.",
+          ]
+        : [
+            `Schedule: every ${schedule.intervalMs}ms`,
+            `Next run: ${schedule.startsAt}`,
+            `Ends: ${schedule.endsAt}`,
+            "Missed intervals coalesce into at most one pending run.",
+          ];
   const runPolicyLines = (
     runPolicy: Extract<
       AgentControlProposal["plan"],

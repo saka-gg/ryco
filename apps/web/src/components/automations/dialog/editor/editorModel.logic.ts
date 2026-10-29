@@ -26,6 +26,7 @@ import {
   when,
   type ScheduleErrors,
 } from "@ryco/shared/automationSchedule";
+import { calendarDaysWords, formatLocalTime, localDateTime } from "@ryco/shared/automationCalendar";
 import { createModelSelection, getProviderOptionCurrentValue } from "@ryco/shared/model";
 
 import { REASONING_DESCRIPTOR_IDS } from "../../../chat/modelTuning.logic";
@@ -190,9 +191,43 @@ export interface SentenceWords {
   readonly refLabel: string;
 }
 
+/** Which calendar choice a draft's weekdays are, if any. */
+export type CalendarChoice = "daily" | "weekdays" | "weekly";
+
+export function calendarChoiceOf(draft: ScheduleDraft): CalendarChoice | null {
+  if (draft.kind !== "calendar") return null;
+  const days = draft.weekdays.join();
+  if (days === "0,1,2,3,4,5,6") return "daily";
+  if (days === "1,2,3,4,5") return "weekdays";
+  return draft.weekdays.length === 1 ? "weekly" : null;
+}
+
+/** The weekdays a calendar choice runs on; "weekly" runs on the first run's weekday. */
+export function calendarChoiceWeekdays(choice: CalendarChoice, draft: ScheduleDraft): number[] {
+  if (choice === "daily") return [0, 1, 2, 3, 4, 5, 6];
+  if (choice === "weekdays") return [1, 2, 3, 4, 5];
+  return [weekdayIn(draft.start, draft.timeZone)];
+}
+
+/** The weekday (0 = Sunday) of an instant in a zone. */
+function weekdayIn(ms: number, timeZone: string): number {
+  const local = localDateTime(ms, timeZone);
+  return new Date(Date.UTC(local.year, local.month - 1, local.day)).getUTCDay();
+}
+
+/** "weekday at 09:00" · "Friday at 09:00" — a calendar schedule's words after "Every". */
+function calendarIntervalWords(draft: ScheduleDraft): string {
+  const days = calendarDaysWords(draft.weekdays).replace(/^every /, "");
+  const minutes = Number.isFinite(draft.start)
+    ? localDateTime(draft.start, draft.timeZone).minutes
+    : 0;
+  return `${days} at ${formatLocalTime(minutes)}`;
+}
+
 /** The sentence's words: "Every [day] from [tomorrow 09:00] for [30 days] on … in … off …". */
 export function sentenceWords(draft: ScheduleDraft, nowMs: number): SentenceWords {
-  const interval = everyWords(draft.intervalMs);
+  const interval =
+    draft.kind === "calendar" ? calendarIntervalWords(draft) : everyWords(draft.intervalMs);
   const start = when(draft.start, nowMs);
   // Relative words ("tomorrow 09:00") also say the day for a screen reader.
   const absolute = start === formatDateTime(draft.start) ? "" : `, ${formatDay(draft.start)}`;
@@ -200,7 +235,10 @@ export function sentenceWords(draft: ScheduleDraft, nowMs: number): SentenceWord
   const env = envWords(draft.envMode);
   return {
     interval,
-    intervalLabel: `Repeat interval: every ${interval}`,
+    intervalLabel:
+      draft.kind === "calendar"
+        ? `Repeats: every ${interval}`
+        : `Repeat interval: every ${interval}`,
     startWord: draft.kind === "once" ? "Once," : "from",
     start,
     startLabel: `${draft.kind === "once" ? "Runs at" : "First run"}: ${start}${absolute}`,
@@ -222,11 +260,15 @@ export function sentenceWords(draft: ScheduleDraft, nowMs: number): SentenceWord
  */
 export function withStart(draft: ScheduleDraft, startMs: number): ScheduleDraft {
   const ends = endWords(draft.start, draft.endsAt);
-  return {
+  const moved: ScheduleDraft = {
     ...draft,
     start: startMs,
     endsAt: ends.dur ? startMs + (draft.endsAt - draft.start) : draft.endsAt,
   };
+  // A weekly calendar schedule runs on its first run's weekday (and time).
+  return calendarChoiceOf(draft) === "weekly"
+    ? { ...moved, weekdays: calendarChoiceWeekdays("weekly", moved) }
+    : moved;
 }
 
 /** A message's one-click fix applied to the field it names. */
@@ -237,7 +279,7 @@ export function applyDraftFix(
 ): ScheduleDraft {
   if (key === "start") return withStart(draft, value);
   if (key === "end") return { ...draft, endsAt: value };
-  if (key === "interval") return { ...draft, intervalMs: value };
+  if (key === "interval") return { ...draft, kind: "fixed-interval", intervalMs: value };
   return draft;
 }
 

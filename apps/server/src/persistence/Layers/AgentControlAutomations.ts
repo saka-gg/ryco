@@ -53,15 +53,26 @@ const toAutomation = (row: typeof AutomationDbRow.Type): AgentControlAutomation 
   cancelled: row.cancelled === 1,
 });
 
+/** Calendar schedule rules, loaded the first time one is due so they stay off boot. */
+const loadCalendarSchedules = Effect.promise(
+  () => import("../../agentControl/calendarSchedules.ts"),
+);
+
 function nextOccurrence(
   automation: AgentControlAutomation,
   now: IsoDateTime,
+  calendar: typeof import("../../agentControl/calendarSchedules.ts") | null,
 ): { readonly nextRunAt: IsoDateTime | null; readonly coalescedOccurrences: number } {
   const dueAt = automation.nextRunAt;
   if (dueAt === null || automation.definition.schedule.kind === "once") {
     return { nextRunAt: null, coalescedOccurrences: 0 };
   }
   const schedule = automation.definition.schedule;
+  if (schedule.kind === "calendar") {
+    return calendar === null
+      ? { nextRunAt: null, coalescedOccurrences: 0 }
+      : calendar.nextCalendarOccurrence(schedule, dueAt, now);
+  }
   const dueMs = Date.parse(dueAt);
   const nowMs = Date.parse(now);
   const endsMs = Date.parse(schedule.endsAt);
@@ -386,10 +397,13 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
             limit: Math.max(1, input.limit),
           }).pipe(Effect.flatMap(decodeAutomations));
           const claimed: ClaimedAgentControlAutomationRun[] = [];
+          const calendar = rows.some((row) => row.definition.schedule.kind === "calendar")
+            ? yield* loadCalendarSchedules
+            : null;
           for (const row of rows) {
             const automation = toAutomation(row);
             if (automation.nextRunAt === null) continue;
-            const occurrence = nextOccurrence(automation, input.now);
+            const occurrence = nextOccurrence(automation, input.now, calendar);
             const run: AgentControlAutomationRun = {
               runId: AgentControlAutomationRunId.make(crypto.randomUUID()),
               automationId: automation.automationId,

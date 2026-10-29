@@ -10,7 +10,9 @@ asking (see below).
 
 The schedule language is deliberately finite:
 
-- one future `runAt`, or a fixed interval of at least 15 minutes;
+- one future `runAt`, a fixed interval of at least 15 minutes, or a calendar rule: one time of
+  day on chosen weekdays in a named time zone (a time a clock change skips is skipped that day,
+  a repeated time runs once);
 - a required end within 90 days for recurring schedules;
 - at most 25 active definitions per project;
 - at most one pending or executing run per automation;

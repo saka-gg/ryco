@@ -240,6 +240,52 @@ describe("ScheduleEditor", () => {
       .toBe("Weekly digest");
   });
 
+  it("repeats on weekdays at the first run's time, and back to an interval", async () => {
+    const screen = await renderDialog();
+    openRyco();
+    const dialog = screen.getByRole("dialog");
+    await expect.poll(detailTitle).toBe("Triage new issues");
+    await userEvent.keyboard("n");
+    const editor = dialog.getByRole("region", { name: "New schedule" });
+    await expect.element(editor).toBeVisible();
+    await userEvent.fill(editor.getByRole("textbox", { name: "Title" }), "Standup notes");
+    await userEvent.fill(editor.getByRole("textbox", { name: "Prompt" }), "Draft the notes.");
+
+    await userEvent.click(editor.getByRole("button", { name: "Repeat interval: every day" }));
+    await page.getByRole("radio", { name: "Weekdays at this time" }).click();
+    const token = editor.getByRole("button", { name: "Repeats: every weekday at 09:00" });
+    await expect.element(token).toBeVisible();
+    await expect.poll(() => document.querySelector('[data-ae-pop$=":interval"]')).toBeNull();
+    // Back to an interval from the same popover.
+    await userEvent.click(token);
+    await expect
+      .element(page.getByRole("radio", { name: "Weekdays at this time" }))
+      .toHaveAttribute("aria-checked", "true");
+    await page.getByRole("radio", { name: intervalLabel(2 * HOUR_MS) }).click();
+    await expect
+      .element(editor.getByRole("button", { name: "Repeat interval: every 2 hours" }))
+      .toBeVisible();
+    await expect.poll(() => document.querySelector('[data-ae-pop$=":interval"]')).toBeNull();
+    await userEvent.click(editor.getByRole("button", { name: "Repeat interval: every 2 hours" }));
+    await page.getByRole("radio", { name: "Weekdays at this time" }).click();
+    await expect.poll(() => document.querySelector('[data-ae-pop$=":interval"]')).toBeNull();
+
+    (editor.getByRole("textbox", { name: "Prompt" }).element() as HTMLElement).focus();
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await expect.poll(() => dialogCentreFixture.commands.length).toBe(1);
+    expect(lastCommand()).toMatchObject({
+      kind: "save",
+      definition: {
+        schedule: {
+          kind: "calendar",
+          localTime: "09:00",
+          weekdays: [1, 2, 3, 4, 5],
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
+      },
+    });
+  });
+
   it("refuses a save with what's missing, focusing the first field, and fixes it in one click", async () => {
     const screen = await renderDialog({
       editorComponent: editorWithDraft((props) => {

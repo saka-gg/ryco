@@ -74,6 +74,11 @@ export interface IntervalPickerProps {
   readonly label?: string | undefined;
   /** Say that day-based intervals are elapsed time (hosts without a run preview). */
   readonly dstHint?: boolean | undefined;
+  /**
+   * No interval is chosen (the schedule repeats on the calendar instead): nothing is
+   * checked, and any choice here reports itself, even the interval already set.
+   */
+  readonly unselected?: boolean | undefined;
   readonly className?: string | undefined;
 }
 
@@ -108,7 +113,7 @@ export function IntervalPicker(props: IntervalPickerProps) {
     const nextValue = next.value ?? value;
     if ((next.bad?.text ?? null) !== (bad?.text ?? null)) props.onInvalid?.(next.bad?.text ?? null);
     setState({ ...next, value: nextValue });
-    if (nextValue !== value) props.onChange(nextValue);
+    if (nextValue !== value || props.unselected) props.onChange(nextValue);
   };
 
   /** setValue: clamp, and with `keepUnit` false re-derive amount (and the unit unless custom). */
@@ -310,7 +315,8 @@ export function IntervalPicker(props: IntervalPickerProps) {
     })),
     { value: CUSTOM, label: "Custom", ariaLabel: "Custom interval" },
   ];
-  const checked = customOpen ? CUSTOM : String(value);
+  const checked = props.unselected ? null : customOpen ? CUSTOM : String(value);
+  const revealOpen = customOpen && !props.unselected;
   const hintRef = useRef<HTMLDivElement | null>(null);
 
   return (
@@ -325,8 +331,8 @@ export function IntervalPicker(props: IntervalPickerProps) {
         className="pk-reveal"
         role="group"
         aria-label="Custom interval"
-        data-open={customOpen ? "" : undefined}
-        inert={!customOpen}
+        data-open={revealOpen ? "" : undefined}
+        inert={!revealOpen}
       >
         <div className="pk-reveal-in">
           <div className="pk-stepper">

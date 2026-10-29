@@ -18,6 +18,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   applyDraftFix,
+  calendarChoiceOf,
+  calendarChoiceWeekdays,
   defaultScheduleModel,
   editorHint,
   editorOpening,
@@ -195,6 +197,53 @@ describe("the sentence", () => {
     expect(words.start).toBe("Sat, Oct 10 · 10:40");
     expect(words.startLabel).toBe("Runs at: Sat, Oct 10 · 10:40");
     expect(words.endWord).toBe("until");
+  });
+});
+
+describe("calendar schedules", () => {
+  const weekdays = blank({
+    kind: "calendar",
+    weekdays: [1, 2, 3, 4, 5],
+    timeZone: "Europe/Berlin",
+  });
+
+  it("says the days and the first run's time after Every", () => {
+    const words = sentenceWords(weekdays, NOW);
+    expect(words.interval).toBe("weekday at 09:00");
+    expect(words.intervalLabel).toBe("Repeats: every weekday at 09:00");
+    expect(sentenceWords({ ...weekdays, weekdays: [4] }, NOW).interval).toBe("Thursday at 09:00");
+  });
+
+  it("names the choice and runs a weekly schedule on its first run's weekday", () => {
+    expect(calendarChoiceOf(weekdays)).toBe("weekdays");
+    expect(calendarChoiceOf({ ...weekdays, weekdays: [0, 1, 2, 3, 4, 5, 6] })).toBe("daily");
+    expect(calendarChoiceOf(blank())).toBeNull();
+    // Tomorrow is Thursday Oct 8.
+    expect(calendarChoiceWeekdays("weekly", weekdays)).toEqual([4]);
+    const weekly = { ...weekdays, weekdays: [4] };
+    expect(withStart(weekly, new Date(2026, 9, 12, 9, 0).getTime()).weekdays).toEqual([1]);
+    // Weekdays stay weekdays when the first run moves.
+    expect(withStart(weekdays, new Date(2026, 9, 12, 9, 0).getTime()).weekdays).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
+  });
+
+  it("turns an interval fix into an interval schedule", () => {
+    expect(applyDraftFix(weekdays, "interval", 15 * MINUTE_MS)).toMatchObject({
+      kind: "fixed-interval",
+      intervalMs: 15 * MINUTE_MS,
+    });
+  });
+
+  it("saves the first run's time of day in the schedule's zone", () => {
+    expect(JSON.parse(scheduleDraftKey(weekdays)).schedule).toEqual({
+      kind: "calendar",
+      timeZone: "Europe/Berlin",
+      localTime: "09:00",
+      weekdays: [1, 2, 3, 4, 5],
+      startsAt: new Date(weekdays.start).toISOString(),
+      endsAt: new Date(weekdays.endsAt).toISOString(),
+    });
   });
 });
 
