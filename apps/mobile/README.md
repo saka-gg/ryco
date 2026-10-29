@@ -74,6 +74,17 @@ routes; the custom scheme remains for verified-email and reset links.
      background -> foreground transition re-drives reconnect for any connection
      whose heartbeat went stale while iOS suspended the socket.
 
+## Over-the-air updates
+
+OTA updates are off until the build names the Ryco EAS project:
+`RYCO_EAS_PROJECT_ID=<project uuid>` in the build environment (or the repo
+`.env`). With it, `app.config.ts` turns on `expo-updates` with
+`https://u.expo.dev/<project>`, checks on launch and applies a newer update on
+the next launch. Each `eas.json` build profile names its channel (`development`,
+`preview`, `production`), and the fingerprint `runtimeVersion` keeps an update
+from reaching a binary whose native project differs. Publish with
+`eas update --channel <channel>` from `apps/mobile`.
+
 ## Measuring renders (development client)
 
 `scripts/measure-renders.mts` counts React renders in the running development
