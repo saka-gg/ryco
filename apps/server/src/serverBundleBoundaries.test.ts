@@ -348,6 +348,17 @@ describe("server boot import boundaries", () => {
     );
   });
 
+  it("loads the agents' usage limits read and its limit presentation on the first call", () => {
+    const usageLimits = [
+      "apps/server/src/agentControl/Mcp/usageLimits.ts",
+      "packages/client-runtime/src/usage/limits.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(usageLimits.filter((file) => boot.includes(file))).toEqual([]);
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(usageLimits.filter((file) => reachable.includes(file))).toEqual(usageLimits);
+  });
+
   it("keeps the direct GitHub API transport behind the GitHub client's import()", () => {
     const graph = staticGraph("src/cliMain.ts");
     expect(

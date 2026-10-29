@@ -128,6 +128,8 @@ either.
 - Ryco only reads hubs while the Limits tab or the composer's usage popup is open. Account lists
   are cached for 20 seconds, quota for 5 minutes, and a forced refresh re-reads quota at most once
   a minute per account, because the provider usage endpoints rate-limit aggressively.
+- Agents see the accounts of the last read through `ryco_usage_limits`, numbered instead of named;
+  the tool never reads a hub itself (see [Usage limits](./usage-limits.md#agents)).
 - CLIProxyAPI bans a client IP (localhost included) for 30 minutes after five rejected management
   keys, and remembers rejections for up to three hours. Ryco stays below that ban:
   - After the hub rejects a key, Ryco does not send that key again for three hours: not when

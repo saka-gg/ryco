@@ -197,6 +197,7 @@ it("tells agents to delegate, confirm, end their turn and let Ryco wake them", (
   assert.include(context, "ryco_task_status");
   assert.include(context, "ryco_task_cancel");
   assert.include(context, "untrusted reference data");
+  assert.include(context, "ryco_usage_limits");
   assert.notInclude(context, "ryco_wait_threads to follow work");
   assert.include(AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS, "end your turn");
   assert.include(AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS, "ryco_task_status");

@@ -18,6 +18,7 @@ import {
   ProviderInstanceId,
   RuntimeSessionId,
   ServerProvider,
+  CliProxyHubError,
   ThreadId,
   TurnId,
   type AgentControlProposal,
@@ -866,6 +867,136 @@ it.effect("diagnostic reads stay exact-scope and serialize only the redacted con
       writeSession,
     );
     assert.isTrue(denied.isError);
+  }),
+);
+
+it.effect("ryco_usage_limits reads cached limits under the diagnostics grant, without a turn", () =>
+  Effect.gen(function* () {
+    const rateLimits = {
+      limitId: "limit-account-123",
+      planType: "pro",
+      observedAt: T1,
+      windows: [{ id: "primary", usedPercent: 25, windowDurationMins: 300 }],
+    };
+    const limited = decodeProvider({ ...codexProvider, rateLimits });
+    const routed = decodeProvider({
+      ...codexProvider,
+      instanceId: "claude-hub",
+      driver: "claudeAgent",
+      displayName: "Claude via hub",
+      rateLimits,
+    });
+    let hubReads = 0;
+    const deps = makeDeps({
+      getProviders: Effect.succeed([limited, routed]),
+      getCliProxyHubs: Effect.sync(() => {
+        hubReads += 1;
+        return [
+          {
+            label: "Home hub",
+            routedInstanceIds: [ProviderInstanceId.make("claude-hub")],
+            failed: false,
+            listed: {
+              fetchedAtMs: Date.parse(T2),
+              accounts: [
+                {
+                  provider: "claude",
+                  disabled: false,
+                  quota: {
+                    status: "ok" as const,
+                    checkedAt: T2,
+                    windows: [{ id: "five_hour", usedPercent: 80, windowDurationMins: 300 }],
+                  },
+                },
+              ],
+            },
+          },
+        ];
+      }),
+    });
+    const reader = {
+      ...session,
+      grantedCapabilities: [AGENT_CONTROL_CAPABILITIES.readDiagnostics],
+    };
+    const tools = makeAgentControlMcpTools(deps);
+    const name = AGENT_CONTROL_MCP_TOOLS.usageLimits;
+    assert.include(
+      (yield* tools.descriptorsFor(reader)).map((tool) => tool.name),
+      name,
+    );
+    assert.notInclude(
+      (yield* tools.descriptorsFor(session)).map((tool) => tool.name),
+      name,
+    );
+    assert.isFalse(tools.isWriteTool(name));
+
+    // No turn authority is stubbed: a routine read needs none.
+    const result = yield* call(deps, name, {}, reader);
+    assert.isUndefined(result.isError);
+    assert.deepStrictEqual(structured(result), {
+      checkedAt: new Date(0).toISOString(),
+      instances: [
+        {
+          instanceId: "codex",
+          driver: "codex",
+          displayName: "Codex personal",
+          windows: [{ label: "5h", usedPercent: 25, resetsAt: null, pace: "Pace unavailable" }],
+          observedAt: T1,
+        },
+        {
+          instanceId: "claude-hub",
+          driver: "claudeAgent",
+          displayName: "Claude via hub",
+          windows: [],
+          observedAt: null,
+          note: 'Served by the CLIProxyAPI hub "Home hub": its own limits describe no account the hub uses. See that hub\'s accounts under hubs.',
+        },
+      ],
+      hubs: [
+        {
+          hubLabel: "Home hub",
+          routedInstanceIds: ["claude-hub"],
+          observedAt: T2,
+          accounts: [
+            {
+              label: "Account 1",
+              provider: "claude",
+              windows: [{ label: "5h", usedPercent: 80, resetsAt: null, pace: "Pace unavailable" }],
+              observedAt: T2,
+            },
+          ],
+        },
+      ],
+    });
+    const serialized = JSON.stringify(result);
+    for (const forbidden of ["user@example.com", "limit-account-123", '"pro"']) {
+      assert.notInclude(serialized, forbidden);
+    }
+    assert.strictEqual(hubReads, 1);
+
+    const filtered = yield* call(deps, name, { instanceId: "claude-hub" }, reader);
+    assert.deepStrictEqual(
+      (structured(filtered) as { instances: Array<{ instanceId: string }> }).instances.map(
+        (instance) => instance.instanceId,
+      ),
+      ["claude-hub"],
+    );
+
+    const denied = yield* call(deps, name, {}, session);
+    assert.strictEqual(denied.content[0]?.text, "Capability denied.");
+    const invalid = yield* call(deps, name, { instanceId: "codex", refresh: true }, reader);
+    assert.strictEqual(invalid.content[0]?.text, "Invalid tool arguments.");
+    const unreadable = yield* call(
+      makeDeps({
+        getCliProxyHubs: Effect.fail(
+          new CliProxyHubError({ message: "Couldn't read the hub settings." }),
+        ),
+      }),
+      name,
+      {},
+      reader,
+    );
+    assert.strictEqual(unreadable.content[0]?.text, "Usage limits read failed.");
   }),
 );
 

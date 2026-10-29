@@ -11,6 +11,7 @@ import {
   AGENT_CONTROL_EXTERNAL_MCP_TOOLS,
   AGENT_CONTROL_MCP_MODELS_PER_INSTANCE_MAX,
   AGENT_CONTROL_MCP_AUTOMATION_LIST_PROMPT_MAX_CHARS,
+  AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
   AgentControlExternalCapabilitiesResult,
   AgentControlExternalCreateTaskInput,
   AgentControlExternalOverviewResult,
@@ -22,6 +23,8 @@ import {
   AgentControlAutomationId,
   AgentControlMcpDiagnosticsSummaryInput,
   AgentControlMcpDiagnosticsSummaryResult,
+  AgentControlMcpUsageLimitsInput,
+  AgentControlMcpUsageLimitsResult,
   AgentControlMcpListAutomationsInput,
   AgentControlMcpListAutomationsResult,
   AgentControlMcpListAutomationRunsInput,
@@ -61,11 +64,13 @@ import {
   type AgentControlProposal,
   type ProjectId,
   type ServerProvider,
+  type CliProxyHubError,
 } from "@ryco/contracts";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { Effect, Option, Schema } from "effect";
+import { Clock, Effect, Option, Schema } from "effect";
 
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
+import type { CliProxyCachedHub } from "../../cliProxy/CliProxyService.ts";
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   type ProjectionSnapshotQueryShape,
@@ -101,6 +106,7 @@ import {
   type ThreadVisibility,
 } from "../Mcp/threadReads.ts";
 import { AGENT_CONTROL_MCP_TOOL_DESCRIPTORS } from "../Mcp/tools.ts";
+import { agentControlUsageLimits } from "../Mcp/usageLimits.ts";
 import type { AgentControlProposalEventsShape } from "../Services/AgentControlProposalEvents.ts";
 import type { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { agentControlSupportForDriver } from "../ProviderInjection.ts";
@@ -386,6 +392,10 @@ const readDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
       AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readWorkspace,
       "Inspect one workspace in an allowed project: sessions, protection, and Git lifecycle status. Read-only.",
     ],
+    [
+      AGENT_CONTROL_EXTERNAL_MCP_TOOLS.usageLimits,
+      "Read the usage limits Ryco last read for each enabled provider instance and each CLIProxyAPI hub's accounts: per window the percent used, the reset time and the pace. Never asks a provider or a hub.",
+    ],
   ] as const
 ).map(([name, description]) => {
   const inputSchema = internalInputSchema(name);
@@ -454,6 +464,7 @@ const toolCapability = (name: string): AgentControlCapability | null => {
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.providerRuntimeEvents:
       return AGENT_CONTROL_CAPABILITIES.externalReadActivity;
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.diagnosticsSummary:
+    case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.usageLimits:
       return AGENT_CONTROL_CAPABILITIES.externalReadDiagnostics;
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listThreads:
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThread:
@@ -524,6 +535,8 @@ export const makeExternalMcpTools = (deps: {
   /** Wakes `ryco_wait_threads` when a waited thread settles. */
   readonly domainEvents: Pick<OrchestrationEngineShape, "subscribeDomainEvents">;
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
+  /** Enabled CLIProxyAPI hubs as earlier reads cached them (`CliProxyService.cachedQuotas`). */
+  readonly getCliProxyHubs?: Effect.Effect<ReadonlyArray<CliProxyCachedHub>, CliProxyHubError>;
   readonly validator?: AgentControlActionValidatorShape;
   readonly proposals?: Pick<AgentControlProposalServiceShape, "submit"> &
     Partial<Pick<AgentControlProposalServiceShape, "getProposal" | "findByRequest">>;
@@ -1164,6 +1177,24 @@ export const makeExternalMcpTools = (deps: {
             yield* deps.diagnostics.summary({
               projectId: input.projectId,
               providerInstanceId: input.providerInstanceId,
+            }),
+          );
+        }
+        case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.usageLimits: {
+          const input = yield* decode(AgentControlMcpUsageLimitsInput, args);
+          // Node-wide like the provider list of `ryco_capabilities`: limits belong to no project.
+          yield* deps.integrations.authorizeTool({
+            integrationId,
+            tool: name,
+            requiredCapability: AGENT_CONTROL_CAPABILITIES.externalReadDiagnostics,
+          });
+          return Schema.encodeSync(AgentControlMcpUsageLimitsResult)(
+            agentControlUsageLimits({
+              providers: yield* deps.getProviders,
+              hubs: yield* deps.getCliProxyHubs ?? Effect.succeed([]),
+              instanceId: input.instanceId,
+              nowMs: yield* Clock.currentTimeMillis,
+              max: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
             }),
           );
         }

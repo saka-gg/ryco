@@ -54,6 +54,20 @@ Claude instances with a separate home use that home's credential file for usage 
 fall back to the default account's global macOS Keychain entry. Refreshes are persisted only to the
 credential store that supplied the account. Missing separate-home credentials mean usage is unavailable.
 
+### Agents
+
+With Agent Control on, agents read the same numbers with `ryco_usage_limits` (see
+[Agent Control](../agent-control.md)), for example to send work to an instance with headroom or
+to stop before a limit. It lists each enabled instance's windows, labelled as on the Limits page,
+with the percent used, the reset time, the pace at the read, the read time, and whether the
+numbers are re-served after a failed or throttled read. Each enabled CLIProxyAPI hub gets one
+entry with its accounts numbered in the hub's order (`Account 1`, `Account 2`…), their provider
+and their windows, labelled and paced as on the hub cards. An instance routed through a hub lists
+no windows of its own and points at the hub's entry. The tool reads what Ryco already holds and
+never asks a provider or a hub for a new reading: a hub's accounts appear once the Limits page or
+the composer's usage popup has read the hub since the server started, and keep the time of that
+read. Emails, account names, ids, credential files, plans and credits are left out.
+
 ### Codex banked resets
 
 Codex provider settings show the reported banked reset count, available detail rows,

@@ -42,6 +42,16 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   updates, including default model, system prompt, scripts, and preferred remote.
 - `ryco_settings_summary`, `ryco_propose_settings_change`: the closed non-secret boolean preference
   allowlist. Provider credentials, connection settings and Agent Control policy are excluded.
+- `ryco_usage_limits`: the usage limits Ryco last read for each enabled provider instance, or one
+  by `instanceId`, and for each enabled CLIProxyAPI hub's accounts. Each window has the label the
+  Limits page uses, the percent used, the reset time and the pace at the read; each instance has
+  the read time and says when the numbers are re-served after a failed or throttled read. Hub
+  accounts are numbered (`Account 1`, `Account 2`…) in the hub's order, with their provider. An
+  instance a hub serves lists no windows of its own and points at that hub's entry. It never asks
+  a provider or a hub for a new reading, so a hub shows accounts only after the Limits page or the
+  composer's usage popup read it. It needs the `diagnostics.read` grant and no active turn, and
+  leaves out emails, account names, ids, credential files, plans and credits (see
+  [Usage limits](./providers/usage-limits.md#agents)).
 - `ryco_browser`, `ryco_computer`: browser tabs and native app interaction when the desktop bridge
   and the corresponding user permissions are available. Browser `open` accepts `visible: true`.
   Browser `wait` works in every browser; `console`, `network`, `resize`, `appearance` and `upload`
@@ -257,17 +267,19 @@ integration on the Integrations page, and only reaches projects inside the integ
 scope. A thread, project, or workspace outside that scope reads exactly like one that does not
 exist.
 
-| Grant                      | Tools                                                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `external.threads.read`    | `ryco_list_threads`, `ryco_read_thread`, `ryco_search_threads`, `ryco_wait_threads`, `ryco_inspect_thread` |
-| `external.reviews.read`    | `ryco_read_thread_diff` and the `review` section of `ryco_inspect_thread`                                  |
-| `external.files.read`      | `ryco_read_thread_file`                                                                                    |
-| `external.workspaces.read` | `ryco_read_project`, `ryco_list_workspaces`, `ryco_read_workspace`                                         |
+| Grant                       | Tools                                                                                                      |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `external.threads.read`     | `ryco_list_threads`, `ryco_read_thread`, `ryco_search_threads`, `ryco_wait_threads`, `ryco_inspect_thread` |
+| `external.reviews.read`     | `ryco_read_thread_diff` and the `review` section of `ryco_inspect_thread`                                  |
+| `external.files.read`       | `ryco_read_thread_file`                                                                                    |
+| `external.workspaces.read`  | `ryco_read_project`, `ryco_list_workspaces`, `ryco_read_workspace`                                         |
+| `external.diagnostics.read` | `ryco_diagnostics_summary`, `ryco_usage_limits`                                                            |
 
 These tools return the same bounded, redacted results as the private-session tools, with two
 differences. Standalone inspection never returns terminal output, because that is where secrets
 most often appear. Workspace reads have no calling thread, so no workspace is reported as
-`current`. `ryco_wait_threads` re-checks the integration whenever it changes and at least every 5
+`current`. `ryco_usage_limits` covers every enabled provider instance whatever the project scope,
+because usage belongs to the account, not to a project. `ryco_wait_threads` re-checks the integration whenever it changes and at least every 5
 seconds, so revoking a grant or narrowing the scope ends a wait in progress at once, and disabling
 Agent Control ends it within 5 seconds. Workspace files can include local
 configuration such as `.env`, so grant `external.files.read` only to clients you would also let

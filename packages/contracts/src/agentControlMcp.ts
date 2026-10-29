@@ -157,6 +157,7 @@ export const AGENT_CONTROL_MCP_TOOLS = {
   orchestrationEvents: "ryco_orchestration_events",
   providerRuntimeEvents: "ryco_provider_runtime_events",
   diagnosticsSummary: "ryco_diagnostics_summary",
+  usageLimits: "ryco_usage_limits",
   listDevices: "ryco_list_devices",
   readDeviceState: "ryco_read_device_state",
   readDeviceScreenshot: "ryco_read_device_screenshot",
@@ -457,6 +458,12 @@ export const AgentControlMcpDiagnosticsSummaryInput = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpDiagnosticsSummaryInput =
   typeof AgentControlMcpDiagnosticsSummaryInput.Type;
+
+export const AgentControlMcpUsageLimitsInput = Schema.Struct({
+  /** Only this instance; absent lists every enabled instance. */
+  instanceId: Schema.optional(ProviderInstanceId),
+}).pipe(rejectExcessProperties);
+export type AgentControlMcpUsageLimitsInput = typeof AgentControlMcpUsageLimitsInput.Type;
 
 export const AgentControlMcpListDevicesInput = Schema.Struct({
   includeShutdown: Schema.optional(Schema.Boolean),
@@ -925,6 +932,97 @@ export const AgentControlMcpDiagnosticsSummaryResult = Schema.Struct({
 export type AgentControlMcpDiagnosticsSummaryResult =
   typeof AgentControlMcpDiagnosticsSummaryResult.Type;
 
+/**
+ * Caps of a `ryco_usage_limits` answer: 1,152 windows at most, so even long labels sent twice
+ * (MCP text and structured content) stay well under the listeners' 512 KiB response cap.
+ */
+export const AGENT_CONTROL_MCP_USAGE_LIMITS_MAX = {
+  instances: 32,
+  /** Per instance or hub account. */
+  windows: 12,
+  hubs: 4,
+  /** Per hub. */
+  hubAccounts: 16,
+} as const;
+
+/** One usage window as the Limits page labels it (`5h`, `Weekly`, `Weekly · Opus`). */
+export const AgentControlMcpUsageLimitWindow = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  /** 0..100. */
+  usedPercent: Schema.Number,
+  resetsAt: Schema.NullOr(IsoDateTime),
+  /** How use compared with an even spread over the window at the read; absent when even. */
+  pace: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpUsageLimitWindow = typeof AgentControlMcpUsageLimitWindow.Type;
+
+const UsageLimitWindows = Schema.Array(AgentControlMcpUsageLimitWindow).check(
+  Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.windows),
+);
+
+/**
+ * The usage limits the server last read for one enabled provider instance. Never carries the
+ * account's email, ids, plan or credentials.
+ */
+export const AgentControlMcpInstanceUsageLimits = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  displayName: Schema.NullOr(TrimmedNonEmptyString),
+  windows: UsageLimitWindows,
+  /** When the windows were read from the provider; null without a reading. */
+  observedAt: Schema.NullOr(IsoDateTime),
+  /** The last read failed or was throttled: these are the last good numbers. */
+  stale: Schema.optionalKey(Schema.Literal(true)),
+  staleReason: Schema.optionalKey(TrimmedNonEmptyString),
+  note: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpInstanceUsageLimits = typeof AgentControlMcpInstanceUsageLimits.Type;
+
+/**
+ * One subscription account a CLIProxyAPI hub pools: `Account 1`, `Account 2`… in the order the
+ * hub lists them. Never carries the account's email, name, credential index or file.
+ */
+export const AgentControlMcpHubAccountUsageLimits = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  /** The hub's provider slug (`claude`, `codex`, `antigravity`…). */
+  provider: TrimmedNonEmptyString,
+  windows: UsageLimitWindows,
+  observedAt: Schema.NullOr(IsoDateTime),
+  note: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpHubAccountUsageLimits = typeof AgentControlMcpHubAccountUsageLimits.Type;
+
+/** The accounts of one enabled CLIProxyAPI hub as Ryco last read them. */
+export const AgentControlMcpHubUsageLimits = Schema.Struct({
+  /** The hub's own label, else its host. */
+  hubLabel: TrimmedNonEmptyString,
+  /** The instances whose requests this hub serves. */
+  routedInstanceIds: Schema.Array(ProviderInstanceId).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.instances),
+  ),
+  accounts: Schema.Array(AgentControlMcpHubAccountUsageLimits).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.hubAccounts),
+  ),
+  /** When the account list was read; null without a reading. */
+  observedAt: Schema.NullOr(IsoDateTime),
+  /** The latest hub read failed: the accounts are from an earlier one. */
+  stale: Schema.optionalKey(Schema.Literal(true)),
+  staleReason: Schema.optionalKey(TrimmedNonEmptyString),
+  note: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AgentControlMcpHubUsageLimits = typeof AgentControlMcpHubUsageLimits.Type;
+
+export const AgentControlMcpUsageLimitsResult = Schema.Struct({
+  checkedAt: IsoDateTime,
+  instances: Schema.Array(AgentControlMcpInstanceUsageLimits).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.instances),
+  ),
+  hubs: Schema.Array(AgentControlMcpHubUsageLimits).check(
+    Schema.isMaxLength(AGENT_CONTROL_MCP_USAGE_LIMITS_MAX.hubs),
+  ),
+});
+export type AgentControlMcpUsageLimitsResult = typeof AgentControlMcpUsageLimitsResult.Type;
+
 // ── External stdio MCP tool catalog ──────────────────────────────────
 
 export const AGENT_CONTROL_EXTERNAL_MCP_TOOLS = {
@@ -944,6 +1042,7 @@ export const AGENT_CONTROL_EXTERNAL_MCP_TOOLS = {
   orchestrationEvents: "ryco_orchestration_events",
   providerRuntimeEvents: "ryco_provider_runtime_events",
   diagnosticsSummary: "ryco_diagnostics_summary",
+  usageLimits: "ryco_usage_limits",
   readControlRequest: "ryco_read_control_request",
   waitForControlRequest: "ryco_wait_for_control_request",
   listThreads: "ryco_list_threads",

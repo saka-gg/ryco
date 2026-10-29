@@ -1,6 +1,7 @@
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
+import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
 import { ServerConfig } from "../../config.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -42,6 +43,7 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const diffs = yield* Effect.serviceOption(CheckpointDiffQuery);
   const files = yield* Effect.serviceOption(WorkspaceFileSystem);
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
+  const cliProxy = yield* Effect.serviceOption(CliProxyService);
   const topology = yield* AgentControlExternalTopologyService;
   // The tools and the listener load with the first start: most nodes never enable the external
   // integration, so their modules stay off the boot path.
@@ -54,6 +56,7 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
         projections,
         domainEvents: engine,
         getProviders: providers.getProviders,
+        ...(Option.isSome(cliProxy) ? { getCliProxyHubs: cliProxy.value.cachedQuotas } : {}),
         ...(Option.isSome(validator) ? { validator: validator.value } : {}),
         ...(Option.isSome(automations) ? { automations: automations.value } : {}),
         ...(Option.isSome(diagnostics) ? { diagnostics: diagnostics.value } : {}),

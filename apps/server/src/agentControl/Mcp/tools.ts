@@ -33,6 +33,7 @@ import {
   AGENT_CONTROL_MCP_MODELS_PER_INSTANCE_MAX,
   AGENT_CONTROL_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOL_NAMES,
+  AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
   AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
   AGENT_CONTROL_CAPABILITIES,
   AgentControlMcpCapabilitiesResult,
@@ -84,6 +85,8 @@ import {
   AgentControlMcpSendMessageInput,
   AgentControlMcpSettingsSummaryResult,
   AgentControlMcpUpdateThreadInput,
+  AgentControlMcpUsageLimitsInput,
+  AgentControlMcpUsageLimitsResult,
   AgentControlMcpWaitForControlRequestInput,
   type AgentControlAutomation,
   type AgentControlMcpProviderInstanceSummary,
@@ -91,18 +94,20 @@ import {
   type AgentControlActionPlan,
   type AgentControlDeviceActionPlan,
   type AgentControlCapability,
+  type CliProxyHubError,
   type OrchestrationProjectShell,
   type ServerProvider,
   type ServerSettings,
   type ServerSettingsError,
 } from "@ryco/contracts";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { Effect, Option, Schema } from "effect";
+import { Clock, Effect, Option, Schema } from "effect";
 
 import {
   type ProjectionSnapshotQueryShape,
   readProjectShells,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import type { CliProxyCachedHub } from "../../cliProxy/CliProxyService.ts";
 import type { DeviceServiceShape } from "../../device/Services/DeviceService.ts";
 import { fitScreenshotToBase64Budget } from "../../screenshotFit.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
@@ -181,6 +186,8 @@ export interface AgentControlMcpToolDeps {
   readonly deviceService?: DeviceServiceShape;
   readonly workspaceAccess?: WorkspaceAccessPolicyShape;
   readonly getSettings?: Effect.Effect<ServerSettings, ServerSettingsError>;
+  /** Enabled CLIProxyAPI hubs as earlier reads cached them (`CliProxyService.cachedQuotas`). */
+  readonly getCliProxyHubs?: Effect.Effect<ReadonlyArray<CliProxyCachedHub>, CliProxyHubError>;
   readonly getTurnAuthority?: (
     sessionId: string,
   ) => Effect.Effect<Option.Option<AgentControlTurnAuthority>>;
@@ -330,6 +337,9 @@ const pullRequestWatchInputSchema = {
   required: ["requestId"],
   additionalProperties: false,
 } as const;
+
+// Its handler module loads on the first call, off the boot path.
+const loadUsageLimits = Effect.promise(() => import("./usageLimits.ts"));
 
 const deviceMutationTargetRequired = [
   "requestId",
@@ -992,6 +1002,16 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
       additionalProperties: false,
     },
   },
+  {
+    name: AGENT_CONTROL_MCP_TOOLS.usageLimits,
+    description:
+      "Read the usage limits Ryco last read for each enabled provider instance and each CLIProxyAPI hub's accounts: per window the percent used, the reset time and the pace. Never asks a provider or a hub. Use it to pick an instance with headroom or to stop before a limit.",
+    inputSchema: {
+      type: "object",
+      properties: { instanceId: { type: "string", maxLength: 256 } },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const WRITE_TOOL_NAMES = new Set<string>([
@@ -1103,7 +1123,10 @@ const readCapabilityForTool = (name: string): AgentControlCapability => {
     name === AGENT_CONTROL_MCP_TOOLS.providerRuntimeEvents
   )
     return AGENT_CONTROL_CAPABILITIES.readActivity;
-  if (name === AGENT_CONTROL_MCP_TOOLS.diagnosticsSummary) {
+  if (
+    name === AGENT_CONTROL_MCP_TOOLS.diagnosticsSummary ||
+    name === AGENT_CONTROL_MCP_TOOLS.usageLimits
+  ) {
     return AGENT_CONTROL_CAPABILITIES.readDiagnostics;
   }
   return AGENT_CONTROL_CAPABILITIES.read;
@@ -2258,6 +2281,25 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       return Schema.encodeSync(AgentControlMcpDiagnosticsSummaryResult)(result);
     });
 
+  const usageLimits = (args: unknown) =>
+    Effect.gen(function* () {
+      const input = yield* decodeArgs(AgentControlMcpUsageLimitsInput, args);
+      const providers = yield* deps.getProviders;
+      const hubs = yield* (deps.getCliProxyHubs ?? Effect.succeed([])).pipe(
+        Effect.mapError(() => new ToolFailure("Usage limits read failed.")),
+      );
+      const { agentControlUsageLimits } = yield* loadUsageLimits;
+      return Schema.encodeSync(AgentControlMcpUsageLimitsResult)(
+        agentControlUsageLimits({
+          providers,
+          hubs,
+          instanceId: input.instanceId,
+          nowMs: yield* Clock.currentTimeMillis,
+          max: AGENT_CONTROL_MCP_USAGE_LIMITS_MAX,
+        }),
+      );
+    });
+
   const listProjects = (_session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       const input = yield* decodeArgs(AgentControlMcpListProjectsInput, args);
@@ -2368,6 +2410,8 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           return providerRuntimeEvents(session, args);
         case AGENT_CONTROL_MCP_TOOLS.diagnosticsSummary:
           return diagnosticsSummary(session, args);
+        case AGENT_CONTROL_MCP_TOOLS.usageLimits:
+          return usageLimits(args);
         case AGENT_CONTROL_MCP_TOOLS.createThreads:
           return authority
             ? createThreads(session, authority, args)
