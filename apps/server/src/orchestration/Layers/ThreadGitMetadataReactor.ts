@@ -24,6 +24,7 @@ export const mayRequestThreadGitSync = (event: ProviderRuntimeEvent): boolean =>
   event.type === "turn.completed" ||
   event.type === "turn.aborted" ||
   event.type === "session.exited" ||
+  event.type === "vcs.state.changed" ||
   (event.type === "item.completed" && event.payload.itemType === "command_execution");
 
 export const makeThreadGitMetadataReactorLive = (options?: ThreadGitMetadataOptions) =>

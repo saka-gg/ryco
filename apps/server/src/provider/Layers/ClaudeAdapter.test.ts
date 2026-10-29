@@ -3030,6 +3030,64 @@ describe("ClaudeAdapterLive", () => {
       );
     });
 
+    it.effect("reports Claude's git and pull request signals as vcs.state.changed", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* startSideChannelSession("test-claudeadapter-side-channel-vcs");
+        const events = yield* emitSystemFrames(harness, adapter, [
+          {
+            subtype: "vcs_state_changed",
+            kind: "commit",
+            cwd: `${SIDE_CHANNEL_CWD}/packages/app`,
+            branch: "feat/signal",
+          },
+          {
+            subtype: "code_change_published",
+            provider: "github",
+            url: "https://github.com/acme/app/pull/12",
+            repo: "acme/app",
+            identifier: "12",
+            action: "created",
+            branch: "feat/signal",
+          },
+          // The pull request a session's branch already had when it started: nothing moved.
+          {
+            subtype: "code_change_published",
+            provider: "github",
+            url: "https://github.com/acme/app/pull/11",
+            repo: "acme/app",
+            identifier: "11",
+            action: "started",
+          },
+          // A kind a newer CLI adds is still a change.
+          { subtype: "vcs_state_changed", kind: "squash", cwd: SIDE_CHANNEL_CWD },
+          // A field that is not a string is dropped, not trusted.
+          { subtype: "vcs_state_changed", kind: "push", cwd: 42 },
+          { subtype: "code_change_published", action: 7 },
+          // No kind: no signal.
+          { subtype: "vcs_state_changed", cwd: SIDE_CHANNEL_CWD },
+          { subtype: "vcs_state_changed", kind: "  ", cwd: SIDE_CHANNEL_CWD },
+        ]);
+        assert.deepEqual(
+          events.map((event) =>
+            event.type === "vcs.state.changed" ? event.payload : { unexpected: event.type },
+          ),
+          [
+            // The branch hints are dropped: the node re-reads the checkout instead.
+            { kind: "commit", cwd: `${SIDE_CHANNEL_CWD}/packages/app` },
+            { kind: "change-request", action: "created" },
+            { kind: "squash", cwd: SIDE_CHANNEL_CWD },
+            { kind: "push" },
+            { kind: "change-request" },
+          ],
+        );
+        assert.ok(events.every((event) => event.threadId === THREAD_ID));
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
     it.effect("reports api_retry as a readable retry notice, not a warning", () => {
       const harness = makeHarness();
       return Effect.gen(function* () {

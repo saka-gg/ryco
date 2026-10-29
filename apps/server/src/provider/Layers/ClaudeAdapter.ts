@@ -105,6 +105,7 @@ import {
   ThreadId,
   TurnId,
   type UserInputQuestion,
+  type VcsStateChangedPayload,
 } from "@ryco/contracts";
 import {
   applyClaudePromptEffortPrefix,
@@ -1004,6 +1005,31 @@ function readClaudeToolUseResult(message: SDKMessage): Record<string, unknown> |
   return result !== null && typeof result === "object" && !Array.isArray(result)
     ? (result as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * Claude Code's own report that a shell command changed git or forge state; the pinned SDK
+ * typings carry neither subtype, so both are matched structurally. `vcs_state_changed` follows a
+ * commit, push, merge or rebase the CLI saw in a Bash command's output (scripts and aliases
+ * included); `code_change_published` follows a command that opened or touched a pull request.
+ * The CLI calls both a cue to re-read the repository: the thread git sync re-reads the checkout
+ * and trusts no field. A kind a newer CLI adds is kept; fields that are not strings are dropped.
+ * Null for a frame that reports no change: `started` names the pull request the session's branch
+ * already had when the session started or resumed. Undefined for any other frame.
+ */
+function readClaudeVcsSignal(message: SDKMessage): VcsStateChangedPayload | null | undefined {
+  if (message.type !== "system") return undefined;
+  const wire = message as unknown as Record<string, unknown>;
+  if (wire.subtype === "code_change_published") {
+    const action = trimmedClaudeString(wire.action);
+    if (action === "started") return null;
+    return { kind: "change-request", ...(action !== undefined ? { action } : {}) };
+  }
+  if (wire.subtype !== "vcs_state_changed") return undefined;
+  const kind = trimmedClaudeString(wire.kind);
+  if (kind === undefined) return undefined;
+  const cwd = trimmedClaudeString(wire.cwd);
+  return { kind, ...(cwd !== undefined ? { cwd } : {}) };
 }
 
 const WORKFLOW_PHASE_CAP = 64;
@@ -4458,6 +4484,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(info.description !== undefined ? { title: info.description } : {}),
             ...taskLinkageFor(context.taskAgents, taskId),
           },
+        });
+      }
+      return;
+    }
+
+    // Claude's git and pull request signals (untyped, like the background set above): the
+    // node's thread git sync refreshes the checkout's status on them, mid-turn.
+    const vcsSignal = readClaudeVcsSignal(message);
+    if (vcsSignal !== undefined) {
+      if (vcsSignal !== null) {
+        yield* offerRuntimeEventForContext(context, {
+          ...base,
+          type: "vcs.state.changed",
+          payload: vcsSignal,
         });
       }
       return;

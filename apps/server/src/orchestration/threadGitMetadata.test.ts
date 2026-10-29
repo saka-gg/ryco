@@ -9,14 +9,17 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   EMPTY_SYNC_REQUEST,
+  MAX_SIGNAL_DIRECTORIES,
   UNTRACKED_TURN,
   combineTurnOverlaps,
+  countedSignalEffect,
   decideThreadBranchAdoption,
   gitSyncTriggerFor,
   isAdoptableBranchName,
   isCommandOnlyRequest,
   makeThreadTurnOwnership,
   mergeThreadGitSyncRequests,
+  vcsSignalEffect,
   type ThreadGitSyncRequest,
 } from "./threadGitMetadata.ts";
 
@@ -288,6 +291,7 @@ describe("mergeThreadGitSyncRequests", () => {
     const second: ThreadGitSyncRequest = {
       turnStart: true,
       command: { local: false, remote: true },
+      signals: null,
       turnEnd: {
         overlap: { tracked: true, overlaps: new Set([B]), overflowed: false },
         aborted: true,
@@ -298,6 +302,7 @@ describe("mergeThreadGitSyncRequests", () => {
     expect(mergeThreadGitSyncRequests(first, second)).toEqual({
       turnStart: true,
       command: { local: true, remote: true },
+      signals: null,
       turnEnd: {
         overlap: { tracked: true, overlaps: new Set([A, B]), overflowed: false },
         aborted: true,
@@ -306,10 +311,94 @@ describe("mergeThreadGitSyncRequests", () => {
     });
   });
 
+  it("keeps signals apart by directory, merging effects per directory", () => {
+    const signal = (cwd: string, local: boolean, remote: boolean): ThreadGitSyncRequest => ({
+      ...EMPTY_SYNC_REQUEST,
+      signals: new Map([[cwd, { local, remote }]]),
+    });
+    const merged = [
+      signal("/repo", true, false),
+      signal("/elsewhere", false, true),
+      signal("/repo", false, true),
+    ].reduce<ThreadGitSyncRequest | undefined>(mergeThreadGitSyncRequests, undefined);
+    expect(merged).toEqual({
+      ...EMPTY_SYNC_REQUEST,
+      signals: new Map([
+        ["/repo", { local: true, remote: true }],
+        ["/elsewhere", { local: false, remote: true }],
+      ]),
+    });
+    // A command and a signal stay apart: only the signal waits for its directory check.
+    expect(
+      mergeThreadGitSyncRequests(
+        { ...EMPTY_SYNC_REQUEST, command: { local: true, remote: false } },
+        signal("/repo", false, true),
+      ),
+    ).toEqual({
+      ...EMPTY_SYNC_REQUEST,
+      command: { local: true, remote: false },
+      signals: new Map([["/repo", { local: false, remote: true }]]),
+    });
+  });
+
+  it("counts signals past the directory cap without a check", () => {
+    let request: ThreadGitSyncRequest | undefined;
+    for (let index = 0; index < MAX_SIGNAL_DIRECTORIES; index += 1) {
+      request = mergeThreadGitSyncRequests(request, {
+        ...EMPTY_SYNC_REQUEST,
+        signals: new Map([[`/dir-${index}`, { local: true, remote: false }]]),
+      });
+    }
+    request = mergeThreadGitSyncRequests(request, {
+      ...EMPTY_SYNC_REQUEST,
+      signals: new Map([["/one-too-many", { local: false, remote: true }]]),
+    });
+    // A directory already kept still merges in place.
+    request = mergeThreadGitSyncRequests(request, {
+      ...EMPTY_SYNC_REQUEST,
+      signals: new Map([["/dir-0", { local: false, remote: true }]]),
+    });
+    expect(request?.signals?.size).toBe(MAX_SIGNAL_DIRECTORIES);
+    expect(request?.signals?.has("/one-too-many")).toBe(false);
+    expect(request?.signals?.get("/dir-0")).toEqual({ local: true, remote: true });
+    expect(request?.command).toEqual({ local: false, remote: true });
+  });
+
+  it("merges the effects of the signals whose directory counts", () => {
+    const signals = new Map([
+      ["/repo/src", { local: true, remote: false }],
+      ["/repo", { local: false, remote: true }],
+      ["/elsewhere", { local: true, remote: true }],
+    ]);
+    expect(countedSignalEffect(null, () => true)).toBeNull();
+    expect(countedSignalEffect(signals, () => false)).toBeNull();
+    expect(countedSignalEffect(signals, (cwd) => cwd.startsWith("/repo"))).toEqual({
+      local: true,
+      remote: true,
+    });
+    expect(countedSignalEffect(signals, (cwd) => cwd === "/repo/src")).toEqual({
+      local: true,
+      remote: false,
+    });
+  });
+
   it("settles only command-only requests", () => {
     expect(
       isCommandOnlyRequest({ ...EMPTY_SYNC_REQUEST, command: { local: true, remote: false } }),
     ).toBe(true);
+    expect(
+      isCommandOnlyRequest({
+        ...EMPTY_SYNC_REQUEST,
+        signals: new Map([["/repo", { local: false, remote: true }]]),
+      }),
+    ).toBe(true);
+    expect(
+      isCommandOnlyRequest({
+        ...EMPTY_SYNC_REQUEST,
+        signals: new Map([["/repo", { local: false, remote: true }]]),
+        remoteDue: true,
+      }),
+    ).toBe(false);
     expect(
       isCommandOnlyRequest({
         ...EMPTY_SYNC_REQUEST,
@@ -328,6 +417,36 @@ const base = {
   createdAt: "2026-10-28T00:00:00.000Z",
 };
 const event = (value: Record<string, unknown>) => ({ ...base, ...value }) as ProviderRuntimeEvent;
+
+describe("vcsSignalEffect", () => {
+  it.each([
+    [{ kind: "commit" }, { local: true, remote: false }],
+    [{ kind: "merge" }, { local: true, remote: false }],
+    [{ kind: "rebase" }, { local: true, remote: false }],
+    // A kind a newer CLI adds still means something changed: re-read the checkout.
+    [{ kind: "squash" }, { local: true, remote: false }],
+    [{ kind: "push" }, { local: false, remote: true }],
+    [
+      { kind: "change-request", action: "created" },
+      { local: false, remote: true },
+    ],
+    [
+      { kind: "change-request", action: "merged" },
+      { local: false, remote: true },
+    ],
+    [
+      { kind: "change-request", action: "pushed" },
+      { local: false, remote: true },
+    ],
+    [{ kind: "change-request" }, { local: false, remote: true }],
+    [
+      { kind: "change-request", action: "checked-out" },
+      { local: true, remote: true },
+    ],
+  ])("%j", (payload, effect) => {
+    expect(vcsSignalEffect(payload)).toEqual(effect);
+  });
+});
 
 describe("gitSyncTriggerFor", () => {
   it("maps turn boundaries with a turn id, and only those", () => {
@@ -390,6 +509,25 @@ describe("gitSyncTriggerFor", () => {
         }),
       ),
     ).toBeNull();
+  });
+
+  it("turns a provider's git signal into a command with the directory it ran in", () => {
+    const signal = (payload: Record<string, unknown>) =>
+      gitSyncTriggerFor(event({ type: "vcs.state.changed", payload }));
+    expect(signal({ kind: "commit", cwd: "/repo" })).toEqual({
+      kind: "command",
+      effect: { local: true, remote: false },
+      cwd: "/repo",
+    });
+    // No directory: it counts like a command's text.
+    expect(signal({ kind: "push" })).toEqual({
+      kind: "command",
+      effect: { local: false, remote: true },
+    });
+    expect(signal({ kind: "change-request", action: "created" })).toEqual({
+      kind: "command",
+      effect: { local: false, remote: true },
+    });
   });
 
   it("ignores deltas, retryable errors and everything else", () => {
