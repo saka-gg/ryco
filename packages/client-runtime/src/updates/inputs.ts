@@ -2,7 +2,7 @@ import type {
   UpdateEverythingEnvironmentInput,
   UpdateEverythingLocalApp,
   UpdateEverythingPlan,
-} from "@ryco/client-runtime/updates";
+} from "./plan.ts";
 import type {
   DesktopUpdateState,
   EnvironmentId,
@@ -10,7 +10,7 @@ import type {
   ServerConfig,
 } from "@ryco/contracts";
 
-import type { EnvironmentTurnActivity } from "../desktopRelaunchGuard.logic";
+import type { EnvironmentTurnActivity } from "../state/threads/interruptibleTurns.ts";
 
 /** What this app knows about one connection, read from the stores that own it. */
 export interface UpdateEverythingEnvironmentSource {

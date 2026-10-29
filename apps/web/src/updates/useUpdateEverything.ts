@@ -4,11 +4,12 @@
  * this module feeds them this app's environments, permissions, chats and desktop
  * updater, and keeps the run outside React so it survives the surfaces that show it.
  */
-import type {
-  UpdateEverythingIo,
-  UpdateEverythingPlan,
-  UpdateEverythingResult,
-  UpdateEverythingRunState,
+import {
+  createUpdateEverythingRunner,
+  type UpdateEverythingIo,
+  type UpdateEverythingPlan,
+  type UpdateEverythingResult,
+  type UpdateEverythingRunState,
 } from "@ryco/client-runtime/updates";
 import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import { WS_METHODS, type EnvironmentId, type NodeUpdateState } from "@ryco/contracts";
@@ -22,7 +23,6 @@ import { setDesktopUpdateState } from "../rpc/desktopUpdateAtoms";
 import { installDesktopAppUpdate } from "./desktopAppInstall";
 import { canMutateNodeUpdates, mayCallNodeOwnerMethod } from "./nodeUpdatePermissions";
 import { listNodeUpdateEnvironmentIds, nodeUpdateStore } from "./nodeUpdateStore";
-import { createUpdateEverythingRunner } from "./updateEverythingRunner";
 import {
   readUpdateEverythingInputs,
   readUpdateEverythingPlan,

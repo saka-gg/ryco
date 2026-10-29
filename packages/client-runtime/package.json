@@ -146,6 +146,10 @@
       "types": "./src/updates/index.ts",
       "import": "./src/updates/index.ts"
     },
+    "./updates/view": {
+      "types": "./src/updates/view.ts",
+      "import": "./src/updates/view.ts"
+    },
     "./state/orchestration": {
       "types": "./src/state/orchestration/index.ts",
       "import": "./src/state/orchestration/index.ts"
