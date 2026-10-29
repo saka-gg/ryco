@@ -191,6 +191,13 @@ describe("server boot import boundaries", () => {
   it("keeps optional feature stacks off the serve path", () => {
     const graph = staticGraph("src/cliMain.ts");
     const reached = (pattern: RegExp) => graph.files.filter((file) => pattern.test(file));
+    // Test helpers (replay transports, tripwires, fakes) and captured fixtures never load, not
+    // even lazily.
+    expect(
+      staticGraph("src/bin.ts", { dynamic: true }).files.filter((file) =>
+        /\/(?:testUtils|testFixtures)\//u.test(file),
+      ),
+    ).toEqual([]);
     // Native Computer use loads only when Desktop hands over a native bridge; the turn
     // lifecycle and the tool guidance the provider reactor reads stay eager.
     expect(reached(/^apps\/server\/src\/computer\//u).toSorted()).toEqual([
