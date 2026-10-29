@@ -424,30 +424,44 @@ it.effect("lists only summary fields, without stack lookups, when asked for the 
   }),
 );
 
-it.effect("reads pull request state with the summary field set", () =>
+it.effect("reads one pull request's state through the batched link read, not gh pr view", () =>
   Effect.gen(function* () {
-    let requestedFields: string | undefined;
+    const asked: Array<{ pullRequests: ReadonlyArray<number>; issues: ReadonlyArray<number> }> = [];
     const provider = yield* makeProvider({
-      getPullRequest: (input) =>
+      getPullRequest: () => Effect.die("gh pr view is not used for a state read"),
+      getLinkStates: (input) =>
         Effect.sync(() => {
-          requestedFields = input.fields;
+          asked.push({ pullRequests: input.pullRequests, issues: input.issues });
           return {
-            number: 5,
-            title: "Done",
-            url: "https://github.com/owner/repo/pull/5",
-            baseRefName: "main",
-            headRefName: "feature/done",
-            state: "merged" as const,
-            updatedAt: Option.none(),
-            mergedAt: DateTime.makeUnsafe("2026-01-03T00:00:00.000Z"),
+            pullRequests: new Map(
+              input.pullRequests.includes(5)
+                ? [
+                    [
+                      5,
+                      {
+                        state: "merged" as const,
+                        isDraft: false,
+                        closedAt: "2026-01-03T00:00:05Z",
+                        mergedAt: "2026-01-03T00:00:00Z",
+                      },
+                    ],
+                  ]
+                : [],
+            ),
+            issues: new Map(),
           };
         }),
     });
 
     const state = yield* provider.getPullRequestState({ cwd: "/repo", number: 5 });
-    assert.strictEqual(requestedFields, "summary");
     assert.strictEqual(state.state, "merged");
     assert.deepStrictEqual(state.terminalAt, DateTime.makeUnsafe("2026-01-03T00:00:00.000Z"));
+    assert.deepStrictEqual(asked, [{ pullRequests: [5], issues: [] }]);
+
+    const missing = yield* provider
+      .getPullRequestState({ cwd: "/repo", number: 42 })
+      .pipe(Effect.flip);
+    assert.include(missing.detail, "GitHub could not resolve pull request #42.");
   }),
 );
 
@@ -1953,40 +1967,45 @@ it.effect("returns a fresh uncapped detail after a lifecycle update", () =>
 
 it.effect("reports the PR terminal time from mergedAt and closedAt", () =>
   Effect.gen(function* () {
-    const mergedAt = DateTime.makeUnsafe("2026-05-01T10:00:00.000Z");
-    const closedAt = DateTime.makeUnsafe("2026-05-01T10:00:05.000Z");
     const pullRequest = (
       state: "open" | "closed" | "merged",
-      times: { readonly mergedAt?: DateTime.Utc; readonly closedAt?: DateTime.Utc },
+      times: { readonly mergedAt?: string; readonly closedAt?: string },
     ) =>
       makeProvider({
-        getPullRequest: () =>
+        getLinkStates: () =>
           Effect.succeed({
-            number: 42,
-            title: "Terminal time",
-            url: "https://github.com/owner/repo/pull/42",
-            baseRefName: "main",
-            headRefName: "feature/terminal-time",
-            state,
-            isDraft: false,
-            ...times,
+            pullRequests: new Map([
+              [
+                42,
+                {
+                  state,
+                  isDraft: false,
+                  mergedAt: times.mergedAt ?? null,
+                  closedAt: times.closedAt ?? null,
+                },
+              ],
+            ]),
+            issues: new Map(),
           }),
       }).pipe(
         Effect.flatMap((provider) => provider.getPullRequestState({ cwd: "/repo", number: 42 })),
       );
 
+    const mergedAt = "2026-05-01T10:00:00.000Z";
+    const closedAt = "2026-05-01T10:00:05.000Z";
     const merged = yield* pullRequest("merged", { mergedAt, closedAt });
     assert.strictEqual(merged.state, "merged");
     assert.isTrue(merged.terminalAt !== null && merged.terminalAt !== undefined);
-    assert.strictEqual(
-      merged.terminalAt && DateTime.formatIso(merged.terminalAt),
-      "2026-05-01T10:00:00.000Z",
-    );
+    assert.strictEqual(merged.terminalAt && DateTime.formatIso(merged.terminalAt), mergedAt);
 
     const closed = yield* pullRequest("closed", { closedAt });
+    assert.strictEqual(closed.terminalAt && DateTime.formatIso(closed.terminalAt), closedAt);
+
+    // A merge without a merge time falls back to the close time.
+    const mergedWithoutTime = yield* pullRequest("merged", { closedAt });
     assert.strictEqual(
-      closed.terminalAt && DateTime.formatIso(closed.terminalAt),
-      "2026-05-01T10:00:05.000Z",
+      mergedWithoutTime.terminalAt && DateTime.formatIso(mergedWithoutTime.terminalAt),
+      closedAt,
     );
 
     const open = yield* pullRequest("open", {});

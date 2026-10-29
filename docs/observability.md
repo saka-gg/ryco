@@ -783,6 +783,12 @@ Current high-value span and metric boundaries include:
   `ryco_server_event_loop_stall_max_ms` and `ryco_server_event_loop_utilization`, the last two per
   30 s window)
 - heap snapshots (`server.heapSnapshot`)
+- the process governor (`ryco_process_governor_in_flight`, `_queued` and `_queue_wait_duration`, by
+  `pool`: `git`, `forge` for CLI children, `github-api` for direct GitHub API requests)
+- direct GitHub API reads (`GitHubApi.request` spans carry the host, operation, status and
+  `x-ratelimit-*` values, never the URL path or a token; metrics
+  `ryco_github_api_requests_total{kind,lane,outcome}`, `ryco_github_api_request_duration{kind}`,
+  `ryco_github_api_fallbacks_total{reason}` and `ryco_github_api_rate_limit_remaining{host,resource}`)
 
 ### Client perf profiling
 

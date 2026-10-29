@@ -12,7 +12,9 @@
  *   children, and it yields to interactive work, which takes room first.
  *
  * A permit covers exactly one child's lifetime (spawn to exit or timeout), so
- * holding one never waits on another and the pools cannot deadlock.
+ * holding one never waits on another and the pools cannot deadlock. Direct
+ * GitHub API requests reuse the same pool type and lanes through
+ * {@link governWithPool}, one pool per credential.
  */
 import os from "node:os";
 
@@ -52,12 +54,16 @@ export function processPoolForCommand(command: string): ProcessPoolName | null {
 }
 
 export interface ProcessPoolStats {
-  readonly pool: ProcessPoolName;
+  /** The pool's label: a CLI pool name, or another admission pool (`github-api`). */
+  readonly pool: string;
   readonly limit: number;
   readonly inFlight: number;
   readonly queued: number;
   readonly admittedTotal: number;
+  /** Requests that had to queue; only background work ever queues. */
   readonly queuedTotal: number;
+  /** Admissions per lane: the denominator for the share of background work that queued. */
+  readonly admittedByLane: Readonly<Record<ProcessLane, number>>;
   readonly maxQueueWaitMs: number;
 }
 
@@ -70,14 +76,21 @@ export interface ProcessPermitRequest {
   readonly cancel: () => void;
 }
 
+/**
+ * A lane-aware admission pool. The CLI pools (`git`, `forge`) use it for child
+ * processes; other bounded work (direct GitHub API requests) reuses it through
+ * {@link governWithPool} so lanes behave the same everywhere.
+ */
 export class ProcessPool {
   private inFlight = 0;
   private readonly waiters: Waiter[] = [];
   private admittedTotal = 0;
   private queuedTotal = 0;
+  private admittedInteractive = 0;
+  private admittedBackground = 0;
   private maxQueueWaitMs = 0;
 
-  readonly name: ProcessPoolName;
+  readonly name: string;
   readonly limit: number;
   private readonly now: () => number;
   private readonly onChange: ((pool: ProcessPool) => void) | undefined;
@@ -88,7 +101,7 @@ export class ProcessPool {
    * path (Effect or Promise) made it.
    */
   constructor(
-    name: ProcessPoolName,
+    name: string,
     limit: number,
     now: () => number = Date.now,
     onChange?: (pool: ProcessPool) => void,
@@ -115,6 +128,8 @@ export class ProcessPool {
       this.maxQueueWaitMs = Math.max(this.maxQueueWaitMs, queueWaitMs);
       this.inFlight += 1;
       this.admittedTotal += 1;
+      if (lane === "interactive") this.admittedInteractive += 1;
+      else this.admittedBackground += 1;
       let released = false;
       release = () => {
         if (released) return;
@@ -162,6 +177,10 @@ export class ProcessPool {
       queued: this.waiters.length,
       admittedTotal: this.admittedTotal,
       queuedTotal: this.queuedTotal,
+      admittedByLane: {
+        interactive: this.admittedInteractive,
+        background: this.admittedBackground,
+      },
       maxQueueWaitMs: this.maxQueueWaitMs,
     };
   }
@@ -176,7 +195,7 @@ export class ProcessPool {
 }
 
 const processQueueWaitDuration = Metric.timer("ryco_process_governor_queue_wait_duration", {
-  description: "Time background child processes waited for a governor permit.",
+  description: "Time background work waited for a governor permit.",
 });
 
 export const processGovernorMetricNames = {
@@ -193,25 +212,30 @@ const processQueued = Metric.gauge(processGovernorMetricNames.queued, {
 });
 
 /**
- * Publishes a pool's current counts; the pool calls it synchronously after
- * every change, from the Effect path and the Promise path alike.
+ * Publishes the in-flight and queued gauges for `label`. The CLI pools call it
+ * synchronously after every change, from the Effect path and the Promise path
+ * alike; a group of pools (one per GitHub credential) publishes its sum.
  */
-const publishPoolGauges = (pool: ProcessPool): void => {
-  const stats = pool.stats();
+export const publishPoolGauges = (
+  label: string,
+  stats: { readonly inFlight: number; readonly queued: number },
+): void => {
   Effect.runSync(
     Effect.all(
       [
-        Metric.update(Metric.withAttributes(processInFlight, { pool: pool.name }), stats.inFlight),
-        Metric.update(Metric.withAttributes(processQueued, { pool: pool.name }), stats.queued),
+        Metric.update(Metric.withAttributes(processInFlight, { pool: label }), stats.inFlight),
+        Metric.update(Metric.withAttributes(processQueued, { pool: label }), stats.queued),
       ],
       { discard: true },
     ),
   );
 };
 
+const publishOwnGauges = (pool: ProcessPool): void => publishPoolGauges(pool.name, pool.stats());
+
 const pools: Record<ProcessPoolName, ProcessPool> = {
-  git: new ProcessPool("git", GIT_PROCESS_LIMIT, Date.now, publishPoolGauges),
-  forge: new ProcessPool("forge", FORGE_PROCESS_LIMIT, Date.now, publishPoolGauges),
+  git: new ProcessPool("git", GIT_PROCESS_LIMIT, Date.now, publishOwnGauges),
+  forge: new ProcessPool("forge", FORGE_PROCESS_LIMIT, Date.now, publishOwnGauges),
 };
 
 export function processGovernorStats(): ReadonlyArray<ProcessPoolStats> {
@@ -227,6 +251,31 @@ const acquirePermit = (pool: ProcessPool, lane: ProcessLane) =>
   });
 
 /**
+ * Runs `effect` under one permit of `pool`, in the current fiber's lane, and
+ * records a positive queue wait as `{pool: pool.name, lane}`. One permit covers
+ * exactly one operation; queue time is not part of the operation's own timeout.
+ */
+export const governWithPool = <A, E, R>(
+  pool: ProcessPool,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.flatMap(ProcessLaneRef, (lane) =>
+    Effect.uninterruptibleMask((restore) =>
+      restore(acquirePermit(pool, lane)).pipe(
+        Effect.flatMap((permit) =>
+          (permit.queueWaitMs > 0
+            ? Metric.update(
+                Metric.withAttributes(processQueueWaitDuration, { pool: pool.name, lane }),
+                Duration.millis(permit.queueWaitMs),
+              ).pipe(Effect.andThen(restore(effect)))
+            : restore(effect)
+          ).pipe(Effect.ensuring(Effect.sync(permit.release))),
+        ),
+      ),
+    ),
+  );
+
+/**
  * Runs `effect` — the full lifetime of one `command` child — under its pool's
  * permit, in the current fiber's lane. Commands outside the governed pools run
  * unchanged. Queue time is not part of the child's own timeout.
@@ -236,23 +285,7 @@ export const governChildProcess = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> => {
   const poolName = processPoolForCommand(command);
-  if (poolName === null) return effect;
-  const pool = pools[poolName];
-  return Effect.flatMap(ProcessLaneRef, (lane) =>
-    Effect.uninterruptibleMask((restore) =>
-      restore(acquirePermit(pool, lane)).pipe(
-        Effect.flatMap((permit) =>
-          (permit.queueWaitMs > 0
-            ? Metric.update(
-                Metric.withAttributes(processQueueWaitDuration, { pool: poolName, lane }),
-                Duration.millis(permit.queueWaitMs),
-              ).pipe(Effect.andThen(restore(effect)))
-            : restore(effect)
-          ).pipe(Effect.ensuring(Effect.sync(permit.release))),
-        ),
-      ),
-    ),
-  );
+  return poolName === null ? effect : governWithPool(pools[poolName], effect);
 };
 
 /** Promise counterpart of {@link governChildProcess} for non-Effect spawners. */

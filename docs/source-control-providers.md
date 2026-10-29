@@ -119,6 +119,26 @@ Run a quick **Rescan** after setting up a new machine or changing credentials.
 
 That's it—you can now clone, publish, and create pull requests.
 
+#### How Ryco talks to GitHub
+
+Ryco reads pull request and issue states (the sidebar, linked pull requests and issues) straight
+from GitHub's API over HTTPS, with the same token the GitHub CLI uses, instead of starting `gh` for
+each read. Everything else (lists, pull request details, reviews, comments, creating pull requests,
+checkouts, GitHub Actions) still runs through `gh`.
+
+- The token is the one `gh` would use: `GH_TOKEN` or `GITHUB_TOKEN` for github.com and GHE.com, and
+  `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` for the GitHub Enterprise Server host that
+  `GH_HOST` names; otherwise Ryco asks `gh auth token`. Ryco never saves it, and sends it only to
+  that host's API.
+- `gh` is used instead when there is no token, when an enterprise token is set but `GH_HOST` is
+  unset or names another host, when `HTTPS_PROXY` is set and Node.js would not use it (set
+  `NODE_USE_ENV_PROXY=1` on Node.js 24.5 or 22.21 and later to read through the proxy), or when the
+  API cannot be reached. After a connection or certificate error Ryco uses `gh` for 5 minutes (30
+  seconds when the machine is offline) before trying again.
+- GitHub Enterprise Server with a private certificate authority: set `NODE_EXTRA_CA_CERTS` to that
+  certificate for the server process so these reads can use the API; without it they keep using
+  `gh`.
+
 ### For GitLab
 
 1. Install the GitLab CLI:

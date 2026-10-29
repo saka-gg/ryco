@@ -632,6 +632,45 @@ describe("GitHubCli.layer", () => {
         });
       }).pipe(Effect.provide(layer)),
     );
+
+    it.effect("asks the issue's own host for its comment reactions", () =>
+      Effect.gen(function* () {
+        mockRun.mockReturnValueOnce(
+          Effect.succeed(
+            processOutput(
+              JSON.stringify({
+                number: 42,
+                title: "t",
+                url: "https://ghes.example:8443/acme/web/issues/42",
+                state: "OPEN",
+                body: "BODY",
+                comments: [
+                  {
+                    id: "IC_1",
+                    author: { login: "bob" },
+                    body: "hi",
+                    createdAt: "2026-03-14T10:00:00Z",
+                  },
+                ],
+              }),
+            ),
+          ),
+        );
+        mockRun.mockReturnValueOnce(
+          Effect.succeed(processOutput(JSON.stringify({ data: { nodes: [] } }))),
+        );
+
+        const gh = yield* GitHubCli.GitHubCli;
+        yield* gh.getIssue({ cwd: "/tmp", reference: "42" });
+        // Comment node ids belong to that host; gh's default host would not resolve them.
+        assert.deepStrictEqual(mockRun.mock.calls[1]?.[0].args.slice(0, 4), [
+          "api",
+          "graphql",
+          "--hostname",
+          "ghes.example:8443",
+        ]);
+      }).pipe(Effect.provide(layer)),
+    );
   });
 
   describe("repository lists", () => {

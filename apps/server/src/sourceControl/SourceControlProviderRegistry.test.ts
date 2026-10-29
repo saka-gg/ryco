@@ -5,8 +5,13 @@ import { SourceControlProviderError } from "@ryco/contracts";
 import { ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
 
+import { FetchHttpClient } from "effect/http";
+
 import { ServerConfig } from "../config.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { AtlassianConnectionRepository } from "../persistence/Services/AtlassianConnections.ts";
+import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
+import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import type * as VcsDriver from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -15,6 +20,8 @@ import * as BitbucketApi from "./BitbucketApi.ts";
 import { ForgeRateLimitStore, ForgeRateLimits } from "./forgeRateLimit.ts";
 import * as ForgejoApi from "./ForgejoApi.ts";
 import * as GitHubCli from "./GitHubCli.ts";
+import * as GitHubApi from "./gitHubApi.ts";
+import { fakeGitHub } from "./gitHubApiTestServer.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
@@ -871,6 +878,99 @@ describe("change request page forwarding", () => {
       assert.strictEqual(page.items[0]?.provider, "github");
       assert.isTrue(page.truncated);
       assert.strictEqual(page.skippedRows, 1);
+    }),
+  );
+});
+
+describe("the production GitHub client", () => {
+  it.effect("reads link states over the direct API through the lazily built client", () =>
+    Effect.gen(function* () {
+      const server = yield* fakeGitHub(() => ({
+        body: {
+          data: {
+            repository: {
+              p7: { number: 7, state: "OPEN", isDraft: true, closedAt: null, mergedAt: null },
+            },
+          },
+        },
+      }));
+      const ghCalls: string[] = [];
+      const driver = {
+        listRemotes: () =>
+          Effect.succeed({
+            remotes: [
+              {
+                name: "origin",
+                url: "git@github.com:acme/repo.git",
+                pushUrl: Option.none(),
+                isPrimary: true,
+              },
+            ],
+            freshness: {
+              source: "live-local" as const,
+              observedAt: TEST_EPOCH,
+              expiresAt: Option.none(),
+            },
+          }),
+      } satisfies Partial<VcsDriver.VcsDriverShape>;
+      const registry = yield* SourceControlProviderRegistry.SourceControlProviderRegistry.pipe(
+        Effect.provide(
+          SourceControlProviderRegistry.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+                  get: () => Effect.succeed(driver as unknown as VcsDriver.VcsDriverShape),
+                  resolve: () =>
+                    Effect.succeed({
+                      kind: "git",
+                      repository: {
+                        kind: "git",
+                        rootPath: "/repo",
+                        metadataPath: null,
+                        freshness: {
+                          source: "live-local" as const,
+                          observedAt: TEST_EPOCH,
+                          expiresAt: Option.none(),
+                        },
+                      },
+                      driver: driver as unknown as VcsDriver.VcsDriverShape,
+                    }),
+                }),
+                Layer.mock(VcsProcess.VcsProcess)({
+                  run: (input) =>
+                    Effect.sync(() => {
+                      ghCalls.push([input.command, ...input.args].join(" "));
+                      return processOutput(
+                        JSON.stringify({
+                          nameWithOwner: "acme/repo",
+                          url: "https://github.com/acme/repo",
+                        }),
+                      );
+                    }),
+                }),
+                Layer.mock(ForgejoApi.ForgejoApi)({ detectProviderFromRemoteUrl: () => null }),
+                Layer.mock(AtlassianConnectionRepository)({}),
+                Layer.mock(ServerSecretStore)({}),
+                Layer.mock(GitVcsDriver)({}),
+                Layer.succeed(GitHubApi.GitHubApiEnvironment, { GH_TOKEN: "ghp_registry" }),
+                Layer.succeed(GitHubApi.GitHubApiEndpoints, () => server.urls),
+                FetchHttpClient.layer,
+                NodeServices.layer,
+                ServerConfig.layerTest(process.cwd(), {
+                  prefix: "ryco-source-control-registry-direct-",
+                }).pipe(Layer.provide(NodeServices.layer)),
+              ),
+            ),
+          ),
+        ),
+      );
+      const provider = yield* registry.resolve({ cwd: "/repo" });
+      const state = yield* provider.getPullRequestState({ cwd: "/repo", number: 7 });
+      assert.deepStrictEqual(state, { state: "open", isDraft: true, terminalAt: null });
+      assert.lengthOf(server.requests, 1);
+      assert.strictEqual(server.requests[0]!.headers.authorization, "token ghp_registry");
+      // gh only resolved the repository; the state document went over HTTPS.
+      assert.deepStrictEqual(ghCalls, ["gh repo view --json nameWithOwner,url"]);
     }),
   );
 });

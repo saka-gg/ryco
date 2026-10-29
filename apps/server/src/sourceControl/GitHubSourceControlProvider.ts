@@ -34,6 +34,7 @@ import {
 import * as GitHubIssues from "./gitHubIssues.ts";
 import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
+import type * as GitHubRepositoryLists from "./gitHubRepositoryLists.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
 import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
@@ -202,6 +203,26 @@ function dateTimeOption(value: string | null | undefined): Option.Option<DateTim
   const date = new Date(trimmed);
   if (!Number.isFinite(date.getTime())) return Option.none();
   return Option.some(DateTime.fromDateUnsafe(date));
+}
+
+/** A pull request's state as `getPullRequestState` and `getLinkStates` report it. */
+function pullRequestLinkState(record: GitHubRepositoryLists.GitHubPullRequestStateRecord): {
+  readonly state: "open" | "closed" | "merged";
+  readonly isDraft: boolean;
+  readonly terminalAt: DateTime.Utc | null;
+} {
+  const terminal =
+    record.state === "merged"
+      ? (record.mergedAt ?? record.closedAt)
+      : record.state === "closed"
+        ? record.closedAt
+        : null;
+  const terminalAt = terminal === null ? null : DateTime.make(terminal);
+  return {
+    state: record.state,
+    isDraft: record.isDraft,
+    terminalAt: terminalAt !== null && Option.isSome(terminalAt) ? terminalAt.value : null,
+  };
 }
 
 function durationMsOption(
@@ -1168,25 +1189,23 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         ),
         Effect.mapError((cause) => providerError("listAssignees", cause)),
       ),
+    // The batched state read with one number: one GraphQL document, which the
+    // client sends over HTTPS when it can (`gh pr view` always starts gh).
     getPullRequestState: (input) =>
-      github
-        .getPullRequest({ cwd: input.cwd, reference: String(input.number), fields: "summary" })
-        .pipe(
-          Effect.map((summary) => {
-            const state = summary.state ?? "open";
-            return {
-              state,
-              isDraft: summary.isDraft ?? false,
-              terminalAt:
-                state === "merged"
-                  ? (summary.mergedAt ?? summary.closedAt ?? null)
-                  : state === "closed"
-                    ? (summary.closedAt ?? null)
-                    : null,
-            };
-          }),
-          Effect.mapError((cause) => providerError("getPullRequestState", cause)),
-        ),
+      github.getLinkStates({ cwd: input.cwd, pullRequests: [input.number], issues: [] }).pipe(
+        Effect.flatMap((records) => {
+          const record = records.pullRequests.get(input.number);
+          return record === undefined
+            ? Effect.fail(
+                new GitHubCli.GitHubCliError({
+                  operation: "getPullRequestState",
+                  detail: `GitHub could not resolve pull request #${input.number}.`,
+                }),
+              )
+            : Effect.succeed(pullRequestLinkState(record));
+        }),
+        Effect.mapError((cause) => providerError("getPullRequestState", cause)),
+      ),
     getLinkStates: (input) =>
       github
         .getLinkStates({
@@ -1197,24 +1216,9 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         .pipe(
           Effect.map((records) => ({
             pullRequests: new Map(
-              [...records.pullRequests].map(([number, record]) => {
-                const terminal =
-                  record.state === "merged"
-                    ? (record.mergedAt ?? record.closedAt)
-                    : record.state === "closed"
-                      ? record.closedAt
-                      : null;
-                const terminalAt = terminal === null ? null : DateTime.make(terminal);
-                return [
-                  number,
-                  {
-                    state: record.state,
-                    isDraft: record.isDraft,
-                    terminalAt:
-                      terminalAt !== null && Option.isSome(terminalAt) ? terminalAt.value : null,
-                  },
-                ] as const;
-              }),
+              [...records.pullRequests].map(
+                ([number, record]) => [number, pullRequestLinkState(record)] as const,
+              ),
             ),
             issues: records.issues,
           })),

@@ -977,7 +977,7 @@ export const layer = Layer.effect(
       github: yield* lazyClient(
         Effect.flatMap(
           Effect.promise(() => import("./GitHubCli.ts")),
-          (module) => module.make(),
+          (module) => module.makeWithDirectApi(),
         ),
         context,
       ),
