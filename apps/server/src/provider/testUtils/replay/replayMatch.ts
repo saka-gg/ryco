@@ -7,9 +7,9 @@
  *
  * - Frames are compared after a protocol normalizer drops what legitimately varies per run
  *   (package versions, paths, credentials, instruction text).
- * - Values the client generates (JSON-RPC request ids, later Claude uuids) are bound
- *   recorded→actual when a frame matches, and rewritten in the answers, so request order can
- *   change without breaking a fixture.
+ * - Values the client generates (JSON-RPC request ids, Claude session ids and prompt uuids) are
+ *   bound recorded→actual when a frame matches, and rewritten in the answers, so request order
+ *   can change without breaking a fixture.
  * - Consecutive `expect_outbound` entries form a run that matches as a set: concurrent requests
  *   may arrive in any order. Inbound entries after a run flow once its required entries matched.
  * - `optional` entries are never waited for. They stay matchable until the end, and a recorded
@@ -134,6 +134,12 @@ export interface ReplayBindingRules {
   readonly outbound: (frame: unknown) => ReadonlyArray<ReplayJsonPath>;
   /** Paths, in an inbound frame, whose recorded values are replaced by their bound actual. */
   readonly inbound: (frame: unknown) => ReadonlyArray<ReplayJsonPath>;
+  /**
+   * Paths, in a normalized outbound frame, of values that repeat one the client generated
+   * earlier (a resumed session id). A bound recorded value must arrive as its bound actual; a
+   * value never bound compares as recorded.
+   */
+  readonly references?: (frame: unknown) => ReadonlyArray<ReplayJsonPath>;
 }
 
 /**
@@ -214,6 +220,133 @@ export const normalizeCodexOutbound: ReplayFrameNormalizer = (frame) => {
     default:
       return frame;
   }
+};
+
+/** Query options compared as they are; every other option is dropped. */
+const CLAUDE_STABLE_QUERY_OPTIONS = [
+  "model",
+  "permissionMode",
+  "allowDangerouslySkipPermissions",
+  "resume",
+  "resumeSessionAt",
+  "resumeDropsTurn",
+  "sessionId",
+  "effort",
+  "includePartialMessages",
+  "settingSources",
+  "settings",
+  "cwd",
+  "additionalDirectories",
+] as const;
+
+/** Idempotent: a recorded (already stable) `systemPrompt` keeps its `hasAppend`. */
+function stableClaudeSystemPrompt(systemPrompt: unknown): unknown {
+  if (!isRecord(systemPrompt)) return systemPrompt === undefined ? undefined : "<custom>";
+  return {
+    type: systemPrompt.type,
+    ...(systemPrompt.preset !== undefined ? { preset: systemPrompt.preset } : {}),
+    hasAppend:
+      typeof systemPrompt.append === "string"
+        ? systemPrompt.append.length > 0
+        : systemPrompt.hasAppend === true,
+  };
+}
+
+/**
+ * Claude Agent SDK query outbound normalization (frames from `claudeReplayQuery.ts`):
+ * - `query.open` keeps a stable subset of the query options. `env` carries the CLIProxyAPI
+ *   `ANTHROPIC_AUTH_TOKEN`, and `mcpServers` device-gateway and Agent Control credentials, so
+ *   neither is ever compared or kept; neither are the executable, spawn hook, permission
+ *   callback, extra CLI args or the appended system prompt text (product copy).
+ * - `prompt.offer`: the SDK fills `session_id` itself.
+ */
+export const normalizeClaudeOutbound: ReplayFrameNormalizer = (frame) => {
+  if (!isRecord(frame)) return frame;
+  switch (frame.type) {
+    case "query.open": {
+      if (!isRecord(frame.options)) return frame;
+      const options = frame.options;
+      const stable: Record<string, unknown> = {};
+      for (const key of CLAUDE_STABLE_QUERY_OPTIONS) {
+        if (options[key] !== undefined) stable[key] = options[key];
+      }
+      const systemPrompt = stableClaudeSystemPrompt(options.systemPrompt);
+      if (systemPrompt !== undefined) stable.systemPrompt = systemPrompt;
+      return { type: frame.type, options: stable };
+    }
+    case "prompt.offer": {
+      if (!isRecord(frame.message)) return frame;
+      const { session_id: _sessionId, ...message } = frame.message;
+      return { ...frame, message };
+    }
+    default:
+      return frame;
+  }
+};
+
+/** Inbound keys that carry a client-generated id: prompt echoes, session ids, receipts. */
+const CLAUDE_BOUND_INBOUND_KEYS = new Set([
+  "user_message_uuid",
+  "command_uuid",
+  "uuid",
+  "session_id",
+]);
+/** Inbound keys whose array elements carry prompt uuids. */
+const CLAUDE_BOUND_INBOUND_LIST_KEYS = new Set(["user_message_uuids", "still_queued", "cancelled"]);
+
+function collectClaudeInboundPaths(
+  value: unknown,
+  path: ReplayJsonPath,
+  paths: Array<ReplayJsonPath>,
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => collectClaudeInboundPaths(entry, [...path, index], paths));
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, entry] of Object.entries(value)) {
+    if (CLAUDE_BOUND_INBOUND_KEYS.has(key) && typeof entry === "string") {
+      paths.push([...path, key]);
+    } else if (CLAUDE_BOUND_INBOUND_LIST_KEYS.has(key) && Array.isArray(entry)) {
+      entry.forEach((item, index) => {
+        if (typeof item === "string") paths.push([...path, key, index]);
+      });
+    } else {
+      collectClaudeInboundPaths(entry, [...path, key], paths);
+    }
+  }
+}
+
+/**
+ * Claude Agent SDK query: the adapter generates the session id (`query.open`'s `sessionId`) and
+ * every prompt uuid (`prompt.offer`), and a later query resumes that session id. Inbound frames
+ * echo them as `session_id`, `user_message_uuid(s)`, `command_uuid` and `uuid`, and an interrupt
+ * receipt lists them (`still_queued`, `cancelled`); only values equal to a bound recorded value
+ * are rewritten.
+ */
+export const claudeQueryBindingRules: ReplayBindingRules = {
+  outbound: (frame) => {
+    if (!isRecord(frame)) return [];
+    if (frame.type === "query.open" && isRecord(frame.options) && frame.options.sessionId) {
+      return [["options", "sessionId"]];
+    }
+    if (frame.type === "prompt.offer" && isRecord(frame.message) && frame.message.uuid) {
+      return [["message", "uuid"]];
+    }
+    return [];
+  },
+  inbound: (frame) => {
+    const paths: Array<ReplayJsonPath> = [];
+    collectClaudeInboundPaths(frame, [], paths);
+    return paths;
+  },
+  references: (frame) =>
+    isRecord(frame) &&
+    frame.type === "query.open" &&
+    isRecord(frame.options) &&
+    frame.options.resume !== undefined
+      ? [["options", "resume"]]
+      : [],
 };
 
 const MAX_FRAME_TEXT = 4_000;
@@ -323,13 +456,30 @@ export class ReplayUnexpectedSpawnError extends Schema.TaggedError<ReplayUnexpec
   }
 }
 
+/** An inbound entry the replayed protocol cannot deliver where it stands: a transcript bug. */
+export class ReplayInvalidInboundError extends Schema.TaggedError<ReplayInvalidInboundError>()(
+  "ReplayInvalidInboundError",
+  {
+    scenario: Schema.String,
+    spawn: Schema.Number,
+    cursor: Schema.Number,
+    reason: Schema.String,
+    frame: Schema.Unknown,
+  },
+) {
+  override get message(): string {
+    return `${where(this.scenario, this.spawn)}: inbound entry ${this.cursor} cannot be delivered (${this.reason}): ${frameText(this.frame)}`;
+  }
+}
+
 export type ReplayError =
   | ReplayFrameMismatchError
   | ReplayExhaustedError
   | ReplayUnexpectedOutboundError
   | ReplayIncompleteError
   | ReplayRuntimeExitError
-  | ReplayUnexpectedSpawnError;
+  | ReplayUnexpectedSpawnError
+  | ReplayInvalidInboundError;
 
 export type ReplayInboundStep =
   | {
@@ -354,6 +504,12 @@ export interface ReplayCursorOptions {
   readonly spawn?: number;
   readonly normalize?: ReplayFrameNormalizer;
   readonly bindings?: ReplayBindingRules;
+  /**
+   * Bindings (recorded value as stable JSON → actual value) shared with the other cursors of one
+   * replay, so a later process can reference a value an earlier one bound. Each cursor keeps its
+   * own otherwise.
+   */
+  readonly bindingTable?: Map<string, unknown>;
 }
 
 /** The replay state of one process (one transcript segment, without `spawn` entries). */
@@ -386,11 +542,17 @@ export function describeReplayEntry(entry: ReplayEntry): string {
       : frame.id !== undefined
         ? `response:${String(frame.id)}`
         : typeof frame.type === "string"
-          ? frame.type
+          ? `${frame.type}${frame.type === "sdk.message" ? sdkMessageKind(frame.message) : ""}`
           : undefined
     : undefined;
   return kind === undefined ? entry.type : `${entry.type}:${kind}`;
 }
+
+/** `:system/init` for the SDK message a Claude `sdk.message` frame carries. */
+const sdkMessageKind = (message: unknown) =>
+  isRecord(message) && typeof message.type === "string"
+    ? `:${message.type}${typeof message.subtype === "string" ? `/${message.subtype}` : ""}`
+    : "";
 
 const frameKind = (frame: unknown) =>
   isRecord(frame)
@@ -420,7 +582,7 @@ export function makeReplayCursor(
   };
 
   /** recorded value (stable JSON) → actual value. */
-  const bindings = new Map<string, unknown>();
+  const bindings = options.bindingTable ?? new Map<string, unknown>();
   let index = 0;
   /** Unmatched entries of the run the cursor stands at. */
   let run: Array<number> | undefined;
@@ -548,6 +710,14 @@ export function makeReplayCursor(
   const compare = (entryIndex: number, actual: unknown) => {
     let recorded = expected[entryIndex];
     let received = actual;
+    // A reference must arrive as the value its recorded one was bound to.
+    for (const path of rules.references?.(recorded) ?? []) {
+      const value = readReplayJsonPath(recorded, path);
+      const key = value === undefined ? undefined : stableStringify(value);
+      if (key !== undefined && bindings.has(key)) {
+        recorded = updateReplayJsonPath(recorded, path, () => bindings.get(key));
+      }
+    }
     const bound: Array<readonly [string, unknown]> = [];
     for (const path of rules.outbound(recorded)) {
       const recordedValue = readReplayJsonPath(recorded, path);
