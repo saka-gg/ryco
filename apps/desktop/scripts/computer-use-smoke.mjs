@@ -11,9 +11,11 @@ const scripts = {
   signin: "scripts/sign-in-popup-smoke.ts",
   // Hidden windows and its own loopback fixture pages only (no native helper).
   "tab-budget": "scripts/browser-tab-budget-smoke.ts",
+  // Hidden windows and synthetic input into its own fixture page only (no native helper).
+  picker: "scripts/browser-element-picker-smoke.ts",
 };
 if (!Object.hasOwn(scripts, kind ?? ""))
-  throw new Error("Choose browser, integration, project, signin or tab-budget.");
+  throw new Error("Choose browser, integration, project, signin, tab-budget or picker.");
 const cache = join(desktop, "node_modules/.cache");
 mkdirSync(cache, { recursive: true });
 const directory = mkdtempSync(join(cache, "computer-use-smoke-"));

@@ -53,6 +53,8 @@ export function registerProjectBrowserIpc(
     browser.surface(Schema.decodeUnknownSync(ProjectBrowserSurface)(input), window),
   );
   handle("capture", (input) => browser.capture(textArg({ tab: input }, "tab")));
+  // A user action: only the Ryco window's main frame can start a pick (agents have no picker).
+  handle("pick", (input) => browser.pick(textArg({ tab: input }, "tab")));
   handle("discover", (input) =>
     discovery.discover(input === undefined ? undefined : textArg({ cwd: input }, "cwd", 8192)),
   );

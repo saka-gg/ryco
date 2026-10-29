@@ -480,6 +480,14 @@
       "types": "./src/automationWhenParser.ts",
       "import": "./src/automationWhenParser.ts"
     },
+    "./browserElementReference": {
+      "types": "./src/browserElementReference.ts",
+      "import": "./src/browserElementReference.ts"
+    },
+    "./browserElementPickScript": {
+      "types": "./src/browserElementPickScript.ts",
+      "import": "./src/browserElementPickScript.ts"
+    },
     "./savedEnvironmentRecord": "./src/savedEnvironmentRecord.ts"
   },
   "scripts": {

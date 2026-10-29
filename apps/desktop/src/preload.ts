@@ -165,6 +165,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     command: (input) => ipcRenderer.invoke("desktop:browser:command", input),
     surface: (input) => ipcRenderer.invoke("desktop:browser:surface", input),
     capture: (tab) => ipcRenderer.invoke("desktop:browser:capture", tab),
+    pick: (tab) => ipcRenderer.invoke("desktop:browser:pick", tab),
     discover: (cwd) => ipcRenderer.invoke("desktop:browser:discover", cwd),
     onFocusAddress: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, tab: string) => listener(tab);

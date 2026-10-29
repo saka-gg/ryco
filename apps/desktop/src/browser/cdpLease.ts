@@ -9,6 +9,12 @@ export interface CdpSendOptions {
   readonly timeoutMs?: number;
   /** Do not wait for the ready steps (event handlers and fire-and-forget clears). Still requires a session. */
   readonly skipReady?: boolean;
+  /**
+   * A child target's flat session on this attachment (from `Target.attachedToTarget`), instead of
+   * the page itself (undefined). Its events reach `onEvent` with the same id. The ready steps are
+   * the page's.
+   */
+  readonly sessionId?: string | undefined;
 }
 
 type ReadyStep = (send: CdpSend) => Promise<void>;
@@ -112,7 +118,7 @@ export class CdpLease {
 
   /** One command on the open session, after the ready steps unless `skipReady`. Never attaches. */
   send(method: string, params: object = {}, options: CdpSendOptions = {}): Promise<unknown> {
-    const command = this.command(method, params, options.skipReady === true);
+    const command = this.command(method, params, options.skipReady === true, options.sessionId);
     const { timeoutMs } = options;
     if (timeoutMs === undefined) return command;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -124,7 +130,10 @@ export class CdpLease {
     ]).finally(() => clearTimeout(timer));
   }
 
-  /** Fan-out of the debugger "message" event (one Electron listener per page). */
+  /**
+   * Fan-out of the debugger "message" event (one Electron listener per page). `sessionId` is a child
+   * target's flat session, or undefined for the page itself.
+   */
   onEvent(listener: EventListener): () => void {
     if (this.disposed) return () => undefined;
     const entry = { listener };
@@ -165,14 +174,22 @@ export class CdpLease {
     if (open && api.isAttached()) api.detach();
   }
 
-  private async command(method: string, params: object, skipReady: boolean): Promise<unknown> {
+  private async command(
+    method: string,
+    params: object,
+    skipReady: boolean,
+    sessionId: string | undefined,
+  ): Promise<unknown> {
     const attachment = this.attachment;
     if (!attachment || this.contents.isDestroyed()) throw new Error(NOT_ATTACHED);
     if (!skipReady) await this.readyFor(attachment);
     // The session may have ended while the ready steps ran; never reach a later one.
     if (attachment !== this.attachment || this.contents.isDestroyed())
       throw new Error(NOT_ATTACHED);
-    return this.contents.debugger.sendCommand(method, params);
+    const api = this.contents.debugger;
+    return sessionId === undefined
+      ? api.sendCommand(method, params)
+      : api.sendCommand(method, params, sessionId);
   }
 
   private readyFor(attachment: Attachment): Promise<void> {
@@ -234,9 +251,12 @@ export class CdpLease {
     params: unknown,
     sessionId?: string,
   ): void => {
+    // Electron reports the page's own events with an empty sessionId; listeners get undefined, as
+    // in send()'s options.
+    const session = sessionId === "" ? undefined : sessionId;
     for (const { listener } of Array.from(this.eventListeners)) {
       try {
-        listener(method, params, sessionId);
+        listener(method, params, session);
       } catch {
         // Listeners own their errors; never throw into Electron's emitter.
       }

@@ -5,10 +5,13 @@ import {
   type NativeImage,
   type WebContents,
 } from "electron";
+import type { Mutable } from "effect/Types";
 import type {
   ProjectBrowserCommand,
+  ProjectBrowserPickResult,
   ProjectBrowserState,
   ProjectBrowserSurface,
+  ProjectBrowserTab,
 } from "@ryco/contracts";
 import {
   browserUrl,
@@ -24,6 +27,7 @@ import {
 } from "./browserTabBudget.ts";
 import { COMPUTER_TARGET_CLAIM_MS } from "./policy.ts";
 import { CdpLease } from "../browser/cdpLease.ts";
+import { BrowserElementPicker } from "../browser/elementPicker.ts";
 import { SignInPopups } from "../browser/signInPopups.ts";
 
 /** One page of a tab: its view, hidden host window and shared debugger session. */
@@ -72,6 +76,8 @@ interface TabEntry {
   previewUntil: number;
   /** open()'s page load in flight; the budget pins the tab while > 0 (a revival uses reviveDeadline). */
   busy: number;
+  /** Mutating agent actions in progress (beginAgentMutation). A pick cannot start while > 0. */
+  agentMutations: number;
 }
 
 /** Resolves when `promise` settles or after `ms`, whichever is first; rejects when `signal` aborts. */
@@ -113,6 +119,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.publish();
     this.scheduleBudget();
   });
+  private readonly picker = new BrowserElementPicker({ publish: () => this.publish() });
   private readonly entries = new Map<string, TabEntry>();
   /** The memory budget's single timer (see browserTabBudget.ts) and when it fires. */
   private budgetTimer: ReturnType<typeof setTimeout> | undefined;
@@ -169,7 +176,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
             suspended: true,
           };
         const wc = this.liveOf(entry).view.webContents;
-        return {
+        const tab: Mutable<ProjectBrowserTab> = {
           id,
           project: entry.project,
           title: wc.getTitle(),
@@ -182,6 +189,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
           error: entry.error,
           signInPopup: this.signIn.state(id),
         };
+        const picker = this.picker.state(id);
+        if (picker) tab.picker = picker;
+        return tab;
       }),
     };
   }
@@ -269,11 +279,20 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.signIn.install(id, wc, () => this.foreground(id));
     wc.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!current()) return;
-      if (mainFrame && !inPlace) this.signIn.cancel(id);
+      if (mainFrame && !inPlace) {
+        this.signIn.cancel(id);
+        void this.picker.end(id, "navigation");
+      }
       if (mainFrame && /^https?:/u.test(url)) entry.requestedUrl = url;
     });
     wc.on("before-input-event", (event, input) => {
       if (!current() || input.type !== "keyDown") return;
+      if (input.key === "Escape" && this.picker.state(id) === "picking") {
+        // Escape ends a pick in the page itself; the page never sees the key.
+        event.preventDefault();
+        void this.picker.end(id, "user");
+        return;
+      }
       const commandKey = process.platform === "darwin" ? input.meta : input.control;
       if (commandKey && !input.alt && input.key.toLowerCase() === "l") {
         event.preventDefault();
@@ -323,6 +342,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     });
     wc.on("render-process-gone", () => {
       if (!current()) return;
+      void this.picker.end(id, "destroyed");
       this.signIn.fail(id);
       entry.error = "This page stopped responding. Reload to recover.";
       this.publish();
@@ -360,6 +380,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       agentUntil: project ? 0 : now + COMPUTER_TARGET_CLAIM_MS,
       previewUntil: 0,
       busy: 0,
+      agentMutations: 0,
     };
     // No Electron event can fire before the entry is registered.
     const { id, page } = this.createPage(entry);
@@ -440,6 +461,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       page.view.setBounds({ x: 0, y: 0, width, height });
     }
     entry.presentation = "background";
+    // Panel or tab switch, the surface hiding under a Ryco dialog, the shell closing or reloading.
+    void this.picker.end(mounted.tab, "hidden");
   }
   surface(input: ProjectBrowserSurface, ownerWindow: BrowserWindow): void {
     if (input.tab === null) {
@@ -539,6 +562,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
    * debugger session, then the page itself. `destroyed` names the side Electron already destroyed.
    */
   private teardownPage(id: string, page: LivePage, destroyed?: "guest" | "host"): void {
+    // Settles a pending pick before the session it runs on goes away.
+    void this.picker.end(id, "destroyed");
     page.cdp.dispose();
     const wc = page.view.webContents;
     if (destroyed !== "guest" && !wc.isDestroyed()) wc.close({ waitForBeforeUnload: false });
@@ -587,6 +612,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         wc.openDevTools({ mode: "detach" });
         break;
       case "popout":
+        void this.picker.end(input.tab, "hidden");
         if (this.mounted?.tab === input.tab) this.unmount();
         entry.presentation = "window";
         this.fitHost(page);
@@ -598,6 +624,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
           page.host.hide();
           entry.presentation = "background";
         }
+        break;
+      case "end-pick":
+        await this.picker.end(input.tab, "user");
         break;
     }
     this.publish();
@@ -649,6 +678,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       case "forward":
       case "stop":
       case "dock":
+      case "end-pick": // A suspended tab is never shown, so it has no pick to end.
         return false; // Nothing to do without a page.
     }
   }
@@ -811,6 +841,54 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     signal: AbortSignal,
   ): Promise<unknown> {
     return this.withAgentCdp(tab, signal, (cdp) => cdp.send(method, params));
+  }
+  /**
+   * The driver's bracket around a mutating agent action (BROWSER_MUTATING_ACTIONS): ends a user's
+   * pick on the tab and waits until inspect mode and the highlight are off, so the action's input
+   * reaches the page instead of Chromium's inspect tool. Refuses new picks until the returned
+   * function runs. Agent reads never come here, so they keep a pick.
+   */
+  async beginAgentMutation(tab: string, signal: AbortSignal): Promise<() => void> {
+    signal.throwIfAborted();
+    const entry = this.entries.get(tab);
+    // Closed meanwhile: the action's own lookup reports it.
+    if (!entry) return () => undefined;
+    // First, so no pick can start while the cleanup runs.
+    entry.agentMutations++;
+    try {
+      await this.picker.end(tab, "agent");
+    } catch (error) {
+      entry.agentMutations--;
+      throw error;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      entry.agentMutations--;
+    };
+  }
+  /**
+   * Lets the user pick one element on a tab docked in a visible panel; settles with the element or
+   * the reason the pick ended. A user action only: agents have no way to start it.
+   */
+  async pick(tab: string): Promise<ProjectBrowserPickResult> {
+    const page = this.pickablePage(tab);
+    return this.picker.pick(tab, page.cdp, page.view.webContents, () => {
+      // Re-checked after an earlier pick's cleanup: the tab may have changed meanwhile.
+      if (this.pickablePage(tab) !== page) throw new Error("Browser tab closed.");
+    });
+  }
+  private pickablePage(tab: string): LivePage {
+    const entry = this.entry(tab);
+    const page = this.liveOf(entry);
+    if (entry.presentation !== "panel" || !this.presented(tab))
+      throw new Error("Show this tab in the Browser panel to pick an element.");
+    if (!/^https?:/u.test(page.view.webContents.getURL()) || entry.error !== null)
+      throw new Error("Load a page before picking an element.");
+    if (entry.agentBusy > 0 || entry.agentMutations > 0)
+      throw new Error("The agent is using this tab right now. Try again in a moment.");
+    return page;
   }
   stop(): void {
     const now = Date.now();
@@ -995,6 +1073,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.budgetTimer = undefined;
     this.listeners.clear();
     this.focusListeners.clear();
+    this.picker.dispose();
     for (const id of this.entries.keys()) this.destroy(id);
   }
 }

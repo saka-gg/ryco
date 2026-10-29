@@ -47,3 +47,26 @@ it("keeps sign-in authorization behind the trusted shell main frame", () => {
   handler({ sender: contents, senderFrame: frame }, input);
   expect(command).toHaveBeenCalledWith(input);
 });
+
+it("lets only the trusted shell main frame start an element pick", async () => {
+  const frame = {},
+    contents = { mainFrame: frame };
+  const pick = vi.fn(async (tab: string) => ({ kind: "cancelled", reason: "user", tab }));
+  registerProjectBrowserIpc(
+    { pick, onState: vi.fn(), onFocusAddress: vi.fn() } as unknown as EmbeddedComputerBrowser,
+    () => ({ isDestroyed: () => false, webContents: contents }) as unknown as BrowserWindow,
+  );
+  const handler = handlers.get("desktop:browser:pick")!;
+  expect(() => handler({ sender: {}, senderFrame: frame }, "tab-1")).toThrow("only in the Ryco");
+  expect(() => handler({ sender: contents, senderFrame: {} }, "tab-1")).toThrow("only in the Ryco");
+  expect(pick).not.toHaveBeenCalled();
+  expect(() => handler({ sender: contents, senderFrame: frame }, { tab: "tab-1" })).toThrow(
+    "Invalid tab.",
+  );
+  await expect(handler({ sender: contents, senderFrame: frame }, "tab-1")).resolves.toEqual({
+    kind: "cancelled",
+    reason: "user",
+    tab: "tab-1",
+  });
+  expect(pick).toHaveBeenCalledWith("tab-1");
+});

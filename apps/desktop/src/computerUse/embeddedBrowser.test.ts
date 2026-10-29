@@ -19,7 +19,10 @@ import {
   BROWSER_REVIVE_WAIT_MS,
   BROWSER_TAB_LIMIT,
 } from "./browserTabBudget.ts";
-import { COMPUTER_TARGET_CLAIM_MS } from "./policy.ts";
+import { BrowserComputerDriver } from "./browser.ts";
+import { INSPECT_MODE_OFF, NO_AUTO_ATTACH } from "../browser/elementPicker.ts";
+import { BROWSER_ELEMENT_PAGE_NODE_FUNCTION } from "@ryco/shared/browserElementPickScript";
+import { COMPUTER_TARGET_CLAIM_MS, type ComputerOperationContext } from "./policy.ts";
 
 const browsers: EmbeddedComputerBrowser[] = [];
 function newBrowser(): EmbeddedComputerBrowser {
@@ -1237,5 +1240,289 @@ describe("memory budget", () => {
     await advance(11 * MINUTE);
     expect(fakeElectronState.views).toHaveLength(views);
     expect(browser.state().tabs).toEqual([]);
+  });
+});
+
+describe("element picker", () => {
+  /** A tab docked in a visible Ryco window, as the Browser panel shows it. */
+  async function dockedTab(browser: EmbeddedComputerBrowser, owner = fakeOwnerWindow()) {
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    browser.surface(
+      { owner: "owner", tab: tab.id, x: 0, y: 0, width: 800, height: 600 },
+      owner as unknown as BrowserWindow,
+    );
+    return { id: tab.id, owner, ...fakeTab(tab.id) };
+  }
+  const picker = (browser: EmbeddedComputerBrowser, id: string) =>
+    browser.state().tabs.find((tab) => tab.id === id)?.picker;
+  const overlayCommands = (commands: ReadonlyArray<{ method: string }>) =>
+    commands.filter(({ method }) => method.startsWith("Overlay.") || method.startsWith("DOM."));
+  function agentContext(args: Record<string, unknown>): ComputerOperationContext {
+    return {
+      request: { sessionId: "session", threadId: "thread", turnId: "turn", tool: "browser", args },
+      signal: signal(),
+      check: vi.fn(),
+      authorizeApp: vi.fn(async () => undefined),
+      authorizeForeground: vi.fn(async () => undefined),
+      claim: vi.fn(),
+      activity: vi.fn(async () => undefined),
+    };
+  }
+
+  it("gives a session the picker opened focus emulation first, and the agent shares it", async () => {
+    const browser = newBrowser();
+    const { id, contents } = await dockedTab(browser);
+    const pending = browser.pick(id);
+    await flush();
+    expect(picker(browser, id)).toBe("picking");
+    expect(contents.debugger.commands.slice(0, 2).map(({ method }) => method)).toEqual([
+      "Emulation.setFocusEmulationEnabled",
+      "DOM.enable",
+    ]);
+    await browser.send(id, "Runtime.evaluate", { expression: "1" }, signal());
+    expect(contents.debugger.attach).toHaveBeenCalledTimes(1);
+    expect(
+      contents.debugger.commands.filter(
+        ({ method }) => method === "Emulation.setFocusEmulationEnabled",
+      ),
+    ).toHaveLength(1);
+    await browser.command({ tab: id, action: "end-pick" });
+    await expect(pending).resolves.toEqual({ kind: "cancelled", reason: "user" });
+  });
+
+  it("keeps a user's pick through stop()", async () => {
+    const browser = newBrowser();
+    const { id, contents } = await dockedTab(browser);
+    void browser.pick(id);
+    await flush();
+    await browser.send(id, "Page.reload", {}, signal());
+    browser.stop();
+    expect(contents.stop).toHaveBeenCalled();
+    expect(contents.debugger.isAttached()).toBe(true);
+    expect(contents.debugger.detach).not.toHaveBeenCalled();
+    expect(picker(browser, id)).toBe("picking");
+  });
+
+  it("keeps a pick while the agent reads the page", async () => {
+    const browser = newBrowser();
+    const { id, contents } = await dockedTab(browser);
+    void browser.pick(id);
+    await flush();
+    const before = overlayCommands(contents.debugger.commands).length;
+    await browser.send(id, "Page.getFrameTree", {}, signal());
+    await browser.send(id, "Runtime.evaluate", { expression: "document.title" }, signal());
+    await browser.send(id, "Page.captureScreenshot", { format: "png" }, signal());
+    expect(picker(browser, id)).toBe("picking");
+    expect(overlayCommands(contents.debugger.commands)).toHaveLength(before);
+  });
+
+  it("ends a pick before a mutating agent action and refuses new picks until it settles", async () => {
+    const browser = newBrowser();
+    const { id, contents } = await dockedTab(browser);
+    let releaseDisable!: (value: unknown) => void;
+    contents.debugger.respond = (method) =>
+      method === "DOM.disable"
+        ? new Promise((resolve) => {
+            releaseDisable = resolve;
+          })
+        : {};
+    const pending = browser.pick(id);
+    await flush();
+    const from = contents.debugger.commands.length;
+    let begun = false;
+    const bracket = browser.beginAgentMutation(id, signal()).then((end) => {
+      begun = true;
+      return end;
+    });
+    await expect(pending).resolves.toEqual({ kind: "cancelled", reason: "agent" });
+    await flush();
+    // The action's first command waits until inspect mode is off.
+    expect(begun).toBe(false);
+    expect(contents.debugger.commands.slice(from)).toEqual([
+      { method: "Target.setAutoAttach", params: NO_AUTO_ATTACH },
+      { method: "Overlay.setInspectMode", params: INSPECT_MODE_OFF },
+      { method: "Overlay.hideHighlight", params: {} },
+      { method: "Overlay.disable", params: {} },
+      { method: "DOM.disable", params: {} },
+    ]);
+    releaseDisable({});
+    const end = await bracket;
+    expect(begun).toBe(true);
+    expect(picker(browser, id)).toBeUndefined();
+    await expect(browser.pick(id)).rejects.toThrow(
+      "The agent is using this tab right now. Try again in a moment.",
+    );
+    end();
+    end(); // Idempotent.
+    const next = browser.pick(id);
+    await flush();
+    expect(picker(browser, id)).toBe("picking");
+    await browser.command({ tab: id, action: "end-pick" });
+    await expect(next).resolves.toEqual({ kind: "cancelled", reason: "user" });
+  });
+
+  it("brackets an action on a tab that closed meanwhile without failing", async () => {
+    const browser = newBrowser();
+    const end = await browser.beginAgentMutation("missing", signal());
+    expect(() => end()).not.toThrow();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(browser.beginAgentMutation("missing", controller.signal)).rejects.toThrow();
+  });
+
+  it("lets agent reads through the driver keep a pick, and ends it before a mutating action's first command", async () => {
+    const browser = newBrowser();
+    const { id, contents } = await dockedTab(browser);
+    contents.debugger.respond = (method) => {
+      if (method === "Page.getFrameTree")
+        return { frameTree: { frame: { id: "frame", loaderId: "loader" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 3 };
+      if (method === "Runtime.evaluate")
+        return { result: { value: { title: "", url: "", text: "", elements: [] } } };
+      return {};
+    };
+    const driver = new BrowserComputerDriver(new Map([["ryco", browser]]));
+    const pending = browser.pick(id);
+    await flush();
+    await driver.execute(agentContext({ action: "observe", tab: id }), "ryco");
+    expect(picker(browser, id)).toBe("picking");
+    await driver.execute(
+      agentContext({ action: "navigate", tab: id, url: "https://example.com/next" }),
+      "ryco",
+    );
+    await expect(pending).resolves.toEqual({ kind: "cancelled", reason: "agent" });
+    const methods = contents.debugger.commands.map(({ method }) => method);
+    expect(methods.lastIndexOf("DOM.disable")).toBeLessThan(methods.indexOf("Page.navigate"));
+    expect(methods.indexOf("Page.navigate")).toBeGreaterThan(-1);
+    // The bracket ended with the action.
+    const next = browser.pick(id);
+    await flush();
+    expect(picker(browser, id)).toBe("picking");
+    void browser.command({ tab: id, action: "end-pick" });
+    await next;
+  });
+
+  it("refuses a tab that is not docked in a visible panel, not loaded, or in use by the agent", async () => {
+    const browser = newBrowser();
+    const background = await browser.open("https://example.com/", false, signal(), "project");
+    await expect(browser.pick(background.id)).rejects.toThrow(
+      "Show this tab in the Browser panel to pick an element.",
+    );
+    const owner = fakeOwnerWindow({ minimized: true });
+    const { id, contents } = await dockedTab(browser, owner);
+    await expect(browser.pick(id)).rejects.toThrow(
+      "Show this tab in the Browser panel to pick an element.",
+    );
+    owner.minimized = false;
+    contents.url = "about:blank";
+    await expect(browser.pick(id)).rejects.toThrow("Load a page before picking an element.");
+    contents.url = "https://example.com/";
+    contents.emit("did-fail-load", fakeEvent(), -105, "Name not resolved", contents.url, true);
+    await expect(browser.pick(id)).rejects.toThrow("Load a page before picking an element.");
+    contents.emit("did-start-loading");
+    let answer!: (value: unknown) => void;
+    contents.debugger.respond = (method) =>
+      method === "Runtime.evaluate"
+        ? new Promise((resolve) => {
+            answer = resolve;
+          })
+        : {};
+    const agent = browser.send(id, "Runtime.evaluate", {}, signal());
+    await expect(browser.pick(id)).rejects.toThrow(
+      "The agent is using this tab right now. Try again in a moment.",
+    );
+    await flush();
+    answer({});
+    await agent;
+    const pending = browser.pick(id);
+    await flush();
+    expect(picker(browser, id)).toBe("picking");
+    void browser.command({ tab: id, action: "end-pick" });
+    await pending;
+    expect(contents.debugger.attach).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the pick in state() and settles it when the tab closes", async () => {
+    const browser = newBrowser();
+    const { id, contents } = await dockedTab(browser);
+    expect(browser.state().tabs[0]).not.toHaveProperty("picker");
+    contents.debugger.respond = (method, params) =>
+      method === "Runtime.callFunctionOn"
+        ? (params as { functionDeclaration?: unknown }).functionDeclaration ===
+          BROWSER_ELEMENT_PAGE_NODE_FUNCTION
+          ? { result: { type: "undefined" } }
+          : { result: { value: { selector: "#save", tagName: "BUTTON", role: "button" } } }
+        : method === "Page.getFrameTree"
+          ? { frameTree: { frame: { id: "frame", loaderId: "loader" } } }
+          : method === "Page.createIsolatedWorld"
+            ? { executionContextId: 3 }
+            : method === "DOM.resolveNode"
+              ? { object: { objectId: "object" } }
+              : {};
+    const published: Array<string | undefined> = [];
+    browser.onState((state) => published.push(state.tabs[0]?.picker));
+    const pending = browser.pick(id);
+    await flush();
+    expect(picker(browser, id)).toBe("picking");
+    contents.debugger.message("Overlay.inspectNodeRequested", { backendNodeId: 5 });
+    await expect(pending).resolves.toMatchObject({
+      kind: "picked",
+      element: { url: "https://example.com/", selector: "#save", tagName: "button" },
+    });
+    expect(picker(browser, id)).toBe("picked");
+    expect(published).toContain("picking");
+    expect(published.at(-1)).toBe("picked");
+    const next = browser.pick(id);
+    await flush();
+    await browser.close(id, signal());
+    await expect(next).resolves.toEqual({ kind: "cancelled", reason: "destroyed" });
+    expect(browser.state().tabs).toEqual([]);
+  });
+
+  it.each([
+    ["Escape in the page", "user"],
+    ["a navigation", "navigation"],
+    ["a renderer crash", "destroyed"],
+    ["hiding the surface", "hidden"],
+    ["popping the tab out", "hidden"],
+    ["end-pick", "user"],
+  ] as const)("ends a pick on %s", async (trigger, reason) => {
+    const browser = newBrowser();
+    const { id, contents } = await dockedTab(browser);
+    const pending = browser.pick(id);
+    await flush();
+    if (trigger === "Escape in the page") {
+      const event = fakeEvent();
+      contents.emit("before-input-event", event, { type: "keyDown", key: "Escape" });
+      expect(event.defaultPrevented).toBe(true);
+    } else if (trigger === "a navigation") {
+      // A same-document navigation keeps the pick.
+      contents.emit("did-start-navigation", fakeEvent(), "https://example.com/#a", true, true);
+      expect(picker(browser, id)).toBe("picking");
+      contents.emit("did-start-navigation", fakeEvent(), "https://example.com/next", false, true);
+    } else if (trigger === "a renderer crash") {
+      contents.emit("render-process-gone", fakeEvent(), { reason: "crashed" });
+    } else if (trigger === "hiding the surface") {
+      browser.surface(
+        { owner: "owner", tab: null, x: 0, y: 0, width: 0, height: 0 },
+        fakeOwnerWindow() as unknown as BrowserWindow,
+      );
+    } else if (trigger === "popping the tab out") {
+      await browser.command({ tab: id, action: "popout" });
+    } else {
+      await browser.command({ tab: id, action: "end-pick" });
+      // The picker held the session alone, so ending it detached.
+      expect(contents.debugger.isAttached()).toBe(false);
+    }
+    await expect(pending).resolves.toEqual({ kind: "cancelled", reason });
+    expect(picker(browser, id)).toBeUndefined();
+  });
+
+  it("leaves Escape to the page when no pick is choosing", async () => {
+    const browser = newBrowser();
+    const { contents } = await dockedTab(browser);
+    const event = fakeEvent();
+    contents.emit("before-input-event", event, { type: "keyDown", key: "Escape" });
+    expect(event.defaultPrevented).toBe(false);
   });
 });
