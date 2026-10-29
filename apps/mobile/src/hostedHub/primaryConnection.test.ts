@@ -396,6 +396,46 @@ describe("hosted environment connection", () => {
     expect(getHostedEnvironmentSessions().read(laptop.environmentId)).toBeUndefined();
   });
 
+  it("lets its own record generation follow a dropped Git action only once it is adoptable", () => {
+    const { generation } = connect(studio);
+    const sessions = getHostedEnvironmentSessions();
+    const readiness = connectionFactory.input?.resumeReadiness as {
+      read: () => boolean;
+      subscribe: (listener: () => void) => () => void;
+    };
+    const notified = vi.fn();
+    const unsubscribe = readiness.subscribe(notified);
+
+    expect(readiness.read()).toBe(false);
+    sessions.transportStatus(studio.environmentId, generation, "online");
+    sessions.markSessionReady(studio.environmentId, generation);
+    expect(readiness.read()).toBe(true);
+    expect(notified).toHaveBeenCalled();
+
+    // A replaced generation never follows anything again.
+    sessions.renew(studio.environmentId);
+    expect(readiness.read()).toBe(false);
+    unsubscribe();
+  });
+
+  it("hands its Git actions' delivery to the connection, which marks the environment", () => {
+    const { generation } = connect(studio);
+    const sessions = getHostedEnvironmentSessions();
+    const delivery = connectionFactory.input?.gitActionDelivery as {
+      ownsGitActionStarts: () => boolean;
+      markUncertain: () => void;
+    };
+    // The relay attempt factory keeps tracking them until the connection's recovery claims them.
+    expect(delivery.ownsGitActionStarts()).toBe(false);
+    sessions.transportStatus(studio.environmentId, generation, "online");
+    sessions.markSessionReady(studio.environmentId, generation);
+
+    // Environment-scoped: a request-owned action may fail after its generation was replaced.
+    sessions.renew(studio.environmentId);
+    delivery.markUncertain();
+    expect(sessions.read(studio.environmentId)?.sessionStatus).toBe("delivery-unknown");
+  });
+
   it("reports replay and snapshot failure for its own record generation", () => {
     connect(studio);
     const connectionInput = connectionFactory.input as {

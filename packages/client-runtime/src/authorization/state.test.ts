@@ -40,6 +40,7 @@ const { activateHostedNode, deactivateHostedNode, suspendHostedNode, resetRelayA
   });
 vi.mock("./environment", () => ({ activateHostedNode, deactivateHostedNode, suspendHostedNode }));
 
+import { getGitActionRecovery } from "../rpc/gitActionRecovery.ts";
 import { HostedHubApiError, STEP_UP_REQUIRED_CODE, type HostedHubApi } from "./api.ts";
 import { HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS } from "./hostedEnvironmentSessions.ts";
 import {
@@ -477,6 +478,15 @@ describe("hosted account state", () => {
 
     expect(restoreSession).toHaveBeenCalledTimes(2);
     expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+  });
+
+  it("stops the account session's Git actions from waiting when the account is torn down", async () => {
+    const endAccountSession = vi.spyOn(getGitActionRecovery(), "endAccountSession");
+
+    await hostedHubController.clearAccount("signed-out");
+    expect(endAccountSession).toHaveBeenCalledOnce();
+    await hostedHubController.clearAccount("session-expired");
+    expect(endAccountSession).toHaveBeenCalledTimes(2);
   });
 
   it("keeps an adopted credential when the replaced session's check is rejected mid-commit", async () => {

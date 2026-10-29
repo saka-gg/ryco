@@ -1,6 +1,8 @@
 import type {
   GitActionProgressEvent,
+  GitResumeStackedActionInput,
   GitRunStackedActionInput,
+  GitRunStackedActionOptions,
   GitRunStackedActionResult,
   VcsStatusResult,
   VcsStatusStreamEvent,
@@ -121,8 +123,34 @@ type RpcStreamMethod<TTag extends RpcTag> =
     ? (listener: (event: TEvent) => void, options?: StreamSubscriptionOptions) => () => void
     : never;
 
-interface GitRunStackedActionOptions {
+interface GitStackedActionProgressOptions {
   readonly onProgress?: (event: GitActionProgressEvent) => void;
+}
+
+/**
+ * Follows one stacked-action stream to its result. The node reports the result
+ * with `action_finished`; once it has, a failure after it (bookkeeping on an
+ * older node, or a dropped connection) does not undo the action, so the result
+ * stands. Without one, the stream's failure is the outcome. The result is kept
+ * before the caller's progress handler runs, so a handler that throws cannot
+ * lose it.
+ */
+async function collectStackedActionResult(
+  follow: (listener: (event: GitActionProgressEvent) => void) => Promise<void>,
+  options: GitStackedActionProgressOptions | undefined,
+): Promise<GitRunStackedActionResult> {
+  let result: GitRunStackedActionResult | null = null;
+  try {
+    await follow((event) => {
+      if (event.kind === "action_finished") result = event.result;
+      options?.onProgress?.(event);
+    });
+  } catch (error) {
+    if (result) return result;
+    throw error;
+  }
+  if (result) return result;
+  throw new Error("Git action stream completed without a final result.");
 }
 
 export interface WsRpcClient {
@@ -318,10 +346,21 @@ export interface WsRpcClient {
    * Git-specific workflows. Local repository mechanics live under `vcs`.
    */
   readonly git: {
+    /**
+     * One attempt on this connection. The connection's client wraps it with
+     * `GitActionRecovery`, which reads `recoverable` and `onRecoveryState`;
+     * here they are ignored.
+     */
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
     ) => Promise<GitRunStackedActionResult>;
+    /** One attempt to follow a recoverable action again on this connection; never starts one. */
+    readonly resumeStackedAction: (
+      input: GitResumeStackedActionInput,
+      options?: GitStackedActionProgressOptions,
+    ) => Promise<GitRunStackedActionResult>;
+    readonly cancelStackedAction: RpcUnaryMethod<typeof WS_METHODS.gitCancelStackedAction>;
     readonly resolvePullRequest: RpcUnaryMethod<typeof WS_METHODS.gitResolvePullRequest>;
     readonly preparePullRequestThread: RpcUnaryMethod<
       typeof WS_METHODS.gitPreparePullRequestThread
@@ -857,25 +896,26 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       init: (input) => transport.request((client) => client[WS_METHODS.vcsInit](input)),
     },
     git: {
-      runStackedAction: async (input, options) => {
-        let result: GitRunStackedActionResult | null = null;
-
-        await transport.requestStream(
-          (client) => client[WS_METHODS.gitRunStackedAction](input),
-          (event) => {
-            options?.onProgress?.(event);
-            if (event.kind === "action_finished") {
-              result = event.result;
-            }
-          },
-        );
-
-        if (result) {
-          return result;
-        }
-
-        throw new Error("Git action stream completed without a final result.");
-      },
+      runStackedAction: (input, options) =>
+        collectStackedActionResult(
+          (listener) =>
+            transport.requestStream(
+              (client) => client[WS_METHODS.gitRunStackedAction](input),
+              listener,
+            ),
+          options,
+        ),
+      resumeStackedAction: (input, options) =>
+        collectStackedActionResult(
+          (listener) =>
+            transport.requestStream(
+              (client) => client[WS_METHODS.gitResumeStackedAction](input),
+              listener,
+            ),
+          options,
+        ),
+      cancelStackedAction: (input) =>
+        transport.request((client) => client[WS_METHODS.gitCancelStackedAction](input)),
       resolvePullRequest: (input) =>
         transport.request((client) => client[WS_METHODS.gitResolvePullRequest](input)),
       preparePullRequestThread: (input) =>

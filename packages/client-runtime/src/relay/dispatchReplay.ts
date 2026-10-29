@@ -5,9 +5,9 @@ import {
   type HostedRuntimeTimers,
 } from "../authorization/runtime.ts";
 import type { HostedHubState } from "../authorization/state.ts";
-import { isAwaitingAdmission, isDefiniteDispatchFailure } from "../rpc/protocol.ts";
+import { hasErrorTag, isAwaitingAdmission, isDefiniteDispatchFailure } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
-import { RpcTransportDisposedError } from "../rpc/wsTransport.ts";
+import { isRpcTransportFailure } from "../rpc/wsTransport.ts";
 import type { HostedReceiptedRequestOwner } from "./transport.ts";
 
 type DispatchCommand = WsRpcClient["orchestration"]["dispatchCommand"];
@@ -42,30 +42,6 @@ export function hostedDispatchLineage(
   return state.account.id;
 }
 
-function hasTag(error: unknown, tag: string): boolean {
-  return typeof error === "object" && error !== null && "_tag" in error && error._tag === tag;
-}
-
-/**
- * Effect's `Cause.squash` of a cause made only of interruptions: what a request
- * rejects with when its client is disposed or reconnected mid-request, or when
- * the node interrupts it on its way down. The wire test pins it.
- */
-const INTERRUPTED_WITHOUT_ERROR = "All fibers interrupted without error";
-
-/**
- * Whether the transport gave up on the request rather than the node answering
- * it: every socket failure reaches a pending request as an `RpcClientError`, a
- * disposal or reconnect interrupts it, and a disposed transport sends nothing.
- */
-function isTransportFailure(error: unknown): boolean {
-  return (
-    hasTag(error, "RpcClientError") ||
-    error instanceof RpcTransportDisposedError ||
-    (error instanceof Error && error.message === INTERRUPTED_WITHOUT_ERROR)
-  );
-}
-
 /**
  * Whether a first attempt's failure leaves its outcome unknown. A refusal by
  * this client before sending and the node's typed answer are always definite.
@@ -78,7 +54,7 @@ function isTransportFailure(error: unknown): boolean {
  */
 function isDeliveryUnknown(error: unknown, lostSinceSend: boolean): boolean {
   if (isDefiniteDispatchFailure(error)) return false;
-  return lostSinceSend || isTransportFailure(error);
+  return lostSinceSend || isRpcTransportFailure(error);
 }
 
 /**
@@ -93,7 +69,7 @@ function isDeliveryUnknown(error: unknown, lostSinceSend: boolean): boolean {
  * sent, and waits for the next readiness instead.)
  */
 function isReplayAnswer(command: ClientOrchestrationCommand, error: unknown): boolean {
-  if (!hasTag(error, "OrchestrationDispatchCommandError")) return false;
+  if (!hasErrorTag(error, "OrchestrationDispatchCommandError")) return false;
   return !(command.type === "thread.turn.start" && command.bootstrap !== undefined);
 }
 

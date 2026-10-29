@@ -386,6 +386,15 @@ export interface HostedReceiptedRequestOwner {
   readonly connectionLost: () => void;
 }
 
+/**
+ * Whoever answers for a connection's `git.runStackedAction` deliveries after a
+ * drop (`bindHostedGitActionDelivery`). Until it claims them they are tracked
+ * like any other mutation.
+ */
+export interface HostedGitActionStartOwner {
+  readonly ownsGitActionStarts: () => boolean;
+}
+
 export class HostedRelayAttemptFactory {
   readonly #binding: HostedRelayAttemptBinding;
   readonly #reconnect = new HostedReconnectPolicy();
@@ -635,6 +644,7 @@ export class HostedRelayAttemptFactory {
 
   lifecycleHandlers(
     receiptedRequestOwner?: HostedReceiptedRequestOwner,
+    gitActionStartOwner?: HostedGitActionStartOwner,
   ): WsProtocolLifecycleHandlers {
     const subscribePresenceWake = this.#binding.subscribePresenceWake;
     return {
@@ -715,10 +725,19 @@ export class HostedRelayAttemptFactory {
         // delivery uncertain. Reads — unary, or long-lived streams such as the
         // Agent Control queue — are harmless to lose. A receipted command is
         // left to its client only once that client has claimed it: the client
-        // then replays it, or marks the session itself when it cannot.
+        // then replays it, or marks the session itself when it cannot. So is a
+        // Git action once the connection's recovery has claimed it: it follows
+        // a recoverable one again, and marks the session for a request-owned
+        // one lost with its connection.
         const effect = rpcDeliveryEffectFor(info.tag);
         if (effect === "read") return;
         if (effect === "receipted" && receiptedRequestOwner?.ownsReceiptedRequests() === true) {
+          return;
+        }
+        if (
+          info.tag === WS_METHODS.gitRunStackedAction &&
+          gitActionStartOwner?.ownsGitActionStarts() === true
+        ) {
           return;
         }
         this.#pendingRequests.set(info.id, info.stream ? "exit" : "first-chunk");

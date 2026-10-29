@@ -2,6 +2,7 @@ import {
   canAdoptHostedEnvironmentSession,
   getHostedEnvironmentSessions,
   hostedAccountStore,
+  hostedEnvironmentResumeReadiness,
   hostedEnvironmentSessionsMode,
   hostedHubController,
   hostedHubStore,
@@ -42,6 +43,7 @@ export function ensureWebHostedRuntimeConfigured(): void {
 export {
   getHostedEnvironmentSessions,
   hostedAccountStore,
+  hostedEnvironmentResumeReadiness,
   hostedEnvironmentSessionsMode,
   hostedHubController,
   hostedHubStore,

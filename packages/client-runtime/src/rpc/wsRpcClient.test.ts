@@ -4,7 +4,8 @@ import type {
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts";
-import { Effect } from "effect";
+import { GitManagerError } from "@ryco/contracts/git";
+import { Effect, Stream } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("./wsTransport.ts", () => ({
@@ -317,4 +318,106 @@ it("routes thread forks to the threads.fork wire method", async () => {
   } as Parameters<typeof client.threads.fork>[0];
   await expect(client.threads.fork(input)).resolves.toMatchObject({ threadId: "fork-thread" });
   expect(fork).toHaveBeenCalledWith(input);
+});
+
+describe("git stacked actions", () => {
+  const actionInput = {
+    actionId: "6f1c0d3e-8a5b-4c2d-9e7f-1a2b3c4d5e6f",
+    cwd: "/repo",
+    action: "create_pr" as const,
+  };
+  const base = { actionId: actionInput.actionId, cwd: "/repo", action: "create_pr" as const };
+  const result = { action: "create_pr", pr: { status: "created" } };
+  const started = { ...base, kind: "action_started", phases: ["pr"] };
+  const finished = { ...base, kind: "action_finished", result };
+  const linkFailure = new GitManagerError({
+    operation: "git.runStackedAction",
+    detail: "Failed to load worktree for pull request link update",
+  });
+
+  function streamTransport(wire: Record<string, (input: unknown) => unknown>) {
+    return {
+      request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+        Effect.runPromise(invoke(wire)),
+      requestStream: (
+        connect: (client: unknown) => Stream.Stream<unknown, Error>,
+        listener: (value: unknown) => void,
+      ) =>
+        Effect.runPromise(
+          Stream.runForEach(connect(wire), (value) => Effect.sync(() => listener(value))),
+        ),
+    } as unknown as WsTransport;
+  }
+
+  it("keeps the reported result when the stream fails after action_finished", async () => {
+    const run = vi.fn(() =>
+      Stream.concat(Stream.make(started, finished), Stream.fail(linkFailure)),
+    );
+    const client = createWsRpcClient(streamTransport({ [WS_METHODS.gitRunStackedAction]: run }));
+    const progress: unknown[] = [];
+
+    await expect(
+      client.git.runStackedAction(actionInput, { onProgress: (event) => progress.push(event) }),
+    ).resolves.toEqual(result);
+    expect(progress).toEqual([started, finished]);
+    expect(run).toHaveBeenCalledWith(actionInput);
+  });
+
+  it("keeps the reported result when the progress handler throws on it", async () => {
+    const client = createWsRpcClient(
+      streamTransport({ [WS_METHODS.gitRunStackedAction]: () => Stream.make(started, finished) }),
+    );
+
+    await expect(
+      client.git.runStackedAction(actionInput, {
+        onProgress: (event) => {
+          if (event.kind === "action_finished") throw new Error("notice failed");
+        },
+      }),
+    ).resolves.toEqual(result);
+  });
+
+  it("fails with the stream's failure when no result was reported", async () => {
+    const client = createWsRpcClient(
+      streamTransport({
+        [WS_METHODS.gitRunStackedAction]: () =>
+          Stream.concat(Stream.make(started), Stream.fail(linkFailure)),
+      }),
+    );
+    await expect(client.git.runStackedAction(actionInput)).rejects.toBe(linkFailure);
+
+    const silent = createWsRpcClient(
+      streamTransport({ [WS_METHODS.gitRunStackedAction]: () => Stream.make(started) }),
+    );
+    await expect(silent.git.runStackedAction(actionInput)).rejects.toThrow(
+      "Git action stream completed without a final result.",
+    );
+  });
+
+  it("follows and stops an action through their own wire methods", async () => {
+    const resume = vi.fn(() =>
+      Stream.concat(Stream.make(started, finished), Stream.fail(linkFailure)),
+    );
+    const cancel = vi.fn(() => Effect.succeed({ cancelled: true }));
+    const run = vi.fn(() => Stream.empty);
+    const client = createWsRpcClient(
+      streamTransport({
+        [WS_METHODS.gitRunStackedAction]: run,
+        [WS_METHODS.gitResumeStackedAction]: resume,
+        [WS_METHODS.gitCancelStackedAction]: cancel,
+      }),
+    );
+    const progress: unknown[] = [];
+
+    await expect(
+      client.git.resumeStackedAction(actionInput, { onProgress: (event) => progress.push(event) }),
+    ).resolves.toEqual(result);
+    expect(resume).toHaveBeenCalledWith(actionInput);
+    expect(progress).toEqual([started, finished]);
+    await expect(
+      client.git.cancelStackedAction({ actionId: actionInput.actionId }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(cancel).toHaveBeenCalledWith({ actionId: actionInput.actionId });
+    expect(run).not.toHaveBeenCalled();
+  });
 });

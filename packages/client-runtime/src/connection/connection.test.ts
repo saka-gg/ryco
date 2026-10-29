@@ -8,6 +8,7 @@ import { UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { KnownEnvironment } from "../knownEnvironment.ts";
+import { bindHostedGitActionDelivery, getGitActionRecovery } from "../rpc/gitActionRecovery.ts";
 import type { ShellSubscriptionOptions, WsRpcClient } from "../rpc/index.ts";
 import { isEnvironmentNodeNewer, resetNewerNodeStateForTests } from "../rpc/newerNodeState.ts";
 import {
@@ -555,5 +556,268 @@ describe("content from a newer node", () => {
     ]);
     expect(isEnvironmentNodeNewer(environmentId)).toBe(true);
     expect(warn).toHaveBeenCalledOnce();
+  });
+});
+
+describe("git action recovery", () => {
+  const gitEnvironmentId = EnvironmentId.make("env-git-actions");
+  const actionInput = {
+    actionId: "6f1c0d3e-8a5b-4c2d-9e7f-1a2b3c4d5e6f",
+    cwd: "/repo",
+    action: "push" as const,
+  };
+  const pushed = { action: "push" } as never;
+  const dropped = () => Object.assign(new Error("SocketCloseError"), { _tag: "RpcClientError" });
+
+  function openSocketAttempt() {
+    recordWsConnectionAttempt("ws://node.test/ws", {
+      environmentId: gitEnvironmentId,
+      recordGlobal: false,
+    });
+    recordWsConnectionOpened({ environmentId: gitEnvironmentId, recordGlobal: false });
+  }
+
+  async function flush() {
+    for (let index = 0; index < 20; index += 1) await Promise.resolve();
+  }
+
+  function gitHarness() {
+    let shellListener: ((item: OrchestrationShellStreamItem) => void) | undefined;
+    let configListener: ((event: ServerConfigStreamEvent) => void) | undefined;
+    type Call = {
+      readonly input: unknown;
+      readonly emit: (event: unknown) => void;
+      readonly resolve: (value: never) => void;
+      readonly reject: (error: unknown) => void;
+    };
+    const starts: Call[] = [];
+    const resumes: Call[] = [];
+    const record =
+      (calls: Call[]) =>
+      (input: unknown, options?: { readonly onProgress?: (event: unknown) => void }) =>
+        new Promise<never>((resolve, reject) => {
+          calls.push({ input, emit: (event) => options?.onProgress?.(event), resolve, reject });
+        });
+    const git = {
+      runStackedAction: vi.fn(record(starts)),
+      resumeStackedAction: vi.fn(record(resumes)),
+      cancelStackedAction: vi.fn(async () => ({ cancelled: true })),
+    };
+    const client = {
+      server: {
+        subscribeLifecycle: () => () => undefined,
+        subscribeConfig: (next: (event: ServerConfigStreamEvent) => void) => {
+          configListener = next;
+          return () => undefined;
+        },
+      },
+      orchestration: {
+        subscribeShell: (next: (item: OrchestrationShellStreamItem) => void) => {
+          shellListener = next;
+          return () => undefined;
+        },
+      },
+      terminal: { onEvent: () => () => undefined },
+      git,
+      dispose: async () => undefined,
+      reconnect: async () => undefined,
+    } as unknown as WsRpcClient;
+    return {
+      client,
+      git,
+      starts,
+      resumes,
+      acceptShellSnapshot: () => shellListener?.(snapshot(1)),
+      acceptConfig: (capabilities: object) =>
+        configListener?.({
+          version: 1,
+          type: "snapshot",
+          config: {
+            environment: { environmentId: gitEnvironmentId, label: "Remote Mac", capabilities },
+            providers: [],
+            issues: [],
+            keybindings: [],
+            settings: {},
+          },
+        } as unknown as ServerConfigStreamEvent),
+    };
+  }
+
+  function gitConnection(
+    harness: ReturnType<typeof gitHarness>,
+    options: {
+      readonly lifecycleGeneration?: ConnectionLifecycleGeneration;
+      readonly resumeReadiness?: { read: () => boolean; subscribe: (l: () => void) => () => void };
+      readonly gitActionDelivery?: ReturnType<typeof bindHostedGitActionDelivery>;
+    } = {},
+  ) {
+    return createEnvironmentConnection({
+      kind: "saved",
+      knownEnvironment: {
+        environmentId: gitEnvironmentId,
+        label: "Remote Mac",
+      } as unknown as KnownEnvironment,
+      client: harness.client,
+      pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+      resetShellProjection: () => undefined,
+      applyShellEvent: () => undefined,
+      syncShellSnapshot: () => undefined,
+      applyTerminalEvent: () => undefined,
+      ...(options.lifecycleGeneration ? { lifecycleGeneration: options.lifecycleGeneration } : {}),
+      ...(options.resumeReadiness ? { resumeReadiness: options.resumeReadiness } : {}),
+      ...(options.gitActionDelivery ? { gitActionDelivery: options.gitActionDelivery } : {}),
+    });
+  }
+
+  beforeEach(() => {
+    resetWsConnectionStateForTests();
+    openSocketAttempt();
+  });
+
+  afterEach(() => {
+    getGitActionRecovery().resetForTests();
+    resetWsConnectionStateForTests();
+  });
+
+  it("wraps only git.runStackedAction, and keeps a run request-owned unless its caller asks", async () => {
+    const harness = gitHarness();
+    const connection = gitConnection(harness);
+    harness.acceptConfig({ recoverableGitActions: true });
+
+    expect(connection.client.git.runStackedAction).not.toBe(harness.git.runStackedAction);
+    expect(connection.client.git.resumeStackedAction).toBe(harness.git.resumeStackedAction);
+    expect(connection.client.git.cancelStackedAction).toBe(harness.git.cancelStackedAction);
+    expect(connection.client.orchestration).toBe(harness.client.orchestration);
+
+    const run = connection.client.git.runStackedAction(actionInput);
+    expect(harness.starts[0]!.input).toEqual(actionInput);
+    harness.starts[0]!.resolve(pushed);
+    await expect(run).resolves.toBe(pushed);
+  });
+
+  it("claims its Git action deliveries once attached, and marks a lost request-owned run", async () => {
+    const harness = gitHarness();
+    const markUncertain = vi.fn<() => void>();
+    const gitActionDelivery = bindHostedGitActionDelivery(markUncertain);
+    expect(gitActionDelivery.ownsGitActionStarts()).toBe(false);
+    const connection = gitConnection(harness, { gitActionDelivery });
+    harness.acceptConfig({ recoverableGitActions: true });
+    expect(gitActionDelivery.ownsGitActionStarts()).toBe(true);
+
+    const run = connection.client.git.runStackedAction(actionInput);
+    const failure = dropped();
+    harness.starts[0]!.reject(failure);
+    await expect(run).rejects.toBe(failure);
+    expect(markUncertain).toHaveBeenCalledOnce();
+  });
+
+  it("asks the node to keep the action only when this connection's node advertised it", async () => {
+    const harness = gitHarness();
+    const connection = gitConnection(harness);
+
+    // No config yet, then a node without the capability: request-owned.
+    void connection.client.git.runStackedAction(actionInput, { recoverable: true });
+    harness.acceptConfig({});
+    void connection.client.git.runStackedAction(actionInput, { recoverable: true });
+    harness.acceptConfig({ recoverableGitActions: true });
+    void connection.client.git.runStackedAction(actionInput, { recoverable: true });
+
+    expect(harness.starts.map((call) => call.input)).toEqual([
+      actionInput,
+      actionInput,
+      { ...actionInput, recoverable: true },
+    ]);
+  });
+
+  it("follows a dropped action again only on a current, synchronized and adoptable connection", async () => {
+    const harness = gitHarness();
+    let generation = 3;
+    let adoptable = false;
+    const adoptionListeners = new Set<() => void>();
+    const notifyAdoption = () => {
+      for (const listener of Array.from(adoptionListeners)) listener();
+    };
+    const connection = gitConnection(harness, {
+      lifecycleGeneration: { generation: 3, readCurrent: () => generation },
+      resumeReadiness: {
+        read: () => adoptable,
+        subscribe: (listener) => {
+          adoptionListeners.add(listener);
+          return () => adoptionListeners.delete(listener);
+        },
+      },
+    });
+    harness.acceptConfig({ recoverableGitActions: true });
+    harness.acceptShellSnapshot();
+    const progress: unknown[] = [];
+
+    const run = connection.client.git.runStackedAction(actionInput, {
+      recoverable: true,
+      onProgress: (event) => progress.push(event),
+    });
+    harness.starts[0]!.emit("phase:commit");
+    harness.starts[0]!.reject(dropped());
+    await flush();
+    // The lifecycle owner has not adopted the session again.
+    expect(harness.git.resumeStackedAction).not.toHaveBeenCalled();
+
+    // Adoptable, but the generation was replaced.
+    generation = 4;
+    harness.starts[0]!.emit("phase:late");
+    adoptable = true;
+    notifyAdoption();
+    await flush();
+    expect(harness.git.resumeStackedAction).not.toHaveBeenCalled();
+
+    // The socket dropped: the earlier attempt's snapshot no longer counts.
+    generation = 3;
+    recordWsConnectionClosed(
+      { code: 1006 },
+      { environmentId: gitEnvironmentId, recordGlobal: false },
+    );
+    notifyAdoption();
+    openSocketAttempt();
+    notifyAdoption();
+    await flush();
+    expect(harness.git.resumeStackedAction).not.toHaveBeenCalled();
+
+    // The replacement attempt's own snapshot.
+    harness.acceptShellSnapshot();
+    await flush();
+    expect(harness.git.resumeStackedAction).toHaveBeenCalledTimes(1);
+    expect(harness.resumes[0]!.input).toEqual(actionInput);
+    harness.resumes[0]!.emit("action_finished");
+    harness.resumes[0]!.resolve(pushed);
+    await expect(run).resolves.toBe(pushed);
+    expect(progress).toEqual(["phase:commit", "action_finished"]);
+    expect(harness.git.runStackedAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops forwarding a disposed connection's progress and follows on its replacement", async () => {
+    const first = gitHarness();
+    const firstConnection = gitConnection(first);
+    first.acceptConfig({ recoverableGitActions: true });
+    first.acceptShellSnapshot();
+    const progress: unknown[] = [];
+    const run = firstConnection.client.git.runStackedAction(actionInput, {
+      recoverable: true,
+      onProgress: (event) => progress.push(event),
+    });
+
+    await firstConnection.dispose();
+    first.starts[0]!.emit("after dispose");
+    first.starts[0]!.reject(new Error("All fibers interrupted without error"));
+    await flush();
+    expect(first.git.resumeStackedAction).not.toHaveBeenCalled();
+
+    openSocketAttempt();
+    const second = gitHarness();
+    gitConnection(second);
+    second.acceptShellSnapshot();
+    await flush();
+    expect(second.git.resumeStackedAction).toHaveBeenCalledTimes(1);
+    second.resumes[0]!.resolve(pushed);
+    await expect(run).resolves.toBe(pushed);
+    expect(progress).toEqual([]);
   });
 });

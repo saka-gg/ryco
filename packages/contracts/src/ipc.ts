@@ -130,6 +130,8 @@ import type {
   GitRunStackedActionInput,
   GitRunStackedActionResult,
   GitActionProgressEvent,
+  GitCancelStackedActionInput,
+  GitCancelStackedActionResult,
   VcsStatusInput,
   VcsStatusResult,
   VcsCreateRefResult,
@@ -1292,6 +1294,29 @@ export interface LocalApi {
 }
 
 /**
+ * Where a recoverable Git action stands, for the caller's notice. `started` says whether this
+ * run can outlive its connection: the caller asked for it and the node supports it.
+ * `reconnecting`: the connection dropped and the client waits to attach to the action again.
+ * `reattached`: it follows the action again.
+ */
+export type GitActionRecoveryState =
+  | { readonly kind: "started"; readonly recoverable: boolean }
+  | { readonly kind: "reconnecting" }
+  | { readonly kind: "reattached" };
+
+export interface GitRunStackedActionOptions {
+  readonly onProgress?: (event: GitActionProgressEvent) => void;
+  /**
+   * Keep the action running on the node when this connection drops, if the node supports it:
+   * the client attaches to it again instead of failing. Off by default. Closing or reloading
+   * the client then no longer stops the action, so only a caller that offers Stop
+   * (`cancelStackedAction`) asks for it.
+   */
+  readonly recoverable?: boolean;
+  readonly onRecoveryState?: (state: GitActionRecoveryState) => void;
+}
+
+/**
  * APIs bound to a specific backend environment connection.
  *
  * These operations must always be routed with explicit environment context.
@@ -1533,10 +1558,15 @@ export interface EnvironmentApi {
   git: {
     runStackedAction: (
       input: GitRunStackedActionInput,
-      options?: {
-        readonly onProgress?: (event: GitActionProgressEvent) => void;
-      },
+      options?: GitRunStackedActionOptions,
     ) => Promise<GitRunStackedActionResult>;
+    /**
+     * Stops a running recoverable action. `cancelled: false` when no running action of this
+     * client has the id. Absent on clients that predate recoverable actions.
+     */
+    cancelStackedAction?: (
+      input: GitCancelStackedActionInput,
+    ) => Promise<GitCancelStackedActionResult>;
     resolvePullRequest: (input: GitPullRequestRefInput) => Promise<GitResolvePullRequestResult>;
     preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,

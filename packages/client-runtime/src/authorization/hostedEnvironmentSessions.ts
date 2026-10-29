@@ -1,5 +1,6 @@
 import type { EnvironmentId, RelayEffectiveRole } from "@ryco/contracts";
 
+import type { GitActionRecoveryReadiness } from "../rpc/gitActionRecovery.ts";
 import type {
   HostedBrowserStatus,
   HostedHubNode,
@@ -211,6 +212,30 @@ export function canAdoptHostedEnvironmentSession(record: HostedEnvironmentSessio
     (record.sessionStatus === "ready" ||
       (record.sessionStatus === "delivery-unknown" && record.sessionRecoveredAfterUnknown))
   );
+}
+
+/**
+ * Whether the connection of `generation` may follow a dropped Git action again: its
+ * generation is still the environment's record and the record is adoptable
+ * ({@link canAdoptHostedEnvironmentSession}), so the session completed a fresh relay attempt
+ * and accepted its own current snapshot since the drop.
+ */
+export function hostedEnvironmentResumeReadiness(
+  sessions: Pick<HostedEnvironmentSessions, "read" | "subscribe">,
+  environmentId: EnvironmentId,
+  generation: number,
+): GitActionRecoveryReadiness {
+  return {
+    read: () => {
+      const record = sessions.read(environmentId);
+      return (
+        record !== undefined &&
+        record.generation === generation &&
+        canAdoptHostedEnvironmentSession(record)
+      );
+    },
+    subscribe: (listener) => sessions.subscribe(listener),
+  };
 }
 
 /**

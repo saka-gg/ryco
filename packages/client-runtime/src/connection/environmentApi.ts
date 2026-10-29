@@ -114,6 +114,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
     },
     git: {
       runStackedAction: rpcClient.git.runStackedAction,
+      cancelStackedAction: rpcClient.git.cancelStackedAction,
       resolvePullRequest: rpcClient.git.resolvePullRequest,
       preparePullRequestThread: rpcClient.git.preparePullRequestThread,
       createWorktreeForProject: rpcClient.git.createWorktreeForProject,

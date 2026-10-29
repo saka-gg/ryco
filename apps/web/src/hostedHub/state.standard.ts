@@ -16,6 +16,7 @@ import type {
   HostedEnvironmentSessions,
   HostedEnvironmentSessionsSnapshot,
 } from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
+import type { GitActionRecoveryReadiness } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId } from "@ryco/contracts";
 import { useStore } from "zustand";
 
@@ -185,6 +186,18 @@ export const getHostedEnvironmentSessions: () => HostedEnvironmentSessions = () 
 
 /** A standard build keeps no hosted environment sessions at all. */
 export const hostedEnvironmentSessionsMode: () => HostedEnvironmentSessionsMode = () => "single";
+
+const NEVER_RESUME_READY: GitActionRecoveryReadiness = Object.freeze({
+  read: () => false,
+  subscribe: release,
+});
+
+/** A build without hosted sessions has no hosted connection to follow a Git action on. */
+export const hostedEnvironmentResumeReadiness: (
+  sessions: Pick<HostedEnvironmentSessions, "read" | "subscribe">,
+  environmentId: EnvironmentId,
+  generation: number,
+) => GitActionRecoveryReadiness = () => NEVER_RESUME_READY;
 
 /** A build without hosted sessions has none that selecting a node could adopt. */
 export const isHostedEnvironmentSessionAdoptable: (environmentId: EnvironmentId) => boolean = () =>
