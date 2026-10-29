@@ -18,22 +18,14 @@ import type {
 import {
   AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
   AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
-  AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT,
-  AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
-  AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS,
-  AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
-  AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS,
-  AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
   AgentControlMcpListThreadsResult,
   AgentControlMcpReadThreadResult,
   OrchestrationThreadActivity,
   OrchestrationThreadHistoryCursor,
   MessageId,
   type AgentControlMcpListThreadsInput,
-  type AgentControlMcpMessage,
   type AgentControlMcpMessageContinuation,
   type AgentControlMcpReadThreadInput,
-  type AgentControlMcpThreadSummary,
   type OrchestrationMessage,
   type OrchestrationProjectShell,
   type OrchestrationThreadHistoryPageInfo,
@@ -53,19 +45,18 @@ import {
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
+import { isThreadWaitWakeEvent } from "../../orchestration/threadWaitWakeEvents.ts";
 import { threadWakeSource, waitUntil, type WaitWakeSource } from "../eventDrivenWait.ts";
-import type { PageLimits } from "../messagePages.ts";
+import {
+  loadMessagePages,
+  MESSAGE_PAGE_LIMITS,
+  readThreadMessageLimit,
+  toReadThreadResult,
+  toThreadSummary,
+} from "./threadTranscript.ts";
 import { redactAgentControlSecrets } from "../ProviderInjection.ts";
 
-/** Paging rules, loaded on the first read that cuts a text so they stay off the boot path. */
-export const loadMessagePages = Effect.promise(() => import("../messagePages.ts"));
-
-export const MESSAGE_PAGE_LIMITS: PageLimits = {
-  messageMaxChars: AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
-  pageBudgetChars: AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS,
-  continuationMaxChars: AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS,
-  taskResultMaxChars: AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
-};
+export { loadMessagePages, MESSAGE_PAGE_LIMITS } from "./threadTranscript.ts";
 
 /** Bounded, presentation-safe tool failure. Never carries internals. */
 export class ToolFailure {
@@ -221,42 +212,7 @@ const collectThreadsInOrder = (
 
 // ── Result mapping ────────────────────────────────────────────────────
 
-export const toThreadSummary = (shell: OrchestrationThreadShell): AgentControlMcpThreadSummary => ({
-  threadId: shell.id,
-  projectId: shell.projectId,
-  title: shell.title,
-  status: shell.session?.status ?? "idle",
-  activeTurnId: shell.session?.activeTurnId ?? null,
-  providerInstanceId: shell.session?.providerInstanceId ?? null,
-  archived: shell.archivedAt !== null,
-  createdAt: shell.createdAt,
-  updatedAt: shell.updatedAt,
-});
-
-/**
- * Messages of a page as they are, or null when one of them must be cut (longer than the
- * per-message cap, or past the page's text budget): those pages go through the lazy
- * paging rules, which add continuations.
- */
-const wholeMcpMessages = (
-  messages: ReadonlyArray<OrchestrationMessage>,
-): ReadonlyArray<AgentControlMcpMessage> | null => {
-  let total = 0;
-  for (const message of messages) {
-    total += message.text.length;
-    if (message.text.length > AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS) return null;
-  }
-  if (total > AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS) return null;
-  return messages.map((message) => ({
-    messageId: message.id,
-    role: message.role,
-    text: message.text,
-    truncated: false,
-    turnId: message.turnId,
-    attachmentCount: message.attachments?.length ?? 0,
-    createdAt: message.createdAt,
-  }));
-};
+export { toThreadSummary } from "./threadTranscript.ts";
 
 // Bound both arbitrary activity payloads and the aggregate response. Never stringify
 // an unbounded payload first, and never return raw connection/session credentials.
@@ -402,11 +358,7 @@ export const readThreadPage = (
   visible: ThreadVisibility = allThreadsVisible,
 ) =>
   Effect.gen(function* () {
-    const limit = clampLimit(
-      input.messageLimit,
-      AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT,
-      AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
-    );
+    const limit = readThreadMessageLimit(input.messageLimit);
     const shell = yield* findVisibleThread(projections, input.threadId, visible);
     if (input.message !== undefined) {
       if (input.cursor !== undefined) {
@@ -453,14 +405,7 @@ export const readThreadPage = (
       pageInfo = historyPage.page;
     }
 
-    return Schema.encodeSync(AgentControlMcpReadThreadResult)({
-      thread: toThreadSummary(shell),
-      messages:
-        wholeMcpMessages(messages) ??
-        (yield* loadMessagePages).toBudgetedMcpMessages(messages, MESSAGE_PAGE_LIMITS),
-      hasMoreBefore: pageInfo.hasMoreBefore,
-      nextCursor: pageInfo.hasMoreBefore ? pageInfo.oldestCursor : null,
-    });
+    return yield* toReadThreadResult({ shell, messages, pageInfo });
   });
 
 const WAIT_THREADS_TIMEOUT_MS_DEFAULT = 30_000;
@@ -498,7 +443,10 @@ export const waitThreads = <E>(
   Effect.gen(function* () {
     const ids = [...new Set(input.threadIds)];
     const { value: visible, timedOut } = yield* waitUntil({
-      sources: [threadWakeSource(wake.domainEvents, ids), ...(wake.extra ?? [])],
+      sources: [
+        threadWakeSource(wake.domainEvents, ids, isThreadWaitWakeEvent),
+        ...(wake.extra ?? []),
+      ],
       timeoutMs: Math.min(
         input.timeoutMs ?? WAIT_THREADS_TIMEOUT_MS_DEFAULT,
         WAIT_THREADS_TIMEOUT_MS_MAX,

@@ -206,6 +206,10 @@
       "types": "./src/state/composer/providerUpdateRequiredNotice.ts",
       "import": "./src/state/composer/providerUpdateRequiredNotice.ts"
     },
+    "./state/composer/sendEngine": {
+      "types": "./src/state/composer/sendEngine.ts",
+      "import": "./src/state/composer/sendEngine.ts"
+    },
     "./state/files": {
       "types": "./src/state/files/index.ts",
       "import": "./src/state/files/index.ts"

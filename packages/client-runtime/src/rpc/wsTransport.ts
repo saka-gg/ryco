@@ -139,13 +139,7 @@ export function resyncSubscriptionRetryDelayMs(
   );
 }
 
-/**
- * The server does not implement the requested RPC: an older server, or a
- * handler that was never wired. A caller may fall back to an older method.
- */
-export function isUnsupportedRpcError(error: unknown): boolean {
-  return formatErrorMessage(error).includes("Unknown request tag");
-}
+export { isUnsupportedRpcError } from "../errors/transportError.ts";
 
 /**
  * Effect's `Cause.squash` of a cause made only of interruptions: what a request

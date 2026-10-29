@@ -16,6 +16,7 @@ import {
   NodeE2eeAdmissionPolicy,
   OrchestrationReadModel,
   ProjectId,
+  RuntimeMode as ThreadRuntimeMode,
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import {
@@ -121,6 +122,7 @@ import {
 } from "./observability/OtelEnvironment.ts";
 import packageJson from "../package.json" with { type: "json" };
 import type { CliRemoteError } from "./cliRemote/remotes.ts";
+import type { ThreadCliCommand } from "./cliThread/threadCommands.ts";
 import { resolveStandbyHubConnectorConfig } from "./hubConnector/HubConnectorStandby.ts";
 import {
   nodeServiceLabel,
@@ -139,6 +141,7 @@ import {
   formatSessionList,
 } from "./cliAuthFormat.ts";
 import { AuthControlPlane } from "./auth/Services/AuthControlPlane.ts";
+import { readThreadMessageLimit, toReadThreadResult } from "./agentControl/Mcp/threadTranscript.ts";
 import type { AuthControlPlaneShape } from "./auth/Services/AuthControlPlane.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -3845,6 +3848,157 @@ const remoteThreadsCommand = Command.make("threads", {
   ),
 );
 
+// ─── ryco thread ──────────────────────────────────────────────────────────────
+
+// Loads only for `ryco thread` and `ryco remote send`, never on the `serve` path.
+const loadThreadCli = Effect.promise(() => import("./cliThread/threadCommands.ts"));
+
+const runThreadCli = (
+  flags: {
+    readonly baseDir: Option.Option<string>;
+    readonly remote: Option.Option<string>;
+    readonly json: boolean;
+  },
+  command: ThreadCliCommand,
+) =>
+  quietly(
+    flags.json,
+    Effect.gen(function* () {
+      const logLevel = yield* GlobalFlag.LogLevel;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const threadCli = yield* loadThreadCli;
+      yield* threadCli.runThreadCli(command, {
+        json: flags.json,
+        remote: flags.remote,
+        loadRemote: (name) => loadRemote(flags.baseDir, name),
+        local: Effect.map(resolveCliAuthConfig(flags, logLevel), (config) => ({
+          readOrigin: readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+            Effect.map((state) => (Option.isSome(state) ? state.value.origin : null)),
+            Effect.orElseSucceed(() => null),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+          ),
+          authControlPlane: AuthControlPlaneRuntimeLive.pipe(
+            Layer.provide(Layer.succeed(ServerConfig, config)),
+            Layer.provide(
+              Layer.succeed(
+                References.MinimumLogLevel,
+                flags.json ? "Error" : adminCommandLogLevel(logLevel, config.logLevel),
+              ),
+            ),
+          ),
+        })),
+        transcript: { toReadThreadResult, readThreadMessageLimit },
+      });
+    }),
+  );
+
+const threadLocationFlags = {
+  baseDir: baseDirFlag,
+  remote: Flag.String("remote").pipe(
+    Flag.withDescription("Run on a paired remote (`ryco remote add`) instead of this node."),
+    Flag.optional,
+  ),
+  json: jsonFlag,
+} as const;
+
+const threadIdArgument = Argument.String("thread-id").pipe(
+  Argument.withDescription("The thread's id."),
+);
+
+const threadPromptArgument = Argument.String("prompt").pipe(
+  Argument.withDescription("The message, or - to read it from stdin."),
+);
+
+const threadWaitFlag = Flag.Boolean("wait").pipe(
+  Flag.withDescription(
+    "Wait for the turn to end and print its reply. Exit 1 failed or stopped, 2 needs an approval or answer, 3 cut off by a node restart, 5 outcome unknown.",
+  ),
+  Flag.withDefault(false),
+);
+
+const threadTimeoutFlag = Flag.String("timeout").pipe(
+  Flag.withSchema(DurationFromString),
+  Flag.withDescription("Stop waiting after this long and exit 4, for example `30m`."),
+  Flag.optional,
+);
+
+const threadStartCommand = Command.make("start", {
+  ...threadLocationFlags,
+  project: Flag.String("project").pipe(
+    Flag.withDescription("Project id, or a path inside the project such as `.`."),
+  ),
+  title: Flag.String("title").pipe(
+    Flag.withDescription("Thread title. Defaults to the message's first line."),
+    Flag.optional,
+  ),
+  model: Flag.String("model").pipe(
+    Flag.withDescription("instance/model, for example `codex/gpt-5.5`. Defaults to the project's."),
+    Flag.optional,
+  ),
+  runtimeMode: Flag.Literals("runtime-mode", ThreadRuntimeMode.literals).pipe(
+    Flag.withDescription("Defaults to the project's, and may not be above it."),
+    Flag.optional,
+  ),
+  wait: threadWaitFlag,
+  timeout: threadTimeoutFlag,
+  prompt: threadPromptArgument,
+}).pipe(
+  Command.withDescription("Start a thread in a project and print its id."),
+  Command.withHandler((flags) => runThreadCli(flags, { kind: "start", ...flags })),
+);
+
+const threadSendCommand = Command.make("send", {
+  ...threadLocationFlags,
+  wait: threadWaitFlag,
+  timeout: threadTimeoutFlag,
+  threadId: threadIdArgument,
+  prompt: threadPromptArgument,
+}).pipe(
+  Command.withDescription(
+    "Queue a message: it starts as the thread's next turn once the running one ends. Prints the turn's id.",
+  ),
+  Command.withHandler((flags) => runThreadCli(flags, { kind: "send", ...flags })),
+);
+
+const threadWaitCommand = Command.make("wait", {
+  ...threadLocationFlags,
+  turn: Flag.String("turn").pipe(
+    Flag.withDescription("The turn to wait for (`send` prints it). Defaults to the latest."),
+    Flag.optional,
+  ),
+  timeout: threadTimeoutFlag,
+  threadId: threadIdArgument,
+}).pipe(
+  Command.withDescription(
+    "Wait for a turn to end and print its reply, with the exit codes of --wait.",
+  ),
+  Command.withHandler((flags) =>
+    runThreadCli(flags, { kind: "wait", turnId: flags.turn, ...flags }),
+  ),
+);
+
+const threadReadCommand = Command.make("read", {
+  ...threadLocationFlags,
+  limit: Flag.Int("limit").pipe(
+    Flag.withDescription("How many of the latest messages to print (at most 50)."),
+    Flag.optional,
+  ),
+  threadId: threadIdArgument,
+}).pipe(
+  Command.withDescription("Print a thread's latest messages."),
+  Command.withHandler((flags) => runThreadCli(flags, { kind: "read", ...flags })),
+);
+
+const threadCommand = Command.make("thread").pipe(
+  Command.withDescription("Start, message, wait for and read threads, here or on a paired remote."),
+  Command.withSubcommands([
+    threadStartCommand,
+    threadSendCommand,
+    threadWaitCommand,
+    threadReadCommand,
+  ]),
+);
+
 const remoteSendCommand = Command.make("send", {
   ...remoteLocationFlags,
   name: remoteNameArgument,
@@ -3857,34 +4011,23 @@ const remoteSendCommand = Command.make("send", {
   ),
   wait: Flag.Boolean("wait").pipe(
     Flag.withDescription(
-      "Print the assistant's reply as it streams until the turn ends (default; --no-wait returns at once).",
+      "Print the reply once the turn ends (default; --no-wait returns once it starts).",
     ),
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Send a message to a thread on a remote, with the thread's own model."),
+  Command.withDescription("Send a message to a thread on a remote: `ryco thread send --remote`."),
   Command.withHandler((flags) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const remote = yield* loadRemote(flags.baseDir, flags.name);
-        const remoteModule = yield* loadCliRemote;
-        const { connectCliRemote, sendToRemoteThread } = remoteModule;
-        const client = yield* connectCliRemote(remote);
-        const wait = Option.getOrElse(flags.wait, () => true);
-        const text = flags.message.join(" ");
-        const error = yield* sendToRemoteThread(client, {
-          threadId: flags.threadId,
-          text,
-          ...(wait ? { onAssistantText: (chunk: string) => process.stdout.write(chunk) } : {}),
-        });
-        if (wait) process.stdout.write("\n");
-        if (error) {
-          return yield* new remoteModule.CliRemoteError({
-            message: `The turn ended with an error: ${error}`,
-          });
-        }
-        if (!wait) yield* Console.log("Sent.\n");
-      }),
+    runThreadCli(
+      { baseDir: flags.baseDir, remote: Option.some(flags.name), json: false },
+      {
+        kind: "send",
+        threadId: flags.threadId,
+        prompt: flags.message.join(" "),
+        literalPrompt: true,
+        wait: Option.getOrElse(flags.wait, () => true),
+        timeout: Option.none(),
+      },
     ),
   ),
 );
@@ -4330,6 +4473,7 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     configCommand,
     serviceCommand,
     remoteCommand,
+    threadCommand,
     makeDbCommand({
       locationFlags: sharedServerLocationFlags,
       jsonFlag,

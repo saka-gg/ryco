@@ -1,20 +1,16 @@
 /**
- * What `ryco remote threads` and `ryco remote send` do with a connected remote:
- * list its threads from one shell snapshot, and start a turn on a thread,
- * optionally printing the assistant's reply as it streams.
+ * What `ryco remote threads` does with a connected remote: list its threads from
+ * one shell snapshot. `ryco remote send` is `ryco thread send --remote`
+ * (`cliThread/threadCommands.ts`).
  */
 import {
-  CommandId,
-  MessageId,
   ORCHESTRATION_WS_METHODS,
-  type OrchestrationEvent,
   type OrchestrationShellSnapshot,
   type OrchestrationThreadShell,
-  ThreadId,
 } from "@ryco/contracts";
 import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { isRestartReleasedSession } from "@ryco/shared/restartContinuation";
-import { Deferred, Effect, Fiber, Option, Stream } from "effect";
+import { Effect, Option, Stream } from "effect";
 
 import { CliRemoteError, type CliRemoteRpcClient as RemoteRpcClient } from "./remotes.ts";
 
@@ -65,121 +61,3 @@ export function formatRemoteThreads(
     )
     .join("\n");
 }
-
-const TERMINAL_SESSION_STATUSES = new Set(["ready", "idle", "interrupted", "stopped", "error"]);
-
-/**
- * Start a turn on an existing thread with the thread's own model and modes. With
- * `onAssistantText`, keep following the thread and hand over assistant text as
- * it streams until the turn ends; resolves to the session's final error, if any,
- * and fails with an interruption when a node restart cut the turn off.
- */
-export const sendToRemoteThread = (
-  client: RemoteRpcClient,
-  input: {
-    readonly threadId: string;
-    readonly text: string;
-    readonly onAssistantText?: (text: string) => void;
-  },
-) =>
-  Effect.gen(function* () {
-    const snapshot = yield* loadRemoteShell(client);
-    const thread = snapshot.threads.find((entry) => entry.id === input.threadId);
-    if (!thread) {
-      return yield* Effect.fail(
-        new CliRemoteError({
-          message: `No thread ${input.threadId} on this remote. List them with \`ryco remote threads\`.`,
-        }),
-      );
-    }
-    const threadId = ThreadId.make(thread.id);
-    const follow = input.onAssistantText;
-    const subscribed = yield* Deferred.make<void>();
-    const reply =
-      follow === undefined
-        ? undefined
-        : yield* Effect.forkScoped(
-            followTurn(client, threadId, snapshot.snapshotSequence, follow, subscribed),
-          );
-    // Start the turn only once the thread subscription is live, so its first
-    // `running` transition cannot slip past before anyone is listening.
-    if (reply !== undefined) {
-      yield* Deferred.await(subscribed).pipe(Effect.timeoutOption(10_000));
-    }
-    yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-      type: "thread.turn.start",
-      commandId: CommandId.make(`cli:${crypto.randomUUID()}`),
-      threadId,
-      message: {
-        messageId: MessageId.make(crypto.randomUUID()),
-        role: "user",
-        text: input.text,
-        attachments: [],
-      },
-      runtimeMode: thread.runtimeMode,
-      interactionMode: thread.interactionMode,
-      createdAt: new Date().toISOString(),
-    });
-    if (reply === undefined) return null;
-    return yield* Fiber.join(reply);
-  });
-
-const followTurn = (
-  client: RemoteRpcClient,
-  threadId: ThreadId,
-  afterSequence: number,
-  onAssistantText: (text: string) => void,
-  subscribed: Deferred.Deferred<void>,
-) =>
-  Effect.gen(function* () {
-    let turnStarted = false;
-    let finalError: string | null = null;
-    let interruption = null as string | null;
-    const printed = new Set<string>();
-    yield* client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
-      Stream.tap(() => Deferred.succeed(subscribed, undefined)),
-      // Item kinds and event types a remote newer than this CLI added are skipped.
-      Stream.filter(
-        (item) =>
-          !isUnknownUnionMember(item) &&
-          item.kind === "event" &&
-          !isUnknownUnionMember(item.event) &&
-          item.event.sequence > afterSequence,
-      ),
-      Stream.map((item) => (item as { readonly event: OrchestrationEvent }).event),
-      Stream.takeUntil((event) => {
-        if (event.type === "thread.message-sent" && event.payload.role === "assistant") {
-          const { messageId, text, streaming } = event.payload;
-          if (streaming) {
-            printed.add(messageId);
-            onAssistantText(text);
-          } else if (!printed.has(messageId) && text.length > 0) {
-            onAssistantText(text);
-          }
-          return false;
-        }
-        if (event.type !== "thread.session-set") return false;
-        const status = event.payload.session.status;
-        if (status === "running" || status === "starting") {
-          turnStarted = true;
-          return false;
-        }
-        if (turnStarted && TERMINAL_SESSION_STATUSES.has(status)) {
-          const session = event.payload.session;
-          if (isRestartReleasedSession(session)) {
-            interruption = session.lastError;
-          } else if (status === "error") {
-            finalError = session.lastError;
-          }
-          return true;
-        }
-        return false;
-      }),
-      Stream.runDrain,
-    );
-    // A node restart cut the turn off: report an interruption, not a failed turn.
-    if (interruption !== null) {
-      return yield* new CliRemoteError({ message: `The turn was interrupted. ${interruption}` });
-    }
-    return finalError;
-  });

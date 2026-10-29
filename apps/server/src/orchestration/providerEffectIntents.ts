@@ -28,6 +28,7 @@ import {
   type ServerWakeSource,
   type ThreadId,
 } from "@ryco/contracts";
+import { TURN_START_ENDED_ACTIVITY_KINDS, turnStartEndedMessageId } from "@ryco/shared/turnStart";
 import { Option, Schema } from "effect";
 import { SERVER_WAKE_COPY } from "./serverWake.ts";
 
@@ -104,30 +105,10 @@ export const providerIntentKindOf = (
       : "session-stop";
 
 /**
- * Activity kinds that end a turn start without a turn: the reactor's (or the
- * handoff coordinator's) visible failure, and a Stop's cancel notice.
+ * Shared by the planner and `ProjectionPipeline` (pending-row cleanup), and by
+ * `ryco thread`, so all read the outcome key identically.
  */
-export const TURN_START_ENDED_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
-  "provider.turn.start.failed",
-  "provider.turn.start.cancelled",
-]);
-
-/**
- * The user message whose turn start this activity ended, or null. Shared by the
- * planner and `ProjectionPipeline` (pending-row cleanup), so both read the
- * outcome key identically.
- */
-export const turnStartEndedMessageId = (
-  activity: OrchestrationThreadActivity,
-): MessageId | null => {
-  if (!TURN_START_ENDED_ACTIVITY_KINDS.has(activity.kind)) return null;
-  const payload = activity.payload;
-  if (typeof payload !== "object" || payload === null || !("messageId" in payload)) return null;
-  const messageId = payload.messageId;
-  return typeof messageId === "string" && messageId.trim().length > 0
-    ? MessageId.make(messageId)
-    : null;
-};
+export { TURN_START_ENDED_ACTIVITY_KINDS, turnStartEndedMessageId };
 
 const decodeHandoffActivityPayload = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
 

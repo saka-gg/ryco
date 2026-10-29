@@ -210,8 +210,10 @@ ryco remote threads mini
 ryco remote send mini <thread-id> "Run the tests and fix what fails"
 ```
 
-`send` continues a thread with its own model and prints the reply as it streams (`--no-wait` returns
-at once). The session is stored in `~/.ryco/userdata/cli-remotes.json`, readable only by you;
+`send` queues a message on a thread with its own model and prints the reply once the turn ends
+(`--no-wait` returns once it starts). It is `ryco thread send --remote mini`; every `ryco thread`
+command takes `--remote` (see the [server README](./apps/server/README.md#threads-from-scripts)).
+The session is stored in `~/.ryco/userdata/cli-remotes.json`, readable only by you;
 `ryco remote remove mini` forgets it.
 
 ### Option 3: Desktop-Managed SSH Launch

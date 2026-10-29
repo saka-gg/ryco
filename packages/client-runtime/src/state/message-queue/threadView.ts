@@ -7,6 +7,7 @@ import type {
   TurnId,
 } from "@ryco/contracts";
 
+import { isThreadTurnRunning } from "@ryco/shared/turnRunning";
 import type { TurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
 
 import { derivePendingApprovals, derivePendingUserInputs } from "../session/session-logic.ts";
@@ -172,22 +173,6 @@ function readActivityView(
   return next;
 }
 
-/**
- * A turn row can stay `running` after its session has settled (`ready` or
- * `error` with no active turn): non-git tool-only turns, a failed checkpoint
- * capture and ACP prompt failures leave it unfinalized. Waiting on such a turn
- * would strand the queue as `busy`, where no Resume can move it. The session
- * counts as having released the turn only when it was updated after the turn
- * started; an older session update is stale ordering, not a release.
- */
-function sessionReleasedTurn(
-  session: { readonly updatedAt: string } | null,
-  latestTurn: { readonly requestedAt: string; readonly startedAt: string | null },
-): boolean {
-  if (session === null) return false;
-  return Date.parse(session.updatedAt) > Date.parse(latestTurn.startedAt ?? latestTurn.requestedAt);
-}
-
 function isPlaceholderCheckpoint(
   summary:
     | { readonly status?: string | undefined; readonly checkpointRef?: string | undefined }
@@ -246,7 +231,6 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
         shell.worktreeId as keyof typeof environmentState.worktreeById
       ]
     : undefined;
-  const orchestrationStatus = session?.orchestrationStatus ?? null;
 
   return {
     ref,
@@ -256,11 +240,18 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
       (summary?.latestUserMessageAt ?? null) !== null,
     archived: shell.archivedAt !== null || (worktree?.archivedAt ?? null) !== null,
     detailLoaded,
-    running:
-      orchestrationStatus === "running" ||
-      orchestrationStatus === "starting" ||
-      Boolean(session?.activeTurnId) ||
-      (latestTurn?.state === "running" && !sessionReleasedTurn(session, latestTurn)),
+    // A stale `running` turn row the session already released does not strand the queue as
+    // `busy`, where no Resume can move it.
+    running: isThreadTurnRunning(
+      session === null
+        ? null
+        : {
+            status: session.orchestrationStatus,
+            activeTurnId: session.activeTurnId,
+            updatedAt: session.updatedAt,
+          },
+      latestTurn,
+    ),
     hasPendingApproval: Boolean(summary?.hasPendingApprovals) || activityView.pendingApproval,
     hasPendingUserInput: Boolean(summary?.hasPendingUserInput) || activityView.pendingUserInput,
     session: session

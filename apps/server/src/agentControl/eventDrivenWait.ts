@@ -43,7 +43,6 @@ import { Clock, Duration, Effect, Exit, Latch, Scope, Stream } from "effect";
 import type { PubSub } from "effect";
 
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
-import { isThreadWaitWakeEvent } from "../orchestration/threadWaitWakeEvents.ts";
 
 /**
  * Safety-net re-check interval: bounds the latency of anything no wake source
@@ -96,14 +95,15 @@ export const wakeOnSubscription = <A>(
 ): WaitWakeSource => wakeOnStream(Effect.map(subscribe, Stream.fromSubscription), relevant);
 
 /**
- * Wakes on the orchestration events of `threadIds` that `relevant` accepts.
- * The only consumer of `subscribeDomainEvents` in this module: adapt this one
- * function if the engine's subscription shape changes.
+ * Wakes on the orchestration events of `threadIds` that `relevant` accepts
+ * (`isThreadWaitWakeEvent` for a wait on threads settling). The only consumer of
+ * `subscribeDomainEvents` in this module: adapt this one function if the
+ * engine's subscription shape changes.
  */
 export const threadWakeSource = (
   events: Pick<OrchestrationEngineShape, "subscribeDomainEvents">,
   threadIds: Iterable<string>,
-  relevant: (event: OrchestrationEvent) => boolean = isThreadWaitWakeEvent,
+  relevant: (event: OrchestrationEvent) => boolean,
 ): WaitWakeSource => {
   const ids = new Set(threadIds);
   return wakeOnStream(
