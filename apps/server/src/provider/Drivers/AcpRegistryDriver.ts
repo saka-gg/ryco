@@ -7,6 +7,7 @@ import {
 } from "@ryco/contracts";
 import { Effect, FileSystem, Path, PubSub, Ref, Schema, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/process";
+import type * as EffectAcpSchema from "effect-acp/schema";
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeAcpAdapter } from "../Layers/AcpAdapter.ts";
@@ -15,6 +16,7 @@ import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { defaultProviderContinuationIdentity, type ProviderDriver } from "../ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import { acpAvailableCommandsToSlashCommands } from "../providerSlashCommands.ts";
 import {
   makeRegistryAcpRuntime,
   resolveAcpRegistryInstallation,
@@ -85,6 +87,18 @@ export function projectAcpRegistrySession(
       // Audio attachments currently use filesystem paths rather than ACP audio blocks.
       promptAudio: false,
     },
+  };
+}
+
+/** The commands a session advertised, published into the instance snapshot. */
+export function projectAcpRegistryCommands(
+  value: ServerProvider,
+  commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+): ServerProvider {
+  return {
+    ...value,
+    slashCommands: acpAvailableCommandsToSlashCommands(commands),
+    acpCapabilities: { ...EMPTY_ACP_CAPABILITIES, ...value.acpCapabilities, commands: true },
   };
 }
 
@@ -212,22 +226,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
             result.sessionSetupResult.models || result.modelConfigId ? "in-session" : "unsupported";
           return publish((value) => projectAcpRegistrySession(value, result));
         },
-        onCommands: (commands) =>
-          publish((value) => ({
-            ...value,
-            slashCommands: commands
-              .filter((command) => command.name.trim())
-              .map((command) => ({
-                name: command.name,
-                ...(command.description ? { description: command.description } : {}),
-                ...(command.input?.hint ? { input: { hint: command.input.hint } } : {}),
-              })),
-            acpCapabilities: {
-              ...initial.acpCapabilities!,
-              ...value.acpCapabilities,
-              commands: true,
-            },
-          })),
+        onCommands: (commands) => publish((value) => projectAcpRegistryCommands(value, commands)),
         onUsage: () =>
           publish((value) => ({
             ...value,

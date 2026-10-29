@@ -36,6 +36,13 @@ const exitOnSetConfigOption = readEnv("RYCO_ACP_EXIT_ON_SET_CONFIG_OPTION") === 
 const promptResponseText = readEnv("RYCO_ACP_PROMPT_RESPONSE_TEXT");
 // Number of assistant history chunks `session/load` replays before it answers.
 const replayHistoryChunks = Number(readEnv("RYCO_ACP_REPLAY_HISTORY_CHUNKS") ?? "0");
+// JSON arrays of commands: advertised while `session/new` runs, and during each prompt.
+const availableCommands = parseAvailableCommands(readEnv("RYCO_ACP_AVAILABLE_COMMANDS"));
+const availableCommandsAfterPrompt = parseAvailableCommands(
+  readEnv("RYCO_ACP_AVAILABLE_COMMANDS_AFTER_PROMPT"),
+);
+// Raw JSON returned as `initialize` `_meta.availableCommands`, as Grok lists its built-ins.
+const initializeMetaCommands = readEnv("RYCO_ACP_INITIALIZE_META_COMMANDS");
 const permissionOptionIds = {
   allowOnce: readEnv("RYCO_ACP_ALLOW_ONCE_OPTION_ID") ?? "allow-once",
   allowAlways: readEnv("RYCO_ACP_ALLOW_ALWAYS_OPTION_ID") ?? "allow-always",
@@ -62,6 +69,14 @@ function promptIdFromRequestMeta(
   }
   const promptId = meta.promptId ?? meta.requestId;
   return typeof promptId === "string" && promptId.length > 0 ? promptId : undefined;
+}
+
+function parseAvailableCommands(
+  raw: string | undefined,
+): ReadonlyArray<AcpSchema.AvailableCommand> | undefined {
+  return raw === undefined
+    ? undefined
+    : (JSON.parse(raw) as ReadonlyArray<AcpSchema.AvailableCommand>);
 }
 
 function logExit(reason: string): void {
@@ -302,21 +317,37 @@ const program = Effect.gen(function* () {
           loadSession: true,
           ...(advertiseHttpMcp ? { mcpCapabilities: { http: true } } : {}),
         },
+        ...(initializeMetaCommands === undefined
+          ? {}
+          : { _meta: { availableCommands: JSON.parse(initializeMetaCommands) as unknown } }),
       };
     }),
   );
 
   yield* agent.handleAuthenticate(() => Effect.succeed({}));
 
+  const advertiseCommands = (
+    targetSessionId: string,
+    commands: ReadonlyArray<AcpSchema.AvailableCommand> | undefined,
+  ) =>
+    commands === undefined
+      ? Effect.void
+      : agent.client.sessionUpdate({
+          sessionId: targetSessionId,
+          update: { sessionUpdate: "available_commands_update", availableCommands: commands },
+        });
+
   yield* agent.handleCreateSession((request) =>
     failMcpSetupOnce && request.mcpServers.length > 0 && mcpSetupFailures++ === 0
       ? Effect.fail(AcpError.AcpRequestError.invalidParams("mock MCP setup failure"))
-      : Effect.succeed({
-          sessionId,
-          modes: modeState(),
-          models: modelState(),
-          configOptions: configOptions(),
-        }),
+      : advertiseCommands(sessionId, availableCommands).pipe(
+          Effect.as({
+            sessionId,
+            modes: modeState(),
+            models: modelState(),
+            configOptions: configOptions(),
+          }),
+        ),
   );
 
   yield* agent.handleLoadSession((request) =>
@@ -463,6 +494,7 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
       promptCount += 1;
+      yield* advertiseCommands(requestedSessionId, availableCommandsAfterPrompt);
 
       if (failPrompt) {
         return yield* AcpError.AcpRequestError.invalidParams("Mock failure for session/prompt", {

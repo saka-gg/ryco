@@ -7,7 +7,11 @@ import { describe, expect, it } from "vite-plus/test";
 import { ChildProcessSpawner } from "effect/process";
 import { GrokSettings } from "@ryco/contracts";
 
-import { buildInitialGrokProviderSnapshot, checkGrokProviderStatus } from "./GrokProvider.ts";
+import {
+  buildInitialGrokProviderSnapshot,
+  checkGrokProviderStatus,
+  grokSlashCommandsFromInitialize,
+} from "./GrokProvider.ts";
 
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
@@ -109,4 +113,68 @@ describe("checkGrokProviderStatus", () => {
     expect(snapshot.models.map((model) => model.slug)).toEqual(["grok-build"]);
     expect(snapshot.message).toContain("ACP startup failed");
   });
+});
+
+describe("grokSlashCommandsFromInitialize", () => {
+  it("normalizes the listed commands, drops malformed and hidden ones", () => {
+    expect(
+      grokSlashCommandsFromInitialize({
+        _meta: {
+          availableCommands: [
+            { name: "/review", description: " Review a PR ", input: { hint: "<pr>" } },
+            { name: "always-approve", description: "Approve everything" },
+            { name: "context", description: "Show context" },
+            { name: "no-description" },
+            { name: 3, description: "x" },
+            "compact",
+            { name: "compact", description: "Compact the chat" },
+          ],
+        },
+      }),
+    ).toEqual([
+      { name: "review", description: "Review a PR", input: { hint: "<pr>" } },
+      { name: "compact", description: "Compact the chat" },
+    ]);
+    expect(grokSlashCommandsFromInitialize({})).toEqual([]);
+    expect(grokSlashCommandsFromInitialize({ _meta: null })).toEqual([]);
+    expect(grokSlashCommandsFromInitialize({ _meta: { availableCommands: "review" } })).toEqual([]);
+  });
+
+  it("lists the built-in commands of a probed CLI", async () => {
+    const snapshot = await runNode(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-grok-commands-" });
+          const grokPath = path.join(dir, "grok");
+          const mockAgentPath = yield* path.fromFileUrl(
+            new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+          );
+          const commands = JSON.stringify([
+            { name: "review", description: "Review" },
+            { name: "always-approve", description: "Approve everything" },
+          ]);
+          yield* fs.writeFileString(
+            grokPath,
+            [
+              "#!/bin/sh",
+              'if [ "$1" = "--version" ]; then printf "grok-cli 0.0.99\\n"; exit 0; fi',
+              `export RYCO_ACP_INITIALIZE_META_COMMANDS=${JSON.stringify(commands)}`,
+              `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(mockAgentPath)} "$@"`,
+              "",
+            ].join("\n"),
+          );
+          yield* fs.chmod(grokPath, 0o755);
+
+          return yield* checkGrokProviderStatus(
+            decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
+          );
+        }),
+      ),
+    );
+
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.slashCommands).toEqual([{ name: "review", description: "Review" }]);
+  }, 30_000);
 });

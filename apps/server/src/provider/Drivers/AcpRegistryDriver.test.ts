@@ -5,7 +5,11 @@ import { ProviderInstanceId } from "@ryco/contracts";
 import { ServerConfig } from "../../config.ts";
 import { ProviderEventLoggers, NoOpProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
-import { AcpRegistryDriver, projectAcpRegistrySession } from "./AcpRegistryDriver.ts";
+import {
+  AcpRegistryDriver,
+  projectAcpRegistryCommands,
+  projectAcpRegistrySession,
+} from "./AcpRegistryDriver.ts";
 
 const layer = ServerConfig.layerTest(process.cwd(), { prefix: "ryco-registry-driver-test-" }).pipe(
   Layer.provideMerge(NodeServices.layer),
@@ -148,5 +152,22 @@ it.layer(layer)("ACP registry driver", (it) => {
         assert.isFalse(projected.acpCapabilities!.commands);
         assert.isFalse(projected.acpCapabilities!.usage);
       }),
+  );
+  it.effect("publishes advertised commands trimmed, without blank descriptions or hints", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriver();
+      const initial = yield* driver.snapshot.getSnapshot;
+      const projected = projectAcpRegistryCommands(initial, [
+        { name: " /review ", description: " Review a PR ", input: { hint: " <pr> " } },
+        { name: "plan", description: "   ", input: { hint: " " } },
+        { name: "  ", description: "nameless" },
+      ]);
+      assert.deepStrictEqual(projected.slashCommands, [
+        { name: "review", description: "Review a PR", input: { hint: "<pr>" } },
+        { name: "plan" },
+      ]);
+      assert.isTrue(projected.acpCapabilities!.commands);
+      assert.isFalse(projected.acpCapabilities!.usage);
+    }),
   );
 });

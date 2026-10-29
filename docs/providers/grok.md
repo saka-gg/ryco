@@ -60,6 +60,10 @@ applies the new model to the same Grok session on the next message; the conversa
 - Tool approval requests and Grok user questions
 - Image attachments
 - Turn cancellation
+- Grok's own slash commands in the composer's `/` menu: the built-in ones Grok lists when Ryco
+  checks the CLI, and a project's own once a Grok session has started there. `/always-approve` and
+  `/context` are not offered, and Ryco refuses to send `/always-approve`: change permissions with
+  the access selector instead.
 - Commit messages, pull-request content, branch names, issue content, and thread titles
 - Multiple named Grok provider instances
 

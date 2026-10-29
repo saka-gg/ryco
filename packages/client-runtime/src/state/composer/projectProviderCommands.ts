@@ -2,21 +2,31 @@ import type {
   EnvironmentApi,
   ProviderInstanceId,
   ProviderProjectCommands,
+  ProviderProjectCommandsInput,
   ServerProviderSkill,
   ServerProviderSlashCommand,
 } from "@ryco/contracts";
 
 /** A directory's commands are read again (behind the reader) after this long. */
 export const PROJECT_PROVIDER_COMMANDS_FRESH_MS = 5 * 60_000;
-/** A failed read is retried at most this often. */
-const RETRY_AFTER_FAILURE_MS = 30_000;
+/**
+ * A failed read is retried at most this often, and a read that found nothing goes stale this
+ * soon: Cursor and Grok list their commands only once a session has run in the directory.
+ */
+export const PROJECT_PROVIDER_COMMANDS_RETRY_MS = 30_000;
 const CAPACITY = 64;
+
+type ReadCall = (input: ProviderProjectCommandsInput) => Promise<ProviderProjectCommands>;
 
 interface Entry {
   data: ProviderProjectCommands | undefined;
   readAtMs: number | undefined;
   failedAtMs: number | undefined;
   inFlight: boolean;
+  /** The newest runtime session the data was read after. */
+  readForSessionId: string | undefined;
+  /** A runtime session that appeared while a read was in flight, read for once it settles. */
+  pendingSessionId: string | undefined;
 }
 
 const entries = new Map<string, Entry>();
@@ -50,8 +60,10 @@ export function subscribeProjectProviderCommands(listener: () => void): () => vo
  * Reads the skills and slash commands an instance offers in a directory (project and local
  * ones the instance's snapshot cannot carry), once per key and freshness window. Called on the
  * composer's first `/` or `$` in a directory; a stale entry keeps serving while it is re-read.
- * A no-op unless the node advertises `providerProjectCommands` and the transport has the
- * method. Never throws.
+ * A thread's new runtime session forces one more read inside the window, because an agent may
+ * have just advertised its commands for the directory; no session (`null`) never does. A no-op
+ * unless the node advertises `providerProjectCommands` and the transport has the method. Never
+ * throws.
  */
 export function ensureProjectProviderCommands(input: {
   readonly api: EnvironmentApi | undefined;
@@ -59,6 +71,7 @@ export function ensureProjectProviderCommands(input: {
   readonly environmentId: string;
   readonly instanceId: ProviderInstanceId;
   readonly cwd: string;
+  readonly runtimeSessionId?: string | null | undefined;
   readonly nowMs?: number;
 }): void {
   const call = input.api?.server?.readProjectProviderCommands;
@@ -67,7 +80,14 @@ export function ensureProjectProviderCommands(input: {
   const key = projectProviderCommandsKey(input);
   let entry = entries.get(key);
   if (entry === undefined) {
-    entry = { data: undefined, readAtMs: undefined, failedAtMs: undefined, inFlight: false };
+    entry = {
+      data: undefined,
+      readAtMs: undefined,
+      failedAtMs: undefined,
+      inFlight: false,
+      readForSessionId: undefined,
+      pendingSessionId: undefined,
+    };
     entries.set(key, entry);
     while (entries.size > CAPACITY) {
       const oldest = entries.keys().next().value;
@@ -75,26 +95,54 @@ export function ensureProjectProviderCommands(input: {
       entries.delete(oldest);
     }
   }
+  const sessionId = input.runtimeSessionId || undefined;
+  const newSession = sessionId !== undefined && sessionId !== entry.readForSessionId;
+  if (entry.inFlight) {
+    if (newSession) entry.pendingSessionId = sessionId;
+    return;
+  }
+  const isEmpty =
+    entry.data === undefined ||
+    (entry.data.skills.length === 0 && entry.data.slashCommands.length === 0);
   if (
-    entry.inFlight ||
-    (entry.readAtMs !== undefined && nowMs - entry.readAtMs < PROJECT_PROVIDER_COMMANDS_FRESH_MS) ||
-    (entry.failedAtMs !== undefined && nowMs - entry.failedAtMs < RETRY_AFTER_FAILURE_MS)
+    (entry.failedAtMs !== undefined &&
+      nowMs - entry.failedAtMs < PROJECT_PROVIDER_COMMANDS_RETRY_MS) ||
+    (!newSession &&
+      entry.readAtMs !== undefined &&
+      nowMs - entry.readAtMs <
+        (isEmpty ? PROJECT_PROVIDER_COMMANDS_RETRY_MS : PROJECT_PROVIDER_COMMANDS_FRESH_MS))
   ) {
     return;
   }
-  const current = entry;
-  current.inFlight = true;
-  void call({ instanceId: input.instanceId, cwd: input.cwd }).then(
+  readEntry(entry, call, { instanceId: input.instanceId, cwd: input.cwd }, sessionId);
+}
+
+function readEntry(
+  entry: Entry,
+  call: ReadCall,
+  request: ProviderProjectCommandsInput,
+  sessionId: string | undefined,
+): void {
+  entry.inFlight = true;
+  void call(request).then(
     (data) => {
-      current.inFlight = false;
-      current.data = data;
-      current.readAtMs = Date.now();
-      current.failedAtMs = undefined;
+      entry.inFlight = false;
+      entry.data = data;
+      entry.readAtMs = Date.now();
+      entry.failedAtMs = undefined;
+      // A read without a session still ran after the one recorded before it.
+      if (sessionId !== undefined) entry.readForSessionId = sessionId;
+      const pending = entry.pendingSessionId;
+      entry.pendingSessionId = undefined;
       notify();
+      if (pending !== undefined && pending !== entry.readForSessionId) {
+        readEntry(entry, call, request, pending);
+      }
     },
     () => {
-      current.inFlight = false;
-      current.failedAtMs = Date.now();
+      entry.inFlight = false;
+      entry.failedAtMs = Date.now();
+      entry.pendingSessionId = undefined;
     },
   );
 }

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { Context, Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect";
+import { Context, Deferred, Effect, Fiber, Layer, Option, Schema, Stream } from "effect";
 import { createModelSelection } from "@ryco/shared/model";
 
 import {
@@ -18,10 +18,12 @@ import {
   RuntimeSessionId,
 } from "@ryco/contracts";
 
+import type { AgentControlProviderBridge } from "../../agentControl/ProviderInjection.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { assertTurnIdsOnly } from "../testUtils/adapterRetention.ts";
+import { waitForLiveProjectCommands } from "../testUtils/liveProjectCommands.ts";
 import { makeCursorAdapter } from "./CursorAdapter.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* CursorAdapter`.
@@ -120,6 +122,15 @@ function resolveCursorSettingsFrom(serverSettings: ServerSettingsShape) {
     Effect.orDie,
   );
 }
+
+// Agent Control that issues no lease: the session gets the "tools unavailable" host context.
+const agentControlWithoutLease: AgentControlProviderBridge = {
+  issueLease: () => Effect.succeed(Option.none()),
+  issueStdioBootstrap: () => Effect.succeed(Option.none()),
+  revokeLease: () => Effect.void,
+  bindTurnAuthority: () => Effect.die(new Error("No Agent Control lease was issued.")),
+  retireTurnAuthority: () => Effect.void,
+};
 
 const cursorAdapterTestLayer = it.layer(
   Layer.effect(
@@ -1690,6 +1701,80 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         yield* adapter.stopSession(threadId);
       }).pipe(Effect.provide(customAdapterLayer));
     },
+  );
+
+  it.effect("serves the commands Cursor advertises per directory, after its session too", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-live-commands");
+      const cwd = process.cwd();
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          RYCO_ACP_AVAILABLE_COMMANDS: JSON.stringify([
+            { name: "/review", description: " Review a PR ", input: { hint: " <pr> " } },
+            { name: "two words", description: "dropped" },
+            { name: "REVIEW", description: "duplicate" },
+          ]),
+        }),
+      );
+      const adapter = yield* makeCursorAdapter(
+        Schema.decodeSync(CursorSettings)({ binaryPath: wrapperPath }),
+      );
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-cursoradapter-live-commands"),
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd,
+        runtimeMode: "full-access",
+      });
+      const expected = {
+        skills: [],
+        slashCommands: [{ name: "review", description: "Review a PR", input: { hint: "<pr>" } }],
+      };
+      assert.deepStrictEqual(yield* waitForLiveProjectCommands(adapter, cwd), expected);
+      assert.isUndefined(yield* adapter.readLiveProjectCommands(path.join(cwd, "another-project")));
+
+      yield* adapter.stopSession(threadId);
+      assert.deepStrictEqual(yield* adapter.readLiveProjectCommands(cwd), expected);
+    }),
+  );
+
+  it.effect("sends a slash command first and defers the host context to the next turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-command-first");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "cursor-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const argvLogPath = path.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      const adapter = yield* makeCursorAdapter(
+        Schema.decodeSync(CursorSettings)({ binaryPath: wrapperPath }),
+        { agentControl: agentControlWithoutLease },
+      );
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-cursoradapter-command-first"),
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "/review x", attachments: [] });
+      yield* adapter.sendTurn({ threadId, input: "and now explain", attachments: [] });
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const prompts = requests
+        .filter((entry) => entry.method === "session/prompt")
+        .map((entry) => (entry.params as { prompt: Array<Record<string, unknown>> }).prompt);
+      assert.equal(prompts.length, 2);
+      assert.deepStrictEqual(prompts[0], [{ type: "text", text: "/review x" }]);
+      const [hostContext, text] = prompts[1] ?? [];
+      assert.match(String(hostContext?.text), /^<ryco_host_context>.*<\/ryco_host_context>$/su);
+      assert.deepStrictEqual(text, { type: "text", text: "and now explain" });
+    }),
   );
 
   it.effect("retention: reports completed turn ids without keeping prompts or results", () =>

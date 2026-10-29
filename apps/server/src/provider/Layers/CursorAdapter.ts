@@ -80,6 +80,11 @@ import {
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
 import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
+import {
+  acpAvailableCommandsToSlashCommands,
+  makeRecentProjectCommands,
+} from "../providerSlashCommands.ts";
+import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import { applyCursorAcpModelSelection, makeCursorAcpRuntime } from "../acp/CursorAcpSupport.ts";
 import {
@@ -358,6 +363,9 @@ export function makeCursorAdapter(
     const sessions = new Map<ThreadId, CursorSessionContext>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(2_048);
+    // Cursor's own commands per directory (`readLiveProjectCommands`): ACP lists them only
+    // inside a session, so a stopped session's list keeps serving its directory.
+    const recentCommands = makeRecentProjectCommands();
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const nextEventId = Effect.map(
@@ -867,6 +875,12 @@ export function makeCursorAdapter(
                 switch (event._tag) {
                   case "ModeChanged":
                     return;
+                  case "CommandsUpdated":
+                    // A late update after a close is dropped. Only the mapped copy is kept,
+                    // never the raw payload.
+                    if (ctx.stopped) return;
+                    recentCommands.record(cwd, acpAvailableCommandsToSlashCommands(event.commands));
+                    return;
                   case "AssistantItemStarted":
                     yield* offerRuntimeEventForRuntime(
                       runtimeSessionId,
@@ -1075,7 +1089,12 @@ export function makeCursorAdapter(
         let terminalEmitted = false;
         return yield* Effect.gen(function* () {
           const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-          if (!ctx.agentControlHostContextDelivered && ctx.agentControlHostContext.length > 0) {
+          // A slash command must lead the prompt; the context waits for the next turn.
+          if (
+            !isSlashCommandInput(input.input) &&
+            !ctx.agentControlHostContextDelivered &&
+            ctx.agentControlHostContext.length > 0
+          ) {
             promptParts.push({
               type: "text",
               text: `<ryco_host_context>${ctx.agentControlHostContext}</ryco_host_context>`,
@@ -1330,6 +1349,8 @@ export function makeCursorAdapter(
       listSessions,
       hasSession,
       stopAll,
+      readLiveProjectCommands: (cwd) =>
+        Effect.sync(() => recentCommands.read(nodePath.resolve(cwd))),
       streamEvents,
     } satisfies CursorAdapterShape;
   });

@@ -1,7 +1,12 @@
 import type { GrokSettings } from "@ryco/contracts";
 import { ProviderDriverKind } from "@ryco/contracts";
 import { makeAcpAdapter, type AcpAdapterLiveOptions } from "./AcpAdapter.ts";
-import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
+import {
+  GROK_HIDDEN_SLASH_COMMANDS,
+  GROK_REFUSED_SLASH_COMMANDS,
+  makeGrokAcpRuntime,
+  resolveGrokAcpBaseModelId,
+} from "../acp/GrokAcpSupport.ts";
 
 export type GrokAdapterLiveOptions = Pick<
   AcpAdapterLiveOptions,
@@ -14,6 +19,8 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     provider: ProviderDriverKind.make("grok"),
     normalizeModel: resolveGrokAcpBaseModelId,
     xaiExtensions: true,
+    hiddenCommands: GROK_HIDDEN_SLASH_COMMANDS,
+    refusedCommands: GROK_REFUSED_SLASH_COMMANDS,
     makeRuntime: (input) =>
       makeGrokAcpRuntime({
         ...input,

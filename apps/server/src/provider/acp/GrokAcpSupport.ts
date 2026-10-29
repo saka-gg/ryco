@@ -49,6 +49,23 @@ export function buildGrokAcpSpawnInput(
   };
 }
 
+/**
+ * Grok commands the composer does not offer: `/always-approve` changes permissions behind
+ * Ryco's access mode, and `/context` completes without any output.
+ */
+export const GROK_HIDDEN_SLASH_COMMANDS: ReadonlySet<string> = new Set([
+  "always-approve",
+  "context",
+]);
+
+/** Grok commands Ryco refuses to send, even when typed by hand. */
+export const GROK_REFUSED_SLASH_COMMANDS: ReadonlyMap<string, string> = new Map([
+  [
+    "always-approve",
+    "Change permissions with the access selector in Ryco instead of /always-approve.",
+  ],
+]);
+
 const GROK_PHASE_TIMEOUT_HINTS: Partial<Record<AcpStartupPhase, string>> = {
   authenticate: `The Grok CLI did not confirm its login; sign in with the Grok CLI or set ${GROK_API_KEY_ENV}, then try again.`,
 };
