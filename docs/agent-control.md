@@ -61,6 +61,8 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   `ryco_update_local_task`, `ryco_add_local_task_file`, `ryco_remove_local_task_file`,
   `ryco_start_local_task_chat`, `ryco_propose_local_task_delete`: the user's Tasks page (see
   [Tasks](#tasks)).
+- `ryco_watch_pull_request`, `ryco_unwatch_pull_request`: have Ryco wake a chat with a pull
+  request's news instead of polling (see [Pull request watches](#pull-request-watches)).
 - `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
@@ -122,6 +124,36 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   show in the chat's Artifacts tab, marked with the task they came from. A batch carries at most 8
   and 50 MiB in all; the message says how many stayed in their tasks. A returned artifact that is
   gone (its task was reverted) is left out.
+
+## Pull request watches
+
+An agent that waits on a pull request's checks or reviews calls `ryco_watch_pull_request` and ends
+its turn, instead of polling, sleeping or running a watcher. The server reads the pull request every
+2 minutes, with no app open, and wakes the chat with an automatic message when a check fails, the
+required checks pass, someone else comments or reviews, or the branch starts to conflict (see
+[Pull request watch](./pull-request-watch.md) for the reads, the fences and the limits).
+
+- **Which pull request.** By default the one of the woken chat's workspace; one the agent just
+  opened is discovered and linked first. A `number` or `url` may name a pull request of any
+  workspace in the project, or one Ryco links to the woken chat's workspace once its repository
+  matches the checkout's. The woken chat is the caller's own unless `threadId` names another chat
+  of the project; the usual project, runtime-permission and worktree-isolation rules apply to it.
+  Unwatching without a `number` or `url` stops the one pull request the chat watches (of several,
+  the one of its own workspace); otherwise the answer asks which to stop.
+- **Routine and quick.** Both tools need the `pull-requests.watch` grant and exact active-turn
+  authority. The request runs at once and the tool waits up to 25 seconds for its outcome: the
+  receipt's `result.detail` says what is watched and how the pull request stands now (failing checks
+  are reported there, and only later changes wake the chat), or why it cannot be watched. When the
+  answer says `timedOut`, follow it with `ryco_wait_for_control_request`.
+- **Delegated chats.** A chat delegated with `returnToOrigin` whose result is still awaited cannot
+  watch, and no chat can make it watch: it reports the pull request in its result, and the
+  delegating chat watches it (a number or URL from another workspace of the project works).
+- **Ending.** `ryco_unwatch_pull_request` stops the news; call it before handing the work back so the
+  chat can settle (a watched chat never settles on its own). The user's Auto-fix CI keeps running.
+  A watch also ends on merge, close, 8 failed reads in a row, 10 comment-only updates in a row,
+  settling, archiving or a user Stop. A wake is news, not a merge decision.
+- **Scope.** Agents cannot turn Auto-fix CI on or off. While Agent Control is off, an agent-started
+  watch holds its news. Standalone integrations cannot watch pull requests.
 
 ## Tasks
 

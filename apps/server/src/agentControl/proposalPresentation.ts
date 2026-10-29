@@ -17,6 +17,9 @@ export const agentControlRiskTagsForPlan = (
   switch (plan.kind) {
     case "deleteLocalTask":
       return [AGENT_CONTROL_RISK_TAGS.removesLocalTask];
+    case "pullRequestWatch":
+      // Reads only; its wakes go through the same idle, scope and permission fences as any.
+      return [];
     case "createThreads": {
       const tags = [
         AGENT_CONTROL_RISK_TAGS.createsThreads,
@@ -84,6 +87,17 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
   switch (plan.kind) {
     case "deleteLocalTask":
       return `Delete task "${plan.title.slice(0, 200)}" with its files; its chats are kept`;
+    case "pullRequestWatch": {
+      const pullRequest =
+        plan.number !== undefined
+          ? `pull request #${plan.number}`
+          : plan.url !== undefined
+            ? `pull request ${plan.url.slice(0, 200)}`
+            : "the pull request";
+      return plan.watching
+        ? `Watch ${pullRequest} for thread ${plan.threadId}`
+        : `Stop watching ${pullRequest} for thread ${plan.threadId}`;
+    }
     case "createThreads": {
       const tasks = plan.entries.filter((entry) => entry.localTaskId !== undefined).length;
       const threads = `Create ${plan.entries.length} thread${plan.entries.length === 1 ? "" : "s"}`;

@@ -239,6 +239,26 @@ function planPresentation(proposal: AgentControlProposal): {
         runtimeLabel: null,
         detailSections: [{ heading: "Message", lines: [`Thread: ${plan.threadId}`, plan.text] }],
       };
+    case "pullRequestWatch":
+      return {
+        actionLabel: plan.watching ? "Watch pull request" : "Stop watching pull request",
+        targetLabel: `thread ${shortId(plan.threadId)}`,
+        runtimeLabel: null,
+        detailSections: [
+          {
+            heading: plan.watching ? "Watch" : "Stop watching",
+            lines: [
+              `Thread: ${plan.threadId}`,
+              `Pull request: ${plan.number === undefined ? (plan.url ?? "the chat's own") : `#${plan.number}`}`,
+              ...(plan.watching
+                ? [
+                    "Ryco wakes the chat when a check fails, the required checks pass, someone else comments or reviews, or the branch conflicts.",
+                  ]
+                : []),
+            ],
+          },
+        ],
+      };
     case "interruptThread":
       return {
         actionLabel: "Interrupt thread",

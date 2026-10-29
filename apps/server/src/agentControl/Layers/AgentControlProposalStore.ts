@@ -70,6 +70,15 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
           localTaskId: proposal.plan.taskId,
           expectedRevision: String(proposal.plan.expectedRevision),
         };
+      case "pullRequestWatch":
+        // The URL stays in the proposal row, like every other free-form plan field.
+        return {
+          targetThreadId: proposal.plan.threadId,
+          watching: String(proposal.plan.watching),
+          ...(proposal.plan.number === undefined
+            ? {}
+            : { pullRequestNumber: String(proposal.plan.number) }),
+        };
       case "createProject":
         return { projectId: proposal.plan.projectId };
       case "updateProject":

@@ -570,6 +570,90 @@ describe("PullRequestWatchService", () => {
     expect(h.forge.calls).toEqual(reads);
   });
 
+  it("tells an agent when its chat has no pull request yet, or already watches the most", async () => {
+    const h = await harness();
+    const { projectId } = await h.seedProject("refusals");
+    const { worktreePath } = await h.seedWorkspace({ key: "refusals", projectId });
+    const threadId = await h.seedThread({ key: "refusals", projectId, worktreePath });
+    const none = await h.run(
+      h.watch.setWatch({ threadId, origin: "agent", news: true }).pipe(Effect.exit),
+    );
+    expect(Exit.isFailure(none) && JSON.stringify(none.cause)).toContain(
+      "No pull request is linked to this chat's workspace yet.",
+    );
+
+    const max = LIMITS.maxWatchesPerThread;
+    for (let index = 0; index <= max; index += 1) {
+      const pr = addPullRequest(h.forge, 40 + index);
+      await h.seedWorkspace({ key: `refusals-${index}`, projectId, link: pr });
+    }
+    for (let index = 0; index < max; index += 1) {
+      await h.run(h.watch.setWatch({ threadId, origin: "agent", number: 40 + index, news: true }));
+    }
+    const over = await h.run(
+      h.watch
+        .setWatch({ threadId, origin: "agent", number: 40 + max, news: true })
+        .pipe(Effect.exit),
+    );
+    expect(Exit.isFailure(over) && JSON.stringify(over.cause)).toContain(
+      `A chat watches at most ${max} pull requests.`,
+    );
+    expect((await h.watches(threadId)).active).toHaveLength(max);
+  });
+
+  it("answers a stop on a settled chat with nothing watched, and starts nothing there", async () => {
+    const h = await harness();
+    const pr = addPullRequest(h.forge, 12);
+    const { threadId } = await h.seedWatchedSetup("settled-stop", pr);
+    await watchUser(h, threadId);
+    // Settling (like archiving) ended the watch in the same command.
+    await h.dispatch({ type: "thread.settle", commandId: h.commandId("settle"), threadId });
+    expect((await h.watches(threadId)).active).toHaveLength(0);
+    const reads = { ...h.forge.calls };
+    const stopped = await h.run(
+      h.watch.setWatch({ threadId, origin: "agent", number: 12, news: false }),
+    );
+    expect(stopped).toEqual({ watch: null, now: "Not watching #12." });
+    const started = await h.run(
+      h.watch.setWatch({ threadId, origin: "agent", news: true }).pipe(Effect.exit),
+    );
+    expect(Exit.isFailure(started) && JSON.stringify(started.cause)).toContain(
+      "Only an active chat",
+    );
+    expect(h.forge.calls).toEqual(reads);
+  });
+
+  it("asks which pull request to stop when a chat watches several and names none", async () => {
+    const h = await harness();
+    const own = addPullRequest(h.forge, 12);
+    const first = addPullRequest(h.forge, 34);
+    const second = addPullRequest(h.forge, 35);
+    const { projectId, threadId } = await h.seedWatchedSetup("several", own);
+    await h.seedWorkspace({ key: "several-34", projectId, link: first });
+    await h.seedWorkspace({ key: "several-35", projectId, link: second });
+    await watchUser(h, threadId, { number: 34 });
+    await watchUser(h, threadId, { number: 35 });
+    const reads = { ...h.forge.calls };
+    const ambiguous = await h.run(
+      h.watch.setWatch({ threadId, origin: "agent", news: false }).pipe(Effect.exit),
+    );
+    expect(Exit.isFailure(ambiguous) && JSON.stringify(ambiguous.cause)).toContain(
+      "This chat watches #34, #35. Name the one to stop.",
+    );
+    expect((await h.watches(threadId)).active).toHaveLength(2);
+    expect(h.forge.calls).toEqual(reads);
+
+    // With one of them its own workspace's, that one is the chat's pull request.
+    await watchUser(h, threadId);
+    const reads2 = { ...h.forge.calls };
+    const stopped = await h.run(h.watch.setWatch({ threadId, origin: "agent", news: false }));
+    expect(stopped).toEqual({ watch: null, now: "Stopped watching #12." });
+    expect((await h.watches(threadId)).active.map((watch) => watch.number).toSorted()).toEqual([
+      34, 35,
+    ]);
+    expect(h.forge.calls).toEqual(reads2);
+  });
+
   it("stops a watch whose link is gone without linking it again or reading the host", async () => {
     const h = await harness();
     const pr = addPullRequest(h.forge, 12);

@@ -8,6 +8,7 @@
 import type {
   AgentControlActionPlan,
   AgentControlMcpInterruptThreadInput,
+  AgentControlMcpPullRequestWatchInput,
   AgentControlMcpSendMessageInput,
   AgentControlMcpUpdateThreadInput,
   AgentControlPlanWorkspaceInput,
@@ -34,6 +35,19 @@ export const interruptThreadPlan = (
   kind: "interruptThread",
   threadId: input.threadId,
   ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+});
+
+/** The chat defaults to the caller's own: the one Ryco wakes with the pull request's news. */
+export const pullRequestWatchPlan = (
+  input: AgentControlMcpPullRequestWatchInput,
+  callerThreadId: ThreadId,
+  watching: boolean,
+): Plan<"pullRequestWatch"> => ({
+  kind: "pullRequestWatch",
+  threadId: input.threadId ?? callerThreadId,
+  ...(input.number === undefined ? {} : { number: input.number }),
+  ...(input.url === undefined ? {} : { url: input.url }),
+  watching,
 });
 
 export const updateThreadPlan = (

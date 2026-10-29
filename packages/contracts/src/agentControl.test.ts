@@ -366,6 +366,9 @@ describe("forward compatibility (additive extension)", () => {
     expect(AGENT_CONTROL_ACTION_CAPABILITIES.deleteLocalTask).toBe(
       AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
     );
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.pullRequestWatch).toBe(
+      AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+    );
     expect(Object.keys(AGENT_CONTROL_ACTION_CAPABILITIES).toSorted()).toEqual([
       "automationRun",
       "cancelAutomation",
@@ -388,6 +391,7 @@ describe("forward compatibility (additive extension)", () => {
       "deviceSwipe",
       "deviceTap",
       "interruptThread",
+      "pullRequestWatch",
       "removeProject",
       "sendMessage",
       "updateAutomation",
@@ -481,9 +485,11 @@ describe("Agent Control MCP contracts", () => {
         "ryco_propose_device_input",
         "ryco_propose_device_recording",
         "ryco_propose_device_shutdown",
+        "ryco_watch_pull_request",
+        "ryco_unwatch_pull_request",
       ].toSorted(),
     );
-    expect(Object.values(AGENT_CONTROL_MCP_TOOLS)).toHaveLength(43);
+    expect(Object.values(AGENT_CONTROL_MCP_TOOLS)).toHaveLength(45);
     for (const name of AGENT_CONTROL_MCP_TOOL_NAMES) {
       expect(name.startsWith("ryco_")).toBe(true);
     }

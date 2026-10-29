@@ -37,8 +37,10 @@ removing the checkout end its watches in the same command.
   and `autoFix` off ends the watch; stopping never needs a host read or the pull request's link, and
   a request that only turns something off never starts a watch.
 - Changes wait until the server admits commands after a start.
-- Agents may only start or stop news watching (Agent Control tools land separately); Auto-fix CI is
-  the user's switch.
+- **Agents** use `ryco_watch_pull_request` and `ryco_unwatch_pull_request` (Agent Control, see
+  [Pull request watches](./agent-control.md#pull-request-watches)). They may only start or stop
+  news watching; Auto-fix CI is the user's switch. A delegated chat whose result its delegating chat
+  still waits for cannot watch; it reports the pull request, and the delegating chat watches it.
 - Nodes without this feature leave `serverConfig.pullRequestWatch` out, and clients hide every
   watch control.
 

@@ -37,6 +37,7 @@ import {
   AGENT_CONTROL_CAPABILITIES,
   AgentControlMcpCapabilitiesResult,
   AgentControlAutomationId,
+  AgentControlProposalId,
   AgentControlMcpDiagnosticsSummaryInput,
   AgentControlMcpDiagnosticsSummaryResult,
   AgentControlMcpListDevicesInput,
@@ -77,6 +78,7 @@ import {
   AgentControlMcpProposeProjectRemoveInput,
   AgentControlMcpProposeProjectUpdateInput,
   AgentControlMcpProposeSettingsChangeInput,
+  AgentControlMcpPullRequestWatchInput,
   AgentControlMcpReadControlRequestInput,
   AgentControlMcpReadThreadInput,
   AgentControlMcpSendMessageInput,
@@ -134,6 +136,7 @@ import { readControlRequestReceipt, waitForControlRequestReceipt } from "./propo
 import {
   interruptThreadPlan,
   planWorkspaceLifecycle,
+  pullRequestWatchPlan,
   sendMessagePlan,
   updateThreadPlan,
 } from "./controlPlans.ts";
@@ -296,6 +299,22 @@ const deviceMutationTargetProperties = {
   },
   expectedDeviceBootSource: { type: "string", enum: ["ryco", "user"] },
   expectedRecording: { type: "boolean" },
+} as const;
+
+const pullRequestWatchInputSchema = {
+  type: "object",
+  properties: {
+    requestId: { type: "string", maxLength: 128 },
+    threadId: {
+      type: "string",
+      maxLength: 256,
+      description: "The chat to wake; defaults to this one.",
+    },
+    number: { type: "integer", minimum: 1 },
+    url: { type: "string", maxLength: 2048, pattern: "^https?://" },
+  },
+  required: ["requestId"],
+  additionalProperties: false,
 } as const;
 
 const deviceMutationTargetRequired = [
@@ -666,6 +685,18 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
     },
   },
   {
+    name: AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+    description:
+      "Use this instead of polling, sleeping or running a watcher: Ryco watches a pull request for a chat (this one by default) every 2 minutes, with no app open, and wakes the chat with an automatic message when a check fails, the required checks pass, someone else comments or reviews, or the branch starts to conflict. Without number or url: the pull request of the chat's workspace (one you just opened is linked first). A number or url may name a pull request of any workspace in this project. Only changes after this call wake you; the result's detail says how it stands now. End your turn after it. A wake is news, not a merge decision. Ryco stops after 8 failed reads, 10 comment-only updates in a row, or a merge or close. Before you hand the work back, call ryco_unwatch_pull_request so the chat can settle. A chat delegated with returnToOrigin cannot watch: report the pull request in your result. Waits up to 25 s for the outcome; if timedOut, use ryco_wait_for_control_request.",
+    inputSchema: pullRequestWatchInputSchema,
+  },
+  {
+    name: AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest,
+    description:
+      "Stop Ryco waking a chat (this one by default) with a pull request's news: the one named by number or url, else the one the chat watches (of several, its own workspace's). Call it before you hand the work back, so the chat can settle. The user's Auto-fix CI keeps running.",
+    inputSchema: pullRequestWatchInputSchema,
+  },
+  {
     name: AGENT_CONTROL_MCP_TOOLS.updateThread,
     description:
       "Update thread title, model and options, interaction mode, token mode, archive state, or persistent goal. Archiving and runtime permission changes require approval; other changes execute asynchronously.",
@@ -959,6 +990,8 @@ const WRITE_TOOL_NAMES = new Set<string>([
   AGENT_CONTROL_MCP_TOOLS.proposeDeviceInput,
   AGENT_CONTROL_MCP_TOOLS.proposeDeviceRecording,
   AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown,
+  AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+  AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest,
 ]);
 
 const DEVICE_CONTROL_TOOL_NAMES = new Set<string>([
@@ -1011,6 +1044,9 @@ const writeCapabilityForTool = (name: string): AgentControlCapability | null => 
     case AGENT_CONTROL_MCP_TOOLS.proposeDeviceRecording:
     case AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown:
       return AGENT_CONTROL_CAPABILITIES.controlDevices;
+    case AGENT_CONTROL_MCP_TOOLS.watchPullRequest:
+    case AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest:
+      return AGENT_CONTROL_CAPABILITIES.watchPullRequests;
     default:
       return null;
   }
@@ -1363,6 +1399,42 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         requestId: input.requestId,
         plan: updateThreadPlan(input),
       });
+    });
+
+  /**
+   * Routine and quick: the answer waits (bounded) for the outcome, so the agent reads how the pull
+   * request stands, or why it cannot be watched, in the same call.
+   */
+  const pullRequestWatch = (
+    session: AgentControlSessionRecord,
+    authority: AgentControlTurnAuthority,
+    args: unknown,
+    watching: boolean,
+  ) =>
+    Effect.gen(function* () {
+      const input = yield* decodeArgs(AgentControlMcpPullRequestWatchInput, args);
+      const submitted = yield* submitMutation({
+        session,
+        authority,
+        requestId: input.requestId,
+        plan: pullRequestWatchPlan(input, session.threadId, watching),
+      });
+      const settled = yield* waitForControlRequestReceipt({
+        proposals: deps.proposals,
+        proposalEvents: deps.proposalEvents,
+        proposalId: AgentControlProposalId.make(submitted.receipt.proposalId),
+        waitFor: "terminal",
+        timeoutMs: undefined,
+        visible: (proposal) => proposalVisibleToSession(proposal, session),
+      }).pipe(
+        // The request stands either way: an unreadable outcome is followed up like a slow one.
+        Effect.catch(() => Effect.succeed({ receipt: submitted.receipt, timedOut: true })),
+      );
+      return {
+        receipt: settled.receipt,
+        replayed: submitted.replayed,
+        timedOut: settled.timedOut ?? false,
+      };
     });
 
   const workspaceTool = (
@@ -2285,6 +2357,16 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         case AGENT_CONTROL_MCP_TOOLS.updateThread:
           return authority
             ? updateThread(session, authority, args)
+            : failTool("Exact active-turn write authority is unavailable.");
+        case AGENT_CONTROL_MCP_TOOLS.watchPullRequest:
+        case AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest:
+          return authority
+            ? pullRequestWatch(
+                session,
+                authority,
+                args,
+                name === AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+              )
             : failTool("Exact active-turn write authority is unavailable.");
         case AGENT_CONTROL_MCP_TOOLS.settingsSummary:
           return settingsSummary();
