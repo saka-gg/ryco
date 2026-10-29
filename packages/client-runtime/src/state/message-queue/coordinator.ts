@@ -8,6 +8,7 @@ import {
 } from "../session/dispatchAck.ts";
 import type { AppState } from "../threads/store.ts";
 import {
+  queueMigrationFailedCauseKey,
   resolveQueueDrainStep,
   type QueueDrainSteerRejection,
   type QueueDrainStep,
@@ -45,6 +46,19 @@ export interface QueueEnvironmentReadiness {
   readonly shellLive: boolean;
   /** Mutations may be sent to this environment now. */
   readonly mutationReady: boolean;
+  /**
+   * The node keeps follow-up queues itself (`capabilities.serverFollowUpQueue`): this device's
+   * entries of its started threads move there instead of being sent from here.
+   */
+  readonly serverQueue?: boolean | undefined;
+}
+
+/** What moving one device entry to the node's queue needs to know. */
+export interface QueueEntryMoveContext {
+  /** The device's hold, which moves with the queue (`thread.queue.add`'s `hold`). */
+  readonly hold: QueueHold | null;
+  /** The entry's send failed: it may have been delivered, so it moves as failed. */
+  readonly failed: boolean;
 }
 
 export interface MessageQueueDrainPlatform<C, S> {
@@ -68,8 +82,25 @@ export interface MessageQueueDrainPlatform<C, S> {
   readonly onEntryRemoved?: (
     threadKey: string,
     entry: QueuedMessage<C, S>,
-    cause: "accepted" | "projected",
+    cause: "accepted" | "projected" | "migrated",
   ) => void;
+  /**
+   * Sends `thread.queue.add` for one entry under its own message id. Resolves once the node
+   * accepted it (a no-op for an id it already has counts); rejects otherwise. Without it, a
+   * node's queue never takes this device's entries and they are sent from here.
+   */
+  readonly moveEntryToServer?: (
+    threadKey: string,
+    entry: QueuedMessage<C, S>,
+    context: QueueEntryMoveContext,
+  ) => Promise<void>;
+  /** Whether the node's queue can carry the entry (default: yes). */
+  readonly isEntryMovable?: (entry: QueuedMessage<C, S>) => boolean;
+  /**
+   * Every entry this device held for the environment's threads moved to its node. Recorded in
+   * the device's own storage; a move cut short resumes on the next evaluation either way.
+   */
+  readonly onServerQueueMigrated?: (environmentId: EnvironmentId) => void;
   /**
    * A steer attempt was rejected; its message stays queued (marked failed, for an explicit
    * retry, when `deliveryUncertain`). Called once per attempt.
@@ -358,7 +389,12 @@ export function createMessageQueueDrainCoordinator<C, S>(
         headProviderInstanceId: platform.headProviderInstanceId(queue[0]!),
         view,
         draft,
-        environment,
+        environment: {
+          shellLive: environment.shellLive,
+          mutationReady: environment.mutationReady,
+          serverQueue: environment.serverQueue === true && platform.moveEntryToServer !== undefined,
+        },
+        headMigratable: platform.isEntryMovable?.(queue[0]!) ?? true,
         pendingDispatch: pending.get(key) ?? null,
         dispatchedMessageIds: dispatchedFor(key),
         sender: sender?.kind ?? null,
@@ -436,7 +472,88 @@ export function createMessageQueueDrainCoordinator<C, S>(
       case "send":
         send(key, step.messageId, context);
         return false;
+      case "migrate":
+        migrate(key, context.ref);
+        return false;
     }
+  }
+
+  /**
+   * Moves this device's entries of one thread to the node's queue, head first, one
+   * `thread.queue.add` at a time under each entry's own message id. An entry leaves this
+   * device only once the node acknowledged it; the node's add is a no-op for an id it already
+   * queued, sent or steered, so a retry after a lost reply, a second device's copy or a send
+   * that went through never makes a second message. Holds the thread's in-flight slot, so no
+   * send or second move starts meanwhile.
+   */
+  function migrate(key: string, ref: ScopedThreadRef): void {
+    const move = platform.moveEntryToServer;
+    if (!move || inFlight.has(key) || deferTimers.has(key)) return;
+    const head = queueOf(key)[0];
+    if (!head) return;
+    const moveRunId = runId;
+    const epoch = queueStore.getState().epoch;
+    inFlight.set(key, { messageId: head.id, runId: moveRunId, epoch });
+    const current = () => runId === moveRunId && queueStore.getState().epoch === epoch;
+    void (async () => {
+      let failed: { readonly messageId: string; readonly error: unknown } | null = null;
+      for (;;) {
+        if (!current()) return;
+        const state = queueStore.getState();
+        const entry = (state.queuesByThreadKey[key] ?? [])[0];
+        if (
+          !entry ||
+          !(platform.isEntryMovable?.(entry) ?? true) ||
+          entry.deliveryStatus === "sending" ||
+          state.steerAttemptsByThreadKey[key]?.[entry.id] !== undefined
+        ) {
+          break;
+        }
+        try {
+          await move(key, entry, {
+            hold: state.holdsByThreadKey[key] ?? null,
+            failed: entry.deliveryStatus === "failed",
+          });
+        } catch (error) {
+          failed = { messageId: entry.id, error };
+          break;
+        }
+        if (!current()) return;
+        if (!queueOf(key).some((candidate) => candidate.id === entry.id)) continue;
+        queueStore.getState().remove(key, entry.id);
+        platform.onEntryRemoved?.(key, entry, "migrated");
+      }
+      if (inFlight.get(key)?.runId === moveRunId) inFlight.delete(key);
+      if (failed !== null) {
+        // A connection that went away is not a failure: the move resumes once it is back.
+        const environment = platform.readEnvironment(
+          ref.environmentId,
+          platform.threads.getState(),
+        );
+        if (environment.mutationReady) {
+          queueStore.getState().hold(key, {
+            reason: "error",
+            causeKeys: [queueMigrationFailedCauseKey(failed.messageId)],
+            detail:
+              failed.error instanceof Error && failed.error.message.length > 0
+                ? failed.error.message
+                : "This message could not be moved to the node's queue.",
+            heldAt: nowIso(),
+          });
+        }
+      } else if (queueOf(key).length === 0) {
+        notifyEnvironmentMigrated(ref.environmentId);
+      }
+      markDirty(key);
+    })();
+  }
+
+  function notifyEnvironmentMigrated(environmentId: EnvironmentId): void {
+    if (!platform.onServerQueueMigrated) return;
+    const remaining = activeKeys().some(
+      (key) => parseScopedThreadKey(key)?.environmentId === environmentId,
+    );
+    if (!remaining) platform.onServerQueueMigrated(environmentId);
   }
 
   function send(

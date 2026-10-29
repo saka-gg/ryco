@@ -26,6 +26,7 @@ import type {
   ProjectId,
   ScopedProjectRef,
   ScopedThreadRef,
+  ThreadFollowUpQueue,
   WorktreeId,
 } from "@ryco/contracts";
 import { isProviderDriverKind, ProviderDriverKind } from "@ryco/contracts/provider-instance";
@@ -66,6 +67,7 @@ import {
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 import { sessionFailureDetail } from "./threadFailure.ts";
+import { applyFollowUpQueueEvent, isFollowUpQueueEvent } from "./followUpQueue.ts";
 import {
   forgetCollectedRows,
   forgetDerivedThread,
@@ -132,6 +134,11 @@ export interface EnvironmentState {
         Partial<Record<OrchestrationThreadHistoryCollection, ThreadHistoryLoadState>>
       >
     | undefined;
+  /**
+   * The server-owned follow-up queue of each thread whose detail is loaded (absent while
+   * empty and from older servers). Not thread activity: its events never touch the shell.
+   */
+  followUpQueueByThreadId?: Record<ThreadId, ThreadFollowUpQueue> | undefined;
 
   // ---------------------------------------------------------------------------
   // Sidebar summary — written ONLY by the shell stream
@@ -567,6 +574,9 @@ function mapThreadSummary(
     ...(thread.pullRequestWatches === undefined
       ? {}
       : { pullRequestWatches: thread.pullRequestWatches }),
+    ...(thread.followUpQueueSummary === undefined
+      ? {}
+      : { followUpQueueSummary: thread.followUpQueueSummary }),
   };
 }
 
@@ -811,7 +821,9 @@ function sidebarThreadSummariesEqual(
     // Watch progress does not move the thread's `updatedAt` (it is not thread activity), so a
     // shell whose only change is its watches must still compare unequal here. Plain wire data,
     // compared whole so a field the summary gains later can never be missed.
-    plainDataEqual(left.pullRequestWatches, right.pullRequestWatches)
+    plainDataEqual(left.pullRequestWatches, right.pullRequestWatches) &&
+    // Queue events do not move `updatedAt` either.
+    plainDataEqual(left.followUpQueueSummary, right.followUpQueueSummary)
   );
 }
 
@@ -1511,6 +1523,10 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     state.threadHistoryLoadByThreadId ?? {};
   const { [threadId]: _removedSidebarSummary, ...sidebarThreadSummaryById } =
     state.sidebarThreadSummaryById;
+  const followUpQueueByThreadId = withoutThreadEntries(
+    state.followUpQueueByThreadId,
+    new Set([threadId]),
+  );
 
   return {
     ...state,
@@ -1532,6 +1548,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     threadHistoryByThreadId,
     threadHistoryLoadByThreadId,
     sidebarThreadSummaryById,
+    ...(followUpQueueByThreadId === undefined ? {} : { followUpQueueByThreadId }),
   };
 }
 
@@ -1580,6 +1597,7 @@ function evictThreadBodiesFromEnvironment(
     threadHistoryByThreadId: withoutThreadEntries(state.threadHistoryByThreadId, threadIds),
     threadHistoryLoadByThreadId: withoutThreadEntries(state.threadHistoryLoadByThreadId, threadIds),
     cachedMessageThreadIds: withoutThreadEntries(state.cachedMessageThreadIds, threadIds),
+    followUpQueueByThreadId: withoutThreadEntries(state.followUpQueueByThreadId, threadIds),
   };
   return (Object.keys(next) as Array<keyof EnvironmentState>).every(
     (key) => next[key] === state[key],
@@ -2528,6 +2546,30 @@ export function applyLoadedThreadShells(
   return commitEnvironmentState(state, environmentId, environmentState);
 }
 
+/** Writes one thread's follow-up queue; an equal queue keeps its identity. */
+function writeFollowUpQueue(
+  state: EnvironmentState,
+  threadId: ThreadId,
+  queue: ThreadFollowUpQueue | undefined,
+): EnvironmentState {
+  const current = state.followUpQueueByThreadId?.[threadId];
+  if (queue === undefined) {
+    if (current === undefined) return state;
+    return {
+      ...state,
+      followUpQueueByThreadId: withoutThreadEntries(
+        state.followUpQueueByThreadId,
+        new Set([threadId]),
+      ),
+    };
+  }
+  if (current !== undefined && plainDataEqual(current, queue)) return state;
+  return {
+    ...state,
+    followUpQueueByThreadId: { ...state.followUpQueueByThreadId, [threadId]: queue },
+  };
+}
+
 export function syncServerThreadDetail(
   state: AppState,
   thread: OrchestrationThread,
@@ -2538,7 +2580,11 @@ export function syncServerThreadDetail(
   return commitEnvironmentState(
     state,
     environmentId,
-    writeThreadState(environmentState, mapThread(thread, environmentId), previousThread),
+    writeFollowUpQueue(
+      writeThreadState(environmentState, mapThread(thread, environmentId), previousThread),
+      thread.id,
+      thread.followUpQueue,
+    ),
   );
 }
 
@@ -2751,6 +2797,15 @@ function applyEnvironmentOrchestrationEvent(
   event: OrchestrationEvent,
   environmentId: EnvironmentId,
 ): EnvironmentState {
+  if (isFollowUpQueueEvent(event)) {
+    // The queue is not thread activity: the shell and its `updatedAt` stay.
+    const threadId = event.payload.threadId;
+    return writeFollowUpQueue(
+      state,
+      threadId,
+      applyFollowUpQueueEvent(state.followUpQueueByThreadId?.[threadId], event),
+    );
+  }
   switch (event.type) {
     case "project.created": {
       const nextProject = mapProject(

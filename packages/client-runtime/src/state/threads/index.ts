@@ -27,3 +27,4 @@ export * from "./threadNotificationFeed.ts";
 export * from "./usageLimit.ts";
 export * from "./pullRequestWatch.ts";
 export * from "./pullRequestWatchPasses.ts";
+export * from "./followUpQueue.ts";

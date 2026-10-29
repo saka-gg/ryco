@@ -516,6 +516,35 @@ describe("follow-up queue decider: steer", () => {
     expect(accepted.events[2]?.payload).toMatchObject({ messageIds: ["a"], reason: "steered" });
   });
 
+  it("adds nothing for a device's copy of an entry being steered or steered already", async () => {
+    // A device queue moving to the node (design §3.7) may still hold an entry the node is
+    // steering, or one its steer delivered: either way the add, hold included, is a no-op.
+    const deviceHold = {
+      reason: "interrupted" as const,
+      causeKeys: ["interrupt:device-turn"],
+      detail: null,
+    };
+    const steered = await apply(await queued(["a"], running), steer("a"));
+    expect(await decide(steered.model, addCommand("a", { hold: deviceHold }))).toEqual([]);
+    const accepted = await apply(steered.model, {
+      type: "thread.turn.steer.resolve",
+      commandId: nextCommandId("resolve"),
+      requestCommandId: steered.events[1]!.commandId!,
+      threadId,
+      expectedTurnId: runningTurn,
+      message: { messageId: MessageId.make("a"), role: "user", text: "text a", attachments: [] },
+      createdAt: at(2),
+      requestedAt: at(2),
+      resolution: { status: "accepted", turnId: runningTurn, resolvedAt: at(3) },
+    });
+    expect(queueOf(accepted.model)).toBeUndefined();
+    expect(await decide(accepted.model, addCommand("a", { hold: deviceHold }))).toEqual([]);
+    // A second device's copy of an entry the first one moved over: no second entry either.
+    const moved = await apply(accepted.model, addCommand("b"));
+    expect(await decide(moved.model, addCommand("b", {}, { text: "second device" }))).toEqual([]);
+    expect(queueOf(moved.model)?.entries.map((entry) => entry.messageId)).toEqual(["b"]);
+  });
+
   it("returns a rejected steer to the queue, or fails it when delivery is uncertain", async () => {
     const steered = await apply(await queued(["a"], running), steer("a"));
     const reject = (deliveryUncertain: boolean): OrchestrationCommand => ({

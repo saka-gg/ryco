@@ -577,7 +577,8 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       worktree,
       environment,
       pinned,
-      hasLocalQueuedMessage: localQueueKeys.has(key),
+      // The node's own follow-up queue counts like this device's.
+      hasLocalQueuedMessage: localQueueKeys.has(key) || thread.followUpQueueSummary !== undefined,
       deliveryUnknown: deliveryUnknownKeys.has(key),
       // Each node's threads by its own rule; time boundaries use this client's clock.
       autoSettleAfterDays:
