@@ -65,6 +65,10 @@ and `packages/contracts/src/browserElementLimits.ts` were adapted from Synara co
 `299fd573b1d6520c323a87c78d30be74e87e53e1` (`apps/desktop/src/browserAnnotations/guestPreload.ts`,
 `protocol.ts`, `packages/shared/src/browserAnnotations.ts`,
 `packages/contracts/src/browserAnnotations.ts`) under the same license.
+The built-in browser's console/network diagnostics, network idle window, page-dialog policy and dialog
+shim, and expected agent input matching (`apps/desktop/src/computerUse/browserDiagnostics.ts` and
+`browserTabAutomation.ts`) were adapted from Synara commit `8f6521a67` (v0.6.4, PR #444) and main
+`299fd573b` under the same license.
 
 ### MIT License
 

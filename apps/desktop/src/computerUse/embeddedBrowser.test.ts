@@ -31,6 +31,14 @@ function newBrowser(): EmbeddedComputerBrowser {
   return browser;
 }
 const signal = () => new AbortController().signal;
+/** Every session's ready steps: groundwork's focus emulation, then browser-agent-control's domains. */
+const READY = [
+  "Emulation.setFocusEmulationEnabled",
+  "Page.enable",
+  "Network.enable",
+  "Runtime.enable",
+  "Log.enable",
+] as const;
 /** Lets queued microtasks (the fake's command responses) run. */
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 interface PageInternals {
@@ -118,6 +126,17 @@ describe("agent CDP", () => {
     expect(api.attach).toHaveBeenCalledWith("1.3");
     expect(api.commands).toEqual([
       { method: "Emulation.setFocusEmulationEnabled", params: { enabled: true } },
+      { method: "Page.enable", params: {} },
+      {
+        method: "Network.enable",
+        params: {
+          maxTotalBufferSize: 1_048_576,
+          maxResourceBufferSize: 262_144,
+          maxPostDataSize: 0,
+        },
+      },
+      { method: "Runtime.enable", params: {} },
+      { method: "Log.enable", params: {} },
       { method: "Page.getFrameTree", params: {} },
       { method: "Runtime.evaluate", params: { expression: "1" } },
     ]);
@@ -148,9 +167,9 @@ describe("agent CDP", () => {
     expect(api.isAttached()).toBe(true);
     expect(api.detach).toHaveBeenCalledTimes(1);
     expect(api.commands.map(({ method }) => method)).toEqual([
-      "Emulation.setFocusEmulationEnabled",
+      ...READY,
       "Page.navigate",
-      "Emulation.setFocusEmulationEnabled",
+      ...READY,
       "Page.reload",
       "Runtime.evaluate",
     ]);
@@ -195,11 +214,8 @@ describe("agent CDP", () => {
       expect(api.detach).toHaveBeenCalledTimes(1);
       await browser.send(tab.id, "Page.reload", {}, signal());
       expect(api.attach).toHaveBeenCalledTimes(2);
-      expect(api.commands.slice(-2).map(({ method }) => method)).toEqual([
-        "Emulation.setFocusEmulationEnabled",
-        "Page.reload",
-      ]);
-      // Only the memory budget's timer is left, and dispose() clears it.
+      expect(api.commands.slice(-6).map(({ method }) => method)).toEqual([...READY, "Page.reload"]);
+      // The memory budget's timer and the automation's idle quiesce timer; dispose() clears both.
       browser.dispose();
       expect(vi.getTimerCount()).toBe(0);
     },
@@ -215,9 +231,9 @@ describe("agent CDP", () => {
     await expect(browser.send(tab.id, "Runtime.evaluate", {}, signal())).resolves.toEqual({});
     expect(api.attach).toHaveBeenCalledTimes(2);
     expect(api.commands.map(({ method }) => method)).toEqual([
-      "Emulation.setFocusEmulationEnabled",
+      ...READY,
       "Page.reload",
-      "Emulation.setFocusEmulationEnabled",
+      ...READY,
       "Runtime.evaluate",
     ]);
   });
@@ -243,10 +259,11 @@ describe("agent CDP", () => {
     expect(api.attach).toHaveBeenCalledTimes(1);
     expect(api.commands.map(({ method }) => method)).toEqual([
       "Emulation.setFocusEmulationEnabled",
-      "Emulation.setFocusEmulationEnabled",
+      ...READY,
       "Page.reload",
     ]);
-    // Only the memory budget's timer is left, and dispose() clears it.
+    // The memory budget's timer and the automation's idle quiesce timer; dispose() clears both.
+    cdp.release("picker");
     browser.dispose();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -515,10 +532,318 @@ it("ignores the late events of a page the tab no longer shows", async () => {
   expect(published).toHaveBeenCalledTimes(1);
   expect(browser.state().tabs[0]?.error).toBe("Fresh failure");
   await browser.send(tab.id, "Page.reload", {}, signal());
-  expect(fresh.debugger.commands.map(({ method }) => method)).toEqual([
-    "Emulation.setFocusEmulationEnabled",
-    "Page.reload",
-  ]);
+  expect(fresh.debugger.commands.map(({ method }) => method)).toEqual([...READY, "Page.reload"]);
+});
+
+describe("agent automation", () => {
+  /** The tab's per-page automation (browser-agent-control). */
+  const automationOf = (browser: EmbeddedComputerBrowser, tab: string) => browser.automation(tab)!;
+
+  it("creates one automation per page and disposes it with the page", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const first = automationOf(browser, tab.id);
+    const { contents } = fakeTab(tab.id);
+    expect(contents.listenerCount("before-mouse-event")).toBe(1);
+    // What browser-tab-budget's suspend() and revive() do: a new page gets a fresh automation.
+    const inner = internals(browser);
+    const entry = inner.entries.get(tab.id)!;
+    const page = entry.live!;
+    entry.live = null;
+    inner.teardownPage(tab.id, page);
+    expect(contents.listenerCount("before-mouse-event")).toBe(0);
+    entry.live = inner.createPage(entry, tab.id).page;
+    expect(automationOf(browser, tab.id)).not.toBe(first);
+    await browser.close(tab.id, signal());
+    expect(browser.automation(tab.id)).toBeUndefined();
+  });
+
+  it("opens agent tabs whose page answers CDP only once it starts loading", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const browser = newBrowser();
+    const opening = browser.open("https://example.com/", false, signal());
+    const { contents } = fakeTab(String(fakeElectronState.views.at(-1)!.webContents.id));
+    // Like Chromium: a WebContents that has not started loading has no renderer to answer CDP.
+    contents.debugger.respond = () =>
+      contents.loadURL.mock.calls.length > 0 ? {} : new Promise(() => {});
+    const outcome = opening.then(
+      () => "opened",
+      (error: Error) => error.message,
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(outcome).resolves.toBe("opened");
+    expect(contents.debugger.commands.map(({ method }) => method)).toEqual([
+      "Emulation.setFocusEmulationEnabled",
+      "Network.enable",
+      "Page.enable",
+      "Runtime.enable",
+      "Log.enable",
+    ]);
+    expect(contents.debugger.isAttached()).toBe(true);
+  });
+
+  it("turns capture back on for every agent call after the ready steps", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const browser = newBrowser();
+    const agentTab = await browser.open("https://example.com/", false, signal());
+    const userTab = await browser.open("https://example.org/", false, signal(), "project");
+    const agentApi = fakeTab(agentTab.id).contents.debugger;
+    const userApi = fakeTab(userTab.id).contents.debugger;
+    await browser.send(agentTab.id, "Page.reload", {}, signal());
+    await browser.send(userTab.id, "Page.reload", {}, signal());
+    await vi.advanceTimersByTimeAsync(60_000);
+    const quiesce = [
+      "Runtime.disable",
+      "Log.disable",
+      "Runtime.discardConsoleEntries",
+      "Log.clear",
+    ];
+    // The agent's tab keeps Network for idle tracking; the user's own tab stops recording it.
+    expect(agentApi.commands.slice(-4).map(({ method }) => method)).toEqual(quiesce);
+    expect(userApi.commands.slice(-5).map(({ method }) => method)).toEqual([
+      ...quiesce,
+      "Network.disable",
+    ]);
+    await browser.send(agentTab.id, "Runtime.evaluate", {}, signal());
+    expect(agentApi.commands.slice(-3).map(({ method }) => method)).toEqual([
+      "Runtime.enable",
+      "Log.enable",
+      "Runtime.evaluate",
+    ]);
+    await browser.send(userTab.id, "Runtime.evaluate", {}, signal());
+    expect(userApi.commands.slice(-4).map(({ method }) => method)).toEqual([
+      "Network.enable",
+      "Runtime.enable",
+      "Log.enable",
+      "Runtime.evaluate",
+    ]);
+  });
+
+  it("opens agent tabs with the session and network capture on before the page loads", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal());
+    const { contents } = fakeTab(tab.id);
+    // Network.enable goes out with the focus step, ahead of the other ready steps, which wait for
+    // it instead of sending their own.
+    expect(contents.debugger.commands.map(({ method }) => method)).toEqual([
+      "Emulation.setFocusEmulationEnabled",
+      "Network.enable",
+      "Page.enable",
+      "Runtime.enable",
+      "Log.enable",
+    ]);
+    expect(contents.debugger.attach.mock.invocationCallOrder[0]).toBeLessThan(
+      contents.loadURL.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(contents.debugger.sendCommand.mock.invocationCallOrder[1]).toBeLessThan(
+      contents.loadURL.mock.invocationCallOrder[0] ?? 0,
+    );
+    // Project tabs stay detached until an agent uses them.
+    const manual = await browser.open("https://example.org/", false, signal(), "project");
+    expect(fakeTab(manual.id).contents.debugger.attach).not.toHaveBeenCalled();
+    expect(await browser.tabs(signal())).toEqual([
+      expect.objectContaining({ id: tab.id, presented: false, userActive: false, agentTab: true }),
+      expect.objectContaining({
+        id: manual.id,
+        presented: false,
+        userActive: false,
+        agentTab: false,
+      }),
+    ]);
+  });
+
+  it("reports a tab the user is working in", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    browser.surface(
+      { owner: "owner", tab: tab.id, x: 0, y: 0, width: 800, height: 600 },
+      fakeOwnerWindow() as unknown as BrowserWindow,
+    );
+    contents.focused = true;
+    contents.emit("before-mouse-event", fakeEvent(), {
+      type: "mouseDown",
+      x: 5,
+      y: 5,
+      button: "left",
+    });
+    expect(automationOf(browser, tab.id).humanEpoch).toBe(1);
+    expect(await browser.tabs(signal())).toEqual([
+      expect.objectContaining({ id: tab.id, presented: true, userActive: true, agentTab: false }),
+    ]);
+    // Focus elsewhere (the composer) ends the hold at once; the epoch stays.
+    contents.focused = false;
+    expect((await browser.tabs(signal()))[0]?.userActive).toBe(false);
+    // Toolbar navigation counts as the user's input too.
+    await browser.command({ tab: tab.id, action: "reload" });
+    expect(automationOf(browser, tab.id).humanEpoch).toBe(2);
+    await browser.command({ tab: tab.id, action: "zoom", zoom: 1.5 });
+    expect(automationOf(browser, tab.id).humanEpoch).toBe(2);
+  });
+
+  it("clears the agent's emulation when the user shows, resizes or pops out the tab", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { debugger: api } = fakeTab(tab.id).contents;
+    await browser.send(tab.id, "Page.reload", {}, signal());
+    const automation = automationOf(browser, tab.id);
+    const clears = () =>
+      api.commands.filter(({ method }) => method === "Emulation.clearDeviceMetricsOverride").length;
+    const owner = fakeOwnerWindow() as unknown as BrowserWindow;
+    const show = (width: number) =>
+      browser.surface({ owner: "owner", tab: tab.id, x: 0, y: 0, width, height: 600 }, owner);
+    automation.recordEmulation({ viewport: { width: 390, height: 844 } });
+    show(800);
+    await flush();
+    expect(clears()).toBe(1);
+    automation.recordEmulation({ colorScheme: "dark" });
+    show(800); // Same bounds: nothing changes.
+    await flush();
+    expect(clears()).toBe(1);
+    show(700);
+    await flush();
+    expect(clears()).toBe(2);
+    // Hiding keeps it; showing in a pop-out clears it.
+    automation.recordEmulation({ colorScheme: "dark" });
+    browser.surface({ owner: "owner", tab: null, x: 0, y: 0, width: 0, height: 0 }, owner);
+    await flush();
+    expect(clears()).toBe(2);
+    await browser.command({ tab: tab.id, action: "popout" });
+    await flush();
+    expect(clears()).toBe(3);
+  });
+
+  it("stop() clears the agent's emulation before it releases the agent's hold", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { debugger: api } = fakeTab(tab.id).contents;
+    await browser.send(tab.id, "Page.reload", {}, signal());
+    const { cdp } = internals(browser).entries.get(tab.id)!.live!;
+    cdp.acquire("picker"); // A user's pick keeps the session after the stop.
+    automationOf(browser, tab.id).recordEmulation({ viewport: { width: 390, height: 844 } });
+    browser.stop();
+    await flush();
+    expect(api.isAttached()).toBe(true);
+    expect(cdp.holds("agent")).toBe(false);
+    // The memory budget then ends focus emulation with the agent's hold (syncThrottling).
+    expect(api.commands.slice(-3).map(({ method }) => method)).toEqual([
+      "Emulation.clearDeviceMetricsOverride",
+      "Emulation.setEmulatedMedia",
+      "Emulation.setFocusEmulationEnabled",
+    ]);
+  });
+
+  it("applies the sign-in rules to diagnostics reads and the dialog shim", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    browser.surface(
+      { owner: "owner", tab: tab.id, x: 0, y: 0, width: 800, height: 600 },
+      fakeOwnerWindow() as unknown as BrowserWindow,
+    );
+    await browser.command({ tab: tab.id, action: "allow-sign-in" });
+    contents.windowOpenHandler?.({
+      url: "https://id.example/login",
+      disposition: "foreground-tab",
+      frameName: "",
+      features: "",
+      referrer: { url: "", policy: "default" },
+    });
+    expect(browser.state().tabs[0]?.signInPopup).toBe("open");
+    const automation = automationOf(browser, tab.id);
+    await expect(automation.diagnostics("console", 10, signal())).rejects.toThrow(
+      "Finish or close the sign-in popup before agent browser control resumes.",
+    );
+    // The shim's install is refused too; the scope still works without it.
+    const scope = await automation.begin({}, signal(), 15_000);
+    await expect(scope.end()).resolves.toEqual({ dialogs: [] });
+    expect(contents.debugger.attach).not.toHaveBeenCalled();
+  });
+
+  describe("gives the page its dialogs back before the agent's hold ends", () => {
+    const RESTORE = "function () { return this.restore(); }";
+    /** A project tab with an agent action's shim installed; the agent is the only holder. */
+    async function scoped() {
+      const browser = newBrowser();
+      const tab = await browser.open("https://example.com/", false, signal(), "project");
+      const { contents } = fakeTab(tab.id);
+      const api = contents.debugger;
+      api.respond = (method) =>
+        method === "Runtime.evaluate" ? { result: { type: "object", objectId: "shim" } } : {};
+      const scope = await automationOf(browser, tab.id).begin({}, signal(), 15_000);
+      const restoredBeforeDetach = () => {
+        const index = api.commands.findIndex(
+          ({ method, params }) =>
+            method === "Runtime.callFunctionOn" &&
+            (params as { functionDeclaration?: string }).functionDeclaration === RESTORE,
+        );
+        expect(index).toBeGreaterThanOrEqual(0);
+        expect(api.sendCommand.mock.invocationCallOrder[index]).toBeLessThan(
+          api.detach.mock.invocationCallOrder.at(-1) ?? 0,
+        );
+        expect(api.isAttached()).toBe(false);
+        expect(contents.listenerCount("will-prevent-unload")).toBe(0);
+      };
+      return { browser, tab, api, scope, restoredBeforeDetach };
+    }
+
+    it("on stop", async () => {
+      const { browser, scope, restoredBeforeDetach } = await scoped();
+      browser.stop();
+      restoredBeforeDetach();
+      await expect(scope.end({ failed: true })).resolves.toEqual({ dialogs: [] });
+    });
+
+    it("when the action is aborted mid-command", async () => {
+      const { browser, tab, api, restoredBeforeDetach } = await scoped();
+      api.respond = () => new Promise<never>(() => undefined);
+      const controller = new AbortController();
+      const command = browser.send(
+        tab.id,
+        "Runtime.evaluate",
+        { expression: "1" },
+        controller.signal,
+      );
+      await flush();
+      controller.abort();
+      await expect(command).rejects.toThrow();
+      restoredBeforeDetach();
+    });
+
+    it("when a command times out", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const { browser, tab, api, restoredBeforeDetach } = await scoped();
+      api.respond = () => new Promise<never>(() => undefined);
+      const command = browser.send(tab.id, "Runtime.evaluate", { expression: "1" }, signal());
+      const outcome = expect(command).rejects.toThrow("Browser command timed out.");
+      await vi.advanceTimersByTimeAsync(15_000);
+      await outcome;
+      restoredBeforeDetach();
+    });
+  });
+
+  it("answers dialogs between actions only in the agent's own hidden tabs", async () => {
+    const browser = newBrowser();
+    const agentTab = await browser.open("https://example.com/", false, signal());
+    const userTab = await browser.open("https://example.org/", false, signal(), "project");
+    await browser.send(userTab.id, "Runtime.evaluate", { expression: "1" }, signal());
+    for (const { id } of [agentTab, userTab])
+      fakeTab(id).contents.debugger.message("Page.javascriptDialogOpening", {
+        type: "confirm",
+        message: "timer",
+      });
+    await flush();
+    const answered = (id: string) =>
+      fakeTab(id).contents.debugger.commands.some(
+        ({ method }) => method === "Page.handleJavaScriptDialog",
+      );
+    expect(answered(agentTab.id)).toBe(true);
+    expect(automationOf(browser, agentTab.id).pendingDialog()).toBeNull();
+    expect(answered(userTab.id)).toBe(false);
+    expect(automationOf(browser, userTab.id).pendingDialog()).toEqual(
+      expect.objectContaining({ message: "timer" }),
+    );
+  });
 });
 
 describe("memory budget", () => {
@@ -575,7 +900,15 @@ describe("memory budget", () => {
     expect(contents.close).toHaveBeenCalledWith({ waitForBeforeUnload: false });
     expect(destroyHost).toHaveBeenCalledTimes(1);
     await expect(browser.tabs(signal())).resolves.toEqual([
-      { id: tab.id, title: "Example", url: "https://example.com/page", suspended: true },
+      {
+        id: tab.id,
+        title: "Example",
+        url: "https://example.com/page",
+        presented: false,
+        userActive: false,
+        agentTab: false,
+        suspended: true,
+      },
     ]);
     // The old page's late events cannot remove the tab.
     host.emit("closed");
@@ -757,24 +1090,25 @@ describe("memory budget", () => {
       params: { enabled },
     });
     const evaluate = { method: "Runtime.evaluate", params: {} };
+    // The agent automation's ready steps and idle quiesce (Page, Network, Runtime, Log) are not
+    // this test's concern.
+    const commands = () =>
+      contents.debugger.commands.filter(
+        ({ method }) =>
+          method === "Emulation.setFocusEmulationEnabled" || method === evaluate.method,
+      );
     await browser.send(tab.id, "Runtime.evaluate", {}, signal());
     await advance(COMPUTER_TARGET_CLAIM_MS - 1);
-    expect(contents.debugger.commands).toEqual([focus(true), evaluate]);
+    expect(commands()).toEqual([focus(true), evaluate]);
     // In Chromium, focus emulation keeps a hidden page visible and painting whatever its
     // throttling, so it ends with the hold. The session stays (other units keep state in it).
     await advance(1);
     await flush();
     expect(contents.getBackgroundThrottling()).toBe(true);
-    expect(contents.debugger.commands).toEqual([focus(true), evaluate, focus(false)]);
+    expect(commands()).toEqual([focus(true), evaluate, focus(false)]);
     expect(contents.debugger.isAttached()).toBe(true);
     await browser.send(tab.id, "Runtime.evaluate", {}, signal());
-    expect(contents.debugger.commands).toEqual([
-      focus(true),
-      evaluate,
-      focus(false),
-      focus(true),
-      evaluate,
-    ]);
+    expect(commands()).toEqual([focus(true), evaluate, focus(false), focus(true), evaluate]);
     // A thumbnail hold on a page without a session sends nothing when it ends.
     const other = await browser.open("https://example.org/", false, signal(), "project");
     await browser.capture(other.id);
@@ -845,9 +1179,10 @@ describe("memory budget", () => {
     expect(fresh.loadURL.mock.invocationCallOrder[0]).toBeLessThan(
       fresh.debugger.attach.mock.invocationCallOrder[0] ?? 0,
     );
-    // The new page's session gets focus emulation again; it started unthrottled.
+    // The new page's session gets focus emulation (and the agent automation's ready steps) again;
+    // it started unthrottled.
     expect(fresh.debugger.commands.map(({ method }) => method)).toEqual([
-      "Emulation.setFocusEmulationEnabled",
+      ...READY,
       "Runtime.evaluate",
     ]);
     expect(fresh.webPreferences.backgroundThrottling).toBe(false);
@@ -1275,8 +1610,8 @@ describe("element picker", () => {
     const pending = browser.pick(id);
     await flush();
     expect(picker(browser, id)).toBe("picking");
-    expect(contents.debugger.commands.slice(0, 2).map(({ method }) => method)).toEqual([
-      "Emulation.setFocusEmulationEnabled",
+    expect(contents.debugger.commands.slice(0, 6).map(({ method }) => method)).toEqual([
+      ...READY,
       "DOM.enable",
     ]);
     await browser.send(id, "Runtime.evaluate", { expression: "1" }, signal());
