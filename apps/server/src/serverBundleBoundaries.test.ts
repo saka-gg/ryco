@@ -159,6 +159,16 @@ describe("server boot import boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the pull request watch fingerprint with the GitHub client", () => {
+    // Its query and decoder ride with GitHubCli, which loads on first GitHub use.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        file.endsWith("/sourceControl/gitHubPullRequestWatchFingerprint.ts"),
+      ),
+    ).toEqual([]);
+  });
+
   it("keeps optional feature stacks off the serve path", () => {
     const graph = staticGraph("src/cliMain.ts");
     const reached = (pattern: RegExp) => graph.files.filter((file) => pattern.test(file));
@@ -291,6 +301,16 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
         /^(?:effect|@effect\/[\w-]+|mime|ws|undici)(?:\/|$)/u.test(specifier),
       ),
     ).toEqual([]);
+  });
+
+  it("keeps the pull request watch fingerprint decoder out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region src\/sourceControl\/gitHubPullRequestWatchFingerprint\.ts$/mu,
+      );
+    }
   });
 
   it("keeps the boot chunks within budget", () => {

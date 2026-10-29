@@ -65,7 +65,9 @@ import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubPullRequestStacks from "./gitHubPullRequestStacks.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
+import * as GitHubPullRequestWatchFingerprint from "./gitHubPullRequestWatchFingerprint.ts";
 import * as GitHubRepositoryLists from "./gitHubRepositoryLists.ts";
+import type { ChangeRequestWatchFingerprint } from "./SourceControlProvider.ts";
 import {
   decodeGitHubReactionGroupsBySubjectJson,
   formatGitHubReactionGroupsDecodeError,
@@ -360,6 +362,18 @@ export interface GitHubCliShape {
     ReadonlyArray<GitHubRequiredChecks.NormalizedGitHubRequiredCheck>,
     GitHubCliError
   >;
+
+  /**
+   * What a pull request watch compares between passes, in one GraphQL point.
+   * Null when GitHub resolves no such repository or pull request, so the
+   * watch reads it in full instead.
+   */
+  readonly getPullRequestWatchFingerprint: (input: {
+    readonly cwd: string;
+    readonly repository: string;
+    readonly host: string;
+    readonly number: number;
+  }) => Effect.Effect<ChangeRequestWatchFingerprint | null, GitHubCliError>;
 
   readonly mergePullRequestAsync: (input: {
     readonly cwd: string;
@@ -1982,6 +1996,41 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       return checks;
     });
 
+  const getPullRequestWatchFingerprint: GitHubCliShape["getPullRequestWatchFingerprint"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const operation = "getPullRequestWatchFingerprint";
+      const parts = repositoryParts(input.repository);
+      if (!parts) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: "GitHub repository must be in owner/repository form.",
+        });
+      }
+      // GraphQL's Int is 32-bit.
+      if (!Number.isSafeInteger(input.number) || input.number <= 0 || input.number > 2 ** 31 - 1) {
+        return yield* new GitHubCliError({
+          operation,
+          detail: `GitHub pull request number is out of range: ${input.number}`,
+        });
+      }
+      const raw = yield* graphqlDocument({
+        cwd: input.cwd,
+        host: input.host,
+        operation,
+        query: GitHubPullRequestWatchFingerprint.GITHUB_PULL_REQUEST_WATCH_FINGERPRINT_QUERY,
+        variables: { owner: parts.owner, name: parts.name, number: input.number },
+        // A pull request or repository GitHub cannot resolve answers null; the decoder decides.
+        acceptPartialData: true,
+      });
+      const decoded =
+        GitHubPullRequestWatchFingerprint.decodeGitHubPullRequestWatchFingerprintJson(raw);
+      return Result.isSuccess(decoded)
+        ? decoded.success
+        : yield* normalizeGitHubCliError(operation, { detail: decoded.failure });
+    });
+
   const mergePullRequestAsync: GitHubCliShape["mergePullRequestAsync"] = (input) =>
     Effect.gen(function* () {
       const endpoint = `repos/${input.repository}/pulls/${input.number}/merge-async`;
@@ -2821,6 +2870,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     getPullRequestStackSummaries,
     getRepositoryMergeCapabilities,
     getPullRequestRequiredChecks,
+    getPullRequestWatchFingerprint,
     mergePullRequestAsync,
     deleteBranch,
     getPullRequestTarget,

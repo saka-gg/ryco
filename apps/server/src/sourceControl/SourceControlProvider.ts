@@ -159,6 +159,18 @@ export interface SourceControlLinkStates {
   readonly issues: ReadonlyMap<number, IssueState>;
 }
 
+/**
+ * A cheap summary of what a pull request watch reports, compared between
+ * passes so the watch reads a change request in full only when it moved.
+ * `status` moves with the state, mergeability, head or checks, which the
+ * detail read reports; `remarks` moves with comments, reviews and review
+ * threads, which only the costlier activity read reports.
+ */
+export interface ChangeRequestWatchFingerprint {
+  readonly status: string;
+  readonly remarks: string;
+}
+
 export interface SourceControlProviderShape {
   readonly kind: SourceControlProviderKind;
   readonly listChangeRequests: (input: {
@@ -313,6 +325,20 @@ export interface SourceControlProviderShape {
   readonly getChangeRequestActivity?: (
     input: ChangeRequestActivityInput & { readonly context?: SourceControlProviderContext },
   ) => Effect.Effect<ChangeRequestActivity, SourceControlProviderError>;
+  /**
+   * The change request's watch fingerprint (GitHub: one GraphQL point, where
+   * the detail and activity reads it gates cost several calls each). Null when
+   * the host has none for it (the URL names no repository the host reads, or
+   * the change request is gone), so the watch reads it in full. Optional:
+   * hosts without one have their watched change requests read in full.
+   */
+  readonly getChangeRequestWatchFingerprint?: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+    readonly number: number;
+    /** The change request's web URL (`ChangeRequest.url`), which names its repository and host. */
+    readonly url: string;
+  }) => Effect.Effect<ChangeRequestWatchFingerprint | null, SourceControlProviderError>;
   readonly getChangeRequestFileContents?: (
     input: ChangeRequestFileContentsInput & { readonly context?: SourceControlProviderContext },
   ) => Effect.Effect<ChangeRequestFileContents, SourceControlProviderError>;

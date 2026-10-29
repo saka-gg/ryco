@@ -703,6 +703,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
         Effect.fail(
           new GitHubCliError({ operation: "getPullRequestRequiredChecks", detail: "stub" }),
         ),
+      getPullRequestWatchFingerprint: () => Effect.die("unused"),
       mergePullRequestAsync: () =>
         Effect.fail(new GitHubCliError({ operation: "mergePullRequestAsync", detail: "stub" })),
       getPullRequestDiff: () =>

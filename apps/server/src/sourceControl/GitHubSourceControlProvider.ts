@@ -1028,6 +1028,19 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
       github
         .getPullRequestActivity({ cwd: input.cwd, reference: input.reference })
         .pipe(Effect.mapError((error) => providerError("getChangeRequestActivity", error))),
+    // The pull request's own URL names the repository and host, whichever checkout reads it.
+    getChangeRequestWatchFingerprint: (input) => {
+      const identity = parseGitHubRepositoryIdentityFromUrl(input.url);
+      if (!identity) return Effect.succeed(null);
+      return github
+        .getPullRequestWatchFingerprint({
+          cwd: input.cwd,
+          host: identity.host,
+          repository: identity.nameWithOwner,
+          number: input.number,
+        })
+        .pipe(Effect.mapError((cause) => providerError("getChangeRequestWatchFingerprint", cause)));
+    },
     getChangeRequestFileContents: ({ context: _context, ...input }) =>
       github
         .getPullRequestFileContents(input)

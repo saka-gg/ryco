@@ -286,6 +286,12 @@ export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(funct
       () =>
         SourceControlProvider.unsupportedChangeRequestOperation(kind, "getChangeRequestActivity"),
     ),
+    // A host without a fingerprint answers null, so its watches read in full: never a failure.
+    getChangeRequestWatchFingerprint: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.getChangeRequestWatchFingerprint,
+      () => Effect.succeed(null),
+    ),
     getChangeRequestFileContents: lazyOptionalMethod(
       provider,
       (loaded) => loaded.getChangeRequestFileContents,
@@ -544,6 +550,14 @@ export function bindProviderContext(
     ...(provider.getChangeRequestActivity
       ? {
           getChangeRequestActivity: withProviderContext(provider.getChangeRequestActivity, context),
+        }
+      : {}),
+    ...(provider.getChangeRequestWatchFingerprint
+      ? {
+          getChangeRequestWatchFingerprint: withProviderContext(
+            provider.getChangeRequestWatchFingerprint,
+            context,
+          ),
         }
       : {}),
     ...(provider.getChangeRequestFileContents
