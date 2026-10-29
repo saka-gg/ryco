@@ -22,11 +22,11 @@ import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { AgentControlPlanValidationError } from "./Errors.ts";
 import {
   CheckoutInspectionError,
-  checkoutHasBlockingChanges,
   inspectCheckout,
   inspectProjectGitFacts,
   type ProjectGitFacts,
 } from "../workspace/checkoutInspection.ts";
+import { checkoutHasBlockingChanges } from "../workspace/checkoutStatus.ts";
 
 const fail = (detail: string) =>
   Effect.fail(new AgentControlPlanValidationError({ reason: "worktree-preflight", detail }));

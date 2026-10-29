@@ -747,6 +747,8 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
             yield* io(() => fs.writeFile(path.join(staging.path, "staged.txt"), "owned staging"));
             yield* f.service.completeTemporaryDirectory(staging.id);
             yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old}, completed_at = ${old} WHERE id = ${staging.id}`;
+            // The checkout existed when its thread was archived (the clock starts at the later one).
+            yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old} WHERE id = ${f.entry.id}`;
             f.setSettings({
               ...DEFAULT_SERVER_SETTINGS,
               storageRetention: {
@@ -1430,6 +1432,266 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
             );
           }),
         ),
+    );
+
+    it.effect(
+      "removes a checkout whose only ignored files are regenerable, by the rule Remove checkout uses",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* io(() =>
+              fs.writeFile(path.join(f.checkout, ".gitignore"), "*.tsbuildinfo\n.DS_Store\n"),
+            );
+            yield* f.git(f.checkout, ["add", ".gitignore"]);
+            yield* f.git(f.checkout, ["commit", "-m", "ignore build info"]);
+            yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+            yield* io(async () => {
+              await fs.writeFile(path.join(f.checkout, "tsconfig.tsbuildinfo"), "{}");
+              await fs.mkdir(path.join(f.checkout, "src"));
+              await fs.writeFile(path.join(f.checkout, "src", ".DS_Store"), "finder");
+              // An ignored folder holding only empty folders loses nothing either.
+              await fs.mkdir(path.join(f.checkout, "dist", "assets"), { recursive: true });
+            });
+            yield* io(() => fs.appendFile(path.join(f.checkout, ".gitignore"), "dist/\n"));
+            yield* f.git(f.checkout, ["commit", "-am", "ignore dist"]);
+            yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+            const entry = (yield* f.service.scan()).entries.find((item) => item.id === f.entry.id)!;
+            assert.isTrue(entry.eligible, entry.reason);
+            const preview = yield* f.service.preview("owner", [f.entry.id]);
+            const result = yield* f.service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed", result.results[0]?.detail);
+            assert.isFalse(
+              yield* io(() =>
+                fs.lstat(f.checkout).then(
+                  () => true,
+                  () => false,
+                ),
+              ),
+            );
+            assert.isNotEmpty(
+              (yield* f.git(f.repo, ["rev-parse", "refs/heads/fixture-branch"])).stdout,
+            );
+          }),
+        ),
+    );
+    it.effect(
+      "keeps credentials, databases, unknown ignored files and cache folders, with the lifecycle's reasons",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* io(() =>
+              fs.writeFile(
+                path.join(f.checkout, ".gitignore"),
+                ".env\nid_ed25519\nlocal.sqlite\nuser-archive\nsigning.properties\nnode_modules/\n",
+              ),
+            );
+            // A tracked folder with a cache-like name: Git lists its ignored files one by one.
+            yield* io(async () => {
+              await fs.mkdir(path.join(f.checkout, "build"));
+              await fs.writeFile(path.join(f.checkout, "build", "release.gradle"), "tracked");
+            });
+            yield* f.git(f.checkout, ["add", ".gitignore", "build/release.gradle"]);
+            yield* f.git(f.checkout, ["commit", "-m", "ignore local files"]);
+            yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+            const reasonFor = Effect.gen(function* () {
+              const entry = (yield* f.service.scan()).entries.find(
+                (item) => item.id === f.entry.id,
+              )!;
+              assert.isFalse(entry.eligible);
+              return entry.reason;
+            });
+            for (const file of [
+              ".env",
+              "id_ed25519",
+              "local.sqlite",
+              "user-archive",
+              "build/signing.properties",
+            ]) {
+              yield* io(() => fs.writeFile(path.join(f.checkout, file), "keep"));
+              assert.include(
+                yield* reasonFor,
+                `1 ignored file that is not a known cache would be lost (${file}).`,
+                file,
+              );
+              yield* io(() => fs.rm(path.join(f.checkout, file)));
+            }
+            // Installed JavaScript dependencies, with the links package managers put in .bin.
+            yield* io(async () => {
+              await fs.mkdir(path.join(f.checkout, "node_modules", "pkg"), { recursive: true });
+              await fs.writeFile(path.join(f.checkout, "node_modules", "pkg", "index.js"), "");
+              await fs.mkdir(path.join(f.checkout, "node_modules", ".bin"));
+              await fs.symlink(
+                "../pkg/index.js",
+                path.join(f.checkout, "node_modules", ".bin", "pkg"),
+              );
+            });
+            assert.include(
+              yield* reasonFor,
+              "Ignored cache folders are protected (node_modules/).",
+            );
+            assert.isTrue(
+              yield* io(() =>
+                fs.lstat(path.join(f.checkout, "node_modules", "pkg", "index.js")).then(() => true),
+              ),
+            );
+          }),
+        ),
+    );
+    it.effect(
+      "verifies a removable checkout before protected records earlier in the ledger use the budget",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* f.sql`UPDATE storage_owned_entries SET id = 'zz-checkout', created_at = ${old}`;
+            // A protected record that sorts first and alone exceeds a scan's shared budget.
+            const large = path.join(f.root, "unverified-checkout");
+            yield* io(async () => {
+              for (let directory = 0; directory < 160; directory++) {
+                const parent = path.join(large, `d${directory}`);
+                await fs.mkdir(parent, { recursive: true });
+                await Promise.all(
+                  Array.from({ length: 100 }, (_, index) =>
+                    fs.writeFile(path.join(parent, `f${index}`), ""),
+                  ),
+                );
+              }
+            });
+            yield* f.sql`INSERT INTO storage_owned_entries (id, path, category, identity_json, created_at, state) VALUES ('000-unverified', ${large}, 'worktree', '{}', ${old}, 'unverified')`;
+            const scan = yield* f.service.scan();
+            assert.isTrue(scan.entries.find((entry) => entry.id === "zz-checkout")!.eligible);
+            const protectedEntry = scan.entries.find((entry) => entry.id === "000-unverified")!;
+            assert.isFalse(protectedEntry.eligible);
+            assert.strictEqual(protectedEntry.sizeStatus, "bounded");
+            f.setSettings({
+              ...DEFAULT_SERVER_SETTINGS,
+              storageRetention: {
+                automatic: true,
+                completedWorktreeDays: 30,
+                temporaryDataDays: null,
+              },
+            });
+            yield* f.service.runRetention;
+            const states = yield* f.sql<{
+              id: string;
+              state: string;
+            }>`SELECT id, state FROM storage_owned_entries ORDER BY id`;
+            assert.deepEqual(states, [
+              { id: "000-unverified", state: "unverified" },
+              { id: "zz-checkout", state: "removed" },
+            ]);
+          }),
+        ),
+    );
+    it.effect("runs no Git check once a scan's shared budget is spent", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.sql`UPDATE storage_owned_entries SET id = 'zz-checkout', created_at = ${old}`;
+          // A completed staging record that sorts first and alone exceeds the scan's budget.
+          const large = path.join(f.root, "storage-temporary", "large");
+          yield* io(async () => {
+            for (let directory = 0; directory < 160; directory++) {
+              const parent = path.join(large, `d${directory}`);
+              await fs.mkdir(parent, { recursive: true });
+              await Promise.all(
+                Array.from({ length: 100 }, (_, index) =>
+                  fs.writeFile(path.join(parent, `f${index}`), ""),
+                ),
+              );
+            }
+          });
+          yield* f.sql`INSERT INTO storage_owned_entries (id, path, project_id, category, identity_json, created_at, completed_at, state) VALUES ('000-large', ${large}, ${projectId}, 'temporary', '{}', ${old}, ${old}, 'owned')`;
+          let worktreeLists = 0;
+          f.duringListWorktrees(() =>
+            Effect.sync(() => {
+              worktreeLists++;
+            }),
+          );
+          const scan = yield* f.service.scan();
+          for (const id of ["000-large", "zz-checkout"]) {
+            const entry = scan.entries.find((item) => item.id === id)!;
+            assert.isFalse(entry.eligible, id);
+            assert.include(entry.reason, "Scan budget", id);
+          }
+          assert.strictEqual(worktreeLists, 0);
+          // Only the scan's budget refused it: a preview checks it with its own.
+          const preview = yield* f.service.preview("owner", ["zz-checkout"]);
+          assert.isTrue(preview.entries[0]!.eligible);
+          assert.strictEqual(worktreeLists, 1);
+        }),
+      ),
+    );
+    it.effect("starts the retention clock when the checkout was last created", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const day = 86_400_000;
+          f.setSnapshot((s) => ({
+            ...s,
+            threads: s.threads.map((thread) => ({
+              ...thread,
+              archivedAt: new Date(Date.now() - 40 * day).toISOString(),
+            })),
+          }));
+          f.setSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageRetention: {
+              automatic: true,
+              completedWorktreeDays: 30,
+              temporaryDataDays: null,
+            },
+          });
+          // Restore recreates the checkout; recording the creation again restarts the clock.
+          yield* recordCreatedWorktree(f.sql, f.repo, f.checkout);
+          yield* f.service.runRetention;
+          const state = f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`;
+          assert.strictEqual((yield* state)[0]!.state, "owned");
+          assert.isTrue(yield* io(() => fs.lstat(f.checkout).then(() => true)));
+          yield* f.sql`UPDATE storage_owned_entries SET created_at = ${new Date(Date.now() - 31 * day).toISOString()}`;
+          yield* f.service.runRetention;
+          assert.strictEqual((yield* state)[0]!.state, "removed");
+        }),
+      ),
+    );
+    it.effect("bounds each retention pass and continues past candidates that stay protected", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          yield* f.sql`UPDATE storage_owned_entries SET id = 'zz-checkout'`;
+          // 70 due staging records changed after completion, then one that did not change:
+          // more refusals than one pass verifies, ahead of the removable record.
+          for (let index = 0; index <= 70; index++) {
+            const staging = yield* f.service.createTemporaryDirectory(projectId);
+            yield* io(() => fs.writeFile(path.join(staging.path, "owned.txt"), "completed"));
+            yield* f.service.completeTemporaryDirectory(staging.id);
+            if (index < 70)
+              yield* io(() => fs.writeFile(path.join(staging.path, "late.txt"), "external"));
+            yield* f.sql`UPDATE storage_owned_entries SET id = ${String(index).padStart(3, "0")}, created_at = ${old}, completed_at = ${old} WHERE id = ${staging.id}`;
+          }
+          f.setSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageRetention: {
+              automatic: true,
+              completedWorktreeDays: null,
+              temporaryDataDays: 7,
+            },
+          });
+          const stateOf = (id: string) =>
+            f.sql<{ state: string }>`SELECT state FROM storage_owned_entries WHERE id = ${id}`;
+          yield* f.service.runRetention;
+          assert.strictEqual((yield* stateOf("070"))[0]!.state, "owned");
+          // The next pass continues after the last record the first one checked.
+          yield* f.service.runRetention;
+          assert.strictEqual((yield* stateOf("070"))[0]!.state, "removed");
+          const kept = yield* f.sql<{
+            state: string;
+          }>`SELECT state FROM storage_owned_entries WHERE category = 'temporary' AND id < '070'`;
+          assert.isTrue(kept.length === 70 && kept.every((row) => row.state === "owned"));
+        }),
+      ),
     );
   },
 );

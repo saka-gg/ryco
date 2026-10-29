@@ -84,6 +84,7 @@ import {
   type ProjectGitFacts,
   samePath,
 } from "./checkoutInspection.ts";
+import { checkoutChangeBlockers, describeProtectedIgnored, plural } from "./checkoutStatus.ts";
 import { type DiskUsageCache, exclusiveDiskUsage, makeDiskUsageCache } from "./diskUsage.ts";
 import {
   WorkspaceAccessPolicy,
@@ -202,7 +203,6 @@ const statusKey = (status: CheckoutFacts["status"] | undefined) =>
       truncated: status.truncated,
     },
   );
-const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 
 /**
  * A Trash row for clients. `projectKind` comes from the project record, also a deleted one, so a
@@ -358,18 +358,7 @@ export function workspaceActionBlockers(
           blockers.push("Git does not register this directory as a worktree of the project.");
         const status = facts.status;
         if (!status) blockers.push("The checkout status could not be read.");
-        else {
-          if (status.truncated)
-            blockers.push("The checkout has too many changes to verify safely.");
-          if (status.modified > 0)
-            blockers.push(`${plural(status.modified, "tracked file")} has uncommitted changes.`);
-          if (status.untracked > 0)
-            blockers.push(`${plural(status.untracked, "untracked file")} would be lost.`);
-          if (status.protectedIgnored.length > 0)
-            blockers.push(
-              `${plural(status.protectedIgnored.length, "ignored file")} that ${status.protectedIgnored.length === 1 ? "is" : "are"} not a known cache would be lost (${status.protectedIgnored.slice(0, 3).join(", ")}).`,
-            );
-        }
+        else blockers.push(...checkoutChangeBlockers(status));
         if (facts.unmerged !== false)
           blockers.push(
             facts.unmerged === true
@@ -784,9 +773,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       if (status.untracked > 0)
         details.push(`Deletes ${plural(status.untracked, "untracked file")}.`);
       if (status.protectedIgnored.length > 0)
-        details.push(
-          `Deletes ${plural(status.protectedIgnored.length, "ignored file")} that ${status.protectedIgnored.length === 1 ? "is" : "are"} not a known cache (${status.protectedIgnored.slice(0, 3).join(", ")}).`,
-        );
+        details.push(`Deletes ${describeProtectedIgnored(status.protectedIgnored)}.`);
       if (status.truncated)
         details.push("There are more changes than could be counted; all of them are discarded.");
     }
