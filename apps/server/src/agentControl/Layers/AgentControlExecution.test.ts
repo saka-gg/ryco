@@ -15,7 +15,10 @@ import {
   LocalTaskError,
   OrchestrationThreadShell,
   ProjectId,
+  CommandId,
   ProviderInstanceId,
+  PullRequestWatchError,
+  ServerProvider,
   RuntimeSessionId,
   ThreadId,
   TurnId,
@@ -65,6 +68,11 @@ import { DEVICE_IDLE_SHUTDOWN_MS, DeviceManager } from "../../device/DeviceManag
 import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
+import {
+  addPullRequest,
+  createPullRequestWatchHarness,
+} from "../../sourceControl/pullRequestWatch.fixtures.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
@@ -77,7 +85,9 @@ import { AgentControlActionValidator } from "../Services/AgentControlActionValid
 import { AgentControlOperationStore } from "../Services/AgentControlOperationStore.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
+import { makeAgentControlActionValidatorFromDeps } from "./AgentControlActionValidator.ts";
 import {
+  AgentControlExecutionLive,
   makeAgentControlExecution,
   preflightAgentControlWorktreeCheckout,
 } from "./AgentControlExecution.ts";
@@ -176,6 +186,7 @@ const makeTestExecution = (input: {
   readonly workspaceAccess?: unknown;
   readonly validator?: unknown;
   readonly deviceService?: unknown;
+  readonly pullRequestWatches?: unknown;
   /** The server's base directory; a fresh temporary one when absent. */
   readonly baseDir?: string;
 }) =>
@@ -210,6 +221,7 @@ const makeTestExecution = (input: {
       (input.deviceService ?? { supported: false, manager: {} }) as never,
     ),
     Effect.provideService(ServerRuntimeStartup, {} as never),
+    Effect.provideService(PullRequestWatchService, (input.pullRequestWatches ?? {}) as never),
     Effect.provide(
       ServerConfig.layerTest(
         process.cwd(),
@@ -2593,3 +2605,341 @@ it.effect("starts an agent's task chat as the task's, with copies of the task's 
     );
   }).pipe(Effect.scoped),
 );
+
+// ── Pull request watches ──────────────────────────────────────────────
+
+const watchPlan = {
+  kind: "pullRequestWatch" as const,
+  threadId,
+  number: 34,
+  watching: true,
+};
+const watchProposal: AgentControlProposal = {
+  ...approvedProposal,
+  plan: watchPlan,
+  planDigest: computeAgentControlPlanDigest(watchPlan),
+};
+
+it("needs the pull request watch provided beneath it, so server.ts cannot misplace it", () => {
+  // A requirement, not `serviceOption`: were the watch a sibling of execution in the runtime
+  // services' `Layer.mergeAll`, `runServer`'s `satisfies` in server.ts would stop compiling
+  // instead of every agent watch failing with "unavailable".
+  type Needs =
+    typeof AgentControlExecutionLive extends Layer.Layer<infer _Out, infer _Error, infer In>
+      ? In
+      : never;
+  const needsWatch: PullRequestWatchService extends Needs ? true : false = true;
+  assert.isTrue(needsWatch);
+});
+
+it.effect("watches a pull request once and answers with how it stands now", () =>
+  Effect.gen(function* () {
+    const stores = yield* makeExecutionStores(watchProposal);
+    const calls: unknown[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {},
+      commandApplication: {},
+      pullRequestWatches: {
+        setWatch: (input: unknown) =>
+          Effect.sync(() => {
+            calls.push(input);
+            return {
+              watch: { number: 34, url: "https://github.com/o/r/pull/34", news: true },
+              now: "1 check failing: lint. 2 running.",
+            };
+          }),
+      },
+    });
+    yield* executor.executeApproved(watchProposal.proposalId);
+    yield* executor.executeApproved(watchProposal.proposalId);
+    assert.deepEqual(calls, [
+      { threadId, number: 34, url: undefined, news: true, origin: "agent" },
+    ]);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    assert.strictEqual(
+      settled.result?.outcome === "completed" ? settled.result.detail : null,
+      // The plan wakes another chat than the caller's: the answer names it.
+      "Watching #34 (https://github.com/o/r/pull/34). Now: 1 check failing: lint. 2 running. Ryco wakes chat thread-target on the next change.",
+    );
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    assert.include(operation.state.completedSteps, "pull-request-watch-set");
+    assert.deepEqual(operation.state.resources.threadIds, [threadId]);
+  }),
+);
+
+it.effect("tells the agent why a pull request cannot be watched, in the watch's words", () =>
+  Effect.gen(function* () {
+    const stores = yield* makeExecutionStores(watchProposal);
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {},
+      commandApplication: {},
+      pullRequestWatches: {
+        setWatch: () =>
+          Effect.fail(
+            new PullRequestWatchError({
+              reason: "no-pull-request",
+              detail: "No pull request is linked to this chat's workspace yet.",
+            }),
+          ),
+      },
+    });
+    yield* executor.executeApproved(watchProposal.proposalId);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    assert.strictEqual(
+      settled.result?.outcome === "failed" ? settled.result.error.message : null,
+      "No pull request is linked to this chat's workspace yet.",
+    );
+  }),
+);
+
+/** Recovers one interrupted watch stop whose operation state is `state`. */
+const recoverWatchStop = (state: AgentControlOperation["state"]) =>
+  Effect.gen(function* () {
+    const stopPlan = { ...watchPlan, watching: false };
+    const executing: AgentControlProposal = {
+      ...approvedProposal,
+      plan: stopPlan,
+      planDigest: computeAgentControlPlanDigest(stopPlan),
+      status: "executing",
+    };
+    const running: AgentControlOperation = {
+      operationId: AgentControlOperationId.make("operation-watch-interrupted"),
+      proposalId: executing.proposalId,
+      actionKind: "pullRequestWatch",
+      status: "running",
+      attempt: 1,
+      state,
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const proposalRef = yield* Ref.make(executing);
+    const operationRef = yield* Ref.make(running);
+    const calls: unknown[] = [];
+    const execution = yield* makeTestExecution({
+      proposalStore: {
+        getById: () => Ref.get(proposalRef).pipe(Effect.map(Option.some)),
+        listActive: () => Effect.succeed([]),
+        settleExecution: (input: { readonly result: AgentControlResultEnvelope }) =>
+          Ref.modify(proposalRef, (current) => {
+            const next: AgentControlProposal = {
+              ...current,
+              status: input.result.outcome === "completed" ? "completed" : "failed",
+              result: input.result,
+            };
+            return [next, next];
+          }),
+      },
+      operationStore: {
+        listRecoverable: () => Ref.get(operationRef).pipe(Effect.map((operation) => [operation])),
+        getByProposalId: () => Ref.get(operationRef).pipe(Effect.map(Option.some)),
+        transition: (input: {
+          readonly nextStatus: AgentControlOperation["status"];
+          readonly state: AgentControlOperation["state"];
+          readonly result: AgentControlOperation["result"];
+        }) =>
+          Ref.updateAndGet(operationRef, (current) => ({
+            ...current,
+            status: input.nextStatus,
+            state: input.state,
+            result: input.result,
+          })),
+      },
+      projections: {},
+      commandApplication: {},
+      pullRequestWatches: {
+        // Already stopped before the restart: the same change answers as it is.
+        setWatch: (input: unknown) =>
+          Effect.sync(() => {
+            calls.push(input);
+            return { watch: null, now: "Not watching #34." };
+          }),
+      },
+    });
+    yield* execution.recoverIncomplete;
+    const settled = yield* Ref.get(proposalRef);
+    return {
+      calls,
+      status: settled.status,
+      detail: settled.result?.outcome === "completed" ? settled.result.detail : null,
+      completedSteps: (yield* Ref.get(operationRef)).state.completedSteps,
+    };
+  });
+
+const emptyWatchState: AgentControlOperation["state"] = {
+  completedSteps: [],
+  resources: { threadIds: [], ownedThreadIds: [], worktreeIds: [], ownedWorktrees: [] },
+  commandReceipts: [],
+};
+
+it.effect("applies a watch change a restart cut off again, and completes it", () =>
+  Effect.gen(function* () {
+    // The watch changed, but the server stopped before the checkpoint said so.
+    const recovered = yield* recoverWatchStop(emptyWatchState);
+    assert.lengthOf(recovered.calls, 1);
+    assert.strictEqual(recovered.status, "completed");
+    assert.strictEqual(recovered.detail, "Not watching #34.");
+    assert.include(recovered.completedSteps, "pull-request-watch-set");
+  }),
+);
+
+it.effect("completes a recorded watch change a restart cut off, with its answer", () =>
+  Effect.gen(function* () {
+    // The checkpoint recorded the change; only the completion was lost.
+    const recovered = yield* recoverWatchStop({
+      ...emptyWatchState,
+      completedSteps: ["pull-request-watch-set"],
+      resources: { ...emptyWatchState.resources, threadIds: [threadId] },
+      note: "Stopped watching #34.",
+    });
+    assert.lengthOf(recovered.calls, 0);
+    assert.strictEqual(recovered.status, "completed");
+    assert.strictEqual(recovered.detail, "Stopped watching #34.");
+  }),
+);
+
+it("lets the delegating chat watch the pull request its delegated chat reported, and wakes it", async () => {
+  const h = await createPullRequestWatchHarness();
+  try {
+    // The delegated chat opened #34 in its own worktree; the delegating chat works elsewhere.
+    const pr = addPullRequest(h.forge, 34, { checks: [{ name: "lint", conclusion: "SUCCESS" }] });
+    const { projectId: watchProjectId } = await h.seedProject("delegation");
+    const parentWorkspace = await h.seedWorkspace({ key: "parent", projectId: watchProjectId });
+    const childWorkspace = await h.seedWorkspace({
+      key: "child",
+      projectId: watchProjectId,
+      link: pr,
+    });
+    const parent = await h.seedThread({
+      key: "parent",
+      projectId: watchProjectId,
+      worktreePath: parentWorkspace.worktreePath,
+    });
+    const child = await h.seedThread({
+      key: "child",
+      projectId: watchProjectId,
+      worktreePath: childWorkspace.worktreePath,
+    });
+    // Both run a turn: the one calling the tool.
+    const running = (id: ThreadId) =>
+      h.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(`provider:session:${id}`),
+        threadId: id,
+        session: {
+          threadId: id,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make(`runtime-${id}`),
+          runtimeMode: "full-access",
+          activeTurnId: TurnId.make(`turn-${id}`),
+          lastError: null,
+          updatedAt: new Date(h.clock.now()).toISOString(),
+        },
+        createdAt: new Date(h.clock.now()).toISOString(),
+      });
+    await running(parent);
+    await running(child);
+
+    const projections = await h.run(
+      Effect.gen(function* () {
+        return yield* ProjectionSnapshotQuery;
+      }),
+    );
+    const validator = makeAgentControlActionValidatorFromDeps({
+      projections,
+      getProviders: Effect.succeed([
+        Schema.decodeUnknownSync(ServerProvider)({
+          instanceId: "codex",
+          driver: "codex",
+          enabled: true,
+          installed: true,
+          version: "1",
+          status: "ready",
+          auth: { status: "authenticated" },
+          checkedAt: now,
+          models: [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }],
+          slashCommands: [],
+          skills: [],
+        }),
+      ]),
+      listRefs: () => Effect.die("unused"),
+      // The child's result is still awaited by the parent.
+      delegatedReturnPending: (id) => Effect.succeed(id === child),
+    });
+    const submit = (caller: ThreadId) =>
+      validator.validateSubmission({
+        session: {
+          sessionId: `session-${caller}`,
+          threadId: caller,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make(`runtime-${caller}`),
+          grantedCapabilities: [],
+          issuedAt: now,
+          injectionMode: "codex-http",
+        },
+        authority: {
+          sessionId: `session-${caller}`,
+          threadId: caller,
+          turnId: TurnId.make(`turn-${caller}`),
+          boundAt: now,
+        },
+        plan: { kind: "pullRequestWatch", threadId: caller, number: 34, watching: true },
+      });
+
+    // The child reports the pull request instead of watching it.
+    const refused = await h.run(Effect.flip(submit(child)));
+    assert.strictEqual(refused.reason, "delegated-return-pending");
+
+    // The parent watches the number the child reported, through the routine execution.
+    const plan = {
+      kind: "pullRequestWatch" as const,
+      threadId: parent,
+      number: 34,
+      watching: true,
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      principal: await h.run(submit(parent)),
+      plan,
+      planDigest: computeAgentControlPlanDigest(plan),
+    };
+    const settled = await h.run(
+      Effect.gen(function* () {
+        const stores = yield* makeExecutionStores(proposal);
+        const executor = yield* makeTestExecution({
+          ...stores,
+          projections,
+          commandApplication: {},
+          validator,
+          pullRequestWatches: { setWatch: h.watch.setWatch, sweep: h.watch.sweep },
+        });
+        yield* executor.executeApproved(proposal.proposalId);
+        return yield* Ref.get(stores.proposalRef);
+      }).pipe(Effect.scoped),
+    );
+    assert.strictEqual(settled.status, "completed");
+    const detail = settled.result?.outcome === "completed" ? settled.result.detail : "";
+    assert.include(detail, "Watching #34");
+    assert.include(detail, "Ryco wakes this chat on the next change, so end your turn");
+    const [watch] = (await h.watches(parent)).active;
+    assert.strictEqual(watch?.startedBy, "agent");
+    assert.strictEqual(watch?.worktreeId, childWorkspace.worktreeId);
+
+    // The parent's turn ends; a check fails; the parent is woken, the child is not.
+    await h.setSession(parent, "ready");
+    await h.run(h.watch.sweep);
+    pr.checks = [{ name: "lint", conclusion: "FAILURE" }];
+    h.clock.advance(2 * 60_000);
+    await h.run(h.watch.sweep);
+    assert.lengthOf(await h.wakes(parent), 1);
+    assert.lengthOf(await h.wakes(child), 0);
+  } finally {
+    await h.dispose();
+  }
+});

@@ -328,6 +328,7 @@ export function selectAgentControlThreadActivity(
         case "sendMessage":
         case "interruptThread":
         case "updateThread":
+        case "pullRequestWatch":
           return proposal.plan.threadId === threadId;
         default:
           return false;

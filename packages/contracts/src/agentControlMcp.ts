@@ -62,6 +62,7 @@ import {
   AgentControlPrompt,
   AgentControlProposalId,
   AgentControlProposalReceipt,
+  AgentControlPullRequestUrl,
   AgentControlRequestId,
   AgentControlSendMessageDelivery,
   AgentControlSendMessagePlan,
@@ -168,6 +169,8 @@ export const AGENT_CONTROL_MCP_TOOLS = {
   proposeDeviceInput: "ryco_propose_device_input",
   proposeDeviceRecording: "ryco_propose_device_recording",
   proposeDeviceShutdown: "ryco_propose_device_shutdown",
+  watchPullRequest: "ryco_watch_pull_request",
+  unwatchPullRequest: "ryco_unwatch_pull_request",
 } as const;
 export type AgentControlMcpToolName =
   (typeof AGENT_CONTROL_MCP_TOOLS)[keyof typeof AGENT_CONTROL_MCP_TOOLS];
@@ -288,6 +291,15 @@ export const AgentControlMcpUpdateThreadInput = Schema.Struct({
   ),
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpUpdateThreadInput = typeof AgentControlMcpUpdateThreadInput.Type;
+
+/** `ryco_watch_pull_request` and `ryco_unwatch_pull_request`: the chat defaults to the caller's. */
+export const AgentControlMcpPullRequestWatchInput = Schema.Struct({
+  requestId: AgentControlRequestId,
+  threadId: Schema.optional(ThreadId),
+  number: Schema.optional(PositiveInt),
+  url: Schema.optional(AgentControlPullRequestUrl),
+}).pipe(rejectExcessProperties);
+export type AgentControlMcpPullRequestWatchInput = typeof AgentControlMcpPullRequestWatchInput.Type;
 
 export const AgentControlMcpProposeProjectCreateInput = Schema.Struct({
   requestId: AgentControlRequestId,

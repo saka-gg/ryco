@@ -235,6 +235,8 @@ it.effect("grants HTML renders to full provider leases but not to computer-only 
     const [full = [], computerOnly] = state.issuedCapabilities;
     assert.include(full, AGENT_CONTROL_CAPABILITIES.renderHtml);
     assert.include(full, AGENT_CONTROL_CAPABILITIES.attachFile);
+    // The pull request watch tools, so an agent ends its turn instead of polling.
+    assert.include(full, AGENT_CONTROL_CAPABILITIES.watchPullRequests);
     assert.deepStrictEqual(computerOnly, [AGENT_CONTROL_CAPABILITIES.controlComputer]);
   }),
 );

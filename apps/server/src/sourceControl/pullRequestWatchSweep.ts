@@ -1544,7 +1544,17 @@ export const makePullRequestWatchRuntime = (
           const readFailure = () =>
             watchError("thread-unavailable", "Could not read the chat. Try again.");
           const shell = yield* threadShell(request.threadId).pipe(Effect.mapError(readFailure));
-          if (shell === null || shell.archivedAt !== null || shell.settledOverride === "settled") {
+          // Only a request that turns something on may start a watch (neither set means news).
+          const turnsOn =
+            request.news === true ||
+            request.autoFix === true ||
+            (request.news === undefined && request.autoFix === undefined);
+          // Archiving or settling a chat ends its watches, so a request that only stops one
+          // still runs below and answers that nothing is watched.
+          if (
+            shell === null ||
+            (turnsOn && (shell.archivedAt !== null || shell.settledOverride === "settled"))
+          ) {
             return yield* watchError(
               "thread-unavailable",
               "Only an active chat watches pull requests. Make it active first.",
@@ -1555,11 +1565,6 @@ export const makePullRequestWatchRuntime = (
             ...(request.news === undefined ? {} : { news: request.news }),
             ...(request.autoFix === undefined ? {} : { autoFix: request.autoFix }),
           };
-          // Only a request that turns something on may start a watch (neither set means news).
-          const turnsOn =
-            request.news === true ||
-            request.autoFix === true ||
-            (request.news === undefined && request.autoFix === undefined);
           const nowMs = yield* Clock.currentTimeMillis;
           const nowIso = iso(nowMs);
           const row = yield* watchRows
@@ -1599,7 +1604,21 @@ export const makePullRequestWatchRuntime = (
           );
           if (!turnsOn) {
             // The one watch the request names (or, naming none, the chat's only watch).
-            if (matching.length === 1) return yield* turnOff(matching[0]!);
+            let stopping = matching.length === 1 ? matching[0] : undefined;
+            if (matching.length > 1 && named.number === undefined) {
+              // Several watched and none named: the one of the chat's own workspace, else ask
+              // (never the workspace's pull request found by a host read while others stay on).
+              const own = yield* threadWorkspace(shell).pipe(Effect.mapError(readFailure));
+              const owned = matching.filter((watch) => watch.worktreeId === own?.worktreeId);
+              if (owned.length !== 1) {
+                return yield* watchError(
+                  "no-pull-request",
+                  `This chat watches ${matching.map((watch) => `#${watch.number}`).join(", ")}. Name the one to stop.`,
+                );
+              }
+              stopping = owned[0];
+            }
+            if (stopping !== undefined) return yield* turnOff(stopping);
             if (matching.length === 0) {
               return {
                 watch: null,
@@ -1734,7 +1753,8 @@ export const makePullRequestWatchRuntime = (
                   endReason: change.reason,
                   createdAt: nowIso,
                 });
-                return { watch: null, now };
+                // As every other stop answers: the caller asked to stop, not for the checks.
+                return { watch: null, now: `Stopped watching #${existing.number}.` };
             }
           }
 

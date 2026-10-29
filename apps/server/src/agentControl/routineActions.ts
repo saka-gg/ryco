@@ -11,6 +11,7 @@ export const isRoutineAgentControlAction = (
     case "createThreads":
     case "sendMessage":
     case "interruptThread":
+    case "pullRequestWatch":
       // The validator checks caller runtime privileges and worktree isolation.
       return true;
     case "updateThread":

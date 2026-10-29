@@ -23,7 +23,7 @@ import {
   type OrchestrationMessage,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option, Ref, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -1537,3 +1537,178 @@ it.effect("deletes only the task revision the user approves, and only for a prov
     assert.strictEqual(external.reason, "privilege-escalation");
   }),
 );
+
+describe("pull request watches", () => {
+  const watchValidator = (
+    snapshot: Ref.Ref<OrchestrationShellSnapshot>,
+    awaited: ReadonlySet<ThreadId> = new Set(),
+  ) =>
+    Effect.gen(function* () {
+      const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+      return makeAgentControlActionValidatorFromDeps({
+        projections: {
+          getShellSnapshot: () => Ref.get(snapshot),
+        } as unknown as ProjectionSnapshotQueryShape,
+        getProviders: Ref.get(providers),
+        listRefs: () => Effect.die("unused"),
+        delegatedReturnPending: (threadId) => Effect.succeed(awaited.has(threadId)),
+      });
+    });
+  const watch = (threadId: ThreadId, watching = true) => ({
+    kind: "pullRequestWatch" as const,
+    threadId,
+    number: 34,
+    watching,
+  });
+
+  it.effect("lets a chat watch a pull request for itself or a chat it may control", () =>
+    Effect.gen(function* () {
+      const validator = yield* watchValidator(yield* Ref.make(makeSnapshot()));
+      const own = yield* validator.validateSubmission({
+        session,
+        authority,
+        plan: watch(callerThreadId),
+      });
+      assert.strictEqual(own.kind, "provider-session");
+      const other = yield* validator.validateSubmission({
+        session,
+        authority,
+        plan: watch(targetThreadId),
+      });
+      yield* validator.revalidateExecution(approvedProposal(other, watch(targetThreadId)));
+    }),
+  );
+
+  it.effect("keeps a watch inside the caller's project, privilege and isolation", () =>
+    Effect.gen(function* () {
+      const foreign = Schema.decodeUnknownSync(OrchestrationThreadShell)({
+        ...thread({ id: targetThreadId, runtimeMode: "approval-required", envMode: "worktree" }),
+        projectId: "project-other",
+      });
+      const outside = yield* Effect.flip(
+        (yield* watchValidator(
+          yield* Ref.make(makeSnapshot(undefined, foreign)),
+        )).validateSubmission({ session, authority, plan: watch(targetThreadId) }),
+      );
+      assert.strictEqual(outside.reason, "project-scope");
+      const privileged = yield* Effect.flip(
+        (yield* watchValidator(
+          yield* Ref.make(
+            makeSnapshot(
+              undefined,
+              thread({ id: targetThreadId, runtimeMode: "full-access", envMode: "worktree" }),
+            ),
+          ),
+        )).validateSubmission({ session, authority, plan: watch(targetThreadId) }),
+      );
+      assert.strictEqual(privileged.reason, "privilege-escalation");
+      const shared = yield* Effect.flip(
+        (yield* watchValidator(
+          yield* Ref.make(
+            makeSnapshot(
+              undefined,
+              thread({ id: targetThreadId, runtimeMode: "approval-required", envMode: "local" }),
+            ),
+          ),
+        )).validateSubmission({ session, authority, plan: watch(targetThreadId) }),
+      );
+      assert.strictEqual(shared.reason, "worktree-escalation");
+    }),
+  );
+
+  it.effect("starts no watch on an archived chat, but always lets one stop", () =>
+    Effect.gen(function* () {
+      const validator = yield* watchValidator(
+        yield* Ref.make(
+          makeSnapshot(
+            undefined,
+            thread({
+              id: targetThreadId,
+              runtimeMode: "approval-required",
+              envMode: "worktree",
+              archived: true,
+            }),
+          ),
+        ),
+      );
+      const archived = yield* Effect.flip(
+        validator.validateSubmission({ session, authority, plan: watch(targetThreadId) }),
+      );
+      assert.strictEqual(archived.reason, "thread-unavailable");
+      yield* validator.validateSubmission({
+        session,
+        authority,
+        plan: watch(targetThreadId, false),
+      });
+    }),
+  );
+
+  it.effect(
+    "refuses a delegated chat whose result is awaited, as caller or target, and says to report it",
+    () =>
+      Effect.gen(function* () {
+        const snapshot = yield* Ref.make(makeSnapshot());
+        const callerAwaited = yield* Effect.flip(
+          (yield* watchValidator(snapshot, new Set([callerThreadId]))).validateSubmission({
+            session,
+            authority,
+            plan: watch(callerThreadId),
+          }),
+        );
+        assert.strictEqual(callerAwaited.reason, "delegated-return-pending");
+        assert.include(callerAwaited.detail, "Report the pull request in your result");
+        const targetAwaited = yield* Effect.flip(
+          (yield* watchValidator(snapshot, new Set([targetThreadId]))).validateSubmission({
+            session,
+            authority,
+            plan: watch(targetThreadId),
+          }),
+        );
+        assert.strictEqual(targetAwaited.reason, "delegated-return-pending");
+        // Stopping is never refused, and the check runs again before execution.
+        const awaited = yield* watchValidator(snapshot, new Set([callerThreadId]));
+        yield* awaited.validateSubmission({
+          session,
+          authority,
+          plan: watch(callerThreadId, false),
+        });
+        const principal = yield* (yield* watchValidator(snapshot)).validateSubmission({
+          session,
+          authority,
+          plan: watch(callerThreadId),
+        });
+        const atExecution = yield* Effect.flip(
+          awaited.revalidateExecution(approvedProposal(principal, watch(callerThreadId))),
+        );
+        assert.strictEqual(atExecution.reason, "delegated-return-pending");
+      }),
+  );
+
+  it.effect("never lets a standalone integration watch a pull request", () =>
+    Effect.gen(function* () {
+      const validator = yield* watchValidator(yield* Ref.make(makeSnapshot()));
+      const refused = yield* Effect.flip(
+        validator.validateExternalSubmission({
+          integration: externalIntegration([AGENT_CONTROL_CAPABILITIES.externalControlThreads]),
+          plan: watch(targetThreadId),
+        }),
+      );
+      assert.strictEqual(refused.reason, "privilege-escalation");
+      const executed = yield* Effect.flip(
+        validator.revalidateExecution(
+          approvedProposal(
+            {
+              kind: "external-integration",
+              integrationId: AgentControlIntegrationId.make("integration-control"),
+              projectId,
+              runtimeMode: "approval-required",
+              envMode: "worktree",
+            },
+            watch(targetThreadId),
+          ),
+        ),
+      );
+      assert.strictEqual(executed.reason, "privilege-escalation");
+    }),
+  );
+});

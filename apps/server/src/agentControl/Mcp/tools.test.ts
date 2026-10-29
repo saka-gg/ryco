@@ -27,6 +27,7 @@ import {
 import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Option, PubSub, Schema } from "effect";
 import sharp from "sharp";
+import { TestClock } from "effect/testing";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceManager } from "../../device/DeviceManager.ts";
@@ -389,7 +390,7 @@ it.effect("advertises capability-scoped reads and all proposal-only writes with 
     );
     assert.strictEqual(
       writeDescriptors.filter((tool) => writeTools.isWriteTool(tool.name)).length,
-      21,
+      23,
     );
     assert.isTrue(tools.hasTool("ryco_create_threads"));
   }),
@@ -1864,4 +1865,221 @@ it.effect(
       )!.inputSchema;
       assert.notInclude(JSON.stringify(schema), '"$ref"');
     }),
+);
+
+// ── ryco_watch_pull_request / ryco_unwatch_pull_request ───────────────
+
+/** Submits like Ryco does for a routine request, which the executor then settles. */
+const makeWatchDeps = (settle: (proposal: AgentControlProposal) => AgentControlProposal | null) =>
+  Effect.gen(function* () {
+    const pubsub = yield* PubSub.unbounded<AgentControlProposalStreamProposalEvent>();
+    const submitted: Array<AgentControlProposal["plan"]> = [];
+    let stored: AgentControlProposal | null = null;
+    const deps = makeDeps({
+      getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)),
+      validator: {
+        validateOwnerAutomation: () => Effect.void,
+        validateSubmission: () =>
+          Effect.succeed({
+            kind: "provider-session",
+            threadId: callerThreadId,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+            turnId: TurnId.make("turn-active"),
+          }),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () => Effect.void,
+      },
+      proposals: {
+        getProposal: (proposalId) =>
+          Effect.sync(() =>
+            stored !== null && stored.proposalId === proposalId
+              ? Option.some(stored)
+              : Option.none(),
+          ),
+        submit: (input) =>
+          Effect.gen(function* () {
+            submitted.push(input.plan);
+            const approved: AgentControlProposal = {
+              proposalId: AgentControlProposalId.make(`proposal-${submitted.length}`),
+              requestId: input.requestId,
+              principal: input.principal,
+              planVersion: 1,
+              plan: input.plan,
+              planDigest: "c".repeat(64),
+              riskTags: input.riskTags,
+              promptSummary: input.promptSummary,
+              status: "approved",
+              createdAt: input.now,
+              updatedAt: input.now,
+              expiresAt: input.expiresAt,
+              decidedAt: input.now,
+              result: null,
+            };
+            stored = approved;
+            const settled = settle(approved);
+            if (settled !== null) {
+              // The executor settles it a moment later, as a routine request.
+              yield* Effect.forkDetach(
+                Effect.sleep("20 millis").pipe(
+                  Effect.andThen(
+                    Effect.suspend(() => {
+                      stored = settled;
+                      return PubSub.publish(pubsub, {
+                        version: 1 as const,
+                        type: "proposal" as const,
+                        revision: 2,
+                        proposal: settled,
+                      });
+                    }),
+                  ),
+                ),
+              );
+            }
+            return { replayed: false, proposal: approved };
+          }),
+      },
+      proposalEvents: { subscribe: PubSub.subscribe(pubsub) },
+    });
+    return { deps, submitted };
+  });
+
+it.live(
+  "watches the caller's pull request by default and answers with how it stands once it ran",
+  () =>
+    Effect.gen(function* () {
+      const { deps, submitted } = yield* makeWatchDeps((proposal) => ({
+        ...proposal,
+        status: "completed",
+        result: {
+          outcome: "completed",
+          detail: "Watching #34 (https://github.com/o/r/pull/34). Now: 1 check failing: lint.",
+          completedAt: T2,
+        },
+      }));
+      const result = yield* call(
+        deps,
+        AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+        { requestId: "request-watch", number: 34 },
+        writeSession,
+      );
+      assert.isUndefined(result.isError);
+      assert.deepStrictEqual(submitted, [
+        { kind: "pullRequestWatch", threadId: callerThreadId, number: 34, watching: true },
+      ]);
+      const payload = structured(result) as {
+        readonly receipt: {
+          readonly status: string;
+          readonly riskTags: ReadonlyArray<string>;
+          readonly result: { readonly detail: string };
+        };
+        readonly replayed: boolean;
+        readonly timedOut: boolean;
+      };
+      assert.strictEqual(payload.receipt.status, "completed");
+      assert.include(payload.receipt.result.detail, "1 check failing: lint");
+      assert.deepStrictEqual(payload.receipt.riskTags, []);
+      assert.isFalse(payload.timedOut);
+      assert.isFalse(payload.replayed);
+    }),
+);
+
+it.live("stops watching another chat's pull request named by its URL", () =>
+  Effect.gen(function* () {
+    const { deps, submitted } = yield* makeWatchDeps((proposal) => ({
+      ...proposal,
+      status: "failed",
+      result: {
+        outcome: "failed",
+        error: {
+          code: "execution-failed" as never,
+          message: "Not watching #34.",
+          retryable: false,
+        },
+        failedAt: T2,
+      },
+    }));
+    const result = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest,
+      {
+        requestId: "request-unwatch",
+        threadId: "thread-other",
+        url: "https://github.com/o/r/pull/34",
+      },
+      writeSession,
+    );
+    assert.isUndefined(result.isError);
+    assert.deepStrictEqual(submitted, [
+      {
+        kind: "pullRequestWatch",
+        threadId: ThreadId.make("thread-other"),
+        url: "https://github.com/o/r/pull/34",
+        watching: false,
+      },
+    ]);
+    const payload = structured(result) as {
+      readonly receipt: {
+        readonly status: string;
+        readonly result: { readonly error: { readonly message: string } };
+      };
+    };
+    assert.strictEqual(payload.receipt.status, "failed");
+    assert.strictEqual(payload.receipt.result.error.message, "Not watching #34.");
+  }),
+);
+
+it.effect("answers with the receipt as it stands when the outcome takes longer than the wait", () =>
+  Effect.gen(function* () {
+    const { deps } = yield* makeWatchDeps(() => null);
+    const fiber = yield* Effect.forkChild(
+      call(
+        deps,
+        AGENT_CONTROL_MCP_TOOLS.watchPullRequest,
+        { requestId: "request-slow" },
+        writeSession,
+      ),
+    );
+    for (let turn = 0; turn < 50; turn += 1) yield* Effect.yieldNow;
+    assert.isUndefined(fiber.pollUnsafe());
+    yield* TestClock.adjust("25 seconds");
+    const result = yield* Fiber.join(fiber);
+    const payload = structured(result) as {
+      readonly receipt: { readonly status: string };
+      readonly timedOut: boolean;
+    };
+    assert.strictEqual(payload.receipt.status, "approved");
+    assert.isTrue(payload.timedOut);
+  }),
+);
+
+it.effect("lists the watch tools only with their grant, and refuses calls without it", () =>
+  Effect.gen(function* () {
+    const withoutGrant: AgentControlSessionRecord = {
+      ...writeSession,
+      grantedCapabilities: writeSession.grantedCapabilities.filter(
+        (capability) => capability !== AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+      ),
+    };
+    const tools = makeAgentControlMcpTools(
+      makeDeps({ getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)) }),
+    );
+    const names = (yield* tools.descriptorsFor(withoutGrant)).map((tool) => tool.name);
+    assert.notInclude(names, AGENT_CONTROL_MCP_TOOLS.watchPullRequest);
+    assert.notInclude(names, AGENT_CONTROL_MCP_TOOLS.unwatchPullRequest);
+    const granted = (yield* tools.descriptorsFor(writeSession)).map((tool) => tool.name);
+    assert.include(granted, AGENT_CONTROL_MCP_TOOLS.watchPullRequest);
+    const denied = yield* tools.callTool(withoutGrant, AGENT_CONTROL_MCP_TOOLS.watchPullRequest, {
+      requestId: "request-denied",
+    });
+    assert.isTrue(denied.isError);
+    assert.strictEqual(denied.content[0]?.text, "Capability denied.");
+    // Auto-fix CI is the user's switch: the tools take no such argument.
+    const autoFix = yield* tools.callTool(writeSession, AGENT_CONTROL_MCP_TOOLS.watchPullRequest, {
+      requestId: "request-auto-fix",
+      autoFix: true,
+    });
+    assert.isTrue(autoFix.isError);
+    assert.strictEqual(autoFix.content[0]?.text, "Invalid tool arguments.");
+  }),
 );

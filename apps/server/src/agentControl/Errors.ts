@@ -173,6 +173,7 @@ export class AgentControlPlanValidationError extends Schema.TaggedError<AgentCon
       "artifact-unavailable",
       "task-unavailable",
       "task-stale",
+      "delegated-return-pending",
     ]),
     detail: Schema.String,
   },

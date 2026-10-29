@@ -25,6 +25,7 @@ import {
   type AgentControlResultEnvelope,
   type ClientOrchestrationCommand,
   type OrchestrationThreadShell,
+  type SourceControlSetPullRequestWatchResult,
   type ThreadDelegatedCreateCommand,
   type ThreadTurnStartCommand,
 } from "@ryco/contracts";
@@ -53,6 +54,7 @@ import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { legacyTokenStreamingEnabled } from "../settingsControl.ts";
 import { copyArtifactsToThread, resolveThreadArtifacts } from "../artifactHandoff.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
 import { copyTaskFilesToThread, deleteTaskFileCopies } from "../../tasks/taskFiles.ts";
 import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import {
@@ -90,6 +92,10 @@ const isProjectAction = (proposal: AgentControlProposal): boolean =>
   proposal.plan.kind === "removeProject" ||
   proposal.plan.kind === "workspaceLifecycle";
 
+/** Actions whose failure the agent reads in the node's own words (what to do about it). */
+const explainsFailure = (proposal: AgentControlProposal): boolean =>
+  isProjectAction(proposal) || proposal.plan.kind === "pullRequestWatch";
+
 class AgentControlDeviceExecutionError extends Error {
   readonly code: AgentControlErrorCode;
   readonly retryable: boolean;
@@ -100,6 +106,30 @@ class AgentControlDeviceExecutionError extends Error {
     this.retryable = retryable;
   }
 }
+
+/** What the agent reads once its watch request ran: what is watched now and how it stands. */
+const pullRequestWatchNote = (
+  proposal: AgentControlProposal,
+  plan: Extract<AgentControlProposal["plan"], { kind: "pullRequestWatch" }>,
+  result: SourceControlSetPullRequestWatchResult,
+): string => {
+  const watch = result.watch;
+  // The chat Ryco wakes may be another one than the caller's (`threadId`).
+  const own =
+    proposal.principal.kind === "provider-session" && proposal.principal.threadId === plan.threadId;
+  const note =
+    watch === null
+      ? result.now
+      : plan.watching
+        ? `Watching #${watch.number} (${watch.url}). Now: ${result.now} ${
+            own
+              ? "Ryco wakes this chat on the next change, so end your turn when you are done."
+              : `Ryco wakes chat ${plan.threadId} on the next change.`
+          }`
+        : `${own ? "This chat" : `Chat ${plan.threadId}`} no longer gets #${watch.number}'s news; the user's Auto-fix CI keeps watching its checks. Now: ${result.now}`;
+  // A result message is never blank nor padded (the operation state would not encode).
+  return note.slice(0, 2_000).trim() || (plan.watching ? "Watching." : "Not watching.");
+};
 
 const boundedCauseMessage = (cause: Cause.Cause<unknown>, fallback: string): string => {
   const failure = Cause.squash(cause);
@@ -212,10 +242,7 @@ const executionReceipt = (operation: AgentControlOperation): AgentControlExecuti
     : { compensation: operation.state.compensation }),
 });
 
-const completedResult = (
-  operation: AgentControlOperation,
-  detail?: string,
-): AgentControlResultEnvelope => ({
+const completedResult = (operation: AgentControlOperation): AgentControlResultEnvelope => ({
   outcome: "completed",
   createdThreadIds:
     operation.actionKind === "createThreads" || operation.actionKind === "automationRun"
@@ -226,7 +253,8 @@ const completedResult = (
       ? (operation.state.resources.projectIds ?? [])
       : undefined,
   execution: executionReceipt(operation),
-  ...(detail ? { detail } : {}),
+  // What the agent reads about the outcome (a watch's answer), when the action recorded one.
+  ...(operation.state.note === undefined ? {} : { detail: operation.state.note }),
   completedAt: new Date().toISOString(),
 });
 
@@ -271,7 +299,28 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const workspaceAccess = yield* WorkspaceAccessPolicy;
     const deviceService = yield* Effect.serviceOption(DeviceService);
     const localTasks = yield* Effect.serviceOption(LocalTaskService);
+    // Required, not optional: provided beneath the runtime services (`server.ts`), so a layer
+    // placed where execution cannot see it fails to compile instead of failing every watch.
+    const pullRequestWatches = yield* PullRequestWatchService;
     const config = yield* ServerConfig;
+
+    /** Applies an agent's watch change: idempotent, so a replay finds it applied. */
+    const setPullRequestWatch = (
+      proposal: AgentControlProposal,
+      plan: Extract<AgentControlProposal["plan"], { kind: "pullRequestWatch" }>,
+    ) =>
+      pullRequestWatches
+        .setWatch({
+          threadId: plan.threadId,
+          number: plan.number,
+          url: plan.url,
+          news: plan.watching,
+          origin: "agent",
+        })
+        .pipe(
+          Effect.map((result) => pullRequestWatchNote(proposal, plan, result)),
+          Effect.mapError((error) => new Error(error.detail)),
+        );
     const startup = yield* ServerRuntimeStartup;
 
     const loadThread = (threadId: ThreadId) =>
@@ -886,6 +935,27 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             })
             .pipe(Effect.mapError((error) => new Error(error.message)));
           yield* checkpoint(appendStep(operation.state, "local-task-deleted"));
+          return operation;
+        }
+
+        if (proposal.plan.kind === "pullRequestWatch") {
+          const plan = proposal.plan;
+          // Idempotent: a step replayed after a restart answers with the watch as it is.
+          if (operation.state.completedSteps.includes("pull-request-watch-set")) return operation;
+          const note = yield* setPullRequestWatch(proposal, plan);
+          yield* checkpoint(
+            appendStep(
+              {
+                ...operation.state,
+                resources: {
+                  ...operation.state.resources,
+                  threadIds: unique([...operation.state.resources.threadIds, plan.threadId]),
+                },
+                note,
+              },
+              "pull-request-watch-set",
+            ),
+          );
           return operation;
         }
 
@@ -1595,7 +1665,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           yield* settleProposalFailure(executing, operation, {
             revalidation: true,
             message:
-              isProjectAction(executing) ||
+              explainsFailure(executing) ||
               executing.plan.kind === "changeSettings" ||
               executing.plan.kind === "deleteLocalTask" ||
               executing.plan.kind === "deviceControlConsent" ||
@@ -1632,10 +1702,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               : null;
           yield* settleProposalFailure(executing, compensated, {
             revalidation: false,
-            message: isProjectAction(executing)
+            message: explainsFailure(executing)
               ? boundedCauseMessage(
                   outcome.cause,
-                  "The approved project action failed during execution.",
+                  isProjectAction(executing)
+                    ? "The approved project action failed during execution."
+                    : "The approved Agent Control action failed during execution.",
                 )
               : "The approved Agent Control action failed during execution.",
             retryable:
@@ -1681,6 +1753,33 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         ),
       );
 
+    /** Completes a running operation whose outcome recovery established, and settles it. */
+    const completeRecovered = (
+      proposal: AgentControlProposal,
+      operation: AgentControlOperation,
+      state: AgentControlOperationState,
+    ) =>
+      operations
+        .transition({
+          operationId: operation.operationId,
+          expectedStatus: "running",
+          nextStatus: "completed",
+          actor: "executor",
+          attempt: operation.attempt,
+          state,
+          result: completedResult({ ...operation, state }),
+          updatedAt: new Date().toISOString(),
+        })
+        .pipe(
+          Effect.flatMap((completed) =>
+            proposals.settleExecution({
+              proposalId: proposal.proposalId,
+              result: completedResult(completed),
+              now: new Date().toISOString(),
+            }),
+          ),
+        );
+
     const recoverIncomplete: AgentControlExecutionShape["recoverIncomplete"] = Effect.gen(
       function* () {
         const recoverable = yield* operations.listRecoverable();
@@ -1708,22 +1807,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                   ]),
                 },
               };
-              const result = completedResult({ ...operation, state });
-              const completed = yield* operations.transition({
-                operationId: operation.operationId,
-                expectedStatus: "running",
-                nextStatus: "completed",
-                actor: "executor",
-                attempt: operation.attempt,
-                state,
-                result,
-                updatedAt: new Date().toISOString(),
-              });
-              yield* proposals.settleExecution({
-                proposalId: proposal.proposalId,
-                result: completedResult(completed),
-                now: new Date().toISOString(),
-              });
+              yield* completeRecovered(proposal, operation, state);
               continue;
             }
           }
@@ -1742,23 +1826,41 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 ...operation.state,
                 completedSteps: unique([...operation.state.completedSteps, "local-task-deleted"]),
               };
-              const completed = yield* operations.transition({
-                operationId: operation.operationId,
-                expectedStatus: "running",
-                nextStatus: "completed",
-                actor: "executor",
-                attempt: operation.attempt,
-                state,
-                result: completedResult({ ...operation, state }),
-                updatedAt: new Date().toISOString(),
-              });
-              yield* proposals.settleExecution({
-                proposalId: proposal.proposalId,
-                result: completedResult(completed),
-                now: new Date().toISOString(),
-              });
+              yield* completeRecovered(proposal, operation, state);
               continue;
             }
+          }
+          // A watch change a restart cut off is applied again: the same change answers with the
+          // watch as it is, so the receipt tells the agent what really happened. One recorded
+          // before the restart only lost its completion: its answer stands, with no host read.
+          if (operation.status === "running" && proposal.plan.kind === "pullRequestWatch") {
+            if (operation.state.completedSteps.includes("pull-request-watch-set")) {
+              yield* completeRecovered(proposal, operation, operation.state);
+              continue;
+            }
+            const plan = proposal.plan;
+            const replayed = yield* Effect.exit(
+              validator
+                .revalidateExecution(proposal)
+                .pipe(Effect.andThen(setPullRequestWatch(proposal, plan))),
+            );
+            if (replayed._tag === "Success") {
+              yield* completeRecovered(
+                proposal,
+                operation,
+                appendStep({ ...operation.state, note: replayed.value }, "pull-request-watch-set"),
+              );
+            } else {
+              yield* settleProposalFailure(proposal, operation, {
+                revalidation: false,
+                message: boundedCauseMessage(
+                  replayed.cause,
+                  "The pull request watch change was interrupted by a restart.",
+                ),
+                retryable: true,
+              });
+            }
+            continue;
           }
           if (proposal.plan.kind === "workspaceLifecycle") {
             yield* settleProposalFailure(proposal, operation, {

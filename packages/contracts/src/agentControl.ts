@@ -229,6 +229,8 @@ export const AGENT_CONTROL_CAPABILITIES = {
   readLocalTasks: AgentControlCapability.make("local-tasks.read"),
   /** Create, edit, complete, delete (with approval) Tasks and start their chats. */
   manageLocalTasks: AgentControlCapability.make("local-tasks.manage"),
+  /** Start or stop the server's pull request watch that wakes a chat with news. */
+  watchPullRequests: AgentControlCapability.make("pull-requests.watch"),
   externalListProjects: AgentControlCapability.make("external.projects.list"),
   externalCreateTask: AgentControlCapability.make("external.tasks.create"),
   externalReadTask: AgentControlCapability.make("external.tasks.read"),
@@ -276,6 +278,7 @@ export const AgentControlActionKind = Schema.Literals([
   "deviceShutdown",
   "deviceControlConsent",
   "deleteLocalTask",
+  "pullRequestWatch",
 ]);
 export type AgentControlActionKind = typeof AgentControlActionKind.Type;
 
@@ -327,6 +330,7 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   deviceShutdown: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceControlConsent: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deleteLocalTask: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+  pullRequestWatch: AGENT_CONTROL_CAPABILITIES.watchPullRequests,
 };
 
 export const AGENT_CONTROL_PLAN_VERSION = 1;
@@ -875,6 +879,27 @@ export const AgentControlDeleteLocalTaskPlan = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlDeleteLocalTaskPlan = typeof AgentControlDeleteLocalTaskPlan.Type;
 
+/** A pull request's web address, as a host shows it. */
+export const AgentControlPullRequestUrl = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(2_048),
+  Schema.isPattern(/^https?:\/\//i),
+);
+
+/**
+ * Start or stop waking a chat with its pull request's news (failed checks, passing required
+ * checks, other people's comments and reviews, a conflict). Without `number` and `url` it is the
+ * pull request of the chat's workspace; a named one may belong to any workspace of the chat's
+ * project. Auto-fix CI is the user's switch and never part of a plan.
+ */
+export const AgentControlPullRequestWatchPlan = Schema.Struct({
+  kind: Schema.Literal("pullRequestWatch"),
+  threadId: ThreadId,
+  number: Schema.optional(PositiveInt),
+  url: Schema.optional(AgentControlPullRequestUrl),
+  watching: Schema.Boolean,
+}).pipe(rejectExcessProperties);
+export type AgentControlPullRequestWatchPlan = typeof AgentControlPullRequestWatchPlan.Type;
+
 export const AgentControlActionPlan = Schema.Union([
   AgentControlCreateThreadsPlan,
   AgentControlSendMessagePlan,
@@ -892,6 +917,7 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlDeviceActionPlan,
   AgentControlDeviceControlConsentPlan,
   AgentControlDeleteLocalTaskPlan,
+  AgentControlPullRequestWatchPlan,
 ]);
 export type AgentControlActionPlan = typeof AgentControlActionPlan.Type;
 

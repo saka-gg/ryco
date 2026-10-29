@@ -46,6 +46,10 @@ import {
 import { assertSafeAgentControlDeviceUrl, isAgentControlDevicePlan } from "../deviceControl.ts";
 import { resolveThreadArtifacts } from "../artifactHandoff.ts";
 import { LocalTaskService, type LocalTaskServiceShape } from "../../tasks/LocalTaskService.ts";
+import {
+  CompletionReturnRepository,
+  isPendingCompletionReturn,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 
 const fail = (
   reason: ConstructorParameters<typeof AgentControlPlanValidationError>[0]["reason"],
@@ -109,6 +113,7 @@ const targetThreadIds = (plan: AgentControlActionPlan): ReadonlyArray<string> =>
     case "interruptThread":
     case "updateThread":
     case "deviceControlConsent":
+    case "pullRequestWatch":
       return [plan.threadId];
     default:
       return isAgentControlDevicePlan(plan) ? [plan.threadId] : [];
@@ -376,7 +381,8 @@ const validatePlanAgainstSnapshot = (input: {
     if (
       input.plan.kind !== "sendMessage" &&
       input.plan.kind !== "interruptThread" &&
-      input.plan.kind !== "updateThread"
+      input.plan.kind !== "updateThread" &&
+      input.plan.kind !== "pullRequestWatch"
     ) {
       return yield* fail("invalid-plan", "This action is not a thread control plan.");
     }
@@ -426,9 +432,15 @@ const validatePlanAgainstSnapshot = (input: {
       return;
     }
 
-    if (target.archivedAt !== null) {
+    // Stopping a watch is always allowed: the archive ended it already.
+    if (
+      target.archivedAt !== null &&
+      !(input.plan.kind === "pullRequestWatch" && !input.plan.watching)
+    ) {
       return yield* fail("thread-unavailable", "The target thread is archived.");
     }
+    // The pull request itself is resolved (and linked, or discovered) by the watch when it runs.
+    if (input.plan.kind === "pullRequestWatch") return;
 
     if (input.plan.kind === "interruptThread") {
       const activeTurnId = target.session?.activeTurnId ?? null;
@@ -462,6 +474,10 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   readonly automations?: AgentControlAutomationShape;
   readonly deviceService?: DeviceServiceShape;
   readonly localTasks?: Pick<LocalTaskServiceShape, "get">;
+  /** Whether a chat is a delegated one whose result its delegating chat still waits for. */
+  readonly delegatedReturnPending?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, AgentControlPlanValidationError>;
 }): AgentControlActionValidatorShape => {
   const validateAutomation = <A, E>(effect: Effect.Effect<A, E>) =>
     effect.pipe(
@@ -590,6 +606,32 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       ),
     );
 
+  /**
+   * A delegated chat whose result is still awaited never watches a pull request, and no chat
+   * makes it watch one: it reports the pull request in its result, and the delegating chat (the
+   * one Ryco then wakes) decides whether to watch it. Read from the completion-return ledger.
+   */
+  const refuseAwaitedDelegation = (plan: AgentControlActionPlan, callerThreadId: ThreadId) =>
+    plan.kind !== "pullRequestWatch" || !plan.watching || deps.delegatedReturnPending === undefined
+      ? Effect.void
+      : Effect.forEach(
+          [...new Set([callerThreadId, plan.threadId])],
+          (threadId) =>
+            deps.delegatedReturnPending!(threadId).pipe(
+              Effect.flatMap((pending) =>
+                !pending
+                  ? Effect.void
+                  : fail(
+                      "delegated-return-pending",
+                      threadId === callerThreadId
+                        ? "This chat was delegated by another chat that waits for its result. Report the pull request in your result; the delegating chat decides whether to watch it."
+                        : "That chat was delegated by another chat that waits for its result: it reports its pull request, and the delegating chat watches it.",
+                    ),
+              ),
+            ),
+          { discard: true },
+        );
+
   const validateSubmission: AgentControlActionValidatorShape["validateSubmission"] = (input) =>
     Effect.gen(function* () {
       const { snapshot, providers } = yield* loadState([
@@ -694,6 +736,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         });
         yield* validateLocalTaskStarts(input.plan);
         yield* validateHandoffArtifacts(input.plan, caller.id);
+        yield* refuseAwaitedDelegation(input.plan, caller.id);
       }
 
       const targetSnapshots: Array<
@@ -740,6 +783,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail(
             "privilege-escalation",
             "External integrations cannot manage the node's Tasks.",
+          );
+        }
+        if (input.plan.kind === "pullRequestWatch") {
+          return yield* fail(
+            "privilege-escalation",
+            "External integrations cannot watch pull requests.",
           );
         }
         if (isAgentControlDevicePlan(input.plan) || input.plan.kind === "deviceControlConsent") {
@@ -962,6 +1011,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         }
         yield* validateLocalTaskStarts(proposal.plan);
         yield* validateHandoffArtifacts(proposal.plan, principal.threadId);
+        yield* refuseAwaitedDelegation(proposal.plan, principal.threadId);
+      } else if (proposal.plan.kind === "pullRequestWatch") {
+        return yield* fail(
+          "privilege-escalation",
+          "Only an originating provider thread can watch pull requests.",
+        );
       } else if (startsLocalTaskChats(proposal.plan) || proposal.plan.kind === "deleteLocalTask") {
         return yield* fail(
           "privilege-escalation",
@@ -1212,6 +1267,7 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
+  const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
   return makeAgentControlActionValidatorFromDeps({
     projections,
     getProviders: providerRegistry.getProviders,
@@ -1221,6 +1277,22 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
     ...(Option.isSome(deviceService) ? { deviceService: deviceService.value } : {}),
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),
     ...(Option.isSome(localTasks) ? { localTasks: localTasks.value } : {}),
+    ...(Option.isSome(completionReturns)
+      ? {
+          delegatedReturnPending: (threadId: ThreadId) =>
+            completionReturns.value.get(threadId).pipe(
+              Effect.map((record) => record !== undefined && isPendingCompletionReturn(record)),
+              // Fails closed: a watch never starts on a chat that may owe its result.
+              Effect.mapError(
+                () =>
+                  new AgentControlPlanValidationError({
+                    reason: "thread-unavailable",
+                    detail: "Could not check whether the chat was delegated. Try again.",
+                  }),
+              ),
+            ),
+        }
+      : {}),
     ...(Option.isSome(externalIntegrations)
       ? { revalidateExternal: externalIntegrations.value.revalidate }
       : {}),

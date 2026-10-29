@@ -487,3 +487,34 @@ it("says which created thread starts a task's chat", () => {
   );
   expect(model.detailSections[0]?.lines.join("\n")).toContain("chat of task task-1");
 });
+
+it("names the pull request an agent watches, and the chat it wakes", () => {
+  const watch = buildAgentControlProposalCardModel(
+    makeProposal({
+      status: "completed",
+      plan: {
+        kind: "pullRequestWatch",
+        threadId: ThreadId.make("thread-target-5678"),
+        number: 34,
+        watching: true,
+      },
+      promptSummary: "Watch pull request #34 for thread thread-target-5678",
+    }),
+    (threadId) => (threadId === "thread-target-5678" ? "Fix the login loop" : undefined),
+  );
+  expect(watch.actionLabel).toBe("Watch pull request");
+  expect(watch.targetLabel).toBe("Fix the login loop");
+  expect(watch.isDestructive).toBe(false);
+  expect(watch.detailSections[0]?.lines).toContain("Pull request: #34");
+  const stop = buildAgentControlProposalCardModel(
+    makeProposal({
+      plan: {
+        kind: "pullRequestWatch",
+        threadId: ThreadId.make("thread-target-5678"),
+        watching: false,
+      },
+    }),
+  );
+  expect(stop.actionLabel).toBe("Stop watching pull request");
+  expect(stop.detailSections[0]?.lines).toContain("Pull request: the chat's own");
+});
