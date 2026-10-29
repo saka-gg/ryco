@@ -64,6 +64,7 @@ import { AnimatedHeight } from "../AnimatedHeight";
 import { HubSection } from "./HubSection";
 import { DesktopConversationCacheRow } from "./DesktopConversationCacheRow";
 import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
+import { PAIRING_LINK_TARGET_ID } from "./settingsSearchReveal";
 import { savedChangeRelaunch, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import {
   savedBackendConnectionActionLabel,
@@ -2610,6 +2611,7 @@ export function ConnectionsSettings() {
   );
   const renderNetworkAccessRow = () => (
     <SettingsRow
+      id={PAIRING_LINK_TARGET_ID}
       title="Network access"
       description={
         isLocalBackendNetworkAccessible ? (
@@ -2658,6 +2660,7 @@ export function ConnectionsSettings() {
   );
   const renderDisabledNetworkAccessRow = () => (
     <SettingsRow
+      id={PAIRING_LINK_TARGET_ID}
       title="Network access"
       description={
         currentAuthPolicy === "remote-reachable"
