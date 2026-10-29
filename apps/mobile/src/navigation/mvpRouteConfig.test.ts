@@ -162,6 +162,7 @@ describe("MVP route config", () => {
         "SettingsClientStorage",
         "SettingsHub",
         "SettingsInbox",
+        "SettingsProviderAccounts",
         "SettingsStatistics",
         "SettingsNodeSecurity",
         "SettingsNodeVerification",
@@ -172,6 +173,7 @@ describe("MVP route config", () => {
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsWorkspace.linking).toBe("workspace");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking).toBe("inbox");
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsAppearance.linking).toBe("appearance");
+    expect(MVP_SETTINGS_SHEET_ROUTES.SettingsProviderAccounts.linking).toBe("provider-accounts");
     // The hosted Hub account is the ONLY route the hosted plane adds, and it is
     // nested: the root route set above is unchanged by hosted mode.
     expect(MVP_SETTINGS_SHEET_ROUTES.SettingsAccount.linking).toBe("account");

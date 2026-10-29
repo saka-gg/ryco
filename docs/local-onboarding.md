@@ -37,7 +37,8 @@ phone surface remain separate. No tour is offered on those surfaces or for a rem
 bun run --cwd apps/web test src/components/onboarding src/components/settings/settingsRestore.test.ts
 bun run --cwd apps/web test:browser src/components/onboarding/OnboardingCoordinator.browser.tsx src/components/settings/ProviderSignInSection.browser.tsx
 bun run --cwd apps/desktop test src/clientPersistence.test.ts
+bun run --cwd packages/shared test src/providerSignIn.test.ts
 ```
 
-`src/components/onboarding` includes `onboardingSignIn.logic.test.ts`, which decides which
-providers setup offers **Sign in** for.
+`packages/shared/src/providerSignIn.test.ts` covers `canOfferProviderSignIn`, which decides which
+providers setup (and the mobile app's Provider accounts screen) offers **Sign in** for.

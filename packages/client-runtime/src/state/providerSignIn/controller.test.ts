@@ -545,6 +545,22 @@ describe("terminal input", () => {
     expect(fake.respondCalls.every((call) => call.flowId === "flow-1")).toBe(true);
   });
 
+  it("sends a line's text and its Return as two inputs", async () => {
+    const controller = createProviderSignInController(INSTANCE);
+    const fake = fakeApi();
+    controller.attach(fake.api);
+    fake.emitState(terminalWaiting());
+
+    controller.sendLine("CODE-123");
+    controller.sendLine("");
+    for (let i = 0; i < 4; i += 1) await settle();
+
+    const sent = fake.respondCalls.map((call) =>
+      call.action.type === "input" ? call.action.data : call.action.type,
+    );
+    expect(sent).toEqual(["CODE-123", "\r", "\r"]);
+  });
+
   it("never splits a surrogate pair across chunks", async () => {
     const controller = createProviderSignInController(INSTANCE);
     const fake = fakeApi();

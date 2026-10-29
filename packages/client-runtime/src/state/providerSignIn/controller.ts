@@ -390,7 +390,7 @@ export function createProviderSignInController(instanceId: ProviderInstanceId) {
     });
   };
 
-  return {
+  const controller = {
     instanceId,
     getSnapshot: (): ProviderSignInSnapshot => snapshot,
     subscribe(listener: () => void): () => void {
@@ -506,6 +506,14 @@ export function createProviderSignInController(instanceId: ProviderInstanceId) {
       for (const chunk of chunkInput(data)) inputQueue.push({ flowId, data: chunk });
       void pumpInput();
     },
+    /**
+     * Answers a terminal prompt with one line: the text, then Return as its own input, so a
+     * prompt that reads a multi-character chunk as a paste still submits.
+     */
+    sendLine(text: string): void {
+      controller.sendInput(text);
+      controller.sendInput("\r");
+    },
     /** Sizes a terminal flow once the size settles; the last size wins. */
     resize(cols: number, rows: number): void {
       if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
@@ -517,6 +525,7 @@ export function createProviderSignInController(instanceId: ProviderInstanceId) {
       resizeTimer = setTimeout(flushResize, PROVIDER_SIGN_IN_RESIZE_DEBOUNCE_MS);
     },
   };
+  return controller;
 }
 
 export type ProviderSignInController = ReturnType<typeof createProviderSignInController>;
