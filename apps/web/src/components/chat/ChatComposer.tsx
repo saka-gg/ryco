@@ -1024,8 +1024,17 @@ export const ChatComposer = memo(
         environmentId,
         instanceId: selectedInstanceId,
         cwd: gitCwd,
+        // A new session may have just advertised the agent's own commands for this directory.
+        runtimeSessionId: activeRuntimeSessionId,
       });
-    }, [wantsProjectCommands, gitCwd, selectedInstanceId, environmentId, projectCommandsSupported]);
+    }, [
+      wantsProjectCommands,
+      gitCwd,
+      selectedInstanceId,
+      environmentId,
+      projectCommandsSupported,
+      activeRuntimeSessionId,
+    ]);
     const [composerHighlightedItemId, setComposerHighlightedItemId] = useState<string | null>(null);
     // The ArrowUp recall the composer shows, and whose composer it was made in. Any edit ends it.
     const promptRecallRef = useRef<{

@@ -32,6 +32,7 @@ import {
   drainRuntimeEvents,
   makeRetentionProbe,
 } from "../testUtils/adapterRetention.ts";
+import { waitForLiveProjectCommands } from "../testUtils/liveProjectCommands.ts";
 import { makeAcpAdapter } from "./AcpAdapter.ts";
 import { makeGrokAdapter } from "./GrokAdapter.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
@@ -557,6 +558,91 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
 
       yield* Fiber.interrupt(eventsFiber);
       yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("serves the commands Grok advertises per directory, after its session too", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-live-commands");
+      const cwd = process.cwd();
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({
+          RYCO_ACP_AVAILABLE_COMMANDS: JSON.stringify([
+            { name: "review", description: " Review ", input: { hint: "<pr>" } },
+            { name: "always-approve", description: "x" },
+            { name: " ", description: "y" },
+          ]),
+          RYCO_ACP_AVAILABLE_COMMANDS_AFTER_PROMPT: JSON.stringify([
+            { name: "/plan", description: "Plan the work" },
+            { name: "context", description: "Hidden" },
+          ]),
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      assert.isUndefined(yield* adapter.readLiveProjectCommands(cwd));
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-live-commands"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd,
+        runtimeMode: "full-access",
+      });
+      assert.deepStrictEqual(yield* waitForLiveProjectCommands(adapter, cwd), {
+        skills: [],
+        slashCommands: [{ name: "review", description: "Review", input: { hint: "<pr>" } }],
+      });
+      assert.isUndefined(yield* adapter.readLiveProjectCommands(path.join(cwd, "another-project")));
+
+      yield* adapter.sendTurn({ threadId, input: "hello grok", attachments: [] });
+      const afterPrompt = {
+        skills: [],
+        slashCommands: [{ name: "plan", description: "Plan the work" }],
+      };
+      assert.deepStrictEqual(
+        yield* waitForLiveProjectCommands(
+          adapter,
+          cwd,
+          (commands) => commands?.slashCommands[0]?.name === "plan",
+        ),
+        afterPrompt,
+      );
+
+      yield* adapter.stopSession(threadId);
+      assert.deepStrictEqual(yield* adapter.readLiveProjectCommands(cwd), afterPrompt);
+    }),
+  );
+
+  it.effect("refuses /always-approve before the turn reaches Grok", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-refused-command");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "grok-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ RYCO_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-refused-command"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+      for (const input of ["/always-approve", "  /Always-Approve on"]) {
+        const error = yield* Effect.flip(adapter.sendTurn({ threadId, input, attachments: [] }));
+        assert.equal(error._tag, "ProviderAdapterRequestError");
+        if (error._tag === "ProviderAdapterRequestError") {
+          assert.include(error.detail, "access selector");
+        }
+      }
+      assert.isTrue(yield* adapter.hasSession(threadId));
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.isTrue(requests.some((entry) => entry.method === "session/new"));
+      assert.isFalse(requests.some((entry) => entry.method === "session/prompt"));
     }),
   );
 

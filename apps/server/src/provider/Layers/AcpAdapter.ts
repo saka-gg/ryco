@@ -62,6 +62,11 @@ import {
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
 import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
+import {
+  acpAvailableCommandsToSlashCommands,
+  makeRecentProjectCommands,
+  parseSlashCommandInput,
+} from "../providerSlashCommands.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import {
   applyAcpModelSelection,
@@ -103,6 +108,10 @@ export interface AcpAdapterLiveOptions {
   readonly onCommands?: (
     commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
   ) => Effect.Effect<void>;
+  /** Lower-case command names the composer menu must not offer. */
+  readonly hiddenCommands?: ReadonlySet<string>;
+  /** Lower-case command name -> why Ryco refuses to send it; the turn fails before it starts. */
+  readonly refusedCommands?: ReadonlyMap<string, string>;
   readonly onUsage?: () => Effect.Effect<void>;
   readonly onStarted?: (
     result: import("../acp/AcpSessionRuntime.ts").AcpSessionRuntimeStartResult,
@@ -219,6 +228,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
     const sessions = new Map<ThreadId, AcpSessionContext>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(2_048);
+    // The agent's own commands per directory (`readLiveProjectCommands`): ACP lists them only
+    // inside a session, so a stopped session's list keeps serving its directory.
+    const recentCommands = makeRecentProjectCommands();
+    const commandOptions = { hidden: options.hiddenCommands };
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const randomUUIDv4 = Effect.sync(() => crypto.randomUUID());
@@ -668,6 +681,13 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
               Effect.gen(function* () {
                 switch (event._tag) {
                   case "CommandsUpdated":
+                    // A late update after a close is dropped. Only the mapped copy is kept,
+                    // never the raw payload.
+                    if (ctx.stopped) return;
+                    recentCommands.record(
+                      cwd,
+                      acpAvailableCommandsToSlashCommands(event.commands, commandOptions),
+                    );
                     if (options.onCommands) yield* options.onCommands(event.commands);
                     return;
                   case "AssistantItemStarted":
@@ -809,6 +829,18 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
+            const command = parseSlashCommandInput(input.input);
+            const refusal =
+              command === undefined
+                ? undefined
+                : options.refusedCommands?.get(command.name.toLowerCase());
+            if (refusal !== undefined) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: refusal,
+              });
+            }
             const turnId = TurnId.make(yield* randomUUIDv4);
             const turnModelSelection =
               input.modelSelection?.instanceId === boundInstanceId
@@ -1122,6 +1154,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
       listSessions,
       hasSession,
       stopAll,
+      readLiveProjectCommands: (cwd) => Effect.sync(() => recentCommands.read(path.resolve(cwd))),
       streamEvents,
     } satisfies AcpAdapterShape;
   });

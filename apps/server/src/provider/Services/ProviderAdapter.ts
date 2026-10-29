@@ -218,8 +218,10 @@ export interface ProviderAdapterShape<TError> {
   readonly readProjectCommands?: (cwd: string) => Effect.Effect<ProviderProjectCommands, TError>;
   /**
    * The full command list a running session in `cwd` last pushed (Claude's
-   * `commands_changed`), or undefined when none did. While present it supersedes the cached
-   * `readProjectCommands` read: it is the live CLI's own list, fresher than any probe.
+   * `commands_changed`, ACP's `available_commands_update`), or undefined when none did. While
+   * present it supersedes the cached `readProjectCommands` read: it is the live CLI's own list,
+   * fresher than any probe. ACP adapters (Cursor, Grok, ACP Registry) keep serving the newest
+   * list per directory after its session ends, because ACP lists commands only inside a session.
    */
   readonly readLiveProjectCommands?: (
     cwd: string,

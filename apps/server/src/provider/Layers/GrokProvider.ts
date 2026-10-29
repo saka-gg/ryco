@@ -4,14 +4,16 @@ import {
   ProviderDriverKind,
   type ServerProvider,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@ryco/contracts";
-import type * as EffectAcpSchema from "effect-acp/schema";
+import * as EffectAcpSchema from "effect-acp/schema";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { createModelCapabilities } from "@ryco/shared/model";
@@ -28,7 +30,12 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
+import {
+  GROK_HIDDEN_SLASH_COMMANDS,
+  makeGrokAcpRuntime,
+  resolveGrokAcpBaseModelId,
+} from "../acp/GrokAcpSupport.ts";
+import { acpAvailableCommandsToSlashCommands } from "../providerSlashCommands.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 
 const GROK_PRESENTATION = {
@@ -124,6 +131,25 @@ function buildGrokDiscoveredModelsFromSessionModelState(
     .filter((model): model is ServerProviderModel => model !== undefined);
 }
 
+const decodeAvailableCommand = Schema.decodeUnknownOption(EffectAcpSchema.AvailableCommand);
+
+/**
+ * The built-in commands Grok lists in its `initialize` response (`_meta.availableCommands`),
+ * without the hidden ones; entries that are not ACP commands are dropped. A directory's own
+ * commands come from its sessions (`readLiveProjectCommands`), never from this probe, which
+ * runs in the server's directory.
+ */
+export function grokSlashCommandsFromInitialize(
+  initializeResult: Pick<EffectAcpSchema.InitializeResponse, "_meta">,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const listed = initializeResult._meta?.["availableCommands"];
+  if (!Array.isArray(listed)) return [];
+  return acpAvailableCommandsToSlashCommands(
+    listed.flatMap((entry) => Option.toArray(decodeAvailableCommand(entry))),
+    { hidden: GROK_HIDDEN_SLASH_COMMANDS },
+  );
+}
+
 const discoverGrokModelsViaAcp = (
   grokSettings: GrokSettings,
   environment: NodeJS.ProcessEnv = process.env,
@@ -138,7 +164,10 @@ const discoverGrokModelsViaAcp = (
       clientInfo: { name: "ryco-provider-probe", version: "0.0.0" },
     });
     const started = yield* acp.start();
-    return buildGrokDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models);
+    return {
+      models: buildGrokDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models),
+      slashCommands: grokSlashCommandsFromInitialize(started.initializeResult),
+    };
   }).pipe(Effect.scoped);
 
 const runGrokVersionCommand = (
@@ -284,7 +313,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       },
     });
   }
-  const discoveredModels = discoveryExit.value.value;
+  const { models: discoveredModels, slashCommands } = discoveryExit.value.value;
   const models =
     discoveredModels.length > 0
       ? grokModelsFromSettings(grokSettings.customModels, discoveredModels)
@@ -295,6 +324,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     enabled: grokSettings.enabled,
     checkedAt,
     models,
+    slashCommands,
     probe: {
       installed: true,
       version,
