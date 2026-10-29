@@ -32,6 +32,7 @@ import { WorkItemProviderKind, WorkItemState } from "./workItems.ts";
 import { ThreadGoal, ThreadGoalEventOrigin, ThreadGoalUpdate } from "./threadGoal.ts";
 import { ThreadForkedActivityPayload } from "./threadFork.ts";
 import { SidebarAutoSettleAfterDays } from "./threadAutoSettlement.ts";
+import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./runtimeMode.ts";
 import {
   IssueState,
   PullRequestState,
@@ -548,14 +549,7 @@ export const ContextHandoffReference = Schema.Struct({
 });
 export type ContextHandoffReference = typeof ContextHandoffReference.Type;
 
-export const RuntimeMode = Schema.Literals([
-  "approval-required",
-  "auto-accept-edits",
-  "auto",
-  "full-access",
-]);
-export type RuntimeMode = typeof RuntimeMode.Type;
-export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+export { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./runtimeMode.ts";
 export const ProviderInteractionMode = Schema.Literals(["default", "plan", "ask"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";
