@@ -1,12 +1,4 @@
 import type { ProjectScript, ProjectScriptIcon, ResolvedKeybindingsConfig } from "@ryco/contracts";
-import {
-  BugIcon,
-  FlaskConicalIcon,
-  HammerIcon,
-  ListChecksIcon,
-  PlayIcon,
-  WrenchIcon,
-} from "lucide-react";
 import React, {
   type FormEvent,
   type KeyboardEvent,
@@ -44,6 +36,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { ScriptIcon } from "./ScriptIcon";
 import type { SurfaceMorph } from "./ui/surfaceMorph";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
@@ -70,21 +63,6 @@ export const ACTION_DIALOG_SURFACE_CLASS_NAME =
 
 /** How long a picked icon stays visible in the open row before it folds away. */
 const ICON_ROW_SETTLE_MS = 320;
-
-export function ScriptIcon({
-  icon,
-  className = "size-3.5",
-}: {
-  icon: ProjectScriptIcon;
-  className?: string;
-}) {
-  if (icon === "test") return <FlaskConicalIcon className={className} />;
-  if (icon === "lint") return <ListChecksIcon className={className} />;
-  if (icon === "configure") return <WrenchIcon className={className} />;
-  if (icon === "build") return <HammerIcon className={className} />;
-  if (icon === "debug") return <BugIcon className={className} />;
-  return <PlayIcon className={className} />;
-}
 
 export interface NewProjectScriptInput {
   name: string;

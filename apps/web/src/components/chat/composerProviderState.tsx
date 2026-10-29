@@ -15,7 +15,7 @@ import type { ReactNode } from "react";
 
 import type { DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
-import { ComposerModelTuning } from "./ModelTuningDial";
+import { LazyComposerModelTuning } from "./ProviderModelPicker";
 import {
   resolveModelTuning,
   summarizeModelTuning,
@@ -178,14 +178,17 @@ export function renderProviderTraitsChips(input: TraitsRenderInput): ReactNode {
   );
 }
 
-/** The model picker's tuning dial for the composer's active model, or null. */
+/**
+ * The model picker's tuning dial for the composer's active model, or null.
+ * The dial's code loads with the picker body, the only place it renders.
+ */
 export function renderProviderModelTuning(input: TraitsRenderInput): ReactNode {
   const { provider, instanceId, threadRef, draftId, model, models, modelOptions } = input;
   if (threadRef === undefined && draftId === undefined) return null;
   const caps = getProviderModelCapabilities(models, model, provider);
   if (!resolveModelTuning({ caps, selections: modelOptions, prompt: input.prompt })) return null;
   return (
-    <ComposerModelTuning
+    <LazyComposerModelTuning
       provider={provider}
       {...(instanceId ? { instanceId } : {})}
       models={models}

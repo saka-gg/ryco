@@ -4,6 +4,7 @@ import {
   type ProjectId,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
+  type ScopedThreadRef,
 } from "@ryco/contracts";
 import { memo, useMemo } from "react";
 import { ListChecksIcon, PanelRightIcon } from "lucide-react";
@@ -24,6 +25,8 @@ import { preloadWorkspacePanelForIntent } from "../../workspacePanelPreload";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
+  /** Binds the action dialog's load-failure toast (and its Retry) to this thread. */
+  activeThreadRef?: ScopedThreadRef | null;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
   /**
@@ -179,6 +182,7 @@ export const ChatHeader = memo(function ChatHeader({
           onAddScript={props.onAddProjectScript}
           onUpdateScript={props.onUpdateProjectScript}
           onDeleteScript={props.onDeleteProjectScript}
+          threadRef={props.activeThreadRef ?? null}
         />
       ) : null}
       {showOpenInPicker ? (
