@@ -27,12 +27,14 @@ import "../index.css";
 
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import type { ReactNode } from "react";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 import { resetPointerEmulation, setCoarsePointerEmulation } from "../../test/browserPointer";
 import { measureEffectiveHitTarget } from "../../test/touchTargets";
+import { resetAppKeybindings } from "../appKeybindings";
+import { isMacPlatform } from "../lib/utils";
 import { syncDocumentPresentationTier } from "../lib/presentationTier";
 import {
   setAppearancePreference,
@@ -45,6 +47,8 @@ import DiffPanel from "./DiffPanel";
 vi.mock("../composerDraftStore", () => import("@ryco/client-runtime/state/composer"));
 
 const openInPreferredEditor = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+/** The route's search params; `diff: "1"` is an open panel. */
+const routeSearch = vi.hoisted(() => ({ current: { diff: "1" } as Record<string, string> }));
 
 /**
  * A line far wider than any phone viewport. The unwrapped presentation is the
@@ -84,12 +88,16 @@ vi.mock("@pierre/diffs/react", () => ({
     fileDiff: typeof diffFile;
     renderHeaderPrefix?: () => ReactNode;
     options: {
+      collapsed?: boolean;
       overflow?: string;
       diffStyle?: string;
       onLineNumberClick?: (input: { lineNumber: number; lineType: string }) => void;
     };
   }) => (
-    <div data-test-diff-style={props.options.diffStyle}>
+    <div
+      data-test-diff-style={props.options.diffStyle}
+      data-test-collapsed={String(props.options.collapsed ?? false)}
+    >
       <div data-title="">
         {props.renderHeaderPrefix?.()}
         {props.fileDiff.name}
@@ -146,7 +154,7 @@ vi.mock("@tanstack/react-router", () => ({
     return options?.select ? options.select(params) : params;
   }),
   useSearch: vi.fn((options?: { select?: (search: Record<string, string>) => unknown }) => {
-    const search = { diff: "1" };
+    const search = routeSearch.current;
     return options?.select ? options.select(search) : search;
   }),
 }));
@@ -292,6 +300,27 @@ function turnStrip(): HTMLElement {
   return element;
 }
 
+function searchField(): HTMLInputElement {
+  const element = document.querySelector<HTMLInputElement>('[aria-label="Search diff"]');
+  if (!element) throw new Error("Expected the diff search field to be rendered.");
+  return element;
+}
+
+/** The default thread-find key (⌘F, Ctrl+F off macOS) on the focused element; returns the event. */
+function pressFindKey(target: Element | null = document.activeElement): KeyboardEvent {
+  const mac = isMacPlatform(navigator.platform);
+  const event = new KeyboardEvent("keydown", {
+    key: "f",
+    code: "KeyF",
+    metaKey: mac,
+    ctrlKey: !mac,
+    bubbles: true,
+    cancelable: true,
+  });
+  (target ?? document.body).dispatchEvent(event);
+  return event;
+}
+
 describe("DiffPanel", () => {
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
@@ -304,9 +333,11 @@ describe("DiffPanel", () => {
     syncDocumentPresentationTier();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     localStorage.removeItem(APPEARANCE_PREFERENCES_STORAGE_KEY);
     openInPreferredEditor.mockClear();
+    // The default bindings (mod+f is thread.find), hydrated so shortcuts resolve.
+    await resetAppKeybindings();
   });
 
   afterEach(async () => {
@@ -315,6 +346,7 @@ describe("DiffPanel", () => {
       await teardown?.call(mounted).catch(() => {});
     }
     mounted = null;
+    routeSearch.current = { diff: "1" };
     localStorage.removeItem(APPEARANCE_PREFERENCES_STORAGE_KEY);
     document.body.innerHTML = "";
     document.documentElement.style.fontSize = "";
@@ -584,5 +616,212 @@ describe("DiffPanel", () => {
     expect(wrapToggle.getBoundingClientRect().height).toBeLessThan(TOUCH_FLOOR_PX);
     const chip = turnChips()[0]!;
     expect(chip.getBoundingClientRect().height).toBeLessThan(TOUCH_FLOOR_PX);
+  });
+
+  it("focuses the diff search with the find key while focus is in the diff", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    await userEvent.click(page.getByText("beta line"));
+    // The click lands on the diff's scroller, so keyboard scrolling keeps working there.
+    expect(document.activeElement).toBe(diffScrollSurface());
+
+    const event = pressFindKey();
+    expect(event.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(document.activeElement).toBe(searchField()));
+  });
+
+  it("opens a folded file when a match in it is revealed", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    await page.getByRole("button", { name: "Collapse src/app.ts" }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Expand src/app.ts" }))
+      .toBeInTheDocument();
+    expect(
+      document.querySelector("[data-test-collapsed]")?.getAttribute("data-test-collapsed"),
+    ).toBe("true");
+
+    await page.getByLabelText("Search diff").fill("beta");
+    await expect.element(page.getByText("1 of 1")).toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("[data-test-collapsed]")?.getAttribute("data-test-collapsed"),
+      ).toBe("false"),
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Collapse src/app.ts" }))
+      .toBeInTheDocument();
+  });
+
+  it("selects the query when the find key is pressed again in the field", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    await page.getByLabelText("Search diff").fill("alpha");
+    const field = searchField();
+    field.setSelectionRange(5, 5);
+
+    expect(pressFindKey(field).defaultPrevented).toBe(true);
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(field);
+      expect([field.selectionStart, field.selectionEnd]).toEqual([0, 5]);
+    });
+    expect(field.value).toBe("alpha");
+  });
+
+  it("seeds the search from a one-line selection", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    const lineText = page.getByText("beta line").element().firstChild;
+    if (!(lineText instanceof Text)) throw new Error("Expected the mocked line text.");
+    diffScrollSurface().focus();
+    const range = document.createRange();
+    range.setStart(lineText, 0);
+    range.setEnd(lineText, 4);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(range);
+
+    pressFindKey();
+    await vi.waitFor(() => expect(searchField().value).toBe("beta"));
+    await vi.waitFor(() => expect(document.activeElement).toBe(searchField()));
+    await expect.element(page.getByText("1 of 1")).toBeInTheDocument();
+
+    // A selection spanning lines does not seed the field.
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(document.activeElement).toBe(diffScrollSurface()));
+    range.selectNodeContents(diffScrollSurface());
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(range);
+    expect(document.getSelection()?.toString()).toContain("\n");
+    pressFindKey();
+    await vi.waitFor(() => expect(document.activeElement).toBe(searchField()));
+    expect(searchField().value).toBe("");
+  });
+
+  it("does not seed the search from text selected outside the diff", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    // Text selected elsewhere on the page, such as the chat beside the panel.
+    const outside = document.createElement("p");
+    outside.textContent = "chat words";
+    document.body.append(outside);
+    diffScrollSurface().focus();
+    const range = document.createRange();
+    range.selectNodeContents(outside);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(range);
+
+    expect(pressFindKey().defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(document.activeElement).toBe(searchField()));
+    expect(searchField().value).toBe("");
+  });
+
+  it("keeps the search options while open and turns them off when the panel opens again", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    const toggle = page.getByRole("button", { name: "Use regular expression" });
+    await toggle.click();
+    await expect.element(toggle).toHaveAttribute("aria-pressed", "true");
+
+    routeSearch.current = {};
+    await mounted.rerender(<DiffPanel mode="sheet" />);
+    routeSearch.current = { diff: "1" };
+    await mounted.rerender(<DiffPanel mode="sheet" />);
+
+    await expect
+      .element(page.getByRole("button", { name: "Use regular expression" }))
+      .toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("escapes a seeded selection while the pattern option is on", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    await page.getByRole("button", { name: "Use regular expression" }).click();
+    // The file title's text, "src/app.ts", has pattern characters.
+    const titleText = document.querySelector("[data-title]")?.lastChild;
+    if (!(titleText instanceof Text)) throw new Error("Expected the mocked title text.");
+    diffScrollSurface().focus();
+    const range = document.createRange();
+    range.selectNodeContents(titleText);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(range);
+
+    pressFindKey();
+    await vi.waitFor(() => expect(searchField().value).toBe(String.raw`src\/app\.ts`));
+    // The escaped pattern finds the literal path.
+    await expect.element(page.getByText("1 of 1")).toBeInTheDocument();
+  });
+
+  it("clears the search with Escape and keeps focus in the diff", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    await page.getByLabelText("Search diff").fill("alpha");
+    await expect.element(page.getByText("1 of 2")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+
+    await vi.waitFor(() => expect(searchField().value).toBe(""));
+    await vi.waitFor(() => expect(document.activeElement).toBe(diffScrollSurface()));
+    // The find key still lands in the diff afterwards.
+    expect(pressFindKey().defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(document.activeElement).toBe(searchField()));
+  });
+
+  it("shows an invalid pattern and keeps every file", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    const toggle = page.getByRole("button", { name: "Use regular expression" });
+    await toggle.click();
+    await expect.element(toggle).toHaveAttribute("aria-pressed", "true");
+    await page.getByLabelText("Search diff").fill("(");
+
+    await expect.element(page.getByText("Invalid pattern")).toBeInTheDocument();
+    expect(searchField().getAttribute("aria-invalid")).toBe("true");
+    expect(document.querySelector('[data-diff-file-path="src/app.ts"]')).not.toBeNull();
+    expect(page.getByText(/No files match/).query()).toBeNull();
+  });
+
+  it("matches whole words and case only when asked", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    // Queries are identifiers and patterns: no spelling marks under them.
+    await expect.element(page.getByLabelText("Search diff")).toHaveAttribute("spellcheck", "false");
+    // "const alpha" and "const oldAlpha": two hits, one whole word, one with that case.
+    await page.getByLabelText("Search diff").fill("alpha");
+    await expect.element(page.getByText("1 of 2")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Match whole word" }).click();
+    await expect.element(page.getByText("1 of 1")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Match whole word" }).click();
+    await page.getByRole("button", { name: "Match case" }).click();
+    await page.getByLabelText("Search diff").fill("Alpha");
+    await expect.element(page.getByText("1 of 1")).toBeInTheDocument();
+  });
+
+  it("goes to the first match on the first Enter", async () => {
+    mounted = await render(<DiffPanel mode="sheet" />);
+    await page.getByLabelText("Search diff").fill("alpha");
+    await expect.element(page.getByText("1 of 2")).toBeInTheDocument();
+
+    await userEvent.keyboard("{Enter}");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(page.getByText("2 of 2").query()).toBeNull();
+    await expect.element(page.getByText("1 of 2")).toBeInTheDocument();
+
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByText("2 of 2")).toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByText("1 of 2")).toBeInTheDocument();
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    await expect.element(page.getByText("2 of 2")).toBeInTheDocument();
+  });
+
+  it("keeps the phone presentation's search bar without options or the find key", async () => {
+    mounted = await render(<DiffPanel mode="phone" />);
+    await expect.element(page.getByLabelText("Search diff")).toBeInTheDocument();
+    expect(searchField().hasAttribute("spellcheck")).toBe(false);
+    expect(document.querySelector('[aria-label="Match case"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Use regular expression"]')).toBeNull();
+    expect(document.querySelector("[data-diff-find-surface]")).toBeNull();
+
+    const line = page.getByText("beta line").element();
+    expect(pressFindKey(line).defaultPrevented).toBe(false);
+    expect(document.activeElement).not.toBe(searchField());
+
+    // Escape still clears and leaves the field (the phone keyboard closes).
+    await page.getByLabelText("Search diff").fill("alpha");
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(searchField().value).toBe(""));
+    expect(document.activeElement).not.toBe(searchField());
+    expect(document.activeElement).not.toBe(diffScrollSurface());
   });
 });

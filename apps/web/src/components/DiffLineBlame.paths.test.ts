@@ -1,6 +1,6 @@
 import { parsePatchFiles } from "@pierre/diffs";
 import { getRenderablePatch } from "../lib/diffParsing";
-import { resolveDiffFilePath } from "./DiffPanel.search.logic";
+import { resolveDiffFilePath } from "../lib/diffSearch";
 import { describe, expect, it } from "vitest";
 import { displayedBlameTarget } from "@ryco/client-runtime/state/comparison/lineBlame";
 const patch = (oldPath: string, newPath: string) =>

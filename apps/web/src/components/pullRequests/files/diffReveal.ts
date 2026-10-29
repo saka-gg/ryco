@@ -211,30 +211,38 @@ function alignDelta(
 const LAYOUT_WAIT_MAX_MS = 6000;
 
 /**
+ * Check `ready` once a frame until it holds. Pierre draws a file only once the
+ * highlighter worker answers (a cold pool takes a moment), so this is bounded
+ * at that wait; false when cancelled or out of time.
+ */
+export async function waitForDiffFrames(
+  ready: () => boolean,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const started = performance.now();
+  while (!signal.aborted) {
+    if (ready()) return true;
+    if (performance.now() - started > LAYOUT_WAIT_MAX_MS) return false;
+    await nextFrame();
+  }
+  return false;
+}
+
+/**
  * Wait until every mounted pierre file has been laid out. Files render only
  * once the highlighter worker is ready (a cold pool takes a moment), and
  * until then they have no height, so any scroll target measured earlier is
  * wrong by however tall the files above it turn out to be.
  */
-export async function waitForDiffLayout(
-  viewport: HTMLElement,
-  signal: AbortSignal,
-): Promise<boolean> {
-  const started = performance.now();
-  while (!signal.aborted) {
+export function waitForDiffLayout(viewport: HTMLElement, signal: AbortSignal): Promise<boolean> {
+  return waitForDiffFrames(() => {
     const containers = viewport.querySelectorAll<HTMLElement>("diffs-container");
-    let ready = containers.length > 0;
+    if (containers.length === 0) return false;
     for (const container of containers) {
-      if (container.offsetHeight === 0) {
-        ready = false;
-        break;
-      }
+      if (container.offsetHeight === 0) return false;
     }
-    if (ready) return true;
-    if (performance.now() - started > LAYOUT_WAIT_MAX_MS) return false;
-    await nextFrame();
-  }
-  return false;
+    return true;
+  }, signal);
 }
 
 const HOLD_QUIET_MS = 280;
