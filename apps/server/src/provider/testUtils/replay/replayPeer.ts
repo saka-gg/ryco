@@ -7,9 +7,8 @@
  * inbound frames. It stands in for the process behind a `ChildProcessHandle`, so the real
  * protocol client, session runtime and adapter run unchanged.
  *
- * One fiber owns the replay: it emits inbound entries (parking at gates) until the transcript
- * expects an outbound frame, then matches the next frame the client wrote. Frames written while
- * the replay is parked wait their turn, as they would in a real pipe.
+ * The replay runs on `runReplayCursor` (`replayDriver.ts`): frames the client writes while the
+ * replay is parked at a gate wait their turn, as they would in a real pipe.
  *
  * @module provider/testUtils/replay/replayPeer
  */
@@ -17,16 +16,15 @@ import { Cause, Deferred, Effect, Option, Queue, type Scope, Sink, Stream } from
 import type { PlatformError } from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/process";
 
+import { runReplayCursor, type ReplayEmitStep, type ReplayExitStep } from "./replayDriver.ts";
 import { openReplayGate, type ReplayGate } from "./replayGate.ts";
 import {
   makeReplayCursor,
-  ReplayIncompleteError,
   ReplayRuntimeExitError,
   ReplayUnexpectedOutboundError,
   type ReplayBindingRules,
   type ReplayError,
   type ReplayFrameNormalizer,
-  type ReplayInboundStep,
 } from "./replayMatch.ts";
 import type { ReplayTranscript } from "./replayTranscript.ts";
 
@@ -93,10 +91,6 @@ export const makeReplayPeer = (
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     let state: PeerState = "running";
-    // The loops below read state other fibers change, so they read it through functions.
-    const running = () => state === "running";
-    let ownFailure: ReplayError | undefined;
-    let parkedAt: string | undefined;
     let remainder = "";
 
     /** Ends stdout and stderr the way a dying process closes its pipes. */
@@ -110,14 +104,7 @@ export const makeReplayPeer = (
         yield* Deferred.succeed(exit, ChildProcessSpawner.ExitCode(code));
       });
 
-    const fail = (error: ReplayError) =>
-      Effect.gen(function* () {
-        ownFailure ??= error;
-        yield* Deferred.succeed(failure, error);
-        yield* end("failed", error._tag === "ReplayRuntimeExitError" ? error.code : 1);
-      });
-
-    const emit = (step: ReplayInboundStep & { readonly type: "emit" }) => {
+    const emit = (step: ReplayEmitStep) => {
       const text = step.stream === "stderr" ? String(step.frame) : JSON.stringify(step.frame);
       const bytes = encoder.encode(`${text}\n`);
       return Queue.offer(step.stream === "stderr" ? stderrQueue : stdoutQueue, bytes).pipe(
@@ -126,61 +113,34 @@ export const makeReplayPeer = (
       );
     };
 
-    const finish = (step: ReplayInboundStep & { readonly type: "exit" }) => {
-      if (step.status === "success") return end("exited", step.code ?? 0);
-      return fail(
-        new ReplayRuntimeExitError({
-          scenario,
-          spawn,
-          cursor: step.cursor,
-          status: step.status,
-          code: step.code ?? 1,
-          ...(step.error !== undefined ? { error: step.error } : {}),
-        }),
-      );
-    };
+    const finish = (step: ReplayExitStep) =>
+      step.status === "success"
+        ? end("exited", step.code ?? 0)
+        : Effect.fail(
+            new ReplayRuntimeExitError({
+              scenario,
+              spawn,
+              cursor: step.cursor,
+              status: step.status,
+              code: step.code ?? 1,
+              ...(step.error !== undefined ? { error: step.error } : {}),
+            }),
+          );
 
-    const drainInbound = Effect.gen(function* () {
-      while (running()) {
-        const step = cursor.peekInbound();
-        if (step === undefined) return;
-        if (step.type === "exit") {
-          cursor.takeInbound();
-          yield* finish(step);
-          return;
-        }
-        parkedAt = step.label;
-        yield* gate.beforeEmit(step.label);
-        parkedAt = undefined;
-        // Killed while parked: the entry was never delivered.
-        if (!running()) return;
-        cursor.takeInbound();
-        yield* emit(step);
-      }
+    const replay = yield* runReplayCursor({
+      cursor,
+      scenario,
+      spawn,
+      name: `spawn #${spawn}`,
+      gate,
+      failure,
+      outbound,
+      frameOf: (frame) => frame,
+      state: () => state,
+      deliver: emit,
+      finish,
+      onFail: (error) => end("failed", error._tag === "ReplayRuntimeExitError" ? error.code : 1),
     });
-
-    const failed = () => ownFailure !== undefined;
-    yield* Effect.gen(function* () {
-      while (!failed()) {
-        yield* drainInbound;
-        const frame = yield* Queue.take(outbound);
-        const error = cursor.matchOutbound(frame);
-        if (error !== undefined) yield* fail(error);
-      }
-    }).pipe(Effect.forkScoped);
-    // Added after the fork, so it runs before the replay fiber is interrupted: a frame the
-    // client wrote while stopping is still matched (an armed optional entry) or reported,
-    // even when the fiber was not scheduled to take it before the scope closed.
-    yield* Effect.addFinalizer(() =>
-      Effect.gen(function* () {
-        while (!failed()) {
-          const frame = yield* Queue.poll(outbound);
-          if (Option.isNone(frame)) return;
-          const error = cursor.matchOutbound(frame.value);
-          if (error !== undefined) yield* fail(error);
-        }
-      }),
-    );
 
     const parseLine = (line: string) => {
       try {
@@ -199,7 +159,7 @@ export const makeReplayPeer = (
           if (line.length === 0) continue;
           const parsed = parseLine(line);
           if (parsed === undefined) {
-            yield* fail(
+            yield* replay.fail(
               new ReplayUnexpectedOutboundError({
                 scenario,
                 spawn,
@@ -220,31 +180,10 @@ export const makeReplayPeer = (
     const exitCode = Deferred.await(exit);
     const kill = () => end("killed", REPLAY_KILLED_EXIT_CODE);
 
-    const describePosition = () => {
-      const where = `replay '${scenario}' spawn #${spawn}`;
-      if (ownFailure !== undefined) return `${where}: failed with ${ownFailure._tag}`;
-      if (parkedAt !== undefined) return `${where}: parked at gate '${parkedAt}'`;
-      const position = cursor.describeWaiting();
-      return state === "running" ? `${where}: ${position}` : `${where}: ${state} at ${position}`;
-    };
-
-    const assertConsumed = Effect.gen(function* () {
-      if (ownFailure !== undefined) return yield* ownFailure;
-      const remainingLabels = cursor.remainingLabels();
-      if (remainingLabels.length > 0) {
-        return yield* new ReplayIncompleteError({
-          scenario,
-          spawn,
-          cursor: cursor.position(),
-          remainingLabels: [...remainingLabels],
-        });
-      }
-    });
-
     const handle = ChildProcessSpawner.makeHandle({
       pid: ChildProcessSpawner.ProcessId(90_000 + spawn),
       exitCode,
-      isRunning: Effect.sync(running),
+      isRunning: Effect.sync(() => state === "running"),
       kill,
       stdin,
       stdout,
@@ -263,8 +202,8 @@ export const makeReplayPeer = (
       exitCode,
       kill,
       failure,
-      assertConsumed,
-      describePosition,
+      assertConsumed: replay.assertConsumed,
+      describePosition: replay.describePosition,
     } satisfies ReplayPeer;
   });
 

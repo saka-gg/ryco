@@ -512,4 +512,13 @@ running request or folds into it, which `terminal_reason` an abort reports, and 
 checks that settle them (steer mid-stream, steer during a Bash tool, Stop right after a steer on
 each capability level) still need to be run and their findings recorded here.
 
+Replay tests play hand-authored Claude Agent SDK frames through the real adapter and orchestrator.
+They cover two of the edges above (a steer accepted as the turn finishes, and a dropped steer that
+Claude Code runs together with your next message) and Stop with a pending steer on each capability
+level. They pin how Ryco handles these orderings, not whether Claude Code produces them:
+
+```sh
+bun run --cwd apps/server test -- integration/replay/claudeReplay.integration.test.ts
+```
+
 See [observed cache usage and resume review](./claude-cache.md) for evidence scopes, compaction, and recovery behavior.

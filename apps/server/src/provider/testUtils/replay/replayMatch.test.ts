@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../../assistantAttachments.ts";
 import {
+  claudeQueryBindingRules,
+  describeReplayEntry,
   firstDiffPath,
   makeReplayCursor,
   normalizeCodexOutbound,
@@ -257,6 +259,48 @@ describe("replay cursor", () => {
     );
     assert.deepEqual(frames(drain(exited)), [{ method: "bye" }, { exit: "success" }]);
     assert.equal(exited.matchOutbound(request(1, "x"))?._tag, "ReplayUnexpectedOutboundError");
+  });
+
+  it("checks a reference against a value an earlier cursor bound", () => {
+    const open = (options: Record<string, unknown>) => ({ type: "query.open", options });
+    const bindingTable = new Map<string, unknown>();
+    const first = makeReplayCursor(
+      [{ type: "expect_outbound", frame: open({ sessionId: "recorded" }) }],
+      { scenario: "unit", bindings: claudeQueryBindingRules, bindingTable },
+    );
+    assert.isUndefined(first.matchOutbound(open({ sessionId: "actual" })));
+
+    const resumed: ReadonlyArray<ReplayEntry> = [
+      { type: "expect_outbound", frame: open({ resume: "recorded" }) },
+      {
+        type: "emit_inbound",
+        frame: { type: "sdk.message", message: { type: "system", session_id: "recorded" } },
+      },
+    ];
+    const second = makeReplayCursor(resumed, {
+      scenario: "unit",
+      spawn: 2,
+      bindings: claudeQueryBindingRules,
+      bindingTable,
+    });
+    const wrong = second.matchOutbound(open({ resume: "elsewhere" }));
+    assert.equal(wrong?._tag === "ReplayFrameMismatchError" && wrong.diffPath, "$.options.resume");
+    assert.isUndefined(second.matchOutbound(open({ resume: "actual" })));
+    assert.deepEqual(frames(drain(second)), [
+      { type: "sdk.message", message: { type: "system", session_id: "actual" } },
+    ]);
+    assert.equal(describeReplayEntry(resumed[1]!), "emit_inbound:sdk.message:system");
+
+    // Without a binding the reference compares as recorded.
+    const unbound = makeReplayCursor(resumed, {
+      scenario: "unit",
+      bindings: claudeQueryBindingRules,
+    });
+    assert.equal(
+      unbound.matchOutbound(open({ resume: "actual" }))?._tag,
+      "ReplayFrameMismatchError",
+    );
+    assert.isUndefined(unbound.matchOutbound(open({ resume: "recorded" })));
   });
 
   it("lists the entries a scenario never reached", () => {
