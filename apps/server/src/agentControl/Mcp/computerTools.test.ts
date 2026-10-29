@@ -7,7 +7,7 @@ import {
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
-import { withComputerUseTools } from "./computerTools.ts";
+import { COMPUTER_TOOL_DESCRIPTORS, withComputerUseTools } from "./computerTools.ts";
 import type { AgentControlMcpTools } from "./tools.ts";
 import type {
   AgentControlSessionRecord,
@@ -108,4 +108,21 @@ it("uses the authoritative session and turn, never agent-supplied identity", asy
   );
   expect(init?.redirect).toBe("error");
   expect(init?.signal).toBeInstanceOf(AbortSignal);
+});
+it("describes the Ryco browser's wait, diagnostics and emulation actions", () => {
+  const browser = COMPUTER_TOOL_DESCRIPTORS.find((tool) => tool.name === "ryco_browser");
+  const schema = browser?.inputSchema as {
+    properties: Record<string, { enum?: string[]; maximum?: number; minimum?: number }>;
+  };
+  expect(schema.properties.action?.enum).toEqual(
+    expect.arrayContaining(["wait", "console", "network", "resize", "appearance"]),
+  );
+  // Dialogs are a per-action policy, never an action of their own.
+  expect(schema.properties.action?.enum).not.toContain("dialog");
+  expect(schema.properties.dialog?.enum).toEqual(["accept", "dismiss"]);
+  expect(schema.properties.timeout).toEqual({ type: "integer", minimum: 100, maximum: 30000 });
+  expect(schema.properties.limit).toEqual({ type: "integer", minimum: 1, maximum: 200 });
+  expect(schema.properties.width).toEqual({ type: "integer", minimum: 320, maximum: 3840 });
+  expect(schema.properties.height).toEqual({ type: "integer", minimum: 240, maximum: 2160 });
+  expect(browser?.description).toContain("userActive");
 });

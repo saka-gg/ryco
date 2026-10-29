@@ -162,9 +162,19 @@ export class FakeWebContents extends EventEmitter {
     this.backgroundThrottling = webPreferences.backgroundThrottling ?? true;
   }
 
-  get mainFrame(): { readonly frameTreeNodeId: number; readonly url: string } {
-    return { frameTreeNodeId: this.id, url: this.url };
+  get mainFrame(): {
+    readonly frameTreeNodeId: number;
+    readonly url: string;
+    readonly executeJavaScript: (code: string) => Promise<unknown>;
+  } {
+    return {
+      frameTreeNodeId: this.id,
+      url: this.url,
+      executeJavaScript: this.mainFrameExecuteJavaScript,
+    };
   }
+  /** The main frame's `executeJavaScript` (WebFrameMain); resolves at once unless a test holds it. */
+  readonly mainFrameExecuteJavaScript = vi.fn(async (_code: string): Promise<unknown> => undefined);
 
   getURL(): string {
     return this.url;

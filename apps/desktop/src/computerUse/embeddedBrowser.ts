@@ -19,6 +19,7 @@ import {
   type BrowserTabRevival,
   type BrowserTransport,
 } from "./browser.ts";
+import { EmbeddedTabAutomation } from "./browserTabAutomation.ts";
 import {
   BROWSER_PREVIEW_HOLD_MS,
   BROWSER_REVIVE_WAIT_MS,
@@ -30,7 +31,7 @@ import { CdpLease } from "../browser/cdpLease.ts";
 import { BrowserElementPicker } from "../browser/elementPicker.ts";
 import { SignInPopups } from "../browser/signInPopups.ts";
 
-/** One page of a tab: its view, hidden host window and shared debugger session. */
+/** One page of a tab: its view, hidden host window, shared debugger session and agent automation. */
 interface LivePage {
   readonly view: WebContentsView;
   readonly host: BrowserWindow;
@@ -41,6 +42,7 @@ interface LivePage {
    * the agent's hold (syncThrottling) and the agent's next command turns it on again.
    */
   focusEmulation: boolean;
+  readonly automation: EmbeddedTabAutomation;
 }
 interface TabEntry {
   /**
@@ -112,6 +114,15 @@ function assertZoom(zoom: number | undefined): number {
     throw new Error("Invalid zoom.");
   return zoom;
 }
+
+/** Toolbar commands that count as the user's input in the tab. */
+const USER_NAVIGATION: ReadonlySet<ProjectBrowserCommand["action"]> = new Set([
+  "navigate",
+  "back",
+  "forward",
+  "reload",
+  "stop",
+]);
 
 /** One tab owner shared by manual preview and the consent-gated agent transport. */
 export class EmbeddedComputerBrowser implements BrowserTransport {
@@ -201,11 +212,22 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   }
   async tabs(signal: AbortSignal): Promise<BrowserTab[]> {
     signal.throwIfAborted();
-    return this.state().tabs.map(({ id, title, url, suspended }) => {
-      const tab: BrowserTab = { id, title, url };
+    return this.state().tabs.map(({ id, title, url, project, suspended }) => {
+      const tab: BrowserTab = {
+        id,
+        title,
+        url,
+        presented: this.presented(id),
+        userActive: (this.entries.get(id)?.live?.automation.humanHoldMs() ?? 0) > 0,
+        agentTab: !project,
+      };
       if (suspended) tab.suspended = true;
       return tab;
     });
+  }
+  /** The tab's dialogs, diagnostics, human-input guard and emulation (BrowserTransport). */
+  automation(tab: string): EmbeddedTabAutomation | undefined {
+    return this.entries.get(tab)?.live?.automation;
   }
   /**
    * Creates a page for `entry`: its hidden host window, its view with the isolated profile, its
@@ -238,7 +260,6 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     // when a tab gets a new page (browser-tab-budget's revival); open() never passes it.
     const id = existingId ?? String(wc.id);
     const cdp = new CdpLease(wc);
-    const page: LivePage = { view, host, cdp, focusEmulation: false };
     // Activate the page inside Chromium, without focusing its host window or changing the
     // user's selected tab/application. Once per debugger session, whoever opened it. The flag is
     // set first so that the budget's "off" (endFocusEmulation) is always sent after this "on".
@@ -246,6 +267,16 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       page.focusEmulation = true;
       return send("Emulation.setFocusEmulationEnabled", { enabled: true }).then(() => undefined);
     });
+    // Registers its ready step (Page, Network, Runtime, Log) after the focus step.
+    const automation = new EmbeddedTabAutomation(wc, cdp, {
+      agentTab: !entry.project,
+      presented: () => this.presented(id),
+      focused: () => this.focused(id),
+      // Every agent path goes through withAgentCdp, so reads keep the sign-in rules too.
+      attach: (signal) => this.withAgentCdp(id, signal, async () => undefined),
+      send: (method, params, signal) => this.send(id, method, params, signal),
+    });
+    const page: LivePage = { view, host, cdp, focusEmulation: false, automation };
     // Only the tab's current page may change the tab. Electron destroys contents asynchronously, so
     // a page that was torn down (closed, or replaced when the tab gets a new page) can still emit
     // events; every listener below that touches the tab starts with this check.
@@ -264,6 +295,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     host.on("resize", () => {
       if (!current() || entry.presentation === "panel") return;
       this.fitHost(page);
+      // The user resized the pop-out window.
+      if (entry.presentation === "window") automation.presentationChanged({ resized: true });
     });
     host.on("close", (event) => {
       // Closing a detached preview returns it to the browser's tab strip.
@@ -273,6 +306,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       host.hide();
       entry.presentation = "background";
       entry.lastActiveAt = Date.now();
+      automation.presentationChanged({ resized: false });
       this.publish();
       this.scheduleBudget();
     });
@@ -394,7 +428,16 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.publish();
     this.scheduleBudget();
     try {
-      await wc.loadURL(target);
+      if (project) await wc.loadURL(target);
+      else {
+        // Agent tabs: open the session before the load starts, so load-time console and network
+        // are captured. A page that has not started loading has no renderer to answer CDP, so the
+        // ready steps settle while it loads (awaiting them first would wait out the 15 s guard),
+        // and network capture is turned on ahead of them.
+        const attached = this.withAgentCdp(id, signal, async () => undefined);
+        page.automation.captureFirstLoad();
+        await Promise.all([attached, wc.loadURL(target)]);
+      }
       signal.throwIfAborted();
       return { id, title: wc.getTitle(), url: wc.getURL() };
     } catch (error) {
@@ -431,6 +474,16 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const window = this.presentedWindow(id);
     return Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused());
   }
+  /** Foreground and the page itself has keyboard focus: the user is working in it. */
+  private focused(id: string): boolean {
+    const page = this.entries.get(id)?.live ?? null;
+    return (
+      this.foreground(id) &&
+      page !== null &&
+      !page.view.webContents.isDestroyed() &&
+      page.view.webContents.isFocused()
+    );
+  }
   /** The tab, live or suspended; "Browser tab closed." when it is gone. */
   private entry(id: string): TabEntry {
     const entry = this.entries.get(id);
@@ -463,6 +516,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     entry.presentation = "background";
     // Panel or tab switch, the surface hiding under a Ryco dialog, the shell closing or reloading.
     void this.picker.end(mounted.tab, "hidden");
+    page?.automation.presentationChanged({ resized: false });
   }
   surface(input: ProjectBrowserSurface, ownerWindow: BrowserWindow): void {
     if (input.tab === null) {
@@ -506,6 +560,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     )
       throw new Error("Invalid browser surface bounds.");
     const changed = this.mounted?.tab !== input.tab || this.mounted?.owner !== input.owner;
+    const before = entry.live?.view.getBounds() ?? null;
     if (changed) {
       this.unmount();
       // Showing a suspended tab reloads it at its last address.
@@ -526,6 +581,14 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       height: Math.round(height),
     });
     entry.lastActiveAt = Date.now();
+    // Showing the tab or resizing it ends the agent's viewport and color-scheme emulation.
+    if (
+      changed ||
+      before === null ||
+      before.width !== Math.round(width) ||
+      before.height !== Math.round(height)
+    )
+      page.automation.presentationChanged({ resized: !changed });
     if (changed) {
       this.publish();
       // The previously shown tab has just lost its exemption.
@@ -564,6 +627,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   private teardownPage(id: string, page: LivePage, destroyed?: "guest" | "host"): void {
     // Settles a pending pick before the session it runs on goes away.
     void this.picker.end(id, "destroyed");
+    page.automation.dispose();
     page.cdp.dispose();
     const wc = page.view.webContents;
     if (destroyed !== "guest" && !wc.isDestroyed()) wc.close({ waitForBeforeUnload: false });
@@ -579,6 +643,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     if (!entry.live && !this.commandSuspended(input, entry)) return;
     const page = this.liveOf(entry),
       wc = page.view.webContents;
+    // The user navigated the tab from the toolbar: the agent's refs for it are stale.
+    if (USER_NAVIGATION.has(input.action)) page.automation.markHuman();
     switch (input.action) {
       case "allow-sign-in":
         if (!this.foreground(input.tab)) throw new Error(SIGN_IN_NEEDS_FOCUS);
@@ -617,6 +683,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         entry.presentation = "window";
         this.fitHost(page);
         page.host.show();
+        page.automation.presentationChanged({ resized: false });
         break;
       case "dock":
         this.signIn.cancel(input.tab);
@@ -624,6 +691,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
           page.host.hide();
           entry.presentation = "background";
         }
+        page.automation.presentationChanged({ resized: false });
         break;
       case "end-pick":
         await this.picker.end(input.tab, "user");
@@ -754,8 +822,12 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const page = this.liveOf(entry);
     const { cdp } = page;
     const first = cdp.acquire("agent");
-    // Only the agent's own hold ends: another holder (a user's pick) keeps the session.
-    const release = () => cdp.release("agent");
+    // Only the agent's own hold ends: another holder (a user's pick) keeps the session. The page
+    // gets its own dialogs back first, while the session that installed the shim is still open.
+    const release = () => {
+      page.automation.beforeAgentRelease();
+      cdp.release("agent");
+    };
     signal.addEventListener("abort", release, { once: true });
     entry.agentBusy++;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -773,6 +845,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
               throw error;
             }
           }
+          await page.automation.activate(); // Console capture back on, idle timer re-armed.
           signal.throwIfAborted();
           return run(cdp);
         })(),
@@ -874,6 +947,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
    */
   async pick(tab: string): Promise<ProjectBrowserPickResult> {
     const page = this.pickablePage(tab);
+    // The user's own input in the tab: the agent's refs for it are stale.
+    page.automation.markHuman();
     return this.picker.pick(tab, page.cdp, page.view.webContents, () => {
       // Re-checked after an earlier pick's cleanup: the tab may have changed meanwhile.
       if (this.pickablePage(tab) !== page) throw new Error("Browser tab closed.");
@@ -906,6 +981,10 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         stoppedRevival = true;
       }
       page.view.webContents.stop();
+      // Dialogs are the user's again before the session can end (the action fails only later).
+      page.automation.beforeAgentRelease();
+      // A user's pick can keep the session (and the agent's overrides with it) alive.
+      page.automation.clearEmulation();
       this.syncThrottling(entry, now);
       // Emergency stop ends the agent's hold only; another holder keeps its session.
       page.cdp.release("agent");
