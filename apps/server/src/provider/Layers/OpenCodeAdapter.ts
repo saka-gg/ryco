@@ -24,13 +24,7 @@ import {
   type UserInputQuestion,
 } from "@ryco/contracts";
 import { Cause, Clock, Effect, Exit, Fiber, Queue, Ref, Scope, Semaphore, Stream } from "effect";
-import type {
-  OpencodeClient,
-  Part,
-  PermissionRequest,
-  QuestionRequest,
-  Session,
-} from "@opencode-ai/sdk/v2";
+import type { Part, PermissionRequest, QuestionRequest, Session } from "@opencode-ai/sdk/v2";
 import {
   appendAttachmentPathLines,
   formatAttachmentPathLines,
@@ -60,6 +54,7 @@ import {
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import type { OpenCodeServerOwner } from "../OpenCodeServerOwner.ts";
+import type { OpenCodeApi } from "../openCodeApi.ts";
 import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import {
   buildOpenCodePermissionRules,
@@ -85,7 +80,7 @@ const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_RESUME_VERSION = 1;
 
 type OpenCodeSubscribedEvent =
-  Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>> extends {
+  Awaited<ReturnType<OpenCodeApi["event"]["subscribe"]>> extends {
     readonly stream: AsyncIterable<infer TEvent>;
   }
     ? TEvent
@@ -94,7 +89,7 @@ type OpenCodeSubscribedEvent =
 interface OpenCodeSessionContext {
   readonly computerLease?: AgentControlNativeHttpInjection;
   session: ProviderSession;
-  readonly client: OpencodeClient;
+  readonly client: OpenCodeApi;
   readonly server: OpenCodeServerConnection;
   readonly directory: string;
   /** Root OpenCode session. A checkpoint revert rebinds it to a fork. */

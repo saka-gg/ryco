@@ -126,7 +126,8 @@ the running Ryco release. The bundled file seeds OpenCode:
   rating, publish an explicit overriding policy for that `rycoRange`.
 - **Code-owned floors.** Limits of a build that no manifest can lift are rated
   before any policy, for both the installed and the latest version. In this
-  build that is OpenCode `>=2.0.0` (always `unsupported`). The bundled
+  build that is OpenCode `>=2.0.0` (always `unsupported`; `openCodeVersionFloor`
+  in `openCodeVersion.ts`, which names 3.x and later separately). The bundled
   OpenCode `>=2.0.0` range only repeats the floor for readers; a test pins the
   two together.
 - **Lenient decoding.** Invalid entries are dropped one by one, and a malformed

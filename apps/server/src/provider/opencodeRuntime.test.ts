@@ -1,12 +1,13 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import { Effect, Fiber, Layer, Sink, Stream } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
-import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { makeAgentProcessPriority } from "./agentProcessPriority.ts";
+import type { OpenCodeApi } from "./openCodeApi.ts";
+import { OPENCODE_REJECTED_PASSWORD_MESSAGE } from "./openCodeProtocol.ts";
 import { OPENCODE_NON_JSON_HEALTH_MESSAGE } from "./openCodeVersion.ts";
 import {
   assertSupportedOpenCodeBinary,
@@ -49,14 +50,16 @@ describe("resolveOpenCodeServerPassword", () => {
 });
 
 describe("verifyOpenCodeServerVersion", () => {
-  const clientWithHealthData = (data: unknown) =>
+  const clientWithHealthData = (data: unknown, generation?: "v2") =>
     ({
+      ...(generation !== undefined ? { generation } : {}),
       global: {
         health: async () => ({ data }),
       },
-    }) as unknown as OpencodeClient;
-  const clientWithVersion = (version: string) => clientWithHealthData({ healthy: true, version });
-  const failureDetail = (client: OpencodeClient) =>
+    }) as unknown as OpenCodeApi;
+  const clientWithVersion = (version: string, generation?: "v2") =>
+    clientWithHealthData({ healthy: true, version }, generation);
+  const failureDetail = (client: OpenCodeApi) =>
     Effect.runPromise(Effect.flip(verifyOpenCodeServerVersion(client))).then(
       (error) => error.detail,
     );
@@ -76,6 +79,18 @@ describe("verifyOpenCodeServerVersion", () => {
 
   it("rejects a 2.x server with an explicit reason", async () => {
     expect(await failureDetail(clientWithVersion("2.0.18"))).toContain("reports v2.0.18");
+  });
+
+  it("refuses a 1.x client whose server reports 2.x before any mutation", async () => {
+    for (const version of ["2.0.18", "2.2.0", "2.9.0"]) {
+      expect(await failureDetail(clientWithVersion(version))).toContain(`reports v${version}`);
+    }
+  });
+
+  it("refuses a server whose reported generation does not match the client's API", async () => {
+    expect(await failureDetail(clientWithVersion("1.18.18", "v2"))).toBe(
+      "The OpenCode server reports v1.18.18 but did not identify itself as OpenCode 1.",
+    );
   });
 
   it("rejects a v-prefixed 2.x server instead of passing it via string comparison", async () => {
@@ -103,6 +118,79 @@ describe("verifyOpenCodeServerVersion", () => {
       "invalid response",
     );
     expect(await failureDetail(clientWithHealthData(undefined))).toContain("invalid response");
+  });
+});
+
+describe("createOpenCodeSdkClient API detection", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Stubs the global fetch the runtime's detection uses with a server keyed by path. */
+  function stubServer(routes: Readonly<Record<string, () => Response>>) {
+    const paths: Array<string> = [];
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      return routes[path]?.() ?? new Response(null, { status: 404 });
+    });
+    return paths;
+  }
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  const html = () =>
+    new Response("<!doctype html>", { status: 200, headers: { "content-type": "text/html" } });
+  /** Each test uses its own URL: detection remembers the last generation per URL. */
+  const create = (baseUrl: string) =>
+    Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      return yield* runtime.createOpenCodeSdkClient({
+        baseUrl,
+        directory: "/work",
+        serverPassword: "secret",
+      });
+    }).pipe(Effect.provide(recordingRuntimeLayer("").layer));
+
+  effectIt.live("refuses a 2.x server before creating any client", () => {
+    const paths = stubServer({
+      "/global/health": html,
+      "/api/info": () => json({ version: "2.2.0", pid: 42 }),
+    });
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(create("http://127.0.0.1:4096"));
+      expect(error.detail).toBe(
+        "The OpenCode server reports v2.2.0. Ryco works with OpenCode 1.x servers; 2.x support is coming.",
+      );
+      expect(paths).toEqual(["/global/health", "/api/info"]);
+      // The next attempt asks the 2.x route first and sends nothing to the 2.x catch-all.
+      paths.length = 0;
+      yield* Effect.flip(create("http://127.0.0.1:4096"));
+      expect(paths).toEqual(["/api/info"]);
+    });
+  });
+
+  effectIt.live("returns the 1.x SDK client for a 1.x server", () => {
+    const paths = stubServer({
+      "/global/health": () => json({ healthy: true, version: "1.18.34" }),
+    });
+    return Effect.gen(function* () {
+      const client = yield* create("http://127.0.0.1:4097");
+      expect(client.generation).toBeUndefined();
+      expect(typeof client.session.promptAsync).toBe("function");
+      expect(paths).toEqual(["/global/health"]);
+    });
+  });
+
+  effectIt.live("surfaces a rejected password as the fixed detection text", () => {
+    stubServer({ "/global/health": () => new Response(null, { status: 401 }) });
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(create("http://127.0.0.1:4098"));
+      expect(error.detail).toBe(OPENCODE_REJECTED_PASSWORD_MESSAGE);
+      expect(error.operation).toBe("api.detect");
+    });
   });
 });
 

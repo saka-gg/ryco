@@ -8,7 +8,6 @@ import type {
 import type {
   Agent,
   FilePartInput,
-  OpencodeClient,
   PermissionRuleset,
   ProviderListResponse,
   QuestionAnswer,
@@ -34,10 +33,9 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { isPersistableChatAttachment } from "../attachmentStore.ts";
+import type { OpenCodeApi } from "./openCodeApi.ts";
 import {
   describeUnsupportedOpenCodeVersion,
-  normalizeOpenCodeVersion,
-  OPENCODE_NON_JSON_HEALTH_MESSAGE,
   OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
 } from "./openCodeVersion.ts";
 import { collectStreamAsString, parseGenericCliVersion } from "./providerSnapshot.ts";
@@ -101,50 +99,41 @@ export const runOpenCodeSdk = <A>(
       new OpenCodeRuntimeError({ operation, detail: openCodeRuntimeErrorDetail(cause), cause }),
   }).pipe(Effect.withSpan(`opencode.${operation}`));
 
+/** A cached `import()` that a failed load does not poison. */
+export const lazyOpenCodeModule = <M>(
+  name: string,
+  load: () => Promise<M>,
+): Effect.Effect<M, OpenCodeRuntimeError> => {
+  let promise: Promise<M> | undefined;
+  return Effect.tryPromise({
+    try: () =>
+      (promise ??= load().catch((cause: unknown) => {
+        promise = undefined;
+        throw cause;
+      })),
+    catch: (cause) =>
+      new OpenCodeRuntimeError({
+        operation: "createOpenCodeSdkClient",
+        detail: `Failed to load OpenCode ${name}: ${openCodeRuntimeErrorDetail(cause)}`,
+        cause,
+      }),
+  }).pipe(Effect.withSpan(`opencode.${name.toLowerCase()}.load`));
+};
+
+/**
+ * API detection, client creation and the server version check (`openCodeProtocol.ts`) load on
+ * first use, outside the boot chunk.
+ */
+const loadOpenCodeProtocol = lazyOpenCodeModule("protocol", () => import("./openCodeProtocol.ts"));
+
+/**
+ * The server's normalised version; fails unless this build runs it on the client's API
+ * generation. Every caller runs it before its first mutation.
+ */
 export const verifyOpenCodeServerVersion = (
-  client: OpencodeClient,
+  client: OpenCodeApi,
 ): Effect.Effect<string, OpenCodeRuntimeError> =>
-  runOpenCodeSdk("global.health", (signal) => client.global.health({ signal })).pipe(
-    Effect.timeoutOption("5 seconds"),
-    Effect.flatMap((result) => {
-      if (Option.isNone(result)) {
-        return Effect.fail(
-          new OpenCodeRuntimeError({
-            operation: "global.health",
-            detail: "Timed out while checking the OpenCode server version.",
-          }),
-        );
-      }
-      // The SDK parses `text/*` responses as text, so an HTML page (an OpenCode 2.x web UI, a
-      // proxy or a sign-in page) arrives here as a string rather than a health object.
-      const raw: unknown = result.value.data;
-      if (typeof raw === "string") {
-        return Effect.fail(
-          new OpenCodeRuntimeError({
-            operation: "global.health",
-            detail: OPENCODE_NON_JSON_HEALTH_MESSAGE,
-          }),
-        );
-      }
-      const health = result.value.data;
-      if (!health?.healthy || typeof health.version !== "string" || health.version.length === 0) {
-        return Effect.fail(
-          new OpenCodeRuntimeError({
-            operation: "global.health",
-            detail: "OpenCode server health check returned an invalid response.",
-          }),
-        );
-      }
-      // Fails closed: an unparseable or 2.x version is refused, never compared as a string.
-      const problem = describeUnsupportedOpenCodeVersion(health.version, "server");
-      if (problem !== null) {
-        return Effect.fail(
-          new OpenCodeRuntimeError({ operation: "global.health", detail: problem }),
-        );
-      }
-      return Effect.succeed(normalizeOpenCodeVersion(health.version));
-    }),
-  );
+  Effect.flatMap(loadOpenCodeProtocol, (protocol) => protocol.checkOpenCodeServerVersion(client));
 
 /**
  * Runs `<binary> --version` and fails unless it reports an OpenCode version this build can run.
@@ -191,29 +180,6 @@ export const assertSupportedOpenCodeBinary = (
       return Effect.succeed(version);
     }),
   );
-
-type OpenCodeSdkModule = typeof import("@opencode-ai/sdk/v2");
-
-let openCodeSdkModulePromise: Promise<OpenCodeSdkModule> | undefined;
-
-const loadOpenCodeSdkModule = (): Effect.Effect<OpenCodeSdkModule, OpenCodeRuntimeError> =>
-  Effect.tryPromise({
-    try: async () => {
-      try {
-        openCodeSdkModulePromise ??= import("@opencode-ai/sdk/v2");
-        return await openCodeSdkModulePromise;
-      } catch (cause) {
-        openCodeSdkModulePromise = undefined;
-        throw cause;
-      }
-    },
-    catch: (cause) =>
-      new OpenCodeRuntimeError({
-        operation: "createOpenCodeSdkClient",
-        detail: `Failed to load OpenCode SDK: ${openCodeRuntimeErrorDetail(cause)}`,
-        cause,
-      }),
-  }).pipe(Effect.withSpan("opencode.sdk.load"));
 
 export interface OpenCodeCommandResult {
   readonly stdout: string;
@@ -275,13 +241,18 @@ export interface OpenCodeRuntimeShape {
     readonly args: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
   }) => Effect.Effect<OpenCodeCommandResult, OpenCodeRuntimeError>;
+  /**
+   * Detects the server's API generation (read-only requests) before returning a client bound to
+   * it; a 2.x server is refused until `OPENCODE_V2_RUNTIME_SUPPORTED`. Not cached: an external
+   * server can change generation.
+   */
   readonly createOpenCodeSdkClient: (input: {
     readonly baseUrl: string;
     readonly directory: string;
     readonly serverPassword?: string;
-  }) => Effect.Effect<OpencodeClient, OpenCodeRuntimeError>;
+  }) => Effect.Effect<OpenCodeApi, OpenCodeRuntimeError>;
   readonly loadOpenCodeInventory: (
-    client: OpencodeClient,
+    client: OpenCodeApi,
   ) => Effect.Effect<OpenCodeInventory, OpenCodeRuntimeError>;
 }
 
@@ -698,24 +669,9 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
   };
 
   const createOpenCodeSdkClient: OpenCodeRuntimeShape["createOpenCodeSdkClient"] = (input) =>
-    loadOpenCodeSdkModule().pipe(
-      Effect.map(({ createOpencodeClient }) =>
-        createOpencodeClient({
-          baseUrl: input.baseUrl,
-          directory: input.directory,
-          ...(input.serverPassword
-            ? {
-                headers: {
-                  Authorization: `Basic ${Buffer.from(`opencode:${input.serverPassword}`, "utf8").toString("base64")}`,
-                },
-              }
-            : {}),
-          throwOnError: true,
-        }),
-      ),
-    );
+    Effect.flatMap(loadOpenCodeProtocol, (protocol) => protocol.createOpenCodeApi(input));
 
-  const loadProviders = (client: OpencodeClient) =>
+  const loadProviders = (client: OpenCodeApi) =>
     runOpenCodeSdk("provider.list", (signal) => client.provider.list({}, { signal })).pipe(
       Effect.filterMapOrFail(
         (list) =>
@@ -731,7 +687,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ),
     );
 
-  const loadAgents = (client: OpencodeClient) =>
+  const loadAgents = (client: OpenCodeApi) =>
     runOpenCodeSdk("app.agents", (signal) => client.app.agents({}, { signal })).pipe(
       Effect.map((result) => result.data ?? []),
     );

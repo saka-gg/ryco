@@ -3,7 +3,7 @@
  *
  * Three layers, in order:
  * 1. Code-owned floors (`HARD_COMPATIBILITY_FLOORS`): limits of THIS build that no manifest can
- *    lift — today, OpenCode major ≥ 2.
+ *    lift — today, OpenCode major ≥ 2 (`openCodeVersionFloor`).
  * 2. The current model manifest's `compatibility[]` (remote from GitHub main, then disk cache).
  * 3. The bundled manifest's `compatibility[]`, when the current manifest has no policy for the
  *    driver and this Ryco version.
@@ -26,7 +26,7 @@ import { Option, Schema } from "effect";
 import packageJson from "../../package.json" with { type: "json" };
 import { isCliVersionRange, satisfiesCliVersionRange } from "./cliVersion.ts";
 import { BUNDLED_MODEL_MANIFEST, type ModelManifestData } from "./ModelManifest.ts";
-import { isUnsupportedOpenCodeMajor, OPENCODE_V2_ADVISORY_MESSAGE } from "./openCodeVersion.ts";
+import { openCodeVersionFloor } from "./openCodeVersion.ts";
 
 export interface ProviderVersionRating {
   readonly status: ServerProviderCompatibilityStatus;
@@ -72,10 +72,10 @@ const HARD_COMPATIBILITY_FLOORS: ReadonlyMap<
 > = new Map([
   [
     "opencode",
-    (version: string): ProviderVersionRating | undefined =>
-      isUnsupportedOpenCodeMajor(version)
-        ? { status: "unsupported", message: OPENCODE_V2_ADVISORY_MESSAGE }
-        : undefined,
+    (version: string): ProviderVersionRating | undefined => {
+      const message = openCodeVersionFloor(version);
+      return message === undefined ? undefined : { status: "unsupported", message };
+    },
   ],
 ]);
 
