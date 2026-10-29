@@ -55,6 +55,11 @@ the browser on your phone, or losing the connection for a while does not stop it
 Settings to see how it went. **Cancel** stops it. A sign-in that was running when the node
 restarted has to be started again.
 
+The mobile app has the same sign-in under **Settings › Provider accounts**, which lists each
+connected node's provider instances with their accounts. Tap an instance that is not signed in to
+open its sign-in: **Open sign-in page** opens the page in the phone's browser, and the sheet shows
+the outcome when you come back. Closing the sheet does not stop the sign-in either.
+
 Things to know:
 
 - Only owners of a node can sign its providers in. Shared and read-only connections show why the

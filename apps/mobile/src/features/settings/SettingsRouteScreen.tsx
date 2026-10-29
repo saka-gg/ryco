@@ -68,6 +68,10 @@ export function SettingsRouteScreen() {
           onPress={() => navigation.navigate("SettingsStatistics" as never)}
         />
         <SettingsRow
+          label="Provider accounts"
+          onPress={() => navigation.navigate("SettingsProviderAccounts" as never)}
+        />
+        <SettingsRow
           label="Defaults"
           onPress={() => navigation.navigate("SettingsWorkspace" as never)}
         />

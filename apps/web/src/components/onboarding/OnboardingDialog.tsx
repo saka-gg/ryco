@@ -12,6 +12,7 @@ import {
   type ProviderInstanceId,
   type ServerProvider,
 } from "@ryco/contracts";
+import { canOfferProviderSignIn } from "@ryco/shared/providerSignIn";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import {
@@ -37,7 +38,6 @@ import {
 } from "../ui/dialog";
 import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { ONBOARDING_STEPS, type OnboardingOutcome, type OnboardingStep } from "./onboardingState";
-import { canOfferOnboardingSignIn } from "./onboardingSignIn.logic";
 
 const STEP_LABELS = { providers: "Providers", project: "Project", tour: "Quick tour" };
 const PROVIDER_GUIDES: Readonly<Record<string, string>> = {
@@ -107,7 +107,7 @@ export function OnboardingDialog({
   const signInRegionId = useId();
   const stepIndex = ONBOARDING_STEPS.indexOf(step);
   const offersSignIn = (provider: ServerProvider) =>
-    canOfferOnboardingSignIn({
+    canOfferProviderSignIn({
       provider,
       instance: providerInstances?.[provider.instanceId],
       capabilityAllowed: signInCapability.allowed,

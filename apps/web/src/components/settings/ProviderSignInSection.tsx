@@ -7,10 +7,14 @@ import {
 } from "@ryco/contracts";
 import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 import {
+  describeProviderSignIn,
+  formatProviderSignInCountdown,
   getProviderSignInController,
+  isProviderSignInPageUrl,
   isProviderSignInRunning,
   isProviderSignInTerminalWaiting,
   PROVIDER_SIGN_IN_FORBIDDEN,
+  providerSignInOutcome,
   type ProviderSignInApi,
   type ProviderSignInController,
 } from "@ryco/client-runtime/state/providerSignIn";
@@ -77,24 +81,6 @@ function useConnectionSignInApi(environmentId: EnvironmentId | null): ProviderSi
   return useSyncExternalStore(subscribeEnvironmentConnections, read, read);
 }
 
-function isHttpsUrl(value: string): boolean {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-/** `m:ss` until `expiresAt`, or `null` once it passed or when it does not parse. */
-export function formatProviderSignInCountdown(expiresAt: string | null, nowMs: number) {
-  const remainingMs = expiresAt === null ? Number.NaN : Date.parse(expiresAt) - nowMs;
-  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return null;
-  const totalSeconds = Math.ceil(remainingMs / 1_000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
 function Countdown({ expiresAt }: { readonly expiresAt: string | null }) {
   const nowMs = useRelativeTimeTick(1_000);
   const remaining = formatProviderSignInCountdown(expiresAt, nowMs);
@@ -124,7 +110,7 @@ function DeviceCode({
       );
     },
   });
-  const opensHere = isHttpsUrl(verificationUrl);
+  const opensHere = isProviderSignInPageUrl(verificationUrl);
   return (
     <div className="space-y-2">
       <p>
@@ -255,34 +241,24 @@ export function ProviderSignInSection({
   const shown = needsSignIn || (state !== null && state.phase !== "idle");
   if (!engaged || !shown) return null;
 
-  const pending = snapshot?.pending ?? null;
-  const unavailable =
-    blockedReason ??
-    (!connected || api === null
-      ? `Available when ${nodeLabel} is connected`
-      : !canManage || snapshot?.forbidden
-        ? PROVIDER_SIGN_IN_FORBIDDEN
-        : snapshot?.unsupported
-          ? `Update Ryco on ${nodeLabel} to sign in from here.`
-          : !instanceEnabled
-            ? "Enable this provider instance to sign in."
-            : null);
-  // The follow failed before the node reported anything: trying again follows it anew.
-  const followFailed = state === null && (snapshot?.error ?? null) !== null;
-  const canRetryFollow = unavailable === null && followFailed && pending === null;
-  const canStart =
-    unavailable === null &&
-    state !== null &&
-    !running &&
-    pending === null &&
-    (state.phase !== "idle" || state.method !== null);
-  const startLabel =
-    followFailed ||
-    state?.phase === "failed" ||
-    state?.phase === "expired" ||
-    state?.phase === "cancelled"
-      ? "Try again"
-      : "Sign in";
+  const {
+    pending,
+    unavailable,
+    followFailed,
+    canRetryFollow,
+    canStart,
+    canCancel,
+    startLabel,
+    error,
+  } = describeProviderSignIn({
+    snapshot,
+    state,
+    nodeLabel,
+    blockedReason,
+    connected: connected && api !== null,
+    canManage,
+    instanceEnabled,
+  });
   const interaction = state?.phase === "waiting" ? state.interaction : null;
 
   return (
@@ -300,7 +276,7 @@ export function ProviderSignInSection({
             type="button"
             size="xs"
             variant="outline"
-            disabled={pending !== null || state?.phase === "verifying" || unavailable !== null}
+            disabled={!canCancel}
             onClick={() => void controller?.cancel()}
           >
             Cancel
@@ -395,14 +371,7 @@ export function ProviderSignInSection({
           )}
         </p>
       ) : (
-        <p role="status">
-          {state.message ??
-            (state.phase === "expired"
-              ? "The sign-in expired. Start again."
-              : state.phase === "cancelled"
-                ? "Sign-in cancelled."
-                : "The sign-in failed. Try again.")}
-        </p>
+        <p role="status">{providerSignInOutcome(state)}</p>
       )}
 
       {terminalFlowId !== null && controller !== null ? (
@@ -423,9 +392,9 @@ export function ProviderSignInSection({
         </div>
       ) : null}
 
-      {snapshot?.error && unavailable === null ? (
+      {error ? (
         <p className="text-destructive-foreground" role="alert">
-          {snapshot.error}
+          {error}
         </p>
       ) : null}
     </section>

@@ -1,7 +1,7 @@
 import { ProviderDriverKind, type ProviderInstanceConfig } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { claudeInstanceSkipsLogin, instanceOffersSignIn } from "./ProviderSignInOffer.logic";
+import { instanceOffersSignIn } from "./ProviderSignInOffer.logic";
 
 function settings(driver: string, names: readonly string[] = []): ProviderInstanceConfig {
   return {
@@ -11,26 +11,7 @@ function settings(driver: string, names: readonly string[] = []): ProviderInstan
   };
 }
 
-describe("claudeInstanceSkipsLogin", () => {
-  it("reads the non-login credentials and provider flags by name", () => {
-    expect(claudeInstanceSkipsLogin(settings("claudeAgent", ["ANTHROPIC_BASE_URL"]))).toBe(true);
-    expect(claudeInstanceSkipsLogin(settings("claudeAgent", ["ANTHROPIC_API_KEY"]))).toBe(true);
-    expect(claudeInstanceSkipsLogin(settings("claudeAgent", ["CLAUDE_CODE_USE_VERTEX"]))).toBe(
-      true,
-    );
-    expect(
-      claudeInstanceSkipsLogin(settings("claudeAgent", ["CLAUDE_CONFIG_DIR", "HTTPS_PROXY"])),
-    ).toBe(false);
-  });
-
-  it("finds nothing without settings or variables", () => {
-    expect(claudeInstanceSkipsLogin(undefined)).toBe(false);
-    expect(claudeInstanceSkipsLogin({ driver: ProviderDriverKind.make("claudeAgent") })).toBe(
-      false,
-    );
-  });
-});
-
+// claudeInstanceSkipsLogin is tested with the shared rule (packages/shared/src/providerSignIn.test.ts).
 describe("instanceOffersSignIn", () => {
   it("offers the drivers that sign in from Ryco", () => {
     for (const driver of ["codex", "claudeAgent", "cursor", "grok", "opencode"]) {

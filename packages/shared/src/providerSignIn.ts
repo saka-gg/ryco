@@ -4,7 +4,12 @@
  *
  * @module providerSignIn
  */
-import type { ServerProvider } from "@ryco/contracts";
+import type { ProviderInstanceConfig, ServerProvider } from "@ryco/contracts";
+
+import {
+  CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES,
+  CLAUDE_THIRD_PARTY_PROVIDER_FLAGS,
+} from "./claudeCredentialVariables.ts";
 
 /**
  * Drivers a node can sign in from Ryco: Codex by device code, the others by their own login in a
@@ -63,5 +68,43 @@ export function providerNeedsSignIn(
     provider.availability !== "unavailable" &&
     PROVIDER_SIGN_IN_DRIVERS.has(provider.driver) &&
     !providerSignInSettled(provider)
+  );
+}
+
+/** Looked up in the lists themselves: a module-level set would stay in bundles that never ask. */
+function isClaudeNonLoginVariable(name: string): boolean {
+  return (
+    (CLAUDE_NON_LOGIN_CREDENTIAL_VARIABLES as readonly string[]).includes(name) ||
+    (CLAUDE_THIRD_PARTY_PROVIDER_FLAGS as readonly string[]).includes(name)
+  );
+}
+
+/**
+ * Whether the instance's own settings name a variable that keeps Claude Code off the local
+ * login, such as a CLIProxyAPI hub's `ANTHROPIC_BASE_URL`. By name alone: a client never sees
+ * the values, so a flag set to "0" counts too. The node checks the values, and its own ambient
+ * environment, before it starts a sign-in.
+ */
+export function claudeInstanceSkipsLogin(instance: ProviderInstanceConfig | undefined): boolean {
+  return (
+    instance?.environment?.some((variable) => isClaudeNonLoginVariable(variable.name)) ?? false
+  );
+}
+
+/**
+ * Whether a client offers Sign in for an instance: it needs a sign-in (`providerNeedsSignIn`), a
+ * proxied Claude instance is left alone, and this session may start one.
+ */
+export function canOfferProviderSignIn(input: {
+  /** The node's snapshot of the instance (`config.providers`). */
+  readonly provider: ServerProvider;
+  /** Its settings (`settings.providerInstances`); absent for a default instance never edited. */
+  readonly instance: ProviderInstanceConfig | undefined;
+  readonly capabilityAllowed: boolean;
+}): boolean {
+  return (
+    input.capabilityAllowed &&
+    providerNeedsSignIn(input.provider) &&
+    !(input.provider.driver === "claudeAgent" && claudeInstanceSkipsLogin(input.instance))
   );
 }

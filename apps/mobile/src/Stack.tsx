@@ -35,6 +35,7 @@ import {
   SettingsClientStorageRouteScreen,
   SettingsHubRouteScreen,
   SettingsInboxRouteScreen,
+  SettingsProviderAccountsRouteScreen,
   SettingsRouteScreen,
   SettingsStatisticsRouteScreen,
   SettingsWorkspaceRouteScreen,
@@ -185,6 +186,11 @@ const SettingsSheetStack = createNativeStackNavigator({
       screen: SettingsStatisticsRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsStatistics.linking,
       options: settingsRouteOptions("SettingsStatistics", "Statistics"),
+    }),
+    SettingsProviderAccounts: createNativeStackScreen({
+      screen: SettingsProviderAccountsRouteScreen,
+      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsProviderAccounts.linking,
+      options: settingsRouteOptions("SettingsProviderAccounts", "Provider accounts"),
     }),
     SettingsInbox: createNativeStackScreen({
       screen: SettingsInboxRouteScreen,

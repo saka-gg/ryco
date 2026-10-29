@@ -136,6 +136,13 @@ export const SettingsHubRouteScreen = lazyScreen(
       require("../features/settings/SettingsHubRouteScreen") as typeof import("../features/settings/SettingsHubRouteScreen")
     ).SettingsHubRouteScreen,
 );
+export const SettingsProviderAccountsRouteScreen = lazyScreen(
+  "SettingsProviderAccountsRouteScreen",
+  () =>
+    (
+      require("../features/settings/SettingsProviderAccountsRouteScreen") as typeof import("../features/settings/SettingsProviderAccountsRouteScreen")
+    ).SettingsProviderAccountsRouteScreen,
+);
 export const SettingsStatisticsRouteScreen = lazyScreen(
   "SettingsStatisticsRouteScreen",
   () =>
