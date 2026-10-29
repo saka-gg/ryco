@@ -49,7 +49,9 @@ commit `467d2f21` (`feat(device): iOS Simulator pane (#529)`). The upstream work
 The SVG device chassis in `apps/web/src/components/device/DeviceFrame.tsx` was subsequently adapted
 from Synara commit `dd88d9272f97e4dda5735281e73ce14de388ad25` under the same license.
 The idle release of Ryco-owned simulators after their last consumer settles was adapted from Synara
-commit `d419d5d40` (#1966) under the same license.
+commit `d419d5d40` (#1966) under the same license. Agent device tool evidence (screen settling, the
+compact screen snapshot), device_wait and the simulator log reader were adapted from Synara commit
+`74e0b3654` (#1924) under the same license.
 
 ### MIT License
 

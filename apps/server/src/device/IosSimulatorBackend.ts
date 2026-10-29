@@ -58,6 +58,8 @@ import {
   type DeviceFrameListener,
   type DeviceKeyEvent,
   type DeviceListOptions,
+  type DeviceLogQuery,
+  type DeviceLogResult,
   type DeviceSwipeGesture,
 } from "./DeviceBackend.ts";
 import { readDeviceTypeCatalogue, type DeviceTypeCatalogue } from "./deviceTypeCatalogue.ts";
@@ -95,6 +97,14 @@ const RECORDING_KILL_GRACE_MS = 1_000;
 const MAX_RECORDING_STDERR_LENGTH = 64 * 1024;
 /** Screenshots are PNG on stdout-adjacent temp files; cap what we will read. */
 const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
+/**
+ * How long a failed helper build answers for itself before it is tried again
+ * on the same toolchain. Agent device tools read the accessibility tree
+ * around every action, and on a Mac whose helper cannot build each read would
+ * otherwise rerun the build (up to five minutes) only to fail the same way. A
+ * new Xcode builds at once; a fix that keeps the Xcode is retried after this.
+ */
+const HELPER_BUILD_RETRY_MS = 60_000;
 
 export const DEVICE_HELPER_CACHE_ROOT = path.join(homedir(), ...DEVICE_HELPER_CACHE_SEGMENTS);
 
@@ -145,6 +155,8 @@ export interface IosSimulatorBackendOptions {
   readonly now?: () => number;
   /** Overridden in tests to exercise DEVELOPER_DIR without mutating process.env. */
   readonly processEnv?: NodeJS.ProcessEnv;
+  /** Where the host writes crash reports; tests point it at a temp directory. */
+  readonly diagnosticReportsDir?: string;
 }
 
 interface ActiveRecording {
@@ -282,6 +294,9 @@ export class IosSimulatorBackend implements DeviceBackend {
   private readonly now: () => number;
   /** Injected so a test can set DEVELOPER_DIR without touching the real process. */
   private readonly processEnv: NodeJS.ProcessEnv;
+  private readonly diagnosticReportsDir: string;
+  /** App executables by `udid:bundleId`, for log reads (see `deviceLogs.ts`). */
+  private readonly executables = new Map<string, Promise<string>>();
 
   /** Geometry learned from helper attachments, keyed by udid. */
   private readonly deviceGeometry = new Map<string, DeviceGeometry>();
@@ -310,6 +325,12 @@ export class IosSimulatorBackend implements DeviceBackend {
   } | null = null;
   private helper: HelperClient | null = null;
   private helperBuildFailure: string | null = null;
+  /** The last failed build, by toolchain key, on the monotonic clock. */
+  private failedHelperBuild: {
+    readonly key: string;
+    readonly at: number;
+    readonly message: string;
+  } | null = null;
   private helperCompilation: Promise<string> | null = null;
   /** Keyed on the binary so a rebuilt helper is re-probed rather than assumed. */
   private helperProbe: { binaryPath: string; result: HelperProbeResult } | null = null;
@@ -376,6 +397,8 @@ export class IosSimulatorBackend implements DeviceBackend {
       ((command, args) => spawn(command, [...args], { stdio: "pipe", windowsHide: true }));
     this.recordingDirectoryOverride = options.recordingDirectory;
     this.now = options.now ?? Date.now;
+    this.diagnosticReportsDir =
+      options.diagnosticReportsDir ?? path.join(homedir(), "Library", "Logs", "DiagnosticReports");
   }
 
   // ── Availability ───────────────────────────────────────────────────
@@ -582,6 +605,22 @@ export class IosSimulatorBackend implements DeviceBackend {
         );
       }
     }
+  }
+
+  async readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult> {
+    // Loaded here so log reading stays off the server's boot graph.
+    const { readSimulatorLogs } = await import("./deviceLogs.ts");
+    return readSimulatorLogs(
+      {
+        simctl: (args, timeoutMs) => this.simctl(args, { timeoutMs }),
+        simctlError: (action, result) => this.simctlError(action, result),
+        diagnosticReportsDir: this.diagnosticReportsDir,
+        now: this.now,
+        executables: this.executables,
+      },
+      udid,
+      query,
+    );
   }
 
   async openUrl(udid: string, url: string): Promise<void> {
@@ -801,6 +840,10 @@ export class IosSimulatorBackend implements DeviceBackend {
     // the encoder to compress it.
     await this.assertCapability("framebuffer");
     await this.assertCapability("encoder");
+    // Attaching a device is a deliberate step (the pane, or an agent's attach, once each), not
+    // one of the reads around every action, so it tries a failed build again at once: the user
+    // may just have fixed what the error named.
+    this.failedHelperBuild = null;
     const helper = await this.attachedHelper(udid);
     await helper.startStream(udid, onFrame);
   }
@@ -1268,11 +1311,18 @@ export class IosSimulatorBackend implements DeviceBackend {
    * Keyed by the Xcode build number because the helper links private
    * frameworks whose symbols move between releases: a cache hit from a previous
    * Xcode would crash at runtime rather than fail to compile. Concurrent
-   * callers share one compilation.
+   * callers share one compilation, and a build that just failed on this
+   * toolchain is not rerun for `HELPER_BUILD_RETRY_MS`.
    */
   async compileHelperIfNeeded(): Promise<string> {
     const cached = await this.cachedHelperPath();
     if (cached) return cached;
+    const failed = this.failedHelperBuild;
+    if (failed !== null && performance.now() - failed.at < HELPER_BUILD_RETRY_MS) {
+      if ((await this.xcodeBuildKey()) === failed.key) {
+        throw new DeviceBackendError(failed.message);
+      }
+    }
     this.helperCompilation ??= this.compileHelper().finally(() => {
       this.helperCompilation = null;
     });
@@ -1281,7 +1331,12 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   private async compileHelper(): Promise<string> {
     const buildScript = path.join(this.helperSourceDir, "build.sh");
-    const outputDirectory = path.join(this.helperCacheRoot, await this.xcodeBuildKey());
+    const key = await this.xcodeBuildKey();
+    const outputDirectory = path.join(this.helperCacheRoot, key);
+    const buildFailure = (message: string) => {
+      this.failedHelperBuild = { key, at: performance.now(), message };
+      return this.recordHelperFailure(message);
+    };
     const result = await this.run("/bin/sh", [buildScript, outputDirectory], {
       timeoutMs: 300_000,
       allowNonZeroExit: true,
@@ -1290,13 +1345,13 @@ export class IosSimulatorBackend implements DeviceBackend {
       // against the same Xcode the rest of the session talks to.
       env: await this.toolchainEnv(),
     }).catch((error: unknown) => {
-      throw this.recordHelperFailure(
+      throw buildFailure(
         error instanceof Error ? error.message : "Device helper build could not start",
       );
     });
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim();
-      throw this.recordHelperFailure(
+      throw buildFailure(
         `Device helper build failed${detail ? `: ${detail}` : ""}. Verify Xcode is installed and its license accepted.`,
       );
     }
@@ -1306,9 +1361,10 @@ export class IosSimulatorBackend implements DeviceBackend {
       () => false,
     );
     if (!exists) {
-      throw this.recordHelperFailure("Device helper build produced no binary");
+      throw buildFailure("Device helper build produced no binary");
     }
     this.helperBuildFailure = null;
+    this.failedHelperBuild = null;
     return binaryPath;
   }
 

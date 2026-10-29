@@ -64,7 +64,8 @@ export class DeviceUiTargetError extends Error {
 /** How many near-misses to name; a whole screen of labels is noise, not help. */
 const MAX_REPORTED_CANDIDATES = 12;
 
-function flatten(root: DeviceUiNode): DeviceUiNode[] {
+/** Every node in the tree, depth first, the root included. */
+export function flattenUiTree(root: DeviceUiNode): DeviceUiNode[] {
   const out: DeviceUiNode[] = [];
   const walk = (node: DeviceUiNode): void => {
     out.push(node);
@@ -76,7 +77,7 @@ function flatten(root: DeviceUiNode): DeviceUiNode[] {
 
 /** Every label currently rendered, used to tell a moving list from a stuck one. */
 export function visibleLabels(root: DeviceUiNode): string[] {
-  return flatten(root)
+  return flattenUiTree(root)
     .filter((node) => node.label !== null && node.label.length > 0)
     .map((node) => node.label as string);
 }
@@ -102,7 +103,7 @@ function matchesRole(node: DeviceUiNode, role: string): boolean {
 }
 
 /** A node is on screen when the point we would tap is inside the root's frame. */
-function isOnScreen(node: DeviceUiNode, root: DeviceUiNode): boolean {
+export function isOnScreen(node: DeviceUiNode, root: DeviceUiNode): boolean {
   const point = tapPointForNode(node);
   return (
     point.x >= root.frame.x &&
@@ -135,7 +136,9 @@ export function findTarget(root: DeviceUiNode, target: DeviceUiTarget): DeviceUi
     throw new DeviceUiTargetError("A tap target needs a non-empty label.");
   }
 
-  const labelled = flatten(root).filter((node) => node.label !== null && node.label.length > 0);
+  const labelled = flattenUiTree(root).filter(
+    (node) => node.label !== null && node.label.length > 0,
+  );
   const byRole =
     target.role === undefined
       ? labelled

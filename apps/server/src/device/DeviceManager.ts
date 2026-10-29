@@ -54,6 +54,8 @@ import {
   type DeviceBackend,
   type DeviceDiscovery,
   type DeviceKeyEvent,
+  type DeviceLogQuery,
+  type DeviceLogResult,
   type DeviceSwipeGesture,
 } from "./DeviceBackend.ts";
 import { DeviceFrameTransport, type DeviceFrameSink } from "./deviceFrameTransport.ts";
@@ -994,12 +996,28 @@ export class DeviceManager {
         match === null ? this.pageDownStep(tree.root) : planScrollStep(match.node, tree.root);
       if (step === null) return match as DeviceUiTargetMatch;
 
+      const positionBefore = match === null ? null : match.node.frame.y;
       assertCurrent();
       await this.withDeviceAction(udid, () => this.backend.swipe(udid, step));
       assertCurrent();
       tree = await this.describeUi(udid);
       assertCurrent();
       match = this.locate(tree.root, target);
+
+      // Fixed chrome (a navigation bar's back button, a tab bar item) and the
+      // last rows of a list at its end sit outside the safe band and cannot be
+      // scrolled into it. A visible target that one swipe left where it was is
+      // tapped in place rather than reported out of reach. (Synara #1924 does
+      // this for identified navigation and tab bars; this node's tree has no
+      // such containers, so not moving is the evidence.)
+      if (
+        match !== null &&
+        match.onScreen &&
+        positionBefore !== null &&
+        Math.abs(match.node.frame.y - positionBefore) < 0.5
+      ) {
+        return match;
+      }
 
       // A list at its end keeps rendering the same thing; swiping again would
       // burn the whole budget to no effect. Compared across the visible labels
@@ -1101,6 +1119,10 @@ export class DeviceManager {
 
   async testing(input: DeviceTestingInput): Promise<void> {
     await this.withDeviceAction(input.udid, () => this.backend.testing(input));
+  }
+
+  async readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult> {
+    return await this.backend.readLogs(udid, query);
   }
 
   async openUrl(udid: string, url: string): Promise<void> {

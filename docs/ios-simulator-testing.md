@@ -22,12 +22,32 @@ and notification permission overrides are not offered by this drawer. Runtime-sp
 failures are displayed and can be retried. The drawer does not retain bundle IDs, locations
 or push payloads across target/thread/connection-generation changes.
 
+## Agents
+
+Agents apply the same settings with the `device_configure` tool and read an app's unified
+log (os_log, Logger, NSLog) and recent crash reports with `device_logs`; both work on iOS
+simulators attached to this node only. Crash reports are returned by file name, never by
+path, and `print`/stdout is not captured. Agent inputs (tap, swipe, type, press a button,
+scroll to an element, launch, open a URL) wait for the screen to settle and return a
+settled flag, whether the screen changed, and a compact text snapshot of the screen;
+`device_wait` waits for a labelled element or a still screen without sending input.
+
 ## Boundaries
 
-`DeviceTestingInput` travels through the existing owner-only `device.app` RPC and the
-shared client-runtime device facade. The backend validates before spawning commands,
-requires an explicit booted target, and keeps the selected Xcode environment. It never
-boots or attaches a simulator, changes boot ownership, starts a helper, or modifies
+From the drawer, `DeviceTestingInput` travels through the existing owner-only `device.app`
+RPC and the shared client-runtime device facade. The same input has a second path: an
+agent's `device_configure` call on the provider device gateway (loopback-only, bound to
+one thread and accepted only during its active turn). That path is not owner-only. With
+Agent Control off, Ryco adds no approval of its own there; the provider's native tool
+approvals apply (Claude asks before every MCP call except in full-access mode, and auto mode
+uses Claude's own classifier).
+While Agent Control holds the thread, the gateway hides the tool. A gateway call also
+attaches the device to the agent's thread and opens the pane, like the gateway's other
+device tools.
+
+Both paths share the backend, which validates before spawning commands, requires an
+explicit booted target, and keeps the selected Xcode environment. The testing action
+itself never boots a simulator, changes boot ownership, starts a helper, or modifies
 hosted authorization/reconnect policy. Screenshot, recording and accessibility paths
 remain independent. No Android, multi-host or web phone-tier changes are included.
 

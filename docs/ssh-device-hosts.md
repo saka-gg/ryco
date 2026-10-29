@@ -49,7 +49,9 @@ then launch it by bundle ID. Existing project-artifact approvals remain scoped t
 coding node's filesystem; they never authorize a different artifact at the same path
 on a remote Mac. This does not transfer build outputs or forward Metro/dev-server ports. Saved screenshots and recordings on
 SSH hosts are currently refused so remote paths cannot be mistaken for coding-node
-artifacts; screenshots without `save` return PNG bytes normally.
+artifacts; screenshots without `save` return PNG bytes normally. The agent tools
+`device_logs` and `device_configure` are unavailable on SSH hosts; agent input still
+returns the settled screen, read over the SSH connection.
 
 The existing device manager retains the global Ryco boot cap, thread attachments,
 agent authorization, owner-only mutations and user-boot preservation. There are no new
