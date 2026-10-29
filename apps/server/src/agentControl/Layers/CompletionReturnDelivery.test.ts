@@ -452,6 +452,10 @@ it.effect(
       const command = h.sent[0]!;
       assert.include(command.message.text, "Ryco delegation update (automatic message");
       assert.include(command.message.text, '"truncated":true');
+      assert.include(
+        command.message.text,
+        '"readMore":"ryco_task_status with taskId child returns the whole result in pages."',
+      );
       assert.include(command.message.text, "Untrusted child output");
       assert.include(command.message.text, "/ryco/thread/parent");
       assert.isBelow(command.message.text.length, 12000);
@@ -2046,6 +2050,7 @@ it.effect(
         VALUES ('child-narration', 'child', 'child-turn', 'assistant', 'Revenue grew 40%.', 0, ${at(1)}, ${at(1)})`;
       assert.deepEqual(yield* h.repo.output(child, turn), {
         text: "Revenue grew 40%.",
+        messageId: MessageId.make("child-narration"),
         streaming: 0,
       });
       yield* h.ack();
@@ -2062,6 +2067,7 @@ it.effect(
         VALUES ('child-file', 'child', 'child-turn', 'assistant', ' ', ${file}, 0, ${at(3)}, ${at(3)})`;
       assert.deepEqual(yield* h.repo.output(child, turn), {
         text: "[Published HTML page: Revenue chart]\n[Attached file: data.csv]",
+        messageId: null,
         streaming: 0,
       });
     }).pipe(Effect.provide(layer)),

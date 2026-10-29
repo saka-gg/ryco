@@ -341,7 +341,7 @@ const readDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
     ],
     [
       AGENT_CONTROL_EXTERNAL_MCP_TOOLS.readThread,
-      "Read one thread's status header and a bounded, newest-first page of its messages. Threads outside allowed projects read as not found.",
+      "Read one thread's status header and a bounded, newest-first page of its messages. Threads outside allowed projects read as not found. A message cut short carries version and nextOffsetChars: pass them with its messageId as message to read the rest.",
     ],
     [
       AGENT_CONTROL_EXTERNAL_MCP_TOOLS.searchThreads,

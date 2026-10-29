@@ -560,13 +560,24 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.readThread,
     description:
-      "Read one thread's status header and a bounded, newest-first page of its conversation messages (cursor pages older history).",
+      "Read one thread's status header and a bounded, newest-first page of its conversation messages (cursor pages older history). A message cut short carries version and nextOffsetChars: pass them with its messageId as message to read the rest.",
     inputSchema: {
       type: "object",
       properties: {
         threadId: { type: "string", maxLength: 256 },
         messageLimit: limitSchemaProperty(AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX),
         cursor: cursorSchemaProperty,
+        message: {
+          type: "object",
+          description: "Continue one long message instead of reading a page; not with cursor.",
+          properties: {
+            messageId: { type: "string", maxLength: 256 },
+            version: { type: "string", maxLength: 64 },
+            offsetChars: { type: "integer", minimum: 0 },
+          },
+          required: ["messageId", "version", "offsetChars"],
+          additionalProperties: false,
+        },
       },
       required: ["threadId"],
       additionalProperties: false,

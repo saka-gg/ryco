@@ -4,7 +4,9 @@ import {
   AGENT_CONTROL_DELEGATION_MCP_TOOLS,
   AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES,
   AGENT_CONTROL_MCP_TOOLS,
+  AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
   AgentControlProposal,
+  MessageId,
   OrchestrationThreadShell,
   ProviderInstanceId,
   RuntimeSessionId,
@@ -172,6 +174,26 @@ const setupWith = (options: { readonly cancelRaces?: number } = {}) =>
     let authorityThread: string | null = "parent";
     const baseCalls: Array<{ name: string; args: unknown; returnStatus: string | undefined }> = [];
     const projections = {
+      getThreadMessageById: (input: { readonly threadId: ThreadId; readonly messageId: string }) =>
+        sql<{ text: string; createdAt: string; updatedAt: string; streaming: number }>`
+          SELECT text, created_at AS "createdAt", updated_at AS "updatedAt", is_streaming AS streaming
+          FROM projection_thread_messages
+          WHERE thread_id = ${input.threadId} AND message_id = ${input.messageId}`.pipe(
+          Effect.orDie,
+          Effect.map(([row]) =>
+            row === undefined
+              ? Option.none()
+              : Option.some({
+                  id: MessageId.make(input.messageId),
+                  role: "assistant" as const,
+                  text: row.text,
+                  turnId: TurnId.make("child-turn"),
+                  streaming: row.streaming !== 0,
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
+                }),
+          ),
+        ),
       getThreadShellById: (id: ThreadId) =>
         Effect.succeed(
           id === "child"
@@ -363,6 +385,68 @@ it.effect("returns redacted untrusted results and only a pending-question flag",
     assert.isTrue(task!.run.hasPendingUserInput);
     assert.equal(task!.run.state, "completed");
     assert.notInclude(JSON.stringify(result), QUESTION);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("pages a long result read by id, redacted whole so no page shows part of a secret", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    yield* h.ack();
+    // The token straddles the first page boundary of the raw text.
+    const raw = `${"a".repeat(AGENT_CONTROL_TASK_RESULT_MAX_CHARS - 20)} ${TOKEN} ${"b".repeat(15_000)}`;
+    yield* h.sql`UPDATE projection_thread_messages SET text = ${raw} WHERE message_id = 'answer'`;
+    type Page = {
+      readonly text: string;
+      readonly truncated: boolean;
+      readonly version?: string;
+      readonly offsetChars?: number;
+      readonly totalChars?: number;
+      readonly nextOffsetChars?: number | null;
+    };
+    const readPage = (args: unknown) =>
+      h
+        .call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, args)
+        .pipe(
+          Effect.map(
+            (result) => (structured(result).tasks[0] as unknown as { result: Page }).result,
+          ),
+        );
+
+    const first = yield* readPage({ taskId: "child" });
+    assert.isTrue(first.truncated);
+    assert.equal(first.offsetChars, 0);
+    let text = first.text;
+    let next = first.nextOffsetChars ?? null;
+    while (next !== null) {
+      const page = yield* readPage({
+        taskId: "child",
+        result: { version: first.version, offsetChars: next },
+      });
+      assert.equal(page.offsetChars, next);
+      text += page.text;
+      next = page.nextOffsetChars ?? null;
+    }
+    assert.equal(text.length, first.totalChars);
+    assert.include(text, "[REDACTED]");
+    assert.notInclude(text, "rycoac_");
+    assert.isTrue(text.endsWith("b".repeat(100)));
+
+    // A list shows the start only, without a continuation.
+    const [listed] = structured(yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, {}))
+      .tasks as unknown as ReadonlyArray<{ result: Page }>;
+    assert.isTrue(listed!.result.truncated);
+    assert.isUndefined(listed!.result.version);
+
+    // A changed result or a continuation without a task id is refused.
+    yield* h.sql`UPDATE projection_thread_messages SET text = ${`${raw}!`} WHERE message_id = 'answer'`;
+    for (const args of [
+      { taskId: "child", result: { version: first.version, offsetChars: 10 } },
+      { result: { version: first.version, offsetChars: 10 } },
+    ]) {
+      const refused = yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, args);
+      assert.isTrue(refused.isError);
+      assert.include(refused.content[0]?.text ?? "", "That result page is unavailable");
+    }
   }).pipe(Effect.provide(layer)),
 );
 

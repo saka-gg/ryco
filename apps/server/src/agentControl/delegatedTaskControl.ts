@@ -16,6 +16,7 @@ import {
   type AgentControlTaskStatusResult,
   type OrchestrationThreadShell,
   type ThreadId,
+  type TurnId,
 } from "@ryco/contracts";
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { Effect, Option, Schema } from "effect";
@@ -32,9 +33,15 @@ import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/Pro
 import { publishCompletionReturns } from "./completionReturnPublish.ts";
 import { redactAgentControlSecrets } from "./ProviderInjection.ts";
 import type { AgentControlProposalEventsShape } from "./Services/AgentControlProposalEvents.ts";
+import { loadMessagePages, MESSAGE_PAGE_LIMITS } from "./Mcp/threadReads.ts";
 
 export class DelegatedTaskNotOwned {
   readonly _tag = "DelegatedTaskNotOwned";
+}
+
+/** A result continuation named a version or offset the task's result no longer has. */
+export class DelegatedTaskResultChanged {
+  readonly _tag = "DelegatedTaskResultChanged";
 }
 
 export const DELEGATED_TASK_ACK_DETAIL =
@@ -61,15 +68,21 @@ export interface DelegatedTaskControlDeps {
   >;
   readonly proposals: Pick<AgentControlProposalRepositoryShape, "getById">;
   readonly events: Pick<AgentControlProposalEventsShape, "publish">;
-  readonly projections: Pick<ProjectionSnapshotQueryShape, "getThreadShellById">;
+  readonly projections: Pick<
+    ProjectionSnapshotQueryShape,
+    "getThreadShellById" | "getThreadMessageById"
+  >;
   readonly sql: SqlClient.SqlClient;
 }
 
-const redact = (text: string) =>
-  redactDiagnosticText(String(redactAgentControlSecrets(text))).slice(
-    0,
-    AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
-  );
+/** Redacts a whole text; slicing happens after, so a cut never splits a secret. */
+const redact = (text: string) => redactDiagnosticText(String(redactAgentControlSecrets(text)));
+
+/** Where a result read starts: its version and offset. */
+interface ResultContinuation {
+  readonly version: string;
+  readonly offsetChars: number;
+}
 
 export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
   const publish = (record: CompletionReturnRecord) =>
@@ -97,22 +110,60 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
       return !(turn?.pendingMessageId?.startsWith(DELEGATION_WAKE_MESSAGE_PREFIX) ?? false);
     });
 
-  const describe = (record: CompletionReturnRecord, acknowledged: boolean) =>
+  /**
+   * The child's result as one page. With `whole` (a read of one task) the reply message
+   * is read whole, so it can be paged; a list shows only its start.
+   */
+  const resultPage = (
+    record: CompletionReturnRecord,
+    settled: { readonly turnId: TurnId; readonly state: "completed" | "error" },
+    whole: boolean,
+    continuation: ResultContinuation | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const output = yield* deps.repository.output(record.childThreadId, settled.turnId);
+      const message =
+        whole && output.messageId !== null && deps.projections.getThreadMessageById !== undefined
+          ? Option.getOrNull(
+              yield* deps.projections.getThreadMessageById({
+                threadId: record.childThreadId,
+                messageId: output.messageId,
+              }),
+            )
+          : null;
+      const page = (yield* loadMessagePages).pageTaskResult({
+        state: settled.state,
+        text: output.text,
+        whole: message,
+        redact,
+        continuation,
+        limits: MESSAGE_PAGE_LIMITS,
+      });
+      if (page === null) return yield* Effect.fail(new DelegatedTaskResultChanged());
+      return page;
+    });
+
+  const describe = (
+    record: CompletionReturnRecord,
+    acknowledged: boolean,
+    read: { readonly whole: boolean; readonly continuation?: ResultContinuation | undefined },
+  ) =>
     Effect.gen(function* () {
       const shell = yield* deps.projections.getThreadShellById(record.childThreadId);
       const child = Option.getOrNull(shell);
       const settled = record.settled;
       const result =
         settled && (settled.state === "completed" || settled.state === "error")
-          ? yield* deps.repository.output(record.childThreadId, settled.turnId).pipe(
-              Effect.map((output) => ({
-                untrustedChildOutput: true as const,
-                state: settled.state as "completed" | "error",
-                text: redact(output.text.slice(0, AGENT_CONTROL_TASK_RESULT_MAX_CHARS)),
-                truncated: output.text.length > AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
-              })),
+          ? yield* resultPage(
+              record,
+              { turnId: settled.turnId, state: settled.state },
+              read.whole,
+              read.continuation,
             )
           : null;
+      if (read.continuation !== undefined && result === null) {
+        return yield* Effect.fail(new DelegatedTaskResultChanged());
+      }
       // The server-authored notice a wake would carry (no child text). It stays on the row,
       // so an acknowledged notice remains readable.
       const capture = record.capture;
@@ -126,7 +177,7 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
       return {
         taskId: record.childThreadId,
         proposalId: record.proposalId,
-        title: child ? redact(child.title) : null,
+        title: child ? redact(child.title).slice(0, AGENT_CONTROL_TASK_RESULT_MAX_CHARS) : null,
         return: { status: record.status, detail: record.detail, updatedAt: record.updatedAt },
         run: {
           state: yield* runState(record),
@@ -169,6 +220,8 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
   const status = (input: {
     readonly callerThreadId: ThreadId;
     readonly taskId?: ThreadId | undefined;
+    /** Read on in the task's result; requires `taskId`. */
+    readonly result?: ResultContinuation | undefined;
     /** The caller holds exact active-turn authority for its own thread. */
     readonly exactTurn: boolean;
     readonly now: string;
@@ -178,6 +231,9 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
       // one tool result, so marking every listed row read could drop content unseen; its
       // tasks still arrive in a wake.
       const acknowledges = input.exactTurn && input.taskId !== undefined;
+      if (input.result !== undefined && input.taskId === undefined) {
+        return yield* Effect.fail(new DelegatedTaskResultChanged());
+      }
       let rows: ReadonlyArray<CompletionReturnRecord>;
       if (input.taskId !== undefined) {
         const row = yield* deps.repository.get(input.taskId);
@@ -195,7 +251,12 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
         const acked = acknowledges
           ? yield* acknowledge(row, input.now)
           : { record: row, acknowledged: false };
-        tasks.push(yield* describe(acked.record, acked.acknowledged));
+        tasks.push(
+          yield* describe(acked.record, acked.acknowledged, {
+            whole: input.taskId !== undefined,
+            continuation: input.result,
+          }),
+        );
       }
       return {
         tasks,

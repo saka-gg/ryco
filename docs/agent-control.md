@@ -86,7 +86,8 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   one section per task (at most 10 sections and 100,000 characters; the rest follow in the next
   message). Each section links the child and the originating chat.
 - **Results and notices.** A finished task returns its final answer as JSON-escaped, untrusted
-  reference data (8,000 characters at most), never as instructions or approval. A task that was
+  reference data (the first 8,000 characters; the wake says when there is more), never as
+  instructions or approval. A task that was
   interrupted, stopped (for example by a restart; it is not resumed), failed to start, received
   someone else's follow-up, was archived or deleted, whose request failed, or that did not finish
   within 24 hours returns a server-written notice instead, with no child text. A task that itself
@@ -114,6 +115,14 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   the agent in full. `ryco_task_cancel` stops the automatic return first and then interrupts the
   task's running turn through the normal routine interrupt request. If the return is changing at
   that moment, it does not interrupt and asks for a retry.
+- **Long results and messages.** A result read by `taskId` comes in pages of 8,000 characters:
+  the reply is redacted as a whole first, so a page never shows part of a secret, and each page
+  carries `version`, `offsetChars`, `totalChars` and `nextOffsetChars`. Passing `result: { version,
+  offsetChars }` reads on. `ryco_read_thread` does the same for any message it cuts short (a
+  message over 8,000 characters, or older messages past the page's 80,000-character budget): pass
+  `message: { messageId, version, offsetChars }` to read up to 20,000 more characters. A message
+  that is still streaming has no continuation yet, and a continuation of a message that changed
+  since is refused. Offsets count UTF-16 code units and a page never splits a surrogate pair.
 - **Scope of the tools.** They cover only tasks created with `returnToOrigin` by this chat. Local
   Tasks and the standalone integrations' `ryco_read_task` / `ryco_wait_for_task` are separate.
   Return progress is also visible as `completionReturns` on the delegation request

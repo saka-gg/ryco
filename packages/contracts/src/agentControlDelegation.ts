@@ -1,5 +1,11 @@
 import * as Schema from "effect/Schema";
-import { IsoDateTime, ThreadId, rejectExcessProperties } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+  rejectExcessProperties,
+} from "./baseSchemas.ts";
 import {
   AgentControlCompletionReturn,
   AgentControlProposalId,
@@ -19,6 +25,8 @@ export const AGENT_CONTROL_DELEGATION_MCP_TOOLS = {
 
 export const AGENT_CONTROL_TASK_STATUS_MAX_TASKS = 20;
 export const AGENT_CONTROL_TASK_RESULT_MAX_CHARS = 8_000;
+/** Opaque version of a task result's text; a continuation must name the version it continues. */
+export const AGENT_CONTROL_TASK_RESULT_VERSION_MAX_CHARS = 64;
 export const AGENT_CONTROL_TASK_NOTICE_MAX_CHARS = 4_000;
 
 /** Child-side terminal outcomes a task returns as a server-authored notice instead of a result. */
@@ -33,8 +41,22 @@ export const AgentControlTaskNoticeOutcome = Schema.Literals([
 ]);
 export type AgentControlTaskNoticeOutcome = typeof AgentControlTaskNoticeOutcome.Type;
 
+export const AgentControlTaskResultVersion = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(AGENT_CONTROL_TASK_RESULT_VERSION_MAX_CHARS),
+);
+
 export const AgentControlTaskStatusInput = Schema.Struct({
   taskId: Schema.optional(ThreadId),
+  /**
+   * Read on in a long result: the `version` and `nextOffsetChars` a previous read of
+   * the same task reported. Requires `taskId`. Offsets count UTF-16 code units.
+   */
+  result: Schema.optional(
+    Schema.Struct({
+      version: AgentControlTaskResultVersion,
+      offsetChars: NonNegativeInt,
+    }).pipe(rejectExcessProperties),
+  ),
 }).pipe(rejectExcessProperties);
 export type AgentControlTaskStatusInput = typeof AgentControlTaskStatusInput.Type;
 
@@ -79,6 +101,17 @@ export const AgentControlTaskStatusEntry = Schema.Struct({
       state: Schema.Literals(["completed", "error"]),
       text: Schema.String.check(Schema.isMaxLength(AGENT_CONTROL_TASK_RESULT_MAX_CHARS)),
       truncated: Schema.Boolean,
+      /**
+       * Set when `text` is a slice of a longer result: pass `version` and
+       * `nextOffsetChars` back as `result` (with this `taskId`) to read on.
+       */
+      version: Schema.optional(AgentControlTaskResultVersion),
+      /** Where `text` starts in the whole (redacted) result. */
+      offsetChars: Schema.optional(NonNegativeInt),
+      /** Length of the whole (redacted) result. */
+      totalChars: Schema.optional(NonNegativeInt),
+      /** Where the next slice starts; null once `text` reaches the end. */
+      nextOffsetChars: Schema.optional(Schema.NullOr(NonNegativeInt)),
     }),
   ),
   /**

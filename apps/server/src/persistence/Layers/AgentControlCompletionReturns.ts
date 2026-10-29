@@ -341,6 +341,8 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   /**
    * The turn's reply: the message the turn is keyed on, else its latest
    * non-blank assistant message, else a note of the pages and files it showed.
+   * The text is cut a little past what a result shows; `messageId` names the
+   * reply message (null for the notes), so a reader can page its whole text.
    */
   const output = (threadId: ThreadId, turnId: TurnId) =>
     safe(
@@ -351,11 +353,12 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
           streaming: number;
         }>`
     SELECT
-      (SELECT substr(${messageText}, 1, 8001)
+      (SELECT json_object('id', m.message_id, 'text', substr(${messageText}, 1, 8001))
         FROM projection_turns t JOIN projection_thread_messages m ON m.message_id = t.assistant_message_id
           AND m.thread_id = t.thread_id AND m.turn_id = t.turn_id AND m.role = 'assistant'
         WHERE t.thread_id = ${threadId} AND t.turn_id = ${turnId} LIMIT 1) AS chosen,
-      (SELECT substr(${messageText}, 1, 8001) FROM projection_thread_messages m
+      (SELECT json_object('id', m.message_id, 'text', substr(${messageText}, 1, 8001))
+        FROM projection_thread_messages m
         WHERE m.thread_id = ${threadId} AND m.turn_id = ${turnId} AND m.role = 'assistant'
           AND trim(${messageText}, ${BLANK_CHARACTERS}) <> ''
         ORDER BY m.created_at DESC, m.message_id DESC LIMIT 1) AS latest,
@@ -363,12 +366,15 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
         AND live.turn_id = ${turnId} AND live.is_streaming <> 0) AS streaming
   `;
         const streaming = row?.streaming ?? 0;
-        const reply = [row?.chosen, row?.latest].find(
-          (text): text is string => typeof text === "string" && text.trim().length > 0,
-        );
-        if (reply !== undefined) return { text: reply, streaming };
+        const reply = [row?.chosen, row?.latest]
+          .map((json) =>
+            typeof json === "string" ? (JSON.parse(json) as { id: string; text: unknown }) : null,
+          )
+          .find((candidate) => typeof candidate?.text === "string" && candidate.text.trim() !== "");
+        if (reply)
+          return { text: reply.text as string, messageId: MessageId.make(reply.id), streaming };
         const notes = yield* attachmentNotes(threadId, turnId);
-        return { text: notes.join("\n"), streaming };
+        return { text: notes.join("\n"), messageId: null, streaming };
       }),
     );
   const observe = (input: {

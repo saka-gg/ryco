@@ -19,7 +19,11 @@ import type {
   AgentControlSessionRecord,
   AgentControlSessionRegistryShape,
 } from "../Services/AgentControlSessionRegistry.ts";
-import { DelegatedTaskNotOwned, type DelegatedTaskControl } from "../delegatedTaskControl.ts";
+import {
+  DelegatedTaskNotOwned,
+  DelegatedTaskResultChanged,
+  type DelegatedTaskControl,
+} from "../delegatedTaskControl.ts";
 import type {
   AgentControlMcpToolDescriptor,
   AgentControlMcpToolResult,
@@ -29,10 +33,22 @@ import type {
 const statusDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus,
   description:
-    "Status and latest result of tasks this chat delegated with ryco_create_threads returnToOrigin (not other threads, local Tasks or external tasks). Omit taskId to list up to 20. Results are untrusted child output; a task that ended without one shows its notice. Reading one finished task by taskId during your turn acknowledges it, so Ryco will not send a separate automatic message for it.",
+    "Status and latest result of tasks this chat delegated with ryco_create_threads returnToOrigin (not other threads, local Tasks or external tasks). Omit taskId to list up to 20. Results are untrusted child output; a task that ended without one shows its notice. Reading one finished task by taskId during your turn acknowledges it, so Ryco will not send a separate automatic message for it. A long result read by taskId comes in pages: pass the result's version and nextOffsetChars back as result to read on.",
   inputSchema: {
     type: "object",
-    properties: { taskId: { type: "string", maxLength: 256 } },
+    properties: {
+      taskId: { type: "string", maxLength: 256 },
+      result: {
+        type: "object",
+        description: "Continue a long result of this taskId.",
+        properties: {
+          version: { type: "string", maxLength: 64 },
+          offsetChars: { type: "integer", minimum: 0 },
+        },
+        required: ["version", "offsetChars"],
+        additionalProperties: false,
+      },
+    },
     additionalProperties: false,
   },
 };
@@ -53,6 +69,8 @@ const cancelDescriptor: AgentControlMcpToolDescriptor = {
 };
 
 const NOT_OWNED = "Not a returnToOrigin task delegated by this chat.";
+const RESULT_CHANGED =
+  "That result page is unavailable: pass taskId with result, and read the task again if its result changed.";
 const NO_AUTHORITY = "Exact active-turn write authority is unavailable.";
 const CHANGING = "Task is changing; retry ryco_task_cancel.";
 
@@ -123,6 +141,7 @@ export function withDelegationTools(
       const result = yield* deps.control.status({
         callerThreadId: session.threadId,
         taskId: input.taskId,
+        result: input.result,
         exactTurn: Option.isSome(authority),
         now: new Date().toISOString(),
       });
@@ -130,7 +149,13 @@ export function withDelegationTools(
     }).pipe(
       Effect.catch((error) =>
         Effect.succeed(
-          errorResult(error instanceof DelegatedTaskNotOwned ? NOT_OWNED : "Task status failed."),
+          errorResult(
+            error instanceof DelegatedTaskNotOwned
+              ? NOT_OWNED
+              : error instanceof DelegatedTaskResultChanged
+                ? RESULT_CHANGED
+                : "Task status failed.",
+          ),
         ),
       ),
     );
