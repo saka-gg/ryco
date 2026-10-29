@@ -1,3 +1,4 @@
+import * as NodePath from "node:path";
 import { Effect, Schema } from "effect";
 import { NodeServices } from "@effect/platform-node";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,13 +16,14 @@ import { makeProviderHandlers } from "./providerRpc.ts";
 import { ServerConfig } from "../config.ts";
 
 const mocks = vi.hoisted(() => ({
+  catalog: vi.fn(),
   search: vi.fn(),
   install: vi.fn(),
   methods: vi.fn(),
   authenticate: vi.fn(),
 }));
 vi.mock("../provider/acp/AcpRegistryCatalog.ts", () => ({
-  makeAcpRegistryCatalog: () => ({ search: mocks.search, install: mocks.install }),
+  makeAcpRegistryCatalog: (...args: unknown[]) => mocks.catalog(...args),
 }));
 vi.mock("../provider/acp/AcpRegistrySupport.ts", () => ({
   getAcpRegistryAuthMethods: (...args: unknown[]) => mocks.methods(...args),
@@ -39,10 +41,10 @@ const settings = Schema.decodeSync(ServerSettings)({
   },
 });
 const config = { stateDir: "/test-state" } as ServerConfig["Service"];
-function handlers(role: "owner" | "operator" | "viewer", value = settings) {
+function handlers(role: "owner" | "operator" | "viewer", value = settings, stateDir?: string) {
   const principal = relayRpcPrincipal(role, "test-channel");
   return makeProviderHandlers({
-    config,
+    config: stateDir === undefined ? config : { ...config, stateDir },
     ownerEffect: <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) => {
       const access = rpcAccessFor(method);
       expect(["operator", "owner"]).toContain(access);
@@ -63,6 +65,7 @@ const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   );
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.catalog.mockImplementation(() => ({ search: mocks.search, install: mocks.install }));
   mocks.search.mockResolvedValue([]);
   mocks.install.mockResolvedValue({ agentId: "test", version: "1.2.3", sha256: "a".repeat(64) });
   mocks.methods.mockReturnValue(Effect.succeed([{ id: "login", name: "Sign in" }]));
@@ -81,6 +84,42 @@ describe("ACP registry RPC boundaries", () => {
       expect(mocks.authenticate).not.toHaveBeenCalled();
     },
   );
+  it("loads one catalog on first use and shares it across connections", async () => {
+    const stateDir = "/test-state-shared";
+    const viewer = handlers("viewer", settings, stateDir);
+    const owner = handlers("owner", settings, stateDir);
+    expect(mocks.catalog).not.toHaveBeenCalled();
+    await Promise.all([
+      run(viewer[WS_METHODS.serverSearchAcpRegistry]({ query: "a" })),
+      run(owner[WS_METHODS.serverSearchAcpRegistry]({ query: "b" })),
+    ]);
+    await run(owner[WS_METHODS.serverInstallAcpRegistry]({ agentId: "test", version: "1.2.3" }));
+    expect(mocks.catalog).toHaveBeenCalledTimes(1);
+    expect(mocks.catalog).toHaveBeenCalledWith({
+      installationRoot: NodePath.join(stateDir, "acp-registry"),
+    });
+    expect(mocks.install).toHaveBeenCalledTimes(1);
+    // Another state directory gets its own catalog.
+    await run(
+      handlers("viewer", settings, "/test-state-other")[WS_METHODS.serverSearchAcpRegistry]({
+        query: "c",
+      }),
+    );
+    expect(mocks.catalog).toHaveBeenCalledTimes(2);
+  });
+  it("loads the catalog again after a failed load", async () => {
+    mocks.catalog.mockImplementationOnce(() => {
+      throw new Error("load failed");
+    });
+    const rpc = handlers("viewer", settings, "/test-state-retry");
+    await expect(run(rpc[WS_METHODS.serverSearchAcpRegistry]({ query: "a" }))).rejects.toThrow(
+      "ACP Registry operation failed",
+    );
+    await expect(run(rpc[WS_METHODS.serverSearchAcpRegistry]({ query: "a" }))).resolves.toEqual({
+      agents: [],
+    });
+    expect(mocks.catalog).toHaveBeenCalledTimes(2);
+  });
   it.each(["viewer", "operator"] as const)(
     "denies %s execution before touching the catalog or provider settings",
     async (role) => {

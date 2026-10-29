@@ -7,7 +7,6 @@ import {
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import * as NodePath from "node:path";
 import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
-import { makeAcpRegistryCatalog } from "../provider/acp/AcpRegistryCatalog.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import {
   readResourceTelemetryHistory,
@@ -51,6 +50,28 @@ const loadAcpRegistrySupport = Effect.promise(
   () => import("../provider/acp/AcpRegistrySupport.ts"),
 );
 
+type AcpRegistryCatalog = ReturnType<
+  typeof import("../provider/acp/AcpRegistryCatalog.ts").makeAcpRegistryCatalog
+>;
+// One registry catalog per installation root for the whole server, not one per
+// connection: it caches the registry index and coalesces concurrent installs of
+// the same version. It loads with the first registry search or install.
+const acpRegistryCatalogs = new Map<string, Promise<AcpRegistryCatalog>>();
+const acpRegistryCatalog = (installationRoot: string) => {
+  const existing = acpRegistryCatalogs.get(installationRoot);
+  if (existing) return existing;
+  const catalog = import("../provider/acp/AcpRegistryCatalog.ts").then((module) =>
+    module.makeAcpRegistryCatalog({ installationRoot }),
+  );
+  acpRegistryCatalogs.set(installationRoot, catalog);
+  // The next search or install retries a failed load.
+  catalog.catch(() => {
+    if (acpRegistryCatalogs.get(installationRoot) === catalog)
+      acpRegistryCatalogs.delete(installationRoot);
+  });
+  return catalog;
+};
+
 export const makeProviderHandlers = (ctx: WsRpcContext) => {
   const {
     ownerEffect,
@@ -81,9 +102,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     currentSessionId,
   } = ctx;
 
-  const registry = makeAcpRegistryCatalog({
-    installationRoot: NodePath.join(config.stateDir, "acp-registry"),
-  });
+  const registryRoot = NodePath.join(config.stateDir, "acp-registry");
   const registryError = (cause: unknown) =>
     new AcpRegistryOperationError({
       // Do not expose environment variables, filesystem paths, or agent auth payloads.
@@ -168,14 +187,19 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
       ctx.withAccess(
         "viewer",
         WS_METHODS.serverSearchAcpRegistry,
-        Effect.tryPromise({ try: () => registry.search(input.query), catch: registryError }).pipe(
-          Effect.map((agents) => ({ agents })),
-        ),
+        Effect.tryPromise({
+          try: () =>
+            acpRegistryCatalog(registryRoot).then((registry) => registry.search(input.query)),
+          catch: registryError,
+        }).pipe(Effect.map((agents) => ({ agents }))),
       ),
     [WS_METHODS.serverInstallAcpRegistry]: (input) =>
       ownerEffect(
         WS_METHODS.serverInstallAcpRegistry,
-        Effect.tryPromise({ try: () => registry.install(input), catch: registryError }),
+        Effect.tryPromise({
+          try: () => acpRegistryCatalog(registryRoot).then((registry) => registry.install(input)),
+          catch: registryError,
+        }),
       ),
     [WS_METHODS.serverGetAcpRegistryAuthMethods]: (input) =>
       ownerEffect(
