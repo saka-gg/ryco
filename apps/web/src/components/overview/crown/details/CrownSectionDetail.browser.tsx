@@ -386,7 +386,10 @@ describe("CrownSectionDetail interactions", () => {
       isGitRepo: true,
       layout: crownLayoutFixture({ pullRequest: null, pullRequestLinking: linking }),
     });
-    await expect.element(empty.getByRole("button", { name: "Link pull request…" })).toBeEnabled();
+    const linkButton = empty.getByRole("button", { name: "Link pull request…" });
+    await expect.element(linkButton).toBeEnabled();
+    // A popup trigger, so the Crown leaves an early Escape to the popover (CrownOverview).
+    await expect.element(linkButton).toHaveAttribute("aria-haspopup", "dialog");
 
     const shown = await mountDetail({
       section: "pr",

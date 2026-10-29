@@ -344,13 +344,7 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * open and switch uses before its first paint).
  */
 const CHAT_ROUTE_GZIP_BUDGET = 760 * KIB;
-/**
- * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
- * icons regrouped by importing entry set into six `icons` chunks instead of
- * five. The grouping is entries-aware and not additive, so removing importers
- * can add a file as easily as adding them.
- */
-const CHAT_ROUTE_MAX_FILES = 156;
+const CHAT_ROUTE_MAX_FILES = 155;
 
 /** OTLP export loads when client tracing is configured, never at boot. */
 const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [

@@ -23,7 +23,7 @@ function candidate(
   key: string,
   patch: Partial<Omit<ThreadAttentionCandidate, "key">> = {},
 ): ThreadAttentionCandidate {
-  return { key, reason: "completed", recencyMs: 0, ...patch };
+  return { key, reason: "completed", focusIndex: null, recencyMs: 0, ...patch };
 }
 
 const ordered = (candidates: ReadonlyArray<ThreadAttentionCandidate>) =>
@@ -96,6 +96,17 @@ describe("compareThreadAttention", () => {
         candidate("approval", { reason: "approval", recencyMs: 1 }),
       ]),
     ).toEqual(["approval", "input", "plan", "failed", "completed"]);
+  });
+
+  it("puts Focus rows first within a reason, in Focus order", () => {
+    expect(
+      ordered([
+        candidate("newest", { recencyMs: 9 }),
+        candidate("focus-second", { focusIndex: 1 }),
+        candidate("focus-first", { focusIndex: 0 }),
+        candidate("other-reason", { reason: "approval" }),
+      ]),
+    ).toEqual(["other-reason", "focus-first", "focus-second", "newest"]);
   });
 
   it("orders newest first, an unknown time last, then by key", () => {

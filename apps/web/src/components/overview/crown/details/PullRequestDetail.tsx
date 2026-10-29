@@ -111,6 +111,7 @@ function LinkPullRequestAction({
         className={CROWN_PILL_BUTTON_CLASS}
         disabled={!linking.canEdit}
         title={linking.canEdit ? undefined : "Reconnect to link pull requests"}
+        aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => {
           setView("link");

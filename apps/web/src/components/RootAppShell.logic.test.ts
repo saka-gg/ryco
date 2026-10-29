@@ -78,6 +78,7 @@ describe("warmBootstrapThread", () => {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     },
     cwd: "/tmp/workspace",

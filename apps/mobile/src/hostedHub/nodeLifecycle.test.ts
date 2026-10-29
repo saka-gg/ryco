@@ -41,6 +41,7 @@ const fixture = vi.hoisted(() => {
       disposeThreadDetailSubscriptionsForEnvironment: vi.fn(),
       resetShellProjection: vi.fn(),
       applyShellEvent: vi.fn(),
+      applyThreadPriorities: vi.fn(),
       syncShellSnapshot: vi.fn(),
     },
   };

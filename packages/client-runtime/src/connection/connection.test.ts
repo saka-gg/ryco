@@ -216,6 +216,37 @@ describe("reconnect metadata refresh", () => {
   });
 });
 
+describe("thread priority rankings", () => {
+  it("asks for priority deltas only when it can apply them, and routes them past the sequence monitor", () => {
+    const withHandler = shellHarness();
+    const recorded: number[] = [];
+    const priorities: unknown[] = [];
+    createEnvironmentConnection({
+      kind: "primary",
+      knownEnvironment: { environmentId, label: "Remote Mac" } as unknown as KnownEnvironment,
+      client: withHandler.client,
+      pushSequenceMonitor: {
+        recordEvent: (_environmentId, sequence) => recorded.push(sequence),
+        recordSnapshot: () => undefined,
+      },
+      resetShellProjection: () => undefined,
+      applyShellEvent: () => undefined,
+      syncShellSnapshot: () => undefined,
+      applyTerminalEvent: () => undefined,
+      applyThreadPriorities: (item) => priorities.push(item),
+    });
+    expect(withHandler.options()?.threadPriorities).toBe("delta");
+    const item = { kind: "thread-priorities", priorities: [] } as const;
+    withHandler.emit(item);
+    expect(priorities).toEqual([item]);
+    expect(recorded).toEqual([]);
+
+    const withoutHandler = shellHarness();
+    connect(withoutHandler, null);
+    expect(withoutHandler.options()?.threadPriorities).toBeUndefined();
+  });
+});
+
 describe("live config", () => {
   const liveEnvironmentId = EnvironmentId.make("env-live-config");
 

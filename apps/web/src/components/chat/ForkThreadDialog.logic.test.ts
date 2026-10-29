@@ -90,6 +90,7 @@ describe("threadForkSupported", () => {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
+        threadPriorityRanking: false,
         ...(threadFork === undefined ? {} : { threadFork }),
       },
     },

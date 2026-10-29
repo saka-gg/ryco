@@ -59,7 +59,7 @@ export function SettingsRouteScreen() {
       <SettingsSection title="Workspace">
         <SettingsRow
           first
-          label="Inbox"
+          label="Inbox and AI Focus"
           onPress={() => navigation.navigate("SettingsInbox" as never)}
         />
         <SettingsRow

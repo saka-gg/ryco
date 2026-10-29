@@ -16,6 +16,7 @@ import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeCursorTextGeneration } from "./CursorTextGeneration.ts";
 import { waitForAcpPromptRequest } from "./acpMockAgentTestUtils.ts";
+import { makeThreadPriorityTestInput } from "../threadPriority/threadPriorityTestFixtures.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mockAgentPath = path.join(__dirname, "../../scripts/acp-mock-agent.ts");
@@ -157,6 +158,57 @@ it.layer(CursorTextGenerationTestLayer)("CursorTextGeneration", (it) => {
       }),
     ),
   );
+
+  it.effect("ranks inbox threads through tool-disabled ACP", () => {
+    const requestLogDir = mkdtempSync(path.join(os.tmpdir(), "ryco-cursor-rank-log-"));
+    const requestLogPath = path.join(requestLogDir, "requests.ndjson");
+
+    return withFakeAcpAgent(
+      {
+        RYCO_ACP_REQUEST_LOG_PATH: requestLogPath,
+        RYCO_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+          rankings: [
+            {
+              candidateId: "candidate-0001",
+              tier: "soon",
+              confidence: "high",
+              reason: "Continue the requested repair",
+            },
+          ],
+        }),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.rankInboxThreads(
+            makeThreadPriorityTestInput(ProviderInstanceId.make("cursor"), "composer-2"),
+          );
+          expect(result.rankings).toMatchObject([
+            { threadId: "thread-priority-test", tier: "soon", confidence: "high" },
+          ]);
+
+          const requests = readFileSync(requestLogPath, "utf8")
+            .trim()
+            .split("\n")
+            .map(
+              (line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> },
+            );
+          expect(
+            requests.find((request) => request.method === "initialize")?.params?.clientCapabilities,
+          ).toMatchObject({ fs: { readTextFile: false, writeTextFile: false }, terminal: false });
+          expect(
+            requests.find((request) => request.method === "session/prompt")?.params?.prompt,
+          ).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("Untrusted candidate data (JSON)"),
+              }),
+            ]),
+          );
+          rmSync(requestLogDir, { recursive: true, force: true });
+        }),
+    );
+  });
 
   it.effect("uses ACP model config options instead of raw CLI model ids", () => {
     const requestLogDir = mkdtempSync(path.join(os.tmpdir(), "ryco-cursor-text-log-"));

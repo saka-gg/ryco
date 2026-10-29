@@ -312,6 +312,7 @@ const baseEnvironment = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: false,
+    threadPriorityRanking: false,
   },
 };
 
@@ -692,6 +693,8 @@ describe("wsApi", () => {
 
   it("reads and writes persistence through the desktop bridge when available", async () => {
     const clientSettings = {
+      aiFocusEnabled: false,
+      aiFocusRefreshIntervalMs: 600_000 as const,
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       confirmThreadUnpin: false,
@@ -764,6 +767,8 @@ describe("wsApi", () => {
     const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
     const clientSettings = {
+      aiFocusEnabled: false,
+      aiFocusRefreshIntervalMs: 600_000 as const,
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       confirmThreadUnpin: false,

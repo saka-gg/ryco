@@ -2819,6 +2819,74 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("carries a thread's projected priority on its shell upsert", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-ranked', 'Ranked', '/tmp/ranked', NULL, '[]',
+          '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, deleted_at
+        )
+        VALUES
+          ('thread-ranked', 'project-ranked', 'Ranked', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL),
+          ('thread-unranked', 'project-ranked', 'Unranked', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL)
+      `;
+      const rankedAt = new Date(Date.now() - 1_000).toISOString();
+      const usableUntil = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
+      yield* sql`
+        INSERT INTO thread_priority_batches (
+          slot, batch_id, input_fingerprint, model_selection_json, model_fingerprint,
+          prompt_version, ranked_at, usable_until, checked_at
+        ) VALUES (
+          1, 'batch-1', 'fingerprint', '{"provider":"codex","model":"gpt-5-codex"}', 'model',
+          'v1', ${rankedAt}, ${usableUntil}, ${rankedAt}
+        )
+      `;
+      yield* sql`
+        INSERT INTO thread_priority_rankings (
+          thread_id, batch_id, tier, confidence, reason, input_fingerprint
+        ) VALUES ('thread-ranked', 'batch-1', 'now', 'high', 'Waiting on you', 'thread-fp')
+      `;
+
+      const ranked = Option.getOrThrow(
+        yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-ranked")),
+      );
+      assert.equal(ranked.priority?.tier, "now");
+      assert.equal(ranked.priority?.batchId, "batch-1");
+      const unranked = Option.getOrThrow(
+        yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-unranked")),
+      );
+      assert.isUndefined(unranked.priority);
+      // The ranking is part of the snapshot's version: a re-rank must not read
+      // as "current" to a client holding the same event sequence.
+      const snapshot = yield* snapshotQuery.getShellSnapshot();
+      assert.equal(snapshot.updatedAt, rankedAt);
+
+      yield* sql`DELETE FROM thread_priority_rankings`;
+      yield* sql`DELETE FROM thread_priority_batches`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+    }),
+  );
+
   it.effect("keeps deleted project and thread tombstones in the command read model", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

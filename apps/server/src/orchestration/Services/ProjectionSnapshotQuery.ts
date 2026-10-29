@@ -25,6 +25,7 @@ import type {
   OrchestrationThreadHistoryError,
   OrchestrationThreadHistoryPage,
   OrchestrationThreadActivity,
+  OrchestrationThreadPriorityEntry,
   OrchestrationThreadShell,
   OrchestrationThreadWindowSnapshot,
   OrchestrationWorktreeShell,
@@ -400,6 +401,15 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadShellById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * Every thread's current projected priority ranking, for the shell stream's
+   * `thread-priorities` item (a ranking replaces them all at once).
+   */
+  readonly listThreadPriorities?: () => Effect.Effect<
+    ReadonlyArray<OrchestrationThreadPriorityEntry>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read a single worktree shell row by id.

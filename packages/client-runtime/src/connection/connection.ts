@@ -3,6 +3,7 @@ import type {
   ExecutionEnvironmentDescriptor,
   OrchestrationStubbedShellSnapshot,
   OrchestrationShellStreamEvent,
+  OrchestrationShellThreadPrioritiesItem,
   ServerConfig,
   ServerConfigStreamEvent,
   ServerConfigStreamWireEvent,
@@ -102,6 +103,14 @@ export interface OrchestrationHandlers {
     environmentId: EnvironmentId,
   ) => void;
   readonly applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => void;
+  /**
+   * Applies a thread-priority ranking. When provided, the connection asks the
+   * server for these small items instead of a full shell snapshot per ranking.
+   */
+  readonly applyThreadPriorities?: (
+    item: OrchestrationShellThreadPrioritiesItem,
+    environmentId: EnvironmentId,
+  ) => void;
   /**
    * The last shell sequence applied for this environment. When provided, a
    * replacement subscription asks the server to resume after it instead of
@@ -381,10 +390,15 @@ export function createEnvironmentConnection(
         notifyShellReadiness();
         return;
       }
+      if (item.kind === "thread-priorities") {
+        input.applyThreadPriorities?.(item, environmentId);
+        return;
+      }
       input.pushSequenceMonitor.recordEvent(environmentId, item.sequence);
       input.applyShellEvent(item, environmentId);
     },
     {
+      ...(input.applyThreadPriorities === undefined ? {} : { threadPriorities: "delta" as const }),
       // The store keeps archived threads as stubs and loads full shells on demand.
       archivedThreads: "stub" as const,
       ...(readShellResumeSequence === undefined

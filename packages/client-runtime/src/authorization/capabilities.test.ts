@@ -132,6 +132,7 @@ const READS_THAT_REACH_OUT = [
   WS_METHODS.serverRefreshProviders,
   WS_METHODS.serverTestCliProxyHub,
   ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
+  WS_METHODS.threadPriorityEnsureCurrent,
 ] as const;
 
 describe("hosted reads before the snapshot", () => {

@@ -308,6 +308,7 @@ describe("hosted environment connections", () => {
       capabilities: {
         repositoryIdentity: false,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     });
     expect(() => service.getPrimaryEnvironmentConnection()).toThrow(

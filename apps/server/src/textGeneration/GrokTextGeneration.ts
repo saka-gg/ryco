@@ -10,7 +10,11 @@ import { type GrokSettings, type ModelSelection } from "@ryco/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@ryco/shared/git";
 
 import { TextGenerationError } from "@ryco/contracts";
-import { type ThreadTitleGenerationResult, type TextGenerationShape } from "./TextGeneration.ts";
+import {
+  type ThreadTitleGenerationResult,
+  type TextGenerationShape,
+  validateRankInboxThreadsResult,
+} from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -18,6 +22,7 @@ import {
   buildIssueContentTitlePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildThreadPriorityPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
@@ -48,6 +53,7 @@ function mapGrokAcpError(
     | "generateBranchName"
     | "generateThreadTitle"
     | "generateIssueContent"
+    | "rankInboxThreads"
     | "summarizeWorkspaceChanges",
   detail: string,
   cause: unknown,
@@ -89,6 +95,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
+      | "rankInboxThreads"
       | "summarizeWorkspaceChanges";
     cwd: string;
     prompt: string;
@@ -318,6 +325,22 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     return { title: decoded.title.trim() };
   });
 
+  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
+    "GrokTextGeneration.rankInboxThreads",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildThreadPriorityPrompt({
+      serializedCandidates: input.chunk.serializedCandidates,
+    });
+    const generated = yield* runGrokJson({
+      operation: "rankInboxThreads",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      modelSelection: input.modelSelection,
+    });
+    return yield* validateRankInboxThreadsResult(input, generated.rankings);
+  });
+
   const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
     "GrokTextGeneration.summarizeWorkspaceChanges",
   )(function* (input) {
@@ -339,6 +362,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     generateBranchName,
     generateThreadTitle,
     generateIssueContent,
+    rankInboxThreads,
     summarizeWorkspaceChanges,
     answerSideQuestion: (_input: Parameters<TextGenerationShape["answerSideQuestion"]>[0]) =>
       Effect.fail(

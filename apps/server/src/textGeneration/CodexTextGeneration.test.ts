@@ -17,6 +17,7 @@ import {
 } from "../provider/agentProcessPriority.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
+import { makeThreadPriorityTestInput } from "../threadPriority/threadPriorityTestFixtures.ts";
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
   ProviderInstanceId.make("codex"),
@@ -187,6 +188,34 @@ function withFakeCodexEnv<A, E, R>(
 }
 
 it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
+  it.effect("ranks inbox threads with bounded structured output", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({
+          rankings: [
+            {
+              candidateId: "candidate-0001",
+              tier: "now",
+              confidence: "high",
+              reason: "Requires attention",
+            },
+          ],
+        }),
+        stdinMustContain: "Untrusted candidate data (JSON)",
+        stdinMustNotContain: "thread-priority-test",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.rankInboxThreads(
+            makeThreadPriorityTestInput(ProviderInstanceId.make("codex"), "gpt-5.4-mini"),
+          );
+          expect(result.rankings).toMatchObject([
+            { threadId: "thread-priority-test", tier: "now", confidence: "high" },
+          ]);
+        }),
+    ),
+  );
+
   it.effect("generates and sanitizes commit messages without branch by default", () =>
     withFakeCodexEnv(
       {

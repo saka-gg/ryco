@@ -475,6 +475,8 @@ export function createMobileEnvironmentDriver(
         getSupervisor().skipShellEvent(sequence, environmentId),
       applyShellEvent: (event, environmentId) =>
         getSupervisor().applyShellEvent(event, environmentId),
+      applyThreadPriorities: (item, environmentId) =>
+        getSupervisor().applyThreadPriorities(item, environmentId),
       syncShellSnapshot: (snapshot, environmentId) =>
         getSupervisor().syncShellSnapshot(snapshot, environmentId),
       // Terminal streaming is deferred to v1.1.
@@ -576,6 +578,8 @@ export function createMobileEnvironmentDriver(
           getSupervisor().resetShellProjection(environmentId),
         applyShellEvent: (event, environmentId) =>
           getSupervisor().applyShellEvent(event, environmentId),
+        applyThreadPriorities: (item, environmentId) =>
+          getSupervisor().applyThreadPriorities(item, environmentId),
         syncShellSnapshot: (snapshot, environmentId, callbacks) =>
           getSupervisor().syncShellSnapshot(snapshot, environmentId, callbacks),
       });

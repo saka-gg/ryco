@@ -62,6 +62,7 @@ function config(environmentId: EnvironmentId): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
+        threadPriorityRanking: false,
         projectPreferences: true,
       },
     },

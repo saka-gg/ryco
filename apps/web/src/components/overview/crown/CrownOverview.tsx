@@ -41,6 +41,12 @@ const CARD_CONTENT_LINGER_MS = 600;
 const ROOT_STYLE = { ...ISLAND_DARK_TOKEN_STYLE, ...CROWN_GEOMETRY_STYLE };
 
 const POPUP_SELECTOR = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"]';
+/**
+ * The trigger of an open popup. Base UI moves focus into a popup one animation
+ * frame after it opens, so an Escape pressed in that frame still lands in the card.
+ */
+const OPEN_POPUP_TRIGGER_SELECTOR =
+  '[aria-expanded="true"][aria-haspopup]:not([aria-haspopup="false"])';
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -252,8 +258,10 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   const handleEscape = useEvent((event: KeyboardEvent) => {
     if (event.key !== "Escape" || event.defaultPrevented) return;
     if (isEditableTarget(event.target)) return;
-    // A menu or dialog (often portaled out of the card) owns its own Escape.
+    // A menu or dialog (often portaled out of the card) owns its own Escape,
+    // also before it has taken focus from the card.
     if (event.target instanceof Element && event.target.closest(POPUP_SELECTOR)) return;
+    if (rootRef.current?.querySelector(OPEN_POPUP_TRIGGER_SELECTOR)) return;
     flyout.close();
     if (alertLayerRef.current?.contains(document.activeElement)) {
       faceRef.current?.focus({ preventScroll: true });

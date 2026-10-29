@@ -26,6 +26,13 @@ import {
   TurnId,
   type UnknownUnionMember,
 } from "./baseSchemas.ts";
+import {
+  ThreadPriorityBatchId,
+  ThreadPriorityConfidence,
+  ThreadPriorityFingerprint,
+  ThreadPriorityReason,
+  ThreadPriorityTier,
+} from "./threadPriorityVocabulary.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ComposerSourceControlContext } from "./sourceControl.ts";
 import { WorkItemProviderKind, WorkItemState } from "./workItems.ts";
@@ -1165,6 +1172,19 @@ export const OrchestrationProjectShell = Schema.Struct({
 });
 export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 
+/** Environment-local shell projection used by clients to derive Focus without another data plane. */
+export const ThreadPriorityProjectedRanking = Schema.Struct({
+  tier: ThreadPriorityTier,
+  confidence: ThreadPriorityConfidence,
+  reason: ThreadPriorityReason,
+  inputFingerprint: ThreadPriorityFingerprint,
+  batchId: ThreadPriorityBatchId,
+  modelSelection: ModelSelection,
+  rankedAt: IsoDateTime,
+  usableUntil: IsoDateTime,
+});
+export type ThreadPriorityProjectedRanking = typeof ThreadPriorityProjectedRanking.Type;
+
 export const OrchestrationThreadShell = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -1210,6 +1230,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
   /** Server-owned provenance; absent on root threads and from older servers. */
   lineage: Schema.optional(Schema.NullOr(ThreadLineage)),
+  priority: Schema.optional(ThreadPriorityProjectedRanking),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
@@ -1313,6 +1334,27 @@ export const OrchestrationShellStreamEvent = Schema.Union([
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
 
+/** One thread's current projected ranking, as carried by a `thread-priorities` item. */
+export const OrchestrationThreadPriorityEntry = Schema.Struct({
+  threadId: ThreadId,
+  priority: ThreadPriorityProjectedRanking,
+});
+export type OrchestrationThreadPriorityEntry = typeof OrchestrationThreadPriorityEntry.Type;
+
+/**
+ * A thread-priority ranking replaced the projected rankings. `priorities` lists
+ * every thread's current ranking; a thread it does not list has none. It has
+ * no event sequence: a ranking is not an orchestration event, so it applies on
+ * top of whatever shell the client holds. Only sent to a client that asked for
+ * it (`threadPriorities: "delta"`); others receive a full snapshot instead.
+ */
+export const OrchestrationShellThreadPrioritiesItem = Schema.Struct({
+  kind: Schema.Literal("thread-priorities"),
+  priorities: Schema.Array(OrchestrationThreadPriorityEntry),
+});
+export type OrchestrationShellThreadPrioritiesItem =
+  typeof OrchestrationShellThreadPrioritiesItem.Type;
+
 /**
  * How a client takes the shell snapshot. `"paged"` asks for it in bounded
  * pieces instead of one message: a `snapshot-begin` header, `snapshot-threads`
@@ -1382,6 +1424,7 @@ const OrchestrationShellStreamItemMembers = [
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationShellSnapshot,
   }),
+  OrchestrationShellThreadPrioritiesItem,
   /** Only ever sent to a client that asked for `snapshotDelivery: "paged"`. */
   OrchestrationShellSnapshotBeginItem,
   OrchestrationShellSnapshotThreadsItem,
@@ -1444,6 +1487,13 @@ export const OrchestrationSubscribeShellInput = Schema.Struct({
    * servers ignore the field.
    */
   resumeFromSequence: Schema.optional(NonNegativeInt),
+  /**
+   * How the client takes a thread-priority ranking: `"delta"` asks for a small
+   * `thread-priorities` item instead of a full shell snapshot. Absent, the
+   * server sends a snapshot, which every client understands; older servers
+   * ignore the field and keep sending snapshots.
+   */
+  threadPriorities: Schema.optional(Schema.Literal("delta")),
   /**
    * `"paged"` asks for every shell snapshot in bounded pages (see
    * `OrchestrationShellSnapshotDelivery`). Absent, a snapshot is one `snapshot`

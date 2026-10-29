@@ -19,6 +19,7 @@ import {
 } from "../provider/opencodeRuntime.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeOpenCodeTextGeneration } from "./OpenCodeTextGeneration.ts";
+import { makeThreadPriorityTestInput } from "../threadPriority/threadPriorityTestFixtures.ts";
 
 const runtimeMock = {
   state: {
@@ -343,6 +344,38 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
           expect(fileParts[0]).toMatchObject({ filename: "shot.png", mime: "image/png" });
         }),
       ),
+  );
+
+  it.effect("ranks inbox threads with the configured OpenCode model", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.promptResult = {
+          data: {
+            parts: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  rankings: [
+                    {
+                      candidateId: "candidate-0001",
+                      tier: "later",
+                      confidence: "medium",
+                      reason: "Safe to defer briefly",
+                    },
+                  ],
+                }),
+              },
+            ],
+          },
+        };
+        const result = yield* textGeneration.rankInboxThreads(
+          makeThreadPriorityTestInput(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        );
+        expect(result.rankings).toMatchObject([
+          { threadId: "thread-priority-test", tier: "later", confidence: "medium" },
+        ]);
+      }),
+    ),
   );
 
   it.effect("starts a new server after the warm server idles out", () =>

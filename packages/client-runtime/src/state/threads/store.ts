@@ -13,6 +13,7 @@ import type {
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
   OrchestrationStubbedShellSnapshot,
+  OrchestrationShellThreadPrioritiesItem,
   OrchestrationSession,
   OrchestrationSessionStatus,
   OrchestrationThread,
@@ -562,6 +563,7 @@ function mapThreadSummary(
     hasPendingUserInput: thread.hasPendingUserInput,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     backgroundLiveness: thread.backgroundLiveness ?? null,
+    priority: thread.priority,
     lineage: thread.lineage ?? null,
   };
 }
@@ -803,6 +805,7 @@ function sidebarThreadSummariesEqual(
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     (left.backgroundLiveness ?? null) === (right.backgroundLiveness ?? null) &&
+    threadPrioritiesEqual(left.priority, right.priority) &&
     threadLineagesEqual(left.lineage, right.lineage)
   );
 }
@@ -826,6 +829,25 @@ function threadUsageLimitsEqual(
     a.resetAt === b.resetAt &&
     a.autoResume === b.autoResume &&
     a.updatedAt === b.updatedAt
+  );
+}
+
+function threadPrioritiesEqual(
+  left: SidebarThreadSummary["priority"],
+  right: SidebarThreadSummary["priority"],
+): boolean {
+  if (left === right) return true;
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.tier === right.tier &&
+    left.confidence === right.confidence &&
+    left.reason === right.reason &&
+    left.inputFingerprint === right.inputFingerprint &&
+    left.batchId === right.batchId &&
+    modelSelectionsEqual(left.modelSelection, right.modelSelection) &&
+    left.rankedAt === right.rankedAt &&
+    left.usableUntil === right.usableUntil
   );
 }
 
@@ -2288,7 +2310,7 @@ function syncEnvironmentShellSnapshot(
   environmentId: EnvironmentId,
 ): EnvironmentState {
   // Structural sharing: a re-applied snapshot (reconnect, Hub node switch,
-  // cache-hydrated -> live) usually leaves most rows unchanged.
+  // cache-hydrated -> live, priority push) usually leaves most rows unchanged.
   // Reusing the previous objects keeps every row selector and memo stable.
   const nextProjects = snapshot.projects.map((project) => {
     const mapped = mapProject(project, environmentId);
@@ -4016,6 +4038,44 @@ function applyShellEventInBatch(
 }
 
 /**
+ * A `thread-priorities` item: every listed thread takes its ranking and every
+ * other thread loses the one it had. Summaries whose ranking did not change
+ * keep their identity, so an unchanged sidebar row does not re-render.
+ */
+export function applyThreadPriorities(
+  state: AppState,
+  item: OrchestrationShellThreadPrioritiesItem,
+  environmentId: EnvironmentId,
+): AppState {
+  const environmentState = getStoredEnvironmentState(state, environmentId);
+  const priorityByThread = new Map(
+    item.priorities.map((entry) => [entry.threadId, entry.priority]),
+  );
+  let sidebarThreadSummaryById: EnvironmentState["sidebarThreadSummaryById"] | null = null;
+  for (const threadId of environmentState.threadIds) {
+    const summary = ownValue(environmentState.sidebarThreadSummaryById, threadId);
+    // A stub carries no ranking; archived threads are never ranked.
+    if (summary === undefined || isArchivedThreadStub(summary)) continue;
+    const priority = priorityByThread.get(threadId);
+    if (threadPrioritiesEqual(summary.priority, priority)) continue;
+    sidebarThreadSummaryById ??= { ...environmentState.sidebarThreadSummaryById };
+    const { priority: _previous, ...withoutPriority } = summary;
+    sidebarThreadSummaryById[threadId] =
+      priority === undefined ? withoutPriority : { ...withoutPriority, priority };
+  }
+  if (sidebarThreadSummaryById === null) return state;
+  return commitEnvironmentState(state, environmentId, {
+    ...environmentState,
+    sidebarThreadSummaryById,
+  });
+}
+
+/** What the shell stream changes in the store: a sequenced event or a priority ranking. */
+export type ShellStoreUpdate =
+  | OrchestrationShellStreamEvent
+  | OrchestrationShellThreadPrioritiesItem;
+
+/**
  * Folds a run of shell updates into `state`. Consecutive thread upserts share
  * the records the run already copied, so a frame of upserts for different
  * threads copies each record keyed by every thread once, not once per upsert.
@@ -4026,11 +4086,11 @@ function applyShellEventInBatch(
  * `prepare` must read what it needs synchronously and keep neither the state
  * nor any record reached through it.
  */
-function applyOrchestrationShellStreamEvents<Item>(
+function applyShellStoreUpdates<Item>(
   state: AppState,
   items: ReadonlyArray<Item>,
   read: (item: Item) => {
-    readonly update: OrchestrationShellStreamEvent;
+    readonly update: ShellStoreUpdate;
     readonly environmentId: EnvironmentId;
   },
   beforeEach?: (state: AppState, item: Item) => void,
@@ -4045,7 +4105,10 @@ function applyOrchestrationShellStreamEvents<Item>(
       continue;
     }
     owned = new WeakSet<object>();
-    nextState = applyShellEvent(nextState, update, environmentId);
+    nextState =
+      update.kind === "thread-priorities"
+        ? applyThreadPriorities(nextState, update, environmentId)
+        : applyShellEvent(nextState, update, environmentId);
   }
   return nextState;
 }
@@ -4443,7 +4506,7 @@ interface ShellEventCoalescerDeps {
 }
 
 export interface ShellEventCoalescer {
-  readonly enqueue: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
+  readonly enqueue: (event: ShellStoreUpdate, environmentId: EnvironmentId) => void;
   readonly flush: () => void;
   readonly hasPending: () => boolean;
 }
@@ -4458,7 +4521,7 @@ export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellE
     ((callback: () => void, delayMs: number) => void setTimeout(callback, delayMs));
 
   let queue: Array<{
-    event: OrchestrationShellStreamEvent;
+    event: ShellStoreUpdate;
     environmentId: EnvironmentId;
   }> = [];
   let scheduledGeneration = 0;
@@ -4473,14 +4536,14 @@ export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellE
     const pending = queue;
     queue = [];
     deps.commitState(
-      applyOrchestrationShellStreamEvents(deps.getState(), pending, (item) => ({
+      applyShellStoreUpdates(deps.getState(), pending, (item) => ({
         update: item.event,
         environmentId: item.environmentId,
       })),
     );
   }
 
-  function enqueue(event: OrchestrationShellStreamEvent, environmentId: EnvironmentId): void {
+  function enqueue(event: ShellStoreUpdate, environmentId: EnvironmentId): void {
     queue.push({ event, environmentId });
     if (scheduled) return;
     scheduled = true;
@@ -4572,7 +4635,7 @@ interface AppStore extends AppState {
     environmentId: EnvironmentId,
   ) => void;
   /** Joins the next frame's shell commit. */
-  applyShellEvent: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
+  applyShellEvent: (event: ShellStoreUpdate, environmentId: EnvironmentId) => void;
   /**
    * Applies one environment's shell updates in order as a single commit, now.
    * `prepare` sees the state each update applies to (after the ones before it)
@@ -4581,9 +4644,9 @@ interface AppStore extends AppState {
    * synchronously and keep neither it nor any record reached through it.
    */
   applyShellEvents: <Context>(
-    events: ReadonlyArray<OrchestrationShellStreamEvent>,
+    events: ReadonlyArray<ShellStoreUpdate>,
     environmentId: EnvironmentId,
-    prepare?: (state: AppState, event: OrchestrationShellStreamEvent) => Context,
+    prepare?: (state: AppState, event: ShellStoreUpdate) => Context,
   ) => ReadonlyArray<Context>;
   removeThread: (threadRef: ScopedThreadRef) => void;
   setThreadError: (threadRef: ScopedThreadRef, error: string | null) => void;
@@ -4631,7 +4694,7 @@ export const useStore = create<AppStore>((set, get) => {
       runStoreMutationBarriers();
       coalescer.flush();
     },
-    enqueue: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => {
+    enqueue: (event: ShellStoreUpdate, environmentId: EnvironmentId) => {
       runStoreMutationBarriers();
       coalescer.enqueue(event, environmentId);
     },
@@ -4700,13 +4763,13 @@ export const useStore = create<AppStore>((set, get) => {
     },
     applyShellEvent: (event, environmentId) => shellCoalescer.enqueue(event, environmentId),
     applyShellEvents: <Context>(
-      events: ReadonlyArray<OrchestrationShellStreamEvent>,
+      events: ReadonlyArray<ShellStoreUpdate>,
       environmentId: EnvironmentId,
-      prepare?: (state: AppState, event: OrchestrationShellStreamEvent) => Context,
+      prepare?: (state: AppState, event: ShellStoreUpdate) => Context,
     ): ReadonlyArray<Context> => {
       shellCoalescer.flush();
       const contexts: Context[] = [];
-      const nextState = applyOrchestrationShellStreamEvents(
+      const nextState = applyShellStoreUpdates(
         get(),
         events,
         (event) => ({ update: event, environmentId }),

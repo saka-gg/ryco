@@ -46,6 +46,12 @@ export interface HostedPrimaryConnectionDeps extends Pick<
   OrchestrationHandlers,
   "applyShellEvent" | "resetShellProjection"
 > {
+  /**
+   * Required, unlike on the shared handlers: supplying it makes the connection
+   * ask for thread-priority deltas, so an AI Focus ranking batch reaches the
+   * phone as a small item instead of a full shell snapshot over the relay.
+   */
+  readonly applyThreadPriorities: NonNullable<OrchestrationHandlers["applyThreadPriorities"]>;
   readonly syncShellSnapshot: EnvironmentConnectionSupervisor["syncShellSnapshot"];
   readonly pushSequenceMonitor: Parameters<
     typeof createEnvironmentConnection
@@ -181,6 +187,10 @@ export function createHostedEnvironmentConnection(
     applyShellEvent: (event, eventEnvironmentId) => {
       if (!acceptsEvent()) return;
       input.applyShellEvent(event, eventEnvironmentId);
+    },
+    applyThreadPriorities: (item, eventEnvironmentId) => {
+      if (!acceptsEvent()) return;
+      input.applyThreadPriorities(item, eventEnvironmentId);
     },
     syncShellSnapshot: (snapshot, eventEnvironmentId) => {
       if (!acceptsEvent()) return;

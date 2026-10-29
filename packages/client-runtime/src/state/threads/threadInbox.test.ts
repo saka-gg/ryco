@@ -7,6 +7,9 @@ import {
   ThreadId,
   TurnId,
   WorktreeId,
+  ThreadPriorityBatchId,
+  ThreadPriorityFingerprint,
+  ThreadPriorityReason,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -708,6 +711,55 @@ describe("thread inbox", () => {
     ]);
   });
 
+  it("derives a duplicate-free Focus partition from scoped projected rankings", () => {
+    const rankedAt = new Date(nowMs - 60_000).toISOString();
+    const usableUntil = new Date(nowMs + 60_000).toISOString();
+    const ranked = (environmentId: EnvironmentId) =>
+      makeThread(environmentId, "shared-thread-id", {
+        priority: {
+          tier: "now",
+          confidence: "high",
+          reason: ThreadPriorityReason.make("Actionable next work"),
+          inputFingerprint: ThreadPriorityFingerprint.make(`fingerprint-${environmentId}`),
+          batchId: ThreadPriorityBatchId.make(`batch-${environmentId}`),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.4",
+          },
+          rankedAt,
+          usableUntil,
+        },
+      });
+    const approval = makeThread(environmentA, "approval", { hasPendingApprovals: true });
+    const active = makeThread(environmentB, "active");
+    const inbox = buildThreadInbox(
+      baseInput({
+        threads: [ranked(environmentA), ranked(environmentB), approval, active],
+        aiFocusEnabled: true,
+      }),
+    );
+
+    expect(inbox.focus.map((entry) => [entry.key, entry.focus?.source])).toEqual([
+      [scopedThreadKey({ environmentId: environmentA, threadId: approval.id }), "approval"],
+      [
+        scopedThreadKey({
+          environmentId: environmentA,
+          threadId: ThreadId.make("shared-thread-id"),
+        }),
+        "ai",
+      ],
+      [
+        scopedThreadKey({
+          environmentId: environmentB,
+          threadId: ThreadId.make("shared-thread-id"),
+        }),
+        "ai",
+      ],
+    ]);
+    expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([active.id]);
+    expect(new Set([...inbox.focus, ...inbox.active].map((entry) => entry.key)).size).toBe(4);
+  });
+
   it("composes filters while retaining the currently routed settled row", () => {
     const settled = makeThread(environmentA, "thread-current", {
       title: "Needle",
@@ -790,13 +842,14 @@ describe("snoozed inbox entries", () => {
       nowMs,
       ...overrides,
     });
-  it("keeps pins on snoozed rows and schedules the next wake", () => {
+  it("keeps pins while suppressing focus and schedules the next wake", () => {
     const key = scopedThreadKey({
       environmentId: environmentA,
       threadId: ThreadId.make("snoozed"),
     });
-    const inbox = build({ pinnedThreadKeys: [key] });
+    const inbox = build({ pinnedThreadKeys: [key], aiFocusEnabled: true });
     expect(inbox.active).toHaveLength(0);
+    expect(inbox.focus).toHaveLength(0);
     expect(inbox.snoozed[0]).toMatchObject({ pinned: true, canSnooze: true });
     expect(inbox.nextSettlementEvaluationAtMs).toBe(Date.parse(until));
     const awake = build({ nowMs: Date.parse(until), pinnedThreadKeys: [key] });

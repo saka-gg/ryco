@@ -69,6 +69,7 @@ const baseEnvironment = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: false,
+    threadPriorityRanking: false,
   },
 };
 

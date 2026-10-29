@@ -121,9 +121,9 @@ const LazyProvidersSettingsPanel = lazy(() =>
     default: module.ProvidersSettingsPanel,
   })),
 );
-const LazyInboxSettings = lazy(() =>
-  import("../../settings/InboxSettings").then((module) => ({
-    default: module.InboxSettings,
+const LazyAiFocusSettings = lazy(() =>
+  import("../../settings/AiFocusSettings").then((module) => ({
+    default: module.AiFocusSettings,
   })),
 );
 const LazyOpinionatedPluginsSettingsPanel = lazy(() =>
@@ -183,7 +183,7 @@ function SectionPanel({ section }: { section: SettingsSectionId }) {
     >
       {section === "account" ? <LazyAccountSettingsPanel /> : null}
       {section === "general" ? <GeneralSettingsPanel /> : null}
-      {section === "inbox" ? <LazyInboxSettings /> : null}
+      {section === "inbox" ? <LazyAiFocusSettings /> : null}
       {section === "providers" ? <LazyProvidersSettingsPanel /> : null}
       {section === "opinionated-plugins" ? <LazyOpinionatedPluginsSettingsPanel /> : null}
       {section === "mcp-servers" ? <LazyMcpServersSettings /> : null}

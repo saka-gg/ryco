@@ -7,6 +7,12 @@ import {
   type ProviderInstanceRegistryShape,
 } from "../provider/Services/ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
+import {
+  ThreadPriorityPolicyError,
+  validateThreadPriorityRankings,
+  type ThreadPriorityPromptChunk,
+  type ValidatedThreadPriorityRanking,
+} from "../threadPriority/threadPriorityPolicy.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
 export type TextGenerationProvider = "codex" | "claudeAgent" | "cursor" | "grok" | "opencode";
@@ -135,6 +141,34 @@ export interface WorkspaceChangesSummaryGenerationResult {
   summary: string;
 }
 
+export interface RankInboxThreadsInput {
+  cwd: string;
+  chunk: ThreadPriorityPromptChunk;
+  modelSelection: ModelSelection;
+}
+
+export interface RankInboxThreadsResult {
+  rankings: ReadonlyArray<ValidatedThreadPriorityRanking>;
+}
+
+export function validateRankInboxThreadsResult(
+  input: RankInboxThreadsInput,
+  rankings: unknown,
+): Effect.Effect<RankInboxThreadsResult, TextGenerationError> {
+  return Effect.try({
+    try: () => ({ rankings: validateThreadPriorityRankings(rankings, input.chunk) }),
+    catch: (cause) =>
+      new TextGenerationError({
+        operation: "rankInboxThreads",
+        detail:
+          cause instanceof ThreadPriorityPolicyError
+            ? `Invalid inbox ranking output (${cause.kind}).`
+            : "Invalid inbox ranking output.",
+        cause,
+      }),
+  });
+}
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -143,6 +177,7 @@ export interface TextGenerationService {
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
   generateIssueContent(input: IssueContentGenerationInput): Promise<IssueContentGenerationResult>;
+  rankInboxThreads(input: RankInboxThreadsInput): Promise<RankInboxThreadsResult>;
   answerSideQuestion(input: SideQuestionInput): Promise<SideQuestionResult>;
 }
 
@@ -190,6 +225,11 @@ export interface TextGenerationShape {
     input: IssueContentGenerationInput,
   ) => Effect.Effect<IssueContentGenerationResult, TextGenerationError>;
 
+  /** Rank one bounded, environment-local chunk without tools or mutations. */
+  readonly rankInboxThreads: (
+    input: RankInboxThreadsInput,
+  ) => Effect.Effect<RankInboxThreadsResult, TextGenerationError>;
+
   /**
    * Describe, in at most two sentences, the work a checkout holds that deleting
    * it would lose. Tool-free; the change data is quoted, never followed.
@@ -212,6 +252,7 @@ type TextGenerationOp =
   | "generateBranchName"
   | "generateThreadTitle"
   | "generateIssueContent"
+  | "rankInboxThreads"
   | "answerSideQuestion"
   | "summarizeWorkspaceChanges";
 
@@ -259,6 +300,10 @@ export const makeTextGenerationFromRegistry = (
   generateIssueContent: (input) =>
     resolveInstance(registry, "generateIssueContent", input.modelSelection.instanceId).pipe(
       Effect.flatMap((textGeneration) => textGeneration.generateIssueContent(input)),
+    ),
+  rankInboxThreads: (input) =>
+    resolveInstance(registry, "rankInboxThreads", input.modelSelection.instanceId).pipe(
+      Effect.flatMap((textGeneration) => textGeneration.rankInboxThreads(input)),
     ),
   summarizeWorkspaceChanges: (input) =>
     resolveInstance(registry, "summarizeWorkspaceChanges", input.modelSelection.instanceId).pipe(

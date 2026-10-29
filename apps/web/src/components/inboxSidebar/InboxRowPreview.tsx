@@ -2,6 +2,7 @@ import {
   FolderIcon,
   GitBranchIcon,
   GitForkIcon,
+  InfoIcon,
   MessageCircleIcon,
   ShieldAlertIcon,
 } from "lucide-react";
@@ -21,7 +22,7 @@ import {
   resolveInboxGlyph,
   resolveInboxStateLine,
 } from "./inboxRowPresentation";
-import type { InboxSidebarRow } from "./inboxSidebarModel";
+import { describeInboxFocus, type InboxSidebarRow } from "./inboxSidebarModel";
 import { InboxStatusGlyph } from "./InboxStatusGlyph";
 import { useInboxClock } from "./useInboxListMotion";
 
@@ -101,6 +102,7 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
   const alsoLinked = isPhone
     ? []
     : row.otherPullRequests.filter((pr) => !shownNumbers.has(pr.number));
+  const focus = row.focus ? describeInboxFocus(row.focus) : null;
   return (
     <div className="w-[18.875rem] space-y-2 py-1.5 text-left" data-testid="inbox-preview">
       <div className="flex min-w-0 items-center gap-3 text-[11px] leading-4">
@@ -231,6 +233,22 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
           />
         ) : null}
       </div>
+      {focus ? (
+        <div className="border-t border-border/60 pt-1.5 text-[11px] leading-4 text-muted-foreground">
+          <div className="flex items-start gap-2 text-popover-foreground/85">
+            <InfoIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+            <span className="whitespace-normal">
+              <span className="font-medium">Why focused? {focus.title}.</span> {focus.detail}
+            </span>
+          </div>
+          {focus.aiGenerated && row.focus?.ranking ? (
+            <div className="ml-5 mt-1 whitespace-normal text-[10px] text-muted-foreground/75">
+              {row.rankingModelLabel ? `${row.rankingModelLabel} · ` : ""}
+              ranked {formatRelativeTimeLabel(row.focus.ranking.rankedAt)}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -70,6 +70,7 @@ export const SERVER_PURE_TEST_FILES = [
   "src/sourceControl/gitLabIssues.test.ts",
   "src/sourceControl/gitLabMergeRequests.test.ts",
   "src/terminal/historyBuffer.test.ts",
+  "src/threadPriority/threadPriorityPolicy.test.ts",
   "src/usage/claudeTranscript.test.ts",
   "src/usage/codexTranscript.test.ts",
   "src/usage/usageAggregation.test.ts",

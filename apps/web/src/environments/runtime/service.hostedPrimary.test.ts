@@ -52,6 +52,7 @@ function descriptor(environmentId: EnvironmentId, label: string): ExecutionEnvir
     capabilities: {
       repositoryIdentity: false,
       threadSettlement: false,
+      threadPriorityRanking: false,
     },
   };
 }

@@ -111,6 +111,7 @@ function props(overrides: Partial<InboxSidebarProps> = {}): InboxSidebarProps {
     deliveryUnknownThreadKeys: new Set(),
     localQueuedThreadKeys: new Set(),
     activeThreadKey: null,
+    aiFocusEnabled: false,
     autoSettleAfterDays: null,
     pinnedThreadKeys: new Set([keyOf("pinned")]),
     onOpenThread: vi.fn(),

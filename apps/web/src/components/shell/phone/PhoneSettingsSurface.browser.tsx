@@ -127,6 +127,7 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -252,7 +253,7 @@ describe("PhoneSettingsSurface", () => {
     // once so cold Vite transforms cannot exhaust a short interaction wait.
     await Promise.all([
       import("../../settings/ProvidersSettingsPanel"),
-      import("../../settings/InboxSettings"),
+      import("../../settings/AiFocusSettings"),
       import("../../settings/OpinionatedPluginsSettings"),
       import("../../settings/McpServersSettings"),
       import("../../settings/AppearanceSettings"),

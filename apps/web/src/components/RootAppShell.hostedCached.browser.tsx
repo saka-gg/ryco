@@ -41,6 +41,9 @@ vi.mock("./MessageQueueDrainBridge", () => ({
 vi.mock("../notifications/ThreadAlertsBootstrap", () => ({
   ThreadAlertsBootstrap: () => <div data-testid="thread-alerts" />,
 }));
+vi.mock("./ThreadPriorityRefreshBridge", () => ({
+  ThreadPriorityRefreshBridge: () => <div data-testid="thread-priority-refresh" />,
+}));
 vi.mock("./AppSidebarLayout", () => ({
   AppSidebarLayout: ({ children }: { readonly children?: ReactNode }) => (
     <div data-testid="app-sidebar-layout">{children}</div>
@@ -107,6 +110,7 @@ describe("hosted workspace owners by gate state", () => {
       threadAlerts: false,
       coordinatorOwner: null,
     });
+    expect(document.querySelector('[data-testid="thread-priority-refresh"]')).toBeNull();
     expect(coordinatorMounts).toEqual([]);
   });
 
@@ -120,6 +124,7 @@ describe("hosted workspace owners by gate state", () => {
       threadAlerts: false,
       coordinatorOwner: "hosted-lifecycle",
     });
+    expect(document.querySelector('[data-testid="thread-priority-refresh"]')).not.toBeNull();
   });
 
   it("mounts no connection owner for a static hosted shell", async () => {
