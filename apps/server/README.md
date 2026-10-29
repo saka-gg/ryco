@@ -163,7 +163,44 @@ ryco remote add <name> <pairing-url>
 ryco remote list | remove <name>
 ryco remote threads <name>
 ryco remote send <name> <thread-id> <message>
+
+ryco thread start --project <id|path> [--title] [--model <instance/model>] [--runtime-mode] [--wait] [--json] <prompt|->
+ryco thread send <thread-id> [--wait] [--json] <prompt|->
+ryco thread wait <thread-id> [--turn <turn-id>] [--timeout 30m] [--json]
+ryco thread read <thread-id> [--limit 20] [--json]
 ```
+
+### Threads from scripts
+
+`ryco thread` drives agent threads on this machine's running node, or on a paired remote with
+`--remote <name>`. On this machine it signs in with a short-lived owner session that it revokes
+when the command ends (Ctrl-C included); no token is printed or written to disk.
+
+- `start` creates a thread in a project and starts its first turn, with the project's default
+  model and checkout (a new worktree when the project's threads start in one). `--runtime-mode`
+  may not be above the default the apps start a thread with.
+- `send` queues the message behind a running turn: it starts as the next turn once the thread is
+  idle, with the thread's own model and modes. It never steers the running turn.
+- `wait` waits for the turn `send` printed (`--turn`), else the running or latest turn.
+- `read` prints the thread's latest messages.
+
+`start` prints the thread id and `send` the turn id once the turn has started. With `--wait`
+(and always for `wait`) the command waits for exactly that turn and prints its final reply on
+stdout; diagnostics go to stderr. `--json` prints one line: `{ threadId, turnId, state, reply,
+error }`. Exit codes: 0 replied (or started), 1 failed or stopped, 2 needs an approval or an
+answer, 3 a node restart cut the turn off, 4 timed out (`--timeout`), 5 the turn ended but a later
+turn replaced it before the command saw how (`wait --turn` on an old turn).
+
+```bash
+thread=$(ryco thread start --project . "Fix the failing tests")
+ryco thread wait "$thread" --timeout 1h
+turn=$(ryco thread send "$thread" "Now update the changelog")
+ryco thread wait "$thread" --turn "$turn" --json
+```
+
+`--project` is a path when it is written as one (`.`, `..`, `/…`, `./…`, `~/…`) or exists;
+anything else is a project id. `ryco remote send <name> …` is
+`ryco thread send --remote <name> --wait`, except that its message is never read from stdin.
 
 See [REMOTE.md](../../REMOTE.md) for remote access setups.
 

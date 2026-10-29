@@ -15,6 +15,7 @@ import type {
   RuntimeMode,
   ServerWakeSource,
 } from "@ryco/contracts";
+import { RUNTIME_MODE_RANK } from "@ryco/shared/runtimeMode";
 import type { QueuedTurnIdleInput } from "@ryco/shared/threadSettlement";
 
 /**
@@ -28,12 +29,7 @@ export const MAX_COLD_WAKES_IN_FLIGHT = 4;
 export const COLD_WAKE_GRACE_MS = 120_000;
 
 /** Privilege order of runtime modes: lower is less privileged. */
-export const runtimeModePrivilegeRank: Record<RuntimeMode, number> = {
-  "approval-required": 0,
-  "auto-accept-edits": 1,
-  auto: 2,
-  "full-access": 3,
-};
+export const runtimeModePrivilegeRank = RUNTIME_MODE_RANK;
 
 /** The wake source a turn start's guard names; null for a turn start without a guard. */
 export const serverWakeSource = (

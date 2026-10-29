@@ -40,6 +40,10 @@
       "types": "./src/restartContinuation.ts",
       "import": "./src/restartContinuation.ts"
     },
+    "./runtimeMode": {
+      "types": "./src/runtimeMode.ts",
+      "import": "./src/runtimeMode.ts"
+    },
     "./htmlRender": {
       "types": "./src/htmlRender.ts",
       "import": "./src/htmlRender.ts"
@@ -448,6 +452,10 @@
       "types": "./src/turnReply.ts",
       "import": "./src/turnReply.ts"
     },
+    "./turnRunning": {
+      "types": "./src/turnRunning.ts",
+      "import": "./src/turnRunning.ts"
+    },
     "./userInputExchange": {
       "types": "./src/userInputExchange.ts",
       "import": "./src/userInputExchange.ts"
@@ -504,6 +512,10 @@
       "import": "./src/pairingUrl.ts"
     },
     "./storageRetention": "./src/storageRetention.ts",
+    "./turnStart": {
+      "types": "./src/turnStart.ts",
+      "import": "./src/turnStart.ts"
+    },
     "./turnSteer": {
       "types": "./src/turnSteer.ts",
       "import": "./src/turnSteer.ts"

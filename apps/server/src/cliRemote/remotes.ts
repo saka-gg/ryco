@@ -15,7 +15,7 @@ import { createRemoteEnvironmentApi } from "@ryco/client-runtime/connection";
 import { resolveRemotePairingTarget } from "@ryco/client-runtime/connection";
 import { WsRpcGroup } from "@ryco/contracts";
 import { getPairingTokenFromUrl } from "@ryco/shared/pairingUrl";
-import { Data, Effect, Layer, Schema, type Scope } from "effect";
+import { Data, Effect, Layer, Schedule, Schema, type Scope } from "effect";
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc";
 import * as Socket from "effect/socket/Socket";
 
@@ -149,11 +149,19 @@ export async function pairCliRemote(input: {
 }
 
 /**
+ * Where the CLI connects and with which session: a paired remote, or (unnamed)
+ * this machine's own node for `ryco thread`.
+ */
+export type CliRemoteEndpoint = Pick<CliRemote, "httpBaseUrl" | "wsBaseUrl" | "token"> & {
+  readonly name?: string;
+};
+
+/**
  * An RPC client for a remote, scoped to the caller. The session token never
  * reaches the socket URL; a short-lived WebSocket token minted with it does.
  */
 export const connectCliRemote = (
-  remote: CliRemote,
+  remote: CliRemoteEndpoint,
 ): Effect.Effect<CliRemoteRpcClient, CliRemoteError, Scope.Scope> =>
   Effect.gen(function* () {
     const socketUrl = yield* Effect.tryPromise({
@@ -165,13 +173,18 @@ export const connectCliRemote = (
         }),
       catch: (cause) =>
         new CliRemoteError({
-          message: `Could not reach "${remote.name}" at ${remote.httpBaseUrl}, or its pairing was revoked.`,
+          message:
+            remote.name === undefined
+              ? `Could not reach the Ryco server at ${remote.httpBaseUrl}.`
+              : `Could not reach "${remote.name}" at ${remote.httpBaseUrl}, or its pairing was revoked.`,
           cause,
         }),
     });
     const url = new URL(socketUrl);
     url.pathname = "/ws";
-    const protocol = RpcClient.layerProtocolSocket().pipe(
+    // No reconnect under the caller: a quick node restart would bring the socket back with
+    // its subscriptions gone. A dropped socket fails the calls, and the caller connects again.
+    const protocol = RpcClient.layerProtocolSocket({ retryPolicy: Schedule.recurs(0) }).pipe(
       Layer.provide(
         Socket.layerWebSocket(url.toString()).pipe(
           Layer.provide(NodeSocket.layerWebSocketConstructor),

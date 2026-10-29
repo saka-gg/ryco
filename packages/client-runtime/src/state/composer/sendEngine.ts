@@ -522,6 +522,72 @@ async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput
   }
 }
 
+export interface TurnStartCommandInput {
+  readonly commandId: CommandId;
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  /** The composed message text (`composeOutgoingPrompt`). */
+  readonly text: string;
+  readonly attachments: readonly SendTurnDispatchAttachment[];
+  readonly modelSelection: ModelSelection;
+  /** The prompt-derived title; the node may give a thread still titled so a generated one. */
+  readonly titleSeed: string;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+  /** Absent keeps the thread's own. */
+  readonly tokenMode?: AgentTokenMode | undefined;
+  readonly goal?: ThreadGoalUpdate | undefined;
+  readonly bootstrap?: SendTurnBootstrap;
+  readonly sourceControlContexts?: readonly ComposerSourceControlContext[] | undefined;
+  readonly computerUse?: ComputerTurnIntent | undefined;
+  readonly claudeResumeGuard?: ClaudeResumeGuard | undefined;
+  readonly usageLimitResumeGuard?: UsageLimitResumeGuard | undefined;
+  /** A turn start sent again past background work (see `startTurnPastBackgroundWork`). */
+  readonly retryPastBackgroundWork?: { readonly createdAt: string } | undefined;
+  readonly createdAt: string;
+}
+
+/**
+ * The `thread.turn.start` command every client sends: web, desktop and mobile through
+ * `commitSendTurnDispatch`, and `ryco thread start|send`. Thread references are read from
+ * the text here, so no sender assembles the command by hand.
+ */
+export function buildTurnStartCommand(
+  input: TurnStartCommandInput,
+): LocalTaskDelegateInput["command"] {
+  const threadReferences = extractThreadReferences(input.text, input.threadId);
+  const sourceControlContexts = input.sourceControlContexts ?? [];
+  return {
+    type: "thread.turn.start",
+    ...(input.computerUse ? { computerUse: input.computerUse } : {}),
+    commandId: input.commandId,
+    ...(input.claudeResumeGuard ? { claudeResumeGuard: input.claudeResumeGuard } : {}),
+    ...(input.usageLimitResumeGuard ? { usageLimitResumeGuard: input.usageLimitResumeGuard } : {}),
+    threadId: input.threadId,
+    message: {
+      messageId: input.messageId,
+      role: "user",
+      text: input.text,
+      attachments: input.attachments,
+    },
+    modelSelection: input.modelSelection,
+    titleSeed: input.titleSeed,
+    runtimeMode: input.runtimeMode,
+    interactionMode: input.interactionMode,
+    ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
+    ...(input.goal ? { goal: input.goal } : {}),
+    ...(input.bootstrap ? { bootstrap: input.bootstrap } : {}),
+    ...(sourceControlContexts.length > 0 ? { sourceControlContexts } : {}),
+    ...(threadReferences.length > 0 ? { threadReferences } : {}),
+    // Every caller handles the node's refusal (the choice, a held queue message, or a failed
+    // send that keeps the draft), so each turn start asks for it until the user chose to stop.
+    ...(input.retryPastBackgroundWork
+      ? { stopBackgroundWork: true }
+      : { keepBackgroundWork: true }),
+    createdAt: input.retryPastBackgroundWork?.createdAt ?? input.createdAt,
+  };
+}
+
 function dispatchTurnStart(
   input: CommitSendTurnDispatchInput,
   claudeResumeGuard: ClaudeResumeGuard | undefined,
@@ -530,36 +596,26 @@ function dispatchTurnStart(
   /** A turn start sent again past background work (see `startTurnPastBackgroundWork`). */
   retryPastBackgroundWork: { readonly createdAt: string } | undefined,
 ) {
-  const threadReferences = extractThreadReferences(input.outgoingMessageText, input.threadId);
-  const command: LocalTaskDelegateInput["command"] = {
-    type: "thread.turn.start",
-    ...(input.computerUse ? { computerUse: input.computerUse } : {}),
+  const command = buildTurnStartCommand({
     commandId,
-    ...(claudeResumeGuard ? { claudeResumeGuard } : {}),
-    ...(input.usageLimitResumeGuard ? { usageLimitResumeGuard: input.usageLimitResumeGuard } : {}),
     threadId: input.threadId,
-    message: {
-      messageId: input.messageId,
-      role: "user",
-      text: input.outgoingMessageText,
-      attachments: input.turnAttachments,
-    },
+    messageId: input.messageId,
+    text: input.outgoingMessageText,
+    attachments: input.turnAttachments,
     modelSelection: input.modelSelection,
     titleSeed: input.title,
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
     tokenMode: input.tokenMode,
-    ...(input.goal ? { goal: input.goal } : {}),
-    ...(bootstrap ? { bootstrap } : {}),
-    ...(input.sourceControlContexts.length > 0
-      ? { sourceControlContexts: input.sourceControlContexts }
-      : {}),
-    ...(threadReferences.length > 0 ? { threadReferences } : {}),
-    // Every caller handles the node's refusal (the choice, a held queue message, or a failed
-    // send that keeps the draft), so each turn start asks for it until the user chose to stop.
-    ...(retryPastBackgroundWork ? { stopBackgroundWork: true } : { keepBackgroundWork: true }),
-    createdAt: retryPastBackgroundWork?.createdAt ?? input.createdAt,
-  };
+    goal: input.goal,
+    bootstrap,
+    sourceControlContexts: input.sourceControlContexts,
+    computerUse: input.computerUse,
+    claudeResumeGuard,
+    usageLimitResumeGuard: input.usageLimitResumeGuard,
+    retryPastBackgroundWork,
+    createdAt: input.createdAt,
+  });
   return input.localTask
     ? input.localTask.delegate(command)
     : input.api.orchestration.dispatchCommand(command);

@@ -1,10 +1,7 @@
-import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Stream } from "effect";
 
-import type { CliRemoteRpcClient } from "./remotes.ts";
-import { formatRemoteThreads, sendToRemoteThread } from "./threads.ts";
+import { formatRemoteThreads } from "./threads.ts";
 
 const now = "2026-09-30T00:00:00.000Z";
 const thread = (id: string, updatedAt: string, extra: Record<string, unknown> = {}) => ({
@@ -37,28 +34,6 @@ const snapshot = {
   updatedAt: now,
 } as never;
 
-const event = (sequence: number, type: string, payload: Record<string, unknown>) => ({
-  kind: "event",
-  event: { sequence, type, payload },
-});
-
-/** A remote serving `snapshot` and, for every thread, `threadEvents`. */
-const remoteClient = (threadEvents: ReadonlyArray<unknown>, dispatched: unknown[] = []) =>
-  ({
-    [ORCHESTRATION_WS_METHODS.subscribeShell]: () => Stream.make({ kind: "snapshot", snapshot }),
-    [ORCHESTRATION_WS_METHODS.subscribeThread]: () =>
-      Stream.fromIterable([{ kind: "snapshot", snapshot: {} }, ...threadEvents]),
-    [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command: unknown) =>
-      Effect.sync(() => {
-        dispatched.push(command);
-        return { sequence: 11 };
-      }),
-  }) as unknown as CliRemoteRpcClient;
-
-const running = event(11, "thread.session-set", {
-  session: { status: "running", lastError: null },
-});
-
 describe("ryco remote threads", () => {
   it("lists open threads newest first with what they need", () => {
     const lines = formatRemoteThreads(snapshot).split("\n");
@@ -74,107 +49,4 @@ describe("ryco remote threads", () => {
     );
     assert.include(lines[0]!, "ryco / Thread t-new");
   });
-
-  it.effect("sends with the thread's modes and prints the reply until the turn ends", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const dispatched: unknown[] = [];
-        const printed: string[] = [];
-        const client = remoteClient(
-          [
-            event(9, "thread.message-sent", {
-              role: "assistant",
-              messageId: "m0",
-              text: "old",
-              streaming: false,
-            }),
-            running,
-            event(12, "thread.message-sent", {
-              role: "assistant",
-              messageId: "m1",
-              text: "Hel",
-              streaming: true,
-            }),
-            event(13, "thread.message-sent", {
-              role: "assistant",
-              messageId: "m1",
-              text: "lo",
-              streaming: true,
-            }),
-            event(14, "thread.message-sent", {
-              role: "assistant",
-              messageId: "m1",
-              text: "Hello",
-              streaming: false,
-            }),
-            event(15, "thread.session-set", { session: { status: "ready", lastError: null } }),
-            event(16, "thread.message-sent", {
-              role: "assistant",
-              messageId: "m2",
-              text: "later",
-              streaming: false,
-            }),
-          ],
-          dispatched,
-        );
-
-        const error = yield* sendToRemoteThread(client, {
-          threadId: "t-old",
-          text: "hi there",
-          onAssistantText: (text) => printed.push(text),
-        });
-
-        assert.isNull(error);
-        assert.deepEqual(printed, ["Hel", "lo"]);
-        assert.deepInclude(dispatched[0] as object, {
-          type: "thread.turn.start",
-          threadId: "t-old",
-          runtimeMode: "full-access",
-          interactionMode: "default",
-        });
-      }),
-    ),
-  );
-
-  it.effect("reports the session's error when the turn fails", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const client = remoteClient([
-          running,
-          event(12, "thread.session-set", {
-            session: { status: "error", lastError: "The provider crashed." },
-          }),
-        ]);
-        const error = yield* sendToRemoteThread(client, {
-          threadId: "t-old",
-          text: "hi there",
-          onAssistantText: () => undefined,
-        });
-        assert.strictEqual(error, "The provider crashed.");
-      }),
-    ),
-  );
-
-  it.effect("reports a turn a node restart cut off as interrupted, not failed", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const client = remoteClient([
-          running,
-          event(12, "thread.session-set", {
-            session: { status: "error", lastError: ORPHANED_PROVIDER_SESSION_ERROR },
-          }),
-        ]);
-        const failure = yield* sendToRemoteThread(client, {
-          threadId: "t-old",
-          text: "hi there",
-          onAssistantText: () => undefined,
-        }).pipe(Effect.flip);
-        assert.strictEqual(failure._tag, "CliRemoteError");
-        assert.strictEqual(
-          failure.message,
-          `The turn was interrupted. ${ORPHANED_PROVIDER_SESSION_ERROR}`,
-        );
-      }),
-    ),
-  );
 });
