@@ -50,6 +50,7 @@ describe("pre-auth server environment descriptor", () => {
       "cliProxyCloudflareAccess",
       "cliProxyHubs",
       "conversationRevert",
+      "crossRepositoryChangeRequests",
       "environmentIcon",
       "fileAttachments",
       "gitWritingStyle",

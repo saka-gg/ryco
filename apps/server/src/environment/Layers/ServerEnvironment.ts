@@ -96,6 +96,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       storageManagement: true,
       threadSidebarUndo: true,
       projectIcons: true,
+      crossRepositoryChangeRequests: true,
       environmentIcon: true,
       projectPreferences: true,
       usageLimitRecovery: true,

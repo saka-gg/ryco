@@ -55,6 +55,15 @@ Ryco works with the platforms your team already uses:
 - To always open links in the browser, set **Settings → Source control → Pull request links in chat** to **Browser**. The setting belongs to this browser or app.
 - Ryco matches the link with the remote your project's pull request numbers come from (`upstream`, else `origin`, else the first remote by name), so a fork opens only the links of the repository it tracks.
 
+**Pull requests that need you, across repositories**
+
+- Each machine answers one request (`sourceControl.listInvolvedChangeRequests`) with the pull requests that ask for your review or that you opened, across all of its repositories, newest activity first.
+- GitHub is read with one search per host and kind of involvement (`review-requested:@me`, `author:@me`), not one list per repository, so a machine with many GitHub repositories costs two GraphQL requests per host. Archived repositories are left out, and each search returns the 100 most recently updated pull requests.
+- GitLab, Forgejo, Bitbucket and Azure DevOps repositories are read one repository at a time, with the same involvement filters the Pull requests page uses.
+- Answers are kept for 4 minutes per host or repository. A refresh reads again anything older than 10 seconds, and merging, closing or editing a pull request in Ryco drops the cached answer for its host.
+- A machine answers within 20 seconds however many repositories it reads, at most four at a time. Lists still loading then are reported as loading, keep loading in the background, and appear when Ryco asks again.
+- A host that fails is reported on its own; the other hosts' pull requests still show. Pull requests in organizations your `gh` login may not read (SAML single sign-on, OAuth app restrictions) are counted and left out instead of failing the whole host.
+
 **Keep your place in a GitHub review**
 
 - In a pull request's **Files** tab, check **Viewed** beside a file. Progress is saved to GitHub using the account authenticated by `gh` in the connected environment, and survives reopening Ryco or using another machine with that account.
@@ -228,6 +237,7 @@ Then restart Ryco and verify the connection in **Source Control settings**.
   - After a rate limit, Ryco pauses its own background reads for that host (sidebar rows, worktree sweeps and other background refreshes) until the time the forge named in `Retry-After` or a spent quota's reset, or for 30 seconds, doubling with each limit in a row up to 15 minutes, when it named none. Paused reads fail at once with "… requests are paused after a rate limit." and do not reach the forge, so the limit can reset. What you open or click is never paused, and a request of yours that goes through ends a guessed pause early. SSH and HTTPS remotes of one host share a pause, and so do all Azure DevOps organizations on `dev.azure.com`. Pauses are kept in memory, so a restart starts without one.
   - While a forge is rate limiting, pull request badges and inbox rows keep showing what they last loaded, for up to an hour, instead of an error, and Ryco links no pull request it only saw in that data. The pull requests page and the open thread report the rate limit instead. Ryco asks the forge for the same list again only when the pause ends (every 15 minutes during a longer one), and the open thread's periodic remote refresh waits until then too.
   - The app says when requests go out again: "GitHub requests paused until 14:32" (with the host's name) above the pull request list, in place of its rows when none are loaded, in the conversation, on the thread's pull request checks, and once at the top of the Inbox. Pages and panels wait until then (at most 15 minutes) before reading again instead of retrying sooner; when that time has already passed (an answer the node still holds, or a clock ahead of the node's), they back off from one second, doubling with each refusal. A node that predates the pause shows the same line without a time, except in the Inbox, which shows only pauses with a known end.
+- **Pull requests from one GitHub organization are missing across repositories** – The organization enforces SAML single sign-on or restricts OAuth apps, and the token `gh` uses has not been authorized for it. Authorize it on GitHub (or run `gh auth refresh`) on the server.
 - **Can't push to a remote** – Verify your Git remote URL matches the provider you've authenticated with (SSH vs HTTPS remotes may need different credentials)
 
 **Need more help?** Check your provider's CLI documentation:

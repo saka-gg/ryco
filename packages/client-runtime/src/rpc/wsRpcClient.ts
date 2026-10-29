@@ -205,6 +205,9 @@ export interface WsRpcClient {
     readonly getIssue: RpcUnaryMethod<typeof WS_METHODS.sourceControlGetIssue>;
     readonly searchIssues: RpcUnaryMethod<typeof WS_METHODS.sourceControlSearchIssues>;
     readonly listChangeRequests: RpcUnaryMethod<typeof WS_METHODS.sourceControlListChangeRequests>;
+    readonly listInvolvedChangeRequests: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlListInvolvedChangeRequests
+    >;
     readonly searchChangeRequests: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlSearchChangeRequests
     >;
@@ -711,6 +714,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.sourceControlSearchIssues](input)),
       listChangeRequests: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlListChangeRequests](input)),
+      listInvolvedChangeRequests: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlListInvolvedChangeRequests](input),
+        ),
       searchChangeRequests: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlSearchChangeRequests](input)),
       getChangeRequestDetail: (input) =>

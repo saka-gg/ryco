@@ -788,6 +788,91 @@ describe("change request page forwarding", () => {
       }),
     );
   });
+
+  it.effect("forwards the involved search through the lazy provider with the bound context", () =>
+    Effect.gen(function* () {
+      const inputs: Array<unknown> = [];
+      const searching = {
+        kind: "github",
+        searchInvolvedChangeRequests: (input: unknown) =>
+          Effect.sync(() => {
+            inputs.push(input);
+            return {
+              host: "github.com",
+              viewerLogin: "octocat",
+              items: [],
+              truncated: false,
+              skippedRows: 0,
+            };
+          }),
+      } as unknown as SourceControlProvider.SourceControlProviderShape;
+      const lazy = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "github",
+        Effect.succeed(searching),
+        { involvedSearch: true },
+      );
+      const bound = SourceControlProviderRegistry.bindProviderContext(lazy, context);
+      const search = bound.searchInvolvedChangeRequests;
+      assert.ok(search, "the involved search must survive the lazy provider and context");
+      const page = yield* search({ cwd: "/repo", involvement: "authored", state: "open" });
+      assert.strictEqual(page.viewerLogin, "octocat");
+      assert.deepStrictEqual((inputs[0] as { readonly context?: unknown }).context, context);
+
+      // Hosts without a host-wide search keep the method absent, so callers read per repository.
+      const gitlab = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "gitlab",
+        Effect.succeed(recordingProvider([], { withOptional: false })),
+      );
+      assert.strictEqual(gitlab.searchInvolvedChangeRequests, undefined);
+      assert.strictEqual(
+        SourceControlProviderRegistry.bindProviderContext(gitlab, context)
+          .searchInvolvedChangeRequests,
+        undefined,
+      );
+    }),
+  );
+
+  it.effect("searches the checkout's host through registry.resolveHandle", () =>
+    Effect.gen(function* () {
+      const hosts: Array<string> = [];
+      const registry = yield* makeRegistry({
+        remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+        githubCli: {
+          searchInvolvedPullRequests: (input) =>
+            Effect.sync(() => {
+              hosts.push(input.host);
+              return {
+                host: input.host,
+                viewerLogin: "octocat",
+                items: [
+                  {
+                    summary: {
+                      number: 4,
+                      title: "Four",
+                      url: "https://github.com/acme/other/pull/4",
+                      baseRefName: "main",
+                      headRefName: "feature/four",
+                    },
+                    stackSummary: null,
+                  },
+                ],
+                truncated: true,
+                skippedRows: 1,
+              };
+            }),
+        },
+      });
+      const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+      const search = handle.provider.searchInvolvedChangeRequests;
+      assert.ok(search);
+      const page = yield* search({ cwd: "/repo", involvement: "review-requested", state: "open" });
+      assert.deepStrictEqual(hosts, ["github.com"]);
+      assert.strictEqual(page.items[0]?.url, "https://github.com/acme/other/pull/4");
+      assert.strictEqual(page.items[0]?.provider, "github");
+      assert.isTrue(page.truncated);
+      assert.strictEqual(page.skippedRows, 1);
+    }),
+  );
 });
 
 describe("unsupported change request options", () => {

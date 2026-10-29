@@ -157,6 +157,7 @@ describe("shared RPC access policy", () => {
       WS_METHODS.gitResumeStackedAction,
       WS_METHODS.vcsReadComparison,
       WS_METHODS.sourceControlListChangeRequests,
+      WS_METHODS.sourceControlListInvolvedChangeRequests,
       ORCHESTRATION_WS_METHODS.getTaskOutput,
     ]) {
       expect(rpcAccessFor(method)).toBe("operator");

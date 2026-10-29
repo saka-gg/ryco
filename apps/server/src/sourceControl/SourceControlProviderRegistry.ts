@@ -38,6 +38,8 @@ interface LazyProviderOptions {
   readonly cloneAuthentication?: boolean;
   /** The loaded provider reads link states in batches (`getLinkStates`). */
   readonly linkStates?: boolean;
+  /** The loaded provider searches across the host's repositories (`searchInvolvedChangeRequests`). */
+  readonly involvedSearch?: boolean;
 }
 
 export interface SourceControlProviderRegistration {
@@ -383,6 +385,15 @@ export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(funct
             ),
         }
       : {}),
+    ...(options.involvedSearch
+      ? {
+          searchInvolvedChangeRequests: lazyOptionalMethod(
+            provider,
+            (loaded) => loaded.searchInvolvedChangeRequests,
+            () => unsupportedProviderOperation(kind, "searchInvolvedChangeRequests"),
+          ),
+        }
+      : {}),
     listWorkflowRuns: (input) =>
       provider.pipe(
         Effect.flatMap((loaded) => {
@@ -664,6 +675,14 @@ export function bindProviderContext(
     ...(provider.getLinkStates
       ? { getLinkStates: withProviderContext(provider.getLinkStates, context) }
       : {}),
+    ...(provider.searchInvolvedChangeRequests
+      ? {
+          searchInvolvedChangeRequests: withProviderContext(
+            provider.searchInvolvedChangeRequests,
+            context,
+          ),
+        }
+      : {}),
     ...(provider.listWorkflowRuns
       ? {
           listWorkflowRuns: (input) => {
@@ -847,7 +866,7 @@ export const makeWithClients = Effect.fn("makeSourceControlProviderRegistry")(fu
           Effect.provideService(FileSystem.FileSystem, fileSystem),
         );
     }),
-    { linkStates: true },
+    { linkStates: true, involvedSearch: true },
   );
 
   const gitlab = yield* makeLazyProvider(

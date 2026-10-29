@@ -255,6 +255,17 @@ export interface GitHubPullRequestListItem {
   readonly stackSummary: SourceControlChangeRequestStackSummary | null;
 }
 
+/** One page of a search across every repository on a host (`searchInvolvedPullRequests`). */
+export interface GitHubInvolvedPullRequestSearch {
+  readonly host: string;
+  readonly viewerLogin: string | null;
+  readonly items: ReadonlyArray<GitHubPullRequestListItem>;
+  /** More pull requests matched than the page holds. */
+  readonly truncated: boolean;
+  /** Matches GitHub did not return to this account (SAML SSO, OAuth app restrictions). */
+  readonly skippedRows: number;
+}
+
 /** Resolved identity of a pull request, used to address API calls precisely. */
 export interface GitHubPullRequestTarget {
   /** GraphQL node id. */
@@ -495,6 +506,21 @@ export interface GitHubCliShape {
     /** Ask for stack summaries in the same request (default `true`). */
     readonly includeStackSummary?: boolean;
   }) => Effect.Effect<ReadonlyArray<GitHubPullRequestListItem>, GitHubCliError>;
+
+  /**
+   * Pull requests involving the viewer across every repository on a host, newest activity
+   * first, archived repositories left out: one GraphQL search of up to 100 rows. `github.com`
+   * is searched as is; for any other `host`, the one `gh` resolves for `cwd`'s repository (it
+   * knows SSH host aliases), else `host`, so a checkout whose repository is gone still searches.
+   */
+  readonly searchInvolvedPullRequests: (input: {
+    readonly cwd: string;
+    readonly host: string;
+    readonly involvement: ChangeRequestInvolvement;
+    readonly state: GitHubRepositoryLists.GitHubPullRequestListState;
+    /** Clamped to 1..100. */
+    readonly limit?: number;
+  }) => Effect.Effect<GitHubInvolvedPullRequestSearch, GitHubCliError>;
 
   readonly getPullRequest: (input: {
     readonly cwd: string;
@@ -1565,6 +1591,63 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
         summary: withPresentUpdatedAt(row.record),
         stackSummary: row.stackSummary,
       }));
+    });
+
+  const searchInvolvedPullRequests: GitHubCliShape["searchInvolvedPullRequests"] = (input) =>
+    Effect.gen(function* () {
+      // github.com needs no resolution. Other names may be SSH host aliases, which gh's
+      // resolution (cached, shared with the lists) translates; a failed one (the repository
+      // was deleted, renamed or made private) must not fail a search that spans the host.
+      const host =
+        input.host === "github.com"
+          ? input.host
+          : yield* listRepository(input.cwd).pipe(
+              Effect.map((repository) => repository.host),
+              Effect.orElseSucceed(() => input.host),
+            );
+      const pageSize = GitHubRepositoryLists.GITHUB_REPOSITORY_LIST_PAGE_SIZE;
+      const first = Math.min(pageSize, Math.max(1, Math.trunc(input.limit ?? pageSize)));
+      const q = GitHubRepositoryLists.buildGitHubPullRequestInvolvementSearch({
+        involvement: input.involvement,
+        state: input.state,
+        excludeArchived: true,
+        sort: "updated",
+      });
+      const read = (checks: boolean) =>
+        graphqlDocument({
+          cwd: input.cwd,
+          host,
+          operation: "searchInvolvedPullRequests",
+          query: GitHubRepositoryLists.buildGitHubInvolvedPullRequestSearchQuery({ checks }),
+          variables: { q, first },
+          // Rows from organizations this login may not read fail alone; the decoder decides.
+          acceptPartialData: true,
+        }).pipe(
+          Effect.flatMap((raw) => {
+            const decoded = GitHubRepositoryLists.decodeGitHubInvolvedSearchJson(raw);
+            return Result.isSuccess(decoded)
+              ? Effect.succeed(decoded.success)
+              : Effect.fail(
+                  new GitHubCliError({
+                    operation: "searchInvolvedPullRequests",
+                    detail: decoded.failure,
+                  }),
+                );
+          }),
+        );
+      const page = yield* read(true).pipe(
+        Effect.catchIf(isStatusCheckRollupAccessError, () => read(false)),
+      );
+      return {
+        host,
+        viewerLogin: page.viewerLogin,
+        items: page.rows.map((row): GitHubPullRequestListItem => ({
+          summary: withPresentUpdatedAt(row.record),
+          stackSummary: null,
+        })),
+        truncated: page.hasNextPage,
+        skippedRows: page.skippedRows,
+      };
     });
 
   const listIssues: GitHubCliShape["listIssues"] = (input) =>
@@ -2947,6 +3030,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     updatePullRequest,
     getPullRequestFileContents,
     listPullRequests,
+    searchInvolvedPullRequests,
     getLinkStates,
     listOpenPullRequests: (input) =>
       executePrJson({

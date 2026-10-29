@@ -280,4 +280,93 @@ describe("repositoryListCache", () => {
       }),
     );
   });
+
+  it.effect("reads again a finished entry older than maxAgeMs and keeps a younger one", () =>
+    Effect.gen(function* () {
+      let now = 0;
+      let loads = 0;
+      const cache = makeRepositoryListCache({ ttlMs: 60_000, nowMs: () => now });
+      const read = (maxAgeMs?: number) =>
+        cache.get({
+          repository: "host",
+          key: "involved",
+          load: Effect.sync(() => ++loads),
+          ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
+        });
+      expect(yield* read()).toBe(1);
+      now = 9_999;
+      expect(yield* read(10_000)).toBe(1);
+      now = 10_000;
+      expect(yield* read(10_000)).toBe(2);
+      // The re-read restarts the entry's age for every reader.
+      now = 15_000;
+      expect(yield* read(10_000)).toBe(2);
+      expect(yield* read()).toBe(2);
+    }),
+  );
+
+  it.effect("joins an in-flight read even with maxAgeMs 0, and never caches its failure", () =>
+    Effect.gen(function* () {
+      const cache = makeRepositoryListCache();
+      let loads = 0;
+      const gate = yield* Deferred.make<void>();
+      const leader = yield* Effect.forkChild(
+        cache.get({
+          repository: "a",
+          key: "k",
+          load: Deferred.await(gate).pipe(Effect.as(++loads)),
+        }),
+      );
+      yield* Effect.yieldNow;
+      const follower = yield* Effect.forkChild(
+        cache.get({ repository: "a", key: "k", load: Effect.sync(() => ++loads), maxAgeMs: 0 }),
+      );
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(gate, undefined);
+      expect([yield* Fiber.join(leader), yield* Fiber.join(follower)]).toEqual([1, 1]);
+
+      let failures = 0;
+      const failing = cache.get({
+        repository: "a",
+        key: "failing",
+        load: Effect.suspend(() => (++failures, Effect.fail("offline" as const))),
+        maxAgeMs: 10_000,
+      });
+      expect(yield* Effect.flip(failing)).toBe("offline");
+      expect(yield* Effect.flip(failing)).toBe("offline");
+      expect(failures).toBe(2);
+    }),
+  );
+
+  it.effect("keeps an entry stored soon after an invalidation only for settleTtlMs", () =>
+    Effect.gen(function* () {
+      let now = 0;
+      let loads = 0;
+      const cache = makeRepositoryListCache({ nowMs: () => now });
+      const read = (repository: string) =>
+        cache.get({
+          repository,
+          key: "search",
+          load: Effect.sync(() => ++loads),
+          ttlMs: 240_000,
+          settleTtlMs: 15_000,
+        });
+      // Never invalidated: the normal lifetime.
+      expect(yield* read("quiet")).toBe(1);
+      now = 200_000;
+      expect(yield* read("quiet")).toBe(1);
+
+      yield* cache.invalidate("busy");
+      expect(yield* read("busy")).toBe(2);
+      now = 214_999;
+      expect(yield* read("busy")).toBe(2);
+      now = 215_000;
+      expect(yield* read("busy")).toBe(3);
+      // A full lifetime after the invalidation, entries live their normal TTL again.
+      now = 440_000;
+      expect(yield* read("busy")).toBe(4);
+      now = 600_000;
+      expect(yield* read("busy")).toBe(4);
+    }),
+  );
 });

@@ -51,6 +51,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   requiredWorktreeBootstrap: Schema.optional(Schema.Boolean),
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   projectIcons: Schema.optional(Schema.Boolean),
+  /**
+   * `sourceControl.listInvolvedChangeRequests` (pull requests involving you across the node's
+   * repositories); absent on older servers.
+   */
+  crossRepositoryChangeRequests: Schema.optionalKey(Schema.Boolean),
   storageManagement: Schema.optionalKey(Schema.Boolean),
   environmentIcon: Schema.optionalKey(Schema.Boolean),
   projectPreferences: Schema.optionalKey(Schema.Boolean),

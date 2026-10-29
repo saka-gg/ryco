@@ -21,6 +21,7 @@ import { makeTerminalHandlers } from "./terminalRpc.ts";
 import { makeProjectHandlers } from "./projectRpc.ts";
 import { makeChatProjectHandlers } from "./chatProjectRpc.ts";
 import { makeSourceControlHandlers } from "./sourceControlRpc.ts";
+import { makeSourceControlInvolvedHandlers } from "./sourceControlInvolvedRpc.ts";
 import { makeProviderHandlers } from "./providerRpc.ts";
 import { makeProviderSessionPrewarmHandlers } from "./providerSessionPrewarmRpc.ts";
 import { makeProviderProjectCommandsHandlers } from "./providerProjectCommandsRpc.ts";
@@ -47,6 +48,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeStatisticsHandlers(ctx),
       ...makeCliProxyHandlers(ctx),
       ...makeSourceControlHandlers(ctx),
+      ...makeSourceControlInvolvedHandlers(ctx),
       ...makeProjectHandlers(ctx),
       ...makeChatProjectHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
