@@ -109,6 +109,39 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.reason).toBe("User denied command execution.");
   });
 
+  it("decodes and round-trips vcs.state.changed events, with an open set of kinds", () => {
+    const base = {
+      type: "vcs.state.changed",
+      eventId: "event-vcs-1",
+      provider: "claudeAgent",
+      createdAt: "2026-10-28T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    } as const;
+    const commit = decodeRuntimeEvent({
+      ...base,
+      payload: { kind: "commit", cwd: "/repo/packages/app" },
+    });
+    expect(commit.type).toBe("vcs.state.changed");
+    if (commit.type !== "vcs.state.changed") throw new Error("expected vcs.state.changed");
+    expect(commit.payload).toEqual({ kind: "commit", cwd: "/repo/packages/app" });
+    expect(decodeRuntimeEvent(Schema.encodeSync(ProviderRuntimeEvent)(commit))).toEqual(commit);
+
+    const published = decodeRuntimeEvent({
+      ...base,
+      payload: { kind: "change-request", action: "created" },
+    });
+    expect(published.payload).toEqual({ kind: "change-request", action: "created" });
+    // A kind a newer CLI adds still decodes: it means "something changed".
+    expect(decodeRuntimeEvent({ ...base, payload: { kind: "squash" } }).payload).toEqual({
+      kind: "squash",
+    });
+
+    expect(() => decodeRuntimeEvent({ ...base, payload: {} })).toThrow();
+    expect(() => decodeRuntimeEvent({ ...base, payload: { kind: "" } })).toThrow();
+    expect(() => decodeRuntimeEvent({ ...base, payload: { kind: "push", cwd: "" } })).toThrow();
+  });
+
   it("decodes user-input.requested with structured questions", () => {
     const parsed = decodeRuntimeEvent({
       type: "user-input.requested",

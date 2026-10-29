@@ -232,6 +232,13 @@ export interface ThreadGitSyncRequest {
   readonly turnStart: boolean;
   /** What the finished git or forge commands may have changed; null for none. */
   readonly command: VcsCommandEffect | null;
+  /**
+   * The provider's own git and pull request signals, by the directory each command finished in.
+   * One counts only once the sync finds that directory inside the thread's checkout or its
+   * repository: the directory is a hint, and a signal from elsewhere changed nothing here.
+   * Null for none.
+   */
+  readonly signals: ReadonlyMap<string, VcsCommandEffect> | null;
   readonly turnEnd: { readonly overlap: TurnOverlap; readonly aborted: boolean } | null;
   /** A remote refresh held back by the per-checkout spacing is now due. */
   readonly remoteDue: boolean;
@@ -240,9 +247,16 @@ export interface ThreadGitSyncRequest {
 export const EMPTY_SYNC_REQUEST: ThreadGitSyncRequest = {
   turnStart: false,
   command: null,
+  signals: null,
   turnEnd: null,
   remoteDue: false,
 };
+
+/**
+ * Signal directories one queued sync keeps apart. Past it a signal counts as if it had named no
+ * directory: over-counting costs one re-read, losing one a missed refresh.
+ */
+export const MAX_SIGNAL_DIRECTORIES = 8;
 
 export function mergeThreadGitSyncRequests(
   current: ThreadGitSyncRequest | undefined,
@@ -258,24 +272,93 @@ export function mergeThreadGitSyncRequests(
             overlap: combineTurnOverlaps(current.turnEnd.overlap, next.turnEnd.overlap),
             aborted: current.turnEnd.aborted || next.turnEnd.aborted,
           };
+  let command = mergeVcsCommandEffects(current.command, next.command);
+  let signals = current.signals;
+  if (next.signals !== null) {
+    if (signals === null) {
+      signals = next.signals;
+    } else {
+      const merged = new Map(signals);
+      for (const [cwd, effect] of next.signals) {
+        const known = merged.get(cwd);
+        if (known !== undefined || merged.size < MAX_SIGNAL_DIRECTORIES) {
+          merged.set(cwd, mergeVcsCommandEffects(known ?? null, effect) ?? effect);
+        } else {
+          command = mergeVcsCommandEffects(command, effect);
+        }
+      }
+      signals = merged;
+    }
+  }
   return {
     turnStart: current.turnStart || next.turnStart,
-    command: mergeVcsCommandEffects(current.command, next.command),
+    command,
+    signals,
     turnEnd,
     remoteDue: current.remoteDue || next.remoteDue,
   };
 }
 
-/** Only commands to settle: the sync waits briefly so a burst of commands reads HEAD once. */
+/**
+ * The effect of the signals whose directory `counts` (lies in the repository of the thread's
+ * checkout), merged; null when none does.
+ */
+export function countedSignalEffect(
+  signals: ReadonlyMap<string, VcsCommandEffect> | null,
+  counts: (cwd: string) => boolean,
+): VcsCommandEffect | null {
+  if (signals === null) return null;
+  let effect: VcsCommandEffect | null = null;
+  for (const [cwd, signal] of signals) {
+    if (counts(cwd)) effect = mergeVcsCommandEffects(effect, signal);
+  }
+  return effect;
+}
+
+/**
+ * Only commands or signals to settle: the sync waits briefly so a burst of them reads HEAD once
+ * (and a signal meets the command it reports).
+ */
 export function isCommandOnlyRequest(request: ThreadGitSyncRequest): boolean {
   return (
-    request.command !== null && !request.turnStart && request.turnEnd === null && !request.remoteDue
+    (request.command !== null || request.signals !== null) &&
+    !request.turnStart &&
+    request.turnEnd === null &&
+    !request.remoteDue
   );
+}
+
+const SIGNAL_LOCAL: VcsCommandEffect = { local: true, remote: false };
+const SIGNAL_REMOTE: VcsCommandEffect = { local: false, remote: true };
+const SIGNAL_BOTH: VcsCommandEffect = { local: true, remote: true };
+
+/**
+ * What a provider's git or pull request signal may have changed. A push and a pull request
+ * change reach the remote; checking a pull request out also moves HEAD. Every other kind (commit,
+ * merge, rebase, one a newer CLI adds) is local. Adapters send only changes: an announcement of
+ * what already was (Claude's `started`) never becomes a signal.
+ */
+export function vcsSignalEffect(payload: {
+  readonly kind: string;
+  readonly action?: string | undefined;
+}): VcsCommandEffect {
+  if (payload.kind === "push") return SIGNAL_REMOTE;
+  if (payload.kind !== "change-request") return SIGNAL_LOCAL;
+  return payload.action === "checked-out" ? SIGNAL_BOTH : SIGNAL_REMOTE;
 }
 
 export type GitSyncTrigger =
   | { readonly kind: "turn-start"; readonly turnId: string }
-  | { readonly kind: "command"; readonly effect: VcsCommandEffect }
+  | {
+      readonly kind: "command";
+      readonly effect: VcsCommandEffect;
+      /**
+       * Where a provider signal says the command ran; it counts only inside the repository of
+       * the thread's checkout. Undefined for a command seen in a tool call's text, and for a
+       * signal that names no directory (both count without a check).
+       */
+      readonly cwd?: string;
+    }
   | { readonly kind: "turn-end"; readonly turnId: string; readonly aborted: boolean }
   | { readonly kind: "session-exit" };
 
@@ -284,7 +367,10 @@ export type GitSyncTrigger =
  * Turn ends without a turn id are ignored: an untargeted completion (Claude's
  * resume handshake) proves no turn. `runtime.error` can be retried, so it ends
  * nothing. Copilot tool items carry no command, so Copilot threads sync at turn
- * boundaries only.
+ * boundaries only. A provider's own git signal (`vcs.state.changed`, Claude)
+ * also catches pushes and pull requests inside scripts and aliases; Claude
+ * sends none for a branch switch, which the command text and the turn
+ * boundaries still catch.
  */
 export function gitSyncTriggerFor(event: ProviderRuntimeEvent): GitSyncTrigger | null {
   switch (event.type) {
@@ -303,6 +389,11 @@ export function gitSyncTriggerFor(event: ProviderRuntimeEvent): GitSyncTrigger |
       const command = readToolCommandText({ itemType, detail, data });
       const effect = command === undefined ? null : classifyVcsCommand(command);
       return effect === null ? null : { kind: "command", effect };
+    }
+    case "vcs.state.changed": {
+      const effect = vcsSignalEffect(event.payload);
+      const { cwd } = event.payload;
+      return cwd === undefined ? { kind: "command", effect } : { kind: "command", effect, cwd };
     }
     default:
       return null;

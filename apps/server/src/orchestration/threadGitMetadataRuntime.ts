@@ -1,8 +1,9 @@
 /**
  * The thread git metadata runtime: follows each thread's checkout into its
  * thread and workspace records, and refreshes the checkout's published status
- * after git and forge commands. The reactor layer loads it with the first
- * provider event that can ask for a sync.
+ * after git and forge commands (seen in a command's text or reported by the
+ * provider itself). The reactor layer loads it with the first provider event
+ * that can ask for a sync.
  *
  * Per thread there is at most one queued sync plus one running: requests that
  * arrive meanwhile merge into the queued one. Lanes are per thread, so one
@@ -28,6 +29,7 @@ import {
 import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { isChatProject } from "@ryco/shared/projectKind";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
+import { mergeVcsCommandEffects } from "@ryco/shared/vcsCommand";
 import { Cause, Clock, Duration, Effect, Option, type Scope } from "effect";
 
 import { resolveThreadWorkspaceCwd } from "../checkpointing/Utils.ts";
@@ -46,6 +48,7 @@ import {
   EMPTY_SYNC_REQUEST,
   UNTRACKED_TURN,
   combineTurnOverlaps,
+  countedSignalEffect,
   decideThreadBranchAdoption,
   gitSyncTriggerFor,
   isCommandOnlyRequest,
@@ -91,7 +94,7 @@ type CheckoutHeadLocation =
   /** Not inside a git repository (no `.git` up to the root). */
   | { readonly _tag: "none" }
   /** A `.git` the file read cannot follow (bare, reftable, unusual layout): ask git. */
-  | { readonly _tag: "unparsed" }
+  | { readonly _tag: "unparsed"; readonly root: string }
   | { readonly _tag: "head"; readonly root: string; readonly branch: string | null };
 
 const pathExists = (target: string) =>
@@ -118,14 +121,11 @@ export const locateCheckoutHead = Effect.fn("locateCheckoutHead")(function* (
   const maxDepth = options?.ownGitOnly === true ? 1 : MAX_GIT_DISCOVERY_DEPTH;
   for (let depth = 0; depth < maxDepth; depth += 1) {
     if (yield* pathExists(path.join(folder, ".git"))) {
+      const root = canonicalizeFilesystemPath(folder);
       const head = yield* readCheckoutHead(folder);
       return head === null
-        ? ({ _tag: "unparsed" } as const)
-        : ({
-            _tag: "head",
-            root: canonicalizeFilesystemPath(folder),
-            branch: head.branch,
-          } as const);
+        ? ({ _tag: "unparsed", root } as const)
+        : ({ _tag: "head", root, branch: head.branch } as const);
     }
     // Checked only when the checkout has no `.git` of its own, so the usual read costs nothing more.
     if (depth === 0 && !(yield* pathExists(folder))) break;
@@ -381,7 +381,7 @@ export const makeThreadGitMetadataRuntime = (
 
     const syncThread = Effect.fn("ThreadGitMetadata.syncThread")(function* (
       threadId: ThreadId,
-      request: ThreadGitSyncRequest,
+      queued: ThreadGitSyncRequest,
     ) {
       // No checkout to follow (the thread, its project or its folder is gone, or it is a
       // chat): a remote refresh held back for it can never be delivered either.
@@ -401,6 +401,25 @@ export const makeThreadGitMetadataRuntime = (
       });
       if (location._tag === "none") return noCheckout();
       const canonicalCheckout = canonicalizeFilesystemPath(checkout);
+      // The repository the checkout belongs to: a subfolder project shares its root's HEAD.
+      const { root } = location;
+
+      // A provider signal counts only when its command finished in this checkout's repository.
+      const signalled = countedSignalEffect(queued.signals, (cwd) =>
+        // A relative directory names no place: it counts, like a command's text.
+        path.isAbsolute(cwd) ? isWithin(canonicalizeFilesystemPath(cwd), root) : true,
+      );
+      const command = mergeVcsCommandEffects(queued.command, signalled);
+      if (command === null && isCommandOnlyRequest(queued)) {
+        // Only signals, all from elsewhere: nothing to read, nothing to refresh.
+        yield* Effect.logDebug("thread git sync ignored a signal from another directory", {
+          threadId,
+          directories: [...(queued.signals?.keys() ?? [])],
+        });
+        return;
+      }
+      const request: ThreadGitSyncRequest =
+        command === queued.command ? queued : { ...queued, command };
 
       // A held-back remote refresh alone follows no branch.
       const followsBranch =
@@ -409,10 +428,8 @@ export const makeThreadGitMetadataRuntime = (
       let localRefreshed = false;
       if (followsBranch) {
         let observedBranch: string | null | undefined;
-        let root = canonicalCheckout;
         if (location._tag === "head") {
           observedBranch = location.branch;
-          root = location.root;
         } else {
           // git reads what the file read cannot; the read publishes, so it is also the local refresh.
           const status = yield* inBackgroundProcessLane(
@@ -470,9 +487,11 @@ export const makeThreadGitMetadataRuntime = (
                 ? request.turnEnd.aborted
                   ? "turn-stopped"
                   : "turn-end"
-                : request.command
+                : queued.command
                   ? "command"
-                  : "turn-start",
+                  : request.command
+                    ? "signal"
+                    : "turn-start",
             });
           }
         }
@@ -504,6 +523,7 @@ export const makeThreadGitMetadataRuntime = (
           !remoteOwed.has(threadId) &&
           !request.turnStart &&
           request.command === null &&
+          request.signals === null &&
           request.turnEnd === null
         ) {
           return;
@@ -549,7 +569,13 @@ export const makeThreadGitMetadataRuntime = (
           ownership.start(threadId, trigger.turnId);
           return request(threadId, { ...EMPTY_SYNC_REQUEST, turnStart: true });
         case "command":
-          return request(threadId, { ...EMPTY_SYNC_REQUEST, command: trigger.effect });
+          // A signal's directory is checked in the lane: resolving it touches the disk.
+          return request(
+            threadId,
+            trigger.cwd === undefined
+              ? { ...EMPTY_SYNC_REQUEST, command: trigger.effect }
+              : { ...EMPTY_SYNC_REQUEST, signals: new Map([[trigger.cwd, trigger.effect]]) },
+          );
         case "turn-end": {
           // A late or stray end of another turn neither ends ownership nor syncs.
           const overlap = ownership.end(threadId, trigger.turnId);

@@ -18,6 +18,13 @@ The node reads the checkout's branch:
   similar);
 - when a turn ends or is stopped, which catches branch changes made by scripts.
 
+With Claude, Claude Code also tells the node when a command it ran committed,
+pushed, merged or rebased, or opened or changed a pull request, even inside a
+script or an alias whose text names no git command. The node takes that as a
+cue to read the checkout again, the same way; a report from a folder outside
+the thread's repository is ignored. Claude Code doesn't report branch switches,
+so those are still caught from the command's text and at the end of the turn.
+
 It reads the branch from the repository's files, without starting git. After a
 commit or a branch switch it refreshes the checkout's local git status. After a
 push or a pull request command it also refreshes the upstream state and the

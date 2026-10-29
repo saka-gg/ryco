@@ -208,6 +208,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "deprecation.notice",
   "files.persisted",
   "tool.denied",
+  "vcs.state.changed",
   "runtime.notice",
   "runtime.warning",
   "runtime.error",
@@ -267,6 +268,7 @@ const ConfigWarningType = Schema.Literal("config.warning");
 const DeprecationNoticeType = Schema.Literal("deprecation.notice");
 const FilesPersistedType = Schema.Literal("files.persisted");
 const ToolDeniedType = Schema.Literal("tool.denied");
+const VcsStateChangedType = Schema.Literal("vcs.state.changed");
 const RuntimeNoticeType = Schema.Literal("runtime.notice");
 const RuntimeWarningType = Schema.Literal("runtime.warning");
 const RuntimeErrorType = Schema.Literal("runtime.error");
@@ -884,6 +886,24 @@ const ToolDeniedPayload = Schema.Struct({
 export type ToolDeniedPayload = typeof ToolDeniedPayload.Type;
 
 /**
+ * The provider's own report that a command it ran changed git or forge state (Claude Code's
+ * `vcs_state_changed` and `code_change_published`). A cue to re-read the checkout, never the new
+ * state itself.
+ */
+const VcsStateChangedPayload = Schema.Struct({
+  /**
+   * commit | push | merge | rebase | change-request | …: an open set, and an unknown kind still
+   * means something changed.
+   */
+  kind: TrimmedNonEmptyStringSchema,
+  /** The shell's directory when the command finished: where to look, never proof. */
+  cwd: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** For `change-request`: what the command did (created, merged, closed, checked-out, …). */
+  action: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type VcsStateChangedPayload = typeof VcsStateChangedPayload.Type;
+
+/**
  * A low-key provider status line that is neither a warning nor an error (a request retry, a
  * provider banner): an info row labelled with `message`, with `detail` as its plain-text body.
  */
@@ -1303,6 +1323,13 @@ const ProviderRuntimeToolDeniedEvent = Schema.Struct({
 });
 export type ProviderRuntimeToolDeniedEvent = typeof ProviderRuntimeToolDeniedEvent.Type;
 
+const ProviderRuntimeVcsStateChangedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: VcsStateChangedType,
+  payload: VcsStateChangedPayload,
+});
+export type ProviderRuntimeVcsStateChangedEvent = typeof ProviderRuntimeVcsStateChangedEvent.Type;
+
 const ProviderRuntimeNoticeEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: RuntimeNoticeType,
@@ -1378,6 +1405,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeDeprecationNoticeEvent,
   ProviderRuntimeFilesPersistedEvent,
   ProviderRuntimeToolDeniedEvent,
+  ProviderRuntimeVcsStateChangedEvent,
   ProviderRuntimeNoticeEvent,
   ProviderRuntimeWarningEvent,
   ProviderRuntimeErrorEvent,

@@ -335,6 +335,18 @@ async function createHarness(options: HarnessOptions = {}) {
         data: { item: { command } },
       },
     });
+  /** Claude's own git or pull request signal (`vcs_state_changed` / `code_change_published`). */
+  const vcsSignal = (
+    threadId: ThreadId,
+    payload: { readonly kind: string; readonly cwd?: string; readonly action?: string },
+  ) =>
+    emit({
+      type: "vcs.state.changed",
+      provider: ProviderDriverKind.make("claudeAgent"),
+      threadId,
+      turnId: TurnId.make("turn-1"),
+      payload,
+    });
 
   // A barrier: a local thread in a repository of its own. Events are offered in emit
   // order, so once its stopped turn was synced every earlier event was offered too.
@@ -380,6 +392,7 @@ async function createHarness(options: HarnessOptions = {}) {
     turnCompleted,
     turnAborted,
     commandCompleted,
+    vcsSignal,
     local,
     full,
     settle,
@@ -393,6 +406,7 @@ describe("mayRequestThreadGitSync", () => {
     expect(mayRequestThreadGitSync(of({ type: "turn.started" }))).toBe(true);
     expect(mayRequestThreadGitSync(of({ type: "turn.aborted" }))).toBe(true);
     expect(mayRequestThreadGitSync(of({ type: "session.exited" }))).toBe(true);
+    expect(mayRequestThreadGitSync(of({ type: "vcs.state.changed" }))).toBe(true);
     expect(
       mayRequestThreadGitSync(
         of({ type: "item.completed", payload: { itemType: "command_execution" } }),
@@ -432,6 +446,8 @@ describe("mayRequestThreadGitSync", () => {
         },
       }),
       of({ type: "item.updated", payload: { itemType: "command_execution", detail: "git push" } }),
+      of({ type: "vcs.state.changed", payload: { kind: "push", cwd: "/repo" } }),
+      of({ type: "vcs.state.changed", payload: { kind: "change-request", action: "created" } }),
       of({ type: "runtime.error", turnId: "t1", payload: { message: "x" } }),
       of({ type: "content.delta", turnId: "t1", payload: { delta: "git push" } }),
     ];
@@ -442,6 +458,8 @@ describe("mayRequestThreadGitSync", () => {
       "turn.aborted",
       "session.exited",
       "item.completed",
+      "vcs.state.changed",
+      "vcs.state.changed",
     ]);
     for (const event of triggering) expect(mayRequestThreadGitSync(event)).toBe(true);
   });
@@ -459,6 +477,14 @@ describe("locateCheckoutHead", () => {
     // A removed worktree inside the repository must not read the repository's branch.
     expect(await run(path.join(repo, "worktrees", "removed"))).toEqual({ _tag: "none" });
     expect(await run(makeTempDir("ryco-thread-git-plain-"))).toEqual({ _tag: "none" });
+
+    // A layout only git can read (a reftable placeholder HEAD) still names its repository.
+    const reftable = makeTempDir("ryco-thread-git-reftable-root-");
+    fs.mkdirSync(path.join(reftable, ".git"));
+    fs.writeFileSync(path.join(reftable, ".git", "HEAD"), "ref: refs/heads/.invalid\n");
+    const nested = path.join(reftable, "packages", "app");
+    fs.mkdirSync(nested, { recursive: true });
+    expect(await run(nested)).toEqual({ _tag: "unparsed", root: reftable });
   });
 });
 
@@ -873,5 +899,116 @@ describe("ThreadGitMetadataReactor", () => {
     expect(harness.local(worktreePath)).toEqual([]);
     expect(harness.full(worktreePath)).toEqual([]);
     expect(await harness.threadBranch(A)).toBe(TEMPORARY_BRANCH);
+  });
+});
+
+describe("ThreadGitMetadataReactor with Claude's git signals", () => {
+  const A = ThreadId.make("thread-a");
+
+  it("refreshes the full status on a push signal", async () => {
+    const harness = await createHarness();
+    const { worktreePath } = await harness.createWorktreeThread(A);
+    harness.turnStarted(A, "turn-1");
+    await harness.settle();
+
+    harness.vcsSignal(A, { kind: "push", cwd: worktreePath });
+    await harness.settle();
+    expect(harness.full(worktreePath)).toHaveLength(1);
+    expect(harness.local(worktreePath)).toEqual([]);
+  });
+
+  it("follows a branch a script switched to, from its commit signal, mid-turn", async () => {
+    const harness = await createHarness();
+    const { worktreePath, worktreeId } = await harness.createWorktreeThread(A);
+    harness.turnStarted(A, "turn-1");
+    await harness.settle();
+
+    git(worktreePath, ["checkout", "-b", "feat/scripted"]);
+    git(worktreePath, ["commit", "--allow-empty", "-m", "scripted"]);
+    // The command's text names no git command; Claude saw the commit in its output.
+    harness.commandCompleted(A, "./scripts/release.sh");
+    harness.vcsSignal(A, { kind: "commit", cwd: worktreePath });
+
+    await waitFor(async () => (await harness.threadBranch(A)) === "feat/scripted", "thread branch");
+    expect(await harness.worktreeBranch(worktreeId)).toBe("feat/scripted");
+    await harness.settle();
+    expect(harness.local(worktreePath)).toHaveLength(1);
+    expect(harness.full(worktreePath)).toEqual([]);
+  });
+
+  it("ignores a signal from outside the checkout's repository, and counts one from inside", async () => {
+    const harness = await createHarness();
+    const { worktreePath } = await harness.createWorktreeThread(A);
+    harness.turnStarted(A, "turn-1");
+    await harness.settle();
+    git(worktreePath, ["checkout", "-b", "feat/unseen"]);
+
+    const elsewhere = makeRepository();
+    harness.vcsSignal(A, { kind: "commit", cwd: elsewhere });
+    harness.vcsSignal(A, { kind: "push", cwd: elsewhere });
+    await harness.settle();
+    expect(await harness.threadBranch(A)).toBe(TEMPORARY_BRANCH);
+    expect(harness.local(worktreePath)).toEqual([]);
+    expect(harness.full(worktreePath)).toEqual([]);
+
+    // The agent's shell finished in a folder of the checkout.
+    const source = path.join(worktreePath, "src");
+    fs.mkdirSync(source);
+    harness.vcsSignal(A, { kind: "commit", cwd: source });
+    await waitFor(async () => (await harness.threadBranch(A)) === "feat/unseen", "thread branch");
+  });
+
+  it("counts a signal from the repository root for a project in a subfolder", async () => {
+    const harness = await createHarness();
+    const subfolder = path.join(harness.repo, "packages", "app");
+    fs.mkdirSync(subfolder, { recursive: true });
+    const subProject = ProjectId.make("project-sub");
+    await harness.dispatch({
+      type: "project.create",
+      commandId: CommandId.make("cmd-project-sub"),
+      projectId: subProject,
+      title: "App",
+      workspaceRoot: subfolder,
+      defaultModelSelection: MODEL,
+      createdAt: new Date().toISOString(),
+    });
+    await harness.createThread({ threadId: A, branch: "main", projectId: subProject });
+    harness.turnStarted(A, "turn-1");
+    await harness.settle();
+
+    git(harness.repo, ["checkout", "-b", "feat/from-root"]);
+    harness.vcsSignal(A, { kind: "merge", cwd: harness.repo });
+    await waitFor(
+      async () => (await harness.threadBranch(A)) === "feat/from-root",
+      "thread branch",
+    );
+  });
+
+  it("merges a signal with the command it reports into one refresh", async () => {
+    const harness = await createHarness();
+    const { worktreePath } = await harness.createWorktreeThread(A);
+    harness.turnStarted(A, "turn-1");
+    await harness.settle();
+
+    // Claude reports the push just before the tool's own completion.
+    harness.vcsSignal(A, { kind: "push", cwd: worktreePath });
+    harness.commandCompleted(A, "git push -u origin HEAD");
+    await harness.settle();
+    // Past the 200 ms spacing: a second, held-back refresh would have run by now.
+    await sleep(300);
+    await harness.settle();
+    expect(harness.full(worktreePath)).toHaveLength(1);
+  });
+
+  it("refreshes the full status on a pull request signal, which names no directory", async () => {
+    const harness = await createHarness();
+    const { worktreePath } = await harness.createWorktreeThread(A);
+    harness.turnStarted(A, "turn-1");
+    await harness.settle();
+
+    harness.vcsSignal(A, { kind: "change-request", action: "created" });
+    await harness.settle();
+    expect(harness.full(worktreePath)).toHaveLength(1);
+    expect(harness.local(worktreePath)).toEqual([]);
   });
 });
