@@ -26,6 +26,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import {
   ApprovalRequestId,
+  type ComposerSourceControlContext,
   OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -35,6 +36,7 @@ import {
   TurnId,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
+import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -137,6 +139,19 @@ const runtimeMock = {
     subscribeError: null as Error | null,
     streamReadError: null as Error | null,
     startupOrder: [] as string[],
+    /** What `global.health` reports. */
+    healthVersion: "1.18.18",
+    sdkClients: [] as Array<{ baseUrl: string; directory: string }>,
+    /** What `command.list` answers. */
+    commands: [] as Array<unknown>,
+    commandListCalls: [] as Array<{ directory?: string } | undefined>,
+    commandListError: null as Error | null,
+    commandCalls: [] as Array<unknown>,
+    commandSignals: [] as Array<AbortSignal | undefined>,
+    /** Answers `session.command`; unset: it answers at once. */
+    commandHandler: null as
+      | ((input: unknown, signal: AbortSignal | undefined) => Promise<unknown>)
+      | null,
   },
   reset() {
     this.state.mcpAddCalls.length = 0;
@@ -171,6 +186,14 @@ const runtimeMock = {
     this.state.subscribeError = null;
     this.state.streamReadError = null;
     this.state.startupOrder = [];
+    this.state.healthVersion = "1.18.18";
+    this.state.sdkClients.length = 0;
+    this.state.commands = [];
+    this.state.commandListCalls.length = 0;
+    this.state.commandListError = null;
+    this.state.commandCalls.length = 0;
+    this.state.commandSignals.length = 0;
+    this.state.commandHandler = null;
   },
 };
 
@@ -215,7 +238,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       };
     }),
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
-  createOpenCodeSdkClient: ({ baseUrl, serverPassword }) =>
+  createOpenCodeSdkClient: ({ baseUrl, directory, serverPassword }) =>
     Effect.succeed({
       mcp: {
         add: async (input: { name: string; directory: string }) => {
@@ -224,9 +247,26 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         },
       },
       global: {
-        health: async () => ({ data: { healthy: true, version: "1.18.18" } }),
+        health: async () => ({
+          data: { healthy: true, version: runtimeMock.state.healthVersion },
+        }),
+      },
+      command: {
+        list: async (parameters?: { directory?: string }) => {
+          runtimeMock.state.commandListCalls.push(parameters);
+          if (runtimeMock.state.commandListError) throw runtimeMock.state.commandListError;
+          return { data: runtimeMock.state.commands };
+        },
       },
       session: {
+        command: async (input: unknown, options?: { signal?: AbortSignal }) => {
+          runtimeMock.state.commandCalls.push(input);
+          runtimeMock.state.commandSignals.push(options?.signal);
+          if (runtimeMock.state.commandHandler) {
+            return runtimeMock.state.commandHandler(input, options?.signal);
+          }
+          return { data: { info: { id: "command-reply", role: "assistant" }, parts: [] } };
+        },
         create: async () => {
           runtimeMock.state.sessionCreateUrls.push(baseUrl);
           runtimeMock.state.authHeaders.push(
@@ -354,7 +394,11 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           runtimeMock.state.questionReplyCalls.push(input);
         },
       },
-    } as unknown as OpencodeClient),
+    } as unknown as OpencodeClient).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => runtimeMock.state.sdkClients.push({ baseUrl, directory })),
+      ),
+    ),
   loadOpenCodeInventory: () =>
     Effect.fail(
       new OpenCodeRuntimeError({
@@ -1784,6 +1828,581 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       );
       assert.deepEqual(runtimeMock.state.promptCalls, []);
     }).pipe(Effect.provide(adapterLayer));
+  });
+
+  const reviewCommand = { name: "review", hints: ["$ARGUMENTS"], template: "T" };
+  const commandModel = createModelSelection(ProviderInstanceId.make("opencode"), "p/m");
+  const hostContextText = `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>`;
+  const lastPromptText = () =>
+    (runtimeMock.state.promptCalls.at(-1) as { parts: Array<{ text?: string }> } | undefined)
+      ?.parts[0]?.text;
+  const rootStatus = (type: "busy" | "idle") => ({
+    type: "session.status",
+    properties: { sessionID: taskRoot, status: { type } },
+  });
+  type LiveEvents = { queue: unknown[]; wake: (() => void) | null; closed: boolean };
+  const pushLive = (live: LiveEvents, ...events: Array<unknown>) => {
+    live.queue.push(...events);
+    live.wake?.();
+    live.wake = null;
+  };
+  const closeLive = (live: LiveEvents) =>
+    Effect.sync(() => {
+      live.closed = true;
+      live.wake?.();
+    });
+  /** A `session.command` that runs until the test settles it or its request is aborted. */
+  const holdCommand = () => {
+    const call = {
+      resolve: (_value: unknown) => {},
+      reject: (_error: unknown) => {},
+    };
+    runtimeMock.state.commandHandler = (_input, signal) =>
+      new Promise((resolve, reject) => {
+        call.resolve = resolve;
+        call.reject = reject;
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+          once: true,
+        });
+      });
+    return call;
+  };
+  const waitUntil = (condition: () => boolean) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 200 && !condition(); attempt += 1) yield* sleep(5);
+      assert.ok(condition());
+    });
+  const takeEvent = (
+    received: Queue.Queue<ProviderRuntimeEvent>,
+    predicate: (event: ProviderRuntimeEvent) => boolean,
+  ) =>
+    Effect.gen(function* () {
+      for (;;) {
+        const event = yield* Queue.take(received);
+        if (predicate(event)) return event;
+      }
+    });
+  /** A session whose directory lists `/review`, with its runtime events collected. */
+  const startCommandSession = (threadId: ThreadId, live: LiveEvents) =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.liveEvents = live;
+      // Startup primes the stream with its first event before reading history.
+      runtimeMock.state.subscribedEvents = [{ type: "server.connected", properties: {} }];
+      runtimeMock.state.commands = [reviewCommand];
+      const received = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.runForEach((event) => Queue.offer(received, event)),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make(`runtime-${threadId}`),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      return { adapter, received };
+    });
+
+  /** What the SDK throws for an error response: the status rides on the cause. */
+  const openCodeErrorResponse = (message: string, status: number) =>
+    new Error(message, { cause: { body: { name: "UnknownError", data: { message } }, status } });
+  const isSettling = (event: ProviderRuntimeEvent) =>
+    event.type === "runtime.warning" ||
+    event.type === "turn.completed" ||
+    event.type === "turn.aborted";
+  /** Sends `/review` with the call held, and returns once the send is admitted. */
+  const sendHeldCommand = (
+    adapter: OpenCodeAdapterShape,
+    threadId: ThreadId,
+    admit: Effect.Effect<void>,
+  ) =>
+    Effect.gen(function* () {
+      const call = holdCommand();
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      yield* sleep(20);
+      yield* admit;
+      const { turnId } = yield* Fiber.join(send);
+      return { call, turnId };
+    });
+  const pastAdmissionBound = TestClock.adjust("10 seconds");
+  /** The thread's session; the adapter layer is shared by every test in this block. */
+  const sessionOf = (adapter: OpenCodeAdapterShape, threadId: ThreadId) =>
+    adapter
+      .listSessions()
+      .pipe(Effect.map((sessions) => sessions.find((session) => session.threadId === threadId)));
+  const waitForStatus = (adapter: OpenCodeAdapterShape, threadId: ThreadId, status: string) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if ((yield* sessionOf(adapter, threadId))?.status === status) return;
+        yield* sleep(5);
+      }
+      assert.equal((yield* sessionOf(adapter, threadId))?.status, status);
+    });
+
+  it.effect("runs a listed command with session.command and keeps the host context back", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-native-command");
+      runtimeMock.state.commands = [reviewCommand];
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-native-command"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/review focus api",
+        modelSelection: commandModel,
+      });
+
+      // The client is bound to the session's directory.
+      assert.deepEqual(runtimeMock.state.commandListCalls, [undefined]);
+      assert.deepEqual(runtimeMock.state.commandCalls, [
+        { sessionID: taskRoot, command: "review", arguments: "focus api", model: "p/m" },
+      ]);
+      assert.deepEqual(runtimeMock.state.promptCalls, []);
+
+      // The host context waits for the next ordinary turn.
+      yield* adapter.sendTurn({ threadId, input: "Thanks", modelSelection: commandModel });
+      assert.equal(lastPromptText(), `${hostContextText}\n\nThanks`);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("sends an unknown name, a path or an unlisted command as an ordinary prompt", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-command-fallback");
+      runtimeMock.state.commands = [reviewCommand];
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-command-fallback"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const send = (input: string) =>
+        adapter.sendTurn({ threadId, input, modelSelection: commandModel });
+
+      yield* send("/nope x");
+      assert.equal(lastPromptText(), `${hostContextText}\n\n/nope x`);
+      yield* send("/Users/a/b.ts explain");
+      assert.equal(lastPromptText(), "/Users/a/b.ts explain");
+      // A path is never looked up.
+      assert.equal(runtimeMock.state.commandListCalls.length, 1);
+
+      runtimeMock.state.commandListError = new Error("command list unavailable");
+      yield* send("/review focus api");
+      assert.equal(lastPromptText(), "/review focus api");
+      assert.deepEqual(runtimeMock.state.commandCalls, []);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("appends source-control contexts and attachment paths to a command's arguments", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const config = yield* ServerConfig;
+      const threadId = asThreadId("thread-command-contexts");
+      runtimeMock.state.commands = [reviewCommand];
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-command-contexts"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const issue = {
+        id: "context-1",
+        kind: "issue",
+        provider: "github",
+        reference: "owner/repo#42",
+        detail: {
+          provider: "github",
+          number: 42,
+          title: "Login fails",
+          url: "https://github.com/owner/repo/issues/42",
+          state: "open",
+          body: "Steps to reproduce.",
+          comments: [],
+          truncated: false,
+        },
+      } as unknown as ComposerSourceControlContext;
+      const zip = {
+        type: "file" as const,
+        id: "thread-command-contexts-zip",
+        name: "bundle.zip",
+        mimeType: "application/zip",
+        sizeBytes: 10,
+      };
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/review focus api",
+        sourceControlContexts: [issue],
+        attachments: [zip],
+        modelSelection: commandModel,
+      });
+
+      assert.deepEqual(runtimeMock.state.commandCalls, [
+        {
+          sessionID: taskRoot,
+          command: "review",
+          arguments: [
+            "focus api",
+            formatSourceControlContextsForAgent([issue]),
+            `[Attached file] bundle.zip (application/zip, 10 bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(zip)}`,
+          ].join("\n\n"),
+          model: "p/m",
+        },
+      ]);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("returns once OpenCode takes a running command and completes it on idle", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-admission");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const call = holdCommand();
+
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      yield* sleep(20);
+      // `session.command` answers only when the generation ends: busy is the admission.
+      assert.equal(send.pollUnsafe(), undefined);
+      assert.equal((runtimeMock.state.commandCalls[0] as { arguments: string }).arguments, "");
+      pushLive(live, rootStatus("busy"));
+      const { turnId } = yield* Fiber.join(send);
+
+      pushLive(live, rootStatus("idle"));
+      const completed = yield* takeEvent(received, (event) => event.type === "turn.completed");
+      assert.equal(completed.turnId, turnId);
+      call.resolve({ data: {} });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("admits a command when its user message is stored", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-user-message");
+      const { adapter } = yield* startCommandSession(threadId, live);
+      const userMessage = (sessionID: string, id: string) => ({
+        type: "message.updated",
+        properties: { sessionID, info: { id, role: "user" } },
+      });
+      pushLive(live, userMessage(taskRoot, "earlier-user"));
+      yield* sleep(20);
+      holdCommand();
+
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review now", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      // An earlier turn's user message updated again, or a child session's, is not this command's.
+      pushLive(live, userMessage(taskRoot, "earlier-user"), userMessage("child", "child-user"));
+      yield* sleep(20);
+      assert.equal(send.pollUnsafe(), undefined);
+      pushLive(live, userMessage(taskRoot, "command-user"));
+      yield* Fiber.join(send);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("interrupting a running command aborts its request and the OpenCode session", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-interrupt");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      holdCommand();
+      const send = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.forkChild);
+      yield* waitUntil(() => runtimeMock.state.commandCalls.length === 1);
+      pushLive(live, rootStatus("busy"));
+      const { turnId } = yield* Fiber.join(send);
+
+      yield* adapter.interruptTurn(threadId);
+
+      assert.equal(runtimeMock.state.commandSignals[0]?.aborted, true);
+      assert.deepEqual(runtimeMock.state.abortCalls, [taskRoot]);
+      const aborted = yield* takeEvent(received, (event) => event.type === "turn.aborted");
+      assert.equal(aborted.turnId, turnId);
+      // An aborted request is no failure to warn about.
+      yield* sleep(20);
+      const rest = yield* Queue.clear(received);
+      assert.deepEqual(
+        rest.filter((event) => event.type === "runtime.warning"),
+        [],
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("aborts the turn when OpenCode rejects a command before taking it", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-command-rejected");
+      runtimeMock.state.commands = [reviewCommand];
+      runtimeMock.state.commandHandler = async () => {
+        throw new Error("Agent not found");
+      };
+      const aborted = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.aborted"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-command-rejected"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* adapter
+        .sendTurn({ threadId, input: "/review", modelSelection: commandModel })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag !== "ProviderAdapterRequestError") throw new Error("Unexpected error type");
+      assert.equal(error.method, "session.command");
+      assert.equal(error.detail, "Agent not found");
+      const event = Option.getOrUndefined(yield* Fiber.join(aborted));
+      assert.equal(event?.type === "turn.aborted" ? event.payload.reason : null, "Agent not found");
+      const session = yield* sessionOf(adapter, threadId);
+      assert.equal(session?.status, "ready");
+      assert.equal(session?.activeTurnId, undefined);
+      assert.deepEqual(runtimeMock.state.promptCalls, []);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("warns on the turn when a command could not be checked against the list", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-unchecked");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      runtimeMock.state.commandListError = new Error("command list unavailable");
+
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "/review focus api",
+        modelSelection: commandModel,
+      });
+      assert.equal(lastPromptText(), `${hostContextText}\n\n/review focus api`);
+      assert.deepEqual(runtimeMock.state.commandCalls, []);
+      const warning = yield* takeEvent(received, (event) => event.type === "runtime.warning");
+      assert.equal(warning.turnId, turn.turnId);
+      assert.equal(
+        warning.type === "runtime.warning" ? warning.payload.message : null,
+        "Couldn't check whether /review is an OpenCode command, so it went to the model as a prompt.",
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("warns when OpenCode answers a started command with an error", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-late-failure");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const { call, turnId } = yield* sendHeldCommand(
+        adapter,
+        threadId,
+        Effect.sync(() => pushLive(live, rootStatus("busy"))),
+      );
+
+      call.reject(openCodeErrorResponse("Session is busy", 500));
+
+      const warning = yield* takeEvent(received, isSettling);
+      assert.equal(warning.type, "runtime.warning");
+      assert.equal(warning.turnId, turnId);
+      assert.deepEqual(warning.type === "runtime.warning" ? warning.payload : null, {
+        message: "OpenCode /review failed after it was accepted.",
+        detail: "Session is busy",
+      });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("keeps a started command's turn when its request ends without a response", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-request-dropped");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const { call, turnId } = yield* sendHeldCommand(
+        adapter,
+        threadId,
+        Effect.sync(() => pushLive(live, rootStatus("busy"))),
+      );
+
+      // Node's fetch gives up on the held response after 5 minutes; OpenCode keeps going.
+      call.reject(new TypeError("fetch failed"));
+      yield* sleep(20);
+      pushLive(live, rootStatus("idle"));
+
+      const settled = yield* takeEvent(received, isSettling);
+      assert.equal(settled.type, "turn.completed");
+      assert.equal(settled.turnId, turnId);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("runs a command OpenCode still holds at the admission bound", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-admission-bound");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      // OpenCode resolves the template (a slow shell substitution) before the turn starts.
+      const { turnId } = yield* sendHeldCommand(adapter, threadId, pastAdmissionBound);
+
+      // Aborting the request would not stop OpenCode, so it stays open.
+      assert.equal(runtimeMock.state.commandSignals[0]?.aborted, false);
+      const session = yield* sessionOf(adapter, threadId);
+      assert.equal(session?.status, "running");
+      assert.equal(session?.activeTurnId, turnId);
+
+      pushLive(live, rootStatus("busy"), rootStatus("idle"));
+      const settled = yield* takeEvent(received, isSettling);
+      assert.equal(settled.type, "turn.completed");
+      assert.equal(settled.turnId, turnId);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("aborts the turn when OpenCode refuses a command it held past the bound", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-late-refusal");
+      const { adapter, received } = yield* startCommandSession(threadId, live);
+      const { call, turnId } = yield* sendHeldCommand(adapter, threadId, pastAdmissionBound);
+
+      call.reject(openCodeErrorResponse("Command not found: review", 400));
+
+      const settled = yield* takeEvent(received, isSettling);
+      assert.equal(settled.type, "turn.aborted");
+      assert.equal(settled.turnId, turnId);
+      assert.equal(
+        settled.type === "turn.aborted" ? settled.payload.reason : null,
+        "Command not found: review",
+      );
+      const session = yield* sessionOf(adapter, threadId);
+      assert.equal(session?.status, "ready");
+      assert.equal(session?.activeTurnId, undefined);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  it.effect("hands the session back when an interrupted command runs anyway", () => {
+    const live: LiveEvents = { queue: [], wake: null, closed: false };
+    return Effect.gen(function* () {
+      const threadId = asThreadId("thread-command-untracked-run");
+      const { adapter } = yield* startCommandSession(threadId, live);
+      yield* sendHeldCommand(adapter, threadId, pastAdmissionBound);
+      yield* adapter.interruptTurn(threadId);
+
+      // OpenCode finishes the template and runs the command with no turn left to track it.
+      pushLive(live, rootStatus("busy"));
+      yield* waitForStatus(adapter, threadId, "running");
+      pushLive(live, rootStatus("idle"));
+      yield* waitForStatus(adapter, threadId, "ready");
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(closeLive(live)));
+  });
+
+  const commandsAdapterLayer = (
+    settings: OpenCodeSettings,
+    options?: Parameters<typeof makeOpenCodeAdapter>[1],
+  ) =>
+    Layer.effect(OpenCodeAdapter, makeOpenCodeAdapter(settings, options)).pipe(
+      Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+  it.effect("lists a directory's commands through a lease on the shared server", () => {
+    const leases: Array<string> = [];
+    const layer = commandsAdapterLayer(
+      Schema.decodeSync(OpenCodeSettings)({ binaryPath: "fake-opencode" }),
+      {
+        serverOwner: {
+          acquire: Effect.gen(function* () {
+            leases.push("acquired");
+            yield* Effect.addFinalizer(() => Effect.sync(() => leases.push("released")));
+            return { url: "http://127.0.0.1:4555", exitCode: Effect.never };
+          }),
+        },
+      },
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.commands = [
+        {
+          name: "review",
+          description: "Review changes",
+          source: "command",
+          hints: ["$ARGUMENTS"],
+          template: "Review $ARGUMENTS",
+        },
+        { name: "brainstorm", source: "skill", hints: [], template: "Skill body" },
+      ];
+      assert.ok(adapter.readProjectCommands);
+
+      const commands = yield* adapter.readProjectCommands("/repo");
+
+      assert.deepEqual(commands, {
+        skills: [],
+        slashCommands: [
+          { name: "review", description: "Review changes", input: { hint: "$ARGUMENTS" } },
+        ],
+      });
+      assert.deepEqual(runtimeMock.state.sdkClients, [
+        { baseUrl: "http://127.0.0.1:4555", directory: "/repo" },
+      ]);
+      assert.deepEqual(runtimeMock.state.commandListCalls, [{ directory: "/repo" }]);
+      assert.deepEqual(leases, ["acquired", "released"]);
+      assert.deepEqual(runtimeMock.state.startCalls, []);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("refuses an OpenCode 2.x server before listing its commands", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.healthVersion = "2.0.18";
+      runtimeMock.state.commands = [reviewCommand];
+      assert.ok(adapter.readProjectCommands);
+
+      const error = yield* adapter.readProjectCommands("/repo").pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag !== "ProviderAdapterRequestError") throw new Error("Unexpected error type");
+      assert.equal(error.method, "global.health");
+      assert.deepEqual(runtimeMock.state.commandListCalls, []);
+    }),
+  );
+
+  it.effect("lists no commands for a disabled instance", () => {
+    const layer = commandsAdapterLayer(
+      Schema.decodeSync(OpenCodeSettings)({ enabled: false, binaryPath: "fake-opencode" }),
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.commands = [reviewCommand];
+      assert.ok(adapter.readProjectCommands);
+
+      assert.deepEqual(yield* adapter.readProjectCommands("/repo"), {
+        skills: [],
+        slashCommands: [],
+      });
+      assert.deepEqual(runtimeMock.state.sdkClients, []);
+      assert.deepEqual(runtimeMock.state.startCalls, []);
+    }).pipe(Effect.provide(layer));
   });
 
   const rollbackMessages = () => [

@@ -28,7 +28,9 @@ export interface OpenCodeApi {
     | "prompt"
     | "abort"
     | "fork"
+    | "command"
   >;
+  readonly command: Pick<OpencodeClient["command"], "list">;
   readonly permission: Pick<OpencodeClient["permission"], "list" | "respond">;
   readonly question: Pick<OpencodeClient["question"], "list" | "reply">;
   readonly event: Pick<OpencodeClient["event"], "subscribe">;

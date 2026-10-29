@@ -312,6 +312,17 @@ describe("OpenCode 2 facade requests", () => {
     expect(server.calls[1]!.body).toEqual({ before: "msg_user2" });
   });
 
+  it("lists no commands and sends no command request, so slash input stays a prompt", async () => {
+    const server = fakeServer({});
+    const api = server.api();
+
+    await expect(api.command.list()).resolves.toEqual({ data: [] });
+    await expect(
+      api.session.command({ sessionID: SESSION.id, command: "review", arguments: "" }),
+    ).rejects.toThrow("OpenCode 2 commands are not available in Ryco yet.");
+    expect(server.calls).toEqual([]);
+  });
+
   it("lists pending permissions and replies on the request's session", async () => {
     const request = PERMISSION_ASKED!.data;
     const server = fakeServer({
