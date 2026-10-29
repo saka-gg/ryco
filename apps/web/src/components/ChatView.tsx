@@ -177,6 +177,7 @@ import {
   type ChatMessage,
   type TurnDiffSummary,
 } from "../types";
+import { useScopedState } from "../hooks/useScopedState";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useReducedMotionEffective } from "../hooks/useAppearancePreference";
@@ -875,7 +876,6 @@ export default function ChatView(props: ChatViewProps) {
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const readComposer = useCallback(() => composerRef.current, [composerRef]);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const [threadMessageSearchQuery, setThreadMessageSearchQuery] = useState("");
@@ -975,13 +975,6 @@ export default function ChatView(props: ChatViewProps) {
   );
   const legendListRef = useRef<LegendListRef | null>(null);
   const isAtEndRef = useRef(true);
-  const [timelineLiveFollowEnabled, setTimelineLiveFollowEnabled] = useState(true);
-  // Mirrors the live follow the committed timeline was given, for end pins
-  // that outlive the render which started them.
-  const timelineLiveFollowEnabledRef = useRef(timelineLiveFollowEnabled);
-  useEffect(() => {
-    timelineLiveFollowEnabledRef.current = timelineLiveFollowEnabled;
-  }, [timelineLiveFollowEnabled]);
   // ChatView follows thread navigation instead of remounting: a send in flight
   // belongs to the thread it started on, and keeps writing to this view's state
   // (composer, timeline, busy state) only while the view still shows it.
@@ -1121,17 +1114,22 @@ export default function ChatView(props: ChatViewProps) {
     }),
     [activeThreadIdRaw, routeThreadKey],
   );
-  // Applied while rendering, before the timeline renders: a navigation runs
-  // as a transition, so the deferred timeline can mount in this same render,
-  // and it reads live follow at mount (on there means a send chose the end).
-  const [appliedThreadOpening, setAppliedThreadOpening] = useState<typeof threadOpening | null>(
-    null,
+  // Live follow and the pill belong to the opening, and a new one starts from
+  // its own, already in its first render: a navigation runs as a transition,
+  // so the deferred timeline can mount in that render, and it reads live
+  // follow at mount (on there means a send chose the end). Not reset by a
+  // setter called while rendering, which React can lose (see `useScopedState`).
+  const [timelineLiveFollowEnabled, setTimelineLiveFollowEnabled] = useScopedState(
+    threadOpening,
+    (opening) => opening.readingAnchor === null,
   );
-  if (appliedThreadOpening !== threadOpening) {
-    setAppliedThreadOpening(threadOpening);
-    setTimelineLiveFollowEnabled(threadOpening.readingAnchor === null);
-    setShowScrollToBottom(false);
-  }
+  const [showScrollToBottom, setShowScrollToBottom] = useScopedState(threadOpening, () => false);
+  // Mirrors the live follow the committed timeline was given, for end pins
+  // that outlive the render which started them.
+  const timelineLiveFollowEnabledRef = useRef(timelineLiveFollowEnabled);
+  useEffect(() => {
+    timelineLiveFollowEnabledRef.current = timelineLiveFollowEnabled;
+  }, [timelineLiveFollowEnabled]);
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode = enforceBuildMode
     ? DEFAULT_INTERACTION_MODE
