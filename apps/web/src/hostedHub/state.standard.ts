@@ -97,6 +97,7 @@ const standardHostedHubController: {
   revokeE2eeDevice: refuseSignedOut,
   setPassword: refuseSignedOut,
   removePassword: refuseSignedOut,
+  deleteAccount: refuseSignedOut,
   beginTotpEnrollment: refuseSignedOut,
   confirmTotpEnrollment: refuseSignedOut,
   revokeTotp: refuseSignedOut,
