@@ -41,6 +41,7 @@ import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { readCheckoutHead } from "./gitCheckoutHead.ts";
+import type { WorktreeRegistration } from "./worktreeRegistrationReplacement.ts";
 import {
   parseRemoteNames,
   parseRemoteNamesInGitOrder,
@@ -2879,49 +2880,109 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         ),
     });
 
-  // Recovery needs proof of absence. The ordinary discovery method tolerates
-  // non-repositories; never use its empty-list fallback for journal recovery.
-  const registeredWorktreePathsForRecovery = (cwd: string) =>
+  // Every registration with its canonical path and porcelain fields, from a complete listing
+  // only: callers act on what it proves (absence for journal recovery, a stale entry to
+  // replace), so the ordinary discovery method's empty-list fallback is never used here.
+  const listWorktreeRegistrations = (cwd: string, operation: string, failure: string) =>
     Effect.gen(function* () {
       const args = ["worktree", "list", "--porcelain", "-z"];
-      const result = yield* executeGit("GitVcsDriver.worktreeSetup.registration", cwd, args, {
-        timeoutMs: 5_000,
-      });
+      const result = yield* executeGit(operation, cwd, args, { timeoutMs: 5_000 });
       if (result.stdoutTruncated || !result.stdout.endsWith("\0\0"))
         return yield* createGitCommandError(
-          "GitVcsDriver.worktreeSetup.registration",
+          operation,
           cwd,
           args,
-          "Cannot prove worktree registration is absent: incomplete Git worktree listing.",
+          `${failure}: incomplete Git worktree listing.`,
         );
-      const paths: string[] = [];
+      const registrations: WorktreeRegistration[] = [];
       for (const record of result.stdout.slice(0, -2).split("\0\0")) {
-        const field = record.split("\0")[0];
+        const fields = record.split("\0");
+        const field = fields[0];
         const candidate = field?.startsWith("worktree ")
           ? field.slice("worktree ".length)
           : undefined;
         if (!candidate || !nodePath.isAbsolute(candidate))
           return yield* createGitCommandError(
-            "GitVcsDriver.worktreeSetup.registration",
+            operation,
             cwd,
             args,
-            "Cannot prove worktree registration is absent: invalid Git worktree listing.",
+            `${failure}: invalid Git worktree listing.`,
           );
-        paths.push(yield* worktreePathIdentity(candidate));
+        registrations.push({ path: yield* worktreePathIdentity(candidate), fields });
       }
-      return paths;
+      return registrations;
+    });
+
+  // Recovery needs proof of absence. Recreating a recorded checkout (`staleAt`) replaces a
+  // registration of that missing path that Git itself reports prunable, so such an entry does
+  // not count: a failed attempt there (its Git child has exited, or ownership would refuse)
+  // left nothing to protect, and keeping its journal would refuse every later attempt.
+  const registeredWorktreePathsForRecovery = (cwd: string, staleAt?: string) =>
+    listWorktreeRegistrations(
+      cwd,
+      "GitVcsDriver.worktreeSetup.registration",
+      "Cannot prove worktree registration is absent",
+    ).pipe(
+      Effect.map((registrations) =>
+        registrations
+          .filter(
+            (registration) =>
+              registration.path !== staleAt ||
+              !registration.fields.some((field) => field.startsWith("prunable")),
+          )
+          .map((registration) => registration.path),
+      ),
+    );
+
+  /**
+   * Whether recreating the missing checkout `worktreePath` on `branch` must replace Git's
+   * registration of that path (`missingRegistrationReplacement` decides; a refusal fails here,
+   * before anything changes).
+   */
+  const missingRegistrationToReplace = (cwd: string, worktreePath: string, branch: string) =>
+    Effect.gen(function* () {
+      const operation = "GitVcsDriver.createWorktree.registration";
+      const registrations = yield* listWorktreeRegistrations(
+        cwd,
+        operation,
+        "Cannot check Git's registration of the missing checkout",
+      );
+      // Only recreating a recorded checkout needs it: off the server's boot path.
+      const { missingRegistrationReplacement } = yield* Effect.promise(
+        () => import("./worktreeRegistrationReplacement.ts"),
+      );
+      const { registered, refusal } = missingRegistrationReplacement(
+        registrations,
+        worktreePath,
+        branch,
+      );
+      if (refusal !== null)
+        return yield* createGitCommandError(
+          operation,
+          cwd,
+          ["worktree", "add", ...(registered ? ["--force"] : []), worktreePath, branch],
+          refusal,
+        );
+      return registered;
     });
 
   const worktreeRepositoryIdentity = (cwd: string) =>
     resolveGitCommonDir(cwd).pipe(Effect.flatMap(worktreePathIdentity));
 
-  const recoverSetup = (cwd: string, checkoutPath: string) =>
+  const recoverSetup = (
+    cwd: string,
+    checkoutPath: string,
+    options?: { readonly replacingMissingRegistration?: boolean },
+  ) =>
     Effect.gen(function* () {
       return yield* recoverOrphanedWorktreeSetup({
         stateDir: config.stateDir,
         checkoutPath,
         repositoryPath: worktreeRepositoryIdentity(cwd),
-        registeredWorktreePaths: registeredWorktreePathsForRecovery(cwd),
+        registeredWorktreePaths: registeredWorktreePathsForRecovery(
+          cwd,
+          options?.replacingMissingRegistration === true ? checkoutPath : undefined,
+        ),
       });
     });
 
@@ -3049,7 +3110,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                   "Worktree destination already exists. Choose a different branch or root.",
                 );
               }
-              yield* recoverSetup(input.cwd, worktreePath);
+              // Recreating a recorded checkout replaces a stale registration of exactly this
+              // path in the add itself; nothing prunes the repository's other registrations.
+              const recreating =
+                input.replaceMissingRegistration === true &&
+                input.newRefName === undefined &&
+                input.fetchOrigin !== true;
+              yield* recoverSetup(input.cwd, worktreePath, {
+                replacingMissingRegistration: recreating,
+              });
+              const addArgs =
+                recreating &&
+                (yield* missingRegistrationToReplace(input.cwd, worktreePath, baseRef))
+                  ? ["worktree", "add", "--force", worktreePath, baseRef]
+                  : args;
               const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
               yield* input.progress?.onCheckoutStarted?.() ?? Effect.void;
               // Persist journal and mutation ownership before Git can register a
@@ -3059,7 +3133,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                   Effect.andThen(mutation),
                   Effect.andThen(
                     restore(
-                      executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
+                      executeGit("GitVcsDriver.createWorktree", input.cwd, addArgs, {
                         fallbackErrorMessage: "git worktree add failed",
                         ...(onCheckoutProgress
                           ? {
@@ -3351,12 +3425,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
   });
 
-  const pruneWorktrees: GitVcsDriver.GitVcsDriverShape["pruneWorktrees"] = (cwd) =>
-    executeGit("GitVcsDriver.pruneWorktrees", cwd, ["worktree", "prune", "--expire", "now"], {
-      timeoutMs: 10_000,
-      fallbackErrorMessage: "git worktree prune failed",
-    }).pipe(Effect.asVoid);
-
   const renameBranch: GitVcsDriver.GitVcsDriverShape["renameBranch"] = Effect.fn("renameBranch")(
     function* (input) {
       if (input.oldBranch === input.newBranch) {
@@ -3498,14 +3566,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     executeGit(
       "GitVcsDriver.listLocalBranchNames",
       cwd,
-      ["branch", "--list", "--no-column", "--format=%(refname:short)"],
+      // The full ref, not `%(refname:short)`: that prints `heads/<name>` for a branch a tag shares
+      // its name with.
+      ["branch", "--list", "--no-column", "--format=%(refname)"],
       { readOnly: true },
     ).pipe(
       Effect.map((result) =>
         result.stdout
           .split("\n")
           .map((line) => line.trim())
-          .filter((line) => line.length > 0),
+          .filter((line) => line.startsWith("refs/heads/"))
+          .map((line) => line.slice("refs/heads/".length)),
       ),
     );
 
@@ -3570,7 +3641,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     fetchRemoteTrackingBranch,
     setBranchUpstream,
     removeWorktree,
-    pruneWorktrees,
     renameBranch,
     createRef,
     deleteBranch,

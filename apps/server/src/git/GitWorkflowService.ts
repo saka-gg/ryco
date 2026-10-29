@@ -121,7 +121,6 @@ export interface GitWorkflowServiceShape {
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
   readonly prefetchWorktreeBase: GitVcsDriverShape["prefetchWorktreeBase"];
   readonly removeWorktree: GitVcsDriverShape["removeWorktree"];
-  readonly pruneWorktrees: (cwd: string) => Effect.Effect<void, GitCommandError>;
   readonly listWorktreePaths: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
   readonly listLocalBranchNames: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
   readonly createRef: (
@@ -460,10 +459,6 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
-      ),
-    pruneWorktrees: (cwd) =>
-      ensureGitCommand("GitWorkflowService.pruneWorktrees", cwd).pipe(
-        Effect.andThen(git.pruneWorktrees(cwd)),
       ),
     listWorktreePaths: (cwd) => {
       const empty: readonly string[] = [];

@@ -352,7 +352,9 @@ Checkout removal never uses force. It requires a registered checkout with no tra
 untracked, or ignored changes and a branch merged into the project's current HEAD.
 Branch deletion uses the approved commit as an atomic compare-and-delete guard. Main,
 current, overlapping, locked, active, or unverifiable workspaces are blocked. Restore
-requires an archived record, an absent checkout/registration, and a retained branch.
+requires an archived record, an absent checkout, and a retained branch. A Git registration
+left at the missing path (storage cleanup keeps one) is replaced when the checkout is
+recreated; a locked one blocks.
 
 Deleting with `sessions: "preserve"` atomically moves the exact associated sessions to
 an existing registered main workspace and clears their removed checkout paths; history

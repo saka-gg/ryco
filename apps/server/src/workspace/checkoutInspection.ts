@@ -38,6 +38,11 @@ export interface CheckoutFacts {
   readonly checkoutIdentity: string | null;
   readonly checkout: "present" | "missing";
   readonly gitRegistered: boolean;
+  /**
+   * Why recreating the missing checkout may not replace the registration Git keeps for it (the
+   * driver's rule, `staleRegistrationRefusal`); null when there is none to replace or it may.
+   */
+  readonly registrationRefusal: string | null;
   readonly repository: string;
   readonly repositoryIdentity: string;
   readonly baseHead: string;
@@ -435,6 +440,13 @@ export const inspectCheckout = (
     const registered = checkoutEntry !== undefined;
     if (checkoutEntry?.some((f) => f.startsWith("locked")))
       return yield* fail("The worktree is locked in Git.");
+    // Loaded only for a missing checkout Git still registers, as the driver loads it.
+    const registrationRefusal =
+      !stat && checkoutEntry
+        ? (yield* Effect.promise(
+            () => import("../vcs/worktreeRegistrationReplacement.ts"),
+          )).staleRegistrationRefusal(checkoutEntry, directory)
+        : null;
     const branchHead =
       input.branch === null ? null : (projectFacts.branchHeads.get(input.branch) ?? null);
     const fingerprint =
@@ -542,6 +554,7 @@ export const inspectCheckout = (
       checkoutIdentity: stat ? `${stat.dev}:${stat.ino}` : null,
       checkout: stat ? ("present" as const) : ("missing" as const),
       gitRegistered: registered,
+      registrationRefusal,
       repository,
       repositoryIdentity: projectFacts.repositoryIdentity,
       baseHead,

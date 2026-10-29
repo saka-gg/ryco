@@ -3,7 +3,7 @@ import { makeManagedWorktreeMigration } from "./managedWorktreeMigration.ts";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
-import { Context, Effect, Layer, Option, Semaphore } from "effect";
+import { Cause, Context, Effect, Layer, Option, Semaphore } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
@@ -152,7 +152,11 @@ export interface WorkspaceLifecycleDeps {
   readonly gitDriver: GitVcsDriverShape;
   readonly git: Pick<
     GitWorkflowServiceShape,
-    "removeWorktree" | "createWorktree" | "listWorktreePaths" | "invalidateStatus"
+    | "removeWorktree"
+    | "createWorktree"
+    | "listLocalBranchNames"
+    | "listWorktreePaths"
+    | "invalidateStatus"
   >;
   readonly settings: Pick<ServerSettingsShape, "getSettings">;
   readonly fence: CheckoutFence;
@@ -266,18 +270,20 @@ const activeWorkBlocker = (state: BlockerState) =>
 const checkoutGone = (state: BlockerState) =>
   state.worktree.checkoutRemovedAt != null || state.facts?.checkout === "missing";
 
-/** Why the checkout cannot be checked out again at its recorded path; empty when it can. */
+/**
+ * Why the checkout cannot be checked out again at its recorded path; empty when it can. A Git
+ * registration left at the missing path (storage cleanup keeps it) does not block: recreating
+ * replaces it, unless the driver's rule refuses to (a detached one; a locked one already fails
+ * the inspection).
+ */
 function recreateCheckoutBlockers(state: BlockerState): string[] {
   const { worktree, facts } = state;
   if (!facts) return [state.inspectionError ?? "The checkout could not be inspected."];
   const blockers: string[] = [];
   if (facts.checkout === "present") blockers.push("The checkout already exists.");
-  else if (facts.gitRegistered)
-    blockers.push(
-      "Git still registers this missing path. Run `git worktree prune` in the project, then retry.",
-    );
   if (facts.branchHead === null)
     blockers.push(`Branch ${worktree.branch} no longer exists; the checkout cannot be recreated.`);
+  if (facts.registrationRefusal !== null) blockers.push(facts.registrationRefusal);
   return blockers;
 }
 
@@ -740,10 +746,13 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     }
     if (request.action === "archive")
       details.push("Hides the workspace. Its directory, branch and conversations are untouched.");
-    if (effects.recreateCheckout)
+    if (effects.recreateCheckout) {
       details.push(
         `Checks out the existing branch ${state.worktree.branch} at ${state.worktree.worktreePath ?? "its recorded path"}.`,
       );
+      if (state.facts?.gitRegistered)
+        details.push("Git still registers this missing path; recreating replaces that entry.");
+    }
     if (request.action === "restore") {
       if (effects.restoreWorkspace) details.push("Shows the workspace again.");
       if (!effects.recreateCheckout && checkoutGone(state))
@@ -845,6 +854,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             checkout: facts.checkout,
             checkoutIdentity: facts.checkoutIdentity,
             gitRegistered: facts.gitRegistered,
+            registrationRefusal: facts.registrationRefusal,
             head: facts.head,
             branchHead: facts.branchHead,
             baseHead: facts.baseHead,
@@ -961,17 +971,25 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         // Shared by Restore and Recreate checkout: check the existing branch out again at the
         // recorded path, then clear the removal and the archive from the record.
         const recreateCheckout = Effect.gen(function* () {
-          const path = state.worktree.worktreePath!;
           const created = yield* Effect.exit(
-            deps.git.createWorktree({
-              projectId: state.worktree.projectId,
-              cwd: projectRoot,
-              refName: state.worktree.branch,
-              path,
-            }),
+            // Loaded when a checkout is recreated: off the server's boot path.
+            Effect.promise(() => import("./checkoutRecreation.ts")).pipe(
+              Effect.flatMap(({ recreateRecordedCheckout }) =>
+                recreateRecordedCheckout(deps.git, {
+                  projectId: state.worktree.projectId,
+                  repositoryRoot: projectRoot,
+                  path: state.worktree.worktreePath!,
+                  branch: state.worktree.branch,
+                }),
+              ),
+              Effect.mapError((error) => error.detail),
+            ),
           );
           if (created._tag === "Failure") {
-            step("recreate-checkout", "failed", "Git could not recreate the checkout.");
+            // Git's reason, or the routine's (a deleted branch); nothing for a defect.
+            const detail = Cause.squash(created.cause);
+            const reason = typeof detail === "string" ? ` ${detail}` : "";
+            step("recreate-checkout", "failed", `Git could not recreate the checkout.${reason}`);
             return result("failed", "The checkout could not be recreated. Nothing was changed.");
           }
           step(

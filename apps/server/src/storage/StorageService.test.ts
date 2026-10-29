@@ -22,10 +22,12 @@ import {
 } from "@ryco/contracts";
 import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
-import { type ServerConfigShape } from "../config.ts";
+import { ServerConfig, type ServerConfigShape } from "../config.ts";
 import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { runProcess } from "../processRunner.ts";
 import { makeStorageService } from "./StorageService.ts";
+import { makeGitVcsDriverCore } from "../vcs/GitVcsDriverCore.ts";
+import { recreateRecordedCheckout } from "../workspace/checkoutRecreation.ts";
 import { resolveUsageProtectedPaths } from "../usage/usageProtectedPaths.ts";
 import {
   acquireWorktreeCreationLease,
@@ -316,6 +318,52 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
             );
             assert.isTrue(yield* isStoragePathBlocked(f.sql, path.join(f.checkout, "nested")));
             assert.isTrue((yield* f.service.scan()).history.length > 0);
+          }),
+        ),
+    );
+    it.effect(
+      "brings a checkout storage cleanup removed back on its branch, over the registration it kept",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            const preview = yield* f.service.preview("owner", [f.entry.id]);
+            const result = yield* f.service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed");
+            // Cleanup keeps Git's registration of the removed path, so a plain add refuses it.
+            assert.include(
+              (yield* f.git(f.repo, ["worktree", "list", "--porcelain"])).stdout,
+              `worktree ${f.checkout}\n`,
+            );
+            const driver = yield* makeGitVcsDriverCore().pipe(
+              Effect.provide(ServerConfig.layerTest(f.repo, path.join(f.root, "server"))),
+            );
+            const plain = yield* driver
+              .createWorktree({ cwd: f.repo, path: f.checkout, refName: "fixture-branch" })
+              .pipe(Effect.result);
+            assert.strictEqual(plain._tag, "Failure");
+
+            // Restore, Recreate checkout and a turn start's recovery all use this routine.
+            const created = yield* recreateRecordedCheckout(driver, {
+              projectId,
+              repositoryRoot: f.repo,
+              path: f.checkout,
+              branch: "fixture-branch",
+            });
+            assert.strictEqual(created.worktree.path, f.checkout);
+            assert.strictEqual(
+              (yield* f.git(f.checkout, ["branch", "--show-current"])).stdout.trim(),
+              "fixture-branch",
+            );
+            // Ownership is recorded again with a fresh retention clock, and the path is open.
+            const rows = yield* f.sql<{
+              state: string;
+              created_at: string;
+            }>`SELECT state, created_at FROM storage_owned_entries`;
+            assert.strictEqual(rows.length, 1);
+            assert.strictEqual(rows[0]?.state, "owned");
+            assert.isAbove(Date.parse(rows[0]!.created_at), Date.parse(old));
+            assert.isFalse(yield* isStoragePathBlocked(f.sql, f.checkout));
           }),
         ),
     );
