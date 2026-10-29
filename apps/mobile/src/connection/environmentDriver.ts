@@ -36,6 +36,7 @@ import { invalidateProjectFilesState } from "../rpc/projectFilesAtoms";
 import { markEnvironmentSnapshotDirty } from "../persistence/environmentSnapshotPersistence";
 import { createHostedPrimaryConnectionIfLoaded } from "../hostedHub/primaryConnectionFactory";
 import { subscribeAppStateResume } from "./appStateResume";
+import { subscribeNetworkPathChange } from "./networkPathChange";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import type { MobileRemoteEnvironmentApi } from "./remoteApi";
 import { usableSavedSessionHint, type SavedSessionHints } from "./savedSessionHints";
@@ -120,6 +121,7 @@ export interface MobileEnvironmentDriverDeps {
   >;
   readonly stateSink?: EnvironmentStateSink;
   readonly subscribeResume?: (listener: (reason: string) => void) => () => void;
+  readonly subscribeNetworkChange?: (listener: () => void) => () => void;
   /**
    * The node's last session answer per environment. With it, a connect whose
    * session is not due for renewal skips the pre-socket session check and
@@ -175,6 +177,7 @@ export function createMobileEnvironmentDriver(
   deps: MobileEnvironmentDriverDeps,
 ): MobileEnvironmentDriver {
   const subscribeResume = deps.subscribeResume ?? subscribeAppStateResume;
+  const subscribeNetworkChange = deps.subscribeNetworkChange ?? subscribeNetworkPathChange;
   const { catalog, remoteApi, sessionHints } = deps;
 
   // Assigned immediately below; the input closures only read it once the
@@ -593,6 +596,7 @@ export function createMobileEnvironmentDriver(
     },
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
     subscribeBrowserResume: (listener) => subscribeResume(listener),
+    subscribeNetworkChange: (listener) => subscribeNetworkChange(listener),
     isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
       isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
     listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),

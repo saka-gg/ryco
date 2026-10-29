@@ -121,6 +121,11 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   readonly disconnectSavedEnvironment: (environmentId: EnvironmentId) => Promise<void>;
   readonly waitForPrimaryShellSnapshotApplied: (timeoutMs: number) => Promise<void>;
   readonly subscribeBrowserResume: (listener: (reason: string) => void) => () => void;
+  /**
+   * The device stayed online but moved to another network path (the platform's
+   * `network-changed`). Optional: a platform that cannot tell paths apart omits it.
+   */
+  readonly subscribeNetworkChange?: (listener: () => void) => () => void;
   readonly isThreadDetailSubscriptionNonIdle: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
@@ -452,6 +457,7 @@ export function createEnvironmentConnectionSupervisor<
     stop: () => void;
   } | null = null;
   let lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
+  let lastNetworkChangeReconnectAt = Number.NEGATIVE_INFINITY;
   const savedRetries = new Map<
     EnvironmentId,
     { failedAttempts: number; timeoutId: ReturnType<typeof setTimeout> | null }
@@ -1480,30 +1486,50 @@ export function createEnvironmentConnectionSupervisor<
       return active;
     };
   };
+  // Waking or regaining the network is the moment an unreachable environment
+  // most likely became reachable: try every one now rather than on the backoff
+  // it had grown while the machine slept or sat on the other network.
+  const retrySavedEnvironmentsNow = () => {
+    if (savedRetries.size === 0) return;
+    for (const retry of savedRetries.values()) {
+      if (retry.timeoutId !== null) input.clearTimeout(retry.timeoutId);
+      retry.timeoutId = null;
+      retry.failedAttempts = 0;
+    }
+    requestSavedSyncForRetry?.();
+  };
+  const reconnectLogged = (connection: EnvironmentConnection, reason: string) => {
+    void connection.reconnect().catch((error) => {
+      console.warn("Environment reconnect after a wake signal failed", {
+        environmentId: connection.environmentId,
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
   const reconnectAfterResume = (reason: string) => {
     const now = input.now();
     if (now - lastBrowserResumeReconnectAt < BROWSER_RESUME_RECONNECT_COOLDOWN_MS) return;
-    // Waking or regaining the network is the moment an unreachable environment
-    // most likely became reachable: try every one now rather than on the
-    // backoff it had grown while the machine slept.
-    if (savedRetries.size > 0) {
-      for (const retry of savedRetries.values()) {
-        if (retry.timeoutId !== null) input.clearTimeout(retry.timeoutId);
-        retry.timeoutId = null;
-        retry.failedAttempts = 0;
-      }
-      requestSavedSyncForRetry?.();
-    }
+    retrySavedEnvironmentsNow();
     for (const connection of connections.values()) {
       if (connection.client.isHeartbeatFresh()) continue;
       lastBrowserResumeReconnectAt = now;
-      void connection.reconnect().catch((error) => {
-        console.warn("Environment reconnect after browser resume failed", {
-          environmentId: connection.environmentId,
-          reason,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+      reconnectLogged(connection, reason);
+    }
+  };
+  // A new network path leaves sockets opened on the old one dead without a close,
+  // and a heartbeat answered just before the move still reads as fresh for up
+  // to its 16 s timeout. So every direct connection reconnects now, not only
+  // the stale ones resume picks. Hub relay connections are left to their own
+  // lifecycle owner.
+  const reconnectAfterNetworkChange = () => {
+    const now = input.now();
+    if (now - lastNetworkChangeReconnectAt < BROWSER_RESUME_RECONNECT_COOLDOWN_MS) return;
+    lastNetworkChangeReconnectAt = now;
+    retrySavedEnvironmentsNow();
+    for (const connection of connections.values()) {
+      if (connection.knownEnvironment.source === "hub-hosted") continue;
+      reconnectLogged(connection, "network-changed");
     }
   };
   const stopActive = () => {
@@ -1544,12 +1570,16 @@ export function createEnvironmentConnectionSupervisor<
     const unsubscribeResume = input.isHostedMode()
       ? NOOP
       : input.subscribeBrowserResume(reconnectAfterResume);
+    const unsubscribeNetworkChange = input.isHostedMode()
+      ? NOOP
+      : (input.subscribeNetworkChange?.(reconnectAfterNetworkChange) ?? NOOP);
     const service = {
       throttle,
       refCount: 1,
       stop: () => {
         unsubscribeSaved();
         unsubscribeResume();
+        unsubscribeNetworkChange();
         throttle.cancel();
       },
     };
@@ -1564,6 +1594,7 @@ export function createEnvironmentConnectionSupervisor<
     flushShellEvents();
     stopActive();
     lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
+    lastNetworkChangeReconnectAt = Number.NEGATIVE_INFINITY;
     for (const key of threadDetailSubscriptions.keys()) disposeByKey(key);
     departedThreadBodies.clear();
     // The disposals above scheduled a pass; with no access records left it
