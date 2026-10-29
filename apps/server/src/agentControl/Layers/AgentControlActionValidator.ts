@@ -320,6 +320,8 @@ const validateBaseRef = (baseRef: string | undefined) => {
 
 const validatePlanAgainstSnapshot = (input: {
   readonly plan: AgentControlActionPlan;
+  /** The calling provider session's thread; absent for external integrations. */
+  readonly originThreadId?: string | undefined;
   readonly originProjectId: string;
   readonly originRuntimeMode: RuntimeMode;
   readonly originEnvMode: "local" | "worktree";
@@ -415,12 +417,25 @@ const validatePlanAgainstSnapshot = (input: {
         input.plan.title === undefined &&
         input.plan.archived === undefined &&
         input.plan.persistentGoal === undefined &&
+        input.plan.goalStatus === undefined &&
         input.plan.modelSelection === undefined &&
         input.plan.runtimeMode === undefined &&
         input.plan.interactionMode === undefined &&
         input.plan.tokenMode === undefined
       ) {
         return yield* fail("invalid-plan", "At least one supported thread update is required.");
+      }
+      if (input.plan.goalStatus !== undefined) {
+        // Only the agent working toward a goal reports on it, and only on a goal it has.
+        if (input.originThreadId === undefined || target.id !== input.originThreadId) {
+          return yield* fail("project-scope", "Only the calling thread can report on its goal.");
+        }
+        if (input.plan.persistentGoal !== undefined) {
+          return yield* fail("invalid-plan", "Set a goal or report on it, not both at once.");
+        }
+        if (target.goal == null) {
+          return yield* fail("invalid-plan", "This thread has no goal to report on.");
+        }
       }
       if (input.plan.modelSelection !== undefined)
         yield* providerForSelection(input.providers, input.plan.modelSelection);
@@ -439,6 +454,7 @@ const validatePlanAgainstSnapshot = (input: {
         input.plan.archived !== false &&
         (input.plan.title !== undefined ||
           input.plan.persistentGoal !== undefined ||
+          input.plan.goalStatus !== undefined ||
           input.plan.modelSelection !== undefined ||
           input.plan.runtimeMode !== undefined ||
           input.plan.interactionMode !== undefined ||
@@ -747,6 +763,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       } else {
         yield* validatePlanAgainstSnapshot({
           plan: input.plan,
+          originThreadId: caller.id,
           originProjectId: caller.projectId,
           originRuntimeMode: caller.runtimeMode,
           originEnvMode,
@@ -1243,6 +1260,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
 
       yield* validatePlanAgainstSnapshot({
         plan: proposal.plan,
+        originThreadId: principal.kind === "provider-session" ? principal.threadId : undefined,
         originProjectId,
         originRuntimeMode,
         originEnvMode,

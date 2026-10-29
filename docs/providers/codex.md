@@ -33,7 +33,16 @@ current native state so delayed notifications cannot undo newer changes.
 
 A Codex version supporting the goal APIs is required for native pursuit. Providers without
 native goal integration show a **Goal reminder**: the objective accompanies subsequent
-messages, with no automatic continuation or goal usage tracking.
+messages, with no goal usage tracking.
+
+On those providers Ryco continues the goal itself when Agent Control is on and the provider gets
+its tools (Claude, Copilot, Cursor). About five seconds after a turn ends cleanly and the chat is
+idle, Ryco starts the next turn toward the goal. A message you queued goes first, and pending
+approvals, questions, plans and usage limits hold it, like delegated results. The agent ends the
+loop by calling `ryco_update_thread` with `goalStatus` `complete` or `blocked`. A Stop, a failed
+turn, or 25 automatic turns in a row pause the goal; resume it from the goal header. After a Ryco
+restart, the goal waits for your next message. Delegated tasks, Plan mode and chats on OpenCode or
+Grok never continue on their own.
 
 See the [Codex goal workflow](https://learn.chatgpt.com/use-cases/follow-goals) and
 [app-server goal API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal).

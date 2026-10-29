@@ -1609,6 +1609,16 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 },
           );
         }
+        if (plan.goalStatus !== undefined) {
+          // The same goal update a person makes, so a native goal is synced to its provider.
+          yield* dispatch("thread-goal-status", {
+            type: "thread.goal.set",
+            commandId: commandIdFor(operation.operationId, "thread-goal-status"),
+            threadId: plan.threadId,
+            status: plan.goalStatus,
+            createdAt: new Date().toISOString(),
+          });
+        }
         if (plan.archived !== undefined) {
           const current = yield* loadThread(plan.threadId);
           const isArchived = current.archivedAt !== null;

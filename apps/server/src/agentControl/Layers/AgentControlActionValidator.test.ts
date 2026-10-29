@@ -625,6 +625,60 @@ it.effect("blocks runtime and worktree privilege escalation before proposal crea
   }),
 );
 
+it.effect("lets an agent report only on its own thread's goal", () =>
+  Effect.gen(function* () {
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const goal = {
+      objective: "Ship the release notes",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: now,
+      updatedAt: now,
+    } as const;
+    const caller = thread({
+      id: callerThreadId,
+      runtimeMode: "approval-required",
+      envMode: "worktree",
+      running: true,
+    });
+    const target = thread({
+      id: targetThreadId,
+      runtimeMode: "approval-required",
+      envMode: "worktree",
+    });
+    const snapshot = yield* Ref.make(makeSnapshot({ ...caller, goal }, { ...target, goal }));
+    const validator = makeValidator(snapshot, providers);
+    const submit = (plan: AgentControlProposal["plan"]) =>
+      validator.validateSubmission({ session, authority, plan });
+
+    yield* submit({ kind: "updateThread", threadId: callerThreadId, goalStatus: "complete" });
+    yield* submit({ kind: "updateThread", threadId: callerThreadId, goalStatus: "blocked" });
+
+    const otherThread = yield* Effect.flip(
+      submit({ kind: "updateThread", threadId: targetThreadId, goalStatus: "complete" }),
+    );
+    assert.strictEqual(otherThread.reason, "project-scope");
+
+    const both = yield* Effect.flip(
+      submit({
+        kind: "updateThread",
+        threadId: callerThreadId,
+        goalStatus: "complete",
+        persistentGoal: "Another goal",
+      }),
+    );
+    assert.strictEqual(both.reason, "invalid-plan");
+
+    yield* Ref.set(snapshot, makeSnapshot(caller, target));
+    const noGoal = yield* Effect.flip(
+      submit({ kind: "updateThread", threadId: callerThreadId, goalStatus: "complete" }),
+    );
+    assert.strictEqual(noGoal.reason, "invalid-plan");
+  }),
+);
+
 it.effect("revalidates target state and provider/model availability at execution time", () =>
   Effect.gen(function* () {
     const snapshot = yield* Ref.make(makeSnapshot());
@@ -1247,6 +1301,10 @@ it.effect(
         submit({ kind: "updateThread", threadId: targetThreadId, runtimeMode: "full-access" }),
       );
       assert.strictEqual(elevated.reason, "privilege-escalation");
+      const goalReport = yield* Effect.flip(
+        submit({ kind: "updateThread", threadId: targetThreadId, goalStatus: "complete" }),
+      );
+      assert.strictEqual(goalReport.reason, "project-scope");
 
       const proposal = approvedProposal(principal, interrupt);
       yield* validator.revalidateExecution(proposal);

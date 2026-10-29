@@ -57,6 +57,7 @@ import {
   AgentControlExternalClientKind,
   AgentControlExternalProjectScope,
   AgentControlExternalTaskId,
+  AgentControlGoalStatusUpdate,
   AgentControlIntegrationId,
   AgentControlProjectPreferences,
   AgentControlPrompt,
@@ -316,6 +317,7 @@ export const AgentControlMcpUpdateThreadInput = Schema.Struct({
       TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS)),
     ),
   ),
+  goalStatus: Schema.optional(AgentControlGoalStatusUpdate),
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpUpdateThreadInput = typeof AgentControlMcpUpdateThreadInput.Type;
 
