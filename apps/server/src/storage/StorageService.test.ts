@@ -42,6 +42,8 @@ import {
 } from "./lifecycle.ts";
 import { assertCanonicalPath, measureDirectory } from "./filesystem.ts";
 import { assertRemovableWorktree, removeVerifiedWorktree } from "./quarantineRemoval.ts";
+import type { CheckoutMergeProverShape } from "../sourceControl/checkoutMergeProof.ts";
+import { makeCheckoutMergeProver } from "../sourceControl/checkoutMergeProver.ts";
 
 const projectId = ProjectId.make("fixture-project");
 const threadId = ThreadId.make("fixture-thread");
@@ -261,6 +263,35 @@ const ignoreAndMerge = (f: Fixture, ignore: string) =>
     yield* f.git(f.checkout, ["add", ".gitignore"]);
     yield* f.git(f.checkout, ["commit", "-m", "ignore caches"]);
     yield* f.git(f.repo, ["merge", "--ff-only", "fixture-branch"]);
+  });
+/**
+ * A commit on the fixture branch that the project's main lacks, and pull request #7 linked to
+ * the workspace as merged: squash-merged upstream. `service` proves it as the forge would (only
+ * that pull request, only at that commit); `calls` records what it was asked.
+ */
+const squashMerged = (f: Fixture) =>
+  Effect.gen(function* () {
+    yield* io(() => fs.writeFile(path.join(f.checkout, "tracked.txt"), "squash-merged\n"));
+    yield* f.git(f.checkout, ["commit", "-am", "squash-merged work"]);
+    const head = (yield* f.git(f.checkout, ["rev-parse", "HEAD"])).stdout.trim();
+    f.setSnapshot((s) => ({
+      ...s,
+      worktrees: s.worktrees?.map((w) => ({ ...w, prNumber: 7, prState: "merged" as const })),
+    }));
+    const calls: Parameters<CheckoutMergeProverShape["prove"]>[0][] = [];
+    const mergeProof: CheckoutMergeProverShape = {
+      prove: (input) =>
+        Effect.sync(() => {
+          calls.push(input);
+          return input.pullRequest?.number === 7 &&
+            input.pullRequest.state === "merged" &&
+            input.head === head
+            ? { kind: "pull-request" as const, head, number: 7, baseRefName: "main" }
+            : null;
+        }),
+      remoteDefaultBranches: () => Effect.succeed(null),
+    };
+    return { head, calls, service: f.withDeps({ mergeProof }) };
   });
 /** Quarantines and moved-out cache folders beside the checkout. */
 const cleanupSiblings = (f: Fixture) =>
@@ -2310,6 +2341,198 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory(), NodeServices.layer))(
           assert.include(row!.last_error, "nothing was deleted");
         }),
       ),
+    );
+    it.effect(
+      "removes a squash-merged checkout when its linked pull request merged at the same head",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            const { head, calls, service } = yield* squashMerged(f);
+            // Without a merge proof, commits the project HEAD lacks keep the checkout.
+            const plain = (yield* f.service.scan()).entries.find((e) => e.id === f.entry.id)!;
+            assert.isFalse(plain.eligible);
+            assert.include(
+              plain.reason,
+              "The branch has commits the project HEAD does not contain, and no merged pull request or default branch contains them.",
+            );
+            const entry = (yield* service.scan()).entries.find((e) => e.id === f.entry.id)!;
+            assert.isTrue(entry.eligible);
+            assert.include(entry.reason, "Its branch is merged through pull request #7.");
+            assert.deepEqual(calls[0]?.pullRequest, { number: 7, state: "merged" });
+            // A scan page shares a few forge reads.
+            assert.isAtMost(calls[0]!.reads!.remaining, 3);
+            const preview = yield* service.preview("owner", [entry.id]);
+            assert.isTrue(preview.entries[0]!.eligible);
+            calls.length = 0;
+            const result = yield* service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed");
+            // Proved once before the claim; the revalidation under the settings lease asks nothing.
+            assert.strictEqual(calls.length, 1);
+            assert.isFalse(yield* exists(f.checkout));
+            assert.strictEqual(
+              (yield* f.git(f.repo, ["rev-parse", "refs/heads/fixture-branch"])).stdout.trim(),
+              head,
+            );
+            const [row] = yield* f.sql<{
+              state: string;
+              identity_json: string;
+            }>`SELECT state, identity_json FROM storage_owned_entries WHERE id = ${entry.id}`;
+            assert.strictEqual(row!.state, "removed");
+            // The ledger records the commit the proof covered.
+            assert.strictEqual(JSON.parse(row!.identity_json).mergedHead, head);
+          }),
+        ),
+    );
+    it.effect("refuses a squash-merged checkout whose HEAD moved after the proof", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const { service } = yield* squashMerged(f);
+          const moveHead = (message: string) =>
+            Effect.gen(function* () {
+              yield* io(() => fs.writeFile(path.join(f.checkout, "tracked.txt"), `${message}\n`));
+              yield* f.git(f.checkout, ["commit", "-am", message]);
+            }).pipe(Effect.orDie);
+
+          // A commit after the review is not covered by the merged pull request.
+          const reviewed = yield* service.preview("owner", [f.entry.id]);
+          yield* moveHead("after review");
+          const afterReview = yield* service.execute("owner", reviewed.token);
+          assert.strictEqual(afterReview.results[0]?.status, "protected");
+          assert.include(afterReview.results[0]!.detail, "no merged pull request");
+          yield* f.git(f.checkout, ["reset", "--hard", "HEAD~1"]);
+
+          // A commit between the proof and the revalidation under the settings lease: that
+          // revalidation only accepts the proven commit and does not ask again.
+          const second = yield* service.preview("owner", [f.entry.id]);
+          let listings = 0;
+          f.duringListWorktrees(() =>
+            ++listings === 2 ? moveHead("during removal") : Effect.void,
+          );
+          const duringRemoval = yield* service.execute("owner", second.token);
+          assert.strictEqual(duringRemoval.results[0]?.status, "protected");
+          assert.include(
+            duringRemoval.results[0]!.detail,
+            "The branch moved after its merge was verified",
+          );
+          assert.deepEqual(
+            yield* f.sql<{ state: string }>`SELECT state FROM storage_owned_entries`,
+            [{ state: "owned" }],
+          );
+          f.duringListWorktrees(() => Effect.void);
+          yield* f.git(f.checkout, ["reset", "--hard", "HEAD~1"]);
+
+          // A commit at the removal boundary itself: the claimed commit no longer matches.
+          const third = yield* service.preview("owner", [f.entry.id]);
+          f.beforeRemove(() => moveHead("at the boundary"));
+          const atBoundary = yield* service.execute("owner", third.token);
+          assert.strictEqual(atBoundary.results[0]?.status, "failed");
+          assert.include(atBoundary.results[0]!.detail, "moved after its merge was verified");
+          assert.strictEqual(
+            yield* io(() => fs.readFile(path.join(f.checkout, "tracked.txt"), "utf8")),
+            "at the boundary\n",
+          );
+          assert.deepEqual(yield* cleanupSiblings(f), []);
+        }),
+      ),
+    );
+    it.effect("retention removes a squash-merged checkout once it is due", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const { calls, service } = yield* squashMerged(f);
+          yield* f.sql`UPDATE storage_owned_entries SET created_at = ${old}`;
+          f.setSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            storageRetention: {
+              automatic: true,
+              completedWorktreeDays: 30,
+              temporaryDataDays: null,
+            },
+          });
+          yield* f.service.runRetention;
+          assert.isTrue(yield* exists(f.checkout));
+          yield* service.runRetention;
+          assert.isFalse(yield* exists(f.checkout));
+          // The pass shares its forge reads between candidates.
+          assert.isAtMost(calls[0]!.reads!.remaining, 8);
+        }),
+      ),
+    );
+    it.effect("a slow forge read for a merge proof does not use up the measurement budget", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const { head } = yield* squashMerged(f);
+          // Each proof waits 4 seconds on the forge, longer than the 3-second budget that
+          // bounds measuring the checkout: the clock moves on while it waits.
+          const realNow = Date.now.bind(Date);
+          let skew = 0;
+          const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+          yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+          const service = f.withDeps({
+            mergeProof: {
+              prove: (input) =>
+                Effect.sync(() => {
+                  skew += 4_000;
+                  return input.head === head
+                    ? { kind: "pull-request" as const, head, number: 7, baseRefName: "main" }
+                    : null;
+                }),
+              remoteDefaultBranches: () => Effect.succeed(null),
+            },
+          });
+          const entry = (yield* service.scan()).entries.find((e) => e.id === f.entry.id)!;
+          assert.isTrue(entry.eligible, entry.reason);
+          const preview = yield* service.preview("owner", [entry.id]);
+          assert.isTrue(preview.entries[0]!.eligible, preview.entries[0]!.reason);
+          const result = yield* service.execute("owner", preview.token);
+          assert.strictEqual(result.results[0]?.status, "removed");
+          assert.isFalse(yield* exists(f.checkout));
+        }),
+      ),
+    );
+    it.effect(
+      "accepts a branch the remote default branch contains while the local main is behind",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* io(() => fs.writeFile(path.join(f.checkout, "tracked.txt"), "landed\n"));
+            yield* f.git(f.checkout, ["commit", "-am", "landed upstream"]);
+            const head = (yield* f.git(f.checkout, ["rev-parse", "HEAD"])).stdout.trim();
+            // Fetched earlier: origin/main has the commit, the local main does not. Never fetched here.
+            yield* f.git(f.repo, [
+              "remote",
+              "add",
+              "origin",
+              "https://example.invalid/fixture.git",
+            ]);
+            yield* f.git(f.repo, ["update-ref", "refs/remotes/origin/main", head]);
+            yield* f.git(f.repo, [
+              "symbolic-ref",
+              "refs/remotes/origin/HEAD",
+              "refs/remotes/origin/main",
+            ]);
+            const driver = yield* makeGitVcsDriverCore().pipe(
+              Effect.provide(ServerConfig.layerTest(f.repo, path.join(f.root, "server"))),
+            );
+            const service = f.withDeps({
+              mergeProof: makeCheckoutMergeProver({
+                git: driver,
+                providers: { resolve: () => Effect.die(new Error("no forge read expected")) },
+              }),
+            });
+            const entry = (yield* service.scan()).entries.find((e) => e.id === f.entry.id)!;
+            assert.isTrue(entry.eligible);
+            assert.include(entry.reason, "Its branch is contained in origin/main.");
+            const preview = yield* service.preview("owner", [entry.id]);
+            const result = yield* service.execute("owner", preview.token);
+            assert.strictEqual(result.results[0]?.status, "removed");
+            assert.isFalse(yield* exists(f.checkout));
+          }),
+        ),
     );
   },
 );

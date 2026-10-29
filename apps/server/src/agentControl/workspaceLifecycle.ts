@@ -19,9 +19,17 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
+import {
+  CheckoutMergeProver,
+  listingMergeProofReads,
+  type MergeProofReads,
+  reviewMergeProofReads,
+  workspacePullRequestLink,
+} from "../sourceControl/checkoutMergeProof.ts";
 import { AgentControlPlanValidationError } from "./Errors.ts";
 import {
   CheckoutInspectionError,
+  effectiveUnmerged,
   inspectCheckout,
   inspectProjectGitFacts,
   type ProjectGitFacts,
@@ -93,7 +101,7 @@ export const workspacePlanBlockers = (
       s.unmerged !== false
     )
       blockers.push(
-        "Checkout removal requires a registered, clean checkout merged into the project HEAD.",
+        "Checkout removal requires a registered, clean checkout whose branch is verified merged.",
       );
   } else blockers.push("Invalid checkout mode for archive/delete.");
   if (
@@ -152,6 +160,8 @@ export const AgentControlWorkspacesLive = Layer.effect(
     const projections = yield* ProjectionSnapshotQuery;
     const policy = yield* WorkspaceAccessPolicy;
     const git = yield* GitVcsDriver;
+    // The same merge proofs as human workspace management (squash and rebase merges).
+    const mergeProof = yield* CheckoutMergeProver;
     const load = (projectId: ProjectId, callerId: ThreadId | null) =>
       Effect.gen(function* () {
         // The project's thread summaries, plus every placement for the overlap checks: no
@@ -208,6 +218,8 @@ export const AgentControlWorkspacesLive = Layer.effect(
       },
       /** The project's repository facts, read once for a whole listing. */
       projectFacts?: ProjectGitFacts,
+      /** Forge reads for merge proofs; a listing shares one budget. */
+      reads: MergeProofReads = reviewMergeProofReads(),
     ) =>
       Effect.gen(function* () {
         const { snapshot, caller, project } = context;
@@ -271,7 +283,7 @@ export const AgentControlWorkspacesLive = Layer.effect(
         };
         const inspection = yield* Effect.exit(
           inspectCheckout(
-            { policy, git },
+            { policy, git, mergeProof },
             {
               snapshot: snapshot.placement,
               project,
@@ -280,13 +292,17 @@ export const AgentControlWorkspacesLive = Layer.effect(
               branch: row?.branch ?? null,
               operation: "Agent Control workspace inspection",
               projectFacts,
+              pullRequest: row ? workspacePullRequestLink(row) : null,
+              mergeProofReads: reads,
             },
           ).pipe(
-            Effect.map(({ status, ...facts }) => ({
+            Effect.map(({ status, mergedBy, ...facts }) => ({
               ...facts,
-              // Same rule as human checkout removal: modified, untracked or protected
-              // ignored content is dirty; known regenerable caches are not.
+              // Same rules as human checkout removal: modified, untracked or protected
+              // ignored content is dirty, known regenerable caches are not, and a merge proof
+              // (squash or rebase merge, remote default branch) makes a branch merged.
               dirty: status === null ? null : checkoutHasBlockingChanges(status),
+              unmerged: effectiveUnmerged({ unmerged: facts.unmerged, mergedBy }),
             })),
           ),
         );
@@ -329,7 +345,7 @@ export const AgentControlWorkspacesLive = Layer.effect(
           const projectFacts =
             selected.length > 1
               ? yield* inspectProjectGitFacts(
-                  { policy, git },
+                  { policy, git, mergeProof },
                   {
                     project: context.project,
                     operation: "Agent Control workspace inspection",
@@ -337,9 +353,10 @@ export const AgentControlWorkspacesLive = Layer.effect(
                   },
                 ).pipe(Effect.orElseSucceed(() => undefined))
               : undefined;
+          const reads = listingMergeProofReads();
           const workspaces = yield* Effect.forEach(
             selected,
-            (g) => inspect(context, g, projectFacts),
+            (g) => inspect(context, g, projectFacts, reads),
             { concurrency: 2 },
           );
           return {

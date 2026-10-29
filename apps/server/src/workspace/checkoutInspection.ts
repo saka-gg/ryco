@@ -8,10 +8,17 @@ import type {
   OrchestrationThreadShell,
   OrchestrationWorktreeShell,
   ProjectId,
+  PullRequestState,
   WorktreeId,
 } from "@ryco/contracts";
 import { parseWorktreeStatus } from "@ryco/shared/workspaceLifecycle";
 
+import type {
+  CheckoutMergeProof,
+  CheckoutMergeProverShape,
+  MergeProofReads,
+  RemoteDefaultBranches,
+} from "../sourceControl/checkoutMergeProof.ts";
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { type CheckoutStatus, withoutEmptyIgnoredDirectories } from "./checkoutStatus.ts";
 import type { WorkspaceAccessPolicyShape } from "./Services/WorkspaceAccessPolicy.ts";
@@ -49,8 +56,24 @@ export interface CheckoutFacts {
   readonly branchHead: string | null;
   readonly head: string | null;
   readonly status: CheckoutStatus | null;
+  /** Git's answer: the branch has commits `baseHead` does not contain. */
   readonly unmerged: boolean | null;
+  /**
+   * What proves those commits merged anyway (the remote default branch contains them, or the
+   * workspace's pull request merged at exactly this commit); null when `unmerged` is not true or
+   * nothing does.
+   */
+  readonly mergedBy: CheckoutMergeProof | null;
 }
+
+/**
+ * Whether the branch holds commits that exist nowhere else: Git's answer against the project
+ * HEAD (`unmerged`), unless a merge proof covers them (`mergedBy`). Every lifecycle rule
+ * (removal, branch deletion, the Delete review and its description, Agent Control) uses it.
+ */
+export const effectiveUnmerged = (
+  facts: Pick<CheckoutFacts, "unmerged" | "mergedBy"> | null | undefined,
+): boolean | null => (facts?.mergedBy ? false : (facts?.unmerged ?? null));
 
 /**
  * Git facts about a project's repository that every checkout's inspection
@@ -71,6 +94,11 @@ export interface ProjectGitFacts {
    * (see `withUnmergedBranches`); absent when each inspection counts its own branch.
    */
   readonly unmergedBranches?: ReadonlySet<string> | undefined;
+  /**
+   * The remote default branch and the local branches it does not contain, read with
+   * `unmergedBranches` when some branch is unmerged; absent means each proof reads it.
+   */
+  readonly remoteDefault?: RemoteDefaultBranches | null | undefined;
 }
 
 /**
@@ -216,6 +244,8 @@ export const checkoutReadFingerprint = (
 type InspectionDeps = {
   readonly policy: WorkspaceAccessPolicyShape;
   readonly git: GitVcsDriverShape;
+  /** Proves unmerged branches merged by other means; absent: only the project HEAD counts. */
+  readonly mergeProof?: CheckoutMergeProverShape | undefined;
 };
 
 const lstatFor = (candidate: string, detail: string) =>
@@ -335,6 +365,11 @@ export const inspectProjectGitFacts = (
             ),
         )
       : undefined;
+    // Branches the project HEAD lacks may still be in the remote default branch: one pass too.
+    const remoteDefault =
+      unmergedBranches && unmergedBranches.size > 0 && deps.mergeProof
+        ? yield* deps.mergeProof.remoteDefaultBranches(root)
+        : undefined;
     return {
       projectId: project.id,
       rootIdentity: `${rootStat.dev}:${rootStat.ino}`,
@@ -344,6 +379,7 @@ export const inspectProjectGitFacts = (
       worktreeEntries: listing.split("\0\0").map((entry) => entry.split("\0")),
       branchHeads,
       ...(unmergedBranches ? { unmergedBranches } : {}),
+      ...(remoteDefault !== undefined ? { remoteDefault } : {}),
     } satisfies ProjectGitFacts;
   });
 
@@ -375,6 +411,13 @@ export const inspectCheckout = (
     readonly projectFacts?: ProjectGitFacts | undefined;
     /** Read-only listings reuse recent Git reads; absent means every read runs. */
     readonly caches?: CheckoutInspectionCaches | undefined;
+    /** The workspace's current pull request link, for a merge proof of an unmerged branch. */
+    readonly pullRequest?:
+      | { readonly number: number; readonly state: PullRequestState | null }
+      | null
+      | undefined;
+    /** Forge reads the merge proof may spend (a listing shares one); absent: none. */
+    readonly mergeProofReads?: MergeProofReads | null | undefined;
   },
 ): Effect.Effect<CheckoutFacts, CheckoutInspectionError> =>
   Effect.gen(function* () {
@@ -549,6 +592,18 @@ export const inspectCheckout = (
       )
     )
       return yield* fail("Branch is checked out in another workspace.");
+    // Last, so an inspection that fails never asks the forge.
+    const mergedBy =
+      unmerged === true && branchHead !== null && deps.mergeProof
+        ? yield* deps.mergeProof.prove({
+            projectRoot: project.workspaceRoot,
+            head: branchHead,
+            branch: input.branch,
+            pullRequest: input.pullRequest ?? null,
+            reads: input.mergeProofReads ?? null,
+            remoteDefault: projectFacts.remoteDefault,
+          })
+        : null;
     return {
       rootIdentity: projectFacts.rootIdentity,
       checkoutIdentity: stat ? `${stat.dev}:${stat.ino}` : null,
@@ -562,5 +617,6 @@ export const inspectCheckout = (
       head,
       status,
       unmerged,
+      mergedBy,
     };
   });

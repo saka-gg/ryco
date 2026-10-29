@@ -14,6 +14,11 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
 import {
+  CheckoutMergeProver,
+  type CheckoutMergeProverShape,
+  workspacePullRequestLink,
+} from "../sourceControl/checkoutMergeProof.ts";
+import {
   TextGeneration,
   type TextGenerationShape,
   type WorkspaceChangesSummaryGenerationInput,
@@ -27,6 +32,7 @@ import {
 } from "../vcs/GitVcsDriver.ts";
 import {
   CheckoutInspectionError,
+  effectiveUnmerged,
   inspectCheckout,
   makeCheckoutReadCache,
   samePath,
@@ -74,6 +80,8 @@ export interface WorkspaceChangeSummaryDeps {
   readonly gitDriver: GitVcsDriverShape;
   readonly textGeneration: Pick<TextGenerationShape, "summarizeWorkspaceChanges">;
   readonly settings: Pick<ServerSettingsShape, "getSettings">;
+  /** Commits a merge proof covers (a squash-merged pull request) are not described as lost. */
+  readonly mergeProof?: CheckoutMergeProverShape | undefined;
 }
 
 type ChangeContext = Omit<WorkspaceChangesSummaryGenerationInput, "modelSelection">;
@@ -203,7 +211,7 @@ export function makeWorkspaceChangeSummary(
       // The same checks every lifecycle read applies: access policy, exact path,
       // no overlap, registered worktree, branch matching its record.
       const facts = yield* inspectCheckout(
-        { policy: deps.policy, git: deps.gitDriver },
+        { policy: deps.policy, git: deps.gitDriver, mergeProof: deps.mergeProof },
         {
           snapshot: placement,
           project,
@@ -211,6 +219,9 @@ export function makeWorkspaceChangeSummary(
           rowWorktreeId: worktree.worktreeId,
           branch: worktree.branch,
           operation: OPERATION,
+          pullRequest: workspacePullRequestLink(worktree),
+          // The review this summary belongs to has just proved what it could: no forge read.
+          mergeProofReads: null,
         },
       ).pipe(
         Effect.tapError((error) =>
@@ -222,16 +233,17 @@ export function makeWorkspaceChangeSummary(
         Effect.option,
       );
       if (Option.isNone(facts)) return NO_SUMMARY;
-      const { status, unmerged, baseHead, checkout } = facts.value;
+      const { status, baseHead, checkout } = facts.value;
+      const unmerged = effectiveUnmerged(facts.value) === true;
       if (checkout !== "present" || status === null) return NO_SUMMARY;
       const hasLocalChanges = status.truncated || status.modified > 0 || status.untracked > 0;
-      if (!hasLocalChanges && unmerged !== true) return NO_SUMMARY;
+      if (!hasLocalChanges && !unmerged) return NO_SUMMARY;
 
       const changes = yield* gatherChanges({
         directory,
         branch: worktree.branch,
         baseHead,
-        unmerged: unmerged === true,
+        unmerged,
       }).pipe(
         Effect.tapError((error) =>
           Effect.logWarning("workspace change summary: git read failed", {
@@ -298,6 +310,7 @@ export const WorkspaceChangeSummaryLive = Layer.effect(
       gitDriver: yield* GitVcsDriver,
       textGeneration: yield* TextGeneration,
       settings: yield* ServerSettingsService,
+      mergeProof: yield* CheckoutMergeProver,
     });
   }),
 );

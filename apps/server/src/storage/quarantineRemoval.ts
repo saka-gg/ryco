@@ -44,6 +44,17 @@ export interface RemovableWorktree {
   readonly cacheFolders: readonly string[];
 }
 
+export interface CheckedWorktree extends RemovableWorktree {
+  /** The commit the checkout is at. */
+  readonly head: string;
+  /** The project HEAD contains `head`; otherwise only a merge proof of `head` lets it go. */
+  readonly inProjectHead: boolean;
+}
+
+/** Why a checkout whose commits the project HEAD lacks, and nothing proved merged, is kept. */
+export const UNMERGED_CHECKOUT_REASON =
+  "The branch has commits the project HEAD does not contain, and no merged pull request or default branch contains them.";
+
 /**
  * Fresh status with ignored files, classified by the shared rule (`classifyIgnoredPath`, the
  * one the workspace lifecycle uses) in its unattended form (`withRegenerableByOwnNameOnly`):
@@ -53,12 +64,13 @@ export interface RemovableWorktree {
  * removal manifest. Ignored dependency and tool cache folders (`node_modules/`, `.venv/`,
  * `.turbo/`) are returned to be moved out whole; ignored build output (`dist/`, `build/`) keeps
  * the checkout, and so does every cache folder on Windows, where moving them is untested.
- * Throws the reasons when the checkout is not removable.
+ * Then the checkout's HEAD and whether the project HEAD contains it; then submodules.
+ * Throws the reasons when the checkout is not removable whatever its merge state.
  */
-export async function assertRemovableWorktree(
+export async function checkRemovableWorktree(
   candidate: string,
   repository: string,
-): Promise<RemovableWorktree> {
+): Promise<CheckedWorktree> {
   const gitFile = await readSmallFile(path.join(candidate, ".git"));
   const match = /^gitdir: (.+)\r?\n?$/.exec(gitFile);
   if (!match) throw new Error("Only linked Git worktrees are eligible.");
@@ -107,20 +119,20 @@ export async function assertRemovableWorktree(
     );
   if (unattended.length > MAX_CACHE_FOLDERS) blockers.push("Too many cache folders to verify.");
   if (blockers.length > 0) throw new Error(blockers.join(" "));
-  const base = await runProcess("git", ["rev-parse", "--verify", "HEAD"], {
-    cwd: repository,
-    timeoutMs: 5000,
-    maxBufferBytes: 4096,
-  });
-  const unmerged = await runProcess("git", ["rev-list", "--count", `${base.stdout.trim()}..HEAD`], {
+  const revParse = (cwd: string) =>
+    runProcess("git", ["rev-parse", "--verify", "HEAD"], {
+      cwd,
+      timeoutMs: 5000,
+      maxBufferBytes: 4096,
+    }).then((result) => result.stdout.trim());
+  const base = await revParse(repository);
+  // One commit for both answers: the count and the proof refer to the same HEAD.
+  const head = await revParse(candidate);
+  const unmerged = await runProcess("git", ["rev-list", "--count", `${base}..${head}`], {
     cwd: candidate,
     timeoutMs: 5000,
     maxBufferBytes: 4096,
   });
-  if (unmerged.stdout.trim() !== "0")
-    throw new Error(
-      "Unmerged branch history is protected; merge into project HEAD before cleanup.",
-    );
   // Even clean initialized submodules may own unpublished commits. Git removal is not a recursive cleanup tool.
   try {
     await fs.lstat(path.join(candidate, ".gitmodules"));
@@ -128,7 +140,27 @@ export async function assertRemovableWorktree(
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
   }
-  return { cacheFolders: unattended };
+  return { cacheFolders: unattended, head, inProjectHead: unmerged.stdout.trim() === "0" };
+}
+
+/**
+ * {@link checkRemovableWorktree}, and its commits must be merged: contained in the project HEAD,
+ * or exactly `mergedHead`, the commit a merge proof (`CheckoutMergeProver`) vouched for before
+ * the claim. A checkout that moved since then is refused at every removal boundary.
+ */
+export async function assertRemovableWorktree(
+  candidate: string,
+  repository: string,
+  options: { readonly mergedHead?: string | null | undefined } = {},
+): Promise<RemovableWorktree> {
+  const checked = await checkRemovableWorktree(candidate, repository);
+  if (!checked.inProjectHead && (options.mergedHead ?? null) !== checked.head)
+    throw new Error(
+      options.mergedHead
+        ? "The branch moved after its merge was verified; review again."
+        : UNMERGED_CHECKOUT_REASON,
+    );
+  return { cacheFolders: checked.cacheFolders };
 }
 
 /** Quarantine first; never recursively delete a tree that external writers can extend.
@@ -325,6 +357,11 @@ export interface VerifiedWorktreeCleanup {
   readonly claim: StorageCleanupClaim;
   /** Cache folders the claim records; moved out whole, deleted by the background purge. */
   readonly caches?: readonly CacheMove[];
+  /**
+   * The commit a merge proof vouched for when the project HEAD does not contain the checkout's
+   * commits (a squash-merged pull request); the claim records it and HEAD must still be it.
+   */
+  readonly mergedHead?: string | null;
   /** Compatibility only; callers cannot supply admission authority. */
   readonly assertAdmission?: () => void;
 }
@@ -340,6 +377,7 @@ export async function removeVerifiedWorktree(
 ): Promise<void> {
   const { quarantinePath, fingerprint, claim } = cleanup;
   const caches = cleanup.caches ?? [];
+  const mergedHead = cleanup.mergedHead ?? null;
   const identityJSON = JSON.stringify(cleanup.identity);
   const cachesJSON = JSON.stringify(caches);
   const validateClaim = () =>
@@ -351,10 +389,12 @@ export async function removeVerifiedWorktree(
       fingerprint,
       identityJSON,
       cachesJSON,
+      mergedHead,
     );
-  // The cache folders a fresh status lists must be exactly the claimed ones.
+  // The cache folders a fresh status lists must be exactly the claimed ones, and the checkout
+  // must still be merged: in the project HEAD, or at the commit the claimed proof covers.
   const assertRemovable = async (checkout: string) => {
-    const { cacheFolders } = await assertRemovableWorktree(checkout, repository);
+    const { cacheFolders } = await assertRemovableWorktree(checkout, repository, { mergedHead });
     if (JSON.stringify(cacheFolders) !== JSON.stringify(caches.map((cache) => cache.relativePath)))
       throw new Error("Cache folders changed at the removal boundary.");
   };

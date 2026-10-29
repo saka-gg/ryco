@@ -359,7 +359,7 @@ function planPresentation(proposal: AgentControlProposal): {
               `Checkout action: ${plan.checkoutMode}`,
               `Branch: ${plan.expected.branch} (${plan.deleteBranch ? "delete" : "retain"})`,
               `Expected branch commit: ${plan.expected.branchHead ?? "missing"}`,
-              `Merged into project HEAD: ${plan.expected.unmerged === false ? "yes" : "unverified"}`,
+              `Branch merged: ${plan.expected.unmerged === false ? "yes" : "unverified"}`,
               `Expected revision: ${plan.expected.updatedAt}`,
               `Conversations: ${
                 plan.sessions === "delete"

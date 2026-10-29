@@ -4,6 +4,7 @@ import { NodeUpdateServiceLive } from "./nodeUpdate/NodeUpdateService.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
+import { CheckoutMergeProverLive } from "./sourceControl/checkoutMergeProof.ts";
 import { WorkspaceChangeSummaryLive } from "./workspace/WorkspaceChangeSummary.ts";
 import { ChatFoldersLive } from "./project/chatFolders.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
@@ -712,6 +713,8 @@ const RuntimeServicesLive = Layer.mergeAll(
   // One fence for every server wake (delegated results, pull request updates): they share its
   // pending-start sightings and its cold-start budget.
   Layer.provideMerge(ServerWakeFenceLive),
+  // Squash- and rebase-merge proofs for checkout removal: lifecycle, storage, Agent Control.
+  Layer.provideMerge(CheckoutMergeProverLive),
   Layer.provideMerge(RuntimeDependenciesLive),
   // One process-scoped manager is shared by control RPC, frame streaming,
   // provider tools, idle cleanup, and crash-recovery ownership.
