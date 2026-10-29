@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { Effect, Redacted, Schema } from "effect";
+import { Deferred, Effect, Fiber, Redacted, Schema } from "effect";
 import { describe, it } from "vite-plus/test";
 import { MessageId, ThreadId, TurnId } from "@ryco/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
@@ -14,9 +14,11 @@ import {
 } from "../CodexDeveloperInstructions.ts";
 import {
   CODEX_AGENT_CONTROL_SERVER_NAME,
+  CodexSessionRuntimeCompactionNotStartedError,
   buildTurnStartParams,
   buildTurnSteerParams,
   isRecoverableThreadResumeError,
+  makeCodexCompactionStarter,
   openCodexThread,
   revertCodexThread,
 } from "./CodexSessionRuntime.ts";
@@ -632,6 +634,279 @@ describe("openCodexThread", () => {
         Schema.is(CodexErrors.CodexAppServerRequestError)(error) &&
         error.errorMessage === "timed out waiting for server",
     );
+  });
+});
+
+describe("makeCodexCompactionStarter", () => {
+  const threadId = ThreadId.make("thread-1");
+  const rootThread = "provider-thread";
+  const idle = { turnRunning: () => false };
+
+  function makeClient(
+    request: (
+      method: string,
+      payload?: unknown,
+    ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>,
+  ) {
+    const calls: Array<{ readonly method: string; readonly payload: unknown }> = [];
+    return {
+      calls,
+      client: {
+        raw: {
+          request: (method: string, payload?: unknown) => {
+            calls.push({ method, payload });
+            return request(method, payload);
+          },
+        },
+      },
+    };
+  }
+
+  it("adopts the root thread's turn that starts before Codex answers", async () => {
+    let starter: ReturnType<typeof makeCodexCompactionStarter>;
+    const { client, calls } = makeClient(() =>
+      starter.turnStarted(rootThread, TurnId.make("turn-compact")).pipe(Effect.as({})),
+    );
+    starter = makeCodexCompactionStarter(client, idle);
+
+    const turnId = await Effect.runPromise(
+      starter.start({ threadId, providerThreadId: rootThread }),
+    );
+
+    assert.equal(turnId, "turn-compact");
+    assert.deepStrictEqual(calls, [
+      { method: "thread/compact/start", payload: { threadId: rootThread } },
+    ]);
+    assert.equal(starter.waiting(), false);
+  });
+
+  it("adopts the root thread's turn that starts after Codex answers", async () => {
+    const turnId = await Effect.runPromise(
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>();
+        const { client } = makeClient(() =>
+          Deferred.succeed(answered, undefined).pipe(Effect.as({})),
+        );
+        const starter = makeCodexCompactionStarter(client, idle);
+        const started = yield* starter
+          .start({ threadId, providerThreadId: rootThread })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(answered);
+        assert.equal(starter.waiting(), true);
+        yield* starter.turnStarted(rootThread, TurnId.make("turn-late"));
+        return yield* Fiber.join(started);
+      }),
+    );
+
+    assert.equal(turnId, "turn-late");
+  });
+
+  it("never adopts a child thread's turn", async () => {
+    let starter: ReturnType<typeof makeCodexCompactionStarter>;
+    const { client } = makeClient(() =>
+      starter
+        .turnStarted("child-thread", TurnId.make("turn-child"))
+        .pipe(
+          Effect.andThen(starter.turnStarted(rootThread, TurnId.make("turn-root"))),
+          Effect.as({}),
+        ),
+    );
+    starter = makeCodexCompactionStarter(client, idle);
+
+    const turnId = await Effect.runPromise(
+      starter.start({ threadId, providerThreadId: rootThread }),
+    );
+
+    assert.equal(turnId, "turn-root");
+  });
+
+  it("fails without retrying when no compaction turn starts in time", async () => {
+    let starter: ReturnType<typeof makeCodexCompactionStarter>;
+    const { client, calls } = makeClient(() =>
+      // A child's turn is not the compaction's.
+      starter.turnStarted("child-thread", TurnId.make("turn-child")).pipe(Effect.as({})),
+    );
+    starter = makeCodexCompactionStarter(client, idle);
+
+    const error = await Effect.runPromise(
+      starter
+        .start({ threadId, providerThreadId: rootThread, timeout: "20 millis" })
+        .pipe(Effect.flip),
+    );
+
+    assert.ok(Schema.is(CodexSessionRuntimeCompactionNotStartedError)(error));
+    assert.match(error.message, /^Codex did not start compaction: no compaction turn started/);
+    assert.equal(calls.length, 1);
+    assert.equal(starter.waiting(), false);
+    // A turn that starts late is an ordinary turn now.
+    await Effect.runPromise(starter.turnStarted(rootThread, TurnId.make("turn-late")));
+  });
+
+  it("drops the wait when Codex refuses the request", async () => {
+    let refuse = true;
+    let starter: ReturnType<typeof makeCodexCompactionStarter>;
+    const { client, calls } = makeClient(() =>
+      refuse
+        ? Effect.fail(
+            new CodexErrors.CodexAppServerRequestError({
+              code: -32601,
+              errorMessage: "Method not found",
+            }),
+          )
+        : starter.turnStarted(rootThread, TurnId.make("turn-2")).pipe(Effect.as({})),
+    );
+    starter = makeCodexCompactionStarter(client, idle);
+
+    const error = await Effect.runPromise(
+      starter.start({ threadId, providerThreadId: rootThread }).pipe(Effect.flip),
+    );
+    assert.equal(error.message, "Codex did not start compaction: Method not found");
+    assert.equal(calls.length, 1);
+    assert.equal(starter.waiting(), false);
+
+    // Nothing is left waiting, so the next compaction adopts its own turn.
+    refuse = false;
+    const turnId = await Effect.runPromise(
+      starter.start({ threadId, providerThreadId: rootThread }),
+    );
+    assert.equal(turnId, "turn-2");
+  });
+
+  it("refuses a second compaction while one waits for its turn", async () => {
+    const error = await Effect.runPromise(
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>();
+        const { client } = makeClient(() =>
+          Deferred.succeed(answered, undefined).pipe(Effect.as({})),
+        );
+        const starter = makeCodexCompactionStarter(client, idle);
+        const first = yield* starter
+          .start({ threadId, providerThreadId: rootThread })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(answered);
+        const second = yield* Effect.flip(
+          starter.start({ threadId, providerThreadId: rootThread }),
+        );
+        yield* starter.turnStarted(rootThread, TurnId.make("turn-first"));
+        assert.equal(yield* Fiber.join(first), "turn-first");
+        return second;
+      }),
+    );
+
+    assert.equal(
+      error.message,
+      "Codex did not start compaction: another compaction is still starting.",
+    );
+  });
+
+  it("refuses while a turn runs, without asking Codex", async () => {
+    const { client, calls } = makeClient(() => Effect.succeed({}));
+    const starter = makeCodexCompactionStarter(client, { turnRunning: () => true });
+
+    const error = await Effect.runPromise(
+      starter.start({ threadId, providerThreadId: rootThread }).pipe(Effect.flip),
+    );
+
+    assert.equal(
+      error.message,
+      "Codex did not start compaction: a turn is running. Compact once it finishes.",
+    );
+    assert.deepStrictEqual(calls, []);
+    assert.equal(starter.waiting(), false);
+  });
+
+  it("refuses while a turn/start is on its way, and compacts once it returned", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        let starter: ReturnType<typeof makeCodexCompactionStarter>;
+        const { client, calls } = makeClient(() =>
+          starter.turnStarted(rootThread, TurnId.make("turn-compact")).pipe(Effect.as({})),
+        );
+        starter = makeCodexCompactionStarter(client, idle);
+        const sending = yield* Deferred.make<void>();
+        const answer = yield* Deferred.make<void>();
+        const turnStart = yield* starter
+          .sendingTurn(
+            Deferred.succeed(sending, undefined).pipe(Effect.andThen(Deferred.await(answer))),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(sending);
+
+        const refused = yield* Effect.flip(
+          starter.start({ threadId, providerThreadId: rootThread }),
+        );
+        const callsWhileSending = calls.length;
+        yield* Deferred.succeed(answer, undefined);
+        yield* Fiber.join(turnStart);
+        const turnId = yield* starter.start({ threadId, providerThreadId: rootThread });
+        return { refused, callsWhileSending, turnId };
+      }),
+    );
+
+    assert.equal(
+      result.refused.message,
+      "Codex did not start compaction: a turn is running. Compact once it finishes.",
+    );
+    assert.equal(result.callsWhileSending, 0);
+    assert.equal(result.turnId, "turn-compact");
+  });
+
+  it("holds a turn/start until the compaction's turn has started", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>();
+        const { client } = makeClient(() =>
+          Deferred.succeed(answered, undefined).pipe(Effect.as({})),
+        );
+        const starter = makeCodexCompactionStarter(client, idle);
+        const compacting = yield* starter
+          .start({ threadId, providerThreadId: rootThread })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(answered);
+
+        let sent = false;
+        const turnStart = yield* starter
+          .sendingTurn(
+            Effect.sync(() => {
+              sent = true;
+            }),
+          )
+          .pipe(Effect.forkChild);
+        for (let step = 0; step < 5; step += 1) yield* Effect.yieldNow;
+        const sentWhileCompactionWaited = sent;
+
+        yield* starter.turnStarted(rootThread, TurnId.make("turn-compact"));
+        const turnId = yield* Fiber.join(compacting);
+        yield* Fiber.join(turnStart);
+        return { sentWhileCompactionWaited, turnId, sent };
+      }),
+    );
+
+    assert.equal(result.sentWhileCompactionWaited, false);
+    assert.equal(result.turnId, "turn-compact");
+    assert.equal(result.sent, true);
+  });
+
+  it("lets a held turn/start go when the compaction fails", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>();
+        const { client } = makeClient(() =>
+          Deferred.succeed(answered, undefined).pipe(Effect.as({})),
+        );
+        const starter = makeCodexCompactionStarter(client, idle);
+        const compacting = yield* starter
+          .start({ threadId, providerThreadId: rootThread, timeout: "20 millis" })
+          .pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(answered);
+        const turnStart = yield* starter.sendingTurn(Effect.succeed("sent")).pipe(Effect.forkChild);
+        const error = yield* Fiber.join(compacting);
+        return { error, sent: yield* Fiber.join(turnStart) };
+      }),
+    );
+
+    assert.match(result.error.message, /no compaction turn started/);
+    assert.equal(result.sent, "sent");
   });
 });
 

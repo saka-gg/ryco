@@ -276,6 +276,11 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
+  /**
+   * Codex's own compaction of the thread (`thread/compact/start`), run as a turn. Refused while
+   * a turn runs or starts.
+   */
+  readonly compactThread: () => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
   readonly steerTurn: (
     input: CodexSessionRuntimeSteerTurnInput,
   ) => Effect.Effect<ProviderTurnSteerResult, CodexSessionRuntimeError>;
@@ -314,7 +319,8 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
-  | CodexSessionRuntimeThreadIdMissingError;
+  | CodexSessionRuntimeThreadIdMissingError
+  | CodexSessionRuntimeCompactionNotStartedError;
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedError<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -357,6 +363,23 @@ export class CodexSessionRuntimeThreadIdMissingError extends Schema.TaggedError<
 ) {
   override get message(): string {
     return `Codex session is missing a provider thread id for ${this.threadId}`;
+  }
+}
+
+/**
+ * Compaction was refused while a turn ran, or Codex refused the request or never reported its
+ * turn; it is not sent again.
+ */
+export class CodexSessionRuntimeCompactionNotStartedError extends Schema.TaggedError<CodexSessionRuntimeCompactionNotStartedError>()(
+  "CodexSessionRuntimeCompactionNotStartedError",
+  {
+    threadId: Schema.String,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Codex did not start compaction: ${this.detail}`;
   }
 }
 
@@ -815,6 +838,139 @@ export const revertCodexThread = (
       ),
     );
 };
+
+/** How long Codex gets to take a compaction request and start its turn. */
+export const CODEX_COMPACTION_START_TIMEOUT: Duration.Input = Duration.seconds(30);
+
+interface CodexCompactionClient {
+  readonly raw: {
+    readonly request: (
+      method: string,
+      payload?: unknown,
+    ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  };
+}
+
+/**
+ * Codex's own compaction on request. `thread/compact/start` answers `{}` without naming a turn,
+ * and Codex may report the turn it starts before or after that answer, so the root thread's next
+ * `turn/started` is the compaction's turn. That holds only while nothing else can start a turn:
+ * compaction is refused while a turn runs or a `turn/start` is on its way, and a `turn/start`
+ * (`sendingTurn`) waits while a compaction waits for its turn. One compaction waits at a time.
+ */
+export function makeCodexCompactionStarter(
+  client: CodexCompactionClient,
+  options: {
+    /** Whether the root thread has a turn running. */
+    readonly turnRunning: () => boolean;
+  },
+) {
+  let pending:
+    | {
+        readonly providerThreadId: string;
+        readonly turn: Deferred.Deferred<TurnId>;
+        /** Done once the compaction returned or failed. */
+        readonly settled: Deferred.Deferred<void>;
+      }
+    | undefined;
+  let turnStartsInFlight = 0;
+
+  return {
+    /** Whether a compaction still waits for its turn. */
+    waiting: (): boolean => pending !== undefined,
+    /**
+     * Each `turn/started` the runtime takes as its own. Only a turn of the thread a compaction
+     * waits on settles it; a child thread's turn never does.
+     */
+    turnStarted: (providerThreadId: string, turnId: TurnId): Effect.Effect<void> =>
+      Effect.suspend(() => {
+        const waiter = pending;
+        if (waiter === undefined || waiter.providerThreadId !== providerThreadId) {
+          return Effect.void;
+        }
+        pending = undefined;
+        return Deferred.succeed(waiter.turn, turnId).pipe(Effect.asVoid);
+      }),
+    /**
+     * Runs `send`, a `turn/start`, once no compaction waits for its turn, and refuses compaction
+     * until it returns: the turn it starts would be taken for the compaction's. `send` marks its
+     * turn running before it returns, which keeps compaction refused from then on.
+     */
+    sendingTurn: <A, E, R>(send: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+      Effect.gen(function* () {
+        // Checked again after each wait, with no step between the last check and the count.
+        for (let waiter = pending; waiter !== undefined; waiter = pending) {
+          yield* Deferred.await(waiter.settled);
+        }
+        turnStartsInFlight += 1;
+        return yield* send.pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              turnStartsInFlight -= 1;
+            }),
+          ),
+        );
+      }),
+    /**
+     * Asks Codex to compact `providerThreadId` and returns the turn it starts. The wait is in
+     * place before the request is sent, so a turn that starts before the answer counts. A refused
+     * request, or a turn that does not start in time, drops the wait and is never sent again:
+     * Codex may have taken it.
+     */
+    start: (input: {
+      readonly threadId: ThreadId;
+      readonly providerThreadId: string;
+      readonly timeout?: Duration.Input;
+    }): Effect.Effect<TurnId, CodexSessionRuntimeCompactionNotStartedError> => {
+      const timeoutMs = Duration.toMillis(
+        Duration.fromInputUnsafe(input.timeout ?? CODEX_COMPACTION_START_TIMEOUT),
+      );
+      const notStarted = (detail: string, cause?: unknown) =>
+        new CodexSessionRuntimeCompactionNotStartedError({
+          threadId: input.threadId,
+          detail,
+          ...(cause !== undefined ? { cause } : {}),
+        });
+      return Effect.acquireUseRelease(
+        // One synchronous step: nothing can start a turn between these checks and the wait.
+        Effect.suspend(() => {
+          if (pending !== undefined) {
+            return Effect.fail(notStarted("another compaction is still starting."));
+          }
+          if (turnStartsInFlight > 0 || options.turnRunning()) {
+            return Effect.fail(notStarted("a turn is running. Compact once it finishes."));
+          }
+          const waiter = {
+            providerThreadId: input.providerThreadId,
+            turn: Deferred.makeUnsafe<TurnId>(),
+            settled: Deferred.makeUnsafe<void>(),
+          };
+          pending = waiter;
+          return Effect.succeed(waiter);
+        }),
+        (waiter) =>
+          client.raw.request("thread/compact/start", { threadId: input.providerThreadId }).pipe(
+            Effect.mapError((cause) => notStarted(cause.message, cause)),
+            Effect.andThen(Deferred.await(waiter.turn)),
+            timeoutWhileResponsiveOrElse({
+              duration: timeoutMs,
+              orElse: () =>
+                Effect.fail(
+                  notStarted(
+                    `no compaction turn started within ${timeoutMs / 1000} seconds. It may still start; check the thread before compacting again.`,
+                  ),
+                ),
+            }),
+          ),
+        (waiter) =>
+          Effect.suspend(() => {
+            if (pending === waiter) pending = undefined;
+            return Deferred.succeed(waiter.settled, undefined).pipe(Effect.asVoid);
+          }),
+      );
+    },
+  };
+}
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
   switch (notification.method) {
@@ -1299,6 +1455,9 @@ export const makeCodexSessionRuntime = (
       updatedAt: new Date().toISOString(),
     } satisfies ProviderSession;
     const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
+    const compaction = makeCodexCompactionStarter(client, {
+      turnRunning: () => Ref.getUnsafe(sessionRef).activeTurnId !== undefined,
+    });
     const offerEvent = (event: ProviderEvent) => Queue.offer(events, event).pipe(Effect.asVoid);
 
     const emitEvent = (event: Omit<ProviderEvent, "id" | "provider" | "createdAt">) =>
@@ -1898,10 +2057,11 @@ export const makeCodexSessionRuntime = (
             return Effect.void;
           }
           deviceTurnActive = true;
-          return updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: TurnId.make(payload.turn.id),
-          });
+          const turnId = TurnId.make(payload.turn.id);
+          return updateSession(sessionRef, { status: "running", activeTurnId: turnId }).pipe(
+            // After the update: a compaction waiting for this turn returns with it running.
+            Effect.andThen(compaction.turnStarted(payload.threadId, turnId)),
+          );
         }),
       ),
     );
@@ -2272,6 +2432,16 @@ export const makeCodexSessionRuntime = (
       return providerThreadId;
     });
 
+    const turnStartResult = (turnId: TurnId) =>
+      Effect.map(Ref.get(sessionRef), (session) => {
+        const providerThreadId = currentProviderThreadId(session);
+        return {
+          threadId: options.threadId,
+          turnId,
+          ...(providerThreadId ? { resumeCursor: { threadId: providerThreadId } } : {}),
+        } satisfies ProviderTurnStartResult;
+      });
+
     const close = Effect.gen(function* () {
       const alreadyClosed = yield* Ref.getAndSet(closedRef, true);
       if (alreadyClosed) {
@@ -2319,32 +2489,39 @@ export const makeCodexSessionRuntime = (
               : {}),
             attachmentInstructions: ASSISTANT_ATTACHMENT_INSTRUCTIONS,
           });
-          const rawResponse = yield* client.raw.request("turn/start", params);
-          const response = yield* Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse)(
-            rawResponse,
-          ).pipe(
-            Effect.mapError((error) =>
-              toProtocolParseError("Invalid turn/start response payload", error),
-            ),
+          // A compaction waiting for its turn would take this turn's `turn/started` as its own.
+          const turnId = yield* compaction.sendingTurn(
+            Effect.gen(function* () {
+              const rawResponse = yield* client.raw.request("turn/start", params);
+              const response = yield* Schema.decodeUnknownEffect(
+                EffectCodexSchema.V2TurnStartResponse,
+              )(rawResponse).pipe(
+                Effect.mapError((error) =>
+                  toProtocolParseError("Invalid turn/start response payload", error),
+                ),
+              );
+              const turnId = TurnId.make(response.turn.id);
+              deviceTurnActive = true;
+              yield* updateSession(sessionRef, (session) => ({
+                status: "running",
+                // A follow-up can be accepted while another turn is active. The
+                // returned id is queued, but interrupt must still target the turn
+                // that is actually running now.
+                activeTurnId: session.activeTurnId ?? turnId,
+                ...(normalizedModel ? { model: normalizedModel } : {}),
+              }));
+              return turnId;
+            }),
           );
-          const turnId = TurnId.make(response.turn.id);
-          deviceTurnActive = true;
-          yield* updateSession(sessionRef, (session) => ({
-            status: "running",
-            // A follow-up can be accepted while another turn is active. The
-            // returned id is queued, but interrupt must still target the turn
-            // that is actually running now.
-            activeTurnId: session.activeTurnId ?? turnId,
-            ...(normalizedModel ? { model: normalizedModel } : {}),
-          }));
-          const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
-          return {
-            threadId: options.threadId,
-            turnId,
-            ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
-              : {}),
-          } satisfies ProviderTurnStartResult;
+          return yield* turnStartResult(turnId);
+        }),
+      compactThread: () =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          const turnId = yield* compaction.start({ threadId: options.threadId, providerThreadId });
+          // The `turn/started` that named this turn already set the session running on it.
+          // Setting it again here could mark a compaction that already finished as running.
+          return yield* turnStartResult(turnId);
         }),
       steerTurn: (input) =>
         Effect.gen(function* () {

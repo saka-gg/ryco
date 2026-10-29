@@ -1,9 +1,5 @@
 import { claudeApprovalPresentation } from "../claudeApprovalPresentation.ts";
-import {
-  CLAUDE_NATIVE_COMPACTION_COMMAND,
-  claudeInitAdvertisesNativeCompaction,
-  isClaudeNativeCompaction,
-} from "../claudeNativeCompaction.ts";
+import { claudeInitAdvertisesNativeCompaction } from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
 import { getActiveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
 import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
@@ -124,6 +120,7 @@ import { findServerProviderModel } from "@ryco/shared/serverProviderModels";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
+import { isNativeCompactionCommand, NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 import {
   resolveHtmlRenderToolKind,
   resolveHtmlRenderToolPresentation,
@@ -1515,7 +1512,7 @@ function buildPromptText(
   input: ProviderSendTurnInput,
   boundInstanceId: ProviderInstanceId,
 ): string {
-  if (isClaudeNativeCompaction(input)) return "/compact";
+  if (isNativeCompactionCommand(input)) return NATIVE_COMPACTION_COMMAND;
   const rawEffort =
     input.modelSelection?.instanceId === boundInstanceId
       ? getModelSelectionStringOptionValue(input.modelSelection, "effort")
@@ -2853,7 +2850,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       type: "message",
       message: {
         ...buildUserMessage({
-          sdkContent: [{ type: "text", text: CLAUDE_NATIVE_COMPACTION_COMMAND }],
+          sdkContent: [{ type: "text", text: NATIVE_COMPACTION_COMMAND }],
         }),
         uuid: requestId,
       },

@@ -62,13 +62,19 @@ function setup(thread: OrchestrationThread = windowThread()) {
 describe("nativeCompactionBlocker", () => {
   it.each([
     ["a ready, idle Claude session", readySession, null],
-    ["another provider", { ...readySession, providerName: "codex" }, "unsupported"],
+    ["a ready, idle Codex session", { ...readySession, providerName: "codex" }, null],
+    ["another provider", { ...readySession, providerName: "opencode" }, "unsupported"],
     ["an unknown provider", { ...readySession, providerName: null }, "unsupported"],
     ["a stopped session", { ...readySession, status: "stopped" }, "stopped"],
+    [
+      "a stopped Codex session",
+      { ...readySession, providerName: "codex", status: "stopped" },
+      "stopped",
+    ],
     // Starting it again would withdraw the action, so it is never offered.
     [
       "a stopped session of another provider",
-      { ...readySession, providerName: "codex", status: "stopped" },
+      { ...readySession, providerName: "opencode", status: "stopped" },
       "unsupported",
     ],
     ["a session without a runtime", { ...readySession, runtimeSessionId: undefined }, "no-runtime"],
@@ -123,6 +129,12 @@ describe("nativeCompactionBlocker", () => {
     ).toBe("busy");
     expect(
       nativeCompactionBlockerForSession({ ...session, provider: ProviderDriverKind.make("codex") }),
+    ).toBeNull();
+    expect(
+      nativeCompactionBlockerForSession({
+        ...session,
+        provider: ProviderDriverKind.make("opencode"),
+      }),
     ).toBe("unsupported");
     expect(nativeCompactionBlockerForSession({ ...session, runtimeSessionId: undefined })).toBe(
       "no-runtime",
@@ -144,7 +156,7 @@ describe("nativeCompactionBlocker", () => {
     // A pending send never offers the action to a provider that cannot compact on request.
     expect(
       nativeCompactionBlockerForSession(
-        { ...session, provider: ProviderDriverKind.make("codex") },
+        { ...session, provider: ProviderDriverKind.make("opencode") },
         { turnStartPending: true },
       ),
     ).toBe("unsupported");
@@ -170,34 +182,64 @@ describe("nativeCompactionAdvertised", () => {
   });
 
   it("reads the latest context usage", () => {
-    expect(nativeCompactionAdvertised([usage({ compactsAutomatically: true })])).toBe(true);
     expect(
-      nativeCompactionAdvertised([
-        usage({ compactsAutomatically: true }),
-        { kind: "tool.completed", payload: {} },
-      ]),
+      nativeCompactionAdvertised([usage({ compactsAutomatically: true })], "claudeAgent"),
+    ).toBe(true);
+    expect(
+      nativeCompactionAdvertised(
+        [usage({ compactsAutomatically: true }), { kind: "tool.completed", payload: {} }],
+        "claudeAgent",
+      ),
     ).toBe(true);
     // A newer usage from a CLI without `/compact` withdraws it.
     expect(
-      nativeCompactionAdvertised([
-        usage({ compactsAutomatically: true }),
-        usage({ compactsAutomatically: false }),
-      ]),
+      nativeCompactionAdvertised(
+        [usage({ compactsAutomatically: true }), usage({ compactsAutomatically: false })],
+        "claudeAgent",
+      ),
     ).toBe(false);
+  });
+
+  it("offers Codex's compaction only when its node says it routes the command", () => {
+    // Nodes from before Codex compaction mark every Codex usage `compactsAutomatically` and send
+    // `/compact` to the model as a prompt.
+    expect(nativeCompactionAdvertised([usage({ compactsAutomatically: true })], "codex")).toBe(
+      false,
+    );
+    expect(
+      nativeCompactionAdvertised(
+        [usage({ compactsAutomatically: true, compactsOnRequest: true })],
+        "codex",
+      ),
+    ).toBe(true);
+    expect(
+      nativeCompactionAdvertised(
+        [
+          usage({ compactsAutomatically: true, compactsOnRequest: true }),
+          usage({ compactsAutomatically: true }),
+        ],
+        "codex",
+      ),
+    ).toBe(false);
+    expect(nativeCompactionAdvertised([usage({ compactsAutomatically: true })], null)).toBe(false);
   });
 
   it("skips a usage without a valid token count, as the context meter does", () => {
     expect(
-      nativeCompactionAdvertised([
-        usage({ compactsAutomatically: true }),
-        usage({ usedTokens: null, compactsAutomatically: false }),
-      ]),
+      nativeCompactionAdvertised(
+        [
+          usage({ compactsAutomatically: true }),
+          usage({ usedTokens: null, compactsAutomatically: false }),
+        ],
+        "claudeAgent",
+      ),
     ).toBe(true);
   });
 
   it("is false without any context usage", () => {
-    expect(nativeCompactionAdvertised([])).toBe(false);
-    expect(nativeCompactionAdvertised([usage({})])).toBe(false);
+    expect(nativeCompactionAdvertised([], "claudeAgent")).toBe(false);
+    expect(nativeCompactionAdvertised([usage({})], "claudeAgent")).toBe(false);
+    expect(nativeCompactionAdvertised([usage({})], "codex")).toBe(false);
   });
 });
 
@@ -232,6 +274,29 @@ describe("requestNativeCompaction", () => {
       tokenMode: "aggressive",
       createdAt: expect.any(String),
     });
+  });
+
+  it("sends a Codex thread the same command without Claude's resume guard", async () => {
+    const f = setup({
+      ...windowThread({ providerName: "codex" }),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex_work"), model: "gpt-5.5" },
+    });
+    await requestNativeCompaction({
+      api: f.api,
+      threadId: ThreadId.make("thread-1"),
+      newId: () => "uuid-1",
+    });
+
+    const command = f.dispatchCommand.mock.calls[0]?.[0];
+    expect(command).toMatchObject({
+      type: "thread.turn.start",
+      commandId: "compact-now:uuid-1",
+      message: { messageId: "compact-now:uuid-1", role: "user", text: "/compact", attachments: [] },
+      modelSelection: { instanceId: "codex_work", model: "gpt-5.5" },
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    });
+    expect(command).not.toHaveProperty("claudeResumeGuard");
   });
 
   it("leaves the token mode out when the thread has none", async () => {
@@ -278,7 +343,7 @@ describe("requestNativeCompaction", () => {
     [{ status: "running", activeTurnId: TurnId.make("turn-8") }, "busy"],
     [{ status: "stopped" }, "stopped"],
     [{ status: "error" }, "not-ready"],
-    [{ providerName: "codex" }, "unsupported"],
+    [{ providerName: "opencode" }, "unsupported"],
   ] as const)("refuses a blocked thread as the node reports it: %o", async (session, blocker) => {
     const f = setup(windowThread(session as Partial<Session>));
     await expect(

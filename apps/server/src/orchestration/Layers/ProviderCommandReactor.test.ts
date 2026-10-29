@@ -1104,6 +1104,29 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "/compact" });
   });
 
+  it("sends a Codex thread's native compaction as the exact command", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("codex-native-compact"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("codex-native-compact-message"),
+          role: "user",
+          text: " /compact\n",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "/compact" });
+  });
+
   it("recovers pending goal delivery when the reactor starts", async () => {
     const now = new Date().toISOString();
     const native = {

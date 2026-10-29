@@ -30,8 +30,12 @@ vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
 
 const BUSY = "Wait until the current turn finishes and the session is ready.";
 
-/** A Claude thread on a ready, idle runtime whose Claude Code lists `/compact`. */
-function claudeThreadSnapshot(): OrchestrationReadModel {
+/** A thread on a ready, idle runtime of `provider`, whose latest context usage is `usage`. */
+function threadSnapshot(input: {
+  readonly provider: "claudeAgent" | "codex";
+  readonly model: string;
+  readonly usage: Record<string, unknown>;
+}): OrchestrationReadModel {
   const snapshot = createSnapshotForTargetUser({
     targetMessageId: "msg-user-compact-now" as MessageId,
     targetText: "compact this conversation",
@@ -43,8 +47,8 @@ function claudeThreadSnapshot(): OrchestrationReadModel {
         ? thread
         : Object.assign({}, thread, {
             modelSelection: {
-              instanceId: ProviderInstanceId.make("claudeAgent"),
-              model: "claude-sonnet-4-6",
+              instanceId: ProviderInstanceId.make(input.provider),
+              model: input.model,
             },
             activities: [
               {
@@ -52,18 +56,27 @@ function claudeThreadSnapshot(): OrchestrationReadModel {
                 tone: "info" as const,
                 kind: "context-window.updated",
                 summary: "Context window updated",
-                payload: { usedTokens: 150_000, maxTokens: 200_000, compactsAutomatically: true },
+                payload: { usedTokens: 150_000, maxTokens: 200_000, ...input.usage },
                 turnId: null,
                 createdAt: NOW_ISO,
               },
             ],
             session: Object.assign({}, thread.session, {
-              providerName: "claudeAgent",
+              providerName: input.provider,
               runtimeSessionId: RuntimeSessionId.make("runtime-compact-now"),
             }),
           }),
     ),
   };
+}
+
+/** A Claude thread on a ready, idle runtime whose Claude Code lists `/compact`. */
+function claudeThreadSnapshot(): OrchestrationReadModel {
+  return threadSnapshot({
+    provider: "claudeAgent",
+    model: "claude-sonnet-4-6",
+    usage: { compactsAutomatically: true },
+  });
 }
 
 interface Command {
@@ -161,6 +174,46 @@ describe("ChatView Compact now (full app)", () => {
         .toBeVisible();
       await openContextMeterIfClosed();
       await expect.element(page.getByRole("button", { name: "Compact now" })).toBeEnabled();
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+});
+
+describe("ChatView Compact now on Codex (full app)", () => {
+  setupChatViewBrowserSuite();
+
+  it.each([
+    // A node from before Codex compaction marks Codex usage this way, and sends `/compact` to
+    // the model as a prompt.
+    ["withholds it on a node that sends /compact to the model", {}, false],
+    ["offers it on a node that runs Codex's compaction", { compactsOnRequest: true }, true],
+  ] as const)("%s", async (_name, usage, offered) => {
+    const snapshot = threadSnapshot({
+      provider: "codex",
+      model: "gpt-5",
+      usage: { compactsAutomatically: true, ...usage },
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot,
+      configureFixture: configureContextHandoffProviders,
+    });
+    const serving = serveCompaction(snapshot);
+    try {
+      await waitForComposerEditor();
+      await page.getByRole("button", { name: /Context window/ }).click();
+      await expect
+        .element(page.getByText("Automatically compacts its context when needed."))
+        .toBeVisible();
+      const compactNow = page.getByRole("button", { name: "Compact now" });
+      if (!offered) {
+        await expect.element(compactNow).not.toBeInTheDocument();
+        return;
+      }
+      await compactNow.click();
+      await vi.waitFor(() => expect(serving.compactions()).toHaveLength(1));
     } finally {
       __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();

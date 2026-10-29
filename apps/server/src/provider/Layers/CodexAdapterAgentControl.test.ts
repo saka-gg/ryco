@@ -99,6 +99,13 @@ class FakeRuntime implements CodexSessionRuntimeShape {
     } satisfies ProviderTurnStartResult);
   }
 
+  compactThread() {
+    return Effect.succeed({
+      threadId: this.options.threadId,
+      turnId: TurnId.make("turn-compact"),
+    } satisfies ProviderTurnStartResult);
+  }
+
   steerTurn(input: CodexSessionRuntimeSteerTurnInput) {
     return Effect.succeed({
       threadId: this.options.threadId,
@@ -410,6 +417,24 @@ it.live("binds write authority to the exact started turn and retires it on compl
         threadId,
         turnId: TurnId.make("turn-1"),
       });
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(makeAdapterLayer({ bridge, runtimeFactory })));
+  }),
+);
+
+it.effect("binds write authority to a compaction's turn like any other", () =>
+  Effect.gen(function* () {
+    const { bridge, bindTurnAuthority } = makeBridge();
+    const runtimeFactory = makeRuntimeFactory();
+
+    yield* Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession(startInput);
+      const started = yield* adapter.sendTurn({ threadId, input: "/compact", attachments: [] });
+      assert.strictEqual(started.turnId, TurnId.make("turn-compact"));
+      assert.deepStrictEqual(bindTurnAuthority.mock.calls, [
+        [{ sessionId: "session-ac", turnId: TurnId.make("turn-compact") }],
+      ]);
       yield* adapter.stopSession(threadId);
     }).pipe(Effect.provide(makeAdapterLayer({ bridge, runtimeFactory })));
   }),

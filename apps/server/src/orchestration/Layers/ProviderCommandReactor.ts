@@ -1,6 +1,10 @@
 import * as SqlClient from "effect/sql/SqlClient";
 import { acquireStoragePathUseLeaseHandle } from "../../storage/lifecycle.ts";
-import { isClaudeNativeCompaction } from "../../provider/claudeNativeCompaction.ts";
+import {
+  compactsOnRequest,
+  isNativeCompactionCommand,
+  NATIVE_COMPACTION_COMMAND,
+} from "@ryco/shared/threadActivity";
 import { modelSelectionChangeRestartsSession } from "../../provider/sessionModelRestart.ts";
 import { computerToolInstructions } from "../../computer/tools/computerGuidance.ts";
 import type { ComputerTurnIntent } from "@ryco/contracts";
@@ -1456,12 +1460,12 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         : input.modelSelection;
 
     const nativeCompaction =
-      activeSession?.provider === "claudeAgent" &&
+      compactsOnRequest(activeSession?.provider) &&
       !input.computerUse &&
-      isClaudeNativeCompaction({ input: input.messageText, attachments: normalizedAttachments });
+      isNativeCompactionCommand({ input: input.messageText, attachments: normalizedAttachments });
     return {
       threadId: input.threadId,
-      ...(nativeCompaction ? { input: "/compact" } : {}),
+      ...(nativeCompaction ? { input: NATIVE_COMPACTION_COMMAND } : {}),
       ...(!nativeCompaction && normalizedInput
         ? {
             input: input.computerUse

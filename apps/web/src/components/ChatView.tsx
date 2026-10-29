@@ -38,6 +38,7 @@ import {
   type ApprovalSightings,
   type SubscribedClaudeReviewState,
   describeNativeCompactionBlocker,
+  nativeCompactionAdvertised,
   nativeCompactionBlockerForSession,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
@@ -2326,9 +2327,15 @@ export default function ChatView(props: ChatViewProps) {
   const compactNowBlocker = isServerThread
     ? nativeCompactionBlockerForSession(activeThread?.session, { turnStartPending: isSendBusy })
     : "unsupported";
+  const compactNowSessionProvider = activeThread?.session?.provider;
+  // An older node sends Codex `/compact` as a prompt; only its usage tells the two apart.
+  const compactNowAdvertised = useMemo(
+    () => nativeCompactionAdvertised(threadActivities, compactNowSessionProvider),
+    [compactNowSessionProvider, threadActivities],
+  );
   const compactNow = useMemo(
     () =>
-      compactNowBlocker === "unsupported"
+      compactNowBlocker === "unsupported" || !compactNowAdvertised
         ? undefined
         : {
             blocker:
@@ -2337,7 +2344,7 @@ export default function ChatView(props: ChatViewProps) {
                 : describeNativeCompactionBlocker(compactNowBlocker),
             onCompact: onCompactNow,
           },
-    [compactNowBlocker, onCompactNow],
+    [compactNowAdvertised, compactNowBlocker, onCompactNow],
   );
   const canonicalProvider = useMemo(
     () =>

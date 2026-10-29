@@ -9,7 +9,7 @@ import type {
   RuntimeMode,
 } from "@ryco/contracts";
 import { CommandId, MessageId, type ThreadId } from "@ryco/contracts/base-schemas";
-import { NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
+import { compactsOnRequest, NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 
 import type { ThreadSession } from "../threads/types.ts";
 
@@ -50,7 +50,7 @@ export function nativeCompactionBlocker(
 ): NativeCompactionBlocker | null {
   const session = thread.session;
   if (!session) return "stopped";
-  if (session.providerName !== "claudeAgent") return "unsupported";
+  if (!compactsOnRequest(session.providerName)) return "unsupported";
   if (session.status === "stopped") return "stopped";
   // Only these end on their own; any other state waits for the user's next message.
   if (
@@ -107,12 +107,15 @@ export function describeNativeCompactionBlocker(blocker: NativeCompactionBlocker
 }
 
 /**
- * Whether the thread's latest context usage says its provider compacts its own context: for
- * Claude, that its CLI lists `/compact`. Web's context meter reads the same flag off the same
- * snapshot (the latest with a valid token count), so both clients offer Compact now alike.
+ * Whether the thread's latest context usage (the latest with a valid token count, the snapshot
+ * web's context meter shows) says its node compacts the session on request. For Claude, that its
+ * CLI lists `/compact`: every node sends Claude Code the command as it is. Any other provider
+ * needs `compactsOnRequest`, which only a node that turns the command into the provider's own
+ * compaction sets; an older node sends `/compact` to the model as a prompt.
  */
 export function nativeCompactionAdvertised(
   activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>,
+  provider: string | null | undefined,
 ): boolean {
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index]!;
@@ -120,10 +123,14 @@ export function nativeCompactionAdvertised(
     const payload = activity.payload as {
       readonly usedTokens?: unknown;
       readonly compactsAutomatically?: unknown;
+      readonly compactsOnRequest?: unknown;
     } | null;
     const used = payload?.usedTokens;
     if (typeof used !== "number" || !Number.isFinite(used) || used < 0) continue;
-    return payload?.compactsAutomatically === true;
+    return (
+      (provider === "claudeAgent" ? payload?.compactsAutomatically : payload?.compactsOnRequest) ===
+      true
+    );
   }
   return false;
 }
@@ -199,6 +206,7 @@ export async function requestNativeCompaction(input: {
       runtimeMode: thread.runtimeMode,
       interactionMode: thread.interactionMode,
       tokenMode: thread.tokenMode,
+      // The guard is Claude's. A Codex turn has none; the node still refuses it while a turn runs.
       ...(thread.session?.providerName === "claudeAgent"
         ? {
             claudeResumeGuard: {

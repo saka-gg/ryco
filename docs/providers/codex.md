@@ -73,6 +73,29 @@ Things to know:
 - If the node's Codex is too old for device-code login, or device code is turned off for your
   account, run `codex login --device-auth` on the node instead.
 
+## Compacting the conversation
+
+Send `/compact` on its own (no other text, no attachments) in a Codex thread, or use **Compact now**
+in the context meter popover, to have Codex summarize older context and free room in its window.
+The mobile app offers it as **Compact conversation** in the thread's Task details sheet, and in a
+project the composer's `/` menu lists `/compact`. Ryco runs it through Codex's own compaction request
+(`thread/compact/start`) instead of sending the text to the model. It runs as a turn: the
+transcript shows it with **Context compacted**, and the meter updates from Codex's next usage
+report. Codex still compacts on its own when the window fills up.
+
+It needs a ready, idle session. While a turn runs or waits on an approval or answer, or while the
+session is stopped, **Compact now** is disabled and says why. The node checks this too: a
+compaction that reaches it while a turn runs or is starting fails with "a turn is running", and a
+message sent while a compaction is starting waits until the compaction's turn has started. If
+Codex refuses the request (an older Codex, for example) or does not start the compaction turn
+within 30 seconds, the turn fails with "Codex did not start compaction" and Ryco does not send it
+again, since Codex may still have taken it: check the thread before compacting again. The summary
+request itself uses tokens.
+
+**Compact now** appears once the thread has reported context usage from a node that runs Codex's
+compaction: an older node sends `/compact` to the model as a prompt, so the action stays hidden on
+Codex threads it serves.
+
 ## I Only Use One Codex Account
 
 Use the default provider.

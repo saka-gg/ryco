@@ -596,11 +596,17 @@ describe("thread header compact action", () => {
     createdAt: "2026-10-28T10:00:00.000Z",
     updatedAt: "2026-10-28T10:00:00.000Z",
   } as NonNullable<Thread["session"]>;
-  const usage = (compactsAutomatically: boolean) =>
+  // `compactsOnRequest` is what a current node adds to Codex usage; Claude's gate ignores it.
+  const usage = (compactsAutomatically: boolean, compactsOnRequest = compactsAutomatically) =>
     [
       {
         kind: "context-window.updated",
-        payload: { usedTokens: 150_000, maxTokens: 200_000, compactsAutomatically },
+        payload: {
+          usedTokens: 150_000,
+          maxTokens: 200_000,
+          compactsAutomatically,
+          ...(compactsOnRequest ? { compactsOnRequest } : {}),
+        },
       },
     ] as unknown as Thread["activities"];
 
@@ -665,11 +671,35 @@ describe("thread header compact action", () => {
     });
   });
 
+  it("offers it on a ready, idle Codex session", () => {
+    expect(compactAction({ provider: "codex" } as never)).toEqual({
+      label: "Compact conversation",
+      detail: "Summarize older context. The summary request itself uses tokens.",
+      disabled: false,
+    });
+  });
+
+  it("withholds it from a Codex session on a node that sends /compact to the model", () => {
+    // Older nodes mark Codex usage as compacting automatically, but not on request.
+    const model = buildThreadHeaderModel({
+      thread: thread({
+        session: { ...readyClaude, provider: "codex" } as NonNullable<Thread["session"]>,
+        activities: usage(true, false),
+      }),
+      project: { name: "Ryco", cwd: "/repo" },
+      worktree: null,
+      nodeLabel: "Studio",
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+    });
+    expect(model.compactAction).toBeNull();
+  });
+
   it("withholds it from another provider's session, live or stopped", () => {
-    // Codex reports compactsAutomatically too, but cannot be asked to compact yet.
-    expect(compactAction({ provider: "codex" } as never)).toBeNull();
+    // OpenCode cannot be asked to compact; a usage claiming it compacts changes nothing.
+    expect(compactAction({ provider: "opencode" } as never)).toBeNull();
     expect(
-      compactAction({ provider: "codex", orchestrationStatus: "stopped" } as never),
+      compactAction({ provider: "opencode", orchestrationStatus: "stopped" } as never),
     ).toBeNull();
   });
 
