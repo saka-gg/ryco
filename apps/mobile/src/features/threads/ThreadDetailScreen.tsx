@@ -88,6 +88,8 @@ import {
   deriveForkableReplyMessageIds,
   isArchivedThreadStub,
   readThreadForkApi,
+  CONTINUE_AFTER_FAILURE_PROMPT,
+  failedTurnNotice,
   restartInterruptionNotice,
   threadForkBoundaryQuote,
   threadForkReplyExcerpt,
@@ -460,6 +462,7 @@ export function ThreadDetailScreen(props: {
   const { environmentId, threadId } = props;
   const targetMessageId = props.targetMessageId ?? null;
   const [sideChatStore] = useState(createSideChatStore);
+  const [dismissedFailedTurnId, setDismissedFailedTurnId] = useState<string | null>(null);
   const sideChatKey = JSON.stringify([environmentId, threadId]);
   const sideChat = useZustandStore(sideChatStore, (state) => state.chatsByThreadKey[sideChatKey]);
   const navigation = useNavigation();
@@ -1916,6 +1919,15 @@ export function ThreadDetailScreen(props: {
   // out): a quiet line once the thread's own activities can tell whether the node
   // already explained it.
   const restartNotice = thread && threadDetailLoaded ? restartInterruptionNotice(thread) : null;
+  // A failed last turn stays visible, with Continue, until a new turn starts or it is
+  // dismissed for that turn; the error banner then leaves out what it already says.
+  const failedNoticeDerived = thread && threadDetailLoaded ? failedTurnNotice(thread) : null;
+  const failedNotice =
+    failedNoticeDerived && failedNoticeDerived.turnId !== dismissedFailedTurnId
+      ? failedNoticeDerived
+      : null;
+  const errorBannerMessage =
+    failedNotice !== null && visibleError === failedNotice.detail ? null : visibleError;
   const hasPrompts =
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0 ||
@@ -1971,7 +1983,42 @@ export function ThreadDetailScreen(props: {
           }
         />
       ) : null}
-      {visibleError ? <ErrorBanner message={visibleError} /> : null}
+      {errorBannerMessage ? <ErrorBanner message={errorBannerMessage} /> : null}
+      {failedNotice ? (
+        <View
+          accessibilityRole="alert"
+          testID="thread-failed-turn-banner"
+          className="mx-4 mb-1 gap-2 rounded-2xl border border-danger-border bg-danger px-3.5 py-3"
+        >
+          <Text className="font-ryco-medium text-sm text-danger-foreground">
+            {failedNotice.title}
+          </Text>
+          {failedNotice.detail ? (
+            <Text className="text-xs text-foreground-muted" numberOfLines={4}>
+              {failedNotice.detail}
+            </Text>
+          ) : null}
+          <Text className="text-2xs text-foreground-tertiary">
+            To try another model, pick it in the composer first.
+          </Text>
+          <View className="flex-row gap-2">
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => void onSend(CONTINUE_AFTER_FAILURE_PROMPT, [])}
+              className="rounded-full bg-foreground px-3 py-1.5 active:opacity-70"
+            >
+              <Text className="font-ryco-medium text-xs text-background">Continue</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setDismissedFailedTurnId(failedNotice.turnId)}
+              className="rounded-full border border-border px-3 py-1.5 active:opacity-70"
+            >
+              <Text className="font-ryco-medium text-xs text-foreground">Dismiss</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
       {restartNotice ? (
         <ThreadCachedBanner text={restartNotice} tone="info" testID="thread-restart-banner" />
       ) : null}

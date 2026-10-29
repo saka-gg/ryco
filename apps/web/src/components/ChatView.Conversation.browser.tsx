@@ -1069,6 +1069,55 @@ describe("ChatView Conversation (full app)", () => {
     }
   });
 
+  it("keeps a failed last turn under the composer with Continue, instead of a toast", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "failed-turn-existing" as MessageId,
+      targetText: "Existing turn",
+    });
+    const base = snapshot.threads[0]!;
+    const failed = {
+      ...base,
+      latestTurn: {
+        turnId: "turn-failed" as TurnId,
+        state: "error" as const,
+        requestedAt: base.createdAt,
+        startedAt: base.createdAt,
+        completedAt: base.updatedAt,
+        assistantMessageId: null,
+      },
+      session: {
+        ...base.session!,
+        status: "error" as const,
+        lastError: "Provider exited with code 1",
+      },
+    };
+    const errorToast = () =>
+      document.querySelector<HTMLElement>('[data-slot="toast-root"][data-type="error"]');
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: { ...snapshot, threads: [failed] },
+    });
+    try {
+      await waitForComposerEditor();
+      await expect.element(page.getByText("The last turn failed")).toBeVisible();
+      await expect.element(page.getByText("Provider exited with code 1")).toBeVisible();
+      await waitForLayout();
+      expect(errorToast()).toBeNull();
+      const dispatch = recordingDispatch({ ...snapshot, threads: [failed] });
+      // The banner slides in while the timeline settles, so click it directly.
+      const continueButton = page.getByRole("button", { name: "Continue", exact: true });
+      await expect.element(continueButton).toBeVisible();
+      (continueButton.element() as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(dispatch.turnStarts()).toHaveLength(1));
+      expect(JSON.stringify(dispatch.turnStarts()[0])).toContain(
+        "First check what the last turn already finished",
+      );
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
   it("shows a restart release as a quiet interruption line, not a thread error", async () => {
     const snapshot = createSnapshotForTargetUser({
       targetMessageId: "restart-release-existing" as MessageId,

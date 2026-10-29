@@ -79,6 +79,7 @@ import {
   type ThreadGoalStatus,
   type ThreadGoalUpdate,
   THREAD_GOAL_OBJECTIVE_MAX_CHARS,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   WS_METHODS,
@@ -181,6 +182,7 @@ import {
   type TurnDiffSummary,
 } from "../types";
 import { useScopedState } from "../hooks/useScopedState";
+import { useEvent } from "../hooks/useEvent";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useReducedMotionEffective } from "../hooks/useAppearancePreference";
@@ -307,10 +309,14 @@ import {
   resolveProviderStatusNotice,
 } from "./chat/providerStatusNotice";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
-import { useRestartInterruptionBannerItem } from "./chat/restartInterruptionBanner";
+import {
+  useFailedTurnBannerItem,
+  useRestartInterruptionBannerItem,
+} from "./chat/restartInterruptionBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
 import {
+  CONTINUE_AFTER_FAILURE_PROMPT,
   applicableUsageLimit,
   deriveThreadSnoozeEligibility,
   isMaterializableCheckpointSummary,
@@ -2010,6 +2016,23 @@ export default function ChatView(props: ChatViewProps) {
       ? (activeThread ?? null)
       : null,
   );
+  // A failed last turn stays visible with what failed, Continue and Change model, instead
+  // of only a toast. Same tier rule as above.
+  const continueAfterFailure = useEvent(() => {
+    void onSubmitPlanFollowUp({
+      text: CONTINUE_AFTER_FAILURE_PROMPT,
+      interactionMode: activeThread?.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+    });
+  });
+  const changeModelAfterFailure = useEvent(() => readComposer()?.openModelPicker());
+  const failedTurnBanner = useFailedTurnBannerItem({
+    thread:
+      isServerThread && activeThreadDetailLoaded && presentationTier !== "phone"
+        ? (activeThread ?? null)
+        : null,
+    onContinue: continueAfterFailure,
+    onChangeModel: changeModelAfterFailure,
+  });
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
     if (hostedDeliveryNotice) {
@@ -2115,6 +2138,9 @@ export default function ChatView(props: ChatViewProps) {
     if (restartInterruptionBannerItem) {
       items.push(restartInterruptionBannerItem);
     }
+    if (failedTurnBanner.item) {
+      items.push(failedTurnBanner.item);
+    }
     return items;
   }, [
     dispatchCapability.allowed,
@@ -2129,6 +2155,7 @@ export default function ChatView(props: ChatViewProps) {
     openSettings,
     reconnectingEnvironmentId,
     restartInterruptionBannerItem,
+    failedTurnBanner.item,
     showVersionMismatchBanner,
     versionMismatch,
     versionMismatchDismissKey,
@@ -6732,7 +6759,13 @@ export default function ChatView(props: ChatViewProps) {
           the global notification surface instead of obscuring the
           transcript with a full-width inline strip. */}
       <ThreadErrorBanner
-        error={applicableUsageLimit(activeThread) ? null : activeThread.error}
+        error={
+          applicableUsageLimit(activeThread) ||
+          (failedTurnBanner.notice !== null &&
+            failedTurnBanner.notice.detail === activeThread.error)
+            ? null
+            : activeThread.error
+        }
         threadRef={activeThreadRef}
         onDismiss={() => setThreadError(activeThread.id, null)}
       />
