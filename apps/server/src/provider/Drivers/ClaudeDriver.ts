@@ -13,7 +13,7 @@
  * @module provider/Drivers/ClaudeDriver
  */
 import { ClaudeSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
-import { Cache, Duration, Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
+import { Cache, Duration, Effect, Exit, FileSystem, Option, Path, Schema, Stream } from "effect";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -23,6 +23,7 @@ import { ProviderDriverError } from "../Errors.ts";
 import { makeClaudeAdapter } from "../Layers/ClaudeAdapter.ts";
 import {
   checkClaudeProviderStatus,
+  claudeProbeSignedOut,
   makePendingClaudeProvider,
   probeClaudeCapabilities,
   refreshClaudeProviderUsage,
@@ -168,14 +169,21 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
 
       // Per-instance capabilities cache: keyed on binary + resolved HOME so
       // account-specific probes never share auth metadata across instances.
-      const capabilitiesProbeCache = yield* Cache.make({
-        capacity: 1,
-        timeToLive: CAPABILITIES_PROBE_TTL,
-        lookup: () =>
+      // A signed-out answer is never kept, so a refresh after `claude auth login`
+      // sees the new login instead of the cached signed-out probe.
+      const capabilitiesProbeCache = yield* Cache.makeWith(
+        () =>
           probeClaudeCapabilities(effectiveConfig, processEnv).pipe(
             Effect.provideService(Path.Path, path),
           ),
-      });
+        {
+          capacity: 1,
+          timeToLive: (exit) =>
+            Exit.isSuccess(exit) && exit.value !== undefined && claudeProbeSignedOut(exit.value)
+              ? Duration.zero
+              : CAPABILITIES_PROBE_TTL,
+        },
+      );
       const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(
         effectiveConfig,
         processEnv,
