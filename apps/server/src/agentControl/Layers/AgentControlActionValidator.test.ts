@@ -1025,6 +1025,15 @@ it.effect("binds external automation proposals to project, provider, and current
     };
     yield* validator.revalidateExecution(proposal);
 
+    // Only the owner may let a schedule run without asking.
+    const unattended = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: yield* Ref.get(integrationRef),
+        plan: { ...plan, definition: { ...plan.definition, runPolicy: "run-without-asking" } },
+      }),
+    );
+    assert.strictEqual(unattended.reason, "privilege-escalation");
+
     const deniedScope = yield* Effect.flip(
       validator.validateExternalSubmission({
         integration: {

@@ -293,6 +293,7 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
     readonly result: AgentControlProposal["result"];
     readonly eventKind: AgentControlAuditEventKind;
     readonly updatedAt: IsoDateTime;
+    readonly extraMetadata?: AgentControlAuditMetadata;
   }) =>
     Effect.gen(function* () {
       const issue = proposalTransitionIssue({
@@ -335,7 +336,9 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
               eventKind: input.eventKind,
               createdAt: input.updatedAt,
               ...(input.result === null
-                ? {}
+                ? input.extraMetadata === undefined
+                  ? {}
+                  : { extraMetadata: input.extraMetadata }
                 : {
                     extraMetadata:
                       input.result.outcome === "completed"
@@ -595,6 +598,10 @@ const makeAgentControlProposalStore = Effect.gen(function* () {
         result,
         eventKind: DECISION_AUDIT_EVENT_KINDS[input.decision],
         updatedAt: input.decidedAt,
+        // A run its schedule's owner let run without asking: the audit row says so.
+        ...(input.actor === "standing-approval"
+          ? { extraMetadata: { approvedBy: "standing-approval" } }
+          : {}),
       });
     });
 

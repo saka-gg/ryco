@@ -1055,6 +1055,15 @@ describe("drafts", () => {
     expect(local.execution).toMatchObject({ title: "Spaced", tokenMode: "balanced" });
   });
 
+  it("carries run without asking, and writes the policy only when it is on", () => {
+    const asking = draftFromDefinition(twoHourly);
+    expect(asking.runWithoutAsking).toBe(false);
+    expect(definitionFromDraft(asking)).not.toHaveProperty("runPolicy");
+    const unattended = definitionFromDraft({ ...asking, runWithoutAsking: true });
+    expect(unattended.runPolicy).toBe("run-without-asking");
+    expect(draftFromDefinition(unattended).runWithoutAsking).toBe(true);
+  });
+
   it("keeps a worktree schedule without a branch without one", () => {
     const { baseRef: _none, ...execution } = twoHourly.execution;
     const noRef: AgentControlAutomationDefinition = { ...twoHourly, execution };

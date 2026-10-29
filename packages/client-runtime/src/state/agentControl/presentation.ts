@@ -9,6 +9,7 @@
 import type { ThreadId } from "@ryco/contracts";
 import {
   AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT,
+  AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX,
   AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS,
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
@@ -134,6 +135,18 @@ function planPresentation(proposal: AgentControlProposal): {
           `Ends: ${schedule.endsAt}`,
           "Missed intervals coalesce into at most one pending run.",
         ];
+  const runPolicyLines = (
+    runPolicy: Extract<
+      AgentControlProposal["plan"],
+      { kind: "createAutomation" }
+    >["definition"]["runPolicy"],
+  ) =>
+    runPolicy === "run-without-asking"
+      ? [
+          "Runs without asking: each due run starts on its own, with exactly this project, provider, model, runtime mode and checkout.",
+          `It pauses after ${AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX} failed runs in a row.`,
+        ]
+      : ["Asks before each run."];
   const scheduleLimitLines = [
     `Limits: ${AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT} active schedules per project; minimum interval ${AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS}ms.`,
     `Horizon: ${AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS}ms; retained run history: ${AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX}.`,
@@ -437,9 +450,12 @@ function planPresentation(proposal: AgentControlProposal): {
               ...scheduleLines(plan.definition.schedule),
               ...scheduleLimitLines,
               `Enabled: ${plan.definition.enabled ? "yes" : "no"}`,
+              ...runPolicyLines(plan.definition.runPolicy),
               ...executionLines(plan.definition.execution),
               "This approval authorizes only the schedule definition.",
-              "Every due run creates a fresh exact proposal and waits for user approval.",
+              ...(plan.definition.runPolicy === "run-without-asking"
+                ? []
+                : ["Every due run creates a fresh exact proposal and waits for user approval."]),
               "At most one pending or executing run is allowed for this automation.",
             ],
           },
@@ -456,6 +472,7 @@ function planPresentation(proposal: AgentControlProposal): {
             lines: [
               ...scheduleLines(plan.before.definition.schedule),
               `Enabled: ${plan.before.definition.enabled ? "yes" : "no"}`,
+              ...runPolicyLines(plan.before.definition.runPolicy),
               `Last changed: ${plan.before.updatedAt}`,
             ],
           },
@@ -465,10 +482,13 @@ function planPresentation(proposal: AgentControlProposal): {
               ...scheduleLines(plan.after.schedule),
               ...scheduleLimitLines,
               `Enabled: ${plan.after.enabled ? "yes" : "no"}`,
+              ...runPolicyLines(plan.after.runPolicy),
               ...executionLines(plan.after.execution),
               "Pending, unaccepted runs from the old definition are cancelled.",
               "Already accepted or executing runs are not interrupted.",
-              "Future runs still require separate approval.",
+              ...(plan.after.runPolicy === "run-without-asking"
+                ? []
+                : ["Future runs still require separate approval."]),
             ],
           },
         ],

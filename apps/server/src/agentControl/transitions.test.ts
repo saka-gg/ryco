@@ -6,7 +6,12 @@ import {
   type AgentControlTransitionActor,
 } from "./transitions.ts";
 
-const ACTORS: ReadonlyArray<AgentControlTransitionActor> = ["user", "executor", "system"];
+const ACTORS: ReadonlyArray<AgentControlTransitionActor> = [
+  "user",
+  "executor",
+  "system",
+  "standing-approval",
+];
 
 describe("proposalTransitionIssue", () => {
   it("permits the documented lifecycle", () => {
@@ -28,6 +33,32 @@ describe("proposalTransitionIssue", () => {
     expect(
       proposalTransitionIssue({ from: "executing", to: "failed", actor: "executor" }),
     ).toBeNull();
+  });
+
+  it("lets a standing approval approve a pending proposal and do nothing else", () => {
+    expect(
+      proposalTransitionIssue({
+        from: "pending-user-approval",
+        to: "approved",
+        actor: "standing-approval",
+      }),
+    ).toBeNull();
+    for (const [from, to] of [
+      ["pending-user-approval", "rejected"],
+      ["pending-user-approval", "cancelled"],
+      ["pending-user-approval", "expired"],
+      ["approved", "executing"],
+      ["approved", "cancelled"],
+      ["executing", "completed"],
+    ] as const) {
+      expect(proposalTransitionIssue({ from, to, actor: "standing-approval" })).not.toBeNull();
+    }
+    for (const [from, to] of [
+      ["pending", "running"],
+      ["running", "completed"],
+    ] as const) {
+      expect(operationTransitionIssue({ from, to, actor: "standing-approval" })).not.toBeNull();
+    }
   });
 
   it("only the executor may move an accepted proposal into executing", () => {

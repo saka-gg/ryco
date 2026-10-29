@@ -8,8 +8,11 @@ import type { AgentControlOperationStatus, AgentControlProposalStatus } from "@r
  *   may move an accepted proposal into `executing` and the only consumer of
  *   accepted proposals.
  * - `system`: server lifecycle (expiry sweeps, shutdown compensation).
+ * - `standing-approval`: the automation scheduler approving a scheduled run of a
+ *   schedule its owner set to run without asking (the owner's decision, made when
+ *   they approved the schedule). It may only approve; nothing else uses it.
  */
-export type AgentControlTransitionActor = "user" | "executor" | "system";
+export type AgentControlTransitionActor = "user" | "executor" | "system" | "standing-approval";
 
 type TransitionTable<Status extends string> = Record<
   Status,
@@ -24,7 +27,7 @@ type TransitionTable<Status extends string> = Record<
  */
 const PROPOSAL_TRANSITIONS: TransitionTable<AgentControlProposalStatus> = {
   "pending-user-approval": {
-    approved: ["user"],
+    approved: ["user", "standing-approval"],
     rejected: ["user"],
     cancelled: ["user", "system"],
     expired: ["system"],

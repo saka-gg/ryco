@@ -87,6 +87,14 @@ export function ScheduleModelLine(props: {
         ·
       </span>
       <span>{runtimeModeConfig[ex.runtimeMode].label}</span>
+      {props.definition.runPolicy === "run-without-asking" ? (
+        <>
+          <span className="ad-sep" aria-hidden="true">
+            ·
+          </span>
+          <span>Runs without asking</span>
+        </>
+      ) : null}
     </p>
   );
 }

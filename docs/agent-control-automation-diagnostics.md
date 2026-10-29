@@ -5,7 +5,8 @@ create or update proposal authorizes only that definition. It never creates a th
 provider turn. When an occurrence is due, the scheduler materializes a new immutable
 `automationRun` proposal containing the exact project, provider instance, runtime/worktree
 options, title, and bounded prompt. A user must approve that run before the existing thread-action
-executor can create the thread and start work.
+executor can create the thread and start work, unless the schedule's owner let it run without
+asking (see below).
 
 The schedule language is deliberately finite:
 
@@ -68,9 +69,18 @@ On desktop/web, open **Project settings → Automations** to review schedules an
 The editor uses the existing once/fixed-interval schedule language and an explicit provider
 instance, model and supported options. Saving and cancelling create owner-authored immutable
 proposals; the normal approval executor applies them. Every occurrence still needs separate
-approval. The `automation-owner` principal is constructed only behind owner-authorized RPC and
-may authorize automation plans only. Private-session and external-integration MCP authority is
-unchanged.
+approval, unless the owner turned on **Run without asking** for that schedule. The
+`automation-owner` principal is constructed only behind owner-authorized RPC and may authorize
+automation plans only. Private-session and external-integration MCP authority is unchanged.
+
+**Run without asking** (`runPolicy: "run-without-asking"`) is the owner's standing approval of
+one schedule's runs. Only the `automation-owner` principal may set it: agents' proposals carrying
+it are refused, an agent's edit of the schedule drops it, and the scheduler honours it only on a
+definition the owner authored. Each due run is still materialized as the same immutable
+`automationRun` proposal and is then approved by the `standing-approval` actor (recorded in the
+audit row as `approvedBy`); execution revalidates it against the current definition. The run uses
+exactly the definition's project, provider, model, runtime mode and checkout. After three failed
+runs in a row the schedule disables itself (a new revision; the owner turns it on again).
 
 Run identity, original execution selection and thread links come from durable runs and their
 immutable proposals. **Dispatched** means the thread-start operation completed, not that the

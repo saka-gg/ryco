@@ -930,6 +930,11 @@ export interface ScheduleDraft {
   readonly intervalMs: number;
   readonly endsAt: number;
   readonly enabled: boolean;
+  /**
+   * Each run starts without asking (the owner's standing approval). Only the owner's
+   * editor offers it, and only on a node that supports it.
+   */
+  readonly runWithoutAsking: boolean;
 }
 
 /**
@@ -959,6 +964,7 @@ export function draftFromDefinition(
     intervalMs: s.kind === "once" ? DAY_MS : s.intervalMs,
     endsAt: s.kind === "once" ? addDays(start, 7) : s.endsAt,
     enabled: definition.enabled,
+    runWithoutAsking: definition.runPolicy === "run-without-asking",
   };
 }
 
@@ -991,6 +997,8 @@ export function definitionFromDraft(draft: ScheduleDraft): AgentControlAutomatio
     execution,
     schedule: scheduleToContract(draftSchedule(draft)),
     enabled: draft.enabled,
+    // Written only when set, so a schedule that asks keeps its stored shape.
+    ...(draft.runWithoutAsking ? { runPolicy: "run-without-asking" as const } : {}),
   };
 }
 
@@ -1028,6 +1036,7 @@ export function blankScheduleDraft(input: {
     intervalMs: DAY_MS,
     endsAt: start + 30 * DAY_MS,
     enabled: true,
+    runWithoutAsking: false,
   };
 }
 

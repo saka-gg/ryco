@@ -212,6 +212,23 @@ describe("buildAgentControlProposalCardModel", () => {
       "Every due run creates a fresh exact proposal and waits for user approval.",
     );
     expect(definition.detailSections[0]?.lines).toContain("Token mode: aggressive");
+    expect(definition.detailSections[0]?.lines).toContain("Asks before each run.");
+
+    const unattended = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: {
+          kind: "createAutomation",
+          automationId: "automation-2" as never,
+          definition: { execution, schedule, enabled: true, runPolicy: "run-without-asking" },
+        },
+      }),
+    );
+    const lines = unattended.detailSections[0]?.lines ?? [];
+    expect(lines.some((line) => line.startsWith("Runs without asking:"))).toBe(true);
+    expect(lines).toContain("It pauses after 3 failed runs in a row.");
+    expect(lines).not.toContain(
+      "Every due run creates a fresh exact proposal and waits for user approval.",
+    );
 
     const run = buildAgentControlProposalCardModel(
       makeProposal({
