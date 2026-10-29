@@ -72,6 +72,43 @@ Semantics of the Claude adapter payloads:
   model on incompatible Claude Code versions. The provider check surfaces an
   upgrade message naming the model with the lowest unmet minimum.
 
+### Claude Code's own model report
+
+The provider check's capabilities probe already starts the installed Claude
+Code, and its `initialize` answer lists the models that CLI offers. Ryco uses
+that list to correct the controls of **that provider instance only**; the
+manifest stays the source of the model list, and the report never adds a
+model or a control:
+
+- `supportsAutoMode` is copied onto the instance's model as `supportsAutoMode`,
+  which the pickers and the Auto-mode gate read (see
+  [Auto Mode](./claude.md#auto-mode)).
+- `supportsFastMode: false` removes the model's Fast toggle. `true` adds none
+  where the manifest has no `fastMode` descriptor.
+- `supportedEffortLevels` drops the effort options whose CLI value (after the
+  profile's `effortMap`, so `ultracode` needs `xhigh`) is not offered. Options
+  sent without an effort flag (`ultrathink`) stay. A dropped default moves to
+  the highest remaining option below it. If no offered option would remain,
+  the effort control is left as the manifest has it.
+
+Rows are matched by the model's slug first, then its aliases (with a `[1m]`
+suffix ignored). A row that names the model it resolves to (`resolvedModel`)
+describes that model only: it matches when that model, or the row's own value,
+is the slug, else through one of that model's aliases, but never because its
+alias value is a manifest alias. So an `opus` row that resolves to a newer Opus
+than the manifest's, or a `sonnet` row a proxy remaps to another model, leaves
+the manifest's `opus` and `sonnet` models alone. A row without a resolved model
+is matched by its value, except `default`, `best` and `opusplan`, which are
+skipped. When several rows match and disagree on a flag, it stays unknown.
+Custom models are never changed.
+
+The report is kept per instance and per Claude Code version: a probe that
+fails or comes back without a model list reuses the last report of the same
+version, and an updated CLI starts from the manifest again. Because the data
+rides on each instance's snapshot, an instance routed through a proxy such as
+CLIProxyAPI can lose Fast mode while a first-party instance keeps it; nothing
+reaches the process-wide catalog. Code map: `claudeCliModels.ts`.
+
 ## Provider compatibility (`compatibility`)
 
 The optional top-level `compatibility` array rates provider versions against

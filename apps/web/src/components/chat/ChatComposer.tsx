@@ -157,7 +157,11 @@ import { composerContextIntake } from "../../composerContextIntake";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { cn, randomUUID } from "~/lib/utils";
 import { planFollowUpRefines, proposedPlanTitle } from "../../proposedPlan";
-import { getProviderInteractionModeToggle, getProviderSupportsAskMode } from "../../providerModels";
+import {
+  getAutoRuntimeModeUnavailableReason,
+  getProviderInteractionModeToggle,
+  getProviderSupportsAskMode,
+} from "../../providerModels";
 import {
   deriveProviderInstanceEntries,
   resolveProviderDriverKindForInstanceSelection,
@@ -907,8 +911,13 @@ export const ChatComposer = memo(
         showInteractionModeToggle:
           !enforceBuildMode && getProviderInteractionModeToggle(providerStatuses, selectedProvider),
         askModeSupported: getProviderSupportsAskMode(providerStatuses, selectedProvider),
+        // From this instance's own snapshot: a proxied instance's CLI may answer differently.
+        autoModeUnavailableReason: getAutoRuntimeModeUnavailableReason(
+          selectedProviderModels,
+          selectedModel,
+        ),
       }),
-      [enforceBuildMode, providerStatuses, selectedProvider],
+      [enforceBuildMode, providerStatuses, selectedModel, selectedProvider, selectedProviderModels],
     );
     const selectedModelSelection = useMemo<ModelSelection>(
       () =>
@@ -3429,6 +3438,7 @@ export const ChatComposer = memo(
                 onProviderModelSelect={onProviderModelSelect}
                 showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                 askModeSupported={composerProviderControls.askModeSupported}
+                autoModeUnavailableReason={composerProviderControls.autoModeUnavailableReason}
                 showPlanSidebarToggle={showPlanSidebarToggle}
                 interactionMode={interactionMode}
                 runtimeMode={runtimeMode}

@@ -55,6 +55,7 @@ export function NewTaskComposer(props: {
   readonly interactionMode: ProviderInteractionMode;
   readonly interactionModeSupported: boolean;
   readonly askModeSupported: boolean;
+  readonly autoModeUnavailableReason: string | null;
   readonly onChangeInteractionMode: (mode: ProviderInteractionMode) => void;
   readonly busy: boolean;
   readonly canSend: boolean;
@@ -262,6 +263,7 @@ export function NewTaskComposer(props: {
                 interactionMode: props.interactionMode,
                 interactionModeSupported: props.interactionModeSupported,
                 askModeSupported: props.askModeSupported,
+                autoModeUnavailableReason: props.autoModeUnavailableReason,
               })}
               disabled={props.busy}
               onSelectRuntimeMode={props.onChangeRuntimeMode}

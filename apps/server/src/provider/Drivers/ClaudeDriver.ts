@@ -6,14 +6,27 @@
  * closures captured over the per-instance `ClaudeSettings`.
  *
  * Unlike Codex, the Claude snapshot probe may invoke a secondary probe
- * (`probeClaudeCapabilities`) to read Anthropic account + slash-command
- * metadata. That probe is per-instance and keyed by binary + resolved HOME so
- * two concurrent Claude instances don't cross-contaminate account metadata.
+ * (`probeClaudeCapabilities`) to read Anthropic account, slash-command and
+ * model metadata. That probe is per-instance and keyed by binary + resolved HOME
+ * so two concurrent Claude instances don't cross-contaminate account metadata;
+ * the CLI's model report is likewise remembered per instance.
  *
  * @module provider/Drivers/ClaudeDriver
  */
 import { ClaudeSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
-import { Cache, Duration, Effect, Exit, FileSystem, Option, Path, Schema, Stream } from "effect";
+import { findServerProviderModel } from "@ryco/shared/serverProviderModels";
+import {
+  Cache,
+  Duration,
+  Effect,
+  Exit,
+  FileSystem,
+  Option,
+  Path,
+  Ref,
+  Schema,
+  Stream,
+} from "effect";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -30,6 +43,7 @@ import {
 } from "../Layers/ClaudeProvider.ts";
 import { makeCachedClaudeUsageProbe } from "../Layers/ClaudeUsage.ts";
 import { AgentProcessPriority } from "../agentProcessPriority.ts";
+import { makeClaudeCliModelMemory } from "../claudeCliModels.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { ModelManifest } from "../ModelManifest.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -39,6 +53,7 @@ import {
   type ProviderInstance,
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import type { ServerProviderShape } from "../Services/ServerProvider.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -180,12 +195,24 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationGroupKey,
       });
 
+      // Set once the snapshot source exists. Auto-mode support is read from the snapshot the UI
+      // shows, which a restart restores from the persisted probe.
+      const snapshotSource = yield* Ref.make<ServerProviderShape | undefined>(undefined);
       const adapterOptions = {
         instanceId,
         environment: processEnv,
         processPriority,
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        resolveAutoModeSupport: (model: string) =>
+          Ref.get(snapshotSource).pipe(
+            Effect.flatMap((source) => (source ? source.getSnapshot : Effect.succeed(undefined))),
+            Effect.map((current) =>
+              current === undefined
+                ? undefined
+                : findServerProviderModel(current.models, model)?.supportsAutoMode,
+            ),
+          ),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv, {
@@ -214,13 +241,20 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         processEnv,
       );
       const probeUsage = yield* makeCachedClaudeUsageProbe(USAGE_PROBE_TTL);
+      const cliModelMemory = yield* makeClaudeCliModelMemory();
 
       const checkProvider = checkClaudeProviderStatus(
         effectiveConfig,
-        () => readClaudeCapabilities(capabilitiesProbeCache, capabilitiesCacheKey),
+        // Keyed by CLI version too: the model report remembered per version must come from it.
+        (_settings, cliVersion) =>
+          readClaudeCapabilities(
+            capabilitiesProbeCache,
+            `${capabilitiesCacheKey}\0${cliVersion ?? ""}`,
+          ),
         processEnv,
         probeUsage,
         Option.getOrUndefined(modelManifest),
+        { cliModelMemory },
       ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -261,6 +295,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             }),
         ),
       );
+      yield* Ref.set(snapshotSource, snapshot);
 
       return {
         instanceId,

@@ -203,6 +203,79 @@ describe("ComposerFooterModeControls", () => {
     expect(onInteractionModeChange).not.toHaveBeenCalled();
   });
 
+  it("disables the Auto option with the reason when the model cannot run it", async () => {
+    const reason = "Claude Opus 4.8 can't run in Auto mode on this provider.";
+    const onRuntimeModeChange = vi.fn();
+    mounted = await render(
+      <ComposerFooterModeControls
+        {...baseProps}
+        runtimeMode="approval-required"
+        autoModeUnavailableReason={reason}
+        onRuntimeModeChange={onRuntimeModeChange}
+      />,
+    );
+
+    await page.getByLabelText("Runtime mode: Supervised").click();
+    const autoOption = await vi.waitFor(() => {
+      const option = document
+        .querySelector('[data-runtime-mode-option-label="auto"]')
+        ?.closest<HTMLElement>('[data-slot="select-item"]');
+      expect(option).toBeTruthy();
+      return option!;
+    });
+    expect(autoOption.hasAttribute("data-disabled")).toBe(true);
+    expect(
+      document.querySelector('[data-runtime-mode-option-description="auto"]')?.textContent,
+    ).toBe(reason);
+    autoOption.click();
+    await wait(50);
+    expect(onRuntimeModeChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Auto option enabled without a reason", async () => {
+    const onRuntimeModeChange = vi.fn();
+    mounted = await render(
+      <ComposerFooterModeControls
+        {...baseProps}
+        runtimeMode="approval-required"
+        autoModeUnavailableReason={null}
+        onRuntimeModeChange={onRuntimeModeChange}
+      />,
+    );
+
+    await page.getByLabelText("Runtime mode: Supervised").click();
+    await vi.waitFor(() => {
+      const option = document
+        .querySelector('[data-runtime-mode-option-label="auto"]')
+        ?.closest<HTMLElement>('[data-slot="select-item"]');
+      expect(option?.hasAttribute("data-disabled")).toBe(false);
+    });
+    expect(
+      document.querySelector('[data-runtime-mode-option-description="auto"]')?.textContent,
+    ).toBe("Routine actions proceed without you; risky ones still ask.");
+    await page.getByRole("option", { name: /Routine actions proceed/ }).click();
+    await vi.waitFor(() => {
+      expect(onRuntimeModeChange).toHaveBeenCalledWith("auto");
+    });
+  });
+
+  it("explains a refused Auto mode on the trigger when Auto is selected", async () => {
+    const reason = "Claude Opus 4.8 can't run in Auto mode on this provider.";
+    mounted = await render(
+      <ComposerFooterModeControls
+        {...baseProps}
+        runtimeMode="auto"
+        autoModeUnavailableReason={reason}
+      />,
+    );
+
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[aria-label="Runtime mode: Auto"]')?.getAttribute("title"),
+      ).toBe(`${reason} Sessions ask before commands and file changes instead.`);
+    });
+  });
+
   it("closes token mode popup after selecting the current value again", async () => {
     mounted = await render(<ComposerFooterModeControls {...baseProps} />);
 

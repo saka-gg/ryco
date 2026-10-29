@@ -44,6 +44,12 @@ import {
   setActiveClaudeModelCatalog,
 } from "../ClaudeModelCatalog.ts";
 import type { ModelManifest } from "../ModelManifest.ts";
+import {
+  applyClaudeCliModelInfo,
+  type ClaudeCliModelInfo,
+  type ClaudeCliModelMemory,
+  parseClaudeCliModels,
+} from "../claudeCliModels.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { type ClaudeCredentialStore, resolveClaudeLoginStore } from "./ClaudeUsage.ts";
 
@@ -230,6 +236,8 @@ type ClaudeCapabilitiesProbe = {
   /** The API backend; Anthropic credentials only apply to `firstParty`. */
   readonly apiProvider?: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  /** Claude Code's own model report; absent when the CLI sent none that parsed. */
+  readonly models?: ReadonlyArray<ClaudeCliModelInfo>;
 };
 
 /**
@@ -246,8 +254,10 @@ function claudeProbeSignedOut(probe: ClaudeCapabilitiesProbe): boolean {
   );
 }
 
+/** `cliVersion` is the version `--version` just reported, so a probe cached before an update is not reused. */
 type ResolveClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
+  cliVersion: string | null,
 ) => Effect.Effect<ClaudeCapabilitiesProbe | undefined>;
 
 type ResolveClaudeRateLimits = (
@@ -338,19 +348,20 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * We pass a never-yielding AsyncIterable as the prompt so that no user
  * message is ever written to the subprocess stdin. This means the Claude
  * Code subprocess completes its local initialization IPC (returning
- * account info and slash commands) but never starts an API request to
+ * account info, slash commands and models) but never starts an API request to
  * Anthropic. We read the init data and then abort the subprocess.
  *
  * This is used as a fallback when `claude auth status` does not include
  * subscription type information.
  *
  * MCP is disabled for the probe (`strictMcpConfig` with no servers): it reads
- * account and slash-command metadata only, and must never start the user's MCP
- * servers (each a Node process tree of 100+ MiB). Slash commands contributed by
- * MCP prompts are therefore absent from the probed list; live sessions still
- * load MCP normally.
+ * account, slash-command and model metadata only, and must never start the
+ * user's MCP servers (each a Node process tree of 100+ MiB). Slash commands
+ * contributed by MCP prompts are therefore absent from the probed list; live
+ * sessions still load MCP normally.
  * The reported subscription and token source also decide whether the
- * instance's usage limits may be read from the local claude.ai login.
+ * instance's usage limits may be read from the local claude.ai login, and the
+ * reported models narrow this instance's model controls (`claudeCliModels.ts`).
  */
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
@@ -392,6 +403,7 @@ const probeClaudeCapabilities = (
             readonly apiProvider?: string;
           }
         | undefined;
+      const models = parseClaudeCliModels(init.models);
       return {
         email: account?.email,
         subscriptionType: account?.subscriptionType,
@@ -399,6 +411,7 @@ const probeClaudeCapabilities = (
         apiKeySource: account?.apiKeySource,
         apiProvider: account?.apiProvider,
         slashCommands: parseClaudeSlashCommands(init.commands),
+        ...(models ? { models } : {}),
       } satisfies ClaudeCapabilitiesProbe;
     });
   }).pipe(
@@ -435,6 +448,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   environment: NodeJS.ProcessEnv = process.env,
   resolveRateLimits?: ResolveClaudeRateLimits,
   modelManifest?: Pick<ModelManifest["Service"], "current" | "refreshInBackground">,
+  options?: {
+    /** This instance's last good CLI model report, kept across failed or partial probes. */
+    readonly cliModelMemory?: ClaudeCliModelMemory;
+  },
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -535,7 +552,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const models = providerModelsFromSettings(
+  const manifestModels = providerModelsFromSettings(
     resolveClaudeModelsForVersion(catalog, parsedVersion),
     PROVIDER,
     claudeSettings.customModels,
@@ -544,8 +561,23 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const upgradeMessage = formatClaudeVersionUpgradeMessage(catalog, parsedVersion) ?? "";
 
   const capabilities = resolveCapabilities
-    ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
+    ? yield* resolveCapabilities(claudeSettings, parsedVersion).pipe(
+        Effect.orElseSucceed(() => undefined),
+      )
     : undefined;
+  // The CLI's own model report narrows this instance's manifest controls. A probe without one
+  // falls back to the last report of the same CLI version, so a failed or partial probe never
+  // brings back controls the CLI refused.
+  const cliModelMemory = options?.cliModelMemory;
+  if (capabilities?.models && cliModelMemory) {
+    yield* cliModelMemory.remember(parsedVersion, capabilities.models);
+  }
+  const cliModels =
+    capabilities?.models ??
+    (cliModelMemory ? yield* cliModelMemory.recall(parsedVersion) : undefined);
+  const models = cliModels
+    ? applyClaudeCliModelInfo(manifestModels, cliModels, catalog)
+    : manifestModels;
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 

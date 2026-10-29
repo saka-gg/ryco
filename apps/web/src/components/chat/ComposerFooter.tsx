@@ -53,6 +53,8 @@ const SELECT_OPEN_SUPPRESSION_MS = 300;
 export const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
   showInteractionModeToggle: boolean;
   askModeSupported: boolean;
+  /** Why the selected model cannot run Auto mode; the server downgrades an Auto session. */
+  autoModeUnavailableReason?: string | null | undefined;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   tokenMode: AgentTokenMode;
@@ -246,7 +248,11 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
             props.runtimeMode === CAUTION_RUNTIME_MODE && CAUTION_RUNTIME_MODE_CLASS_NAME,
           )}
           aria-label={`Runtime mode: ${runtimeModeOption.triggerLabel}`}
-          title={runtimeModeOption.description}
+          title={
+            props.runtimeMode === "auto" && props.autoModeUnavailableReason
+              ? `${props.autoModeUnavailableReason} Sessions ask before commands and file changes instead.`
+              : runtimeModeOption.description
+          }
         >
           <ComposerExpandableLabelControl
             collapsed={wideComposerControlsAutoCollapse}
@@ -262,10 +268,12 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
           {runtimeModeOptions.map((mode) => {
             const option = runtimeModeConfig[mode];
             const OptionIcon = option.icon;
+            const unavailableReason = mode === "auto" ? props.autoModeUnavailableReason : null;
             return (
               <SelectItem
                 key={mode}
                 value={mode}
+                disabled={Boolean(unavailableReason)}
                 className="min-w-0 py-1.5"
                 onClick={closeRuntimeModeSelectAfterItemPress}
               >
@@ -292,7 +300,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
                     )}
                     data-runtime-mode-option-description={mode}
                   >
-                    {option.description}
+                    {unavailableReason || option.description}
                   </span>
                 </div>
               </SelectItem>
@@ -513,6 +521,8 @@ export interface ComposerFooterProps {
   // Mode controls
   showInteractionModeToggle: boolean;
   askModeSupported: boolean;
+  /** Why the selected model cannot run Auto mode (desktop pickers only). */
+  autoModeUnavailableReason?: string | null | undefined;
   showPlanSidebarToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
@@ -707,6 +717,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             tokenMode={props.tokenMode}
             showInteractionModeToggle={props.showInteractionModeToggle}
             askModeSupported={props.askModeSupported}
+            autoModeUnavailableReason={props.autoModeUnavailableReason}
             traitsMenuContent={props.providerExtraTraitsMenuContent}
             onInteractionModeChange={props.onInteractionModeChange}
             onTogglePlanSidebar={props.onTogglePlanSidebar}
@@ -719,6 +730,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             <ComposerFooterModeControls
               showInteractionModeToggle={props.showInteractionModeToggle}
               askModeSupported={props.askModeSupported}
+              autoModeUnavailableReason={props.autoModeUnavailableReason}
               interactionMode={props.interactionMode}
               runtimeMode={props.runtimeMode}
               tokenMode={props.tokenMode}

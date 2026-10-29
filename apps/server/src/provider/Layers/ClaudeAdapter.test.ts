@@ -227,6 +227,7 @@ function makeHarness(config?: {
   readonly runtimeEventQueueCapacity?: number;
   /** What the transcript check before a resume finds; defaults to `present`. */
   readonly transcriptPresence?: ClaudeTranscriptPresence;
+  readonly resolveAutoModeSupport?: ClaudeAdapterLiveOptions["resolveAutoModeSupport"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -242,6 +243,9 @@ function makeHarness(config?: {
     ...(config?.agentControl ? { agentControl: config.agentControl } : {}),
     ...(config?.runtimeEventQueueCapacity !== undefined
       ? { runtimeEventQueueCapacity: config.runtimeEventQueueCapacity }
+      : {}),
+    ...(config?.resolveAutoModeSupport
+      ? { resolveAutoModeSupport: config.resolveAutoModeSupport }
       : {}),
     createQuery: (input) => {
       createInput = input;
@@ -813,6 +817,198 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+
+  describe("auto mode gate", () => {
+    const OPUS_SELECTION = createModelSelection(
+      ProviderInstanceId.make("claudeAgent"),
+      "claude-opus-5-5",
+    );
+    const REFUSED_WARNING =
+      "Claude Code reports that Claude Opus 5.5 can't run in Auto mode, so this session asks before commands and file changes.";
+    const autoModeWarnings = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+      events.flatMap((event) =>
+        event.type === "runtime.warning" && event.payload.message.includes("Auto mode")
+          ? [event.payload.message]
+          : [],
+      );
+    const initFrame = (permissionMode: PermissionMode, uuid: string): SDKMessage =>
+      ({
+        type: "system",
+        subtype: "init",
+        model: "claude-opus-5-5[1m]",
+        cwd: "/tmp/claude-adapter-test",
+        tools: [],
+        mcp_servers: [],
+        slash_commands: [],
+        permissionMode,
+        apiKeySource: "none",
+        claude_code_version: "2.1.300",
+        uuid,
+        session_id: "sdk-session-auto-mode",
+      }) as unknown as SDKMessage;
+    const startAutoSession = (adapter: ClaudeAdapterShape, id: string) =>
+      adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make(`test-claudeadapter-auto-${id}`),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "auto",
+        modelSelection: OPUS_SELECTION,
+      });
+    const sendDefaultTurn = (adapter: ClaudeAdapterShape, input: string) =>
+      adapter.sendTurn({ threadId: THREAD_ID, input, interactionMode: "default", attachments: [] });
+
+    it.effect(
+      "starts in the CLI default mode when Claude Code says the model can't run auto",
+      () => {
+        const resolved: Array<string> = [];
+        const harness = makeHarness({
+          resolveAutoModeSupport: (model) =>
+            Effect.sync(() => {
+              resolved.push(model);
+              return false;
+            }),
+        });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const log = yield* makeRuntimeEventLog(adapter);
+          const session = yield* startAutoSession(adapter, "refused");
+
+          const options = harness.getLastCreateQueryInput()?.options;
+          assert.equal(options?.permissionMode, undefined);
+          assert.equal(options?.allowDangerouslySkipPermissions, undefined);
+          // The session keeps reporting Auto, so the orchestrator sees no mode change to restart for.
+          assert.equal(session.runtimeMode, "auto");
+          assert.deepEqual(resolved, ["claude-opus-5-5"]);
+
+          yield* log.waitFor((event) => event.type === "session.state.changed");
+          // A default turn restores the CLI default, never Auto.
+          yield* sendDefaultTurn(adapter, "hello");
+          assert.deepEqual(harness.query.setPermissionModeCalls, ["default"]);
+          // A later init reporting the default mode warns no second time.
+          harness.query.emit(initFrame("default", "init-auto-refused"));
+          harness.query.emit(sentinelFrame("auto-refused"));
+          yield* log.waitFor(isSentinel("auto-refused"));
+          assert.deepEqual(autoModeWarnings(log.events), [REFUSED_WARNING]);
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      },
+    );
+
+    it.effect.each([
+      { support: true, label: "supported" },
+      { support: undefined, label: "unknown" },
+    ])("keeps auto when the model's auto support is $label", ({ support }) => {
+      const harness = makeHarness({ resolveAutoModeSupport: () => Effect.succeed(support) });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startAutoSession(adapter, `kept-${String(support)}`);
+        assert.equal(harness.getLastCreateQueryInput()?.options.permissionMode, "auto");
+        yield* log.waitFor((event) => event.type === "session.state.changed");
+        yield* log.drain;
+        assert.deepEqual(autoModeWarnings(log.events), []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("asks no auto support for a session without a model selection", () => {
+      const resolved: Array<string> = [];
+      const harness = makeHarness({
+        resolveAutoModeSupport: (model) =>
+          Effect.sync(() => {
+            resolved.push(model);
+            return false;
+          }),
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-auto-no-model"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "auto",
+        });
+        assert.equal(harness.getLastCreateQueryInput()?.options.permissionMode, "auto");
+        assert.deepEqual(resolved, []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("stops asking for auto once the first init reports the default mode", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startAutoSession(adapter, "observed");
+        assert.equal(harness.getLastCreateQueryInput()?.options.permissionMode, "auto");
+
+        harness.query.emit(initFrame("default", "init-auto-observed"));
+        harness.query.emit(sentinelFrame("auto-observed"));
+        yield* log.waitFor(isSentinel("auto-observed"));
+        assert.deepEqual(autoModeWarnings(log.events), [REFUSED_WARNING]);
+
+        yield* sendDefaultTurn(adapter, "hello");
+        assert.notInclude(harness.query.setPermissionModeCalls, "auto");
+        assert.deepEqual(harness.query.setPermissionModeCalls, ["default"]);
+
+        // A later init reporting the default mode again neither warns nor changes anything.
+        harness.query.emit(initFrame("default", "init-auto-observed-2"));
+        harness.query.emit(sentinelFrame("auto-observed-2"));
+        yield* log.waitFor(isSentinel("auto-observed-2"));
+        assert.deepEqual(autoModeWarnings(log.events), [REFUSED_WARNING]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("keeps auto when the first init reports plan mode", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startAutoSession(adapter, "plan");
+
+        harness.query.emit(initFrame("plan", "init-auto-plan"));
+        harness.query.emit(sentinelFrame("auto-plan"));
+        yield* log.waitFor(isSentinel("auto-plan"));
+
+        yield* sendDefaultTurn(adapter, "hello");
+        assert.deepEqual(harness.query.setPermissionModeCalls, ["auto"]);
+        assert.deepEqual(autoModeWarnings(log.events), []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("keeps auto when a later init reports the default mode", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startAutoSession(adapter, "later");
+
+        harness.query.emit(initFrame("auto", "init-auto-first"));
+        harness.query.emit(initFrame("default", "init-auto-later"));
+        harness.query.emit(sentinelFrame("auto-later"));
+        yield* log.waitFor(isSentinel("auto-later"));
+
+        yield* sendDefaultTurn(adapter, "hello");
+        assert.deepEqual(harness.query.setPermissionModeCalls, ["auto"]);
+        assert.deepEqual(autoModeWarnings(log.events), []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
   });
 
   it.effect("loads Claude filesystem settings sources for SDK sessions", () => {

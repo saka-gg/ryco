@@ -27,6 +27,7 @@ import {
   ProviderInstanceId,
   ServerSettings,
   type ServerProvider,
+  type ServerProviderModel,
   type ServerProviderRateLimits,
   type ServerProviderSlashCommand,
   type ServerSettings as ContractServerSettings,
@@ -45,6 +46,7 @@ import {
   resolveClaudeApiModelId,
 } from "./ClaudeProvider.ts";
 import type { ClaudeCredentialStore } from "./ClaudeUsage.ts";
+import { type ClaudeCliModelInfo, makeClaudeCliModelMemory } from "../claudeCliModels.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
@@ -231,6 +233,7 @@ type TestClaudeCapabilities = {
   readonly apiKeySource?: string | undefined;
   readonly apiProvider?: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly models?: ReadonlyArray<ClaudeCliModelInfo>;
 };
 
 function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
@@ -3010,6 +3013,195 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           ),
         ),
       );
+
+      describe("with Claude Code's own model report", () => {
+        const cliModels: ReadonlyArray<ClaudeCliModelInfo> = [
+          {
+            value: "claude-opus-5-5",
+            supportsAutoMode: false,
+            supportsFastMode: false,
+            supportedEffortLevels: ["low", "medium", "high"],
+          },
+          { value: "sonnet", resolvedModel: "claude-sonnet-5", supportsAutoMode: true },
+        ];
+        const claudeVersionLayer = (version: string) =>
+          mockSpawnerLayer((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: `${version}\n`, stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          });
+        const opusOf = (status: { readonly models: ReadonlyArray<ServerProviderModel> }) => {
+          const opus = status.models.find((model) => model.slug === "claude-opus-5-5");
+          if (!opus) assert.fail("Expected Claude Opus 5.5 in the snapshot.");
+          return opus;
+        };
+        const effortIds = (model: ServerProviderModel) => {
+          const effort = model.capabilities?.optionDescriptors?.find(
+            (descriptor) => descriptor.id === "effort",
+          );
+          return effort?.type === "select" ? effort.options.map((option) => option.id) : undefined;
+        };
+        const hasFastMode = (model: ServerProviderModel) =>
+          model.capabilities?.optionDescriptors?.some(
+            (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
+          ) ?? false;
+
+        it.effect("carries Auto support and the narrowed controls on a ready snapshot", () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ models: cliModels }),
+            );
+            assert.strictEqual(status.status, "ready");
+            const opus = opusOf(status);
+            assert.strictEqual(opus.supportsAutoMode, false);
+            assert.isFalse(hasFastMode(opus));
+            assert.deepStrictEqual(effortIds(opus), ["low", "medium", "high"]);
+            assert.strictEqual(
+              status.models.find((model) => model.slug === "claude-sonnet-5")?.supportsAutoMode,
+              true,
+            );
+            // Models the report does not name keep the manifest's controls.
+            const opus46 = status.models.find((model) => model.slug === "claude-opus-4-6");
+            assert.strictEqual(opus46?.supportsAutoMode, undefined);
+            assert.isTrue(opus46 !== undefined && hasFastMode(opus46));
+          }).pipe(Effect.provide(claudeVersionLayer("1.0.0"))),
+        );
+
+        it.effect("keeps the last report of the same CLI version when a later probe has none", () =>
+          Effect.gen(function* () {
+            const memory = yield* makeClaudeCliModelMemory();
+            const options = { cliModelMemory: memory };
+            yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ models: cliModels }),
+              {},
+              undefined,
+              undefined,
+              options,
+            );
+
+            const failed = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              options,
+            );
+            assert.strictEqual(failed.status, "warning");
+            assert.strictEqual(opusOf(failed).supportsAutoMode, false);
+            assert.isFalse(hasFastMode(opusOf(failed)));
+
+            const partial = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(),
+              {},
+              undefined,
+              undefined,
+              options,
+            );
+            assert.strictEqual(partial.status, "ready");
+            assert.strictEqual(opusOf(partial).supportsAutoMode, false);
+            assert.deepStrictEqual(effortIds(opusOf(partial)), ["low", "medium", "high"]);
+          }).pipe(Effect.provide(claudeVersionLayer("1.0.0"))),
+        );
+
+        it.effect("asks for the capabilities of the CLI version it just read", () =>
+          Effect.gen(function* () {
+            const versions: Array<string | null> = [];
+            const resolve = (_settings: unknown, cliVersion: string | null) => {
+              versions.push(cliVersion);
+              return claudeCapabilities({ models: cliModels })();
+            };
+            yield* checkClaudeProviderStatus(defaultClaudeSettings, resolve).pipe(
+              Effect.provide(claudeVersionLayer("1.0.0")),
+            );
+            yield* checkClaudeProviderStatus(defaultClaudeSettings, resolve).pipe(
+              Effect.provide(claudeVersionLayer("1.0.1")),
+            );
+            assert.deepStrictEqual(versions, ["1.0.0", "1.0.1"]);
+          }),
+        );
+
+        it.effect("drops the remembered report once the CLI version changes", () =>
+          Effect.gen(function* () {
+            const memory = yield* makeClaudeCliModelMemory();
+            const options = { cliModelMemory: memory };
+            yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ models: cliModels }),
+              {},
+              undefined,
+              undefined,
+              options,
+            ).pipe(Effect.provide(claudeVersionLayer("1.0.0")));
+
+            const updated = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              options,
+            ).pipe(Effect.provide(claudeVersionLayer("1.0.1")));
+            assert.strictEqual(opusOf(updated).supportsAutoMode, undefined);
+            assert.isTrue(hasFastMode(opusOf(updated)));
+
+            // Going back does not resurrect it either.
+            const reverted = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              options,
+            ).pipe(Effect.provide(claudeVersionLayer("1.0.0")));
+            assert.strictEqual(opusOf(reverted).supportsAutoMode, undefined);
+          }),
+        );
+
+        it.effect("keeps each instance's report to itself", () =>
+          Effect.gen(function* () {
+            // A first-party instance and one routed through a proxy, each with its own memory.
+            const firstParty = { cliModelMemory: yield* makeClaudeCliModelMemory() };
+            const proxied = { cliModelMemory: yield* makeClaudeCliModelMemory() };
+            const firstPartyStatus = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({
+                models: [{ value: "claude-opus-5-5", supportsAutoMode: true }],
+              }),
+              {},
+              undefined,
+              undefined,
+              firstParty,
+            );
+            const proxiedStatus = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ tokenSource: "ANTHROPIC_AUTH_TOKEN", models: cliModels }),
+              PROXIED_CLAUDE_ENVIRONMENT,
+              undefined,
+              undefined,
+              proxied,
+            );
+            assert.strictEqual(opusOf(firstPartyStatus).supportsAutoMode, true);
+            assert.isTrue(hasFastMode(opusOf(firstPartyStatus)));
+            assert.strictEqual(opusOf(proxiedStatus).supportsAutoMode, false);
+            assert.isFalse(hasFastMode(opusOf(proxiedStatus)));
+
+            const firstPartyFailed = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              {},
+              undefined,
+              undefined,
+              firstParty,
+            );
+            assert.strictEqual(opusOf(firstPartyFailed).supportsAutoMode, true);
+            assert.isTrue(hasFastMode(opusOf(firstPartyFailed)));
+          }).pipe(Effect.provide(claudeVersionLayer("1.0.0"))),
+        );
+      });
     });
   },
 );

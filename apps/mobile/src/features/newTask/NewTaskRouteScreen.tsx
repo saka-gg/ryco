@@ -9,7 +9,10 @@ import { StackActions, type StaticScreenProps, useNavigation } from "@react-navi
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, TextInput, View } from "react-native";
 
-import { normalizeInteractionModeForProviderTarget } from "@ryco/client-runtime/state/composer";
+import {
+  getAutoRuntimeModeUnavailableReason,
+  normalizeInteractionModeForProviderTarget,
+} from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 import {
@@ -268,6 +271,10 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   );
   const interactionModeSupported = selectedProvider?.showInteractionModeToggle ?? true;
   const askModeSupported = selectedProvider?.supportsAskMode ?? false;
+  const autoModeUnavailableReason = getAutoRuntimeModeUnavailableReason(
+    selectedProvider?.models ?? [],
+    modelSelection.model,
+  );
   const interactionMode = interactionModeSupported
     ? normalizeInteractionModeForProviderTarget(selectedInteractionMode, askModeSupported)
     : "default";
@@ -663,6 +670,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             interactionMode={interactionMode}
             interactionModeSupported={interactionModeSupported}
             askModeSupported={askModeSupported}
+            autoModeUnavailableReason={autoModeUnavailableReason}
             onChangeInteractionMode={(mode) => {
               setInteractionMode(mode);
               resetAttempt();
