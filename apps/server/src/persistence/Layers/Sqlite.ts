@@ -69,10 +69,12 @@ export const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(functi
 
 /**
  * Which database `setup` prepares. A file database may be shared with other processes, so it
- * migrates under the ownership policy and is backed up before it changes; an in-memory one is
- * private to this connection.
+ * migrates under the ownership policy and is backed up before it changes; a private one (in
+ * memory, or a copy no other process knows of) is migrated directly.
  */
-type SetupTarget = { readonly kind: "file"; readonly dbPath: string } | { readonly kind: "memory" };
+type SetupTarget =
+  | { readonly kind: "file"; readonly dbPath: string }
+  | { readonly kind: "private" };
 
 /**
  * The backup code (~30 KB) stays out of the boot path: startup loads it only when a backup is
@@ -144,7 +146,7 @@ const backUpAndMigrate = (dbPath: string, options: { readonly finalize: boolean 
  * for one to finish its own upgrade, never takes a backup.
  */
 const upgradeSchema = (target: SetupTarget) =>
-  target.kind === "memory"
+  target.kind === "private"
     ? runMigrations()
     : migrateUnderOwnershipPolicy(target.dbPath, (options) =>
         backUpAndMigrate(target.dbPath, options),
@@ -200,7 +202,7 @@ const runSetup = (target: SetupTarget) =>
   });
 
 const makeSetup = (target: SetupTarget) => Layer.effectDiscard(runSetup(target));
-const memorySetup = makeSetup({ kind: "memory" });
+const privateSetup = makeSetup({ kind: "private" });
 
 export interface SqlitePersistenceOptions {
   /**
@@ -245,8 +247,19 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   );
 }, Layer.unwrap);
 
+/**
+ * A private copy of a database, set up and migrated as the server does its own, without the
+ * ownership policy or a pre-upgrade backup: no other process knows the file. The node update
+ * preflight (nodeUpdate/preflight.ts) migrates one to show a release can upgrade this node's
+ * database. The file must exist: Node's client would create an empty one.
+ */
+export const makePrivateSqliteCopyLive = (dbPath: string) =>
+  Layer.provideMerge(privateSetup, makeRuntimeSqliteLayer({ filename: dbPath, create: false }));
+
 const memoryPersistence = (sqlite: Layer.Layer<SqlClient.SqlClient, SqlError>) =>
-  SqliteReadClientLayer.layerMain.pipe(Layer.provideMerge(Layer.provideMerge(memorySetup, sqlite)));
+  SqliteReadClientLayer.layerMain.pipe(
+    Layer.provideMerge(Layer.provideMerge(privateSetup, sqlite)),
+  );
 
 /** A new in-memory database that runs every migration itself. */
 export const SqlitePersistenceMemoryFresh = memoryPersistence(
@@ -268,7 +281,7 @@ const buildMigratedMemoryImage = Effect.gen(function* () {
     return yield* client.export;
   }).pipe(
     Effect.provide(
-      Layer.provideMerge(memorySetup, NodeSqliteClient.layer({ filename: ":memory:" })),
+      Layer.provideMerge(privateSetup, NodeSqliteClient.layer({ filename: ":memory:" })),
     ),
   );
 }).pipe(

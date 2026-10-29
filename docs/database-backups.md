@@ -33,6 +33,10 @@ it already has. A later restart that finds the same takes a new copy and removes
 Either way, a crash loop keeps one copy and never replaces older backups with copies of the same
 data.
 
+A node update from the apps also keeps a copy of its own, `<stateDir>/node-update/pre-<version>.sqlite`,
+taken right before the node restarts into the new release. It is what a rolled-back update restores
+([node-updates.md](node-updates.md)).
+
 ## How it works, and what it costs
 
 The backup is taken in two phases.

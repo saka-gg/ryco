@@ -1757,6 +1757,110 @@ export const createManualBackup = Effect.fn("createManualBackup")(function* (inp
   );
 });
 
+export interface LiveDatabaseCopy {
+  readonly path: string;
+  /** The schema (latest migration) the copy holds. */
+  readonly schema: number;
+  readonly bytes: number;
+  readonly ms: number;
+}
+
+/**
+ * A consistent, compacted copy of the live database `dbPath` at `destination`, for a node update:
+ * its preflight migrates one, and the snapshot it can roll back to is one. `VACUUM INTO` on a
+ * read-only connection as `ryco db backup` takes it, so a live writer keeps going; unlike a
+ * backup it is neither compressed nor `quick_check`ed (the snapshot is taken right before a
+ * restart, and every second it takes is a second of writes it does not hold), only its size and
+ * ledger are checked. It is written under a partial name beside `destination`, flushed, and
+ * renamed over it: `destination` is the previous file or a complete copy. Refused when the
+ * volume has less than twice the database's size free, so the copy cannot fill the disk under
+ * the live database.
+ */
+export const copyLiveDatabase = Effect.fn("copyLiveDatabase")(function* (input: {
+  readonly dbPath: string;
+  readonly destination: string;
+  readonly openSqlite: OpenSqlite;
+}) {
+  const env = yield* BackupEnvironment;
+  const startedAt = performance.now();
+  const { dbPath, destination, openSqlite } = input;
+  const directory = dirname(destination);
+
+  const database = yield* io("stat", dbPath, () => stat(dbPath)).pipe(Effect.option);
+  if (Option.isNone(database) || !database.value.isFile()) {
+    return yield* commandError("no-database", `No Ryco database at ${dbPath}.`);
+  }
+  yield* io("mkdir", directory, () => mkdir(directory, { recursive: true, mode: 0o700 })).pipe(
+    Effect.mapError(asCommandError),
+  );
+  const databaseBytes =
+    database.value.size + (yield* fileSize(`${dbPath}-wal`).pipe(Effect.mapError(asCommandError)));
+  const space = yield* Effect.promise(() => env.statfs(directory).catch(() => undefined));
+  const needed = BACKUP_FREE_SPACE_FACTOR * databaseBytes;
+  if (space !== undefined && space.bavail * space.bsize < needed) {
+    return yield* commandError(
+      "insufficient-space",
+      `Not enough free space to copy the database into ${directory}: ${formatBytes(space.bavail * space.bsize)} free, ${formatBytes(needed)} needed for a ${formatBytes(databaseBytes)} database.`,
+    );
+  }
+
+  const partial = join(directory, partialName(basename(destination), env.pid));
+  const discardPartial = Effect.forEach(
+    ["", "-wal", "-shm", "-journal"].map((suffix) => `${partial}${suffix}`),
+    (path) => Effect.ignore(removeFile(path)),
+  );
+  return yield* Effect.gen(function* () {
+    // A partial of an earlier attempt of this process would make `VACUUM INTO` fail.
+    yield* discardPartial;
+    const liveSchema = yield* withReadConnection(
+      openSqlite,
+      dbPath,
+      Effect.gen(function* () {
+        const client = yield* SqlClient.SqlClient;
+        const schema = yield* readLedgerVersion(clientRunner(client));
+        yield* client.unsafe("VACUUM INTO ?", [partial]);
+        return schema;
+      }),
+    );
+    const shape = yield* withReadConnection(
+      openSqlite,
+      partial,
+      Effect.gen(function* () {
+        const run = clientRunner(yield* SqlClient.SqlClient);
+        return {
+          schema: yield* readLedgerVersion(run),
+          pageCount: yield* queryNumber(run, "PRAGMA page_count"),
+          pageSize: yield* queryNumber(run, "PRAGMA page_size"),
+        };
+      }),
+    );
+    const bytes = yield* fileSize(partial);
+    if (bytes !== shape.pageCount * shape.pageSize || shape.schema < liveSchema) {
+      return yield* commandError(
+        "check-failed",
+        `The copy of ${dbPath} does not match it (${bytes} bytes for ${shape.pageCount} pages of ${shape.pageSize} bytes, schema ${shape.schema} of ${liveSchema}).`,
+      );
+    }
+    yield* restrictToOwner(partial);
+    yield* io("sync", partial, () => syncFile(partial));
+    yield* io("rename", destination, () => rename(partial, destination));
+    yield* io("sync", directory, () => syncDirectory(directory)).pipe(Effect.ignore);
+    return {
+      path: destination,
+      schema: shape.schema,
+      bytes,
+      ms: Math.round(performance.now() - startedAt),
+    } satisfies LiveDatabaseCopy;
+  }).pipe(
+    Effect.catchTags({
+      SqlError: (error) =>
+        Effect.fail(commandError("io", `Could not copy ${dbPath}: ${error.message}`, error)),
+      DatabaseBackupError: (error) => Effect.fail(asCommandError(error)),
+    }),
+    Effect.onExit((exit) => (exit._tag === "Success" ? Effect.void : discardPartial)),
+  );
+});
+
 /** A backup, as `ryco db list` shows it. */
 export interface ListedDatabaseBackup extends DatabaseBackup {
   /** This build can open it: its schema is not newer than the newest migration it knows. */

@@ -1,6 +1,9 @@
 import { LocalTaskServiceLive } from "./tasks/LocalTaskService.ts";
 import { WorktreeNotesServiceLive } from "./notes/WorktreeNotesService.ts";
-import { NodeUpdateServiceLive } from "./nodeUpdate/NodeUpdateService.ts";
+import {
+  confirmNodeUpdateAfterServe,
+  NodeUpdateServiceLive,
+} from "./nodeUpdate/NodeUpdateService.ts";
 import { ProviderSignInLive } from "./provider/signIn/ProviderSignIn.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
@@ -64,6 +67,7 @@ import {
   HubConnectorDeferredLive,
   startHubConnectorAfterServe,
 } from "./hubConnector/HubConnectorDeferred.ts";
+import { HubConnectorReady } from "./hubConnector/HubConnectorService.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
 import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReachabilityHttp.ts";
@@ -790,6 +794,14 @@ export const makeServerLayer = Layer.unwrap(
         // Process lock and key custody: built now that handlers are attached;
         // Hub routes wait for it rather than the whole server.
         yield* startHubConnectorAfterServe(config.hubConnector);
+        // An update this process was restarted into succeeded once the node is ready.
+        const hubConnector = yield* HubConnectorReady;
+        yield* Effect.forkScoped(
+          confirmNodeUpdateAfterServe({
+            commandReady: startup.awaitCommandReady,
+            hubConnector: config.hubConnector?.enabled === true ? hubConnector.await : null,
+          }),
+        );
       }),
     );
     const runtimeStateLayer = Layer.effectDiscard(

@@ -4,7 +4,7 @@
  *
  * Every command is bounded by its timeout and keeps only the tail of its output, which
  * is what explains a failed install. The restart is handed to launchd or systemd in a
- * detached process, because it ends this one.
+ * detached process, because it ends this one. Loaded with the first update.
  *
  * @module nodeUpdate/processes
  */
@@ -16,10 +16,108 @@ import { ChildProcess, type ChildProcessSpawner } from "effect/process";
 
 import { systemdUnitName } from "../service/nodeService.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
-import type { NodeUpdateCommand } from "./installation.ts";
+import { type DetectedNodeInstallation, RYCO_CLI_PACKAGE } from "./installation.ts";
+import {
+  NODE_UPDATE_OUTPUT_MAX_CHARS,
+  NODE_UPDATE_PREFLIGHT_ARG,
+  NODE_UPDATE_PREFLIGHT_DATABASE_FLAG,
+} from "./updateProtocol.ts";
 
-/** The contract's bound on `run.output`. */
-export const NODE_UPDATE_OUTPUT_MAX_CHARS = 10_000;
+export { NODE_UPDATE_OUTPUT_MAX_CHARS };
+
+export interface NodeUpdateCommand {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly timeout: Duration.Input;
+}
+
+export const NODE_INSTALL_TIMEOUT = Duration.minutes(10);
+export const NODE_VERIFY_TIMEOUT = Duration.seconds(60);
+
+/**
+ * Installs exactly `version` into the installation this process runs from: npm into its
+ * own prefix (not whichever `npm` the PATH finds first), bun with the running bun.
+ */
+export function nodeInstallCommand(
+  installation: DetectedNodeInstallation,
+  version: string,
+  execPath: string,
+): NodeUpdateCommand | null {
+  const target = `${RYCO_CLI_PACKAGE}@${version}`;
+  switch (installation.kind) {
+    case "npm-global":
+      return installation.npmPrefix === null
+        ? null
+        : {
+            command: "npm",
+            args: ["install", "-g", "--prefix", installation.npmPrefix, target],
+            timeout: NODE_INSTALL_TIMEOUT,
+          };
+    case "bun-global": {
+      const runtime = execPath.split(/[\\/]/u).at(-1) ?? "";
+      return {
+        command: /^bun(?:\.exe)?$/iu.test(runtime) ? execPath : "bun",
+        args: ["add", "-g", target],
+        timeout: NODE_INSTALL_TIMEOUT,
+      };
+    }
+    case "pnpm-global":
+      return { command: "pnpm", args: ["add", "-g", target], timeout: NODE_INSTALL_TIMEOUT };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Runs the installed entry script once; it must report the release that was installed. Only
+ * for a release that predates the preflight ({@link nodePreflightCommand}).
+ */
+export function nodeVerifyCommand(
+  installation: DetectedNodeInstallation,
+  execPath: string,
+): NodeUpdateCommand | null {
+  return installation.entryScript === null
+    ? null
+    : {
+        command: execPath,
+        args: [installation.entryScript, "--version"],
+        timeout: NODE_VERIFY_TIMEOUT,
+      };
+}
+
+/** Migrating a copy of a large database can take minutes. */
+export const NODE_PREFLIGHT_TIMEOUT = Duration.minutes(10);
+
+/**
+ * Runs the installed release's preflight (preflight.ts) against `databaseCopy`: it loads
+ * its whole server graph, native modules included, and migrates the copy, without listening or
+ * touching this node's own state.
+ */
+export function nodePreflightCommand(
+  installation: DetectedNodeInstallation,
+  execPath: string,
+  databaseCopy: string,
+): NodeUpdateCommand | null {
+  return installation.entryScript === null
+    ? null
+    : {
+        command: execPath,
+        args: [
+          installation.entryScript,
+          NODE_UPDATE_PREFLIGHT_ARG,
+          NODE_UPDATE_PREFLIGHT_DATABASE_FLAG,
+          databaseCopy,
+        ],
+        timeout: NODE_PREFLIGHT_TIMEOUT,
+      };
+}
+
+/** `command` as the boot guard runs it during a rollback (bootGuard.ts). */
+export const recordNodeUpdateCommand = (command: NodeUpdateCommand) => ({
+  command: command.command,
+  args: [...command.args],
+  timeoutMs: Math.max(1, Math.round(Duration.toMillis(command.timeout))),
+});
 
 export interface NodeUpdateCommandResult {
   readonly exitCode: number | null;

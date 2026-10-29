@@ -17,6 +17,7 @@ import {
   BACKUP_NAME_PATTERN,
   BackupEnvironment,
   cleanStaleBackupPartials,
+  copyLiveDatabase,
   createManualBackup,
   databaseBackupsDirectory,
   describeDatabaseBackups,
@@ -1248,6 +1249,82 @@ describe("manual backups", () => {
       assert.deepEqual(backupFiles(home.backupsDir), []);
     }).pipe(Effect.ensuring(home.cleanup));
   });
+});
+
+describe("live database copies (node updates)", () => {
+  const copyTo = (dbPath: string, destination: string) =>
+    copyLiveDatabase({ dbPath, destination, openSqlite: makeRuntimeSqliteLayer }).pipe(
+      Effect.provide(quiet),
+    );
+
+  it.effect(
+    "copies what is still in the WAL, replacing an earlier copy, with no partial left",
+    () => {
+      const home = makeHome();
+      return Effect.gen(function* () {
+        yield* buildDatabase(home.dbPath, undefined);
+        // An open writer whose last commit is only in the WAL.
+        const writer = new DatabaseSync(home.dbPath);
+        writer.exec("PRAGMA wal_autocheckpoint = 0");
+        writer.exec("INSERT INTO backup_marker (note) VALUES ('only in the wal')");
+        assert.isAbove(NodeFS.statSync(`${home.dbPath}-wal`).size, 0);
+        const updateDir = NodePath.join(NodePath.dirname(home.dbPath), "node-update");
+        const destination = NodePath.join(updateDir, "pre-0.1.35.sqlite");
+        NodeFS.mkdirSync(updateDir);
+        NodeFS.writeFileSync(destination, "an older snapshot");
+
+        const copy = yield* copyTo(home.dbPath, destination).pipe(
+          Effect.ensuring(Effect.sync(() => writer.close())),
+        );
+        assert.equal(copy.path, destination);
+        assert.equal(copy.schema, LATEST);
+        assert.equal(copy.bytes, NodeFS.statSync(destination).size);
+        const copied = new DatabaseSync(destination, { readOnly: true });
+        try {
+          assert.deepEqual(
+            (
+              copied.prepare("SELECT note FROM backup_marker ORDER BY id").all() as Array<{
+                note: string;
+              }>
+            ).map((row) => row.note),
+            ["before-upgrade", "only in the wal"],
+          );
+          assert.deepEqual(copied.prepare("PRAGMA quick_check").get(), { quick_check: "ok" });
+        } finally {
+          copied.close();
+        }
+        // One copy, under its own name: no partial, no sidecars.
+        assert.deepEqual(NodeFS.readdirSync(updateDir), ["pre-0.1.35.sqlite"]);
+        if (process.platform !== "win32") {
+          assert.equal(NodeFS.statSync(destination).mode & 0o777, 0o600);
+        }
+      }).pipe(Effect.ensuring(home.cleanup));
+    },
+  );
+
+  it.effect(
+    "refuses without a database or the space for a copy, and keeps the earlier copy",
+    () => {
+      const home = makeHome();
+      return Effect.gen(function* () {
+        const destination = NodePath.join(home.root, "copy.sqlite");
+        const missing = yield* Effect.flip(copyTo(home.dbPath, destination));
+        assert.equal(missing.reason, "no-database");
+        assert.isFalse(NodeFS.existsSync(home.dbPath));
+
+        yield* buildDatabase(home.dbPath, undefined);
+        NodeFS.writeFileSync(destination, "the earlier copy");
+        const full = yield* Effect.flip(
+          copyTo(home.dbPath, destination).pipe(
+            withEnvironment({ statfs: async () => ({ type: 1, bavail: 10, bsize: 4096 }) }),
+          ),
+        );
+        assert.equal(full.reason, "insufficient-space");
+        assert.equal(NodeFS.readFileSync(destination, "utf8"), "the earlier copy");
+        assert.deepEqual(NodeFS.readdirSync(home.root).toSorted(), ["copy.sqlite", "userdata"]);
+      }).pipe(Effect.ensuring(home.cleanup));
+    },
+  );
 });
 
 describe("listing backups", () => {
