@@ -5,6 +5,7 @@ import { Schema } from "effect";
 
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { CliProxyHubId } from "./cliProxy.ts";
+import { ChangeRequestTemplateListInput } from "./changeRequestReview.ts";
 import {
   ClientSettingsPatch,
   ClientSettingsSchema,
@@ -718,4 +719,26 @@ describe("git writing style settings", () => {
         expect(() => decodeServerSettingsPatch({ projectGitWritingStyle: { a: style } })).toThrow();
     },
   );
+});
+
+describe("pull request template settings and listing input", () => {
+  const decodeListInput = Schema.decodeUnknownSync(ChangeRequestTemplateListInput);
+
+  it("turns pull request templates on for old settings and patches the switch alone", () => {
+    expect(decodeServerSettings({}).pullRequestTemplates).toBe(true);
+    expect(decodeServerSettingsPatch({ pullRequestTemplates: false })).toEqual({
+      pullRequestTemplates: false,
+    });
+    expect(() => decodeServerSettingsPatch({ pullRequestTemplates: "no" })).toThrow();
+  });
+
+  it("takes a branch name as the base, never revision syntax", () => {
+    for (const base of ["main", "release/2026.10", "refs/heads/main"]) {
+      expect(decodeListInput({ cwd: "/repo", baseRefName: base }).baseRefName).toBe(base);
+    }
+    expect(decodeListInput({ cwd: "/repo" })).toEqual({ cwd: "/repo" });
+    for (const base of [":/fix", "main:docs", "main@{1}", "@{-1}", "-x", "a..b", "a b", "main^"]) {
+      expect(() => decodeListInput({ cwd: "/repo", baseRefName: base })).toThrow();
+    }
+  });
 });

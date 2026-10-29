@@ -213,6 +213,7 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.sourceControlUpdateChangeRequestComment]: "operator",
   [WS_METHODS.sourceControlUpdateChangeRequest]: "operator",
   [WS_METHODS.sourceControlCreateChangeRequest]: "operator",
+  [WS_METHODS.sourceControlListChangeRequestTemplates]: "operator",
   [WS_METHODS.sourceControlLinkWorktreePullRequest]: "operator",
   [WS_METHODS.sourceControlDismissWorktreePullRequest]: "operator",
   // Wakes the thread's agent later, with the thread's permissions: an operator mutation.
@@ -487,6 +488,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.sourceControlUpdateChangeRequestComment]: "mutation",
   [WS_METHODS.sourceControlUpdateChangeRequest]: "mutation",
   [WS_METHODS.sourceControlCreateChangeRequest]: "mutation",
+  [WS_METHODS.sourceControlListChangeRequestTemplates]: "read",
   [WS_METHODS.sourceControlLinkWorktreePullRequest]: "mutation",
   [WS_METHODS.sourceControlDismissWorktreePullRequest]: "mutation",
   [WS_METHODS.sourceControlSetPullRequestWatch]: "mutation",

@@ -1,10 +1,12 @@
 import * as fs from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ChildProcessSpawner } from "effect/process";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, Schema } from "effect";
 import {
   AuthSessionId,
+  GitCommandError,
   SourceControlProviderError,
   ThreadId,
   WorktreeId,
@@ -33,7 +35,17 @@ import {
   SourceControlProviderRegistry,
   type SourceControlProviderRegistryShape,
 } from "../sourceControl/SourceControlProviderRegistry.ts";
+import * as GitManager from "../git/GitManager.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import {
+  WorkspaceAccessDeniedError,
+  WorkspaceAccessPolicy,
+  type WorkspaceAccessPolicyShape,
+} from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WsRpcContext } from "./context.ts";
+import { rpcAccessFor } from "./RpcAccessPolicy.ts";
 import { makeSourceControlHandlers, selectCreatedChangeRequest } from "./sourceControlRpc.ts";
 
 const handlerLayer = Layer.mergeAll(
@@ -947,4 +959,90 @@ describe("pull request watch", () => {
       expect(error).toMatchObject({ _tag: "PullRequestWatchError", reason: "unsupported" });
     }),
   );
+});
+
+describe("change request template listing", () => {
+  const input = { cwd: "/requested", baseRefName: "main" };
+  for (const denied of ["role", "workspace", "none"] as const) {
+    it.effect(`checks role and workspace before any git read (${denied} denied)`, () =>
+      Effect.gen(function* () {
+        let pathReads = 0;
+        let gitReads = 0;
+        const listed: Array<{ readonly cwd: string; readonly baseRefName?: string | undefined }> =
+          [];
+        const gitWorkflow = yield* GitWorkflowService.make().pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+                resolve: () => Effect.succeed({ kind: "git" } as never),
+              }),
+              Layer.mock(GitVcsDriver.GitVcsDriver)({
+                execute: () =>
+                  Effect.sync(() => {
+                    gitReads++;
+                    return {
+                      exitCode: ChildProcessSpawner.ExitCode(0),
+                      stdout: "/canonical\n",
+                      stderr: "",
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    };
+                  }),
+              }),
+              Layer.mock(GitManager.GitManager)({
+                listChangeRequestTemplates: (request) =>
+                  Effect.sync(() => {
+                    listed.push(request);
+                    return { templates: [], generationTemplatePath: null };
+                  }),
+              }),
+            ),
+          ),
+        );
+        const ctx = {
+          ownerEffect: <A, E, R>(_method: string, work: Effect.Effect<A, E, R>) =>
+            denied === "role"
+              ? Effect.fail(
+                  new GitCommandError({
+                    cwd: input.cwd,
+                    command: "test",
+                    operation: "authorization",
+                    detail: "denied",
+                  }),
+                )
+              : work,
+          gitWorkflow,
+        } as unknown as WsRpcContext;
+        const policy = {
+          assertExistingPath: () =>
+            Effect.suspend(() => {
+              pathReads++;
+              return denied === "workspace"
+                ? Effect.fail(
+                    new WorkspaceAccessDeniedError({
+                      operation: "listChangeRequestTemplates",
+                      requestedPath: input.cwd,
+                      accessRoot: "/allowed",
+                      reason: "outsideRoot",
+                    }),
+                  )
+                : Effect.succeed("/canonical");
+            }),
+        } as unknown as WorkspaceAccessPolicyShape;
+        const outcome = yield* makeSourceControlHandlers(ctx)
+          [WS_METHODS.sourceControlListChangeRequestTemplates](input)
+          .pipe(
+            Effect.provideService(WorkspaceAccessPolicy, policy),
+            Effect.provide(handlerLayer),
+            Effect.result,
+          );
+        expect(outcome._tag).toBe(denied === "none" ? "Success" : "Failure");
+        expect(pathReads).toBe(denied === "role" ? 0 : denied === "workspace" ? 1 : 3);
+        // One `rev-parse --show-toplevel`, only once the path was allowed.
+        expect(gitReads).toBe(denied === "none" ? 1 : 0);
+        expect(listed).toEqual(denied === "none" ? [{ ...input, cwd: "/canonical" }] : []);
+        expect(rpcAccessFor(WS_METHODS.sourceControlListChangeRequestTemplates)).toBe("operator");
+      }),
+    );
+  }
 });

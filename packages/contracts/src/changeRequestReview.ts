@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { GIT_REF_NAME_PATTERN } from "./settings.ts";
 import {
   SourceControlChangeRequestDetail,
   SourceControlChangeRequestMergeMethod,
@@ -432,6 +433,53 @@ export const ChangeRequestCreateInput = Schema.Struct({
   draft: Schema.optional(Schema.Boolean),
 });
 export type ChangeRequestCreateInput = typeof ChangeRequestCreateInput.Type;
+
+// ── Repository templates for new change requests ──────────────────────
+
+/** A template body is cut to this many bytes of UTF-8, never inside a character. */
+export const CHANGE_REQUEST_TEMPLATE_MAX_BYTES = 8_000;
+/** Templates read and listed per repository tree, default files first. */
+export const CHANGE_REQUEST_TEMPLATE_LIST_MAX = 16;
+
+/** A change request template from the repository's base tree (untrusted repository text). */
+export const ChangeRequestTemplate = Schema.Struct({
+  /** Repository-relative path, e.g. `.github/PULL_REQUEST_TEMPLATE/bug.md`. */
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  /** File name without extension; "Default" for the template the host applies on its own. */
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  /** The host applies it on its own (GitHub's default file, GitLab's `default.md`). */
+  isDefault: Schema.Boolean,
+  /** Byte-bounded below, so this character cap never rejects a read template. */
+  body: Schema.String.check(Schema.isMaxLength(CHANGE_REQUEST_TEMPLATE_MAX_BYTES)),
+  /** The file was longer than CHANGE_REQUEST_TEMPLATE_MAX_BYTES. */
+  truncated: Schema.Boolean,
+});
+export type ChangeRequestTemplate = typeof ChangeRequestTemplate.Type;
+
+export const ChangeRequestTemplateListInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  /**
+   * The branch the change request would target; templates come from its tree (the remote's
+   * branch, else the local one, else none). Without it, the remote's default branch, else
+   * HEAD. A branch name only: no revision syntax.
+   */
+  baseRefName: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(256), Schema.isPattern(GIT_REF_NAME_PATTERN)),
+  ),
+});
+export type ChangeRequestTemplateListInput = typeof ChangeRequestTemplateListInput.Type;
+
+export const ChangeRequestTemplateListResult = Schema.Struct({
+  templates: Schema.Array(ChangeRequestTemplate).check(
+    Schema.isMaxLength(CHANGE_REQUEST_TEMPLATE_LIST_MAX),
+  ),
+  /**
+   * The listed template a generated description follows, which a new description starts from
+   * too; null when the server's rule picks none (it never guesses between templates).
+   */
+  generationTemplatePath: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(1024))),
+});
+export type ChangeRequestTemplateListResult = typeof ChangeRequestTemplateListResult.Type;
 
 // ── Diff file contents (hunk expansion) ───────────────────────────────
 

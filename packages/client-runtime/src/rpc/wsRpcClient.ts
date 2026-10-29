@@ -262,6 +262,9 @@ export interface WsRpcClient {
     readonly createChangeRequest: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlCreateChangeRequest
     >;
+    readonly listChangeRequestTemplates: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlListChangeRequestTemplates
+    >;
     readonly linkWorktreePullRequest: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlLinkWorktreePullRequest
     >;
@@ -780,6 +783,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.sourceControlUpdateChangeRequest](input)),
       createChangeRequest: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlCreateChangeRequest](input)),
+      listChangeRequestTemplates: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.sourceControlListChangeRequestTemplates](input),
+        ),
       linkWorktreePullRequest: (input) =>
         transport.request((client) =>
           client[WS_METHODS.sourceControlLinkWorktreePullRequest](input),

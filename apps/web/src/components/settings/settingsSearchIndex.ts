@@ -376,6 +376,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "git writing prompt text generation pr body description before after custom",
   },
   {
+    section: "source-control",
+    title: "Pull request templates",
+    owner: "node",
+    description: "Fill pull request descriptions from the repository's template.",
+    keywords: "pr template description github gitlab merge request",
+  },
+  {
     section: "providers",
     title: "Provider instances",
     owner: "node",

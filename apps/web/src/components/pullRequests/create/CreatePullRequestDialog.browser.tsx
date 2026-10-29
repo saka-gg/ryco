@@ -24,6 +24,12 @@ vi.mock("~/rpc/useGit", async (importOriginal) => {
   return createUseGitMock(await importOriginal());
 });
 
+import { recordWsConnectionOpened, resetWsConnectionStateForTests } from "@ryco/client-runtime/rpc";
+import type {
+  ChangeRequestTemplate,
+  ChangeRequestTemplateListResult,
+  ServerConfig,
+} from "@ryco/contracts";
 import type { ChangeRequestHostCapabilities } from "@ryco/shared/changeRequestHostCapabilities";
 
 import { toastManager } from "~/components/ui/toast";
@@ -31,6 +37,10 @@ import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "~/environmentApi";
+import {
+  resetSavedEnvironmentRuntimeStoreForTests,
+  useSavedEnvironmentRuntimeStore,
+} from "~/environments/runtime";
 import { buildPullRequestLocation } from "~/pullRequestsRoute";
 
 import { PullRequestListPane } from "../list/PullRequestListPane";
@@ -71,6 +81,8 @@ afterEach(() => {
   resetPullRequestsTestState();
   createPullRequestGitMock.reset();
   __resetEnvironmentApiOverridesForTests();
+  resetSavedEnvironmentRuntimeStoreForTests();
+  resetWsConnectionStateForTests();
   routerMock.navigate.mockClear();
   useCreatePullRequestDialogStore.setState({ open: false, request: null });
 });
@@ -340,4 +352,209 @@ describe("New pull request from the palette", () => {
       .toBeVisible();
     await expect.element(dialog().getByLabelText("Title")).not.toBeInTheDocument();
   });
+});
+
+describe("Repository templates in the description", () => {
+  const template = (
+    path: string,
+    body: string,
+    extra: Partial<ChangeRequestTemplate> = {},
+  ): ChangeRequestTemplate => ({
+    path,
+    name: path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/u, ""),
+    isDefault: false,
+    body,
+    truncated: false,
+    ...extra,
+  });
+  const DEFAULT_TEMPLATE = template(".github/pull_request_template.md", "## What changed", {
+    name: "Default",
+    isDefault: true,
+  });
+  const BUG = template(".github/PULL_REQUEST_TEMPLATE/bug.md", "## Bug\n\n## Fix");
+  const FEATURE = template(".github/PULL_REQUEST_TEMPLATE/feature.md", "## Feature", {
+    truncated: true,
+  });
+
+  /** A base tree's templates and the one the server says a generated description follows. */
+  const listing = (
+    templates: ReadonlyArray<ChangeRequestTemplate>,
+    follows: ChangeRequestTemplate | null = null,
+  ): ChangeRequestTemplateListResult => ({
+    templates,
+    generationTemplatePath: follows?.path ?? null,
+  });
+
+  /** The node behind the fixture environment: whether it reads templates, and the setting. */
+  function nodeConfig(input: { readonly capability?: boolean; readonly setting?: boolean } = {}) {
+    useSavedEnvironmentRuntimeStore.getState().patch(FIXTURE_ENVIRONMENT_ID, {
+      serverConfig: {
+        environment: {
+          capabilities: input.capability === false ? {} : { changeRequestTemplates: true },
+        },
+        settings: { pullRequestTemplates: input.setting ?? true },
+      } as unknown as ServerConfig,
+    });
+  }
+
+  const description = () => dialog().getByLabelText("Description");
+  const picker = () => dialog().getByRole("combobox", { name: /^Template:/u });
+  const option = (name: string) => page.getByRole("option", { name, exact: true });
+
+  it("starts from the default template and swaps templates until the text is edited", async () => {
+    nodeConfig();
+    createPullRequestGitMock.templatesByBase.set(
+      "main",
+      listing([DEFAULT_TEMPLATE, BUG, FEATURE], DEFAULT_TEMPLATE),
+    );
+    const screen = await renderList();
+    await openDialog(screen);
+
+    await expect.element(description()).toHaveValue("## What changed");
+    await expect.element(picker()).toHaveAccessibleName("Template: Default");
+    expect(createPullRequestGitMock.listTemplatesCalls).toEqual([
+      { cwd: FIXTURE_CWD, baseRefName: "main" },
+    ]);
+
+    await userEvent.click(picker());
+    await expect.element(option("No template")).toBeVisible();
+    await expect.element(option("Default")).toHaveAttribute("aria-selected", "true");
+    await expect.element(option("feature (shortened)")).toBeVisible();
+    await userEvent.click(option("bug"));
+    await expect.element(description()).toHaveValue("## Bug\n\n## Fix");
+    await expect.element(picker()).toHaveAccessibleName("Template: bug");
+
+    // Editing the text locks the picker, so a switch never throws away what was written.
+    await userEvent.fill(description(), "## Bug\n\n## Fix\nFixes the login loop.");
+    await expect.element(picker()).toBeDisabled();
+    await expect
+      .element(dialog().getByTitle("Clear the description to switch templates"))
+      .toBeVisible();
+    await userEvent.clear(description());
+    await expect.element(picker()).toBeEnabled();
+    await expect.element(picker()).toHaveAccessibleName("Template: No template");
+
+    await userEvent.type(dialog().getByLabelText("Title"), "Fix the login loop");
+    await userEvent.click(picker());
+    await userEvent.click(option("Default"));
+    await userEvent.click(dialog().getByRole("button", { name: /^Create/u }));
+    await expect.element(dialog()).not.toBeInTheDocument();
+    expect(sourceControlRpcMock.callsTo("useCreateChangeRequestMutation")[0]?.args).toMatchObject({
+      title: "Fix the login loop",
+      body: "## What changed",
+    });
+  });
+
+  it("leaves the description empty when there are several templates and no default", async () => {
+    nodeConfig();
+    createPullRequestGitMock.templatesByBase.set("main", listing([BUG, FEATURE]));
+    const screen = await renderList();
+    await openDialog(screen);
+
+    await expect.element(picker()).toHaveAccessibleName("Template: No template");
+    await expect.element(description()).toHaveValue("");
+    await userEvent.click(picker());
+    await userEvent.type(page.getByLabelText("Find a template"), "bu");
+    await expect.element(option("feature (shortened)")).not.toBeInTheDocument();
+    await userEvent.click(option("bug"));
+    await expect.element(description()).toHaveValue("## Bug\n\n## Fix");
+  });
+
+  it("reads the new base's templates and swaps an untouched description", async () => {
+    nodeConfig();
+    createPullRequestGitMock.templatesByBase.set(
+      "main",
+      listing([DEFAULT_TEMPLATE], DEFAULT_TEMPLATE),
+    );
+    createPullRequestGitMock.templatesByBase.set("release/2026.10", listing([BUG], BUG));
+    const screen = await renderList();
+    await openDialog(screen);
+    await expect.element(description()).toHaveValue("## What changed");
+
+    await pickBranch("Base branch", "origin/release/2026.10");
+    await expect.element(description()).toHaveValue("## Bug\n\n## Fix");
+    expect(createPullRequestGitMock.listTemplatesCalls.at(-1)).toEqual({
+      cwd: FIXTURE_CWD,
+      baseRefName: "release/2026.10",
+    });
+
+    // Edited text stays when the base changes again.
+    await userEvent.fill(description(), "## Bug\n\n## Fix\nDetails.");
+    await pickBranch("Base branch", "main");
+    await expect.element(description()).toHaveValue("## Bug\n\n## Fix\nDetails.");
+  });
+
+  it("drops an untouched template when the new base's templates cannot be read", async () => {
+    nodeConfig();
+    createPullRequestGitMock.templatesByBase.set(
+      "main",
+      listing([DEFAULT_TEMPLATE], DEFAULT_TEMPLATE),
+    );
+    createPullRequestGitMock.failingTemplateBases.add("release/2026.10");
+    const screen = await renderList();
+    await openDialog(screen);
+    await expect.element(description()).toHaveValue("## What changed");
+
+    await pickBranch("Base branch", "origin/release/2026.10");
+    await expect.element(description()).toHaveValue("");
+    await expect.element(picker()).not.toBeInTheDocument();
+    expect(createPullRequestGitMock.listTemplatesCalls.at(-1)).toEqual({
+      cwd: FIXTURE_CWD,
+      baseRefName: "release/2026.10",
+    });
+  });
+
+  it("lists a template the server does not follow without filling the description", async () => {
+    // GitLab applies only default.md on its own, so a lone other template is offered, not used.
+    const gitLabFeature = template(".gitlab/merge_request_templates/feature.md", "## Feature");
+    nodeConfig();
+    createPullRequestGitMock.templatesByBase.set("main", listing([gitLabFeature]));
+    const screen = await renderList();
+    await openDialog(screen);
+
+    await expect.element(picker()).toHaveAccessibleName("Template: No template");
+    await expect.element(description()).toHaveValue("");
+    await userEvent.click(picker());
+    await userEvent.click(option("feature"));
+    await expect.element(description()).toHaveValue("## Feature");
+  });
+
+  it("reads the templates again once the connection comes back after a failed read", async () => {
+    nodeConfig();
+    createPullRequestGitMock.templatesByBase.set(
+      "main",
+      listing([DEFAULT_TEMPLATE], DEFAULT_TEMPLATE),
+    );
+    createPullRequestGitMock.failingTemplateBases.add("main");
+    const screen = await renderList();
+    await openDialog(screen);
+    await expect.poll(() => createPullRequestGitMock.listTemplatesCalls.length).toBe(1);
+    await expect.element(description()).toHaveValue("");
+    await expect.element(picker()).not.toBeInTheDocument();
+
+    createPullRequestGitMock.failingTemplateBases.delete("main");
+    recordWsConnectionOpened({ environmentId: FIXTURE_ENVIRONMENT_ID });
+    await expect.element(description()).toHaveValue("## What changed");
+    await expect.element(picker()).toHaveAccessibleName("Template: Default");
+    expect(createPullRequestGitMock.listTemplatesCalls).toHaveLength(2);
+  });
+
+  for (const off of [
+    { name: "a node that cannot read templates", capability: false },
+    { name: "the setting turned off", setting: false },
+  ]) {
+    it(`asks for nothing and shows no picker with ${off.name}`, async () => {
+      nodeConfig(off);
+      createPullRequestGitMock.templatesByBase.set(
+        "main",
+        listing([DEFAULT_TEMPLATE], DEFAULT_TEMPLATE),
+      );
+      const screen = await renderList();
+      await openDialog(screen);
+      await expect.element(dialog().getByLabelText("Title")).toBeVisible();
+      await expect.element(description()).toHaveValue("");
+      await expect.element(picker()).not.toBeInTheDocument();
+      expect(createPullRequestGitMock.listTemplatesCalls).toEqual([]);
+    });
+  }
 });
