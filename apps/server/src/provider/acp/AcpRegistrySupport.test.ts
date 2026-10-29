@@ -4,10 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { Effect, Fiber, Result } from "effect";
+import { AcpRegistrySettings } from "@ryco/contracts";
+import { Effect, Fiber, Layer, Result, Schema } from "effect";
 import { TestClock } from "effect/testing";
+import { ServerConfig } from "../../config.ts";
 import { isMissingConversationError } from "../resumeFailure.ts";
-import { makeRegistryAcpRuntime } from "./AcpRegistrySupport.ts";
+import {
+  getAcpRegistryAuthMethods,
+  makeRegistryAcpRuntime,
+  resolveAcpAgentCommand,
+} from "./AcpRegistrySupport.ts";
 
 /** The JSON-RPC error a failing `session/load` (or failing `session/resume`) answers with. */
 interface LoadError {
@@ -16,7 +22,7 @@ interface LoadError {
   readonly data?: unknown;
 }
 
-const fixture = (
+const mockAgent = (
   capabilities: object = {},
   protocolVersion = 1,
   loadError: LoadError = { code: -32000, message: "Cannot load" },
@@ -48,8 +54,23 @@ createInterface({input:process.stdin}).on('line', line => {
 `,
       ),
     );
+    const requests = Effect.promise(async () =>
+      (await readFile(log, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { method: string; params?: unknown }),
+    );
+    return { dir, script, requests };
+  });
+
+const fixture = (
+  capabilities: object = {},
+  protocolVersion = 1,
+  loadError: LoadError = { code: -32000, message: "Cannot load" },
+) =>
+  Effect.gen(function* () {
+    const { dir, script, requests } = yield* mockAgent(capabilities, protocolVersion, loadError);
     const runtime = yield* makeRegistryAcpRuntime({
-      settings: { agentId: "test", version: "1.0.0", authMethodId: "login" },
       installed: { command: process.execPath, args: [script], env: {} },
       options: {
         cwd: dir,
@@ -57,12 +78,6 @@ createInterface({input:process.stdin}).on('line', line => {
         ...(capabilities && "resume" in capabilities ? { resumeSessionId: "old" } : {}),
       },
     });
-    const requests = Effect.promise(async () =>
-      (await readFile(log, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as { method: string; params?: unknown }),
-    );
     return { runtime, requests };
   });
 
@@ -235,4 +250,63 @@ it.effect("registry startup times out when the agent never responds to session c
         assert.include(result.failure.detail, "timed out");
     }
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+const localServices = ServerConfig.layerTest(process.cwd(), { prefix: "ryco-acp-local-" }).pipe(
+  Layer.provideMerge(NodeServices.layer),
+);
+
+it.effect(
+  "a local command starts its executable with literal arguments and never authenticates",
+  () =>
+    Effect.gen(function* () {
+      const { dir, script, requests } = yield* mockAgent();
+      const settings = Schema.decodeSync(AcpRegistrySettings)({
+        source: "local",
+        command: process.execPath,
+        args: [script],
+        authMethodId: "login",
+      });
+      const installed = yield* resolveAcpAgentCommand(settings);
+      assert.deepStrictEqual(installed, { command: process.execPath, args: [script], env: {} });
+      const runtime = yield* makeRegistryAcpRuntime({
+        installed,
+        options: { cwd: dir, clientInfo: { name: "test", version: "1" } },
+      });
+      assert.equal((yield* runtime.start()).sessionId, "registry-test");
+      assert.deepStrictEqual(
+        (yield* requests).map((request) => request.method),
+        ["initialize", "session/new"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(localServices)),
+);
+
+it.effect("checking a local command's sign-in methods starts it without authenticating", () =>
+  Effect.gen(function* () {
+    const { script, requests } = yield* mockAgent();
+    const methods = yield* getAcpRegistryAuthMethods(
+      Schema.decodeSync(AcpRegistrySettings)({
+        source: "local",
+        command: process.execPath,
+        args: [script],
+      }),
+    );
+    assert.deepStrictEqual(methods, [{ id: "login", name: "Login", type: "agent" }]);
+    assert.deepStrictEqual(
+      (yield* requests).map((request) => request.method),
+      ["initialize"],
+    );
+  }).pipe(Effect.scoped, Effect.provide(localServices)),
+);
+
+it.effect("a local command that is missing fails before anything is spawned", () =>
+  Effect.gen(function* () {
+    const result = yield* getAcpRegistryAuthMethods(
+      Schema.decodeSync(AcpRegistrySettings)({ source: "local", command: "/nonexistent/agent" }),
+    ).pipe(Effect.result);
+    const failure = failureOf(result);
+    assert.equal(failure?._tag, "AcpTransportError");
+    if (failure?._tag === "AcpTransportError")
+      assert.equal(failure.detail, "`/nonexistent/agent` was not found on this node.");
+  }).pipe(Effect.scoped, Effect.provide(localServices)),
 );

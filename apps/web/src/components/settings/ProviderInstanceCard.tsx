@@ -44,6 +44,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { AcpRegistryAuthentication } from "./AcpRegistryAuthentication";
 import { AcpRegistrySettings } from "./AcpRegistrySettings";
+import { readAcpAgentConfig } from "./acpAgentConfig.logic";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -801,11 +802,13 @@ export function ProviderInstanceCard({
 
         {instance.driver === "acpRegistry" ? (
           <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-            <AcpRegistrySettings value={instance.config} onChange={updateConfig} />
+            {/* The source is fixed once added: sessions and sign-in belong to that agent. */}
+            <AcpRegistrySettings value={instance.config} onChange={updateConfig} variant="card" />
             <div className="mt-4 border-t border-border/60 pt-3">
               <AcpRegistryAuthentication
                 instanceId={instanceId}
                 installationKey={JSON.stringify(instance.config)}
+                source={readAcpAgentConfig(instance.config).source}
               />
             </div>
           </div>

@@ -17,10 +17,8 @@ import { defaultProviderContinuationIdentity, type ProviderDriver } from "../Pro
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import { acpAvailableCommandsToSlashCommands } from "../providerSlashCommands.ts";
-import {
-  makeRegistryAcpRuntime,
-  resolveAcpRegistryInstallation,
-} from "../acp/AcpRegistrySupport.ts";
+import { acpLocalCommandDisplayName, AcpLocalCommandUnavailable } from "../acp/AcpLocalCommand.ts";
+import { makeRegistryAcpRuntime, resolveAcpAgentCommand } from "../acp/AcpRegistrySupport.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 
 const DRIVER = ProviderDriverKind.make("acpRegistry");
@@ -42,9 +40,18 @@ const DEFAULT_ACP_MODELS: ServerProviderModel[] = [
     capabilities: { optionDescriptors: [] },
   },
 ];
+const MAX_REPORTED_VERSION_LENGTH = 64;
+
+/** A local agent's self-reported version, when it is short enough to show. */
+function reportedAgentVersion(version: string | undefined): string | null {
+  const trimmed = version?.trim();
+  return trimmed && trimmed.length <= MAX_REPORTED_VERSION_LENGTH ? trimmed : null;
+}
+
 export function projectAcpRegistrySession(
   value: ServerProvider,
   result: import("../acp/AcpSessionRuntime.ts").AcpSessionRuntimeStartResult,
+  source: AcpRegistrySettings["source"] = "registry",
 ): ServerProvider {
   const capabilities = result.initializeResult.agentCapabilities;
   const models: ServerProviderModel[] = (result.sessionSetupResult.models?.availableModels ?? [])
@@ -73,6 +80,13 @@ export function projectAcpRegistrySession(
   }
   return {
     ...value,
+    // A registry agent's version is its pinned install; a local one reports its own.
+    ...(source === "local"
+      ? {
+          version:
+            reportedAgentVersion(result.initializeResult.agentInfo?.version) ?? value.version,
+        }
+      : {}),
     auth: { status: "authenticated" },
     status: "ready",
     message: "ACP session ready.",
@@ -129,15 +143,20 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
       });
       const changes = yield* PubSub.sliding<ServerProvider>(1);
       yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
+      const local = input.config.source === "local";
       const initial: ServerProvider = {
         instanceId: input.instanceId,
         driver: DRIVER,
-        displayName: input.displayName ?? (input.config.agentId || "ACP Registry"),
+        displayName:
+          input.displayName ??
+          (local
+            ? acpLocalCommandDisplayName(input.config.command)
+            : input.config.agentId || "ACP Registry"),
         ...(input.accentColor ? { accentColor: input.accentColor } : {}),
         continuation: { groupKey: continuationIdentity.continuationKey },
         enabled: input.enabled,
         installed: false,
-        version: input.config.version || null,
+        version: local ? null : input.config.version || null,
         status: input.enabled ? "warning" : "disabled",
         auth: { status: "unknown" },
         checkedAt: new Date().toISOString(),
@@ -172,28 +191,35 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
           Effect.tap((value) => PubSub.publish(changes, value)),
           Effect.asVoid,
         );
-      const resolveInstalled = resolveAcpRegistryInstallation(input.config).pipe(
+      // Resolved again before every spawn: the registry install is re-verified and a local
+      // command is looked up on PATH again. Neither ever installs or downloads anything.
+      const resolveCommand = resolveAcpAgentCommand(input.config, environment).pipe(
         Effect.provideService(ServerConfig, server),
         Effect.provideService(Path.Path, path),
       );
-      const refresh = resolveInstalled.pipe(
+      const refresh = resolveCommand.pipe(
         Effect.flatMap(() =>
           publish((value) => ({
             ...value,
             installed: true,
             status: input.enabled ? "ready" : "disabled",
-            message: input.enabled
-              ? "Installed and verified. Capabilities are discovered when a session starts."
-              : "Provider is disabled.",
+            message: !input.enabled
+              ? "Provider is disabled."
+              : local
+                ? "Command found. Capabilities are discovered when a session starts."
+                : "Installed and verified. Capabilities are discovered when a session starts.",
             checkedAt: new Date().toISOString(),
           })),
         ),
-        Effect.catch(() =>
+        Effect.catch((error) =>
           publish((value) => ({
             ...value,
             installed: false,
             status: input.enabled ? "warning" : "disabled",
-            message: "Install the pinned registry version to use this provider.",
+            message:
+              local && error.cause instanceof AcpLocalCommandUnavailable
+                ? error.cause.detail
+                : "Install the pinned registry version to use this provider.",
             checkedAt: new Date().toISOString(),
           })),
         ),
@@ -212,10 +238,9 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
         ...(loggers.native ? { nativeEventLogger: loggers.native } : {}),
         makeRuntime: (options) =>
           Effect.gen(function* () {
-            // Verify the local manifest and executable before every spawn; no install/network fallback.
-            const installed = yield* resolveInstalled;
+            // Verify the command before every spawn; no install/network fallback.
+            const installed = yield* resolveCommand;
             return yield* makeRegistryAcpRuntime({
-              settings: input.config,
               installed,
               environment,
               options,
@@ -224,7 +249,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
         onStarted: (result) => {
           sessionModelSwitch =
             result.sessionSetupResult.models || result.modelConfigId ? "in-session" : "unsupported";
-          return publish((value) => projectAcpRegistrySession(value, result));
+          return publish((value) => projectAcpRegistrySession(value, result, input.config.source));
         },
         onCommands: (commands) => publish((value) => projectAcpRegistryCommands(value, commands)),
         onUsage: () =>
