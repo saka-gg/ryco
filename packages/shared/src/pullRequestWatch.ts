@@ -36,6 +36,8 @@ import {
 import {
   PULL_REQUEST_AUTO_FIX_MAX_ATTEMPTS,
   PULL_REQUEST_WATCH_ENDED_KEPT,
+  PULL_REQUEST_WATCH_MAX_REJECTED_UPDATES,
+  PULL_REQUEST_WATCHES_PER_THREAD,
 } from "./pullRequestWatchSummary.ts";
 import { truncateUnicodeSafe } from "./String.ts";
 
@@ -64,13 +66,13 @@ export const PULL_REQUEST_WATCH_LIMITS = {
   /** Ryco: a held wake is re-checked from the cached read, without host reads. */
   heldWakeRecheckMs: 10_000,
   /** Ryco: a stack's layers. */
-  maxWatchesPerThread: 8,
+  maxWatchesPerThread: PULL_REQUEST_WATCHES_PER_THREAD,
   /** Ryco: ended watches kept per thread. */
   maxEndedKept: PULL_REQUEST_WATCH_ENDED_KEPT,
   /** Ryco: = completion returns' `DELIVERY_EXPIRY_MS`; how long an ending notice or an agent watch without Agent Control waits. */
   heldWakeExpiryMs: 24 * 60 * 60_000,
   /** Ryco: = completion returns' `MAX_DELIVERY_ATTEMPTS`; refused updates in a row before the watch ends. */
-  maxRejectedUpdates: 5,
+  maxRejectedUpdates: PULL_REQUEST_WATCH_MAX_REJECTED_UPDATES,
   /** Ryco: bound on one wake's text. */
   wakeTextMaxChars: 16_000,
   /** Ryco: bound on one host-sourced name (check, path, login, branch) in a message. */

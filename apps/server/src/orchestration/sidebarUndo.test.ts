@@ -4,6 +4,7 @@ import {
   ProjectId,
   type OrchestrationCommand,
   type OrchestrationReadModel,
+  type ThreadPullRequestWatchUpdatedPayload,
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import { createSidebarUndoReceipts } from "./sidebarUndo.ts";
@@ -173,5 +174,63 @@ it("allows Archive Undo on a settled thread because it only restores visibility"
   const before = { ...f.before, settledOverride: "settled", settledAt: "2020-01-01T00:00:00.000Z" };
   const after = { ...before, archivedAt: "2026-01-01T00:00:00.000Z" };
   receipts.record({ ...f.command, type: "thread.archive" }, f.model(before), f.model(after));
-  expect(receipts.restore(f.undo, f.model(after))?.type).toBe("thread.unarchived");
+  expect(receipts.restore(f.undo, f.model(after))?.map((event) => event.type)).toEqual([
+    "thread.unarchived",
+  ]);
+});
+
+describe("pull request watches and sidebar undo", () => {
+  const activeWatch = {
+    watchId: "github.com/o/r#12",
+    number: 12,
+    revision: 3,
+    startedAt: "2026-09-30T00:00:00.000Z",
+  };
+  const ended = {
+    watchId: "github.com/o/r#12",
+    number: 12,
+    reason: "settled",
+    endedAt: "2026-09-30T00:00:00.000Z",
+  };
+
+  it("starts the watches a settle ended again on Undo, at a fresh revision", () => {
+    const receipts = createSidebarUndoReceipts();
+    const f = fixture();
+    const before = { ...f.before, pullRequestWatchState: { active: [activeWatch], ended: [] } };
+    const after = { ...f.after, pullRequestWatchState: { active: [], ended: [ended] } };
+    receipts.record(f.command, f.model(before), f.model(after));
+    const events = receipts.restore(f.undo, f.model(after));
+    expect(events?.map((event) => event.type)).toEqual([
+      "thread.unsettled",
+      "thread.pull-request-watch-updated",
+    ]);
+    const restored = events?.[1]?.payload as ThreadPullRequestWatchUpdatedPayload | undefined;
+    expect(restored?.watches).toEqual({
+      active: [{ ...activeWatch, revision: 4 }],
+      ended: [],
+    });
+    expect(restored?.changed).toEqual([{ watchId: activeWatch.watchId, ended: null }]);
+  });
+
+  it("keeps the receipt through watch progress, but not through a watch wake", () => {
+    const f = fixture();
+    const progress = (wake: boolean) =>
+      ({
+        type: "thread.pull-request-watch.update",
+        commandId: CommandId.make(`watch-${wake}`),
+        threadId: f.before.id,
+        ...(wake ? { wake: {} } : {}),
+      }) as unknown as OrchestrationCommand;
+
+    const quiet = createSidebarUndoReceipts();
+    quiet.record(f.command, f.model(f.before), f.model(f.after));
+    const next = { ...f.after, pullRequestWatchState: { active: [], ended: [] } };
+    quiet.record(progress(false), f.model(f.after), f.model(next));
+    expect(quiet.restore(f.undo, f.model(next))).not.toBeNull();
+
+    const woken = createSidebarUndoReceipts();
+    woken.record(f.command, f.model(f.before), f.model(f.after));
+    woken.record(progress(true), f.model(f.after), f.model(next));
+    expect(woken.restore(f.undo, f.model(next))).toBeNull();
+  });
 });

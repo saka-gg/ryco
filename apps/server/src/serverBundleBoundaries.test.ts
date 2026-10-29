@@ -339,6 +339,20 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
   });
 });
 
+describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", () => {
+  it("keeps the watch decision rules out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    const boot = serve.chunks.map((chunk) => readFileSync(chunk, "utf8")).join("\n");
+    // The decider and the shell use the small summary module (it is inlined without a region
+    // marker, so the check names functions); only the watch sweep, which loads after the server
+    // serves, needs the decision rules and the renderers.
+    expect(boot).toContain("function summarizePullRequestWatches(");
+    expect(boot).not.toContain("function decidePullRequestWatch(");
+    expect(boot).not.toContain("function renderPullRequestWatchWake(");
+  });
+});
+
 describe.skipIf(!hasCurrentBuild)("built server bundle imports", () => {
   it("leaves no import of a patch-added export to the installed package", () => {
     const patchAdded = patchAddedExports();

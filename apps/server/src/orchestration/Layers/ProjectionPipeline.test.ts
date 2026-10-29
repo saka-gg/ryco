@@ -105,7 +105,15 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["worktree.relocated"], [
     ORCHESTRATION_PROJECTOR_NAMES.worktrees,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 51);
+  // Pull request watches have their own table; thread rows never change with them.
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.pull-request-watch-updated"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+  ]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.deleted"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threads,
+    ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 52);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {

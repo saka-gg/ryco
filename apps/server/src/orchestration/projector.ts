@@ -63,6 +63,7 @@ import {
   ThreadTokenModeSetPayload,
   ThreadGoalUpdatedPayload,
   ThreadGoalClearedPayload,
+  ThreadPullRequestWatchUpdatedPayload,
   ThreadUnarchivedPayload,
   ThreadUnsettledPayload,
   ThreadRevertedPayload,
@@ -506,6 +507,8 @@ export function projectEvent(
             deletedAt: payload.deletedAt,
             trashedAt: null,
             updatedAt: payload.deletedAt,
+            // The projection drops the row too; a later incarnation starts without watches.
+            pullRequestWatchState: undefined,
           }),
         })),
       );
@@ -718,6 +721,22 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             goal: null,
             updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.pull-request-watch-updated":
+      // Watch progress is not thread activity: `updatedAt` stays, as in the projection.
+      return decodeForEvent(
+        ThreadPullRequestWatchUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            pullRequestWatchState: payload.watches,
           }),
         })),
       );

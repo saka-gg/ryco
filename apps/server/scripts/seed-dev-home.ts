@@ -175,6 +175,9 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   agent_control_automation_quarantine: "clear",
   agent_control_automation_read_state: "clear",
   agent_control_completion_returns: "clear",
+  // Pull request watches: the seeded server would read the forge on its own and wake agents in
+  // the copied chats.
+  projection_thread_pull_request_watches: "clear",
   // Ownership and journals that move or delete real directories.
   storage_owned_entries: "clear",
   storage_usage_history: "clear",

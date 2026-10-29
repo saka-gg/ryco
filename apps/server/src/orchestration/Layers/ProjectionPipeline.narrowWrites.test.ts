@@ -18,6 +18,7 @@ import { ProjectionStateRepositoryLive } from "../../persistence/Layers/Projecti
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
+import { ProjectionThreadPullRequestWatchRepositoryLive } from "../../persistence/Layers/ProjectionThreadPullRequestWatches.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ProjectionWorktreeRepositoryLive } from "../../persistence/Layers/ProjectionWorktrees.ts";
@@ -72,6 +73,7 @@ const FullRowPipelineTestLayer = withPipelineDependencies(
         ProjectionThreadUserInputRequestRepositoryLive,
         ProjectionPendingApprovalRepositoryLive,
         ProjectionWorktreeRepositoryLive,
+        ProjectionThreadPullRequestWatchRepositoryLive,
         ProjectionStateRepositoryLive,
       ),
     ),

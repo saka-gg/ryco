@@ -30,6 +30,7 @@ import type {
   ThreadGoal,
   ThreadLineage,
   ThreadUsageLimit,
+  ThreadPullRequestWatchShell,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 
@@ -343,6 +344,11 @@ export interface SidebarThreadSummary {
   hasActionableProposedPlan: boolean;
   /** Server-owned provenance; absent/null on root threads and from older servers. */
   lineage?: ThreadLineage | null | undefined;
+  /**
+   * The node's pull request watches for this thread (active, and ended within a day). Absent
+   * when it has none, and from older servers.
+   */
+  pullRequestWatches?: ThreadPullRequestWatchShell;
 }
 
 export interface SidebarWorktreeSummary {

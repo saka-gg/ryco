@@ -205,6 +205,8 @@ export function useThreadActions() {
         type: "thread.session.stop",
         commandId: newCommandId(),
         threadId: target.threadId,
+        // The explicit Stop also ends the thread's pull request watches.
+        userStop: true,
         createdAt: new Date().toISOString(),
       });
     } catch (error) {

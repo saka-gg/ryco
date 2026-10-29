@@ -36,6 +36,7 @@ import {
   type ProjectionThreadProposedPlan,
   ProjectionThreadProposedPlanRepository,
 } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
+import { ProjectionThreadPullRequestWatchRepository } from "../../persistence/Services/ProjectionThreadPullRequestWatches.ts";
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThreadUserInputRequestRepository } from "../../persistence/Services/ProjectionThreadUserInputRequests.ts";
 import {
@@ -50,6 +51,7 @@ import { ProjectionStateRepositoryLive } from "../../persistence/Layers/Projecti
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
+import { ProjectionThreadPullRequestWatchRepositoryLive } from "../../persistence/Layers/ProjectionThreadPullRequestWatches.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
@@ -110,7 +112,10 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
     ORCHESTRATION_PROJECTOR_NAMES.pendingApprovals,
     ORCHESTRATION_PROJECTOR_NAMES.threads,
   ],
-  "thread.deleted": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.deleted": [
+    ORCHESTRATION_PROJECTOR_NAMES.threads,
+    ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+  ],
   "thread.trashed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.untrashed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.archived": [ORCHESTRATION_PROJECTOR_NAMES.threads],
@@ -127,6 +132,9 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.usage-limit-cleared": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.goal-updated": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.goal-cleared": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  // Its own table only: watch progress is not thread activity, so `projection_threads` (and
+  // its `updated_at`) stays untouched.
+  "thread.pull-request-watch-updated": [ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches],
   "thread.context-handoff-requested": [],
   "thread.turn-steer-requested": [],
   "thread.turn-steer-accepted": [],
@@ -650,6 +658,8 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
     const projectionWorktreeRepository = yield* ProjectionWorktreeRepository;
+    const projectionThreadPullRequestWatchRepository =
+      yield* ProjectionThreadPullRequestWatchRepository;
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -2472,6 +2482,27 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       }
     });
 
+    const applyThreadPullRequestWatchesProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyThreadPullRequestWatchesProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "thread.pull-request-watch-updated":
+          yield* projectionThreadPullRequestWatchRepository.upsert({
+            threadId: event.payload.threadId,
+            watches: event.payload.watches,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        case "thread.deleted":
+          yield* projectionThreadPullRequestWatchRepository.deleteByThreadId({
+            threadId: event.payload.threadId,
+          });
+          return;
+        default:
+          return;
+      }
+    });
+
     const projectors: ReadonlyArray<ProjectorDefinition> = [
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -2512,6 +2543,10 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.worktrees,
         apply: applyWorktreesProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+        apply: applyThreadPullRequestWatchesProjection,
       },
     ];
 
@@ -2785,5 +2820,6 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionTurnRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),
   Layer.provideMerge(ProjectionWorktreeRepositoryLive),
+  Layer.provideMerge(ProjectionThreadPullRequestWatchRepositoryLive),
   Layer.provideMerge(ProjectionStateRepositoryLive),
 );

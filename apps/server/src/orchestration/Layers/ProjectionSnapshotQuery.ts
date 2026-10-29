@@ -44,11 +44,14 @@ import {
   ProjectId,
   ThreadId,
   ThreadGoal,
+  ThreadPullRequestWatches,
+  ThreadPullRequestWatchShell,
   TrimmedNonEmptyString,
   ThreadUsageLimit,
   TurnDispatchMode,
   WorktreeId,
 } from "@ryco/contracts";
+import { pullRequestWatchShellAt } from "@ryco/shared/pullRequestWatchSummary";
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import { Clock, Deferred, Effect, Layer, Option, Schema, type Scope, Struct } from "effect";
 import { backgroundWorkCheckpoint } from "@ryco/shared/backgroundWork";
@@ -138,6 +141,8 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     goal: Schema.NullOr(Schema.fromJsonString(ThreadGoal)),
     usageLimit: Schema.NullOr(Schema.fromJsonString(ThreadUsageLimit)),
     latestCompletedTurnAt: Schema.NullOr(IsoDateTime),
+    // The projector's shell summary (`summary_json`), never the full watch state.
+    pullRequestWatches: Schema.NullOr(Schema.fromJsonString(ThreadPullRequestWatchShell)),
   }),
 );
 const ProjectionThreadShellDbRowSchema = ProjectionThreadDbRowSchema.mapFields(
@@ -157,6 +162,18 @@ const ProjectThreadWorkspaceRowSchema = Schema.Struct({
   worktreePath: OrchestrationThreadShell.fields.worktreePath,
   worktreeId: Schema.NullOr(WorktreeId),
 });
+const ThreadPullRequestWatchesRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  watches: Schema.fromJsonString(ThreadPullRequestWatches),
+});
+/** A thread shell's `pullRequestWatches` key: left out while nothing is active or recently ended. */
+const pullRequestWatchShellField = (
+  summary: ThreadPullRequestWatchShell | null,
+  nowMs: number,
+): { readonly pullRequestWatches?: ThreadPullRequestWatchShell } => {
+  const shell = pullRequestWatchShellAt(summary, nowMs);
+  return shell === null ? {} : { pullRequestWatches: shell };
+};
 const PendingGoalSyncThreadRowSchema = Schema.Struct({
   threadId: ThreadId,
   goal: Schema.fromJsonString(ThreadGoal),
@@ -903,6 +920,11 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     deleted_at AS "deletedAt",
     repository_identity_json AS "repositoryIdentityJson"
   `;
+  // One primary-key lookup per thread row; NULL for threads that never watched.
+  const pullRequestWatchSummaryColumn = sql`(
+    SELECT watch_rows.summary_json FROM projection_thread_pull_request_watches watch_rows
+    WHERE watch_rows.thread_id = projection_threads.thread_id
+  )`;
   const threadColumns = sql`
     thread_id AS "threadId",
     project_id AS "projectId",
@@ -937,7 +959,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     lineage_root_thread_id AS "lineageRootThreadId",
     lineage_relationship AS "lineageRelationship",
     lineage_source_message_id AS "lineageSourceMessageId",
-    lineage_source_turn_id AS "lineageSourceTurnId"
+    lineage_source_turn_id AS "lineageSourceTurnId",
+    ${pullRequestWatchSummaryColumn} AS "pullRequestWatches"
   `;
 
   // Every row, deleted ones included: the command read model and the full snapshot need them.
@@ -1305,6 +1328,17 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         JOIN projection_thread_messages messages
           ON messages.message_id IN (threads.first_user_message_id, threads.latest_user_message_id)
         ORDER BY messages.thread_id ASC, messages.created_at ASC, messages.rowid ASC
+      `,
+  });
+
+  // Every thread's full watch state (active and ended), for the command read model only.
+  const listThreadPullRequestWatchRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ThreadPullRequestWatchesRowSchema,
+    execute: () =>
+      sql`
+        SELECT thread_id AS "threadId", watches_json AS "watches"
+        FROM projection_thread_pull_request_watches
       `,
   });
 
@@ -1720,7 +1754,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           lineage_root_thread_id AS "lineageRootThreadId",
           lineage_relationship AS "lineageRelationship",
           lineage_source_message_id AS "lineageSourceMessageId",
-          lineage_source_turn_id AS "lineageSourceTurnId"
+          lineage_source_turn_id AS "lineageSourceTurnId",
+          ${pullRequestWatchSummaryColumn} AS "pullRequestWatches"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
@@ -3074,6 +3109,14 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               ),
             ),
           ),
+          listThreadPullRequestWatchRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getCommandReadModel:listPullRequestWatches:query",
+                "ProjectionSnapshotQuery.getCommandReadModel:listPullRequestWatches:decodeRows",
+              ),
+            ),
+          ),
         ]),
       )
       .pipe(
@@ -3088,10 +3131,14 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             sessionRows,
             latestTurnRows,
             stateRows,
+            pullRequestWatchRows,
           ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
               const projects: OrchestrationProject[] = [];
+              const pullRequestWatchesByThread = new Map(
+                pullRequestWatchRows.map((row) => [row.threadId, row.watches] as const),
+              );
               const worktrees: OrchestrationWorktreeShell[] = [];
               const threads: OrchestrationThread[] = [];
               const userMessageAnchorsByThread = new Map<string, OrchestrationMessage[]>();
@@ -3233,6 +3280,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                 if (!row) {
                   continue;
                 }
+                const pullRequestWatchState = pullRequestWatchesByThread.get(row.threadId);
                 threads.push(
                   withThreadLineage(
                     {
@@ -3258,6 +3306,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                       snoozedUntil: row.snoozedUntil ?? null,
                       snoozedAt: row.snoozedAt ?? null,
                       usageLimit: row.usageLimit ?? null,
+                      ...(pullRequestWatchState === undefined ? {} : { pullRequestWatchState }),
                       deletedAt: row.deletedAt,
                       trashedAt: row.trashedAt,
                       messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
@@ -3419,6 +3468,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             identityRows,
           ]): VersionedShell<BuiltShellSnapshot> => {
             const stubArchived = scope?.archivedThreads === "stub";
+            const nowMs = Date.now();
             let updatedAt: string | null = updatedAtRow.updatedAt;
             if (archivedUpdatedAtRow.updatedAt !== null) {
               updatedAt = maxIso(updatedAt, archivedUpdatedAtRow.updatedAt);
@@ -3507,6 +3557,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                     backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
                       row.threadId,
                     ),
+                    ...pullRequestWatchShellField(row.pullRequestWatches, nowMs),
                   },
                   projectionThreadLineage(row),
                 ),
@@ -3934,6 +3985,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
               threadRow.value.threadId,
             ),
+            ...pullRequestWatchShellField(threadRow.value.pullRequestWatches, Date.now()),
           } satisfies OrchestrationThreadShell,
           projectionThreadLineage(threadRow.value),
         ),

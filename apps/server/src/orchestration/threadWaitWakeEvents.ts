@@ -52,6 +52,8 @@ const THREAD_WAIT_ROUTES = {
   // Inbox settle state, not the session.
   "thread.settled": "ignore",
   "thread.unsettled": "ignore",
+  // Watch state, which no wait reads; a turn a watch starts arrives as a session-set.
+  "thread.pull-request-watch-updated": "ignore",
   "thread.usage-limit-set": "ignore",
   "thread.usage-limit-cleared": "ignore",
   "thread.meta-updated": "ignore",
