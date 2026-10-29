@@ -30,6 +30,7 @@ import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxOrderSnapshot } from "./inboxOrderHold";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
 import type { InboxSettleFinishedProps } from "./InboxSettleFinished";
+import { InboxSourceControlPause } from "./InboxSourceControlPause";
 import {
   buildInboxSidebarModel,
   createInboxSidebarModelSharing,
@@ -310,6 +311,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
         onPointerOverCapture={orderHold.onPointerOverCapture}
         onViewportScroll={handleSidebarListScroll}
       >
+        {isPhone ? null : <InboxSourceControlPause />}
         <InboxHoverLayer hintHandle={hintHandle} previewHandle={previewHandle}>
           {sections.length === 0 ? (
             <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-4 text-center">

@@ -3,7 +3,7 @@ import "../../index.css";
 import { Schema } from "effect";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import { ServerProvider } from "@ryco/contracts";
+import { ServerProvider, SourceControlProviderError } from "@ryco/contracts";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
   EnvironmentId,
@@ -25,6 +25,10 @@ import {
 } from "../../environmentApi";
 import { PANE_DRAG_TYPE } from "../../chatPanes.logic";
 import { readPaneDragSource } from "../../chatPanesStore";
+import {
+  noteSourceControlReadOutcome,
+  resetSourceControlPausesForTests,
+} from "../../sourceControlPause";
 import { useTerminalStateStore } from "../../terminalStateStore";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
@@ -206,6 +210,48 @@ describe("Inbox sidebar rendering and settlement", () => {
       await expect.element(page.getByText("No tasks yet")).toBeInTheDocument();
       expect(document.querySelector('[data-testid="inbox-add-project-button"]')).toBeNull();
     } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("says once above the list while a forge host pauses requests", async () => {
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    // Desktop only: the frozen phone tier gets no new UI.
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...props} />);
+    const paused = new SourceControlProviderError({
+      provider: "github",
+      operation: "getChangeRequestDetail",
+      detail: "GitHub requests are paused after a rate limit.",
+      reason: "rate-limited",
+      retryAt: Date.now() + 10 * 60_000,
+    });
+    try {
+      expect(document.querySelector('[data-testid="inbox-sidebar"] [role="status"]')).toBeNull();
+      noteSourceControlReadOutcome("detail-a", paused, Date.now());
+      noteSourceControlReadOutcome("detail-b", paused, Date.now());
+      await expect.element(page.getByText(/^GitHub requests paused until /u)).toBeInTheDocument();
+      expect(
+        document.querySelectorAll('[data-testid="inbox-sidebar"] [role="status"]'),
+      ).toHaveLength(1);
+      // Both reads answered again: the line goes.
+      noteSourceControlReadOutcome("detail-a", null, Date.now());
+      noteSourceControlReadOutcome("detail-b", null, Date.now());
+      await expect.element(page.getByText(/^GitHub requests paused/u)).not.toBeInTheDocument();
+    } finally {
+      // The store is module state: a failed assertion must not leave the line for later tests.
+      resetSourceControlPausesForTests();
       await mounted.unmount();
     }
   });

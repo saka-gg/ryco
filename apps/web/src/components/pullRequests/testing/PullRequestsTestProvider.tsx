@@ -141,7 +141,7 @@ export interface BuildTestPullRequestsModelInput {
   readonly activityState?: Partial<SourceControlQueryState<ChangeRequestActivity>> | undefined;
   /** Patch the list reads (e.g. `{ isLoading: true }` or `{ error: "…" }`). */
   readonly listState?:
-    | Partial<Pick<PullRequestsListModel, "isLoading" | "isFetching" | "error">>
+    | Partial<Pick<PullRequestsListModel, "isLoading" | "isFetching" | "error" | "pause">>
     | undefined;
   /** Folded list groups (the provider passes the layout store's). */
   readonly foldedGroups?: ReadonlyArray<string> | undefined;
@@ -286,6 +286,7 @@ export function buildTestPullRequestsModel(
     isLoading: false,
     isFetching: false,
     error: null,
+    pause: null,
     ...input.listState,
   };
 

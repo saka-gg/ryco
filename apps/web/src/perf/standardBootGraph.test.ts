@@ -251,6 +251,19 @@ describe("standard build static import graph", () => {
     }
   });
 
+  it("keeps forge failure reading and pause wording out of the boot graph", () => {
+    // Source control reads and their surfaces load it; `sourceControl.ts`, which
+    // the git status stream reaches at boot, must not import it back.
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      expect(
+        forbiddenChains(entry, [
+          /^packages\/shared\/src\/sourceControlFailure\.ts$/u,
+          /^apps\/web\/src\/sourceControlPause\.ts$/u,
+        ]),
+      ).toEqual([]);
+    }
+  });
+
   it("imports Effect modules by subpath in boot code", () => {
     // The boot vendor chunk follows package barrels: one value import of
     // `effect` or `effect/reactivity` from boot code brings every module

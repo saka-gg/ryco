@@ -441,6 +441,8 @@ export function PullRequestInbox({
     );
 
   let body: ReactNode;
+  // Rows kept through a rate-limit pause get one line above them saying so.
+  let showsRows = false;
   if (repository === null || repositoryStatus.kind !== "ready") {
     body =
       repositoryStatus.kind === "ready" ? (
@@ -450,9 +452,12 @@ export function PullRequestInbox({
       );
   } else if (list.isLoading) {
     body = <InboxSkeleton grouped={model.capabilities.involvementFilters} />;
-  } else if (list.error !== null && !hasRows) {
+  } else if ((list.pause !== null || list.error !== null) && !hasRows) {
     body = (
-      <ListMessage title="Couldn’t load pull requests" detail={list.error}>
+      <ListMessage
+        title={list.pause?.title ?? "Couldn’t load pull requests"}
+        detail={list.pause?.detail ?? list.error}
+      >
         <Button
           size="xs"
           variant="ghost"
@@ -465,6 +470,7 @@ export function PullRequestInbox({
       </ListMessage>
     );
   } else if (sections.length > 0) {
+    showsRows = true;
     body = grouped
       ? sections.map((section) => (
           <InboxGroup
@@ -484,6 +490,7 @@ export function PullRequestInbox({
           </div>
         ));
   } else if (search.server.active && (search.server.isLoading || serverRows.length > 0)) {
+    showsRows = serverRows.length > 0;
     body = (
       <section aria-label={`Found on ${providerName}`}>
         <div className="flex h-8 items-center gap-2 pl-2.5 text-[11px] text-muted-foreground">
@@ -528,6 +535,15 @@ export function PullRequestInbox({
             data-visible="false"
             className="pr-list-plate inset-x-1.5"
           />
+          {showsRows && list.pause !== null ? (
+            <p
+              role="status"
+              title={list.pause.detail}
+              className="flex h-8 items-center pl-2.5 text-[11px] text-muted-foreground"
+            >
+              {list.pause.title}
+            </p>
+          ) : null}
           {body}
         </div>
       </InboxMotionContext.Provider>

@@ -23,6 +23,12 @@ export interface KeyedQueryWatchOptions<TData> {
   readonly shouldRefreshOnLifecycle?: (
     context: KeyedQueryLifecycleRefreshContext<TData>,
   ) => boolean;
+  /**
+   * The subscriber takes reads it did not ask for: a failed read whose error
+   * names when to try again (`retryFailedReadAfterMs`) is read again then,
+   * even while no subscriber polls.
+   */
+  readonly allowsRetryAfterFailure?: () => boolean;
 }
 
 interface KeyedQueryPollSubscriber {
@@ -30,6 +36,7 @@ interface KeyedQueryPollSubscriber {
   readonly shouldRefreshOnLifecycle?: (
     context: KeyedQueryLifecycleRefreshContext<unknown>,
   ) => boolean;
+  readonly allowsRetryAfterFailure?: () => boolean;
 }
 
 export interface KeyedQueryControllerBase {
@@ -98,10 +105,21 @@ export interface KeyedQueryRegistryConfig<TState> {
     baseDelayMs: number,
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ) => number;
+  /**
+   * When no subscriber polls: how long until the last read, which failed, is
+   * read again (its error said when, like a rate-limit pause), or null to
+   * wait for a refresh. Only entries with a subscriber that
+   * `allowsRetryAfterFailure` are read again.
+   */
+  readonly retryFailedReadAfterMs?: (
+    controller: KeyedQueryControllerBase & Record<string, unknown>,
+  ) => number | null;
   readonly onRunStart?: (controller: KeyedQueryControllerBase & Record<string, unknown>) => void;
+  /** `error` is the failed read's error, and undefined after a success. */
   readonly onRunEnd?: (
     controller: KeyedQueryControllerBase & Record<string, unknown>,
     outcome: "success" | "error",
+    error?: Error,
   ) => void;
   /**
    * Called after a read's result is published to the controller's state, and
@@ -445,11 +463,12 @@ export function createKeyedQueryRegistry<TState>(
         published = { data };
       } catch (error) {
         if (isFenced()) return;
-        config.onRunEnd?.(controller, "error");
+        const failure = toError(error);
+        config.onRunEnd?.(controller, "error", failure);
         if (isSupersededByLocalWrite()) return;
         setQueryState(
           controller.compositeKey,
-          config.buildErrorState(getQueryState(controller.compositeKey), toError(error)),
+          config.buildErrorState(getQueryState(controller.compositeKey), failure),
         );
       }
       // Outside the try: a throwing hook must not turn a published read into an error.
@@ -499,6 +518,20 @@ export function createKeyedQueryRegistry<TState>(
     return interval;
   }
 
+  function resolveControllerFailureRetryDelay(
+    controller: KeyedQueryControllerBase & Record<string, unknown>,
+  ): number | null {
+    if (!config.retryFailedReadAfterMs) return null;
+    let allowed = false;
+    for (const subscriber of controller.pollSubscribers.values()) {
+      if (subscriber.allowsRetryAfterFailure?.()) {
+        allowed = true;
+        break;
+      }
+    }
+    return allowed ? config.retryFailedReadAfterMs(controller) : null;
+  }
+
   function scheduleControllerPoll(
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ): void {
@@ -512,13 +545,14 @@ export function createKeyedQueryRegistry<TState>(
       return;
     }
     const interval = resolveControllerPollInterval(controller);
-    if (interval === null) {
+    const delayMs =
+      interval === null
+        ? resolveControllerFailureRetryDelay(controller)
+        : (config.adjustPollDelay?.(interval, controller) ?? interval);
+    if (delayMs === null) {
       return;
     }
-    const adjustedInterval = Math.max(
-      1,
-      config.adjustPollDelay?.(interval, controller) ?? interval,
-    );
+    const adjustedInterval = Math.max(1, delayMs);
     const jitter = adjustedInterval * pollJitterRatio * (random() * 2 - 1);
     const delay = Math.max(1, Math.round(adjustedInterval + jitter));
     controller.pollTimer = setTimeout(() => {
@@ -969,6 +1003,9 @@ export function defineKeyedQueryByInput<
               context: KeyedQueryLifecycleRefreshContext<unknown>,
             ) => boolean,
           }
+        : {}),
+      ...(normalizedOptions.allowsRetryAfterFailure
+        ? { allowsRetryAfterFailure: normalizedOptions.allowsRetryAfterFailure }
         : {}),
     });
     controller.subscriberCount += 1;

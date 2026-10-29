@@ -1,5 +1,5 @@
-import type { ChangeRequest } from "@ryco/contracts";
-import { DateTime, Option } from "effect";
+import { SourceControlProviderError, type ChangeRequest } from "@ryco/contracts";
+import { DateTime, Option, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { resolveSourceControlRefreshDelay } from "../../rpc/sourceControlRefreshPolicy";
@@ -10,6 +10,8 @@ import {
   derivePullRequestSelectionThreads,
   derivePullRequestsLayoutMetrics,
   derivePullRequestsList,
+  findSourceControlPause,
+  involvementReadsUsable,
   mergeChangeRequestLists,
   pullRequestSelectionRefreshPhase,
 } from "./pullRequestsModel.logic";
@@ -273,5 +275,58 @@ describe("describePullRequestsListError", () => {
     ).toMatch(/Pick another repository/u);
     expect(describePullRequestsListError("API rate limit exceeded")).toMatch(/rate limit/u);
     expect(describePullRequestsListError("Something else")).toBe("Something else");
+  });
+});
+
+describe("list reads during a rate-limit pause", () => {
+  const paused = new SourceControlProviderError({
+    provider: "github",
+    operation: "listChangeRequests",
+    detail: "GitHub requests are paused after a rate limit.",
+    reason: "rate-limited",
+    retryAt: 1_000_000_300_000,
+  });
+  // A server before the reason field sends none.
+  const legacy = Schema.decodeUnknownSync(SourceControlProviderError)({
+    _tag: "SourceControlProviderError",
+    provider: "github",
+    operation: "listChangeRequests",
+    detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+  });
+
+  it("finds the pause behind the refused list reads, the one that ends last", () => {
+    expect(findSourceControlPause([null, paused])).toEqual({
+      provider: "github",
+      retryAt: 1_000_000_300_000,
+    });
+    // A later refusal carries the host's extended pause.
+    const extended = new SourceControlProviderError({
+      provider: "github",
+      operation: "listChangeRequests",
+      detail: "GitHub requests are paused after a rate limit.",
+      reason: "rate-limited",
+      retryAt: 1_000_000_360_000,
+    });
+    expect(findSourceControlPause([paused, extended, legacy])?.retryAt).toBe(1_000_000_360_000);
+    // Older servers: the substring still maps, both to the pause and the list's sentence.
+    expect(findSourceControlPause([legacy])).toEqual({ provider: "github", retryAt: null });
+    expect(describePullRequestsListError(legacy.message)).toMatch(/rate limit/u);
+    expect(findSourceControlPause([null, new Error("timed out"), undefined])).toBeNull();
+  });
+
+  it("keeps grouping while the involvement reads keep their rows through a pause", () => {
+    const rows = [row(1)];
+    expect(
+      involvementReadsUsable(true, [
+        { data: rows, error: paused },
+        { data: rows, error: null },
+      ]),
+    ).toBe(true);
+    // No rows yet, or a different failure (a host without the filters): one flat list.
+    expect(involvementReadsUsable(true, [{ data: null, error: paused }])).toBe(false);
+    expect(involvementReadsUsable(true, [{ data: rows, error: new Error("unsupported") }])).toBe(
+      false,
+    );
+    expect(involvementReadsUsable(false, [{ data: rows, error: null }])).toBe(false);
   });
 });

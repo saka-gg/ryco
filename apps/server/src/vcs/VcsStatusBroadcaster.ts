@@ -27,7 +27,7 @@ import type {
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
 import { mergeGitStatusParts } from "@ryco/shared/git";
-import { readSourceControlFailure } from "@ryco/shared/sourceControl";
+import { readSourceControlFailure } from "@ryco/shared/sourceControlFailure";
 
 import type { VcsRefSummary } from "../git/GitManager.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";

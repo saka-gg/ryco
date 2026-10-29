@@ -172,6 +172,8 @@ function useWatchedQuery<TInput, TData>(
           lastFetchedAtMs: lastFetchedAt,
           staleTimeMs: staleTime,
         }),
+      // A read that ran into a rate-limit pause is read again when it ends.
+      allowsRetryAfterFailure: () => refreshModeRef.current !== "manual",
     });
   }, [binding, refreshMode, targetKey, cadenceKey]);
 

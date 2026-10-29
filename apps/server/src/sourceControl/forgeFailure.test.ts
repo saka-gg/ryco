@@ -243,7 +243,7 @@ describe("sourceControlProviderErrorFrom", () => {
     expect(error.retryAt).toBe(1_000_000_030_001);
   });
 
-  it("keeps a retry time only on a rate limit, and leaves unclassified errors as before", () => {
+  it("keeps a retry time only on a rate limit, and marks unclassified errors failed", () => {
     const notFound = sourceControlProviderErrorFrom("bitbucket", "getChangeRequest", {
       detail: "Bitbucket returned HTTP 404.",
       failureKind: "not-found",
@@ -255,9 +255,9 @@ describe("sourceControlProviderErrorFrom", () => {
     const plain = sourceControlProviderErrorFrom("github", "listChangeRequests", {
       detail: "GitHub CLI exited with code 1.",
     });
-    expect(plain.reason).toBeUndefined();
+    // Never unset from this server: clients read a missing reason as an older server's error.
+    expect(plain.reason).toBe("failed");
     expect(plain.retryAt).toBeUndefined();
-    expect(Object.hasOwn(plain, "reason")).toBe(false);
 
     const unusable = sourceControlProviderErrorFrom("gitlab", "listChangeRequests", {
       detail: "GitLab is rate limiting requests (HTTP 429).",

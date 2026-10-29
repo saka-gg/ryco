@@ -238,6 +238,44 @@ describe("PullRequestListPane", () => {
     void screen;
   });
 
+  it("says the host paused requests above kept rows, and in place of an empty list", async () => {
+    vi.setSystemTime(FIXTURE_NOW_MS);
+    await page.viewport(1100, 860);
+    const pause = {
+      title: "GitHub requests paused until 14:32",
+      detail: "GitHub is rate limiting this account. Ryco tries again then.",
+    };
+    const listState = { pause, error: "GitHub's rate limit was reached." };
+    const pane = (search?: Partial<PullRequestsSearch>) => (
+      <PullRequestsTestProvider width={1100} height={860} search={search} listState={listState}>
+        <aside className="flex min-h-0 w-[304px] shrink-0 flex-col border-r">
+          <PullRequestListPane variant="docked" />
+        </aside>
+      </PullRequestsTestProvider>
+    );
+    const screen = await render(pane());
+
+    // Rows stay, grouped, under one status line.
+    const line = screen.getByText(pause.title);
+    await expect.element(line).toBeVisible();
+    expect(line.element().getAttribute("role")).toBe("status");
+    expect(line.element().getAttribute("title")).toBe(pause.detail);
+    expect(screen.getByText(pause.title).all()).toHaveLength(1);
+    const header = screen.getByRole("button", { name: /^Needs your review/u }).element();
+    expect(
+      line.element().compareDocumentPosition(header) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(rowButton(703)).toBeTruthy();
+
+    // Nothing to show: the pause is the message, and Try again stays.
+    await screen.unmount();
+    const empty = await render(pane({ label: ["nothing-has-this-label"] }));
+    await expect.element(empty.getByText(pause.detail)).toBeVisible();
+    expect(empty.getByText(pause.title).element().getAttribute("role")).toBeNull();
+    expect(empty.getByText("Couldn’t load pull requests").query()).toBeNull();
+    await expect.element(empty.getByRole("button", { name: "Try again" })).toBeVisible();
+  });
+
   it("shows one flat list when the host cannot tell involvement apart", async () => {
     vi.setSystemTime(FIXTURE_NOW_MS);
     await page.viewport(400, 600);
