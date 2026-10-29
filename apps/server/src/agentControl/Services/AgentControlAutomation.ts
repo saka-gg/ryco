@@ -68,3 +68,7 @@ export class AgentControlAutomationService extends Context.Service<
   AgentControlAutomationService,
   AgentControlAutomationShape
 >()("ryco/agentControl/Services/AgentControlAutomation") {}
+
+/** Why an agent's plan may not let a schedule run without asking. */
+export const UNATTENDED_OWNER_ONLY =
+  "Only the project owner can let a schedule run without asking.";

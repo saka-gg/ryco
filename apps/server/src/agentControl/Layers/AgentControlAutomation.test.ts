@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTROL_ERROR_CODES,
   AGENT_CONTROL_RISK_TAGS,
   AgentControlAutomationId,
   AgentControlProposalId,
@@ -22,7 +23,10 @@ import { AgentControlAutomationRepository } from "../../persistence/Services/Age
 import { AgentControlAuditRepository } from "../../persistence/Services/AgentControlAudit.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
-import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
+import {
+  AgentControlProposalStore,
+  agentControlFailureResult,
+} from "../Services/AgentControlProposalStore.ts";
 import { AgentControlPolicyLive } from "./AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./AgentControlProposalEvents.ts";
 import { AgentControlProposalStoreLive } from "./AgentControlProposalStore.ts";
@@ -39,6 +43,13 @@ const principal = {
   originProjectId: projectId,
   originRuntimeMode: "approval-required" as const,
   originEnvMode: "worktree" as const,
+};
+
+const ownerPrincipal = {
+  kind: "automation-owner" as const,
+  projectId,
+  runtimeMode: "approval-required" as const,
+  envMode: "worktree" as const,
 };
 
 const makeAutomation = (id: string, start: string): AgentControlAutomation => ({
@@ -309,6 +320,159 @@ layer("AgentControlAutomationService", (it) => {
         );
         yield* automations.validateRun(approved);
       }),
+  );
+
+  it.effect("starts a run of an owner's run-without-asking schedule on its own", () =>
+    Effect.gen(function* () {
+      const repository = yield* AgentControlAutomationRepository;
+      const automations = yield* AgentControlAutomationService;
+      const proposals = yield* AgentControlProposalStore;
+      const audit = yield* AgentControlAuditRepository;
+      const due = new Date(Date.now() - 60_000).toISOString();
+      const owned = makeAutomation("automation-unattended", due);
+      const unattended: AgentControlAutomation = {
+        ...owned,
+        principal: ownerPrincipal,
+        definition: { ...owned.definition, runPolicy: "run-without-asking" },
+      };
+      // An agent-authored definition that says the same still asks.
+      const agentAuthored: AgentControlAutomation = {
+        ...makeAutomation("automation-agent-unattended", due),
+        definition: { ...owned.definition, runPolicy: "run-without-asking" },
+      };
+      assert.isTrue(yield* repository.insertAutomation(unattended));
+      assert.isTrue(yield* repository.insertAutomation(agentAuthored));
+      yield* automations.materializeDue;
+
+      const runOf = (automation: AgentControlAutomation) =>
+        repository
+          .listRuns({ automationId: automation.automationId, limit: 1 })
+          .pipe(Effect.map((runs) => runs[0]!));
+      const unattendedRun = yield* runOf(unattended);
+      assert.strictEqual(unattendedRun.status, "approved");
+      const approved = Option.getOrThrow(yield* proposals.getById(unattendedRun.proposalId!));
+      assert.strictEqual(approved.status, "approved");
+      yield* automations.validateRun(approved);
+      const trail = yield* audit.listByProposalId({ proposalId: approved.proposalId });
+      assert.isTrue(trail.some((row) => row.metadata.approvedBy === "standing-approval"));
+
+      assert.strictEqual((yield* runOf(agentAuthored)).status, "pending-approval");
+    }),
+  );
+
+  it.effect("refuses an agent's plan that would let a schedule run without asking", () =>
+    Effect.gen(function* () {
+      const automations = yield* AgentControlAutomationService;
+      const runAt = new Date(Date.now() + 60_000).toISOString();
+      const definition = {
+        ...makeAutomation("template-unattended", runAt).definition,
+        runPolicy: "run-without-asking" as const,
+      };
+      const proposalFor = (proposalPrincipal: AgentControlProposal["principal"], id: string) =>
+        ({
+          proposalId: AgentControlProposalId.make(`proposal-${id}`),
+          requestId: AgentControlRequestId.make(`request-${id}`),
+          principal: proposalPrincipal,
+          planVersion: 1,
+          plan: {
+            kind: "createAutomation",
+            automationId: AgentControlAutomationId.make(id),
+            definition,
+          },
+          planDigest: "f".repeat(64),
+          riskTags: [AGENT_CONTROL_RISK_TAGS.createsAutomation],
+          promptSummary: "Create schedule definition",
+          status: "executing",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          decidedAt: new Date().toISOString(),
+          result: null,
+        }) satisfies AgentControlProposal;
+
+      const refused = yield* Effect.flip(
+        automations.applyLifecycle(proposalFor(principal, "automation-agent-refused")),
+      );
+      assert.strictEqual(refused._tag, "AgentControlPlanValidationError");
+      const stored = yield* automations.applyLifecycle(
+        proposalFor(ownerPrincipal, "automation-owner-accepted"),
+      );
+      assert.strictEqual(stored.definition.runPolicy, "run-without-asking");
+    }),
+  );
+
+  it.effect("pauses an unattended schedule after three failed runs in a row", () =>
+    Effect.gen(function* () {
+      const repository = yield* AgentControlAutomationRepository;
+      const automations = yield* AgentControlAutomationService;
+      const proposals = yield* AgentControlProposalStore;
+      const start = new Date(Date.now() - 10 * 60 * 60_000).toISOString();
+      const base = makeAutomation("automation-failing", start);
+      const automation: AgentControlAutomation = {
+        ...base,
+        principal: ownerPrincipal,
+        definition: {
+          ...base.definition,
+          schedule: {
+            kind: "fixed-interval",
+            startsAt: start,
+            intervalMs: 15 * 60_000,
+            endsAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+          },
+          runPolicy: "run-without-asking",
+        },
+      };
+      assert.isTrue(yield* repository.insertAutomation(automation));
+      const failNextRun = Effect.gen(function* () {
+        yield* automations.materializeDue;
+        const run = (yield* repository.listRuns({
+          automationId: automation.automationId,
+          limit: 1,
+        }))[0]!;
+        const executing = yield* proposals.beginExecution({
+          proposalId: run.proposalId!,
+          actor: "executor",
+          now: new Date().toISOString(),
+        });
+        const failed = yield* proposals.settleExecution({
+          proposalId: executing.proposalId,
+          result: agentControlFailureResult({
+            error: {
+              code: AGENT_CONTROL_ERROR_CODES.executionFailed,
+              message: "Provider down",
+              retryable: true,
+            },
+            failedAt: new Date().toISOString(),
+          }),
+          now: new Date().toISOString(),
+        });
+        yield* automations.reconcileProposal(failed);
+        // Make the next occurrence due at once, unless the failure paused the schedule.
+        const current = Option.getOrThrow(yield* repository.getAutomation(automation.automationId));
+        if (!current.enabled) return;
+        yield* repository.replaceAutomation({
+          automation: { ...current, nextRunAt: new Date(Date.now() - 1_000).toISOString() },
+          expectedRevision: current.revision,
+          expectedCancelled: false,
+        });
+      });
+      yield* failNextRun;
+      yield* failNextRun;
+      assert.isTrue(
+        Option.getOrThrow(yield* repository.getAutomation(automation.automationId)).enabled,
+      );
+      yield* failNextRun;
+      const paused = Option.getOrThrow(yield* repository.getAutomation(automation.automationId));
+      assert.isFalse(paused.enabled);
+      assert.isFalse(paused.definition.enabled);
+      assert.isNull(paused.nextRunAt);
+      assert.strictEqual(paused.revision, automation.revision + 1);
+      const last = (yield* repository.listRuns({
+        automationId: automation.automationId,
+        limit: 1,
+      }))[0]!;
+      assert.include(last.safeFailureDetail ?? "", "Paused after 3 failed runs in a row");
+    }),
   );
 
   it.effect("hides automations outside the exact project/provider scope", () =>

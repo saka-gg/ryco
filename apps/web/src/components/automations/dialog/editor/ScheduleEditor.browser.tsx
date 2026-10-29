@@ -479,6 +479,40 @@ describe("ScheduleEditor", () => {
     await expect.element(editor.getByText("Nothing runs until you approve it.")).toBeVisible();
   });
 
+  it("lets the owner turn on Run without asking where the device supports it", async () => {
+    const base = dialogCentreFixture.snapshots.get(projectCheckoutKey(LOCAL_ENV, RYCO_LOCAL))!;
+    const screen = await renderDialog();
+    openRyco();
+    const dialog = screen.getByRole("dialog");
+    await expect.poll(detailTitle).toBe("Triage new issues");
+    await userEvent.keyboard("e");
+    const editor = dialog.getByRole("region", { name: "Edit Triage new issues" });
+    await expect.element(editor).toBeVisible();
+    // An older device does not offer it.
+    await expect
+      .element(editor.getByRole("switch", { name: "Run without asking" }))
+      .not.toBeInTheDocument();
+
+    dialogCentreFixture.set(LOCAL_ENV, RYCO_LOCAL, {
+      ...base,
+      runWithoutAsking: true,
+    } as AutomationCentreSnapshot);
+    hooks.bump();
+    const toggle = editor.getByRole("switch", { name: "Run without asking" });
+    await expect.element(toggle).toBeVisible();
+    await expect
+      .element(editor.getByText("Off: you approve each run before it starts."))
+      .toBeVisible();
+    await userEvent.click(toggle);
+    await expect.element(editor.getByText(/Each run starts on its own/)).toBeVisible();
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await expect.poll(() => dialogCentreFixture.commands.length).toBe(1);
+    expect(lastCommand()).toMatchObject({
+      kind: "save",
+      definition: { runPolicy: "run-without-asking" },
+    });
+  });
+
   it("closes without proposing when nothing changed, and says so", async () => {
     const toast = vi.spyOn(toastManager, "add");
     const screen = await renderDialog();

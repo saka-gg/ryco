@@ -26,7 +26,10 @@ import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import type { GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { AgentControlPlanValidationError } from "../Errors.ts";
-import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
+import {
+  AgentControlAutomationService,
+  UNATTENDED_OWNER_ONLY,
+} from "../Services/AgentControlAutomation.ts";
 import type { AgentControlAutomationShape } from "../Services/AgentControlAutomation.ts";
 import { AgentControlProjectPlans } from "../Services/AgentControlProjectPlans.ts";
 import type { AgentControlProjectPlansShape } from "../Services/AgentControlProjectPlans.ts";
@@ -280,6 +283,20 @@ const automationDefinitionForPlan = (
           schedule: { kind: "once" as const, runAt: plan.scheduledFor },
           enabled: true,
         };
+
+/** An agent's plan never lets a schedule run without asking: only its owner may. */
+const agentPlanRunsUnattended = (
+  plan: Extract<
+    AgentControlActionPlan,
+    { kind: "createAutomation" | "updateAutomation" | "cancelAutomation" }
+  >,
+): boolean =>
+  (plan.kind === "createAutomation"
+    ? plan.definition
+    : plan.kind === "updateAutomation"
+      ? plan.after
+      : null
+  )?.runPolicy === "run-without-asking";
 
 const requireThread = (snapshot: OrchestrationShellSnapshot, threadId: string) => {
   const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
@@ -675,6 +692,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         if (deps.automations === undefined) {
           return yield* fail("automation-unavailable", "Automation control is unavailable.");
         }
+        if (agentPlanRunsUnattended(input.plan)) {
+          return yield* fail("privilege-escalation", UNATTENDED_OWNER_ONLY);
+        }
         yield* validateAutomation(deps.automations.validateLifecyclePlan(input.plan));
         const automation =
           input.plan.kind === "createAutomation"
@@ -806,6 +826,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             !input.integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalCreateTask)
           ) {
             return yield* fail("privilege-escalation", "External automation authority is absent.");
+          }
+          if (agentPlanRunsUnattended(input.plan)) {
+            return yield* fail("privilege-escalation", UNATTENDED_OWNER_ONLY);
           }
           yield* validateAutomation(deps.automations.validateLifecyclePlan(input.plan));
           const definition =

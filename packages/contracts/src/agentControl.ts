@@ -652,10 +652,29 @@ export const AgentControlAutomationSchedule = Schema.Union([
 ]);
 export type AgentControlAutomationSchedule = typeof AgentControlAutomationSchedule.Type;
 
+/**
+ * Whether a schedule's runs ask first. `approve-each` (also when absent, so every stored
+ * definition keeps it) makes every due run a proposal a person approves. With
+ * `run-without-asking` the scheduler approves each run on the owner's standing decision:
+ * only the owner-authored principal of Project settings may set it, never an agent, and an
+ * agent's edit of the schedule drops it. The run still uses exactly the definition's
+ * project, provider, model, runtime mode and checkout.
+ */
+export const AgentControlAutomationRunPolicy = Schema.Literals([
+  "approve-each",
+  "run-without-asking",
+]);
+export type AgentControlAutomationRunPolicy = typeof AgentControlAutomationRunPolicy.Type;
+
+/** A schedule that runs unattended pauses itself after this many failed runs in a row. */
+export const AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX = 3;
+
 export const AgentControlAutomationDefinition = Schema.Struct({
   execution: AgentControlAutomationExecutionTemplate,
   schedule: AgentControlAutomationSchedule,
   enabled: Schema.Boolean,
+  /** Absent: `approve-each`. Written only when it is `run-without-asking`. */
+  runPolicy: Schema.optional(AgentControlAutomationRunPolicy),
 }).pipe(rejectExcessProperties);
 export type AgentControlAutomationDefinition = typeof AgentControlAutomationDefinition.Type;
 

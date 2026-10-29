@@ -22,6 +22,7 @@ import {
   type ScheduleDraft,
 } from "@ryco/client-runtime/state/agentControl";
 import { AgentControlAutomationId } from "@ryco/contracts";
+import { AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX } from "@ryco/contracts/agent-control";
 import { AUTOMATION_LIMITS } from "@ryco/shared/automationSchedule";
 import { CircleAlertIcon, Repeat2Icon } from "lucide-react";
 import {
@@ -38,6 +39,7 @@ import { useEvent } from "../../../../hooks/useEvent";
 import { cn, isMacPlatform, randomUUID } from "../../../../lib/utils";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../../../store";
 import { formatProjectPath, inferHomeDirectory } from "../../../projects/projectsModel.logic";
+import { Switch } from "../../../ui/switch";
 import { Textarea } from "../../../ui/textarea";
 import { toastManager } from "../../../ui/toast";
 import type { ProjectAutomationsCheckout } from "../../data/useProjectAutomations";
@@ -545,6 +547,26 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
               </p>
             ) : null}
           </div>
+          {checkout?.snapshot?.runWithoutAsking || draft.runWithoutAsking ? (
+            <div className="ae-fld ae-unattended">
+              <Switch
+                id={`${editorId}-unattended`}
+                checked={draft.runWithoutAsking}
+                aria-describedby={`${editorId}-unattended-d`}
+                onCheckedChange={(checked) => update({ ...draft, runWithoutAsking: checked })}
+              />
+              <div className="ae-unattended-t">
+                <label className="ae-unattended-l" htmlFor={`${editorId}-unattended`}>
+                  Run without asking
+                </label>
+                <p className="ae-unattended-d" id={`${editorId}-unattended-d`}>
+                  {draft.runWithoutAsking
+                    ? `Each run starts on its own with this model, permission and checkout. It pauses after ${AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX} failed runs in a row.`
+                    : "Off: you approve each run before it starts."}
+                </p>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
       <footer ref={footerRef} className="ad-ed-foot">
