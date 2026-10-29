@@ -124,6 +124,10 @@ If you really want to dive into the code:
 # Optional: only needed if you use mise for dev tool management
 mise install
 
+# Needs the Bun version pinned in package.json, Node.js 24, rustup (the pinned Rust toolchain
+# installs itself) and, on Linux, a C/C++ toolchain and Python for node-pty
+# (Debian/Ubuntu: sudo apt install build-essential python3)
+
 bun install
 
 # Run the desktop app in dev mode

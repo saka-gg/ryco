@@ -115,13 +115,46 @@ export class NodePtyProcess implements PtyProcess {
   }
 }
 
+/** What a node without node-pty's native module needs, for the boot warning. */
+const NODE_PTY_UNAVAILABLE_HINT =
+  "reinstall ryco-cli where a C/C++ toolchain and Python are available (Debian/Ubuntu: build-essential python3), so node-pty can build its native module";
+
+/**
+ * Loads node-pty, or explains why terminals are unavailable. A native module that is missing or
+ * does not load (no prebuild for this platform and no toolchain at install time) must not stop the
+ * server: it starts, logs why once, and every terminal spawn fails with that reason.
+ */
+export const loadNodePty = (load: () => Promise<typeof import("node-pty")>) =>
+  Effect.tryPromise({
+    try: load,
+    catch: (cause) =>
+      new PtySpawnError({
+        adapter: "node-pty",
+        message: `Terminals are unavailable on this node: node-pty could not be loaded (${
+          // Its first line; node-pty appends the require stack.
+          (cause instanceof Error ? cause.message : String(cause)).split("\n")[0]
+        }).`,
+        cause,
+      }),
+  }).pipe(
+    Effect.map((nodePty) => ({ nodePty, unavailable: null })),
+    Effect.catch((error) =>
+      Effect.gen(function* () {
+        yield* Effect.logWarning(error.message, { hint: NODE_PTY_UNAVAILABLE_HINT });
+        const unavailable: PtyAdapterShape = { spawn: () => Effect.fail(error) };
+        return { nodePty: null, unavailable };
+      }),
+    ),
+  );
+
 export const layer = Layer.effect(
   PtyAdapter,
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
 
-    const nodePty = yield* Effect.promise(() => import("node-pty"));
+    const { nodePty, unavailable } = yield* loadNodePty(() => import("node-pty"));
+    if (nodePty === null) return unavailable;
 
     const ensureNodePtySpawnHelperExecutableCached = yield* Effect.cached(
       ensureNodePtySpawnHelperExecutable().pipe(
