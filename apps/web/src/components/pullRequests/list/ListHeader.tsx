@@ -2,6 +2,7 @@ import { WS_METHODS } from "@ryco/contracts";
 import { resolveChangeRequestPresentation } from "@ryco/shared/sourceControl";
 import {
   ChevronDownIcon,
+  LayersIcon,
   ListFilterIcon,
   LoaderCircleIcon,
   PlusIcon,
@@ -91,7 +92,7 @@ export function ListHeader(props: {
   /** ArrowDown in the field: move focus into the rows. */
   readonly onFocusRows: () => void;
 }) {
-  const { layout, repositories } = usePullRequestsPage();
+  const { layout, repositories, crossRepository } = usePullRequestsPage();
   const leadingInset = usePullRequestsLeadingInsetClass(
     props.variant !== "drawer" && layout.leadingRegion === "list",
     "pl-2.5",
@@ -109,7 +110,7 @@ export function ListHeader(props: {
         inputRef={props.inputRef}
         showHint={props.variant !== "drawer"}
         leaveOnEscape={props.variant !== "drawer"}
-        leading={repositories.length > 1 ? <RepositorySwitcher /> : null}
+        leading={repositories.length > 1 || crossRepository ? <RepositorySwitcher /> : null}
         onSubmit={props.onSubmit}
         onFocusRows={props.onFocusRows}
       />
@@ -124,7 +125,7 @@ export function ListHeader(props: {
  * Hidden where the host can't open change requests or the session can't.
  */
 function NewPullRequestButton() {
-  const { repository, model, nav } = usePullRequestsPage();
+  const { repository, model, nav, crossRepository } = usePullRequestsPage();
   const allowed = useHostedRpcCapability(
     WS_METHODS.sourceControlCreateChangeRequest,
     repository?.environmentId ?? null,
@@ -141,7 +142,8 @@ function NewPullRequestButton() {
         : null,
     [repository],
   );
-  if (!target || !allowed || !model.capabilities.create.supported) return null;
+  // All repositories has no one repository to open a pull request in.
+  if (!target || !allowed || !model.capabilities.create.supported || crossRepository) return null;
   const label = `New ${resolveChangeRequestPresentation(model.provider).longName}`;
   const show = (number: number) => {
     setOpen(false);
@@ -271,13 +273,25 @@ function SearchField(props: {
   );
 }
 
-/** The repository, as the search field's leading segment. */
+/** The switcher's first item: the pull requests that need you across every repository. */
+const ALL_REPOSITORIES_KEY = "\u0000all";
+const ALL_REPOSITORIES_LABEL = "All repositories";
+
+/** The repository (or All repositories), as the search field's leading segment. */
 function RepositorySwitcher() {
-  const { repository, repositories, nav } = usePullRequestsPage();
+  const { repository, repositories, nav, crossRepository } = usePullRequestsPage();
+  const allRepositories = crossRepository != null;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const items = useMemo(() => repositories.map((option) => option.key), [repositories]);
+  // Offered beside two or more repositories, and always while it is the open choice.
+  const items = useMemo(
+    () => [
+      ...(repositories.length > 1 || allRepositories ? [ALL_REPOSITORIES_KEY] : []),
+      ...repositories.map((option) => option.key),
+    ],
+    [allRepositories, repositories],
+  );
   const byKey = useMemo(
     () => new Map(repositories.map((option) => [option.key, option] as const)),
     [repositories],
@@ -288,6 +302,9 @@ function RepositorySwitcher() {
       needle.length === 0
         ? items
         : items.filter((key) => {
+            if (key === ALL_REPOSITORIES_KEY) {
+              return ALL_REPOSITORIES_LABEL.toLowerCase().includes(needle);
+            }
             const option = byKey.get(key);
             return (
               option !== undefined &&
@@ -299,18 +316,25 @@ function RepositorySwitcher() {
     [byKey, items, needle],
   );
   const choose = (key: string) => {
-    const option = byKey.get(key);
     setOpen(false);
     setQuery("");
-    if (option && option.key !== repository?.key) nav.selectRepository(option);
+    if (key === ALL_REPOSITORIES_KEY) {
+      if (!allRepositories) nav.showAllRepositories();
+      return;
+    }
+    const option = byKey.get(key);
+    if (option && (allRepositories || option.key !== repository?.key)) {
+      nav.selectRepository(option);
+    }
   };
+  const triggerName = allRepositories ? ALL_REPOSITORIES_LABEL : (repository?.name ?? "Repository");
   return (
     <Combobox
       items={items}
       filteredItems={filtered}
       autoHighlight
       open={open}
-      value={repository?.key ?? null}
+      value={allRepositories ? ALL_REPOSITORIES_KEY : (repository?.key ?? null)}
       onOpenChange={(next) => {
         setOpen(next);
         if (!next) setQuery("");
@@ -318,12 +342,16 @@ function RepositorySwitcher() {
     >
       <ComboboxTrigger
         ref={triggerRef}
-        aria-label={`Repository: ${repository?.name ?? "none"}`}
+        aria-label={`Repository: ${allRepositories ? ALL_REPOSITORIES_LABEL : (repository?.name ?? "none")}`}
         render={<button type="button" />}
         className="ml-1 inline-flex h-6 max-w-[42%] shrink-0 items-center gap-1.5 rounded-md pr-1 pl-1.5 text-xs font-medium text-foreground/80 outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-accent"
       >
-        {repository ? <RepositoryLogo option={repository} className="size-3.5" /> : null}
-        <span className="truncate">{repository?.name ?? "Repository"}</span>
+        {allRepositories ? (
+          <LayersIcon aria-hidden className="size-3.5 shrink-0 opacity-80" />
+        ) : repository ? (
+          <RepositoryLogo option={repository} className="size-3.5" />
+        ) : null}
+        <span className="truncate">{triggerName}</span>
         <ChevronDownIcon aria-hidden className="size-3 shrink-0 opacity-60" />
       </ComboboxTrigger>
       <span aria-hidden className="ml-1 h-4 w-px shrink-0 bg-border" />
@@ -342,6 +370,23 @@ function RepositorySwitcher() {
         <ComboboxEmpty>No repositories match.</ComboboxEmpty>
         <ComboboxList className="max-h-72">
           {filtered.map((key, index) => {
+            if (key === ALL_REPOSITORIES_KEY) {
+              return (
+                <ComboboxItem key={key} index={index} value={key} onClick={() => choose(key)}>
+                  <span className="flex min-w-0 items-center gap-2.5">
+                    <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                      <LayersIcon aria-hidden className="size-3.5" />
+                    </span>
+                    <span className="flex min-w-0 flex-col py-0.5">
+                      <span className="truncate text-sm">{ALL_REPOSITORIES_LABEL}</span>
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        Pull requests that need you
+                      </span>
+                    </span>
+                  </span>
+                </ComboboxItem>
+              );
+            }
             const option = byKey.get(key);
             if (!option) return null;
             const environment = projectCheckoutQualifier(option, repositories);
@@ -389,17 +434,22 @@ function RepositoryLogo(props: {
 
 /** State, "only", labels, and sort; a dot on the button while any is off its default. */
 function FilterMenu() {
-  const { nav, model } = usePullRequestsPage();
+  const { nav, model, crossRepository } = usePullRequestsPage();
   const search = nav.search;
   const state = resolvePullRequestsStateFilter(search);
   const sort = resolvePullRequestsSort(search);
-  const labels = model.list.labels;
+  const labels = crossRepository?.labels ?? model.list.labels;
   const selectedLabels = new Set(search.label ?? []);
   const active = pullRequestFilterChips(search, labels).length > 0;
-  const onlyOptions = availablePullRequestOnlyOptions({
-    involvementSupported: model.list.involvementSupported,
-    checkRollup: model.capabilities.listCheckRollup,
-  });
+  // Across repositories every row says how it involves you, and hosts differ in checks.
+  const onlyOptions = availablePullRequestOnlyOptions(
+    crossRepository
+      ? { involvementSupported: true, checkRollup: true }
+      : {
+          involvementSupported: model.list.involvementSupported,
+          checkRollup: model.capabilities.listCheckRollup,
+        },
+  );
   return (
     <Menu>
       <Tooltip>

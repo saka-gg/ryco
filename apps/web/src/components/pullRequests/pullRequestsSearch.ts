@@ -10,6 +10,8 @@ export type PullRequestsStateFilter = "open" | "closed" | "merged" | "all";
 export type PullRequestsOnlyFilter = "review" | "failing" | "mine";
 export type PullRequestsSort = "readiness" | "updated";
 export type PullRequestsDiffSide = "left" | "right";
+/** `all`: the pull requests that need you across every repository and node. */
+export type PullRequestsScope = "all";
 
 export const PULL_REQUESTS_TABS: readonly PullRequestsTab[] = [
   "conversation",
@@ -19,6 +21,11 @@ export const PULL_REQUESTS_TABS: readonly PullRequestsTab[] = [
 ];
 
 export interface PullRequestsSearch {
+  /**
+   * `all`: the list spans every repository and node; `env`/`project` then name the
+   * checkout the selected row opens through. Absent: one repository's list.
+   */
+  readonly scope?: PullRequestsScope | undefined;
   /** Environment that owns the selected repository checkout. */
   readonly env?: string | undefined;
   /** Project id within `env`; its checkout is the repository context. */
@@ -49,6 +56,7 @@ const STATES = new Set<string>(["open", "closed", "merged", "all"]);
 const ONLY = new Set<string>(["review", "failing", "mine"]);
 const SORTS = new Set<string>(["readiness", "updated"]);
 const SIDES = new Set<string>(["left", "right"]);
+const SCOPES = new Set<string>(["all"]);
 
 function optionalString(value: unknown, maxLength = 512): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -81,6 +89,7 @@ function optionalSha(value: unknown): string | undefined {
 }
 
 export function parsePullRequestsSearch(raw: Record<string, unknown>): PullRequestsSearch {
+  const scope = oneOf<PullRequestsScope>(raw["scope"], SCOPES);
   const env = optionalString(raw["env"]);
   const project = optionalString(raw["project"]);
   const pr = optionalPositiveInt(raw["pr"]);
@@ -97,6 +106,7 @@ export function parsePullRequestsSearch(raw: Record<string, unknown>): PullReque
   const thread = pr === undefined ? undefined : optionalString(raw["thread"], 256);
   const job = pr === undefined ? undefined : optionalString(raw["job"], 128);
   return {
+    ...(scope === undefined ? {} : { scope }),
     ...(env === undefined ? {} : { env }),
     ...(project === undefined ? {} : { project }),
     ...(pr === undefined ? {} : { pr }),

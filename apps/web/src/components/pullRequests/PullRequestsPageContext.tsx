@@ -2,6 +2,7 @@ import type { ScopedThreadRef } from "@ryco/contracts";
 import { createContext, useContext } from "react";
 
 import type { ProjectCheckoutOption, ProjectCheckoutRequest } from "../../projectCheckouts.logic";
+import type { CrossRepositoryListModel } from "./crossRepository/crossRepositoryList.logic";
 import type {
   PullRequestsDiffSide,
   PullRequestsSearch,
@@ -64,7 +65,19 @@ export interface PullRequestsNavigation {
   revealJob(jobId: string): void;
   /** Scope Files to one commit (`undefined` = whole change request). */
   scopeToCommit(sha: string | undefined): void;
+  /** One repository's list (leaves All repositories). */
   selectRepository(option: ProjectCheckoutOption): void;
+  /** The pull requests that need you across every repository and node (`scope=all`). */
+  showAllRepositories(): void;
+  /**
+   * Select a row of All repositories: its number through its checkout (`env`/`project`),
+   * staying in All repositories. A row without a checkout opens on its host. A `link`
+   * selection (typed into the search) also clears the search, in the same navigation.
+   */
+  selectCrossRepositoryRow(
+    rowKey: string,
+    options?: PullRequestsNavigateOptions & { readonly via?: "list" | "link" },
+  ): void;
 }
 
 export interface PullRequestsLayout {
@@ -158,6 +171,12 @@ export interface PullRequestsPageContextValue {
    * scrolls to and flashes it again. Absent where nothing counts reveals.
    */
   readonly jobRevealToken?: number | undefined;
+  /**
+   * All repositories (`scope=all`): the list across repositories and nodes, which the list
+   * shows instead of `model.list`; `repository` and `model` are then the selected row's
+   * checkout. Absent or null for one repository's list.
+   */
+  readonly crossRepository?: CrossRepositoryListModel | null | undefined;
 }
 
 export const PullRequestsPageContext = createContext<PullRequestsPageContextValue | null>(null);

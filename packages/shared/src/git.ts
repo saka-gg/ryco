@@ -511,8 +511,11 @@ export function checkoutRepositoryKey(remoteUrl: string | null | undefined): str
   );
 }
 
-/** A repository key without a `:port` on its host: web URLs may carry one, remotes rarely do. */
-function repositoryKeyWithoutPort(key: string): string {
+/**
+ * A repository key without a `:port` on its host, lowercased: web URLs may carry one,
+ * remotes rarely do. Keys that name the same repository (`repositoryKeysMatch`) are equal here.
+ */
+export function repositoryKeyWithoutPort(key: string): string {
   const lower = key.toLowerCase();
   if (lower.startsWith("azure:")) return lower;
   const slash = lower.indexOf("/");

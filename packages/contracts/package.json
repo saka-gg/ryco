@@ -86,6 +86,11 @@
       "import": "./src/baseSchemas.ts",
       "require": "./src/baseSchemas.ts"
     },
+    "./change-request-review": {
+      "types": "./src/changeRequestReview.ts",
+      "import": "./src/changeRequestReview.ts",
+      "require": "./src/changeRequestReview.ts"
+    },
     "./claude-cache": {
       "types": "./src/claudeCache.ts",
       "import": "./src/claudeCache.ts",

@@ -143,6 +143,29 @@ describe("rankChangeRequests", () => {
     );
     expect(groups[0]?.entries.map((entry) => entry.number)).toEqual([2, 1]);
   });
+
+  it("takes own rows from isOwn when there is no single viewer login", () => {
+    const mine = new Set([2, 5]);
+    const groups = rankChangeRequests(
+      [cr(1, { author: "alice" }), cr(2, { author: "octocat" }), cr(5, { author: "bot-x" })],
+      null,
+      {
+        isOwn: (entry) => mine.has(entry.number),
+        isReviewRequested: (entry) => entry.number === 1,
+      },
+    );
+    expect(groups.map((group) => [group.key, group.entries.map((entry) => entry.number)])).toEqual([
+      ["needs-your-review", [1]],
+      ["yours", [5, 2]],
+    ]);
+  });
+
+  it("lets isOwn override the viewer login", () => {
+    const groups = rankChangeRequests([cr(1, { author: "octocat" })], "octocat", {
+      isOwn: () => false,
+    });
+    expect(groups.map((group) => group.key)).toEqual(["others"]);
+  });
 });
 
 describe("search", () => {

@@ -27,6 +27,7 @@ export const Route = createFileRoute("/pull-requests")({
   // demand so the list data layer stays out of the boot graph; hover (intent)
   // preloads only warm the chunk, so sweeping across links runs no lists.
   loaderDeps: ({ search }: { readonly search: PullRequestsSearch }) => ({
+    scope: search.scope,
     env: search.env,
     project: search.project,
     state: search.state,

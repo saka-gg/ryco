@@ -23,6 +23,13 @@ export interface ProjectCheckoutOption {
   readonly repositoryKey: string;
   /** True for the representative checkout of its logical repository. */
   readonly isRepresentative: boolean;
+  /**
+   * The remote the checkout's repository identity names (`upstream`, else `origin`); null
+   * without one, absent on a provisional option built before the project's snapshot.
+   */
+  readonly repositoryRemoteUrl?: string | null | undefined;
+  /** The repository identity's host kind (`github`, `gitlab`, …); null when unknown. */
+  readonly repositoryProvider?: string | null | undefined;
 }
 
 export function projectCheckoutKey(environmentId: string, projectId: string): string {
@@ -58,6 +65,8 @@ export function buildProjectCheckoutOptions(
         repositoryKey: snapshot.projectKey,
         isRepresentative:
           member.environmentId === snapshot.environmentId && member.id === snapshot.id,
+        repositoryRemoteUrl: member.repositoryIdentity?.locator.remoteUrl ?? null,
+        repositoryProvider: member.repositoryIdentity?.provider ?? null,
       });
     }
   }
