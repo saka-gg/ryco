@@ -33,6 +33,7 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
+import { stampTurnOrigin } from "../orchestration/turnOrigin.ts";
 import { shellSettlementPolicy } from "../orchestration/threadSettlementInput.ts";
 import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
 import { encodeThreadHistoryCursor } from "../orchestration/threadHistoryCursor.ts";
@@ -225,6 +226,7 @@ const makeThreadWindowLoadScheduler = () => {
 
 export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
+    turnOrigin,
     ownerEffect,
     withAccess,
     projectionSnapshotQuery,
@@ -509,7 +511,11 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           ORCHESTRATION_WS_METHODS.dispatchCommand,
           applyOrchestrationCommand({
             command,
-            normalize: normalizeDispatchCommand,
+            // The connection, never the payload, says where a turn comes from.
+            normalize: (input) =>
+              normalizeDispatchCommand(input).pipe(
+                Effect.map((normalized) => stampTurnOrigin(normalized, turnOrigin)),
+              ),
             dispatch: dispatchNormalizedCommand,
             projections: projectionSnapshotQuery,
             terminals: terminalManager,

@@ -160,3 +160,61 @@ describe("thread mentions in the decider", () => {
     ]);
   });
 });
+
+describe("turn origin in the decider", () => {
+  it("carries a turn start's and a steer's origin onto their events", async () => {
+    const start = await Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: readModelWith(idleThread),
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("command-origin-start"),
+          threadId,
+          message: message("message-origin-start"),
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          origin: { connection: "relay" },
+          createdAt,
+        },
+      }),
+    );
+    expect(eventOfType(start, "thread.turn-start-requested").payload.origin).toEqual({
+      connection: "relay",
+    });
+    const steer = await Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: readModelWith(runningThread),
+        command: {
+          type: "thread.turn.steer",
+          commandId: CommandId.make("command-origin-steer"),
+          threadId,
+          expectedTurnId: turnId,
+          message: message("message-origin-steer"),
+          origin: { connection: "remote" },
+          createdAt,
+          requestedAt: createdAt,
+        },
+      }),
+    );
+    expect(eventOfType(steer, "thread.turn-steer-requested").payload.origin).toEqual({
+      connection: "remote",
+    });
+    const local = await Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: readModelWith(idleThread),
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("command-origin-none"),
+          threadId,
+          message: message("message-origin-none"),
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt,
+        },
+      }),
+    );
+    expect(Object.hasOwn(eventOfType(local, "thread.turn-start-requested").payload, "origin")).toBe(
+      false,
+    );
+  });
+});

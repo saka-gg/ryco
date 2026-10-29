@@ -2060,6 +2060,18 @@ export const RestartContinuationGuard = Schema.Struct({
 });
 export type RestartContinuationGuard = typeof RestartContinuationGuard.Type;
 
+/**
+ * How the user who sent a turn is connected to this node, stamped by the server at the
+ * connection edge from the authenticated connection, never from the payload: `local` is a
+ * process on this machine, `remote` another machine over the network, `relay` the Ryco relay
+ * (hosted web or the mobile app). Server-only on commands (client decode strips it), so it
+ * cannot be forged.
+ */
+export const TurnOrigin = Schema.Struct({
+  connection: Schema.Literals(["local", "remote", "relay"]),
+});
+export type TurnOrigin = typeof TurnOrigin.Type;
+
 /** How many other threads one user message may mention for its agent to read. */
 export const MAX_THREAD_REFERENCES_PER_MESSAGE = 4;
 
@@ -2122,6 +2134,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   threadReferences: Schema.optional(ThreadReferences),
   keepBackgroundWork: KeepBackgroundWork,
   stopBackgroundWork: StopBackgroundWork,
+  origin: Schema.optional(TurnOrigin),
   createdAt: IsoDateTime,
 });
 /** A turn start as dispatched: its attachments are already stored. */
@@ -2170,6 +2183,7 @@ export const ThreadTurnSteerCommand = Schema.Struct({
     attachments: ChatAttachments,
   }),
   threadReferences: Schema.optional(ThreadReferences),
+  origin: Schema.optional(TurnOrigin),
   createdAt: IsoDateTime,
   requestedAt: IsoDateTime,
 });
@@ -3074,6 +3088,7 @@ export const ThreadTurnSteerRequestedPayload = Schema.Struct({
     attachments: Schema.Array(ChatAttachment),
   }),
   threadReferences: Schema.optional(ThreadReferences),
+  origin: Schema.optional(TurnOrigin),
   createdAt: IsoDateTime,
   requestedAt: IsoDateTime,
 });
@@ -3131,6 +3146,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   contextHandoff: Schema.optional(ContextHandoffReference),
   threadReferences: Schema.optional(ThreadReferences),
+  origin: Schema.optional(TurnOrigin),
   createdAt: IsoDateTime,
 });
 

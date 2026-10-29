@@ -138,7 +138,7 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import { BootstrapCredentialService } from "../auth/Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
-import { type RpcPrincipal, rpcPrincipalOwnerKey } from "./RpcPrincipal.ts";
+import { type RpcPrincipal, rpcPrincipalOwnerKey, turnOriginOfPrincipal } from "./RpcPrincipal.ts";
 import { AtlassianConnectionService } from "../atlassian/AtlassianConnectionService.ts";
 import { JiraWorkItemService } from "../atlassian/JiraWorkItemService.ts";
 import { AdvertisedEndpointRegistry } from "../remote/Services/AdvertisedEndpointRegistry.ts";
@@ -1392,6 +1392,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       workspaceLifecycle,
       workspaceChangeSummary,
       storagePrincipalKey: `${principal.transport}:${principal.scopeId}:${crypto.randomUUID()}`,
+      turnOrigin: turnOriginOfPrincipal(principal),
       currentSessionId,
       projectionSnapshotQuery,
       statisticsQuery,

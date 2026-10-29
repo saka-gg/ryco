@@ -5,11 +5,13 @@ import { AuthSessionId } from "@ryco/contracts";
 
 import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
 import {
+  directPeerOf,
   directRpcPrincipal,
   RELAY_UNIDENTIFIED_OWNER_KEY,
   type RelayChannelAuthority,
   relayRpcPrincipal,
   rpcPrincipalOwnerKey,
+  turnOriginOfPrincipal,
 } from "./RpcPrincipal.ts";
 
 it.effect("enforces viewer, operator, owner, and direct-owner access", () =>
@@ -94,4 +96,35 @@ it("keys work that outlives a connection by pairing, by device, or as unidentifi
   expect(rpcPrincipalOwnerKey(session("session-3", "pairing-2"))).not.toBe(
     rpcPrincipalOwnerKey(session("session-1", "pairing-1")),
   );
+});
+
+it("derives where a turn comes from the connection, never the payload", () => {
+  const request = (remoteAddress: string | undefined, headers: Record<string, string> = {}) =>
+    ({ source: { socket: { remoteAddress }, headers } }) as unknown as Parameters<
+      typeof directPeerOf
+    >[0];
+  expect(directPeerOf(request("127.0.0.1"))).toEqual({ peer: "local" });
+  expect(directPeerOf(request("::ffff:127.0.0.1"))).toEqual({ peer: "local" });
+  expect(directPeerOf(request("::1"))).toEqual({ peer: "local" });
+  // A local reverse proxy (Tailscale Serve) relays a remote client.
+  expect(directPeerOf(request("127.0.0.1", { "x-forwarded-for": "100.64.0.9" }))).toEqual({
+    peer: "remote",
+  });
+  expect(directPeerOf(request("192.168.1.20"))).toEqual({ peer: "remote" });
+  expect(directPeerOf(request(undefined))).toEqual({});
+  expect(directPeerOf({ source: {} } as unknown as Parameters<typeof directPeerOf>[0])).toEqual({});
+
+  const direct = directRpcPrincipal({
+    sessionId: AuthSessionId.make("session-owner"),
+    chainId: AuthSessionId.make("session-owner"),
+    subject: "owner",
+    method: "browser-session-cookie",
+    role: "owner",
+  });
+  expect(turnOriginOfPrincipal(direct)).toBeUndefined();
+  expect(turnOriginOfPrincipal({ ...direct, peer: "local" })).toEqual({ connection: "local" });
+  expect(turnOriginOfPrincipal({ ...direct, peer: "remote" })).toEqual({ connection: "remote" });
+  expect(turnOriginOfPrincipal(relayRpcPrincipal("owner", "channel"))).toEqual({
+    connection: "relay",
+  });
 });

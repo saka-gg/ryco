@@ -128,6 +128,18 @@ it.effect("accepts bounded general file uploads for capable providers", () =>
   }),
 );
 
+it.effect("strips a turn origin a client sends: only the connection edge sets it", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeClientOrchestrationCommand({
+      ...clientTurnWithAttachments([]),
+      message: { messageId: "msg-origin", role: "user", text: "Hi", attachments: [] },
+      origin: { connection: "local" },
+    });
+    assert.strictEqual(parsed.type, "thread.turn.start");
+    assert.isFalse(Object.hasOwn(parsed, "origin"));
+  }),
+);
+
 it.effect("rejects oversized, unsafe, and excessive general file uploads", () =>
   Effect.gen(function* () {
     const baseFile = {
