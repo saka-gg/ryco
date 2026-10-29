@@ -19,6 +19,11 @@ npm install -g ryco-cli
 ryco
 ```
 
+On Linux, installing compiles the terminal backend (`node-pty` ships no Linux prebuild), so the
+machine needs a C/C++ toolchain and Python first (Debian/Ubuntu: `sudo apt install build-essential
+python3`). A node whose `node-pty` could not be built still starts; it logs why and its terminals
+stay unavailable.
+
 ### Run an unreleased build from a checkout
 
 To run a node from source — for example a branch that is not on npm yet — clone the repository on
@@ -40,7 +45,9 @@ they carry over. Run the same command again after every pull you want to deploy.
   [Memory](#memory) for the flag).
 
 The build compiles the native resource monitor, so it needs [rustup](https://rustup.rs); the script
-installs the pinned Rust toolchain itself. Use the Bun version pinned in the root `package.json`.
+installs the pinned Rust toolchain itself. Use the Bun version pinned in the root `package.json`, and
+the Node.js version in its `engines` range (24). On Linux, `bun install` also needs
+the C/C++ toolchain and Python above for `node-pty`.
 
 ## Provider Setup
 
