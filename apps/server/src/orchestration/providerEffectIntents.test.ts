@@ -290,7 +290,7 @@ describe("recoveryCopy", () => {
     {
       kind: "turn-start",
       deliveryState: "not-sent",
-      delegatedReturn: false,
+      serverWake: null,
       summary: "Message was not sent",
       detail:
         "Ryco restarted before this message reached the provider. Nothing was sent. Send it again to continue.",
@@ -298,7 +298,7 @@ describe("recoveryCopy", () => {
     {
       kind: "turn-start",
       deliveryState: "uncertain",
-      delegatedReturn: false,
+      serverWake: null,
       summary: "Message delivery unconfirmed",
       detail:
         "Ryco restarted after handing this message to the provider but before the provider confirmed it. It may have been received. Check the thread before sending it again.",
@@ -306,7 +306,7 @@ describe("recoveryCopy", () => {
     {
       kind: "turn-start",
       deliveryState: "not-sent",
-      delegatedReturn: true,
+      serverWake: "delegation-return",
       summary: "Delegated return was not submitted",
       detail:
         "Ryco restarted before this delegated result reached the provider. Inspect the result before sending it manually.",
@@ -314,28 +314,44 @@ describe("recoveryCopy", () => {
     {
       kind: "turn-start",
       deliveryState: "uncertain",
-      delegatedReturn: true,
+      serverWake: "delegation-return",
       summary: "Delegated return delivery unconfirmed",
       detail:
         "Ryco restarted while submitting this delegated result. It may have reached the provider. Inspect the parent thread before sending it manually.",
     },
     {
+      kind: "turn-start",
+      deliveryState: "not-sent",
+      serverWake: "pull-request-watch",
+      summary: "Pull request update was not sent",
+      detail:
+        "Ryco restarted before this pull request update reached the agent. Nothing was sent. Ryco checks the pull request again and reports what is still new.",
+    },
+    {
+      kind: "turn-start",
+      deliveryState: "uncertain",
+      serverWake: "pull-request-watch",
+      summary: "Pull request update delivery unconfirmed",
+      detail:
+        "Ryco restarted while sending this pull request update. It may have reached the agent. Check the chat before acting on it again.",
+    },
+    {
       kind: "turn-steer",
       deliveryState: "not-sent",
-      delegatedReturn: false,
+      serverWake: null,
       summary: "Steer failed",
       detail: "Ryco restarted before this steer message reached the provider. It was not sent.",
     },
     {
       kind: "turn-steer",
       deliveryState: "uncertain",
-      delegatedReturn: false,
+      serverWake: null,
       summary: "Steer failed",
       detail:
         "Ryco restarted while delivering this steer message. It may have reached the provider. Check the turn before sending it again.",
     },
   ] as const)(
-    "words $kind / $deliveryState (delegated: $delegatedReturn)",
+    "words $kind / $deliveryState (server wake: $serverWake)",
     ({ summary, detail, ...input }) => {
       expect(recoveryCopy(input)).toEqual({ summary, detail });
     },

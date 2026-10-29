@@ -19,11 +19,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@ryco/contracts";
-import {
-  QUEUED_TURN_START_GRACE_MS,
-  queuedTurnIdleBlocker,
-  type QueuedTurnIdleInput,
-} from "@ryco/shared/threadSettlement";
+import { QUEUED_TURN_START_GRACE_MS } from "@ryco/shared/threadSettlement";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import { Clock, Context, Effect, Layer, Option, Semaphore } from "effect";
 import { isPersistableChatAttachment } from "../../attachmentStore.ts";
@@ -41,20 +37,20 @@ import {
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { isCheckpointRevertEntryPending } from "../../orchestration/checkpointRevertPolicy.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
+import { ServerWakeFence } from "../../orchestration/Services/ServerWakeFence.ts";
+import { serverWakeInScope } from "../../orchestration/serverWake.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import {
   CAPTURE_EXPIRY_MS,
-  COLD_WAKE_GRACE_MS,
-  MAX_COLD_WAKES_IN_FLIGHT,
   MAX_DELIVERY_ATTEMPTS,
   MAX_REPLAYS,
   buildDelegationReturnCommand,
   compareCodeUnits,
+  delegationWakeIds,
   deliveryExpiresAtMs,
   isStoredAttachmentWake,
   type DelegationWakeCommand,
@@ -66,7 +62,6 @@ import {
 } from "../completionReturnMessages.ts";
 import { publishCompletionReturns } from "../completionReturnPublish.ts";
 import { copyArtifactsToThread } from "../artifactHandoff.ts";
-import { agentControlRuntimeRank } from "./AgentControlActionValidator.ts";
 
 export { renderCompletionReturn } from "../completionReturnMessages.ts";
 
@@ -125,21 +120,6 @@ type CapturedRecord = CompletionReturnRecord & { readonly capture: CompletionRet
 const isCaptured = (record: CompletionReturnRecord): record is CapturedRecord =>
   record.capture !== undefined && record.capture !== null;
 
-export const queuedTurnIdleInputFromShell = (
-  shell: OrchestrationThreadShell,
-  nowMs: number,
-): QueuedTurnIdleInput => ({
-  archivedAt: shell.archivedAt,
-  sessionStatus: shell.session?.status ?? null,
-  latestTurnState: shell.latestTurn?.state ?? null,
-  latestTurnRequestedAt: shell.latestTurn?.requestedAt ?? null,
-  latestUserMessageAt: shell.latestUserMessageAt,
-  hasPendingApprovals: shell.hasPendingApprovals,
-  hasPendingUserInput: shell.hasPendingUserInput,
-  backgroundLiveness: shell.backgroundLiveness ?? null,
-  nowMs,
-});
-
 /**
  * Upgrade pre-batching rows in memory. A legacy frozen command's text is exactly one rendered
  * section; a legacy dispatching row becomes a single-child batch with the legacy ids, so its
@@ -197,10 +177,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   const config = yield* Effect.serviceOption(ServerConfig);
   const policy = yield* AgentControlPolicy;
   const providers = yield* ProviderService;
+  // Idle, usage limit, revert and the cold-start budget: shared with every other server wake.
+  const fence = yield* ServerWakeFence;
   const lock = yield* Semaphore.make(1);
   // All mutated only under `lock`.
-  const pendingStartSeen = new Map<ThreadId, { messageId: string; firstSeenMs: number }>();
-  const coldInFlight = new Map<ThreadId, { messageId: MessageId; sinceMs: number }>();
   /** Child → its own unbound delegation wake, first seen by this process (nested hold). */
   const ownWakeSeen = new Map<ThreadId, { messageId: MessageId; firstSeenMs: number }>();
   /**
@@ -365,19 +345,11 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       Effect.map(Option.isSome),
       Effect.catch(() => Effect.succeed(true)),
     );
-  /** §3.4: a wake is cold when the parent has no live session; a failed read counts as cold. */
-  const parentCold = (threadId: ThreadId) =>
-    providers.getSession(threadId).pipe(
-      Effect.map(Option.isNone),
-      Effect.catch(() => Effect.succeed(true)),
-    );
-  const coldBudgetFull = () => coldInFlight.size >= MAX_COLD_WAKES_IN_FLIGHT;
   const inScope = (record: CompletionReturnRecord, parent: OrchestrationThreadShell) =>
-    // An unattended, untrusted-content-triggered turn never runs with more privilege or in a
-    // different checkout than the delegation had. Lowering privilege is fine.
-    agentControlRuntimeRank[parent.runtimeMode] <=
-      agentControlRuntimeRank[record.parentRuntimeMode] &&
-    parent.worktreePath === record.parentWorktreePath;
+    serverWakeInScope(
+      { runtimeMode: record.parentRuntimeMode, worktreePath: record.parentWorktreePath },
+      parent,
+    );
 
   /** The delegating message of a row's parent turn, cached per delivery pass. */
   const delegatingMessage = (
@@ -436,43 +408,24 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     });
 
   /**
-   * §3.1 parent idle: the shared queued-turn predicate plus no observed pending start. A
-   * pending start blocks for at most QUEUED_TURN_START_GRACE_MS of this process's scan time,
-   * so stale rows left by a restart stop blocking and client clock skew cannot open it early.
-   */
-  const parentIdle = (parent: OrchestrationThreadShell, nowMs: number) =>
-    Effect.gen(function* () {
-      const pending = yield* repository.pendingTurnStart(parent.id);
-      let pendingBlocks = false;
-      if (pending && !pending.startFailed) {
-        const seen = pendingStartSeen.get(parent.id);
-        let firstSeenMs = nowMs;
-        if (seen?.messageId === pending.messageId) firstSeenMs = seen.firstSeenMs;
-        else pendingStartSeen.set(parent.id, { messageId: pending.messageId, firstSeenMs });
-        pendingBlocks = nowMs - firstSeenMs < QUEUED_TURN_START_GRACE_MS;
-      } else {
-        pendingStartSeen.delete(parent.id);
-      }
-      if (pendingBlocks) return false;
-      return queuedTurnIdleBlocker(queuedTurnIdleInputFromShell(parent, nowMs)) === null;
-    });
-
-  /**
-   * Why the parent cannot take a wake now, or null. Every reason is a wait (save and retry),
-   * never a cancel and never a delivery attempt: the decider would reject the wake for the
-   * same reason, and the reason ends on its own.
+   * Why the parent cannot take a wake now, or null (`ServerWakeFence.holdReason`). Every
+   * reason is a wait (save and retry), never a cancel and never a delivery attempt: the
+   * decider would reject the wake for the same reason, and the reason ends on its own.
    * - A usage limit (usage-limits §5.2): an accepted turn start clears the limit, which only
    *   the user's resume or the auto-resume after the reset may do. The decider fences it too.
-   * - Busy: the shared queued-turn idle predicate.
+   * - Busy: the shared queued-turn idle predicate plus a pending start this process saw less
+   *   than QUEUED_TURN_START_GRACE_MS ago (§3.1 parent idle).
    * A pending checkpoint revert is the third such wait, checked by `parentReverting` last,
    * right before a claim, because it reads the journal.
    */
   const parentHoldDetail = (parent: OrchestrationThreadShell, ctx: ScanContext) =>
-    Effect.gen(function* () {
-      if (applicableUsageLimit(parent) !== null) return DETAIL.usageLimited;
-      if (!(yield* parentIdle(parent, ctx.nowMs))) return DETAIL.busy;
-      return null;
-    });
+    fence
+      .holdReason(parent, ctx.nowMs)
+      .pipe(
+        Effect.map((hold) =>
+          hold === "usage-limited" ? DETAIL.usageLimited : hold === "busy" ? DETAIL.busy : null,
+        ),
+      );
 
   /**
    * usage-limits §5.2: the newest known reset of a limit holding the parent, remembered on the
@@ -493,11 +446,28 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
    * pending rule: the decider rejects every turn start until the revert ends.
    */
   const parentReverting = (parentThreadId: ThreadId, ctx: ScanContext) =>
-    Effect.gen(function* () {
-      if (!projections.getLatestCheckpointRevert) return false;
-      const latest = yield* projections.getLatestCheckpointRevert(parentThreadId);
-      return latest !== null && isCheckpointRevertEntryPending(latest, ctx.nowMs);
-    });
+    fence.reverting(parentThreadId, ctx.nowMs);
+
+  /**
+   * §3.4: takes the cold slot of a wake that will start its parent's session, and hands it to
+   * `onTaken` in the same uninterruptible step, so the caller's finalizer gives back every
+   * slot it took. False when the shared budget is full.
+   */
+  const reserveColdSlot = (
+    parentThreadId: ThreadId,
+    messageId: MessageId,
+    ctx: ScanContext,
+    onTaken: () => void,
+  ) =>
+    Effect.uninterruptible(
+      fence.reserveColdSlot(parentThreadId, messageId, ctx.nowMs).pipe(
+        Effect.tap((taken) =>
+          Effect.sync(() => {
+            if (taken) onTaken();
+          }),
+        ),
+      ),
+    );
 
   /**
    * rollback-correctness §6.3: a revert that dropped the delegating turn rolled the request
@@ -571,8 +541,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       readonly applied: boolean;
       readonly trigger?: CompletionReturnRecord;
     },
-  ) =>
-    Effect.gen(function* () {
+  ) => {
+    // The cold slot a replay of this call reserved; given back unless its wake was accepted.
+    let reserved: { readonly threadId: ThreadId; readonly messageId: MessageId } | null = null;
+    return Effect.gen(function* () {
       const now = ctx.now;
       let replay = options.replay;
       let applied = options.applied;
@@ -613,10 +585,11 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
             // The cold slot's grace runs from the apply that started the wake: a replay or
             // a late settle must not inherit the original claim time.
             if (saved && batch.cold)
-              coldInFlight.set(rows[0]!.parentThreadId, {
-                messageId: batch.messageId,
-                sinceMs: applied ? ctx.nowMs : Date.parse(batch.dispatchedAt),
-              });
+              yield* fence.noteColdWake(
+                rows[0]!.parentThreadId,
+                batch.messageId,
+                applied ? ctx.nowMs : Date.parse(batch.dispatchedAt),
+              );
             return;
           }
           // Every member moves past the batch attempt, so any later batch with this anchor has
@@ -730,10 +703,20 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           return;
         }
         // §3.4: a replay that cold-starts the parent counts against the same budget.
-        const cold = yield* parentCold(parent.value.id);
-        if (cold && coldBudgetFull()) return yield* holdAll(bounded, now, DETAIL.cold);
+        const { cold, budgetFull } = yield* fence.coldStart(parent.value.id, ctx.nowMs);
+        if (cold && budgetFull) return yield* holdAll(bounded, now, DETAIL.cold);
         if (yield* parentReverting(parent.value.id, ctx))
           return yield* releaseToReady(bounded, DETAIL.reverting);
+        // Taken before the apply: another server wake may take the last slot meanwhile.
+        const parentId = parent.value.id;
+        const messageId = frozen.message.messageId;
+        if (
+          cold &&
+          !(yield* reserveColdSlot(parentId, messageId, ctx, () => {
+            reserved = { threadId: parentId, messageId };
+          }))
+        )
+          return yield* holdAll(bounded, now, DETAIL.cold);
         const replayed: CompletionReturnBatch = { ...batch, replays: batch.replays + 1, cold };
         if (
           !(yield* saveAll(
@@ -747,7 +730,16 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         applied = true;
         trigger = undefined;
       }
-    });
+    }).pipe(
+      Effect.ensuring(
+        Effect.suspend(() =>
+          reserved === null
+            ? Effect.void
+            : fence.releaseColdSlot(reserved.threadId, reserved.messageId),
+        ),
+      ),
+    );
+  };
 
   // ── capture ────────────────────────────────────────────────────────────
   const integrityMatches = (proposal: AgentControlProposal, record: CompletionReturnRecord) => {
@@ -958,8 +950,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     });
 
   // ── delivery ───────────────────────────────────────────────────────────
-  const deliverParent = (parentThreadId: ThreadId, ctx: ScanContext) =>
-    Effect.gen(function* () {
+  const deliverParent = (parentThreadId: ThreadId, ctx: ScanContext) => {
+    // The cold slot this delivery reserved; given back unless its wake was accepted.
+    let reserved: MessageId | null = null;
+    return Effect.gen(function* () {
       const now = ctx.now;
       const rows = (yield* repository.listReadyForParent(parentThreadId))
         .map(normalizeLegacyCompletionReturn)
@@ -1000,8 +994,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       const remaining = bounded.filter((row) => !stopped.has(row.childThreadId));
       if (remaining.length === 0) return;
 
-      const cold = yield* parentCold(parentThreadId);
-      if (cold && coldBudgetFull()) return yield* holdAll(remaining, now, DETAIL.cold);
+      const { cold, budgetFull } = yield* fence.coldStart(parentThreadId, ctx.nowMs);
+      if (cold && budgetFull) return yield* holdAll(remaining, now, DETAIL.cold);
       // Last before the claim: a journal read per wake, never per held scan.
       if (yield* parentReverting(parentThreadId, ctx))
         return yield* holdAll(remaining, now, DETAIL.reverting);
@@ -1013,11 +1007,20 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         .map((row) => row.childThreadId)
         .reduce((min, id) => (compareCodeUnits(id, min) < 0 ? id : min));
       const attempt = Math.max(...members.map((row) => row.deliveryAttempts ?? 0));
+      const wakeMessageId = delegationWakeIds(anchor, attempt).messageId;
+      // Taken before the claim: another server wake may take the last slot meanwhile.
+      if (
+        cold &&
+        !(yield* reserveColdSlot(parentThreadId, wakeMessageId, ctx, () => {
+          reserved = wakeMessageId;
+        }))
+      )
+        return yield* holdAll(kept, now, DETAIL.cold);
       // Copied under the parent's own ids before the claim; a retry links the same copies.
       const returned = yield* copyReturnedArtifacts(parentThreadId, members);
       const command = buildDelegationReturnCommand({
         parent: parent.value,
-        latestUserMessageId: yield* repository.latestUserMessageId(parentThreadId),
+        latestUserMessageId: yield* fence.latestUserMessageId(parentThreadId),
         sections: members.map((row) => row.capture.section),
         anchorChildThreadId: anchor,
         attempt,
@@ -1059,22 +1062,15 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       wakesAppliedHere.set(command.message.messageId, ctx.nowMs);
       yield* applyWake(command).pipe(Effect.catch(() => Effect.void));
       yield* settleBatch(command.commandId, ctx, { replay: false, applied: true });
-    });
-
-  const releaseColdSlots = (nowMs: number) =>
-    Effect.forEach(
-      [...coldInFlight],
-      ([parentThreadId, entry]) =>
-        Effect.gen(function* () {
-          if (nowMs - entry.sinceMs >= COLD_WAKE_GRACE_MS) {
-            coldInFlight.delete(parentThreadId);
-            return;
-          }
-          const state = yield* repository.wakeStartState(parentThreadId, entry.messageId);
-          if (state === "bound" || state === "failed") coldInFlight.delete(parentThreadId);
-        }),
-      { discard: true },
+    }).pipe(
+      // An accepted wake's slot was noted while settling; any other outcome gives it back.
+      Effect.ensuring(
+        Effect.suspend(() =>
+          reserved === null ? Effect.void : fence.releaseColdSlot(parentThreadId, reserved),
+        ),
+      ),
     );
+  };
 
   const scan = (now = new Date().toISOString()) =>
     lock.withPermit(
@@ -1085,7 +1081,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
           settledCommands: new Set(),
           candidates: new Map(),
         };
-        yield* releaseColdSlots(ctx.nowMs);
+        yield* fence.releaseColdSlots(ctx.nowMs);
         for (const [messageId, appliedMs] of wakesAppliedHere)
           if (ctx.nowMs - appliedMs > CAPTURE_EXPIRY_MS) wakesAppliedHere.delete(messageId);
         for (const record of yield* repository.listDue(now)) {
