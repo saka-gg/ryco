@@ -312,7 +312,6 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -619,7 +618,6 @@ function buildFixture(snapshot: OrchestrationReadModel): TestFixture {
         capabilities: {
           repositoryIdentity: true,
           threadSettlement: false,
-          threadPriorityRanking: false,
         },
       },
       cwd: "/repo/project",
@@ -728,7 +726,6 @@ function enableThreadLifecycle(nextFixture: TestFixture): void {
     threadSettlement: true,
     threadSnooze: true,
     threadSidebarUndo: true,
-    threadPriorityRanking: false,
   };
   nextFixture.serverConfig = {
     ...nextFixture.serverConfig,

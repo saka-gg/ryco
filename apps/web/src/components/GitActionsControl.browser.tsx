@@ -354,7 +354,6 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     });
     setEnvironmentConfig(ENVIRONMENT_A, "ryco");

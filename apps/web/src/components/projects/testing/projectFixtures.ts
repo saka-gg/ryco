@@ -357,7 +357,6 @@ export function seedProjectsFixtureStore(
       repositoryIdentity: true,
       projectPreferences: true,
       threadSettlement: false,
-      threadPriorityRanking: false,
     },
   });
   // The remote device is a saved environment with a live connection.

@@ -67,7 +67,6 @@ describe("pre-auth server environment descriptor", () => {
       "storageManagement",
       "terminalWriteRequireIdle",
       "threadFork",
-      "threadPriorityRanking",
       "threadSettlement",
       "threadSidebarUndo",
       "threadSnooze",

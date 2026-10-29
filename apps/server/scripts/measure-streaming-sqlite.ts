@@ -52,10 +52,6 @@ import { OrchestrationProjectionSnapshotQueryLive } from "../src/orchestration/L
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import { RepositoryIdentityResolver } from "../src/project/Services/RepositoryIdentityResolver.ts";
 import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackgroundLiveness.ts";
-import {
-  ThreadPriorityCandidateQuery,
-  ThreadPriorityCandidateQueryLive,
-} from "../src/threadPriority/ThreadPriorityCandidateQuery.ts";
 import { installRowWriteProbe } from "./sqliteRowWriteProbe.ts";
 
 const profile = process.argv[4] ?? "buffered";
@@ -103,7 +99,6 @@ const layer = Layer.mergeAll(
   OrchestrationProjectionPipelineLive,
   ProjectionThreadMessageRepositoryLive,
   OrchestrationProjectionSnapshotQueryLive,
-  ThreadPriorityCandidateQueryLive,
 ).pipe(
   Layer.provide(ThreadBackgroundLiveness.layer),
   Layer.provide(Layer.succeed(RepositoryIdentityResolver, { resolve: () => Effect.succeed(null) })),
@@ -384,7 +379,6 @@ const program = Effect.gen(function* () {
   }
   if (profile === "reads") {
     const query = yield* ProjectionSnapshotQuery;
-    const priority = yield* ThreadPriorityCandidateQuery;
     const count = 2000;
     const body = 'ordinary completed report: "quoted" line with a backslash \\ and newline\n'
       .repeat(80)
@@ -531,13 +525,6 @@ const program = Effect.gen(function* () {
         .pipe(Effect.map((rows) => rows.map((row) => row.snippet))),
       50,
       body.slice(0, 180).replace(/\s+/g, " ").trim() + "...",
-    );
-    yield* measure(
-      "priority",
-      priority
-        .listActive({ autoSettleAfterDays: null, nowMs: Date.now() })
-        .pipe(Effect.map((rows) => rows.map((row) => row.latestUserRequest ?? ""))),
-      1,
     );
     yield* measure(
       "sideContext201",

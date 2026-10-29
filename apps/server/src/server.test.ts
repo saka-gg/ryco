@@ -213,7 +213,6 @@ const testEnvironmentDescriptor = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: true,
-    threadPriorityRanking: false,
   },
 };
 

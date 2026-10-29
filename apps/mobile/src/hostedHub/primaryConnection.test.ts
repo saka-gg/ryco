@@ -186,7 +186,6 @@ function deps() {
     pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
     resetShellProjection: vi.fn(),
     applyShellEvent: vi.fn(),
-    applyThreadPriorities: vi.fn(),
     syncShellSnapshot: vi.fn(),
   };
 }
@@ -434,24 +433,6 @@ describe("hosted environment connection", () => {
 
     expect(input.applyShellEvent).toHaveBeenCalledTimes(2);
     expect(input.syncShellSnapshot).not.toHaveBeenCalled();
-  });
-
-  it("asks for thread-priority deltas and drops them from a replaced generation", () => {
-    const { input } = connect(studio);
-    // The shared connection requests `threadPriorities: "delta"` exactly when
-    // this handler is supplied; without it every ranking batch is a full
-    // shell snapshot over the relay.
-    const connectionInput = connectionFactory.input as {
-      applyThreadPriorities?: (item: unknown, environmentId: string) => void;
-    };
-    expect(connectionInput.applyThreadPriorities).toBeTypeOf("function");
-    const item = { kind: "thread-priorities", priorities: [] };
-    connectionInput.applyThreadPriorities!(item, studio.environmentId);
-    expect(input.applyThreadPriorities).toHaveBeenCalledExactlyOnceWith(item, studio.environmentId);
-
-    getHostedEnvironmentSessions().release(studio.environmentId);
-    connectionInput.applyThreadPriorities!(item, studio.environmentId);
-    expect(input.applyThreadPriorities).toHaveBeenCalledOnce();
   });
 
   it("never reads or publishes config from a replaced generation", async () => {

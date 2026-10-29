@@ -228,7 +228,6 @@ async function mountInbox(
       deliveryUnknownThreadKeys={new Set()}
       localQueuedThreadKeys={new Set()}
       activeThreadKey={null}
-      aiFocusEnabled={false}
       autoSettleAfterDays={null}
       pinnedThreadKeys={new Set()}
       onOpenThread={onOpenThread}

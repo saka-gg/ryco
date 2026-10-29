@@ -92,10 +92,7 @@ const threadEvent = (
         : { threadId, updatedAt: NOW },
   }) as unknown as OrchestrationEvent;
 
-const makeHelpers = (options: {
-  readonly rows?: Map<string, OrchestrationThreadShell>;
-  readonly threadPriorityChanges?: Stream.Stream<void>;
-}) =>
+const makeHelpers = (options: { readonly rows?: Map<string, OrchestrationThreadShell> }) =>
   Effect.gen(function* () {
     const live = yield* PubSub.unbounded<OrchestrationEvent>();
     const stored: Array<OrchestrationEvent> = [];
@@ -122,9 +119,6 @@ const makeHelpers = (options: {
       orchestrationEngine,
       projectionSnapshotQuery,
       repositoryIdentityResolver: { resolve: () => Effect.succeed(null) },
-      ...(options.threadPriorityChanges === undefined
-        ? {}
-        : { threadPriorityChanges: options.threadPriorityChanges }),
     });
     return { helpers, live, stored };
   });
@@ -235,56 +229,6 @@ describe("archived thread stubs in the shell stream", () => {
         assert(item.kind === "thread-upserted");
         assert.property(item.thread, "modelSelection");
       }
-    }),
-  );
-
-  it.live("a ranking reloads each shell form in its own shared load", () =>
-    Effect.gen(function* () {
-      const changes = yield* PubSub.unbounded<void>();
-      const { helpers } = yield* makeHelpers({ threadPriorityChanges: Stream.fromPubSub(changes) });
-      let fullLoads = 0;
-      let stubbedLoads = 0;
-      const full = Effect.sync(() => {
-        fullLoads += 1;
-        return fullSnapshot;
-      });
-      const stubbed = Effect.sync(() => {
-        stubbedLoads += 1;
-        return stubbedSnapshot;
-      });
-      const subscribe = (asksForStubs: boolean) =>
-        take(
-          helpers.makeReplayableShellStream(full, {
-            snapshotDelivery: "paged",
-            ...(asksForStubs ? { stubbedSnapshot: stubbed } : {}),
-          }),
-          // Snapshot pages, then the ranking's pages.
-          asksForStubs ? 8 : 6,
-        ).pipe(Effect.forkChild);
-      const stubSubscribers = [yield* subscribe(true), yield* subscribe(true)];
-      const fullSubscriber = yield* subscribe(false);
-      yield* Effect.sleep("20 millis");
-      assert.equal(stubbedLoads, 2);
-      assert.equal(fullLoads, 1);
-      yield* PubSub.publish(changes, undefined);
-      for (const fiber of stubSubscribers) {
-        const items = yield* Fiber.join(fiber);
-        assert.deepEqual(kindsOf(items.slice(4)), [
-          "snapshot-begin",
-          "snapshot-threads",
-          "snapshot-archived-threads",
-          "snapshot-end",
-        ]);
-      }
-      const fullItems = yield* Fiber.join(fullSubscriber);
-      assert.deepEqual(kindsOf(fullItems.slice(3)), [
-        "snapshot-begin",
-        "snapshot-threads",
-        "snapshot-end",
-      ]);
-      // One shared load per form for the ranking.
-      assert.equal(stubbedLoads, 3);
-      assert.equal(fullLoads, 2);
     }),
   );
 });

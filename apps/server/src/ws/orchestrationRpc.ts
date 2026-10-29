@@ -16,7 +16,6 @@ import {
   OrchestrationStopBackgroundTaskError,
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
-  ThreadPriorityRpcError,
   type OrchestrationGetThreadHistoryPageInput,
   type OrchestrationGetThreadShellsInput,
   type OrchestrationGetThreadWindowInput,
@@ -245,7 +244,6 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     makeReplayableThreadStream,
     recordThreadSnapshotDurationMs,
     reconcileAllWorktrees,
-    threadPriorityCoordinator,
   } = ctx;
 
   // This connection's thread subscriptions, so a view that attaches to a
@@ -796,7 +794,6 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               shellSnapshotLoad(withSettlementPolicy(projectionSnapshotQuery.getShellSnapshot())),
               {
                 resumeFromSequence: input.resumeFromSequence,
-                threadPriorities: input.threadPriorities,
                 snapshotDelivery: input.snapshotDelivery,
                 ...(input.archivedThreads === "stub"
                   ? {
@@ -982,26 +979,6 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           ),
         ),
         { "rpc.aggregate": "orchestration" },
-      ),
-    [WS_METHODS.threadPriorityEnsureCurrent]: (input) =>
-      observeRpcEffect(
-        WS_METHODS.threadPriorityEnsureCurrent,
-        ownerEffect(
-          WS_METHODS.threadPriorityEnsureCurrent,
-          Option.match(threadPriorityCoordinator, {
-            onNone: () =>
-              Effect.fail(
-                new ThreadPriorityRpcError({
-                  failure: {
-                    kind: "unsupported",
-                    detail: "Inbox priority ranking is not available on this server.",
-                  },
-                }),
-              ),
-            onSome: (coordinator) => coordinator.ensureCurrent(input),
-          }),
-        ),
-        { "rpc.aggregate": "threadPriority" },
       ),
     [WS_METHODS.chatAttachmentsReadChunk]: (input) =>
       observeRpcEffect(

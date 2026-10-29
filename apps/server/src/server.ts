@@ -86,9 +86,6 @@ import { CheckpointDiffQueryLive } from "./checkpointing/Layers/CheckpointDiffQu
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore.ts";
 import * as ForgejoApi from "./sourceControl/ForgejoApi.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
-import { ThreadPriorityCandidateQueryLive } from "./threadPriority/ThreadPriorityCandidateQuery.ts";
-import { ThreadPriorityCoordinatorLive } from "./threadPriority/ThreadPriorityCoordinator.ts";
-import { ThreadPriorityRepositoryLive } from "./threadPriority/ThreadPriorityRepository.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { TerminalManagerLive } from "./terminal/Layers/Manager.ts";
 import { WorktreeSetupTrackerLive } from "./project/Layers/WorktreeSetupTracker.ts";
@@ -352,14 +349,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
-const RuntimeFeatureLayerLive = Layer.mergeAll(
-  ReactorLayerLive,
-  ThreadPriorityCoordinatorLive,
-).pipe(
-  Layer.provideMerge(ThreadPriorityCandidateQueryLive),
-  Layer.provideMerge(ThreadPriorityRepositoryLive),
-  Layer.provideMerge(TextGeneration.layer),
-);
+const RuntimeFeatureLayerLive = ReactorLayerLive.pipe(Layer.provideMerge(TextGeneration.layer));
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
   Layer.provide(ProviderSessionRuntimeRepositoryLive),

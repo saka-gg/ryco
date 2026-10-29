@@ -886,9 +886,9 @@ change, or loss of node eligibility deletes the corresponding records and keys. 
 does not establish a session or role; fresh snapshots reconcile the saved display. See
 [cache bounds and behavior](unified-workspace.md#cache-and-failure-behavior).
 A separate, schema-validated inbox
-preference record stores only three finite user choices: the auto-settle interval, whether AI Focus
-is enabled, and its refresh interval. It contains no node identifiers, rankings, model/provider
-preferences, content, or authentication material. These browser-local choices survive reloads. The
+preference record stores only finite user choices: the auto-settle interval and the thread alert
+preferences. It contains no node identifiers, model/provider preferences, content, or
+authentication material. These browser-local choices survive reloads. The
 auto-settle interval there applies only to nodes that keep no rule of their own, and is what a first
 connection hands to a node that keeps the rule but has none set.
 The hosted root installs a fail-closed

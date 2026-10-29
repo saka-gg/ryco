@@ -237,7 +237,6 @@ function seedNode(localTasks: boolean) {
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: true,
-      threadPriorityRanking: false,
       localTasks,
     },
   };
