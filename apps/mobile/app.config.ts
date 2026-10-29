@@ -1,7 +1,12 @@
 import { DEFAULT_HOSTED_APP_ORIGIN } from "../../packages/shared/src/hostedApp.ts";
 import type { ExpoConfig } from "expo/config";
 
-import { loadMobileEnv, resolveAppVariant, type AppVariant } from "./config/env.ts";
+import {
+  loadMobileEnv,
+  resolveAppVariant,
+  resolveMobileUpdates,
+  type AppVariant,
+} from "./config/env.ts";
 
 // Ryco public mobile scaffold (B1). The upstream hosted-auth vendor plane and
 // managed-cloud plane, its EAS project/owner, upstream bundle IDs/schemes, brand
@@ -13,6 +18,7 @@ const repoEnv = loadMobileEnv();
 Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
+const mobileUpdates = resolveMobileUpdates(repoEnv.RYCO_EAS_PROJECT_ID);
 
 // Local, capability-reduced device builds (free Apple Personal Team) can only
 // sign their own bundle id; expose an override so `expo run:ios` on a device
@@ -161,11 +167,8 @@ const config: ExpoConfig = {
   // a future appearance preference plugs into; this forces the native shell dark so
   // first paint (splash + system chrome) is dark before JS resolves.
   userInterfaceStyle: "dark",
-  // OTA updates are disabled in the public scaffold: no EAS project id is
-  // baked in. B3 wires the Ryco EAS project + update URL.
-  updates: {
-    enabled: false,
-  },
+  // Off unless RYCO_EAS_PROJECT_ID names the Ryco EAS project (config/env.ts).
+  updates: mobileUpdates.updates,
   // Turns on babel-preset-expo's React Compiler pass. Which sources it compiles
   // is scoped in babel.config.js (all of apps/mobile/src);
   // src/perf/reactCompilerCoverage.test.ts keeps them compiling.
@@ -314,6 +317,7 @@ const config: ExpoConfig = {
     "./plugins/withAndroidPredictiveBackCompat.cjs",
   ],
   extra: {
+    ...(mobileUpdates.projectId ? { eas: { projectId: mobileUpdates.projectId } } : {}),
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     // Optional default node origin for local testing; pairing overrides it.
