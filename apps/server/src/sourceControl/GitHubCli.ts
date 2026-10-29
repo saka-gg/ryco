@@ -55,6 +55,12 @@ import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { classifyForgeFailure, type ForgeFailureKind } from "./forgeFailure.ts";
 import { forgeFailureFields } from "./forgeHttpRateLimit.ts";
+import { isForgeRequestRefusedWhilePaused } from "./forgeRequestPaused.ts";
+import {
+  forgeChildAdmission,
+  forgeRequestPausedFailure,
+  forgeRequestPausedRefusal,
+} from "./forgeRateLimit.ts";
 import * as GitHubIssues from "./gitHubIssues.ts";
 import type { NormalizedGitHubIssueDetail, NormalizedGitHubIssueRecord } from "./gitHubIssues.ts";
 import * as GitHubActions from "./gitHubActions.ts";
@@ -809,6 +815,11 @@ export function normalizeGitHubCliError(
   error: VcsError | unknown,
   domain: GitHubCliErrorDomain = "general",
 ): GitHubCliError {
+  // Refused before it ran: GitHub was paused after a rate limit while it queued.
+  const refusal = forgeRequestPausedRefusal(error);
+  if (refusal !== null) {
+    return new GitHubCliError({ operation, ...forgeRequestPausedFailure(refusal), cause: refusal });
+  }
   const text = errorText(error);
   const lower = text.toLowerCase();
   const forge = classifyForgeFailure(error);
@@ -1224,6 +1235,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
+        admit: forgeChildAdmission,
       })
       .pipe(
         Effect.mapError((error) =>
@@ -1348,7 +1360,12 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     {
       capacity: LIST_REPOSITORY_CAPACITY,
       timeToLive: (exit) =>
-        Exit.isSuccess(exit) ? LIST_REPOSITORY_MAX_AGE : LIST_REPOSITORY_FAILURE_TTL,
+        Exit.isSuccess(exit)
+          ? LIST_REPOSITORY_MAX_AGE
+          : // A `gh repo view` refused during a rate-limit pause never ran: ask again next time.
+            isForgeRequestRefusedWhilePaused(Option.getOrUndefined(Exit.findErrorOption(exit)))
+            ? Duration.zero
+            : LIST_REPOSITORY_FAILURE_TTL,
     },
   );
   const refreshingListRepositories = new Set<string>();

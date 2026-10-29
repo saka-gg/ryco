@@ -214,6 +214,11 @@ describe("server boot import boundaries", () => {
     expect(
       reached(/^apps\/server\/src\/sourceControl\/forge(?:Failure|HttpRateLimit)\.ts$/u),
     ).toEqual(["apps/server/src/sourceControl/forgeHttpRateLimit.ts"]);
+    // The forge rate-limit pause loads with the providers it guards. Only the import-free
+    // refusal check the boot-path caches read is on the serve path.
+    expect(
+      reached(/^apps\/server\/src\/sourceControl\/forge(?:RateLimit|RequestPaused)\.ts$/u),
+    ).toEqual(["apps/server/src/sourceControl/forgeRequestPaused.ts"]);
     // Source-control clients load with the provider that uses them (Forgejo answers
     // synchronous remote detection and stays eager).
     expect(

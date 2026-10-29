@@ -2,10 +2,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, afterEach, describe, expect, vi } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option } from "effect";
 import { ChildProcessSpawner } from "effect/process";
-import { VcsProcessExitError } from "@ryco/contracts";
+import { VcsProcessExitError, VcsProcessSpawnError } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
+import { ForgeRequestPausedError, forgeChildAdmission } from "./forgeRateLimit.ts";
 import {
   AZURE_PULL_REQUEST_22,
   AZURE_PULL_REQUEST_LIST,
@@ -87,6 +88,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -146,6 +148,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -231,6 +234,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -290,6 +294,7 @@ describe("AzureDevOpsCli.layer", () => {
         cwd: "/repo",
         timeoutMs: 30_000,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       });
     }).pipe(Effect.provide(layer)),
   );
@@ -581,6 +586,33 @@ describe("AzureDevOpsCli error normalization", () => {
         error.detail,
         "Azure DevOps is rate limiting requests. Ryco tries again shortly.",
       );
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("checks the rate-limit pause after the forge permit and reports a refusal", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessSpawnError({
+            operation: "AzureDevOpsCli.execute",
+            command: "az repos pr list",
+            cwd: "/repo",
+            cause: new ForgeRequestPausedError({
+              provider: "azure-devops",
+              host: "dev.azure.com",
+              retryAt: 1_000_000_030_000,
+            }),
+          }),
+        ),
+      );
+      const az = yield* AzureDevOpsCli.AzureDevOpsCli;
+      const error = yield* az
+        .execute({ cwd: "/repo", args: ["repos", "pr", "list"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.failureKind, "rate-limited");
+      assert.strictEqual(error.retryAt, 1_000_000_030_000);
+      assert.strictEqual(error.detail, "Azure DevOps requests are paused after a rate limit.");
+      assert.strictEqual(mockRun.mock.calls.at(-1)?.[0].admit, forgeChildAdmission);
     }).pipe(Effect.provide(layer)),
   );
 

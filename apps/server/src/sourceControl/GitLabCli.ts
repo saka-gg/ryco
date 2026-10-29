@@ -27,6 +27,11 @@ import {
 } from "./forgeFailure.ts";
 import { forgeFailureFields, forgeFailureKindFromHttp } from "./forgeHttpRateLimit.ts";
 import {
+  forgeChildAdmission,
+  forgeRequestPausedFailure,
+  forgeRequestPausedRefusal,
+} from "./forgeRateLimit.ts";
+import {
   buildGlabApiInvocation,
   describeGitLabApiFailure,
   parseGitLabApiFailure,
@@ -241,6 +246,11 @@ function mentionsMissingMergeRequest(lower: string): boolean {
  * `failureKind` comes only from what glab or GitLab said (`forgeFailureText`).
  */
 function normalizeGitLabCliError(operation: "execute" | "stdout", error: unknown): GitLabCliError {
+  // Refused before it ran: GitLab was paused after a rate limit while it queued.
+  const refusal = forgeRequestPausedRefusal(error);
+  if (refusal !== null) {
+    return new GitLabCliError({ operation, ...forgeRequestPausedFailure(refusal), cause: refusal });
+  }
   if (error instanceof Error) {
     const forge = classifyForgeFailure(error);
     const { kindIf } = forge;
@@ -427,6 +437,7 @@ export const make = Effect.fn("makeGitLabCli")(function* () {
         cwd: input.cwd,
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       })
       .pipe(Effect.mapError((error) => normalizeGitLabCliError("execute", error)));
 
@@ -447,6 +458,7 @@ export const make = Effect.fn("makeGitLabCli")(function* () {
           : {}),
         ...(input.keepOutputTail !== undefined ? { keepOutputTail: input.keepOutputTail } : {}),
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       })
       .pipe(
         Effect.mapError((error) => normalizeGitLabCliError("execute", error)),
