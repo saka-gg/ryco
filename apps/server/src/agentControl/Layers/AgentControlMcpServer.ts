@@ -34,6 +34,7 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
 import { AGENT_CONTROL_CAPABILITIES } from "@ryco/contracts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
+import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
 import { withComputerUseTools } from "../Mcp/computerTools.ts";
 import { withAssistantAttachmentTools } from "../Mcp/attachmentTools.ts";
 import { withHtmlRenderTools } from "../Mcp/htmlRenderTools.ts";
@@ -94,6 +95,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const proposalRepository = yield* Effect.serviceOption(AgentControlProposalRepository);
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
+  const cliProxy = yield* Effect.serviceOption(CliProxyService);
   const toolDeps = {
     policy,
     proposals,
@@ -105,6 +107,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),
     ...(Option.isSome(diagnostics) ? { diagnostics: diagnostics.value } : {}),
     getSettings: serverSettings.getSettings,
+    ...(Option.isSome(cliProxy) ? { getCliProxyHubs: cliProxy.value.cachedQuotas } : {}),
     getProviders: providerRegistry.getProviders,
     ...(Option.isSome(validator) ? { validator: validator.value } : {}),
     ...(Option.isSome(projectPlans) ? { projectPlans: projectPlans.value } : {}),

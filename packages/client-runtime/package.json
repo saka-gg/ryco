@@ -78,6 +78,10 @@
       "types": "./src/usage/index.ts",
       "import": "./src/usage/index.ts"
     },
+    "./usage/limits": {
+      "types": "./src/usage/limits.ts",
+      "import": "./src/usage/limits.ts"
+    },
     "./relay": {
       "types": "./src/relay/index.ts",
       "import": "./src/relay/index.ts"

@@ -89,7 +89,8 @@ const CAPABILITY_OPTIONS: ReadonlyArray<{
   {
     capability: AGENT_CONTROL_CAPABILITIES.externalReadDiagnostics,
     label: "Read diagnostics",
-    description: "Read redacted count-only health summaries for allowed projects.",
+    description:
+      "Read redacted count-only health summaries for allowed projects, and provider usage limits.",
   },
   {
     capability: AGENT_CONTROL_CAPABILITIES.externalReadThreads,

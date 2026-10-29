@@ -5,6 +5,7 @@ import {
   AgentControlProposal,
   OrchestrationProjectShell,
   OrchestrationThreadShell,
+  ServerProvider,
   type AgentControlCapability,
   type AgentControlExternalIntegration,
   type OrchestrationEvent,
@@ -12,6 +13,7 @@ import {
 import { Effect, Option, PubSub, Schema, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
 
+import type { CliProxyCachedHub } from "../../cliProxy/CliProxyService.ts";
 import { AgentControlPlanValidationError } from "../Errors.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
@@ -81,7 +83,13 @@ const makeIntegration = (
 
 const DEFAULT_CAPABILITIES = [C.externalListProjects, C.externalCreateTask, C.externalReadTask];
 
-const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
+const fixture = (
+  capabilities: ReadonlyArray<AgentControlCapability>,
+  options?: {
+    readonly providers?: ReadonlyArray<ServerProvider>;
+    readonly hubs?: ReadonlyArray<CliProxyCachedHub>;
+  },
+) => {
   let current = makeIntegration(capabilities);
   const changes = Effect.runSync(PubSub.unbounded<AgentControlIntegrationId>());
   const domainEvents = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
@@ -197,7 +205,8 @@ const fixture = (capabilities: ReadonlyArray<AgentControlCapability>) => {
     domainEvents: {
       subscribeDomainEvents: Effect.map(PubSub.subscribe(domainEvents), Stream.fromSubscription),
     },
-    getProviders: Effect.succeed([]),
+    getProviders: Effect.succeed(options?.providers ?? []),
+    ...(options?.hubs === undefined ? {} : { getCliProxyHubs: Effect.succeed(options.hubs) }),
     validator: { validateExternalSubmission } as never,
     proposals: { submit, getProposal, findByRequest } as never,
     proposalEvents: { subscribe: Effect.never } as never,
@@ -561,5 +570,101 @@ describe("external Agent Control read catalog", () => {
         }),
       ),
     ).toBe("Project not found.");
+  });
+
+  it("offers usage limits only with the diagnostics grant, node-wide and redacted", async () => {
+    const limits = {
+      limitId: "limit-account-123",
+      observedAt: now,
+      windows: [{ id: "primary", usedPercent: 60, windowDurationMins: 300 }],
+    };
+    const providers = [
+      Schema.decodeUnknownSync(ServerProvider)({
+        instanceId: "codex",
+        driver: "codex",
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready",
+        auth: { status: "authenticated", email: "person@example.com" },
+        checkedAt: now,
+        models: [],
+        rateLimits: limits,
+      }),
+      Schema.decodeUnknownSync(ServerProvider)({
+        instanceId: "claude-hub",
+        driver: "claudeAgent",
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: now,
+        models: [],
+        rateLimits: limits,
+      }),
+    ];
+    const hubs: ReadonlyArray<CliProxyCachedHub> = [
+      {
+        label: "Home hub",
+        routedInstanceIds: [providers[1]!.instanceId],
+        failed: false,
+        listed: {
+          fetchedAtMs: Date.parse(now),
+          accounts: [
+            {
+              provider: "claude",
+              disabled: false,
+              quota: {
+                status: "ok",
+                checkedAt: now,
+                windows: [{ id: "five_hour", usedPercent: 20 }],
+              },
+            },
+          ],
+        },
+      },
+    ];
+    const without = fixture(DEFAULT_CAPABILITIES, { providers, hubs });
+    expect(
+      without.tools.descriptorsFor(without.integration()).map((tool) => tool.name),
+    ).not.toContain(T.usageLimits);
+    expect(text(await without.call(T.usageLimits, {}))).toBe(
+      "External Agent Control request was refused.",
+    );
+
+    const reader = fixture([C.externalReadDiagnostics], { providers, hubs });
+    expect(reader.tools.descriptorsFor(reader.integration()).map((tool) => tool.name)).toContain(
+      T.usageLimits,
+    );
+    const result = await reader.call(T.usageLimits, {});
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      instances: [
+        {
+          instanceId: "codex",
+          windows: [{ label: "5h", usedPercent: 60 }],
+          observedAt: now,
+        },
+        { instanceId: "claude-hub", windows: [], observedAt: null },
+      ],
+      hubs: [
+        {
+          hubLabel: "Home hub",
+          routedInstanceIds: ["claude-hub"],
+          accounts: [{ label: "Account 1", provider: "claude", windows: [{ usedPercent: 20 }] }],
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("person@example.com");
+    expect(JSON.stringify(result)).not.toContain("limit-account-123");
+    // Limits belong to no project, so the integration's project scope does not narrow them.
+    expect(reader.integrations.authorizeTool).toHaveBeenCalledWith({
+      integrationId,
+      tool: T.usageLimits,
+      requiredCapability: C.externalReadDiagnostics,
+    });
+    const filtered = await reader.call(T.usageLimits, { instanceId: "claude-hub" });
+    expect(filtered.structuredContent).toMatchObject({ instances: [{ instanceId: "claude-hub" }] });
   });
 });
