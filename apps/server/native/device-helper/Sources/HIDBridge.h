@@ -1,13 +1,24 @@
 // HID event injection into a booted simulator.
 //
-// Events are Indigo messages (the simulator's internal HID wire format),
-// constructed by SimulatorKit's `IndigoHIDMessageFor*` C functions and delivered
-// through `SimDeviceLegacyHIDClient`. The struct layout and the two-payload
-// touch message below are ported from facebook/idb's FBSimulatorIndigoHID.
+// Two transports behind one interface, chosen by CoreSimulator version
+// (`RycoPreferredInputTransport`, CoreSimulatorVersion.h):
+//
+// - Xcode 27 (CoreSimulator 1155.4) and later: XPC dictionaries to the guest's
+//   `dtuhidd` daemon (DTUHIDTransport). The guest drops legacy Indigo input
+//   there while the host-side send still succeeds, so there is no fallback.
+// - Earlier toolchains: Indigo messages built by SimulatorKit's
+//   `IndigoHIDMessageFor*` C functions and delivered through
+//   `SimDeviceLegacyHIDClient`. The struct layout and the two-payload touch
+//   message are ported from facebook/idb's FBSimulatorIndigoHID.
+//
+// The transport switch and the delivery accounting are adapted from Synara
+// (Emanuele-web04/synara#1924, commit 74e0b3654, MIT).
 //
 // Objective-C because it does raw struct surgery on private message buffers.
 
 #import <Foundation/Foundation.h>
+
+#import "DTUHIDTransport.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -33,9 +44,10 @@ BOOL RycoHardwareButtonFromName(NSString *name, RycoHardwareButton *outButton);
 /// instead of re-deriving the path (Xcode 27 moved the framework).
 @property(class, nonatomic, copy, nullable) NSString *simulatorKitPath;
 
-/// Connects a HID client to `device` (a `SimDevice`). Returns NO on failure,
-/// including when this host's CoreSimulator would drop Indigo input (see
-/// CoreSimulatorVersion.h): refusing is honest, an acked no-op is not.
+/// Connects `device` (a `SimDevice`) through the preferred transport. On
+/// `dtuhid` this starts the daemon's warm-up and returns YES at once; each
+/// input then waits for it. On `indigo` it creates the legacy HID client and
+/// returns NO when SimulatorKit or its symbols are missing.
 - (BOOL)attachToDevice:(id)device
                  error:(NSError **)error NS_SWIFT_NAME(attach(toDevice:));
 
@@ -49,16 +61,35 @@ BOOL RycoHardwareButtonFromName(NSString *name, RycoHardwareButton *outButton);
 /// and turn any increase into an error.
 @property(nonatomic, readonly) NSInteger undeliveredEventCount;
 
+/// Why the current input was not delivered, for the RPC error. Starts with
+/// "nothing was sent:" when no event of the operation went out (safe to
+/// retry), and with "input may have been partially delivered; do not replay:"
+/// otherwise.
+@property(nonatomic, readonly, copy, nullable) NSString *undeliveredReason;
+
+/// `dtuhid` or `indigo`: which transport this attachment injects through.
+@property(nonatomic, readonly, copy) NSString *transportName;
+
+/// Starts one bounded RPC input: resets the delivery accounting and gives the
+/// operation 13 s, inside the server's 15 s request deadline. Delivery errors
+/// then describe the whole operation, not just the last failed key, so a
+/// partially sent operation is never replayed.
+- (void)beginInput NS_SWIFT_NAME(beginInput());
+
 /// Touch down/up at a normalized display point (0..1, origin top-left).
 - (void)sendTouchAtX:(double)x y:(double)y down:(BOOL)down
     NS_SWIFT_NAME(sendTouch(x:y:down:));
 
-/// Press-and-release at a normalized point, holding for `holdMs`.
+/// Press-and-release at a normalized point, holding for `holdMs`. A hold that
+/// cannot finish inside the input deadline is refused before its contact, and
+/// a touch-down that was not delivered sends no touch-up.
 - (void)tapAtX:(double)x y:(double)y holdMs:(NSInteger)holdMs
     NS_SWIFT_NAME(tap(x:y:holdMs:));
 
 /// A drag from start to end over `durationMs`, interpolated into steps so the
 /// gesture recognizers on the far side see a real swipe rather than a teleport.
+/// On `dtuhid` a drag that cannot finish inside the input deadline is refused
+/// before its first contact.
 - (void)dragFromX:(double)startX
                 y:(double)startY
               toX:(double)endX
@@ -70,16 +101,23 @@ BOOL RycoHardwareButtonFromName(NSString *name, RycoHardwareButton *outButton);
 - (void)sendKeyUsage:(uint32_t)usage down:(BOOL)down
     NS_SWIFT_NAME(sendKey(usage:down:));
 
-/// Press and release a key, holding briefly so the guest registers it.
+/// Press and release a key, holding briefly so the guest registers it. A
+/// key-down that was not delivered sends no key-up.
 - (void)tapKeyUsage:(uint32_t)usage NS_SWIFT_NAME(tapKey(usage:));
 
 /// Types `text` by mapping each character to HID usages, shifting as needed.
-/// Returns the count of characters that had no mapping (skipped).
+/// Returns the count of characters that had no mapping (skipped). Stops at the
+/// first undelivered key and releases a held key and Shift before returning.
 - (NSInteger)typeText:(NSString *)text NS_SWIFT_NAME(type(text:));
 
 - (void)sendButton:(RycoHardwareButton)button down:(BOOL)down
     NS_SWIFT_NAME(sendButton(_:down:));
+/// Press and release a button; a press that was not delivered sends no release.
 - (void)tapButton:(RycoHardwareButton)button NS_SWIFT_NAME(tapButton(_:));
+
+/// Releases the transport. Called when an attachment is replaced, so the old
+/// one's background connection attempts stop instead of piling up.
+- (void)invalidate;
 
 @end
 

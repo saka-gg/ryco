@@ -31,13 +31,22 @@ static BOOL RycoBoolAttribute(id element, NSString *selectorName) {
   return ((BOOL (*)(id, SEL))objc_msgSend)(element, selector);
 }
 
+static BOOL RycoRectIsFinite(NSRect rect) {
+  return isfinite(rect.origin.x) && isfinite(rect.origin.y) && isfinite(rect.size.width) &&
+         isfinite(rect.size.height);
+}
+
 // `accessibilityValue` is genuinely `id`; anything not JSON-representable is
 // rendered with -description so the tree never fails to serialize.
 static id RycoJSONValue(id value) {
   if (value == nil) {
     return NSNull.null;
   }
-  if ([value isKindOfClass:NSString.class] || [value isKindOfClass:NSNumber.class]) {
+  if ([value isKindOfClass:NSNumber.class]) {
+    // A NaN or infinite slider value would make the whole tree invalid JSON.
+    return isfinite([value doubleValue]) ? value : [value description];
+  }
+  if ([value isKindOfClass:NSString.class]) {
     return value;
   }
   return [value description] ?: NSNull.null;
@@ -220,12 +229,18 @@ static id RycoJSONValue(id value) {
   SEL frameSelector = NSSelectorFromString(@"accessibilityFrame");
   if ([element respondsToSelector:frameSelector]) {
     NSRect frame = ((NSRect (*)(id, SEL))objc_msgSend)(element, frameSelector);
-    node[@"frame"] = @{
-      @"x": @(frame.origin.x),
-      @"y": @(frame.origin.y),
-      @"width": @(frame.size.width),
-      @"height": @(frame.size.height),
-    };
+    // Off-screen and lazily laid-out elements (SwiftUI especially) report NaN
+    // or infinite frames. Those are not JSON, and they are not a place to tap
+    // either, so the frame is omitted (the server reads that as a zero frame
+    // with no tap point, and never targets the node; uiTreeTargeting.ts).
+    if (RycoRectIsFinite(frame)) {
+      node[@"frame"] = @{
+        @"x": @(frame.origin.x),
+        @"y": @(frame.origin.y),
+        @"width": @(frame.size.width),
+        @"height": @(frame.size.height),
+      };
+    }
   }
 
   // UIKit merges a settings row and the control it contains into ONE element
@@ -235,7 +250,8 @@ static id RycoJSONValue(id value) {
   SEL activationSelector = NSSelectorFromString(@"accessibilityActivationPoint");
   if ([element respondsToSelector:activationSelector]) {
     NSPoint point = ((NSPoint (*)(id, SEL))objc_msgSend)(element, activationSelector);
-    if (!CGPointEqualToPoint(NSPointToCGPoint(point), CGPointZero)) {
+    if (isfinite(point.x) && isfinite(point.y) &&
+        !CGPointEqualToPoint(NSPointToCGPoint(point), CGPointZero)) {
       node[@"activationPoint"] = @{@"x": @(point.x), @"y": @(point.y)};
     }
   }

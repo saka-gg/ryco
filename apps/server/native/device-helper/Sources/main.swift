@@ -51,6 +51,24 @@ func logDiagnostic(_ message: String) {
 }
 
 func writeMessage(_ object: [String: Any]) {
+  // NSJSONSerialization raises an Objective-C exception, not a Swift error, on
+  // NaN or infinity, so `try?` cannot catch it and one bad accessibility frame
+  // would kill the helper and the stream with it. Validate first and answer
+  // the request with an error instead of dropping it (which hangs the caller
+  // until its timeout).
+  guard JSONSerialization.isValidJSONObject(object) else {
+    logDiagnostic("dropping a message that is not valid JSON (NaN or infinity in a number)")
+    if let id = object["id"], object["error"] == nil {
+      writeMessage([
+        "jsonrpc": "2.0", "id": id,
+        "error": [
+          "code": RPCErrorCode.internalError.rawValue,
+          "message": "the helper produced a result that is not valid JSON",
+        ],
+      ])
+    }
+    return
+  }
   guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
   else { return }
   stdoutLock.lock()
@@ -144,8 +162,9 @@ final class HelperSession {
   private(set) var device: SimulatorDevice?
   private(set) var hid: RycoHIDBridge?
   /// Why the current attachment has no HID client, so input calls name the
-  /// cause (CoreSimulator 1155.4+, SimulatorKit missing) instead of a bare
-  /// "unavailable". nil while input works.
+  /// cause (SimulatorKit or its Indigo symbols missing) instead of a bare
+  /// "unavailable". nil while input works. A dtuhidd attachment always has a
+  /// client; its failures are reported per input instead.
   private var hidUnavailableReason: String?
   private(set) var accessibility: RycoAXBridge?
   private var stream: FrameStream?
@@ -195,6 +214,9 @@ final class HelperSession {
 
     self.device = device
     self.displayDescriptor = descriptor
+    // The previous attachment's input transport may still be warming up in the
+    // background (a re-attach during a cold boot); stop it before replacing it.
+    self.hid?.invalidate()
     self.hid = hidReady ? hidBridge : nil
     self.hidUnavailableReason = hidReady ? nil : hidFailure
     self.accessibility = axReady ? axBridge : nil
@@ -221,6 +243,7 @@ final class HelperSession {
         "input": hid != nil,
         "accessibility": accessibility != nil,
       ],
+      "inputTransport": hid?.transportName as Any? ?? NSNull(),
       "degraded": [
         "hid": hidFailure as Any? ?? NSNull(),
       ],
@@ -360,14 +383,21 @@ final class HelperSession {
 /// `{"ok": true}` regardless. A half-attached HID client therefore looked
 /// exactly like a working one: taps were acked and nothing moved. Comparing the
 /// undelivered counter around the call turns that into a real error.
+///
+/// The message keeps "not delivered to the simulator" (the server's detector)
+/// and carries the bridge's reason, which says whether anything went out:
+/// "nothing was sent:" is safe to retry, "do not replay" is not.
 private func withHIDDelivery(_ hid: RycoHIDBridge, _ body: () -> Void) throws {
+  hid.beginInput()
   let before = hid.undeliveredEventCount
   body()
   let dropped = hid.undeliveredEventCount - before
   if dropped > 0 {
+    let reason = hid.undeliveredReason.map { ": \($0)" } ?? ""
     throw RPCError(
       .inputNotDelivered,
-      "\(dropped) HID event(s) were not delivered to the simulator; re-attach and retry")
+      "\(dropped) HID event(s) were not delivered to the simulator\(reason); "
+        + "inspect the screen before another input")
   }
 }
 

@@ -52,7 +52,12 @@ The idle release of Ryco-owned simulators after their last consumer settles was 
 commit `d419d5d40` (#1966) under the same license. Agent device tool evidence (screen settling, the
 compact screen snapshot), device_wait and the simulator log reader were adapted from Synara commit
 `74e0b3654` (#1924) under the same license. The per-task consent for agent device input and its
-"Allow Device for this task" wording follow Synara commit `299fd573b` under the same license.
+"Allow Device for this task" wording follow Synara commit `299fd573b` under the same license. The
+Xcode 27 SimulatorKit lookup and the dtuhidd input transport in the native helper
+(`DTUHIDTransport.h/.m`, the HID bridge's delivery accounting and the server's replay rules) were
+adapted from Synara commits `dbfb2ae1a` (#687) and `74e0b3654` (#1924) under the same license;
+Synara learned the dtuhidd wire format from facebook/idb's MIT-licensed FBSimulatorControl HID
+sources.
 
 ### MIT License
 

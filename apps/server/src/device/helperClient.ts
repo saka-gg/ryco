@@ -33,6 +33,7 @@ import * as path from "node:path";
 import { decodeDeviceFrame } from "@ryco/shared/deviceFrame";
 
 import type { DeviceStreamFrame } from "./DeviceBackend.ts";
+import { parseHelperInputTransport, type HelperInputTransport } from "./helperCapabilities.ts";
 import { describeSandboxSuspicion, type HelperSandboxCommand } from "./helperSandbox.ts";
 
 export const HELPER_METHODS = {
@@ -80,6 +81,12 @@ export interface DeviceHelperAttachment {
   readonly scale: number;
   readonly inputAvailable: boolean;
   readonly accessibilityAvailable: boolean;
+  /**
+   * The transport this attachment injects input through; null when the helper
+   * has no input client or predates the field. Optional so test fakes that
+   * build attachments by hand need not name it; `attach` always sets it.
+   */
+  readonly inputTransport?: HelperInputTransport | null;
 }
 
 interface PendingRequest {
@@ -339,6 +346,7 @@ export class HelperClient {
       pointHeight: readNumber(result, "pointHeight", pixelHeight / scale),
       inputAvailable: capabilities.input === true,
       accessibilityAvailable: capabilities.accessibility === true,
+      inputTransport: parseHelperInputTransport(result.inputTransport) ?? null,
     };
     if (attachment.pointWidth <= 0 || attachment.pointHeight <= 0) {
       throw new DeviceHelperError(

@@ -22,7 +22,14 @@ describe("parseSmokeOptions", () => {
     const parsed = parseSmokeOptions([]);
     assert.deepStrictEqual(parsed, {
       ok: true,
-      value: { probeOnly: false, cacheRoot: undefined, udid: undefined, allowBooted: false },
+      value: {
+        probeOnly: false,
+        cacheRoot: undefined,
+        udid: undefined,
+        allowBooted: false,
+        screenshotOut: undefined,
+        skipInputCheck: false,
+      },
     });
   });
 
@@ -42,7 +49,27 @@ describe("parseSmokeOptions", () => {
         cacheRoot: "/tmp/helper-cache",
         udid: "UDID-1",
         allowBooted: true,
+        screenshotOut: undefined,
+        skipInputCheck: false,
       },
+    });
+  });
+
+  it("reads --screenshot-out and --skip-input-check", () => {
+    const parsed = parseSmokeOptions([
+      "--udid",
+      "UDID-1",
+      "--screenshot-out=shots/ios27.png",
+      "--skip-input-check",
+    ]);
+    assert.isTrue(parsed.ok);
+    if (parsed.ok) {
+      assert.strictEqual(parsed.value.screenshotOut, resolve("shots/ios27.png"));
+      assert.isTrue(parsed.value.skipInputCheck);
+    }
+    assert.deepStrictEqual(parseSmokeOptions(["--screenshot-out"]), {
+      ok: false,
+      error: "--screenshot-out needs a value",
     });
   });
 
@@ -72,6 +99,8 @@ describe("parseSmokeOptions", () => {
         cacheRoot: "/tmp/helper-cache",
         udid: "UDID-1",
         allowBooted: false,
+        screenshotOut: undefined,
+        skipInputCheck: false,
       },
     });
     assert.deepStrictEqual(parseSmokeOptions(["--udid="]), {
@@ -90,7 +119,7 @@ describe("parseSmokeOptions", () => {
     assert.deepStrictEqual(parseSmokeOptions(["--uuid", "UDID-1"]), {
       ok: false,
       error:
-        "unknown argument '--uuid' (expected --probe-only, --cache-dir <dir>, --udid <udid>, --allow-booted)",
+        "unknown argument '--uuid' (expected --probe-only, --cache-dir <dir>, --udid <udid>, --allow-booted, --screenshot-out <path>, --skip-input-check)",
     });
     assert.deepStrictEqual(parseSmokeOptions(["--probe-only=yes"]), {
       ok: false,

@@ -3,6 +3,9 @@
 /// The first CoreSimulator (Xcode 27) whose guests drop legacy Indigo input.
 static NSString *const kRycoFirstDTUHIDCoreSimulatorVersion = @"1155.4";
 
+/// Diagnostic override for the transport choice; see RycoPreferredInputTransport.
+static const char *const kRycoInputTransportOverrideEnv = "RYCO_DEVICE_HELPER_INPUT_TRANSPORT";
+
 NSString *RycoCoreSimulatorVersion(void) {
   // The bundle is registered once CoreSimulator has been dlopen'd; the
   // Info.plist on disk answers the same question before that.
@@ -27,18 +30,24 @@ static BOOL RycoVersionDropsIndigoInput(NSString *_Nullable version) {
          NSOrderedAscending;
 }
 
-NSString *RycoIndigoInputUnsupportedReason(void) {
-  NSString *version = RycoCoreSimulatorVersion();
-  if (!RycoVersionDropsIndigoInput(version)) {
-    return nil;
+RycoInputTransport RycoPreferredInputTransport(void) {
+  const char *override = getenv(kRycoInputTransportOverrideEnv);
+  if (override != NULL) {
+    if (strcmp(override, "indigo") == 0) {
+      return RycoInputTransportIndigo;
+    }
+    if (strcmp(override, "dtuhid") == 0) {
+      return RycoInputTransportDtuhid;
+    }
   }
-  // Names the CoreSimulator rather than the selected Xcode: an older selected
-  // Xcode still runs the newest installed CoreSimulator, and the server puts
-  // the selected Xcode in front of this text.
-  return [NSString
-      stringWithFormat:@"Simulator input on this Mac's CoreSimulator %@ (installed by Xcode 27 or "
-                       @"later, whichever Xcode is selected) goes through the guest's dtuhidd "
-                       @"service, which this helper does not support yet; streaming, screenshots "
-                       @"and the accessibility tree still work",
-                       version];
+  return RycoVersionDropsIndigoInput(RycoCoreSimulatorVersion()) ? RycoInputTransportDtuhid
+                                                                 : RycoInputTransportIndigo;
+}
+
+NSString *RycoInputTransportName(RycoInputTransport transport) {
+  switch (transport) {
+    case RycoInputTransportDtuhid: return @"dtuhid";
+    case RycoInputTransportIndigo: return @"indigo";
+  }
+  return @"indigo";
 }

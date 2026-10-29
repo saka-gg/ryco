@@ -73,6 +73,7 @@ OBJC_OBJECTS=()
 for source in \
   "$SOURCE_DIR/Sources/AXBridge.m" \
   "$SOURCE_DIR/Sources/CoreSimulatorVersion.m" \
+  "$SOURCE_DIR/Sources/DTUHIDTransport.m" \
   "$SOURCE_DIR/Sources/HIDBridge.m"; do
   object="$OUT_DIR/$(basename "${source%.m}").o"
   xcrun clang \

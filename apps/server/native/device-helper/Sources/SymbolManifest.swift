@@ -2,10 +2,11 @@
 // runtime.
 //
 // Nothing here is linked at build time: classes come from `NSClassFromString`,
-// protocols from `NSProtocolFromString`, and the Indigo HID entry points from
-// `dlsym`. That makes the helper relocatable across Xcode installs, but it also
-// means a symbol Apple renamed fails at the point of use, deep inside a capture
-// or an input event, with no indication of which name went missing.
+// protocols from `NSProtocolFromString`, and the Indigo HID entry points and
+// libxpc's simulator endpoint functions from `dlsym`. That makes the helper
+// relocatable across Xcode installs, but it also means a symbol Apple renamed
+// fails at the point of use, deep inside a capture or an input event, with no
+// indication of which name went missing.
 //
 // Collecting the strings here instead lets `--probe` walk the table and name the
 // exact symbol and the Xcode build it is missing from, so a broken capability
@@ -21,7 +22,8 @@ import Foundation
 enum HelperCapability: String, CaseIterable {
   /// Reading the device framebuffer (CoreSimulator display + IOSurface).
   case framebuffer
-  /// Injecting touch, key and button events (SimulatorKit Indigo HID).
+  /// Injecting touch, key and button events (dtuhidd or SimulatorKit Indigo
+  /// HID, whichever `RycoPreferredInputTransport` selects).
   case hid
   /// Reading the accessibility tree (AXPTranslator).
   case accessibility
@@ -36,6 +38,9 @@ enum SymbolKind {
   case objcProtocol
   /// A C function in SimulatorKit, via `dlsym`.
   case simulatorKitFunction
+  /// A C function already loaded in this process (libxpc), via
+  /// `dlsym(RTLD_DEFAULT)`.
+  case processFunction
   /// A selector that must exist on a resolved class.
   case selector(onClass: String)
   /// A selector declared by a protocol. The concrete display classes are
@@ -50,6 +55,11 @@ struct RuntimeSymbol {
   let capability: HelperCapability
   /// Why the helper needs it, surfaced in diagnostics.
   let purpose: String
+  /// Set for a HID symbol only one transport uses. A toolchain needs the
+  /// symbols of the transport it selects, not both: Xcode 27 still ships the
+  /// Indigo builders, and passing a probe on them is how input looked healthy
+  /// while every event was dropped.
+  var transport: RycoInputTransport? = nil
 }
 
 /// Every runtime-resolved symbol, grouped by the capability it supports.
@@ -89,13 +99,23 @@ enum SymbolManifest {
         + "HID client would otherwise swallow input silently"),
     RuntimeSymbol(
       name: "IndigoHIDMessageForButton", kind: .simulatorKitFunction, capability: .hid,
-      purpose: "builds hardware button events"),
+      purpose: "builds hardware button events", transport: .indigo),
     RuntimeSymbol(
       name: "IndigoHIDMessageForKeyboardArbitrary", kind: .simulatorKitFunction, capability: .hid,
-      purpose: "builds key events from USB HID usage codes"),
+      purpose: "builds key events from USB HID usage codes", transport: .indigo),
     RuntimeSymbol(
       name: "IndigoHIDMessageForMouseNSEvent", kind: .simulatorKitFunction, capability: .hid,
-      purpose: "seeds the touch event the helper rewrites into a digitizer message"),
+      purpose: "seeds the touch event the helper rewrites into a digitizer message",
+      transport: .indigo),
+    RuntimeSymbol(
+      name: "lookup:error:", kind: .selector(onClass: "SimDevice"), capability: .hid,
+      purpose: "finds the guest's dtuhidd HID service", transport: .dtuhid),
+    RuntimeSymbol(
+      name: "xpc_endpoint_create_mach_port_4sim", kind: .processFunction, capability: .hid,
+      purpose: "wraps the guest service port in an XPC endpoint", transport: .dtuhid),
+    RuntimeSymbol(
+      name: "xpc_connection_enable_sim2host_4sim", kind: .processFunction, capability: .hid,
+      purpose: "lets dtuhidd accept payloads from the host", transport: .dtuhid),
 
     // ── Accessibility ────────────────────────────────────────────────
     RuntimeSymbol(
@@ -117,8 +137,11 @@ enum SymbolManifest {
       purpose: "the CoreSimulator transport for accessibility requests"),
   ]
 
+  /// The symbols `capability` needs on this host: untagged ones plus those of
+  /// the input transport this host uses.
   static func symbols(for capability: HelperCapability) -> [RuntimeSymbol] {
-    all.filter { $0.capability == capability }
+    let transport = RycoPreferredInputTransport()
+    return all.filter { $0.capability == capability && ($0.transport ?? transport) == transport }
   }
 }
 
