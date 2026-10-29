@@ -16,6 +16,7 @@ import {
 import {
   CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES,
   PositiveInt,
+  SourceControlProviderErrorReason,
   TrimmedNonEmptyString,
   type ChangeRequestActivity,
   type ChangeRequestDraftReviewComment,
@@ -52,6 +53,8 @@ import { parseGitHubRepositoryIdentityFromUrl } from "@ryco/shared/sourceControl
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { classifyForgeFailure, type ForgeFailureKind } from "./forgeFailure.ts";
+import { forgeFailureFields } from "./forgeHttpRateLimit.ts";
 import * as GitHubIssues from "./gitHubIssues.ts";
 import type { NormalizedGitHubIssueDetail, NormalizedGitHubIssueRecord } from "./gitHubIssues.ts";
 import * as GitHubActions from "./gitHubActions.ts";
@@ -196,6 +199,10 @@ export class GitHubCliError extends Schema.TaggedError<GitHubCliError>()("GitHub
   operation: Schema.String,
   detail: Schema.String,
   reason: Schema.optional(Schema.Literal("async-merge-unavailable")),
+  /** Why GitHub refused, read from what gh or GitHub said (never the command line). */
+  failureKind: Schema.optional(SourceControlProviderErrorReason),
+  /** Epoch ms GitHub named for the retry, with failureKind "rate-limited". */
+  retryAt: Schema.optional(Schema.Number),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
@@ -749,6 +756,54 @@ function withGitHubMessage(prefix: string, message: string | null, suffix = ""):
   return message ? `${prefix}: ${message}.${suffix}` : `${prefix}.${suffix}`;
 }
 
+const GITHUB_RATE_LIMIT_DETAIL =
+  "GitHub API rate limit exceeded. Wait for the reset window and retry.";
+
+function mentionsMissingGh(lower: string): boolean {
+  return lower.includes("command not found: gh") || lower.includes("enoent");
+}
+
+function mentionsGhSignIn(lower: string): boolean {
+  return (
+    lower.includes("authentication failed") ||
+    lower.includes("not logged in") ||
+    lower.includes("gh auth login") ||
+    lower.includes("no oauth token")
+  );
+}
+
+function mentionsMissingPullRequest(lower: string): boolean {
+  return (
+    lower.includes("could not resolve to a pullrequest") ||
+    lower.includes("repository.pullrequest") ||
+    lower.includes("no pull requests found for branch") ||
+    lower.includes("pull request not found")
+  );
+}
+
+function mentionsMissingActionsRun(lower: string): boolean {
+  return (
+    lower.includes("not found") ||
+    lower.includes("http 404") ||
+    lower.includes("no workflow runs found")
+  );
+}
+
+function mentionsMissingResource(lower: string): boolean {
+  return (
+    lower.includes("http 404") ||
+    lower.includes("not found") ||
+    lower.includes("could not resolve to a node")
+  );
+}
+
+/**
+ * Turns a failed `gh` call into a `GitHubCliError`. Detail strings match on the
+ * whole error text, as before. `failureKind` comes only from what gh or GitHub
+ * said (`forgeFailureText`): the command line holds titles and branch names and
+ * the cwd a folder name, so "Handle rate limit errors" as a title must not read
+ * as a rate limit.
+ */
 export function normalizeGitHubCliError(
   operation: string,
   error: VcsError | unknown,
@@ -756,28 +811,25 @@ export function normalizeGitHubCliError(
 ): GitHubCliError {
   const text = errorText(error);
   const lower = text.toLowerCase();
+  const forge = classifyForgeFailure(error);
+  const { kindIf } = forge;
   const message = gitHubErrorMessage(error)?.replace(/\.$/u, "") ?? null;
-  const fail = (detail: string) => new GitHubCliError({ operation, detail, cause: error });
+  const fail = (detail: string, failureKind?: ForgeFailureKind) =>
+    new GitHubCliError({ operation, detail, ...forgeFailureFields({ failureKind }), cause: error });
 
-  if (lower.includes("command not found: gh") || lower.includes("enoent")) {
-    return fail("GitHub CLI (`gh`) is required but not available on PATH.");
+  // Before the sign-in rule: a rate-limit reply must not read as "not authenticated".
+  if (forge.rateLimited) return fail(GITHUB_RATE_LIMIT_DETAIL, "rate-limited");
+
+  const missingTool = forge.missingToolIf(mentionsMissingGh);
+  if (missingTool !== undefined || mentionsMissingGh(lower)) {
+    return fail("GitHub CLI (`gh`) is required but not available on PATH.", missingTool);
   }
 
-  if (
-    lower.includes("authentication failed") ||
-    lower.includes("not logged in") ||
-    lower.includes("gh auth login") ||
-    lower.includes("no oauth token")
-  ) {
-    return fail("GitHub CLI is not authenticated. Run `gh auth login` and retry.");
-  }
-
-  if (
-    lower.includes("api rate limit exceeded") ||
-    lower.includes("secondary rate limit") ||
-    lower.includes("rate limit")
-  ) {
-    return fail("GitHub API rate limit exceeded. Wait for the reset window and retry.");
+  if (mentionsGhSignIn(lower)) {
+    return fail(
+      "GitHub CLI is not authenticated. Run `gh auth login` and retry.",
+      kindIf("unauthenticated", mentionsGhSignIn),
+    );
   }
 
   if (domain === "general") {
@@ -833,37 +885,31 @@ export function normalizeGitHubCliError(
     return fail("GitHub Actions logs are no longer available for this run.");
   }
 
-  if (
-    lower.includes("could not resolve to a pullrequest") ||
-    lower.includes("repository.pullrequest") ||
-    lower.includes("no pull requests found for branch") ||
-    lower.includes("pull request not found")
-  ) {
-    return fail("Pull request not found. Check the PR number or URL and try again.");
+  if (mentionsMissingPullRequest(lower)) {
+    return fail(
+      "Pull request not found. Check the PR number or URL and try again.",
+      kindIf("not-found", mentionsMissingPullRequest),
+    );
   }
 
   if (domain === "actions") {
-    if (
-      lower.includes("not found") ||
-      lower.includes("http 404") ||
-      lower.includes("no workflow runs found")
-    ) {
-      return fail("GitHub Actions run or repository was not found.");
+    if (mentionsMissingActionsRun(lower)) {
+      return fail(
+        "GitHub Actions run or repository was not found.",
+        kindIf("not-found", mentionsMissingActionsRun),
+      );
     }
     return fail(text);
   }
 
-  if (
-    lower.includes("http 404") ||
-    lower.includes("not found") ||
-    lower.includes("could not resolve to a node")
-  ) {
+  if (mentionsMissingResource(lower)) {
     return fail(
       withGitHubMessage(
         "GitHub could not find what this action refers to",
         message,
         " It may have been deleted, or your account may not have access.",
       ),
+      kindIf("not-found", mentionsMissingResource),
     );
   }
 
@@ -1009,6 +1055,7 @@ function withGitHubCliOperation<A>(
             options?.normalizeWorkflowRerunErrors === true && isWorkflowRerunStateError(error)
               ? "GitHub Actions cannot rerun this workflow run or job in its current state."
               : error.detail,
+          ...forgeFailureFields(error),
           cause: error,
         }),
     ),

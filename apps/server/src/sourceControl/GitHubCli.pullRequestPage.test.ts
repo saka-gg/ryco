@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, PlatformError } from "effect";
 import { ChildProcessSpawner } from "effect/process";
-import { CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES, VcsProcessExitError } from "@ryco/contracts";
+import {
+  CHANGE_REQUEST_FILE_CONTENTS_MAX_BYTES,
+  VcsProcessExitError,
+  VcsProcessSpawnError,
+} from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubCli from "./GitHubCli.ts";
@@ -130,6 +134,156 @@ describe("GitHub CLI error normalization", () => {
       GitHubCli.gitHubApiErrorBodyMessage(JSON.stringify({ errors: [{ message: "Bad thread" }] })),
     ).toBe("Bad thread");
     expect(GitHubCli.gitHubApiErrorBodyMessage("plain text")).toBeNull();
+  });
+
+  it("does not read a rate limit out of the command line or path", () => {
+    const error = GitHubCli.normalizeGitHubCliError(
+      "execute",
+      new VcsProcessExitError({
+        operation: "GitHubCli.execute",
+        command:
+          "gh pr create --base main --head feature --title Handle rate limit errors --body-file /tmp/b",
+        cwd: "/repo/rate limit demo",
+        exitCode: 1,
+        detail:
+          'a pull request for branch "feature" into branch "main" already exists:\nhttps://github.com/o/r/pull/1',
+      }),
+    );
+    expect(error.detail).not.toContain("rate limit exceeded");
+    expect(error.detail).toContain("already exists");
+    expect(error.failureKind).toBeUndefined();
+
+    // A title that says "not found" or "gh auth login" is not GitHub saying so.
+    const titled = (title: string) =>
+      GitHubCli.normalizeGitHubCliError(
+        "execute",
+        new VcsProcessExitError({
+          operation: "GitHubCli.execute",
+          command: `gh pr create --title ${title}`,
+          cwd: "/repo",
+          exitCode: 1,
+          detail:
+            "pull request create failed: GraphQL: Head sha can't be blank (createPullRequest)",
+        }),
+      );
+    expect(titled("Fix page not found").failureKind).toBeUndefined();
+    expect(titled("Explain gh auth login").failureKind).toBeUndefined();
+
+    // gh reports the step that went through, title included, before the one that failed.
+    const closed = GitHubCli.normalizeGitHubCliError(
+      "execute",
+      exitError(
+        "✓ Closed pull request o/r#12 (Handle API rate limit exceeded errors)\nfailed to delete remote branch feature: HTTP 422: Reference does not exist",
+      ),
+    );
+    expect(closed.failureKind).toBeUndefined();
+    expect(closed.detail).not.toContain("rate limit exceeded. Wait");
+
+    // gh echoes the title in its failure line too (closing a pull request merged meanwhile).
+    const merged = GitHubCli.normalizeGitHubCliError(
+      "execute",
+      exitError(
+        "X Pull request o/r#12 (Retry on too many requests) can't be closed because it was already merged",
+      ),
+    );
+    expect(merged.failureKind).toBeUndefined();
+    expect(merged.detail).toContain("can't be closed because it was already merged");
+  });
+
+  it.effect("keeps the kind when a call names its own operation", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(
+        Effect.fail(exitError("gh: API rate limit exceeded for user ID 1. (HTTP 403)")),
+      );
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .rerunFailedWorkflowJobs({ cwd: "/repo", runId: "123" })
+        .pipe(Effect.flip);
+      expect(error.operation).toBe("rerunFailedWorkflowJobs");
+      expect(error.failureKind).toBe("rate-limited");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it("classifies GitHub failures without changing their copy", () => {
+    const rateLimited = GitHubCli.normalizeGitHubCliError(
+      "execute",
+      exitError("gh: API rate limit exceeded for user ID 1. (HTTP 403)"),
+    );
+    expect(rateLimited.failureKind).toBe("rate-limited");
+    expect(rateLimited.detail).toBe(
+      "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+    );
+    expect(
+      GitHubCli.normalizeGitHubCliError(
+        "execute",
+        exitError("You have exceeded a secondary rate limit. Please wait a few minutes."),
+      ).failureKind,
+    ).toBe("rate-limited");
+    // The shape `gh api` failures arrive in (stderr plus the response body).
+    expect(
+      GitHubCli.normalizeGitHubCliError("graphqlDocument", {
+        detail: "gh: API rate limit already exceeded for user ID 1.",
+      }).failureKind,
+    ).toBe("rate-limited");
+
+    const signIn = GitHubCli.normalizeGitHubCliError(
+      "execute",
+      exitError("To get started with GitHub CLI, please run:  gh auth login"),
+    );
+    expect(signIn.failureKind).toBe("unauthenticated");
+    expect(signIn.detail).toBe("GitHub CLI is not authenticated. Run `gh auth login` and retry.");
+
+    const missing = GitHubCli.normalizeGitHubCliError(
+      "execute",
+      new VcsProcessSpawnError({
+        operation: "GitHubCli.execute",
+        command: "gh pr list",
+        cwd: "/repo",
+        cause: PlatformError.systemError({
+          _tag: "NotFound",
+          module: "ChildProcess",
+          method: "spawn",
+          pathOrDescriptor: "gh pr list",
+        }),
+      }),
+    );
+    expect(missing.failureKind).toBe("missing-tool");
+    expect(missing.detail).toBe("GitHub CLI (`gh`) is required but not available on PATH.");
+    // Out of file descriptors is not a missing tool.
+    expect(
+      GitHubCli.normalizeGitHubCliError(
+        "execute",
+        new VcsProcessSpawnError({
+          operation: "GitHubCli.execute",
+          command: "gh pr list",
+          cwd: "/repo",
+          cause: PlatformError.systemError({
+            _tag: "Unknown",
+            module: "ChildProcess",
+            method: "spawn",
+          }),
+        }),
+      ).failureKind,
+    ).toBeUndefined();
+
+    const pullRequest = GitHubCli.normalizeGitHubCliError(
+      "execute",
+      exitError("GraphQL: Could not resolve to a PullRequest with the number of 4888."),
+    );
+    expect(pullRequest.failureKind).toBe("not-found");
+    expect(pullRequest.detail).toBe(
+      "Pull request not found. Check the PR number or URL and try again.",
+    );
+    expect(
+      GitHubCli.normalizeGitHubCliError("execute", exitError("gh: Not Found (HTTP 404)"))
+        .failureKind,
+    ).toBe("not-found");
+    expect(
+      GitHubCli.normalizeGitHubCliError(
+        "execute",
+        exitError("gh: Must have admin rights to Repository. (HTTP 403)"),
+      ).failureKind,
+    ).toBeUndefined();
   });
 });
 
