@@ -153,6 +153,7 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/settings/SettingsPanels.editor.test.ts",
   "src/components/settings/SettingsPanels.logic.test.ts",
   "src/components/settings/ThemeEditor.test.ts",
+  "src/components/settings/acpAgentConfig.logic.test.ts",
   "src/components/settings/agentControlStartupRetry.test.ts",
   "src/components/settings/archivedSettings.test.ts",
   "src/components/settings/cliProxyHubs.logic.test.ts",

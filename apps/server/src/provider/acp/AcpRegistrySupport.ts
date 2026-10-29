@@ -4,6 +4,7 @@ import { Effect, Layer, Path } from "effect";
 import * as AcpErrors from "effect-acp/errors";
 import { ServerConfig } from "../../config.ts";
 import { AcpSessionRuntime, type AcpSessionRuntimeOptions } from "./AcpSessionRuntime.ts";
+import { resolveAcpLocalCommand, type AcpAgentCommand } from "./AcpLocalCommand.ts";
 import { makeAcpRegistryCatalog } from "./AcpRegistryCatalog.ts";
 
 export const resolveAcpRegistryInstallation = (settings: AcpRegistrySettings) =>
@@ -23,8 +24,19 @@ export const resolveAcpRegistryInstallation = (settings: AcpRegistrySettings) =>
     });
   });
 
+/**
+ * The command an ACP agent instance starts: its local executable, or its verified registry
+ * installation. Resolved again before every spawn; neither source installs anything.
+ */
+export const resolveAcpAgentCommand = (
+  settings: AcpRegistrySettings,
+  environment?: NodeJS.ProcessEnv,
+): Effect.Effect<AcpAgentCommand, AcpErrors.AcpTransportError, ServerConfig | Path.Path> =>
+  settings.source === "local"
+    ? resolveAcpLocalCommand(settings, environment)
+    : resolveAcpRegistryInstallation(settings);
+
 export const makeRegistryAcpRuntime = (input: {
-  readonly settings: AcpRegistrySettings;
   readonly installed: {
     readonly command: string;
     readonly args: ReadonlyArray<string>;
@@ -83,10 +95,9 @@ export const makeRegistryAcpRuntime = (input: {
 
 const authenticationRuntime = (settings: AcpRegistrySettings, environment?: NodeJS.ProcessEnv) =>
   Effect.gen(function* () {
-    const installed = yield* resolveAcpRegistryInstallation(settings);
+    const installed = yield* resolveAcpAgentCommand(settings, environment);
     const server = yield* ServerConfig;
     return yield* makeRegistryAcpRuntime({
-      settings,
       installed,
       ...(environment ? { environment } : {}),
       options: { cwd: server.stateDir, clientInfo: { name: "ryco-auth", version: "0.0.0" } },

@@ -147,10 +147,53 @@ describe("ACP registry RPC boundaries", () => {
       run(rpc[WS_METHODS.serverAuthenticateAcpRegistry]({ instanceId, methodId: "login" })),
     ).resolves.toEqual({ authenticated: true });
     expect(mocks.authenticate).toHaveBeenCalledWith(
-      { agentId: "test", version: "1.2.3" },
+      { agentId: "test", version: "1.2.3", source: "registry", command: "", args: [] },
       "login",
       expect.objectContaining({ API_KEY: "secret" }),
     );
+  });
+  it("passes a local command's configuration through unchanged", async () => {
+    const local = Schema.decodeSync(ServerSettings)({
+      providerInstances: {
+        [instanceId]: {
+          driver: "acpRegistry",
+          enabled: true,
+          config: { source: "local", command: "/opt/agent", args: ["--acp", " $(x) ; ", ""] },
+        },
+      },
+    });
+    await expect(
+      run(handlers("owner", local)[WS_METHODS.serverGetAcpRegistryAuthMethods]({ instanceId })),
+    ).resolves.toEqual([{ id: "login", name: "Sign in" }]);
+    expect(mocks.methods).toHaveBeenCalledWith(
+      {
+        agentId: "",
+        version: "",
+        source: "local",
+        command: "/opt/agent",
+        args: ["--acp", " $(x) ; ", ""],
+      },
+      expect.any(Object),
+    );
+  });
+  it("shows why a local command cannot start, and nothing else", async () => {
+    const detail = "`gemini` was not found on this node.";
+    mocks.methods.mockReturnValue(
+      Effect.fail({
+        _tag: "AcpTransportError",
+        detail,
+        cause: { _tag: "AcpLocalCommandUnavailable", detail },
+      }),
+    );
+    await expect(
+      run(handlers("owner")[WS_METHODS.serverGetAcpRegistryAuthMethods]({ instanceId })),
+    ).rejects.toThrow(detail);
+    mocks.methods.mockReturnValue(
+      Effect.fail({ _tag: "AcpTransportError", detail: "PATH=/secret", cause: new Error("x") }),
+    );
+    await expect(
+      run(handlers("owner")[WS_METHODS.serverGetAcpRegistryAuthMethods]({ instanceId })),
+    ).rejects.toThrow("ACP Registry operation failed");
   });
   it("rejects authentication for other providers", async () => {
     const changed = {

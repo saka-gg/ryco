@@ -1,7 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import { basename } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
-import { ProviderInstanceId } from "@ryco/contracts";
+import { Effect, Layer, Schema } from "effect";
+import { AcpRegistrySettings, ProviderInstanceId } from "@ryco/contracts";
 import { ServerConfig } from "../../config.ts";
 import { ProviderEventLoggers, NoOpProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { AgentProcessPriorityOffLive } from "../agentProcessPriority.ts";
@@ -16,13 +18,17 @@ const layer = ServerConfig.layerTest(process.cwd(), { prefix: "ryco-registry-dri
   Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
   Layer.provideMerge(AgentProcessPriorityOffLive),
 );
-const makeDriver = (enabled = true) =>
+const decodeConfig = Schema.decodeUnknownSync(AcpRegistrySettings);
+const makeDriver = (
+  enabled = true,
+  config: unknown = { agentId: "not-installed", version: "1.0.0" },
+) =>
   AcpRegistryDriver.create({
     instanceId: ProviderInstanceId.make("registry-test"),
     displayName: undefined,
     environment: [],
     enabled,
-    config: { agentId: "not-installed", version: "1.0.0" },
+    config: decodeConfig(config),
   });
 
 it.layer(layer)("ACP registry driver", (it) => {
@@ -67,6 +73,75 @@ it.layer(layer)("ACP registry driver", (it) => {
       const driver = yield* makeDriver(false);
       assert.equal((yield* driver.snapshot.refresh).status, "disabled");
       assert.deepStrictEqual(yield* driver.adapter.listSessions(), []);
+    }),
+  );
+  it.effect("keeps the install warning for a registry agent that is not installed", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* (yield* makeDriver()).snapshot.getSnapshot;
+      assert.equal(snapshot.status, "warning");
+      assert.equal(snapshot.version, "1.0.0");
+      assert.equal(snapshot.message, "Install the pinned registry version to use this provider.");
+    }),
+  );
+  it.effect("warns with the local command's own detail when it is missing", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriver(true, {
+        source: "local",
+        command: "/nonexistent/ryco-acp-agent",
+        args: ["--acp"],
+      });
+      const snapshot = yield* driver.snapshot.getSnapshot;
+      assert.equal(snapshot.status, "warning");
+      assert.isFalse(snapshot.installed);
+      assert.equal(snapshot.message, "`/nonexistent/ryco-acp-agent` was not found on this node.");
+      assert.equal(snapshot.displayName, "ryco-acp-agent");
+      assert.deepStrictEqual(yield* driver.adapter.listSessions(), []);
+    }),
+  );
+  it.effect("reports a local command that resolves as ready without starting it", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriver(true, { source: "local", command: process.execPath });
+      const snapshot = yield* driver.snapshot.refresh;
+      assert.equal(snapshot.status, "ready");
+      assert.isTrue(snapshot.installed);
+      assert.isNull(snapshot.version);
+      // The executable's basename: `node` for the runtime running this test.
+      assert.equal(snapshot.displayName, basename(process.execPath).replace(/\.exe$/iu, ""));
+      assert.equal(
+        snapshot.message,
+        "Command found. Capabilities are discovered when a session starts.",
+      );
+      assert.deepStrictEqual(yield* driver.adapter.listSessions(), []);
+    }),
+  );
+  it.effect("reports a disabled local command as disabled", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriver(false, { source: "local", command: process.execPath });
+      assert.equal((yield* driver.snapshot.refresh).status, "disabled");
+    }),
+  );
+  it.effect("takes a local agent's version from its handshake, never a registry pin", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriver(true, { source: "local", command: process.execPath });
+      const initial = yield* driver.snapshot.getSnapshot;
+      const started = (version: string | undefined) => ({
+        sessionId: "s",
+        initializeResult: {
+          protocolVersion: 1,
+          ...(version === undefined ? {} : { agentInfo: { name: "agent", version } }),
+        },
+        sessionSetupResult: { sessionId: "s" },
+        modelConfigId: undefined,
+      });
+      assert.equal(
+        projectAcpRegistrySession(initial, started(" 2.1.0 "), "local").version,
+        "2.1.0",
+      );
+      assert.isNull(projectAcpRegistrySession(initial, started(undefined), "local").version);
+      assert.isNull(projectAcpRegistrySession(initial, started("x".repeat(65)), "local").version);
+      assert.isNull(projectAcpRegistrySession(initial, started("   "), "local").version);
+      const registry = yield* (yield* makeDriver()).snapshot.getSnapshot;
+      assert.equal(projectAcpRegistrySession(registry, started("9.9.9")).version, "1.0.0");
     }),
   );
   it.effect(

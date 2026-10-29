@@ -72,6 +72,19 @@ const acpRegistryCatalog = (installationRoot: string) => {
   return catalog;
 };
 
+/**
+ * The detail of an `AcpLocalCommandUnavailable`, directly or as the cause of the transport error
+ * wrapping it. Checked by tag so the lazy ACP module stays off the boot path; its details name only
+ * the configured command, never environment values or resolved paths.
+ */
+function localCommandUnavailableDetail(cause: unknown): string | undefined {
+  type Tagged = { readonly _tag?: unknown; readonly detail?: unknown; readonly cause?: unknown };
+  for (const candidate of [cause, (cause as Tagged | null)?.cause] as Array<Tagged | null>)
+    if (candidate?._tag === "AcpLocalCommandUnavailable" && typeof candidate.detail === "string")
+      return candidate.detail;
+  return undefined;
+}
+
 export const makeProviderHandlers = (ctx: WsRpcContext) => {
   const {
     ownerEffect,
@@ -107,9 +120,10 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     new AcpRegistryOperationError({
       // Do not expose environment variables, filesystem paths, or agent auth payloads.
       message:
-        cause instanceof Error && !("code" in cause) && cause.message.startsWith("Registry ")
+        localCommandUnavailableDetail(cause) ??
+        (cause instanceof Error && !("code" in cause) && cause.message.startsWith("Registry ")
           ? cause.message
-          : "ACP Registry operation failed. Check the selected version, installation, and provider authentication.",
+          : "ACP Registry operation failed. Check the selected version, installation, and provider authentication."),
     });
   const registryInstance = (instanceId: import("@ryco/contracts").ProviderInstanceId) =>
     Effect.gen(function* () {
