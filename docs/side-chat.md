@@ -15,8 +15,9 @@ Temporary directories are removed after success, failure, or cancellation.
 
 - **Codex:** a separate ephemeral `codex exec` process, read-only sandbox, no user
   config or exec rules, no project instructions, and disabled shell, images, search,
-  MCP configuration, apps, plugins, hooks, memory, JavaScript execution, and subagents.
-  CLI options were checked against Codex CLI **0.154.0**. Older CLIs missing
+  MCP configuration, apps, plugins, hooks, memory, JavaScript execution, subagents, goals,
+  and sleep.
+  CLI options were last checked against Codex CLI **0.163.0**. Older CLIs missing
   `--ignore-user-config` or `--ignore-rules` fail the side request; Ryco never retries
   without the isolation flags. User-configured custom model providers are not loaded
   for side questions; use a model available through the CLI's default authentication.
