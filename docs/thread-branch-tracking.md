@@ -11,7 +11,8 @@ Agent Control, and for threads nobody is watching.
 The node reads the checkout's branch:
 
 - when a turn starts, which also picks up a branch you switched by hand before
-  sending;
+  sending (except for a project-folder thread you message from the web or
+  desktop app, see [Branches you switch by hand](#branches-you-switch-by-hand));
 - after each git or pull request command the agent runs (`git checkout`,
   `git switch`, `git commit`, `git push`, `gh pr create`, `glab mr create` and
   similar);
@@ -34,13 +35,12 @@ runs as soon as it may, or when the turn ends if that comes first.
 - A checkout another thread worked in at the same time. When two threads run
   turns in the same project folder or worktree, neither can tell whose agent
   moved the branch, so neither follows it. The next turn that runs alone in that
-  checkout records it.
+  checkout records it. A project-folder thread you message from the web or
+  desktop app instead keeps its own branch and continues in a new worktree on
+  it, as after a switch by hand.
 - Chats without a project.
 - Other threads attached to the same worktree. Only the thread whose turn ran is
   updated; the others update at their own next turn.
-
-A branch you switch in a terminal while a thread is idle shows in the git
-controls right away, and the thread records it at its next turn.
 
 GitHub Copilot reports commands without their text, so Copilot threads follow
 branch changes at the start and end of each turn only.
@@ -48,5 +48,26 @@ branch changes at the start and end of each turn only.
 A newer branch change always wins: if you pick a branch while the node is
 recording another one, your choice stays.
 
-Older nodes don't do this. With them, the web app records the branch while the
-thread is open, as before.
+## Branches you switch by hand
+
+A branch you switch while a thread is idle, in a terminal or an editor, shows
+in the git controls right away. The thread itself doesn't change yet:
+
+- A thread in its own worktree records the branch at its next turn.
+- A thread working in the project folder keeps its branch. The next message you
+  send it from the web or desktop app continues it in a new worktree on its own
+  branch, and the project folder stays on the branch you switched to. Sent from
+  the mobile app or through Agent Control, its next turn records the switched
+  branch instead.
+
+Until then the thread's pull request badge can be missing, because the badge
+shows only while the thread's branch matches its checkout.
+
+Branches you pick in the branch menu or create with a git action are recorded
+right away.
+
+## Older nodes
+
+Older nodes don't follow the checkout. With them, the web and desktop apps
+record the branch the checkout is on while the thread is open with its overview
+rail showing, as before.
