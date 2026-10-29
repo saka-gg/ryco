@@ -16,7 +16,8 @@ Automatic prices preserve LiteLLM's full provider/model keys. Canonical model pr
 cannot be overwritten by a gateway or regional entry; a bare alias is created only
 when qualified entries agree. Explicit native `openai/` and `anthropic/` prefixes and
 Claude context suffixes such as `[1m]` resolve to their model rates. Unknown model
-generations remain unpriced rather than being guessed.
+generations remain unpriced rather than being guessed, unless a custom price or
+mapping (below) covers them.
 
 Recorded Codex `priority` / `ultrafast` settings and Claude fast usage select their
 published billing rates, including cache rates. Without a separate cache price, the
@@ -41,6 +42,29 @@ only, so unpriced tokens of the same model do not dilute it. An unpriced model's
 shows tokens, since its cost is unknown rather than zero. The detail has no session
 count: sessions are counted per day and model, so a sum would count a multi-day
 session more than once.
+
+Custom model prices and model mappings are node settings (`usagePriceOverrides`, at
+most 200 entries), keyed by the model ID that history records. Keys match case-
+insensitively, and a context variant such as `claude-x[1m]` uses the entry of
+`claude-x` unless it has its own. An entry either sets a price in USD per million
+tokens or maps the ID to another model. A mapped ID (for example a preview model)
+is reported under its target, in lower case like keys, and priced like it; chains are followed, and a chain
+that loops maps nothing. A custom price applies to every speed without a fast-mode
+premium, replaces published rates and provider-reported cost for all history, and
+can price model families that published rates leave unpriced (`opus`); synthetic
+placeholders are never priced. Blank cache prices charge the input price. Changing
+an entry reprices history from the scan cache without reading transcripts again.
+Buckets count custom-priced tokens separately, and nodes advertise the setting with
+the `usagePriceOverrides` capability; older nodes drop it from settings patches.
+
+Each node's entries are edited in Settings → General → Model prices (desktop and web;
+the native app and the web phone layout only show their effect). The editor saves only
+the entries that changed, is disabled with an update notice on nodes without the
+capability, and drops the client's cached summaries of that node after a save. On the
+Usage page, Coverage lists the models with unpriced tokens; "Set prices" opens the
+editor of the node that recorded them with a row for that model ID. Coverage also
+counts the custom prices and mappings in effect, and Breakdown rows priced from a
+custom price say so.
 
 History includes disabled configured accounts. Codex and Claude instances resolve
 stores with the same home and environment precedence as their runtime, including
@@ -113,7 +137,7 @@ only. No activity counter is converted into tokens. Reasoning is unavailable.
 `tokenUsage.totalCents / 100` is model cost in USD; `chargedCents / 100` is billed USD
 **including the Cursor fee**. Billed totals are shown separately, never added to
 model cost. Missing billed values remain unavailable; unknown model prices remain
-unpriced unless a model cost was reported.
+unpriced unless a model cost was reported or a custom price is set.
 
 Conversation IDs and user emails are hashed at ingestion. Only model, counters,
 dates, costs and anonymous identity reach Statistics; transcripts and hidden fields

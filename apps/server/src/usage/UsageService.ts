@@ -5,9 +5,11 @@ import { createHash } from "node:crypto";
 import {
   USAGE_CONTRACT_VERSION,
   UsageReadError,
+  type ServerSettings,
   type UsageCalendarDate,
   type UsageDailyBucket,
   type UsageImportedMetric,
+  type UsagePriceOverrides,
   type UsagePricingStatus,
   type UsageProviderKind,
   type UsageSourceCoverage,
@@ -47,10 +49,13 @@ import {
   UsageSlotAggregator,
 } from "./usageFileAggregate.ts";
 import {
-  lookupUsageModelRate,
+  compileUsagePriceOverrides,
   encodeUsageRateTable,
+  makeUsagePricingPolicy,
   parseUsageRateTable,
-  priceUsageRecord,
+  resolveUsageModel,
+  type UsagePriceOverrideTables,
+  type UsagePricingPolicy,
   type UsageRateTable,
 } from "./usagePricing.ts";
 import {
@@ -167,10 +172,12 @@ interface PlannedSource {
   readonly deduplicationKind: UsageSourceDeduplicationKind;
 }
 
-/** Rates and pricing status captured once per summary, so every source prices alike. */
+/** Rates, overrides and pricing status captured once per summary, so every source prices alike. */
 interface PricingSnapshot {
-  readonly rates: UsageRateTable;
+  readonly policy: UsagePricingPolicy;
   readonly generation: number;
+  /** Of the custom prices and mappings in effect ({@link usagePriceOverridesRevision}). */
+  readonly overridesRevision: string;
   readonly state: UsagePricingStatus["state"];
   readonly revision: string | null;
   readonly fetchedAtMs: number | null;
@@ -249,6 +256,17 @@ function ratesRevision(text: string): string {
 
 function summaryRequestKey(input: UsageSummaryRequest): string {
   return `${input.contractVersion}\0${input.startDate ?? ""}\0${input.endDate}\0${input.timeZone}`;
+}
+
+/** Digest of the effective custom prices and mappings: results priced under other ones differ. */
+function usagePriceOverridesRevision(tables: UsagePriceOverrideTables): string {
+  if (tables.prices.size === 0 && tables.mappings.size === 0) return "";
+  const sorted = <T>(entries: ReadonlyMap<string, T>) =>
+    [...entries].toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return createHash("sha256")
+    .update(JSON.stringify([sorted(tables.prices), sorted(tables.mappings)]))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 /** Everything a transcript source's result depends on besides the request and rates. */
@@ -484,17 +502,36 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
       Effect.forkIn(serviceScope),
     );
 
-  const resolveTranscriptSources = Effect.fn("UsageService.resolveTranscriptSources")(function* () {
-    const settings = yield* settingsService.getSettings.pipe(
-      Effect.mapError(
-        (cause) =>
-          new UsageReadError({
-            reason: "scan-failed",
-            detail: "Server settings could not be read while locating provider transcripts.",
-            cause,
-          }),
-      ),
-    );
+  const readSettings = settingsService.getSettings.pipe(
+    Effect.mapError(
+      (cause) =>
+        new UsageReadError({
+          reason: "scan-failed",
+          detail: "Server settings could not be read for usage history.",
+          cause,
+        }),
+    ),
+  );
+
+  // Settings reads return the same overrides object until they change: compile them once.
+  let compiledOverrides:
+    | {
+        readonly source: UsagePriceOverrides;
+        readonly tables: UsagePriceOverrideTables;
+        readonly revision: string;
+      }
+    | undefined;
+  const compileOverrides = (source: UsagePriceOverrides) => {
+    if (compiledOverrides?.source !== source) {
+      const tables = compileUsagePriceOverrides(source);
+      compiledOverrides = { source, tables, revision: usagePriceOverridesRevision(tables) };
+    }
+    return compiledOverrides;
+  };
+
+  const resolveTranscriptSources = Effect.fn("UsageService.resolveTranscriptSources")(function* (
+    settings: ServerSettings,
+  ) {
     const claudeHomes = [
       yield* resolveClaudeHomePath(settings.providers.claudeAgent).pipe(
         Effect.provideService(Path.Path, path),
@@ -680,13 +717,13 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
       sourceId: plan.sourceId,
       retainExportIdentity: true,
       ...window,
-      price: (record) => priceUsageRecord(pricing.rates, record),
+      pricing: pricing.policy,
     });
     const slotAggregator = new UsageSlotAggregator({
       sourceId: plan.sourceId,
       provider: source.provider,
       ...window,
-      rates: pricing.rates,
+      pricing: pricing.policy,
     });
     const recognizedModels = new Set<string>();
     const unrecognizedModels = new Set<string>();
@@ -709,16 +746,15 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
     let nativeDiagnostic: string | undefined;
     const addRecord = (record: UsageRecord) => {
       if (recordAggregator.add(record)) {
-        const recognized =
-          record.reportedCostUsd !== null ||
-          lookupUsageModelRate(pricing.rates, record.model) !== null;
-        (recognized ? recognizedModels : unrecognizedModels).add(record.model);
+        const resolution = resolveUsageModel(pricing.policy, record.model);
+        const recognized = record.reportedCostUsd !== null || resolution.rate !== null;
+        (recognized ? recognizedModels : unrecognizedModels).add(resolution.model);
         if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
       }
     };
 
     // Transcript sources are memoized on their listing: an unchanged listing
-    // under the same window and rates yields the same result.
+    // under the same window, rates and overrides yields the same result.
     let memo: { readonly key: string; readonly fingerprint: string } | undefined;
     if (
       index >= SUMMARY_SOURCE_LIMIT ||
@@ -802,7 +838,7 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
       for (const { fileKey } of files) liveFileKeys.push(fileKey);
 
       const memoKey = `${plan.sourceId}\0${summaryRequestKey(input)}`;
-      const fingerprint = `${pricing.generation}\0${listingFingerprint(tally.existingRootCount, listings)}`;
+      const fingerprint = `${pricing.generation}\0${pricing.overridesRevision}\0${listingFingerprint(tally.existingRootCount, listings)}`;
       const hit = sourceMemos.get(memoKey);
       if (hit !== undefined && hit.fingerprint === fingerprint) {
         sourceMemos.delete(memoKey);
@@ -944,6 +980,7 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryRequest,
+    settings: ServerSettings,
   ) {
     if (input.contractVersion !== USAGE_CONTRACT_VERSION)
       return yield* new UsageReadError({
@@ -978,13 +1015,14 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
     const scanStartedAtMs = yield* Clock.currentTimeMillis;
     // Pricing is only needed by the aggregators: any download overlaps source discovery.
     const refresh = yield* startRatesRefresh;
-    const plans = yield* planSources(yield* resolveTranscriptSources());
+    const plans = yield* planSources(yield* resolveTranscriptSources(settings));
     if (refresh !== null && rates.size === 0) {
       const waitedMs = (yield* Clock.currentTimeMillis) - scanStartedAtMs;
       yield* Deferred.await(refresh).pipe(
         Effect.timeoutOption(Duration.millis(Math.max(0, RATES_FIRST_FETCH_WAIT_MS - waitedMs))),
       );
     }
+    const overrides = compileOverrides(settings.usagePriceOverrides);
     const context: SummaryContext = {
       input,
       scanStartedAtMs,
@@ -993,8 +1031,9 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
           ? 0
           : Math.max(0, startOfCalendarDateMs(input.startDate) - MTIME_WINDOW_SLACK_MS),
       pricing: {
-        rates,
+        policy: makeUsagePricingPolicy(rates, overrides.tables),
         generation: ratesGeneration,
+        overridesRevision: overrides.revision,
         state: ratesState,
         revision: ratesRevisionValue,
         fetchedAtMs: ratesFetchedAtMs,
@@ -1113,6 +1152,10 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
       state: snapshot.state,
       recognizedModelCount: recognizedModels.size,
       unrecognizedModelCount: unrecognizedModels.size,
+      ...(snapshot.policy.prices.size > 0 ? { customPriceCount: snapshot.policy.prices.size } : {}),
+      ...(snapshot.policy.mappings.size > 0
+        ? { mappedModelCount: snapshot.policy.mappings.size }
+        : {}),
       ...(snapshot.revision === null ? {} : { sourceRevision: snapshot.revision }),
       ...(snapshot.fetchedAtMs === null
         ? {}
@@ -1135,13 +1178,13 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
     } satisfies UsageSummary;
   });
 
-  const computeSummary = (input: UsageSummaryRequest) =>
+  const computeSummary = (input: UsageSummaryRequest, settings: ServerSettings) =>
     scanSemaphore
       .withPermits(1)(
         // Mark activity under the lock too, so a waiting idle release sees it.
         Clock.currentTimeMillis.pipe(
           Effect.tap((nowMs) => Effect.sync(() => (lastSummaryAtMs = nowMs))),
-          Effect.andThen(readSummaryUnlocked(input)),
+          Effect.andThen(readSummaryUnlocked(input, settings)),
         ),
       )
       .pipe(
@@ -1165,7 +1208,8 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
   // Identical requests (several tabs or clients) share one scan. It runs in the
   // service scope and is interrupted only once every caller has gone away (a
   // closed socket, an abandoned request), so a queued scan nobody waits for
-  // never runs.
+  // never runs. A scan prices with the settings its first caller saw; requests
+  // under other custom prices or mappings do not join it.
   interface Flight {
     readonly done: Deferred.Deferred<UsageSummary, UsageReadError>;
     fiber: Fiber.Fiber<unknown, unknown> | undefined;
@@ -1174,7 +1218,9 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
   const inflight = new Map<string, Flight>();
   const readSummary = (input: UsageSummaryRequest) =>
     Effect.gen(function* () {
-      const key = summaryRequestKey(input);
+      const settings = yield* readSettings;
+      const { revision } = compileOverrides(settings.usagePriceOverrides);
+      const key = `${summaryRequestKey(input)}\0${revision}`;
       let flight = inflight.get(key);
       if (flight === undefined) {
         const started: Flight = {
@@ -1184,7 +1230,7 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
         };
         flight = started;
         inflight.set(key, started);
-        started.fiber = yield* computeSummary(input).pipe(
+        started.fiber = yield* computeSummary(input, settings).pipe(
           Effect.onExit((exit) =>
             Effect.sync(() => {
               if (inflight.get(key) === started) inflight.delete(key);

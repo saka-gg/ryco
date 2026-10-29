@@ -9,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   formatUsageCostShare,
+  listUnpricedUsageModels,
   listUsageCostTypeShares,
   sumUsageCostBreakdown,
   usageCacheReadShare,
@@ -246,5 +247,77 @@ describe("usageCacheReadShare", () => {
         cacheCreationInputTokens: 0,
       }),
     ).toBeNull();
+  });
+});
+
+describe("listUnpricedUsageModels", () => {
+  const unpriced = (sourceId: string, model: string, tokens: number, date = "2026-08-10") => {
+    const { estimatedCostUsd: _cost, ...rest } = bucket(sourceId, {
+      date,
+      model,
+      pricedTokenCount: 0,
+      unpricedTokenCount: tokens,
+      costSource: "unpriced",
+    });
+    return rest;
+  };
+
+  it("lists models with unpriced tokens, most first, with the environments that left them unpriced", () => {
+    const environments = [
+      environment(
+        "environment-a",
+        [source("source-a"), source("shared")],
+        [
+          bucket("source-a"),
+          unpriced("source-a", "claude-preview-x", 300),
+          unpriced("source-a", "claude-preview-x", 200, "2026-08-09"),
+          unpriced("shared", "gateway-model", 100),
+        ],
+      ),
+      environment(
+        "environment-b",
+        [source("source-b"), source("shared")],
+        [
+          // Priced on this node (a custom price): only environment-a needs one.
+          bucket("source-b", { model: "claude-preview-x", customPricedTokenCount: 1160 }),
+          unpriced("source-b", "gateway-model", 900),
+          // A duplicate of environment-a's shared source: excluded from the merge.
+          unpriced("shared", "gateway-model", 100),
+        ],
+      ),
+    ];
+    const merged = mergeUsageEnvironmentResults(environments)!;
+
+    expect(listUnpricedUsageModels(merged, merged.buckets)).toEqual([
+      {
+        provider: "claude",
+        model: "gateway-model",
+        unpricedTokens: 1000,
+        environmentIds: ["environment-a", "environment-b"],
+      },
+      {
+        provider: "claude",
+        model: "claude-preview-x",
+        unpricedTokens: 500,
+        environmentIds: ["environment-a"],
+      },
+    ]);
+  });
+
+  it("follows the shown buckets and is empty when every token is priced", () => {
+    const merged = mergeUsageEnvironmentResults([
+      environment(
+        "environment-a",
+        [source("source-a")],
+        [bucket("source-a"), unpriced("source-a", "claude-preview-x", 300)],
+      ),
+    ])!;
+
+    expect(
+      listUnpricedUsageModels(
+        merged,
+        merged.buckets.filter((entry) => entry.unpricedTokenCount === 0),
+      ),
+    ).toEqual([]);
   });
 });

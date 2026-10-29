@@ -161,6 +161,7 @@ export function applyServerSettingsPatch(
     expectedThreadAutoSettleAfterDays: _expectedAutoSettle,
     projectPreferences: _projects,
     cliProxyHubs: _cliProxyHubs,
+    usagePriceOverrides: _usagePriceOverrides,
     enableLegacyTokenStreaming: legacyTokenStreaming,
     ...persistedPatch
   } = patch;
@@ -242,6 +243,15 @@ export function applyServerSettingsPatch(
       else hubs.set(hubId, hub);
     }
     next = { ...next, cliProxyHubs: Object.fromEntries(hubs) as ServerSettings["cliProxyHubs"] };
+  }
+  if (patch.usagePriceOverrides !== undefined) {
+    // Entries are replaced whole: a mapping never keeps the price it replaces.
+    const overrides = new Map(Object.entries(current.usagePriceOverrides));
+    for (const [model, override] of Object.entries(patch.usagePriceOverrides)) {
+      if (override === null) overrides.delete(model);
+      else overrides.set(model, override);
+    }
+    next = { ...next, usagePriceOverrides: Object.fromEntries(overrides) };
   }
   const nextWithReplacements =
     patch.providerInstances !== undefined

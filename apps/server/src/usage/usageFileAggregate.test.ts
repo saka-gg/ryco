@@ -1,9 +1,19 @@
-import type { UsageCalendarDate, UsageDailyBucket, UsageProviderKind } from "@ryco/contracts";
+import type {
+  UsageCalendarDate,
+  UsageDailyBucket,
+  UsagePriceOverrides,
+  UsageProviderKind,
+} from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { UsageAggregator } from "./usageAggregation.ts";
 import { buildUsageFileAggregate, UsageSlotAggregator } from "./usageFileAggregate.ts";
-import { lookupUsageModelRate, parseUsageRateTable, priceUsageRecord } from "./usagePricing.ts";
+import {
+  compileUsagePriceOverrides,
+  makeUsagePricingPolicy,
+  parseUsageRateTable,
+  resolveUsageModel,
+} from "./usagePricing.ts";
 import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
 import { withTokenTotal } from "./usageRecord.ts";
 
@@ -152,18 +162,49 @@ const SPLIT_FIELDS = [
 const splitSum = (split: NonNullable<UsageDailyBucket["costBreakdown"]>) =>
   split.inputUsd + split.cacheReadUsd + split.cacheWriteUsd + split.outputUsd;
 
+/** A custom price for a model with published rates, and a mapping that merges two models. */
+const OVERRIDES: UsagePriceOverrides = {
+  "Odd-Model": { price: { inputUsdPerMillion: 2, outputUsdPerMillion: 8 } },
+  "unknown-model": { mapTo: "gpt-5" },
+};
+
 describe("usage file aggregates", () => {
   it.each([
-    { timeZone: "UTC", provider: "claude" as const, keyed: true, seed: 1 },
-    { timeZone: "Europe/Berlin", provider: "claude" as const, keyed: true, seed: 2 },
-    { timeZone: "America/Los_Angeles", provider: "codex" as const, keyed: false, seed: 3 },
-    { timeZone: "Asia/Kathmandu", provider: "claude" as const, keyed: true, seed: 4 },
-    { timeZone: "Australia/Lord_Howe", provider: "opencode" as const, keyed: true, seed: 5 },
-    { timeZone: "Pacific/Chatham", provider: "codex" as const, keyed: false, seed: 6 },
+    { timeZone: "UTC", provider: "claude" as const, keyed: true, seed: 1, overrides: {} },
+    { timeZone: "Europe/Berlin", provider: "claude" as const, keyed: true, seed: 2, overrides: {} },
+    {
+      timeZone: "America/Los_Angeles",
+      provider: "codex" as const,
+      keyed: false,
+      seed: 3,
+      overrides: OVERRIDES,
+    },
+    {
+      timeZone: "Asia/Kathmandu",
+      provider: "claude" as const,
+      keyed: true,
+      seed: 4,
+      overrides: {},
+    },
+    {
+      timeZone: "Australia/Lord_Howe",
+      provider: "opencode" as const,
+      keyed: true,
+      seed: 5,
+      overrides: OVERRIDES,
+    },
+    {
+      timeZone: "Pacific/Chatham",
+      provider: "codex" as const,
+      keyed: false,
+      seed: 6,
+      overrides: {},
+    },
   ])(
     "match per-record aggregation ($provider, $timeZone)",
-    ({ timeZone, provider, keyed, seed }) => {
+    ({ timeZone, provider, keyed, seed, overrides }) => {
       const files = makeFiles(seed, provider, keyed);
+      const tables = compileUsagePriceOverrides(overrides);
       for (const window of [
         { endDate: "2026-04-10" as UsageCalendarDate },
         {
@@ -171,11 +212,12 @@ describe("usage file aggregates", () => {
           endDate: "2026-04-01" as UsageCalendarDate,
         },
       ]) {
+        const policy = makeUsagePricingPolicy(rates, tables);
         const reference = new UsageAggregator({
           sourceId: "source",
           timeZone,
           ...window,
-          price: (record) => priceUsageRecord(rates, record),
+          pricing: policy,
         });
         const sessions = new Set<string>();
         const recognized = new Set<string>();
@@ -183,9 +225,9 @@ describe("usage file aggregates", () => {
         for (const record of files.flat()) {
           if (!reference.add(record)) continue;
           if (record.sessionId.length > 0) sessions.add(record.sessionId);
-          const known =
-            record.reportedCostUsd !== null || lookupUsageModelRate(rates, record.model) !== null;
-          (known ? recognized : unrecognized).add(record.model);
+          const resolution = resolveUsageModel(policy, record.model);
+          const known = record.reportedCostUsd !== null || resolution.rate !== null;
+          (known ? recognized : unrecognized).add(resolution.model);
         }
         const expected = reference.finish();
 
@@ -194,7 +236,7 @@ describe("usage file aggregates", () => {
           provider,
           timeZone,
           ...window,
-          rates,
+          pricing: makeUsagePricingPolicy(rates, tables),
         });
         for (const file of files) aggregator.addFile(buildUsageFileAggregate(file));
         const actual = aggregator.finish();
@@ -222,9 +264,96 @@ describe("usage file aggregates", () => {
             1e-7,
           );
         }
+        if (overrides === OVERRIDES) {
+          // The mapped model's usage counts under its target; the custom price covers all of
+          // its model's tokens, reported cost included.
+          expect(actual.buckets.some((bucket) => bucket.model === "unknown-model")).toBe(false);
+          const custom = actual.buckets.filter((bucket) => bucket.model === "odd-model");
+          expect(custom.length).toBeGreaterThan(0);
+          for (const bucket of custom) {
+            expect(bucket.customPricedTokenCount).toBe(bucket.tokens.totalTokens);
+            expect(bucket.costSource).toBe("litellm");
+          }
+          expect(
+            actual.buckets.every(
+              (bucket) =>
+                bucket.model === "odd-model" || bucket.customPricedTokenCount === undefined,
+            ),
+          ).toBe(true);
+        }
       }
     },
   );
+
+  it("reprices the same cached aggregates under custom prices and mappings", () => {
+    const at = Date.parse("2026-04-02T10:00:00.000Z");
+    const response = (model: string, reportedCostUsd: number | null = null): UsageRecord => ({
+      provider: "claude",
+      timestampMs: at,
+      model,
+      sessionId: "session",
+      totals: withTokenTotal({
+        uncachedInputTokens: 1_000_000,
+        cachedInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        outputTokens: 0,
+      }),
+      reportedCostUsd,
+      dedupeKey: null,
+    });
+    const file = buildUsageFileAggregate([
+      response("claude-sonnet-4-5"),
+      response("claude-preview-x"),
+      response("claude-preview-x", 0.5),
+    ]);
+    const summarize = (overrides: UsagePriceOverrides) => {
+      const aggregator = new UsageSlotAggregator({
+        sourceId: "source",
+        provider: "claude",
+        timeZone: "UTC",
+        endDate: "2026-04-10",
+        pricing: makeUsagePricingPolicy(rates, compileUsagePriceOverrides(overrides)),
+      });
+      aggregator.addFile(file);
+      return aggregator.finish();
+    };
+
+    const published = summarize({});
+    expect(published.buckets.map((bucket) => [bucket.model, bucket.estimatedCostUsd])).toEqual([
+      ["claude-preview-x", 0.5],
+      ["claude-sonnet-4-5", 3],
+    ]);
+    expect([...published.unrecognizedModels]).toEqual(["claude-preview-x"]);
+
+    // A custom price replaces published rates and reported cost for the whole history.
+    const custom = summarize({
+      "claude-sonnet-4-5": { price: { inputUsdPerMillion: 5, outputUsdPerMillion: 25 } },
+      "claude-preview-x": { price: { inputUsdPerMillion: 1, outputUsdPerMillion: 5 } },
+    });
+    expect(custom.buckets.map((bucket) => [bucket.model, bucket.estimatedCostUsd])).toEqual([
+      ["claude-preview-x", 2],
+      ["claude-sonnet-4-5", 5],
+    ]);
+    expect(custom.buckets[0]).toMatchObject({
+      costSource: "litellm",
+      customPricedTokenCount: 2_000_000,
+      pricedTokenCount: 2_000_000,
+    });
+    expect([...custom.unrecognizedModels]).toEqual([]);
+
+    // A mapped preview ID lands in its target's row at the target's rate; reported cost stays.
+    const mapped = summarize({ "Claude-Preview-X": { mapTo: "claude-sonnet-4-5" } });
+    expect(mapped.buckets).toHaveLength(1);
+    expect(mapped.buckets[0]).toMatchObject({
+      model: "claude-sonnet-4-5",
+      responseCount: 3,
+      estimatedCostUsd: 6.5,
+      costSource: "mixed",
+    });
+    expect(mapped.buckets[0]?.customPricedTokenCount).toBeUndefined();
+    expect([...mapped.recognizedModels]).toEqual(["claude-sonnet-4-5"]);
+    expect([...mapped.unrecognizedModels]).toEqual([]);
+  });
 
   it("keeps far fewer slots than records for a long single-session transcript", () => {
     const records: UsageRecord[] = Array.from({ length: 2_000 }, (_, index) => ({

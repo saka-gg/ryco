@@ -4,7 +4,11 @@ import type { UsageRecord } from "./usageRecord.ts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { UsageAggregator } from "./usageAggregation.ts";
-import { parseUsageRateTable, priceUsageRecord } from "./usagePricing.ts";
+import {
+  compileUsagePriceOverrides,
+  makeUsagePricingPolicy,
+  parseUsageRateTable,
+} from "./usagePricing.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -75,25 +79,27 @@ describe("UsageAggregator", () => {
     expect(bucket?.unpricedTokenCount).toBe(1160);
   });
 
-  it("accepts an injected model pricer", () => {
+  it("prices records with the summary's pricing policy", () => {
     const aggregator = new UsageAggregator({
       sourceId: "source-a",
       timeZone: "UTC",
       endDate: "2026-08-31",
-      price: (item) => ({
-        estimatedCostUsd: 0.5,
-        estimatedCacheSavingsUsd: 0.75,
-        listCostBreakdown: { inputUsd: 0.1, cacheReadUsd: 0.1, cacheWriteUsd: 0, outputUsd: 0.3 },
-        pricedTokenCount: item.totals.totalTokens,
-        unpricedTokenCount: 0,
-        costSource: "litellm",
-      }),
+      pricing: makeUsagePricingPolicy(
+        parseUsageRateTable({
+          "claude-sonnet-4-5-20250929": {
+            input_cost_per_token: 0.001,
+            output_cost_per_token: 0.006,
+            cache_read_input_token_cost: 0.0001,
+            cache_creation_input_token_cost: 0,
+          },
+        }),
+      ),
     });
     aggregator.add(record());
     const bucket = aggregator.finish().buckets[0];
 
-    expect(bucket?.estimatedCostUsd).toBe(0.5);
-    expect(bucket?.estimatedCacheSavingsUsd).toBe(0.75);
+    expect(bucket?.estimatedCostUsd).toBeCloseTo(0.5, 12);
+    expect(bucket?.estimatedCacheSavingsUsd).toBeCloseTo(0.9, 12);
     expect(bucket?.costBreakdown).toEqual({
       inputUsd: 0.1,
       cacheReadUsd: 0.1,
@@ -141,7 +147,7 @@ describe("UsageAggregator cost by token type", () => {
       sourceId: "source-a",
       timeZone: "UTC",
       endDate: "2026-08-31",
-      price: (item) => priceUsageRecord(rates, item),
+      pricing: makeUsagePricingPolicy(rates),
     });
     for (const item of records) aggregator.add(item);
     return aggregator.finish().buckets;
@@ -220,5 +226,50 @@ describe("UsageAggregator cost by token type", () => {
     expect(
       aggregate([record({ reportedCostUsd: 1.25 })]).buckets[0]?.costBreakdown,
     ).toBeUndefined();
+  });
+});
+
+describe("UsageAggregator custom prices and model mappings", () => {
+  const rates = parseUsageRateTable({
+    "claude-sonnet-4-5-20250929": { input_cost_per_token: 0.00001, output_cost_per_token: 0.00005 },
+  });
+  const aggregateWith = (
+    records: readonly UsageRecord[],
+    overrides: Parameters<typeof compileUsagePriceOverrides>[0],
+  ) => {
+    const aggregator = new UsageAggregator({
+      sourceId: "source-a",
+      timeZone: "UTC",
+      endDate: "2026-08-31",
+      pricing: makeUsagePricingPolicy(rates, compileUsagePriceOverrides(overrides)),
+    });
+    for (const item of records) aggregator.add(item);
+    return aggregator.finish().buckets;
+  };
+
+  it("reports a mapped model under its target and prices custom models over reported cost", () => {
+    const buckets = aggregateWith(
+      [
+        record({ model: "claude-preview" }),
+        record({ model: "claude-preview[1m]", reportedCostUsd: 0.25 }),
+        record({ model: "kimi-k3", reportedCostUsd: 9 }),
+      ],
+      {
+        "claude-preview": { mapTo: "claude-sonnet-4-5-20250929" },
+        "Kimi-K3": { price: { inputUsdPerMillion: 1, outputUsdPerMillion: 2 } },
+      },
+    );
+    expect(buckets.map((bucket) => bucket.model)).toEqual([
+      "claude-sonnet-4-5-20250929",
+      "kimi-k3",
+    ]);
+    const [mapped, custom] = buckets;
+    // Mapping alone keeps the reported cost; the other response is priced at the target's rate.
+    expect(mapped).toMatchObject({ responseCount: 2, costSource: "mixed" });
+    expect(mapped?.estimatedCostUsd).toBeCloseTo(0.25 + 0.0136, 12);
+    expect(mapped?.customPricedTokenCount).toBeUndefined();
+    // Every input token (uncached, cached and written) costs the input price without cache prices.
+    expect(custom).toMatchObject({ costSource: "litellm", customPricedTokenCount: 1160 });
+    expect(custom?.estimatedCostUsd).toBeCloseTo(1110 / 1e6 + 100 / 1e6, 12);
   });
 });

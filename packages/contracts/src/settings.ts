@@ -712,6 +712,53 @@ export const EffectiveProjectPreferences = Schema.Struct({
 });
 export type EffectiveProjectPreferences = typeof EffectiveProjectPreferences.Type;
 
+/** A model ID as recorded in provider usage history; matched case-insensitively. */
+const UsageModelId = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+const UsageUsdPerMillion = Schema.Finite.check(
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(1_000_000),
+);
+
+/** USD per million tokens. A missing cache price charges the input price; 0 is free. */
+export const UsageModelPrice = Schema.Struct({
+  inputUsdPerMillion: UsageUsdPerMillion,
+  outputUsdPerMillion: UsageUsdPerMillion,
+  cacheReadUsdPerMillion: Schema.optionalKey(UsageUsdPerMillion),
+  cacheWriteUsdPerMillion: Schema.optionalKey(UsageUsdPerMillion),
+});
+export type UsageModelPrice = typeof UsageModelPrice.Type;
+
+/**
+ * Exactly one of: a custom price (at every speed; it replaces provider-reported cost), or the
+ * model whose price and usage row this model ID uses (`mapTo`, e.g. a preview ID).
+ */
+export const UsagePriceOverride = Schema.Struct({
+  price: Schema.optionalKey(UsageModelPrice),
+  mapTo: Schema.optionalKey(UsageModelId),
+}).check(
+  Schema.makeFilter((entry) =>
+    (entry.price === undefined) !== (entry.mapTo === undefined)
+      ? undefined
+      : "Set either a price or a model to map to",
+  ),
+);
+export type UsagePriceOverride = typeof UsagePriceOverride.Type;
+
+export const USAGE_PRICE_OVERRIDE_LIMIT = 200;
+
+/** Node-wide custom prices and model mappings for usage cost, keyed by model ID. */
+export const UsagePriceOverrides = Schema.Record(UsageModelId, UsagePriceOverride).check(
+  Schema.makeFilter((entries) => {
+    const keys = Object.keys(entries);
+    if (keys.length > USAGE_PRICE_OVERRIDE_LIMIT)
+      return `At most ${USAGE_PRICE_OVERRIDE_LIMIT} custom model entries`;
+    for (const key of keys)
+      if (entries[key]?.mapTo?.toLowerCase() === key.toLowerCase()) return `${key} maps to itself`;
+    return undefined;
+  }),
+);
+export type UsagePriceOverrides = typeof UsagePriceOverrides.Type;
+
 export const ServerSettings = Schema.Struct({
   initialModelSelection: Schema.NullOr(InitialModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -848,6 +895,8 @@ export const ServerSettings = Schema.Struct({
   ),
   // CLIProxyAPI hubs read as usage sources. Management keys live in the secret store.
   cliProxyHubs: CliProxyHubs.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // Node-scoped; not in Agent Control's settings allowlist.
+  usagePriceOverrides: UsagePriceOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   agentControl: AgentControlSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
@@ -1033,6 +1082,10 @@ export const ServerSettingsPatch = Schema.Struct({
   // Per-hub replacement; `null` removes the hub (and its stored management key).
   cliProxyHubs: Schema.optionalKey(
     Schema.Record(CliProxyHubId, Schema.NullOr(CliProxyHubConfigInput)),
+  ),
+  // Per-model replacement; `null` removes the model's entry.
+  usagePriceOverrides: Schema.optionalKey(
+    Schema.Record(UsageModelId, Schema.NullOr(UsagePriceOverride)),
   ),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;

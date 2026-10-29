@@ -146,6 +146,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * older servers, which drop the key.
    */
   agentProcessPriority: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node prices usage with `usagePriceOverrides` (custom model prices and model mappings);
+   * absent on older servers, which drop the key from settings patches.
+   */
+  usagePriceOverrides: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

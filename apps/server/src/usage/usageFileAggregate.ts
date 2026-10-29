@@ -21,9 +21,9 @@ import type { UsageCalendarDate, UsageCostSource, UsageDailyBucket } from "@ryco
 
 import { makeUsageDayFormatter, UsageCostBreakdownSum } from "./usageAggregation.ts";
 import {
-  lookupUsageModelRate,
   priceUsageSlot,
-  type UsageRateTable,
+  resolveUsageModel,
+  type UsagePricingPolicy,
   type UsageSlotTotals,
 } from "./usagePricing.ts";
 import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
@@ -180,7 +180,7 @@ export interface UsageSlotAggregationOptions {
   readonly timeZone: string;
   readonly startDate?: UsageCalendarDate;
   readonly endDate: UsageCalendarDate;
-  readonly rates: UsageRateTable;
+  readonly pricing: UsagePricingPolicy;
 }
 
 export interface UsageSlotAggregationResult {
@@ -188,6 +188,7 @@ export interface UsageSlotAggregationResult {
   readonly duplicatesDropped: number;
   readonly acceptedRecords: number;
   readonly sessionIds: ReadonlySet<string>;
+  /** Models as reported (mapped model IDs), by whether they have a price. */
   readonly recognizedModels: ReadonlySet<string>;
   readonly unrecognizedModels: ReadonlySet<string>;
 }
@@ -213,6 +214,7 @@ interface MutableBucket {
   costBreakdown: UsageCostBreakdownSum;
   pricedTokenCount: number;
   unpricedTokenCount: number;
+  customPricedTokenCount: number;
   costSources: Set<Exclude<UsageCostSource, "mixed">>;
 }
 
@@ -276,14 +278,16 @@ export class UsageSlotAggregator {
 
   #addSlot(slot: UsageSlot, totals: UsageSlotTotals): void {
     const date = this.#day(slot.slotMs);
-    const { startDate, endDate, rates } = this.#options;
+    const { startDate, endDate, pricing } = this.#options;
     if ((startDate !== undefined && date < startDate) || date > endDate) return;
-    const key = `${date}\0${slot.model}`;
+    // Usage of a mapped model ID counts under its target, priced like it.
+    const resolution = resolveUsageModel(pricing, slot.model);
+    const key = `${date}\0${resolution.model}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
         date: date as UsageCalendarDate,
-        model: slot.model,
+        model: resolution.model,
         tokens: {
           uncachedInputTokens: 0,
           cachedInputTokens: 0,
@@ -302,11 +306,12 @@ export class UsageSlotAggregator {
         costBreakdown: new UsageCostBreakdownSum(),
         pricedTokenCount: 0,
         unpricedTokenCount: 0,
+        customPricedTokenCount: 0,
         costSources: new Set(),
       };
       this.#buckets.set(key, bucket);
     }
-    const price = priceUsageSlot(rates, slot, totals);
+    const price = priceUsageSlot(resolution, slot, totals);
     bucket.tokens.uncachedInputTokens += totals.uncachedInputTokens;
     bucket.tokens.cachedInputTokens += totals.cachedInputTokens;
     bucket.tokens.cacheCreationInputTokens += totals.cacheCreationInputTokens;
@@ -330,10 +335,11 @@ export class UsageSlotAggregator {
     bucket.costBreakdown.add(price);
     bucket.pricedTokenCount += price.pricedTokenCount;
     bucket.unpricedTokenCount += price.unpricedTokenCount;
+    bucket.customPricedTokenCount += price.customPricedTokenCount;
     bucket.costSources.add(price.costSource);
     this.#acceptedRecords += totals.count;
-    const recognized = slot.reported || lookupUsageModelRate(rates, slot.model) !== null;
-    (recognized ? this.#recognizedModels : this.#unrecognizedModels).add(slot.model);
+    const recognized = slot.reported || resolution.rate !== null;
+    (recognized ? this.#recognizedModels : this.#unrecognizedModels).add(resolution.model);
   }
 
   finish(): UsageSlotAggregationResult {
@@ -356,6 +362,9 @@ export class UsageSlotAggregator {
         ...(costBreakdown === undefined ? {} : { costBreakdown }),
         pricedTokenCount: bucket.pricedTokenCount,
         unpricedTokenCount: bucket.unpricedTokenCount,
+        ...(bucket.customPricedTokenCount > 0
+          ? { customPricedTokenCount: bucket.customPricedTokenCount }
+          : {}),
         costSource:
           bucket.costSources.size === 1
             ? (bucket.costSources.values().next().value ?? "unpriced")

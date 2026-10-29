@@ -35,6 +35,7 @@ import {
   type ServerSettingsPatch,
   type ServerProvider,
   type StorageRetentionPolicy,
+  USAGE_PRICE_OVERRIDE_LIMIT,
 } from "@ryco/contracts";
 import { isProviderKnownUnusable, isProviderReady } from "@ryco/shared/providerCapabilities";
 import {
@@ -676,7 +677,13 @@ function recoverServerSettings(
       issues.push(formatSchemaError(entryDecoded.cause));
       if (key === "projectStorageRetention") entries[entryKey] = UNREADABLE_PROJECT_RETENTION;
     }
-    if (Exit.isSuccess(decodeServerSettings({ [key]: entries }))) valid[key] = entries;
+    // The entry limit is the record's own: a hand-edited file over it keeps its first entries.
+    let kept = entries;
+    if (key === "usagePriceOverrides" && Object.keys(entries).length > USAGE_PRICE_OVERRIDE_LIMIT) {
+      kept = Object.fromEntries(Object.entries(entries).slice(0, USAGE_PRICE_OVERRIDE_LIMIT));
+      issues.push(`Only the first ${USAGE_PRICE_OVERRIDE_LIMIT} custom model entries are kept`);
+    }
+    if (Exit.isSuccess(decodeServerSettings({ [key]: kept }))) valid[key] = kept;
     invalidKeys[key] = issues.length > 0 ? issues.join("; ") : formatSchemaError(decoded.cause);
   }
   // With no readable project overrides, no project's opt-out is known: pause automatic cleanup.

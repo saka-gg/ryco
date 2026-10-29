@@ -3,14 +3,16 @@ import {
   USAGE_PROVIDER_COLORS,
   USAGE_PROVIDER_LABELS,
   filterUsageImports,
+  listUnpricedUsageModels,
   sumUsageCostBreakdown,
   sumUsageImports,
   usageCacheReadShare,
   type MergedUsageSummary,
+  type UnpricedUsageModel,
   type UsageBreakdownRow,
   type UsageModelKey,
 } from "@ryco/client-runtime/usage";
-import type { UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
+import type { EnvironmentId, UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
 import {
   AlertCircleIcon,
   BrainCircuitIcon,
@@ -23,10 +25,16 @@ import {
 } from "lucide-react";
 import { useId, useMemo, useState } from "react";
 
+import {
+  requestUsagePriceRow,
+  USAGE_PRICE_SECTION_TITLE,
+} from "~/components/settings/usagePriceSettingsRequest";
+import { requestSettingsReveal } from "~/components/settings/settingsSearchReveal";
 import { Button } from "~/components/ui/button";
 import { notifySurfaceLoadFailure } from "~/components/ui/surfaceLoadFailure";
 import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
 import { cn } from "~/lib/utils";
+import { useSettingsDialogStore } from "~/settingsDialogStore";
 import {
   formatCost,
   formatDayLabel,
@@ -94,6 +102,7 @@ export function UsageView({
       costByType: sumUsageCostBreakdown(buckets),
       days: buildUsageDaySeries(merged, buckets),
       breakdown: buildUsageBreakdown(buckets, search.usageBreakdown),
+      unpriced: listUnpricedUsageModels(merged, buckets),
     };
   }, [merged, search.providers, search.usageBreakdown]);
 
@@ -293,6 +302,7 @@ export function UsageView({
               search.providers === undefined || search.providers.includes(source.provider),
           ),
         }}
+        unpriced={derived.unpriced}
       />
     </div>
   );
@@ -439,7 +449,11 @@ function BreakdownRow({
       <span id={`${id}-cost`} className="block w-24 text-right">
         <span className="block text-sm font-medium tabular-nums">{formatCost(row.costUsd)}</span>
         <span className="block text-[11px] text-muted-foreground">
-          {row.unpricedTokens > 0 ? `${formatTokens(row.unpricedTokens)} unpriced` : "estimated"}
+          {row.unpricedTokens > 0
+            ? `${formatTokens(row.unpricedTokens)} unpriced`
+            : row.customPricedTokens > 0
+              ? "custom price"
+              : "estimated"}
         </span>
       </span>
     </>
@@ -535,7 +549,20 @@ function LegendDot({ color, label }: { readonly color: string; readonly label: s
   );
 }
 
-function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
+/** Open the node's model price editor with a row for `model`. */
+function setModelPrices(environmentId: EnvironmentId, model: string) {
+  requestUsagePriceRow(environmentId, model);
+  useSettingsDialogStore.getState().openSettings("general", environmentId);
+  requestSettingsReveal(USAGE_PRICE_SECTION_TITLE);
+}
+
+function Coverage({
+  summary,
+  unpriced,
+}: {
+  readonly summary: MergedUsageSummary;
+  readonly unpriced: readonly UnpricedUsageModel[];
+}) {
   const included = summary.sources.filter((source) => source.included);
   const issues = included.filter((source) => source.status !== "complete");
   const failedEnvironments = summary.environments.filter(
@@ -564,6 +591,16 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
     })
     .toSorted()
     .at(-1);
+  let customPriceCount = 0;
+  let mappedModelCount = 0;
+  for (const environment of summary.environments) {
+    customPriceCount += environment.summary?.pricing.customPriceCount ?? 0;
+    mappedModelCount += environment.summary?.pricing.mappedModelCount ?? 0;
+  }
+  const customPricing = [
+    customPriceCount > 0 ? plural(customPriceCount, "custom price") : null,
+    mappedModelCount > 0 ? plural(mappedModelCount, "mapped model") : null,
+  ].filter((part) => part !== null);
   const latestScan = included
     .map((source) => source.scanFinishedAt)
     .toSorted()
@@ -600,11 +637,12 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
           icon={CircleDollarSignIcon}
           label="Pricing"
           value={pricingState}
-          detail={
+          detail={[
             pricingFetch
               ? `Rates fetched ${formatTimestamp(pricingFetch)}`
-              : "Token totals remain available without rates"
-          }
+              : "Token totals remain available without rates",
+            ...customPricing,
+          ].join(" · ")}
         />
         <CoverageItem
           icon={AlertCircleIcon}
@@ -621,6 +659,9 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
           }
         />
       </div>
+      {unpriced.length > 0 ? (
+        <UnpricedModels unpriced={unpriced} environments={summary.environments} />
+      ) : null}
       {issues.map((source) => (
         <p
           key={`${source.environmentId}:${source.sourceId}`}
@@ -631,6 +672,73 @@ function Coverage({ summary }: { readonly summary: MergedUsageSummary }) {
         </p>
       ))}
     </Panel>
+  );
+}
+
+function plural(count: number, noun: string): string {
+  return `${formatInteger(count)} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+const UNPRICED_MODEL_LIMIT = 8;
+
+function UnpricedModels({
+  unpriced,
+  environments,
+}: {
+  readonly unpriced: readonly UnpricedUsageModel[];
+  readonly environments: MergedUsageSummary["environments"];
+}) {
+  const labels = new Map(
+    environments.map((environment) => [environment.environmentId, environment.label]),
+  );
+  const hidden = unpriced.length - UNPRICED_MODEL_LIMIT;
+  return (
+    <div className="mt-5 border-t border-border/60 pt-4">
+      <p className="text-xs font-medium">Unpriced models</p>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+        No published rate covers these model IDs. Set a price for them, or map them to a priced
+        model, on the machine that recorded them.
+      </p>
+      <ul aria-label="Unpriced models" className="mt-2 divide-y divide-border/60">
+        {unpriced.slice(0, UNPRICED_MODEL_LIMIT).map((entry) => (
+          <li
+            key={`${entry.provider}:${entry.model}`}
+            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2 text-xs"
+          >
+            <span className="min-w-0">
+              <span className="font-mono break-all">{entry.model}</span>
+              <span className="text-muted-foreground">
+                {" "}
+                · {formatProviderLabel(entry.provider)} · {formatTokens(entry.unpricedTokens)}{" "}
+                tokens
+              </span>
+            </span>
+            <span className="flex flex-wrap gap-1.5">
+              {entry.environmentIds.map((environmentId) => {
+                const label = labels.get(environmentId) ?? "this machine";
+                const several = entry.environmentIds.length > 1;
+                return (
+                  <Button
+                    key={environmentId}
+                    size="xs"
+                    variant="outline"
+                    aria-label={`Set prices for ${entry.model}${several ? ` on ${label}` : ""}`}
+                    onClick={() => setModelPrices(environmentId, entry.model)}
+                  >
+                    {several ? `Set prices on ${label}` : "Set prices"}
+                  </Button>
+                );
+              })}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {hidden > 0 ? (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {plural(hidden, "more unpriced model")}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

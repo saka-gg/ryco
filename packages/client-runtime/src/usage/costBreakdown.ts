@@ -1,5 +1,6 @@
-import type { UsageTokenTotals } from "@ryco/contracts/usage";
-import type { MergedUsageBucket } from "./merge.ts";
+import type { EnvironmentId } from "@ryco/contracts";
+import type { UsageProviderKind, UsageTokenTotals } from "@ryco/contracts/usage";
+import type { MergedUsageBucket, MergedUsageSummary } from "./merge.ts";
 
 /** Estimated cost of a set of usage buckets by token type, at the billed speed. */
 export interface UsageCostBreakdownTotals {
@@ -130,4 +131,70 @@ export function usageCacheReadShare(
   const inputTokens =
     totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationInputTokens;
   return inputTokens > 0 ? totals.cachedInputTokens / inputTokens : null;
+}
+
+/** A model whose usage no published rate or custom price covers. */
+export interface UnpricedUsageModel {
+  readonly provider: UsageProviderKind;
+  /** As recorded: custom prices and mappings match this ID. */
+  readonly model: string;
+  readonly unpricedTokens: number;
+  /** The environments whose own usage of it is unpriced, in the summary's order. */
+  readonly environmentIds: readonly EnvironmentId[];
+}
+
+/**
+ * Models with unpriced tokens among `buckets` (the shown part of `summary`), most unpriced
+ * tokens first. Environments come from each one's own buckets, so a model that one node
+ * prices (with a custom price) and another does not names only the other.
+ */
+export function listUnpricedUsageModels(
+  summary: MergedUsageSummary,
+  buckets: readonly MergedUsageBucket[],
+): readonly UnpricedUsageModel[] {
+  const models = new Map<
+    string,
+    { provider: UsageProviderKind; model: string; unpricedTokens: number }
+  >();
+  for (const bucket of buckets) {
+    if (bucket.unpricedTokenCount <= 0) continue;
+    const key = `${bucket.provider}\0${bucket.model}`;
+    const current = models.get(key);
+    if (current === undefined) {
+      models.set(key, {
+        provider: bucket.provider,
+        model: bucket.model,
+        unpricedTokens: bucket.unpricedTokenCount,
+      });
+    } else current.unpricedTokens += bucket.unpricedTokenCount;
+  }
+  if (models.size === 0) return [];
+  const included = new Set(
+    summary.sources.flatMap((source) =>
+      source.included ? [`${source.environmentId}\0${source.sourceId}`] : [],
+    ),
+  );
+  const environments = new Map<string, EnvironmentId[]>();
+  for (const environment of summary.environments) {
+    for (const bucket of environment.summary?.buckets ?? []) {
+      if (bucket.unpricedTokenCount <= 0) continue;
+      if (!included.has(`${environment.environmentId}\0${bucket.sourceId}`)) continue;
+      const key = `${bucket.provider}\0${bucket.model}`;
+      if (!models.has(key)) continue;
+      const ids = environments.get(key) ?? [];
+      if (!ids.includes(environment.environmentId)) ids.push(environment.environmentId);
+      environments.set(key, ids);
+    }
+  }
+  return [...models]
+    .map(([key, entry]): UnpricedUsageModel => ({
+      provider: entry.provider,
+      model: entry.model,
+      unpricedTokens: entry.unpricedTokens,
+      environmentIds: environments.get(key) ?? [],
+    }))
+    .toSorted(
+      (left, right) =>
+        right.unpricedTokens - left.unpricedTokens || left.model.localeCompare(right.model),
+    );
 }

@@ -6,9 +6,10 @@ export interface SettingsSearchTarget {
 }
 
 /**
- * A row the command palette asked the settings page to reveal. The palette
- * asks before the page has mounted, so the request waits here until the page
- * takes it. Only the page and the palette import this module.
+ * A row the command palette (or a link such as the Usage page's "Set prices")
+ * asked the settings page to reveal. It asks before the page has mounted, so
+ * the request waits here until the page takes it. Only the page and those
+ * callers import this module.
  */
 export const useSettingsSearchRevealStore = create<{
   readonly request: SettingsSearchTarget | null;

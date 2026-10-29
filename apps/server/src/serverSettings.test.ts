@@ -12,6 +12,7 @@ import {
   ProviderInstanceId,
   ServerSettings,
   ServerSettingsPatch,
+  USAGE_PRICE_OVERRIDE_LIMIT,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import { fromLenientJson } from "@ryco/shared/schemaJson";
@@ -1751,6 +1752,63 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(recovered.projectGitWritingStyle, { a: "default", c: "repository" });
     }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
   });
+
+  it.effect("saves custom model prices per entry and drops only an invalid hand-edited one", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const price = { inputUsdPerMillion: 3, outputUsdPerMillion: 15 };
+      const settings = yield* ServerSettingsService;
+      yield* settings.updateSettings({
+        usagePriceOverrides: { "kimi-k3": { price }, preview: { mapTo: "claude-opus-5" } },
+      });
+      const updated = yield* settings.updateSettings({ usagePriceOverrides: { preview: null } });
+      assert.deepEqual(updated.usagePriceOverrides, { "kimi-k3": { price } });
+      // The merged entries are validated: a model cannot map to itself.
+      const refused = yield* Effect.exit(
+        settings.updateSettings({ usagePriceOverrides: { Loop: { mapTo: "loop" } } }),
+      );
+      assert.isTrue(Exit.isFailure(refused));
+
+      const saved = JSON.parse(yield* fs.readFileString(settingsPath));
+      assert.deepEqual(saved.usagePriceOverrides, { "kimi-k3": { price } });
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({
+          ...saved,
+          usagePriceOverrides: {
+            ...saved.usagePriceOverrides,
+            negative: { price: { ...price, outputUsdPerMillion: -1 } },
+            both: { price, mapTo: "kimi-k3" },
+            self: { mapTo: "SELF" },
+            preview: { mapTo: "kimi-k3" },
+          },
+        }),
+      );
+      const recovered = yield* loadSettingsInFreshService();
+      assert.deepEqual(recovered.usagePriceOverrides, {
+        "kimi-k3": { price },
+        preview: { mapTo: "kimi-k3" },
+      });
+
+      // Over the entry limit, the first entries stay rather than none.
+      const many = Object.fromEntries(
+        Array.from({ length: USAGE_PRICE_OVERRIDE_LIMIT + 5 }, (_, index) => [
+          `model-${index}`,
+          { price },
+        ]),
+      );
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({ ...saved, usagePriceOverrides: many }),
+      );
+      const capped = yield* loadSettingsInFreshService();
+      assert.deepEqual(
+        Object.keys(capped.usagePriceOverrides),
+        Object.keys(many).slice(0, USAGE_PRICE_OVERRIDE_LIMIT),
+      );
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
 
   it.effect("stores hand-edited plaintext hub secrets once a client saves its hub", () => {
     const fake = syntheticSecretStore();

@@ -538,6 +538,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "heatmap usage tokens",
   },
   {
+    section: "general",
+    title: "Model prices",
+    owner: "node",
+    description: "Custom prices and model mappings for usage cost.",
+    keywords: "usage cost price pricing rates override map alias preview gateway unpriced",
+  },
+  {
     section: "archived",
     title: "Archive",
     owner: "node",

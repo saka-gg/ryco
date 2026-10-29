@@ -218,3 +218,63 @@ describe("usage cost breakdown", () => {
     ).toBeUndefined();
   });
 });
+
+describe("custom pricing fields", () => {
+  const bucket = {
+    sourceId: "source-1",
+    date: "2026-08-10",
+    provider: "claude",
+    model: "kimi-k3",
+    tokens,
+    responseCount: 1,
+    sessionCount: 1,
+    estimatedCostUsd: 0.01,
+    pricedTokenCount: 265,
+    unpricedTokenCount: 0,
+    customPricedTokenCount: 265,
+    costSource: "litellm",
+  } as const;
+  const summary = {
+    contractVersion: USAGE_CONTRACT_VERSION,
+    endDate: "2026-08-10",
+    timeZone: "UTC",
+    generatedAt: "2026-08-10T12:00:00.000Z",
+    scanDurationMs: 18,
+    buckets: [bucket],
+    sources: [],
+    pricing: {
+      state: "live",
+      recognizedModelCount: 1,
+      unrecognizedModelCount: 0,
+      customPriceCount: 1,
+      mappedModelCount: 2,
+    },
+  } as const;
+
+  it("round-trip on current clients and are dropped by clients built before them", () => {
+    expect(Schema.decodeUnknownSync(UsageSummary)(summary)).toMatchObject({
+      buckets: [{ customPricedTokenCount: 265 }],
+      pricing: { customPriceCount: 1, mappedModelCount: 2 },
+    });
+    const {
+      customPricedTokenCount: _,
+      costBreakdown: __,
+      ...previousBucketFields
+    } = UsageDailyBucket.fields;
+    const PreviousSummary = Schema.Struct({
+      ...UsageSummary.fields,
+      buckets: Schema.Array(Schema.Struct(previousBucketFields)),
+    });
+    const decoded = Schema.decodeUnknownSync(PreviousSummary)(summary);
+    expect(decoded.buckets[0]).not.toHaveProperty("customPricedTokenCount");
+    // A node without custom prices omits the fields.
+    const { customPricedTokenCount: ___, ...plainBucket } = bucket;
+    const plain = Schema.decodeUnknownSync(UsageSummary)({
+      ...summary,
+      buckets: [plainBucket],
+      pricing: { state: "live", recognizedModelCount: 1, unrecognizedModelCount: 0 },
+    });
+    expect(plain.buckets[0]?.customPricedTokenCount).toBeUndefined();
+    expect(plain.pricing.customPriceCount).toBeUndefined();
+  });
+});

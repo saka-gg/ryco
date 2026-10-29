@@ -7,6 +7,7 @@ import type {
 } from "@ryco/contracts";
 
 import { makeUsageDayFormatter } from "./usageDay.ts";
+import { priceUsageRecord, resolveUsageModel, type UsagePricingPolicy } from "./usagePricing.ts";
 import { addUsageTokenTotals, EMPTY_USAGE_TOKEN_TOTALS, type UsageRecord } from "./usageRecord.ts";
 
 export { makeUsageDayFormatter };
@@ -22,17 +23,18 @@ export interface UsageRecordPrice {
   readonly listCostBreakdown: UsageCostBreakdown | null;
   readonly pricedTokenCount: number;
   readonly unpricedTokenCount: number;
+  /** The part of `pricedTokenCount` priced from a custom price. */
+  readonly customPricedTokenCount: number;
   readonly costSource: Exclude<UsageCostSource, "mixed">;
 }
-
-export type UsageRecordPricer = (record: UsageRecord) => UsageRecordPrice;
 
 export interface UsageAggregationOptions {
   readonly sourceId: string;
   readonly timeZone: string;
   readonly startDate?: UsageCalendarDate;
   readonly endDate: UsageCalendarDate;
-  readonly price?: UsageRecordPricer;
+  /** Prices records and maps their model IDs; without it only provider-reported cost counts. */
+  readonly pricing?: UsagePricingPolicy;
   readonly retainExportIdentity?: boolean;
 }
 
@@ -121,6 +123,7 @@ interface MutableBucket {
   costBreakdown: UsageCostBreakdownSum;
   pricedTokenCount: number;
   unpricedTokenCount: number;
+  customPricedTokenCount: number;
   costSources: Set<Exclude<UsageCostSource, "mixed">>;
 }
 
@@ -132,6 +135,7 @@ function defaultPrice(record: UsageRecord): UsageRecordPrice {
       listCostBreakdown: null,
       pricedTokenCount: record.totals.totalTokens,
       unpricedTokenCount: 0,
+      customPricedTokenCount: 0,
       costSource: "provider-reported",
     };
   }
@@ -141,6 +145,7 @@ function defaultPrice(record: UsageRecord): UsageRecordPrice {
     listCostBreakdown: null,
     pricedTokenCount: 0,
     unpricedTokenCount: record.totals.totalTokens,
+    customPricedTokenCount: 0,
     costSource: "unpriced",
   };
 }
@@ -184,9 +189,12 @@ export class UsageAggregator {
       return false;
     }
 
+    const { pricing: policy } = this.#options;
+    const resolution = policy === undefined ? null : resolveUsageModel(policy, record.model);
+    const model = resolution?.model ?? record.model;
     const exportRecordId =
       this.#options.retainExportIdentity && record.provider === "cursor" ? record.dedupeKey : null;
-    const key = `${date}\0${record.provider}\0${record.model}${exportRecordId === null ? "" : `\0${exportRecordId}`}`;
+    const key = `${date}\0${record.provider}\0${model}${exportRecordId === null ? "" : `\0${exportRecordId}`}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
@@ -203,12 +211,14 @@ export class UsageAggregator {
         costBreakdown: new UsageCostBreakdownSum(),
         pricedTokenCount: 0,
         unpricedTokenCount: 0,
+        customPricedTokenCount: 0,
         costSources: new Set(),
       };
       this.#buckets.set(key, bucket);
     }
 
-    const pricing = (this.#options.price ?? defaultPrice)(record);
+    const pricing =
+      resolution === null ? defaultPrice(record) : priceUsageRecord(resolution, record);
     bucket.tokens =
       bucket.responseCount === 0
         ? record.totals
@@ -226,6 +236,7 @@ export class UsageAggregator {
     bucket.costBreakdown.add(pricing);
     bucket.pricedTokenCount += pricing.pricedTokenCount;
     bucket.unpricedTokenCount += pricing.unpricedTokenCount;
+    bucket.customPricedTokenCount += pricing.customPricedTokenCount;
     bucket.costSources.add(pricing.costSource);
     this.#acceptedRecords += 1;
     return true;
@@ -255,6 +266,9 @@ export class UsageAggregator {
         ...(costBreakdown === undefined ? {} : { costBreakdown }),
         pricedTokenCount: bucket.pricedTokenCount,
         unpricedTokenCount: bucket.unpricedTokenCount,
+        ...(bucket.customPricedTokenCount > 0
+          ? { customPricedTokenCount: bucket.customPricedTokenCount }
+          : {}),
         costSource: resolveCostSource(bucket.costSources),
       });
     }

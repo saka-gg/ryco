@@ -134,6 +134,44 @@ describe("usage summary cache", () => {
     expect(getUsageSummary).toHaveBeenCalledTimes(2);
   });
 
+  it("forgets one environment's results, prefetches and in-flight requests", async () => {
+    const otherId = EnvironmentId.make("other-node");
+    const pending: Array<() => void> = [];
+    const getUsageSummary = vi.fn(
+      (request: UsageSummaryRequest) =>
+        new Promise<UsageSummary>((done) => pending.push(() => done(summary(request)))),
+    );
+    const settleAll = () => {
+      for (const settle of pending.splice(0)) settle();
+    };
+    const cache = new UsageSummaryCache();
+    const target = { environmentId, label: "Node", getUsageSummary };
+    const other = { environmentId: otherId, label: "Other", getUsageSummary };
+    const loads = [
+      cache.load(target, "7d", "UTC", { nowMs: NOW }),
+      cache.load(other, "7d", "UTC", { nowMs: NOW }),
+    ];
+    settleAll();
+    await Promise.all(loads);
+    cache.prefetch(target, "30d", "UTC", NOW);
+    const inFlight = cache.load(target, "90d", "UTC", { nowMs: NOW });
+    expect(getUsageSummary).toHaveBeenCalledTimes(4);
+
+    cache.forget(environmentId);
+    expect(cache.peek(environmentId, "7d", "UTC")).toBeUndefined();
+    expect(cache.peek(otherId, "7d", "UTC")?.status).toBe("complete");
+    // Requests started before keep their (old) answers to their callers only.
+    settleAll();
+    expect((await inFlight).status).toBe("complete");
+    expect(cache.peek(environmentId, "90d", "UTC")).toBeUndefined();
+    expect(cache.peek(environmentId, "30d", "UTC")).toBeUndefined();
+    // The next view asks again instead of joining or taking the forgotten ones.
+    void cache.load(target, "30d", "UTC", { nowMs: NOW });
+    expect(getUsageSummary).toHaveBeenCalledTimes(5);
+    settleAll();
+    await vi.waitFor(() => expect(cache.peek(environmentId, "30d", "UTC")).toBeDefined());
+  });
+
   it("classifies partial coverage and contract mismatches", async () => {
     const request = {
       contractVersion: USAGE_CONTRACT_VERSION,

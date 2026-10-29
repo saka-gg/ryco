@@ -235,4 +235,17 @@ describe("usage selectors", () => {
     expect(rows.map((row) => row.label)).toEqual(["claude-sonnet-4-5", "unknown-model"]);
     expect(rows[1]?.costUsd).toBeNull();
   });
+
+  it("counts custom-priced tokens per row", () => {
+    const [bucket] = measuredSummary.buckets;
+    const rows = buildUsageBreakdown(
+      [
+        { ...bucket!, customPricedTokenCount: 400 },
+        { ...bucket!, date: "2026-08-09", customPricedTokenCount: 100 },
+      ],
+      "model",
+    );
+    expect(rows.map((row) => row.customPricedTokens)).toEqual([500]);
+    expect(buildUsageBreakdown(measuredSummary.buckets, "day")[0]?.customPricedTokens).toBe(0);
+  });
 });

@@ -311,3 +311,30 @@ describe("cost breakdown merging", () => {
     expect(older?.buckets[0]).not.toHaveProperty("costBreakdown");
   });
 });
+
+it("sums custom-priced tokens across environments, skipping duplicate sources", () => {
+  const merged = mergeUsageEnvironmentResults([
+    environment(
+      "environment-a",
+      [source("source-a"), source("shared")],
+      [
+        bucket("source-a", { customPricedTokenCount: 1160 }),
+        bucket("shared", { customPricedTokenCount: 1160 }),
+      ],
+    ),
+    environment(
+      "environment-b",
+      [source("source-b"), source("shared", { status: "partial" })],
+      [bucket("source-b"), bucket("shared", { customPricedTokenCount: 1160 })],
+    ),
+  ]);
+  expect(merged?.buckets[0]).toMatchObject({
+    pricedTokenCount: 3480,
+    customPricedTokenCount: 2320,
+  });
+  expect(
+    mergeUsageEnvironmentResults([
+      environment("environment-a", [source("source-a")], [bucket("source-a")]),
+    ])?.buckets[0],
+  ).not.toHaveProperty("customPricedTokenCount");
+});

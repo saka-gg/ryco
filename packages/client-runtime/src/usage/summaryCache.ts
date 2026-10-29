@@ -74,6 +74,8 @@ export class UsageSummaryCache {
   readonly #results = new Map<string, UsageEnvironmentResult>();
   readonly #requests: SharedRequests<UsageEnvironmentResult>;
   readonly #limit: number;
+  /** Bumped by {@link forget}: a request started before keeps its answer to itself. */
+  readonly #generations = new Map<EnvironmentId, number>();
 
   constructor(
     limit = DEFAULT_RESULT_LIMIT,
@@ -122,9 +124,24 @@ export class UsageSummaryCache {
     );
   }
 
+  /**
+   * Drop one environment's results and stop sharing its requests, e.g. after its model prices
+   * changed: the next view asks again instead of painting or joining the old estimate.
+   */
+  forget(environmentId: EnvironmentId): void {
+    const prefix = `${environmentId}\0`;
+    this.#generations.set(environmentId, this.#generation(environmentId) + 1);
+    for (const key of this.#results.keys()) if (key.startsWith(prefix)) this.#results.delete(key);
+    this.#requests.forgetMatching((key) => key.startsWith(prefix));
+  }
+
   clear(): void {
     this.#results.clear();
     this.#requests.clear();
+  }
+
+  #generation(environmentId: EnvironmentId): number {
+    return this.#generations.get(environmentId) ?? 0;
   }
 
   async #read(
@@ -133,8 +150,9 @@ export class UsageSummaryCache {
     request: UsageSummaryRequest,
     signal: AbortSignal,
   ): Promise<UsageEnvironmentResult> {
+    const generation = this.#generation(target.environmentId);
     const result = await readUsageEnvironmentResult(target, request, signal);
-    if (hasUsableSummary(result)) {
+    if (hasUsableSummary(result) && this.#generation(target.environmentId) === generation) {
       const key = resultKey(target.environmentId, range, request.timeZone);
       this.#results.delete(key);
       this.#results.set(key, result);
