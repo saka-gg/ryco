@@ -440,3 +440,43 @@ describe("git stacked actions", () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+it("routes provider sign-in through the shared transport, re-subscribing like any stream", async () => {
+  const subscribeWire = vi.fn(() => Stream.empty);
+  const start = vi.fn(() => Effect.succeed({ phase: "starting" }));
+  const respond = vi.fn(() => Effect.void);
+  const wire = {
+    [WS_METHODS.providerSignInSubscribe]: subscribeWire,
+    [WS_METHODS.providerSignInStart]: start,
+    [WS_METHODS.providerSignInRespond]: respond,
+  };
+  const subscribe = vi.fn(
+    (_connect: (client: unknown) => unknown, _listener: unknown, _options: unknown) => () =>
+      undefined,
+  );
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(invoke(wire)),
+    subscribe,
+  } as unknown as WsTransport;
+  const client = createWsRpcClient(transport);
+  const instanceId = "codex" as Parameters<typeof client.providerSignIn.start>[0]["instanceId"];
+  const listener = vi.fn();
+  const onResubscribe = vi.fn();
+
+  client.providerSignIn.subscribe({ instanceId }, listener, { onResubscribe });
+  await client.providerSignIn.start({ instanceId });
+  await client.providerSignIn.respond({ instanceId, flowId: "flow-1", action: { type: "cancel" } });
+
+  const [connect, subscribedListener, options] = subscribe.mock.calls[0]!;
+  connect(wire);
+  expect(subscribeWire).toHaveBeenCalledWith({ instanceId });
+  expect(subscribedListener).toBe(listener);
+  expect(options).toEqual({ onResubscribe, tag: WS_METHODS.providerSignInSubscribe });
+  expect(start).toHaveBeenCalledWith({ instanceId });
+  expect(respond).toHaveBeenCalledWith({
+    instanceId,
+    flowId: "flow-1",
+    action: { type: "cancel" },
+  });
+});

@@ -1,10 +1,7 @@
 import { ProjectId, ServerSettingsError, KeybindingsConfigError } from "@ryco/contracts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
-import { CodexSettings, CodexResetCreditError } from "@ryco/contracts";
-import {
-  codexProcessEnvironment,
-  resolveCodexInstanceLayout,
-} from "../provider/Drivers/CodexHomeLayout.ts";
+import { CodexResetCreditError } from "@ryco/contracts";
+import { codexProcessEnvironment } from "../provider/Drivers/CodexHomeLayout.ts";
 import * as NodePath from "node:path";
 import { AcpRegistryOperationError, AcpRegistrySettings } from "@ryco/contracts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
@@ -45,6 +42,9 @@ import {
 // at server boot.
 const loadCodexResetCredits = Effect.promise(
   () => import("../provider/Layers/CodexResetCredits.ts"),
+);
+const loadCodexInstanceRuntime = Effect.promise(
+  () => import("../provider/codexInstanceRuntime.ts"),
 );
 const loadAcpRegistrySupport = Effect.promise(
   () => import("../provider/acp/AcpRegistrySupport.ts"),
@@ -132,26 +132,16 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     });
 
   const resetRuntime = (instanceId: import("@ryco/contracts").ProviderInstanceId) =>
-    Effect.gen(function* () {
-      const settings = yield* serverSettings.getSettings;
-      const instance = settings.providerInstances[instanceId];
-      if (!instance || instance.driver !== "codex" || !instance.enabled)
-        return yield* Effect.fail(
-          new CodexResetCreditError({ message: "Select an enabled Codex provider." }),
-        );
-      const codex = yield* Schema.decodeUnknownEffect(CodexSettings)(instance.config ?? {});
-      // The home layout and environment the instance's driver starts Codex with.
-      const { environment, layout } = yield* resolveCodexInstanceLayout(
-        codex,
-        instance.environment,
-      );
-      return {
+    Effect.all([loadCodexInstanceRuntime, serverSettings.getSettings]).pipe(
+      Effect.flatMap(([{ resolveCodexInstanceRuntime }, settings]) =>
+        resolveCodexInstanceRuntime(settings, instanceId),
+      ),
+      Effect.map(({ binaryPath, layout, environment }) => ({
         instanceId,
-        binaryPath: codex.binaryPath,
+        binaryPath,
         homePath: layout.effectiveHomePath ?? "",
         environment: codexProcessEnvironment(layout, environment),
-      };
-    }).pipe(
+      })),
       Effect.mapError(
         () => new CodexResetCreditError({ message: "The selected Codex provider is unavailable." }),
       ),

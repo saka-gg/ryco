@@ -1,6 +1,7 @@
 import { makeLocalTaskHandlers } from "./localTaskRpc.ts";
 import { makeNotesHandlers } from "./notesRpc.ts";
 import { makeNodeUpdateHandlers } from "./nodeUpdateRpc.ts";
+import { makeProviderSignInHandlers } from "./providerSignInRpc.ts";
 import { makeDailyRecapHandlers } from "./dailyRecapRpc.ts";
 import { makeStorageHandlers } from "./storageRpc.ts";
 import { makeLifecycleHandlers } from "./lifecycleRpc.ts";
@@ -42,6 +43,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeOrchestrationHandlers(ctx),
       ...makeContextHandoffHandlers(ctx),
       ...makeProviderHandlers(ctx),
+      ...makeProviderSignInHandlers(ctx),
       ...makeProviderSessionPrewarmHandlers(ctx),
       ...makeProviderProjectCommandsHandlers(ctx),
       ...makeSideQuestionHandlers(ctx),

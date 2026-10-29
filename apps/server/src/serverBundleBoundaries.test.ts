@@ -247,6 +247,10 @@ describe("server boot import boundaries", () => {
     // The OpenCode MCP config adapter loads with the first MCP settings or Agent Control call
     // that reaches OpenCode.
     expect(reached(/^apps\/server\/src\/mcp\/adapters\/OpenCodeMcpConfig\.ts$/u)).toEqual([]);
+    // Provider sign-in flows load with the first sign-in call; boot carries only the facade.
+    expect(reached(/^apps\/server\/src\/provider\/signIn\//u)).toEqual([
+      "apps/server/src/provider/signIn/ProviderSignIn.ts",
+    ]);
     // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
     // with the first Diagnostics snapshot.
     expect(
@@ -455,6 +459,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded once an OpenCode server is detected as 2.x.
       expect(source).not.toMatch(/^\/\/#region .*@opencode\//mu);
       expect(source).not.toMatch(/^\/\/#region src\/provider\/openCodeV2\w*\.ts$/mu);
+      // Loaded with the first provider sign-in call.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/provider\/signIn\/(?:providerSignInRuntime|codexDeviceCodeSignIn|terminalSignIn)\.ts$/mu,
+      );
     }
   });
 });

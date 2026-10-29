@@ -27,6 +27,22 @@ describe("shared RPC access policy", () => {
       expect(hostedRoleAllows("owner", method)).toBe(true);
     }
   });
+  it("keeps provider sign-in owner-only, including following a flow", () => {
+    for (const method of [
+      WS_METHODS.providerSignInSubscribe,
+      WS_METHODS.providerSignInStart,
+      WS_METHODS.providerSignInRespond,
+    ]) {
+      expect(rpcAccessFor(method)).toBe("owner");
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(false);
+      expect(hostedRoleAllows("owner", method, false)).toBe(false);
+      expect(hostedRoleAllows("owner", method)).toBe(true);
+    }
+    expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInSubscribe)).toBe("read");
+    expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInStart)).toBe("mutation");
+    expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInRespond)).toBe("mutation");
+  });
   it("classifies every current and legacy RPC method", () => {
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(
       new Set([

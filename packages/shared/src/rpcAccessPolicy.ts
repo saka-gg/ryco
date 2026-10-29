@@ -176,6 +176,10 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.notesList]: "viewer",
   [WS_METHODS.notesCommand]: "operator",
   [WS_METHODS.serverRefreshProviders]: "owner",
+  // Sign-in runs a provider login on the node and shows its device code to every follower.
+  [WS_METHODS.providerSignInSubscribe]: "owner",
+  [WS_METHODS.providerSignInStart]: "owner",
+  [WS_METHODS.providerSignInRespond]: "owner",
   [WS_METHODS.serverUpdateProvider]: "owner",
   [WS_METHODS.serverSubscribeNodeUpdate]: "viewer",
   [WS_METHODS.serverCheckNodeUpdate]: "owner",
@@ -451,6 +455,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.notesCommand]: "mutation",
   // Re-probes provider status; the result is derived state, not a setting.
   [WS_METHODS.serverRefreshProviders]: "read",
+  [WS_METHODS.providerSignInSubscribe]: "read",
+  [WS_METHODS.providerSignInStart]: "mutation",
+  [WS_METHODS.providerSignInRespond]: "mutation",
   [WS_METHODS.serverUpdateProvider]: "mutation",
   [WS_METHODS.serverSubscribeNodeUpdate]: "read",
   // Asks the registry (or the desktop updater) again; it changes nothing on the node.
