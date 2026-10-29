@@ -248,6 +248,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./vcsCommand": {
+      "types": "./src/vcsCommand.ts",
+      "import": "./src/vcsCommand.ts"
+    },
     "./threadActivity": {
       "types": "./src/threadActivity.ts",
       "import": "./src/threadActivity.ts"

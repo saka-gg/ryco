@@ -46,22 +46,44 @@ function extractCommandFromTitle(title: string | undefined): string | undefined 
   return backtickMatch?.[1]?.trim() || undefined;
 }
 
-function extractToolCommand(data: Record<string, unknown> | undefined, title: string | undefined) {
+/**
+ * The shell command a provider tool item ran: Codex (`item.command`), Claude
+ * (`input.command`), ACP (`rawInput.command`) and OpenCode (`state.input.command`)
+ * shapes, then, for a `command_execution` item, its detail without the trailing
+ * `<exited with exit code N>`. Array commands are joined with spaces. Copilot's
+ * tool items carry neither the tool nor its input, so they have no command.
+ */
+export function readToolCommandText(input: {
+  readonly itemType?: string | null | undefined;
+  readonly detail?: string | null | undefined;
+  readonly data?: unknown;
+}): string | undefined {
+  const data = asRecord(input.data);
   const item = asRecord(data?.item);
-  const itemInput = asRecord(item?.input);
-  const itemResult = asRecord(item?.result);
-  const rawInput = asRecord(data?.rawInput);
   const candidates = [
-    normalizeCommandValue(item?.command),
-    normalizeCommandValue(itemInput?.command),
-    normalizeCommandValue(itemResult?.command),
-    normalizeCommandValue(data?.command),
-    normalizeCommandValue(rawInput?.command),
+    item?.command,
+    asRecord(item?.input)?.command,
+    asRecord(item?.result)?.command,
+    data?.command,
+    asRecord(data?.input)?.command,
+    asRecord(data?.rawInput)?.command,
+    asRecord(asRecord(data?.state)?.input)?.command,
   ];
-  const direct = candidates.find((candidate) => candidate !== undefined);
+  for (const candidate of candidates) {
+    const command = normalizeCommandValue(candidate);
+    if (command !== undefined) return command;
+  }
+  return input.itemType === "command_execution"
+    ? stripTrailingExitCode(asTrimmedString(input.detail))
+    : undefined;
+}
+
+function extractToolCommand(data: Record<string, unknown> | undefined, title: string | undefined) {
+  const direct = readToolCommandText({ data });
   if (direct) {
     return direct;
   }
+  const rawInput = asRecord(data?.rawInput);
   const executable = asTrimmedString(rawInput?.executable);
   const args = normalizeCommandValue(rawInput?.args);
   if (executable && args) {

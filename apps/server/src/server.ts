@@ -105,6 +105,7 @@ import { ProviderSessionPrewarmLive } from "./orchestration/Layers/ProviderSessi
 import { ContextHandoffCoordinatorLive } from "./orchestration/Layers/ContextHandoffCoordinator.ts";
 import { ContextHandoffServiceLive } from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
+import { ThreadGitMetadataReactorLive } from "./orchestration/Layers/ThreadGitMetadataReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ThreadPurgeReactorLive } from "./orchestration/Layers/ThreadPurgeReactor.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -349,6 +350,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ContextHandoffServiceLive),
   Layer.provideMerge(ContextHandoffRepositoryLive),
   Layer.provideMerge(CheckpointReactorLive),
+  Layer.provideMerge(ThreadGitMetadataReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(ThreadPurgeReactorLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
