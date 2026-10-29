@@ -83,6 +83,10 @@
       "types": "./src/bytesEqual.ts",
       "import": "./src/bytesEqual.ts"
     },
+    "./browserUpload": {
+      "types": "./src/browserUpload.ts",
+      "import": "./src/browserUpload.ts"
+    },
     "./relayMessageChunks": {
       "types": "./src/relayMessageChunks.ts",
       "import": "./src/relayMessageChunks.ts"

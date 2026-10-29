@@ -64,6 +64,10 @@ export const ComputerUseBridgeConfig = Schema.Struct({
   native: Schema.optionalKey(Schema.Struct({ endpoint: Schema.String, capability: Schema.String })),
   url: Schema.String,
   token: Schema.String.check(Schema.isMinLength(43), Schema.isMaxLength(43)),
+  /** Desktop-owned private directory the backend stages browser uploads into. */
+  uploadDir: Schema.optionalKey(
+    Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  ),
 });
 export type ComputerUseBridgeConfig = typeof ComputerUseBridgeConfig.Type;
 

@@ -38,6 +38,12 @@ export interface BrowserHandledDialog {
   during: "command" | "background";
 }
 export type BrowserPendingDialog = Omit<BrowserHandledDialog, "action" | "during">;
+export type BrowserFileChooserMode = "selectSingle" | "selectMultiple";
+/** A file chooser the page opened in a hidden tab (intercepted); an upload without ref answers it. */
+export interface BrowserFileChooser {
+  backendNodeId: number;
+  mode: BrowserFileChooserMode;
+}
 /** Input the agent is about to dispatch, so the tab does not count it as the user's. */
 export type ExpectedAgentInput =
   | { kind: "key"; key: string; alt: boolean; control: boolean; meta: boolean; shift: boolean }
@@ -84,6 +90,35 @@ export interface BrowserTabAutomation {
   }): void;
   /** The agent's overrides as recorded. */
   emulation(): { viewport?: { width: number; height: number }; colorScheme?: "dark" | "light" };
+  /** The file chooser waiting for an upload without ref (at most 60 s old). */
+  peekFileChooser(): BrowserFileChooser | null;
+  /** Returns the waiting file chooser and forgets it. */
+  takeFileChooser(): BrowserFileChooser | null;
+  /**
+   * A waiting file chooser no result has mentioned yet; each is returned once. `answerable: false`:
+   * a picker without an input element, which no upload can answer.
+   */
+  noteFileChooser(): { mode: BrowserFileChooserMode; answerable?: false } | null;
+}
+/** A server-staged browser upload the desktop validated for one tab (BrowserUploadStore). */
+export interface ResolvedBrowserUpload {
+  readonly tab: string;
+  /** `<upload root>/<uploadId>`. */
+  readonly dir: string;
+  /** Absolute paths of the copies, in request order. */
+  readonly files: string[];
+  /** The workspace files' own names. */
+  readonly names: string[];
+  readonly bytes: number;
+}
+/** The desktop's private upload directory, as the driver uses it. */
+export interface BrowserUploads {
+  /** Validates the copies a request carries; a refusal removes them. */
+  resolve(tab: string, uploadId: unknown, files: unknown): Promise<ResolvedBrowserUpload>;
+  /** The page has (or may have) the files: keep them until it navigates or closes. */
+  retain(upload: ResolvedBrowserUpload): void;
+  /** No page got them: remove them now. */
+  discard(dir: string): Promise<void>;
 }
 /**
  * A tab's reload since the agent's last command (BrowserTransport.wake). "now": this wake revived
@@ -123,9 +158,9 @@ export interface BrowserTransport {
 
 /**
  * Actions that change the page or its tab: input, navigation, reload, close, viewport and color
- * scheme. The driver brackets each with BrowserTransport.beginAgentMutation, refuses them while the
- * user works in the tab, and answers the dialogs they open; browser-agent-upload adds "upload".
- * Reads (tabs, observe, screenshot, wait, console, network) are never in it.
+ * scheme, and file uploads (their change handlers run page code). The driver brackets each with
+ * BrowserTransport.beginAgentMutation, refuses them while the user works in the tab, and answers
+ * the dialogs they open. Reads (tabs, observe, screenshot, wait, console, network) are never in it.
  */
 export const BROWSER_MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "navigate",
@@ -142,6 +177,7 @@ export const BROWSER_MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "close",
   "resize",
   "appearance",
+  "upload",
 ]);
 
 /** Actions that act on an observed element or the focused one: a reloaded page needs a new observation first. */
@@ -153,6 +189,7 @@ const BROWSER_INTERACTIONS: ReadonlySet<string> = new Set([
   "scroll",
   "type",
   "key",
+  "upload",
 ]);
 export const REVIVED_TAB_NOTE =
   "This Ryco tab had been suspended to save memory and was reloaded from its address. Page state such as form input and history was reset, and so were your viewport and color-scheme overrides and the tab's console and network history.";
@@ -161,8 +198,17 @@ const withRevivedNote = (output: ComputerUseResult): ComputerUseResult => ({
   ...output,
   content: [...output.content, { type: "text", text: REVIVED_TAB_NOTE }],
 });
-/** Actions only the Ryco browser offers: they need CDP events or Emulation, which the extension lacks. */
-const RYCO_ONLY: ReadonlySet<string> = new Set(["console", "network", "resize", "appearance"]);
+/**
+ * Actions only the Ryco browser offers: they need CDP events, Emulation or file inputs, which the
+ * extension lacks (and the user's real profile is no place for workspace files).
+ */
+const RYCO_ONLY: ReadonlySet<string> = new Set([
+  "console",
+  "network",
+  "resize",
+  "appearance",
+  "upload",
+]);
 /** Actions that can run page code, so a page dialog can open while they run. */
 const DIALOG_SCOPED: ReadonlySet<string> = new Set(
   [...BROWSER_MUTATING_ACTIONS, "wait"].filter((action) => action !== "close"),
@@ -184,6 +230,10 @@ const HUMAN_CHANGED =
 export const BROWSER_PENDING_DIALOG_MESSAGE =
   "A page dialog in this tab is waiting for the user. Use another tab, or ask the user to answer it.";
 const VIEWPORT_SCRIPT = "({ width: innerWidth, height: innerHeight, devicePixelRatio })";
+const OBSERVE_FIRST = "Observe this document in the current turn before interacting.";
+const NO_FILE_CHOOSER =
+  "Pass the file input's ref, or click its upload button first (a file picker in a tab the user is viewing belongs to the user).";
+const SINGLE_FILE_CHOOSER = "This file chooser accepts one file.";
 
 function integerArg(args: Record<string, unknown>, name: string, min: number, max: number): number {
   const value = numberArg(args, name, min, max);
@@ -249,6 +299,20 @@ function withDialogs(
     content: [...value.content, { type: "text", text: JSON.stringify({ dialogs }) }],
   };
 }
+function withFileChooser(
+  value: ComputerUseResult,
+  fileChooser: { mode: BrowserFileChooserMode; answerable?: false } | null | undefined,
+): ComputerUseResult {
+  if (!fileChooser) return value;
+  const text = JSON.stringify({
+    fileChooser,
+    next:
+      fileChooser.answerable === false
+        ? "This picker has no file input, so upload cannot answer it. Upload into an <input type=file> from observe by ref, or tell the user this site's picker is not supported."
+        : "Call upload with paths and no ref to answer it.",
+  });
+  return { ...value, content: [...value.content, { type: "text", text }] };
+}
 
 export function browserUrl(value: string): string {
   const url = new URL(value);
@@ -257,23 +321,40 @@ export function browserUrl(value: string): string {
   return url.href;
 }
 
-// Runs in a CDP isolated world. Neither the model nor page scripts choose this code.
-export const BROWSER_SNAPSHOT_SCRIPT = `(() => {
+/**
+ * The observe snapshot. Runs in a CDP isolated world; neither the model nor page scripts choose this
+ * code. With `hiddenFileInputs` (the Ryco browser, the only one that can upload) it also lists
+ * `<input type=file>` elements that are not visible, since most sites hide them behind a styled
+ * button, and marks file inputs with `type`, `multiple`, `accept` and `hidden`.
+ */
+export function browserSnapshotScript(options: { hiddenFileInputs: boolean }): string {
+  const files = options.hiddenFileInputs;
+  return `(() => {
   const refs = new Map(); let next = 0; const rows = [];
   const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
   const walk = root => { for (const el of root.querySelectorAll('*')) {
     if (next >= 500) break;
-    if (el.shadowRoot) walk(el.shadowRoot);
-    if (!visible(el) || el.id === '__ryco_agent_cursor') continue;
+    if (el.shadowRoot) walk(el.shadowRoot);${
+      files
+        ? `
+    const file = el instanceof HTMLInputElement && el.type === 'file';`
+        : ""
+    }
+    if (${files ? "(!visible(el) && !file)" : "!visible(el)"} || el.id === '__ryco_agent_cursor') continue;
     if (!el.matches('a,button,input,textarea,select,summary,[role],[contenteditable="true"]')) continue;
     const ref = 'e' + (++next); refs.set(ref, el);
     const role = el.getAttribute('role') || el.tagName.toLowerCase();
-    const name = (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.innerText || el.getAttribute('placeholder') || '').trim().slice(0, 160);
-    rows.push({ref, role, name, disabled: !!el.disabled, ...(el.tagName === 'SELECT' ? {options: Array.from(el.options).slice(0,50).map(o => ({label:o.label,value:o.value}))} : {})});
+    const name = (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.innerText || el.getAttribute('placeholder') || ${files ? "(file && el.getAttribute('name')) || " : ""}'').trim().slice(0, 160);
+    rows.push({ref, role, name, disabled: !!el.disabled, ...(el.tagName === 'SELECT' ? {options: Array.from(el.options).slice(0,50).map(o => ({label:o.label,value:o.value}))} : {})${files ? ", ...(file ? {type: 'file', multiple: el.multiple, accept: (el.accept || '').slice(0, 160), hidden: !visible(el)} : {})" : ""}});
   }};
   walk(document); globalThis.__rycoRefs = refs;
   return { title: document.title, url: location.href, text: (document.body?.innerText || '').slice(0,24000), elements: rows, truncated: next >= 500 };
 })()`;
+}
+/** Paired Chrome/Brave/Edge: visible elements only. */
+export const BROWSER_SNAPSHOT_SCRIPT = browserSnapshotScript({ hiddenFileInputs: false });
+/** The Ryco browser: hidden file inputs too, so upload can target them. */
+export const RYCO_BROWSER_SNAPSHOT_SCRIPT = browserSnapshotScript({ hiddenFileInputs: true });
 
 export function browserCursorScript(x: number, y: number): string {
   return `(() => {
@@ -306,6 +387,21 @@ export function browserWaitScript(input: { selector?: string; text?: string }): 
     }
     const text = input.text === undefined ? null : (document.body?.innerText || '').includes(input.text);
     return { selector, text, url: location.href, title: document.title, readyState: document.readyState };
+  })()`;
+}
+
+/**
+ * The observed element for an upload, as a remote object for DOM.setFileInputFiles: a connected,
+ * enabled file input that takes `count` files. Hidden inputs are fine (sites hide them).
+ */
+function uploadTargetScript(ref: string, count: number): string {
+  return `(() => {
+    const el = globalThis.__rycoRefs?.get(${JSON.stringify(ref)});
+    if (!el?.isConnected) throw Error('stale');
+    if (!(el instanceof HTMLInputElement) || el.type !== 'file') throw Error('not a file input');
+    if (el.matches(':disabled') || el.closest('[inert]')) throw Error('disabled');
+    if (!el.multiple && ${count} > 1) throw Error('single file');
+    return el;
   })()`;
 }
 
@@ -360,8 +456,14 @@ interface MainFrame {
 export class BrowserComputerDriver {
   private readonly observations = new Map<string, Observation>();
   private readonly transports: Map<ComputerBrowser, BrowserTransport>;
-  constructor(transports: Map<ComputerBrowser, BrowserTransport>) {
+  /** The desktop's upload directory; null while it is unavailable. */
+  private readonly uploads: () => BrowserUploads | null;
+  constructor(
+    transports: Map<ComputerBrowser, BrowserTransport>,
+    options: { uploads?: () => BrowserUploads | null } = {},
+  ) {
     this.transports = transports;
+    this.uploads = options.uploads ?? (() => null);
   }
 
   private async evaluate(
@@ -493,7 +595,8 @@ export class BrowserComputerDriver {
         throw error;
       }
       const dialogs = scope ? (await scope.end()).dialogs : (automation?.takeBacklog() ?? []);
-      const output = withDialogs(value, dialogs);
+      // A file chooser the page opened in this hidden tab, also one an earlier click opened late.
+      const output = withFileChooser(withDialogs(value, dialogs), automation?.noteFileChooser());
       return revival ? withRevivedNote(output) : output;
     } finally {
       try {
@@ -609,6 +712,8 @@ export class BrowserComputerDriver {
           : integerArg(args, "limit", 1, DIAGNOSTICS_MAX_LIMIT);
       return result(await automation.diagnostics(action, limit, context.signal));
     }
+    if (action === "upload" && automation)
+      return this.upload(context, browser, transport, tab, target, automation);
     const observation = await this.world(context, browser, transport, tab, target.url);
     const evaluate = (expression: string) => {
       context.check();
@@ -617,7 +722,9 @@ export class BrowserComputerDriver {
     if (action === "observe") {
       // Input during the snapshot already makes its refs stale.
       const humanEpoch = automation?.humanEpoch ?? 0;
-      const state = await evaluate(BROWSER_SNAPSHOT_SCRIPT);
+      const state = await evaluate(
+        browser === "ryco" ? RYCO_BROWSER_SNAPSHOT_SCRIPT : BROWSER_SNAPSHOT_SCRIPT,
+      );
       observation.observed = true;
       observation.humanEpoch = humanEpoch;
       return result(state);
@@ -716,8 +823,7 @@ export class BrowserComputerDriver {
         ...(scheme === "system" ? {} : { note: EMULATION_NOTE }),
       });
     }
-    if (!observation.observed)
-      throw new Error("Observe this document in the current turn before interacting.");
+    if (!observation.observed) throw new Error(OBSERVE_FIRST);
     if (automation && observation.humanEpoch !== automation.humanEpoch) {
       observation.observed = false;
       throw new Error(HUMAN_CHANGED);
@@ -873,6 +979,112 @@ export class BrowserComputerDriver {
       return result({ delivered: "background" });
     }
     throw new Error("Unknown browser action.");
+  }
+
+  /**
+   * Puts server-staged copies of workspace files into an observed `<input type=file>` (ref) or the
+   * file chooser the page opened in this hidden tab (no ref). Chromium only ever gets paths the
+   * upload store validated inside its private directory. Copies a page may have stay with it until
+   * it navigates or closes; refusals before dispatch remove them at once (and refusals before the
+   * store saw them are removed when the desktop request ends).
+   */
+  private async upload(
+    context: ComputerOperationContext,
+    browser: ComputerBrowser,
+    transport: BrowserTransport,
+    tab: string,
+    target: BrowserTab,
+    automation: BrowserTabAutomation,
+  ): Promise<ComputerUseResult> {
+    const store = this.uploads();
+    if (!store) throw new Error("Browser upload is unavailable in this desktop session.");
+    const args = context.request.args;
+    let input: { observation: Observation; ref: string } | undefined;
+    if (args.ref !== undefined) {
+      const ref = textArg(args, "ref", 16);
+      const observation = await this.world(context, browser, transport, tab, target.url);
+      if (!observation.observed) throw new Error(OBSERVE_FIRST);
+      if (observation.humanEpoch !== automation.humanEpoch) {
+        observation.observed = false;
+        throw new Error(HUMAN_CHANGED);
+      }
+      input = { observation, ref };
+    } else {
+      // Refused before the copies are validated: nothing could take them.
+      const chooser = automation.peekFileChooser();
+      if (!chooser) throw new Error(NO_FILE_CHOOSER);
+      if (chooser.mode === "selectSingle" && Array.isArray(args.files) && args.files.length > 1)
+        throw new Error(SINGLE_FILE_CHOOSER);
+    }
+    context.check();
+    const staged = await store.resolve(tab, args.uploadId, args.files);
+    let dispatched = false;
+    try {
+      if (input) {
+        const { observation, ref } = input;
+        context.check();
+        const response = record(
+          await transport.send(
+            tab,
+            "Runtime.evaluate",
+            {
+              expression: uploadTargetScript(ref, staged.files.length),
+              contextId: observation.contextId,
+              returnByValue: false,
+            },
+            context.signal,
+          ),
+        );
+        if (response.exceptionDetails)
+          throw new Error(
+            "That element is not an enabled file input for these files. Observe again.",
+          );
+        const objectId = textArg(record(response.result), "objectId", 1024);
+        try {
+          // The user can start working in the tab while the target is checked.
+          if (automation.humanEpoch !== observation.humanEpoch || automation.humanHoldMs() > 0) {
+            observation.observed = false;
+            throw new Error(HUMAN_CHANGED);
+          }
+          context.check();
+          dispatched = true;
+          await transport.send(
+            tab,
+            "DOM.setFileInputFiles",
+            { files: staged.files, objectId },
+            context.signal,
+          );
+        } finally {
+          await transport
+            .send(tab, "Runtime.releaseObject", { objectId }, context.signal)
+            .catch(() => undefined);
+        }
+      } else {
+        const chooser = automation.peekFileChooser();
+        if (!chooser) throw new Error(NO_FILE_CHOOSER);
+        if (chooser.mode === "selectSingle" && staged.files.length > 1)
+          throw new Error(SINGLE_FILE_CHOOSER);
+        context.check();
+        automation.takeFileChooser();
+        dispatched = true;
+        await transport.send(
+          tab,
+          "DOM.setFileInputFiles",
+          { files: staged.files, backendNodeId: chooser.backendNodeId },
+          context.signal,
+        );
+      }
+      store.retain(staged);
+      return result({
+        uploaded: staged.names,
+        verify: "Observe the page to verify the selection.",
+      });
+    } catch (error) {
+      // A CDP call that failed may still have reached the page: its copies stay with the page.
+      if (dispatched) store.retain(staged);
+      else await store.discard(staged.dir);
+      throw error;
+    }
   }
 
   /** Polls until every given condition holds, or throws when the timeout passes. */

@@ -5,6 +5,8 @@ import {
   BROWSER_PENDING_DIALOG_MESSAGE,
   type BrowserCommandScope,
   type BrowserDialogPolicy,
+  type BrowserFileChooser,
+  type BrowserFileChooserMode,
   type BrowserHandledDialog,
   type BrowserPendingDialog,
   type BrowserTabAutomation,
@@ -39,6 +41,8 @@ const DIALOG_SHIM_CLEANUP_TIMEOUT_MS = 1_000;
 /** The longest one action's shim may answer dialogs: the desktop ends every request after 60 s. */
 export const DIALOG_SHIM_MAX_MS = 60_000;
 const DIALOG_SHIM_MIN_MS = 1_000;
+/** How long a file chooser the page opened in a hidden tab waits for the agent's upload. */
+export const FILE_CHOOSER_TTL_MS = 60_000;
 /** Synara's network buffer limits; post data is never kept. */
 const NETWORK_ENABLE = {
   maxTotalBufferSize: 1_048_576,
@@ -86,6 +90,15 @@ interface CommandScope {
 }
 
 type Emulation = { viewport?: { width: number; height: number }; colorScheme?: "dark" | "light" };
+
+interface PendingFileChooser {
+  /** Null for a picker without an input element (showOpenFilePicker): no upload can answer it. */
+  readonly backendNodeId: number | null;
+  readonly mode: BrowserFileChooserMode;
+  readonly frameId: string;
+  readonly at: number;
+  reported: boolean;
+}
 
 const dialogText = (value: unknown): string =>
   truncateUtf8(
@@ -196,9 +209,10 @@ function inputMatches(expected: ExpectedAgentInput, actual: ExpectedAgentInput):
 const ignore = () => undefined;
 
 /**
- * One embedded page's agent automation: its CDP domains and diagnostics, JavaScript dialogs, the
- * human-input epoch and hold, and the agent's emulation overrides. Created with the page and
- * disposed with it; it talks to the debugger only through the page's CdpLease.
+ * One embedded page's agent automation: its CDP domains and diagnostics, JavaScript dialogs, file
+ * choosers in hidden tabs, the human-input epoch and hold, and the agent's emulation overrides.
+ * Created with the page and disposed with it; it talks to the debugger only through the page's
+ * CdpLease.
  */
 export class EmbeddedTabAutomation implements BrowserTabAutomation {
   private readonly wc: WebContents;
@@ -228,6 +242,10 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
   /** Network.enable sent ahead of the ready step (an agent tab's first load) and its session. */
   private earlyNetwork: { readonly session: number; readonly enabled: Promise<boolean> } | null =
     null;
+  /** File chooser interception as last sent on the current session; undefined before it is. */
+  private interception: boolean | undefined;
+  /** The newest file chooser the page opened while intercepted, until upload answers it. */
+  private chooser: PendingFileChooser | null = null;
   private disposed = false;
 
   constructor(
@@ -270,6 +288,10 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
     this.epoch += 1;
     this.lastHumanAt = this.now();
     if (this.scope) this.handBack(this.scope);
+    // The user took the tab over: a chooser the agent's click opened is no longer its to answer, and
+    // the user's own clicks open the native picker.
+    this.chooser = null;
+    this.syncFileChooserInterception();
   }
 
   /**
@@ -308,6 +330,8 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
       await this.activating;
     }
     this.armIdleQuiesce();
+    // A window can be hidden or minimized without a presentation change reaching this tab.
+    this.syncFileChooserInterception();
   }
 
   /**
@@ -377,6 +401,34 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
 
   pendingDialog(): BrowserPendingDialog | null {
     return this.pending;
+  }
+
+  /** The file chooser waiting in this tab for an upload without ref, if any. */
+  peekFileChooser(): BrowserFileChooser | null {
+    const chooser = this.liveChooser();
+    return chooser && chooser.backendNodeId !== null
+      ? { backendNodeId: chooser.backendNodeId, mode: chooser.mode }
+      : null;
+  }
+
+  /** Returns the waiting file chooser and forgets it: only one upload can answer it. */
+  takeFileChooser(): BrowserFileChooser | null {
+    const chooser = this.peekFileChooser();
+    this.chooser = null;
+    return chooser;
+  }
+
+  /**
+   * A waiting file chooser that no result has mentioned yet (once per chooser); `answerable:
+   * false` for a picker an upload cannot answer, so the agent does not wait for one that works.
+   */
+  noteFileChooser(): { mode: BrowserFileChooserMode; answerable?: false } | null {
+    const chooser = this.liveChooser();
+    if (!chooser || chooser.reported) return null;
+    chooser.reported = true;
+    return chooser.backendNodeId === null
+      ? { mode: chooser.mode, answerable: false }
+      : { mode: chooser.mode };
   }
 
   /** Dialogs answered in this hidden tab between agent actions (and records of failed actions). */
@@ -471,6 +523,8 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
   presentationChanged(input: { resized: boolean }): void {
     if (this.disposed) return;
     if (input.resized || this.presentation.presented()) this.clearEmulation();
+    // Showing the tab gives the user the native file picker back; hiding it intercepts again.
+    this.syncFileChooserInterception();
   }
 
   /** The session ended (last release, Electron's detach): CDP dropped its domains and overrides. */
@@ -482,6 +536,9 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
     this.clearIdleTimer();
     this.emulated = {};
     this.earlyNetwork = null;
+    // Interception ends with the session; an intercepted chooser cannot be answered without one.
+    this.interception = undefined;
+    this.chooser = null;
     this.recorder.resetSession();
     // A dialog the user still has open stays pending: Chromium does not report it to a new session.
     if (this.pending) this.watchCarried(this.pending);
@@ -502,6 +559,7 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
     this.scope = null;
     this.pending = null;
     this.carried = null;
+    this.chooser = null;
     this.backlog = [];
     this.expected = [];
     this.emulated = {};
@@ -517,6 +575,15 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
     if (early) this.recorder.beforeConsoleReplay();
     else this.recorder.resetSession();
     await send("Page.enable");
+    // A hidden tab cannot receive the user's clicks, so a file chooser there is the agent's: it
+    // waits for an upload instead of opening a native panel on an invisible window. Shown tabs keep
+    // the native picker (Chromium's default).
+    const intercept = !this.presentation.presented();
+    if (session === this.session) this.interception = intercept;
+    await send("Page.setInterceptFileChooserDialog", { enabled: intercept }).catch(() => {
+      if (session === this.session && this.interception === intercept)
+        this.interception = undefined;
+    });
     if (!(early && (await early.enabled))) await send("Network.enable", NETWORK_ENABLE);
     await send("Runtime.enable");
     await send("Log.enable");
@@ -527,7 +594,57 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
     this.captureReady = true;
     this.quiesced = false;
     this.armIdleQuiesce();
+    // The tab may have been shown or hidden while the steps ran.
+    this.syncFileChooserInterception();
   };
+
+  /**
+   * Interception follows presentation: on while the tab is hidden, off while the user can see it.
+   * Sent only when the value changes, without waiting for ready steps.
+   */
+  private syncFileChooserInterception(): void {
+    if (this.disposed || !this.captureReady || !this.cdp.isAttached()) return;
+    const intercept = !this.presentation.presented();
+    if (this.interception === intercept) return;
+    const session = this.session;
+    this.interception = intercept;
+    void this.cdp
+      .send("Page.setInterceptFileChooserDialog", { enabled: intercept }, { skipReady: true })
+      .catch(() => {
+        if (session === this.session && this.interception === intercept)
+          this.interception = undefined;
+      });
+  }
+
+  private liveChooser(): PendingFileChooser | null {
+    if (this.chooser && this.now() - this.chooser.at > FILE_CHOOSER_TTL_MS) this.chooser = null;
+    return this.chooser;
+  }
+
+  /** Page.fileChooserOpened: Chromium did not show a picker; the page waits for files. */
+  private onFileChooser(params: Record<string, unknown>): void {
+    const { backendNodeId } = params;
+    // Chromium names the input only for <input type=file>; a picker without one
+    // (showOpenFilePicker) is reported to the agent as one an upload cannot answer.
+    const input =
+      typeof backendNodeId === "number" && Number.isSafeInteger(backendNodeId) && backendNodeId > 0
+        ? backendNodeId
+        : null;
+    const agentAction = this.scope !== null && !this.scope.handedBack;
+    if (this.presentation.presented() && !agentAction) {
+      // Interception was still on from when the tab was hidden, so the user's own click opened
+      // nothing. Turn it off: their next click gets the native picker.
+      this.syncFileChooserInterception();
+      return;
+    }
+    this.chooser = {
+      backendNodeId: input,
+      mode: params.mode === "selectMultiple" ? "selectMultiple" : "selectSingle",
+      frameId: typeof params.frameId === "string" ? params.frameId : "",
+      at: this.now(),
+      reported: false,
+    };
+  }
 
   private async resumeCapture(): Promise<void> {
     // A quiesce still sending its disables must finish first, or a late disable would win.
@@ -598,10 +715,17 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
       this.pending = null;
       return;
     }
+    if (method === "Page.fileChooserOpened") {
+      this.onFileChooser(params);
+      return;
+    }
     if (method === "Page.frameNavigated") {
-      const frame = params.frame as { parentId?: unknown } | undefined;
+      const frame = params.frame as { id?: unknown; parentId?: unknown } | undefined;
       // A new main document cannot still show the old document's dialog.
       if (frame && !frame.parentId) this.pending = null;
+      // Nor wait for files in the old document's (or that frame's old) input.
+      if (frame && this.chooser && (!frame.parentId || frame.id === this.chooser.frameId))
+        this.chooser = null;
     }
     this.recorder.onMessage(method, params);
   };
@@ -767,6 +891,7 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
   private readonly onDocumentGone = (): void => {
     if (this.carried) this.clearCarried(this.carried);
     this.pending = null;
+    this.chooser = null;
   };
 
   /** Input reaching the page: no dialog blocks it, so a carried one has closed. */

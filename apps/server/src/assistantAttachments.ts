@@ -106,7 +106,8 @@ export function parseAssistantDelivery(
 export const formatAssistantDeliveryText = (text: string, notices: ReadonlyArray<string>): string =>
   [text, ...notices].filter(Boolean).join("\n\n") || " ";
 
-const isInside = (root: string, candidate: string) => {
+/** `candidate` lies strictly inside `root` (both absolute and canonical). */
+export const isInside = (root: string, candidate: string) => {
   const relative = path.relative(root, candidate);
   return (
     relative !== "" &&
@@ -184,20 +185,41 @@ export interface StagedWorkspaceFile {
   readonly sourceBaseName: string;
 }
 
-/**
- * Copies a regular file of the workspace `cwd` (a relative path without links, parent traversal
- * or hard links) into a fresh `.part` staging file in `stagingDir`, in bounded chunks, and fails
- * when the file changes while it is read. At most `maxBytes`, never empty.
- */
-export async function stageWorkspaceFile(input: {
+/** The workspace file is empty or larger than the caller's `maxBytes`; nothing was staged. */
+export class WorkspaceFileSizeError extends Error {
+  readonly sizeBytes: number;
+  constructor(sizeBytes: number) {
+    super("File is empty or exceeds the 50 MiB attachment budget.");
+    this.sizeBytes = sizeBytes;
+  }
+}
+
+interface StageWorkspaceFileInput {
   readonly cwd: string;
   readonly relativePath: string;
   readonly name?: string | undefined;
   readonly stagingDir: string;
   readonly maxBytes: number;
-  readonly hashSeed: (name: string) => string;
+  /** Seeds the content hash; without it the bytes are copied without hashing. */
+  readonly hashSeed?: ((name: string) => string) | undefined;
   readonly signal?: AbortSignal | undefined;
-}): Promise<StagedWorkspaceFile> {
+}
+
+/**
+ * Copies a regular file of the workspace `cwd` (a relative path without links, parent traversal
+ * or hard links) into a fresh `.part` staging file in `stagingDir`, in bounded chunks, and fails
+ * when the file changes while it is read. At most `maxBytes`, never empty
+ * (`WorkspaceFileSizeError` otherwise).
+ */
+export function stageWorkspaceFile(
+  input: StageWorkspaceFileInput & { readonly hashSeed: (name: string) => string },
+): Promise<StagedWorkspaceFile>;
+export function stageWorkspaceFile(
+  input: StageWorkspaceFileInput,
+): Promise<Omit<StagedWorkspaceFile, "contentHash">>;
+export async function stageWorkspaceFile(
+  input: StageWorkspaceFileInput,
+): Promise<Omit<StagedWorkspaceFile, "contentHash"> & { readonly contentHash?: string }> {
   const relative = input.relativePath;
   if (
     path.isAbsolute(relative) ||
@@ -228,8 +250,7 @@ export async function stageWorkspaceFile(input: {
     }
     if (!info.isFile() || info.nlink !== 1)
       throw new Error("Only regular files without hard links can be attached.");
-    if (info.size <= 0 || info.size > input.maxBytes)
-      throw new Error("File is empty or exceeds the 50 MiB attachment budget.");
+    if (info.size <= 0 || info.size > input.maxBytes) throw new WorkspaceFileSizeError(info.size);
     const name = input.name ?? path.basename(source);
     // Generated raster images are identified by bytes. Other formats are downloads or native media.
     const header = Buffer.alloc(16);
@@ -245,7 +266,9 @@ export async function stageWorkspaceFile(input: {
             : undefined;
     const inlineImage = rasterMime !== undefined && info.size <= PROVIDER_SEND_TURN_MAX_IMAGE_BYTES;
     const mimeType = rasterMime ?? Mime.getType(source) ?? "application/octet-stream";
-    const contentHash = createHash("sha256").update(input.hashSeed(name));
+    const contentHash = input.hashSeed
+      ? createHash("sha256").update(input.hashSeed(name))
+      : undefined;
     const staging = await openStagingFile(input.stagingDir);
     temporary = staging.temporary;
     const output = staging.output;
@@ -260,7 +283,7 @@ export async function stageWorkspaceFile(input: {
           offset,
         );
         if (bytesRead === 0) throw new Error("File changed during delivery.");
-        contentHash.update(chunk.subarray(0, bytesRead));
+        contentHash?.update(chunk.subarray(0, bytesRead));
         let written = 0;
         while (written < bytesRead) {
           const result = await output.write(chunk, written, bytesRead - written, offset + written);
@@ -291,7 +314,7 @@ export async function stageWorkspaceFile(input: {
       mimeType,
       sizeBytes: info.size,
       inlineImage,
-      contentHash: contentHash.digest("hex"),
+      ...(contentHash ? { contentHash: contentHash.digest("hex") } : {}),
       sourceBaseName: path.basename(source),
     };
   } finally {
