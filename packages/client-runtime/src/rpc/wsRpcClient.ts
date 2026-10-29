@@ -240,6 +240,9 @@ export interface WsRpcClient {
     readonly dismissWorktreePullRequest: RpcUnaryMethod<
       typeof WS_METHODS.sourceControlDismissWorktreePullRequest
     >;
+    readonly setPullRequestWatch: RpcUnaryMethod<
+      typeof WS_METHODS.sourceControlSetPullRequestWatch
+    >;
   };
   readonly textGeneration: {
     readonly askSideQuestion: RpcUnaryMethod<typeof WS_METHODS.textGenerationAskSideQuestion>;
@@ -746,6 +749,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) =>
           client[WS_METHODS.sourceControlDismissWorktreePullRequest](input),
         ),
+      setPullRequestWatch: (input) =>
+        transport.request((client) => client[WS_METHODS.sourceControlSetPullRequestWatch](input)),
     },
     textGeneration: {
       askSideQuestion: (input) =>

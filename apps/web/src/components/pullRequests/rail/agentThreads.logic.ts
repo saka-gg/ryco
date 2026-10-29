@@ -1,6 +1,8 @@
-import type {
-  SidebarThreadSummary,
-  SidebarWorktreeSummary,
+import {
+  findPullRequestWatch,
+  type PullRequestWatchTarget,
+  type SidebarThreadSummary,
+  type SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 
 import { threadLinkActivityAt } from "../../threads/threadLinkActivity";
@@ -120,6 +122,44 @@ export function linkedAgentThreads<T extends ThreadLike>(input: {
       threadLinkActivityAt(right).localeCompare(threadLinkActivityAt(left)),
     )
     .slice(0, input.limit ?? 4);
+}
+
+/**
+ * The linked thread a pull request's watch control acts for: one that already
+ * watches it, else the newest whose own workspace carries it (Auto-fix CI fixes
+ * in that checkout), else the newest linked thread (the server links the pull
+ * request to its workspace by hand once the repository matches). Threads the
+ * user settled come last: only an active thread may start a watch.
+ */
+export function pullRequestWatchThread<
+  T extends ThreadLike & Pick<SidebarThreadSummary, "pullRequestWatches" | "settledOverride">,
+>(input: {
+  readonly threads: ReadonlyArray<T>;
+  readonly worktrees: ReadonlyArray<WorktreeLike>;
+  readonly target: PullRequestWatchTarget;
+}): T | null {
+  const watching = input.threads.find(
+    (thread) => findPullRequestWatch(thread.pullRequestWatches, input.target)?.kind === "active",
+  );
+  if (watching) return watching;
+  const carrying = input.worktrees.filter((worktree) =>
+    carriesPullRequest(worktree, input.target.number),
+  );
+  const worktreeIds = new Set<string>(carrying.map((worktree) => worktree.id));
+  const worktreePaths = new Set(
+    carrying.flatMap((worktree) => (worktree.worktreePath ? [worktree.worktreePath] : [])),
+  );
+  const unsettled = input.threads.filter((thread) => thread.settledOverride !== "settled");
+  const candidates = unsettled.length > 0 ? unsettled : input.threads;
+  return (
+    candidates.find(
+      (thread) =>
+        (thread.worktreeId != null && worktreeIds.has(thread.worktreeId)) ||
+        (thread.worktreePath !== null && worktreePaths.has(thread.worktreePath)),
+    ) ??
+    candidates[0] ??
+    null
+  );
 }
 
 // ── Hand-off prompt ──────────────────────────────────────────────────

@@ -44,6 +44,29 @@ removing the checkout end its watches in the same command.
 - Nodes without this feature leave `serverConfig.pullRequestWatch` out, and clients hide every
   watch control.
 
+## In the app
+
+- **Pull request page**: the rail's Agents section has an **Auto-fix CI** switch for one linked
+  thread: the one already watching the pull request, else the newest whose own workspace has it,
+  else the newest linked thread (threads you settled come last), named when several are linked.
+  Below it a status line says what the watch does ("Watching the checks", "Fixing CI · attempt 2
+  of 3", "Auto-fix paused: the fix turn ended without a push"), with **Stop watching**, and
+  **Resume** while Auto-fix CI is paused. After a watch ends the line says why for a day
+  ("Stopped watching: merged"). A merged or closed pull request offers no switch.
+- **Crown**: the Checks card has the same switch, status line and buttons for the thread the Crown
+  belongs to; its hover preview shows the status line only. Branch-only CI (no pull request) has
+  none.
+- The controls appear only on nodes that watch pull requests and outside the frozen phone layout,
+  and they change nothing until the connection accepts changes (the same readiness as linking a
+  pull request). The switch follows a click at once; the watch's own state takes over when the
+  thread's shell agrees, the request fails, or the shell changes after the request went through.
+- **Checks passed**: for a watched pull request the "Checks passed for PR #12" notice comes from
+  the watch (its summary's pass turning true), with no pull request page open, once per pull request
+  and head however many threads watch it. The pull request pages keep their own notice for pull
+  requests nobody watches and stay quiet about watched ones. Both notices are shown whatever the
+  thread alert settings are. The phone layout shows none from the watch, so there the pages keep
+  their notice for watched pull requests too.
+
 ## How it reads
 
 Every 2 minutes (the first pass 30 seconds after the server admits commands) the server reads each

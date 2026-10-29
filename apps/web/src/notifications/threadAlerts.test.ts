@@ -4,6 +4,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  WorktreeId,
   type OrchestrationLatestTurn,
   type OrchestrationThreadShell,
   type ScopedThreadRef,
@@ -169,6 +170,7 @@ function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadSh
     createAudioContext: () => audio as unknown as ThreadAlertAudioContext,
     gestureTarget: new EventTarget(),
     canStartAudio: () => true,
+    openUrl: vi.fn((_url: string) => undefined),
   };
 
   const start = (overrides: Partial<ThreadAlertsPlatform> = {}) =>
@@ -556,5 +558,106 @@ describe("thread alerts", () => {
     test.accept(finished("c"));
     await test.settle();
     expect(test.toastManager.add).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("watched pull request checks", () => {
+  const PR_URL = "https://github.com/o/r/pull/12";
+  const watches = (
+    passed: boolean,
+    overrides: Partial<
+      NonNullable<OrchestrationThreadShell["pullRequestWatches"]>["active"][number]
+    > = {},
+  ): NonNullable<OrchestrationThreadShell["pullRequestWatches"]> => ({
+    active: [
+      {
+        watchId: "github.com/o/r#12",
+        number: 12,
+        url: PR_URL,
+        worktreeId: WorktreeId.make("worktree-watch"),
+        startedAt: T0,
+        startedBy: "user",
+        news: false,
+        autoFix: { status: "watching", pauseReason: null, attempts: 0, maxAttempts: 3 },
+        headSha: "abc1234def567890",
+        failingChecks: 0,
+        passed,
+        conflicting: false,
+        delivering: false,
+        lastChangeAt: null,
+        ...overrides,
+      },
+    ],
+    ended: [],
+  });
+  const watching = (id: string, passed: boolean, overrides = {}) =>
+    shell(id, { pullRequestWatches: watches(passed, overrides) });
+
+  it("says the checks passed, with the pull request one click away", async () => {
+    const test = harness({ threads: [watching("a", false)] });
+    test.start();
+
+    test.accept(watching("a", true));
+    await test.settle();
+    const [toast, ...rest] = addedToasts(test);
+    expect(rest).toEqual([]);
+    expect(toast).toMatchObject({
+      type: "success",
+      title: "Checks passed for PR #12",
+      description: "Thread a · abc1234def56",
+      timeout: 6_000,
+    });
+    expect(toast?.actionProps?.children).toBe("Open PR");
+    toast?.actionProps?.onClick?.({} as never);
+    expect(test.platform.openUrl).toHaveBeenCalledWith(PR_URL);
+  });
+
+  it("tells a pull request two threads watch once", async () => {
+    const test = harness({ threads: [watching("a", false), watching("b", false)] });
+    test.start();
+
+    test.accept(watching("a", true));
+    test.accept(watching("b", true));
+    await test.settle();
+    expect(addedToasts(test).map((toast) => toast.title)).toEqual(["Checks passed for PR #12"]);
+  });
+
+  it("stays quiet for a pass it did not see happen", async () => {
+    const test = harness({ threads: [shell("a")] });
+    test.start();
+
+    // A watch started on green checks, a thread that appears already passed.
+    test.accept(watching("a", true));
+    test.accept(watching("new", true));
+    // A watch started again on the same pull request.
+    test.accept(watching("a", false, { startedAt: T1 }));
+    await test.settle();
+    expect(test.toastManager.add).not.toHaveBeenCalled();
+  });
+
+  it("does not depend on the alert settings, and shows nothing on the phone tier", async () => {
+    const test = harness({ threads: [watching("a", false), watching("b", false)] });
+    test.setSettings({
+      ...DEFAULT_CLIENT_SETTINGS,
+      notifyOnTurnCompleteWhenUnfocused: false,
+      threadNotificationToasts: false,
+    });
+    test.start();
+    test.accept(watching("a", true));
+    await test.settle();
+    expect(addedToasts(test).map((toast) => toast.title)).toEqual(["Checks passed for PR #12"]);
+
+    test.setPhoneTier(true);
+    test.accept(watching("b", true, { headSha: "fff0000" }));
+    await test.settle();
+    expect(test.toastManager.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops with the alerts", async () => {
+    const test = harness({ threads: [watching("a", false)] });
+    test.start().stop();
+    test.accept(watching("a", true));
+    await test.settle();
+    expect(test.toastManager.add).not.toHaveBeenCalled();
   });
 });

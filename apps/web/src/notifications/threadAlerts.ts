@@ -12,7 +12,9 @@ import {
   type ThreadAlertPlan,
 } from "@ryco/client-runtime/state/settings";
 import {
+  createPullRequestWatchPassTracker,
   startThreadNotificationFeed,
+  type PullRequestWatchPass,
   type SidebarThreadOrStub,
   type SidebarThreadSummary,
   type ThreadNotificationCandidate,
@@ -80,6 +82,8 @@ export interface ThreadAlertsPlatform {
   readonly gestureTarget: Pick<EventTarget, "addEventListener" | "removeEventListener">;
   /** Audio may start now, without waiting for a gesture. */
   readonly canStartAudio: () => boolean;
+  /** Opens a host page (a pull request) outside Ryco. */
+  readonly openUrl: (url: string) => void;
 }
 
 export function createBrowserThreadAlertsPlatform(): ThreadAlertsPlatform {
@@ -110,6 +114,111 @@ export function createBrowserThreadAlertsPlatform(): ThreadAlertsPlatform {
     // autoplay policy), so a window left in the background since launch chimes.
     canStartAudio: () =>
       window.desktopBridge !== undefined || navigator.userActivation?.hasBeenActive === true,
+    openUrl: (url) => window.open(url, "_blank", "noopener,noreferrer"),
+  };
+}
+
+/** Like the pull request page's own check notice, which it replaces for watched pull requests. */
+const PULL_REQUEST_PASS_TOAST_MS = 6_000;
+
+/**
+ * "Checks passed for PR #12" when a thread's server-side watch of a pull
+ * request sees its checks pass, with no pull request page open. Reads the
+ * shells the stream accepted: a snapshot or a new connection baselines
+ * silently, and each pull request and head is reported once, however many
+ * threads watch it. Independent of the alert settings, like the page's notice
+ * it replaces; the frozen phone tier shows none.
+ */
+function startPullRequestWatchPassToasts(
+  deps: ThreadAlertsDeps,
+  platform: ThreadAlertsPlatform,
+): () => void {
+  const { source } = deps;
+  const tracker = createPullRequestWatchPassTracker();
+  const connections = new Map<EnvironmentId, unknown>();
+  let pending: Array<{ readonly pass: PullRequestWatchPass; readonly threadTitle: string }> = [];
+  let stopped = false;
+
+  const baseline = (environmentId: EnvironmentId) =>
+    tracker.baseline(environmentId, deps.readEnvironmentThreads(environmentId));
+
+  const syncConnections = () => {
+    if (stopped) return;
+    const current = new Map(
+      source.list().map((connection) => [connection.environmentId, connection]),
+    );
+    for (const [environmentId, connection] of Array.from(connections)) {
+      if (current.get(environmentId) === connection) continue;
+      connections.delete(environmentId);
+      tracker.clear(environmentId);
+    }
+    for (const [environmentId, connection] of current) {
+      if (connections.has(environmentId)) continue;
+      connections.set(environmentId, connection);
+      baseline(environmentId);
+    }
+  };
+
+  const toast = ({ pass, threadTitle }: (typeof pending)[number]) => {
+    const { watch } = pass;
+    const shortSha = watch.headSha?.slice(0, 12);
+    const url = /^https?:\/\//iu.test(watch.url) ? watch.url : null;
+    deps.toastManager.add(
+      deps.stackedThreadToast({
+        type: "success",
+        title: `Checks passed for PR #${watch.number}`,
+        description: shortSha ? `${threadTitle} · ${shortSha}` : threadTitle,
+        timeout: PULL_REQUEST_PASS_TOAST_MS,
+        ...(url
+          ? {
+              actionProps: { children: "Open PR", onClick: () => platform.openUrl(url) },
+              actionVariant: "outline" as const,
+            }
+          : {}),
+      }),
+    );
+  };
+
+  const deliver = () => {
+    const passes = pending;
+    pending = [];
+    if (stopped || deps.isPhoneTier()) return;
+    for (const entry of passes) toast(entry);
+  };
+
+  const unsubscribeRegistry = source.subscribe(syncConnections);
+  const unsubscribeAcceptance = source.subscribeShellAcceptance((acceptance) => {
+    if (stopped) return;
+    const { environmentId } = acceptance;
+    if (acceptance.kind === "snapshot") {
+      baseline(environmentId);
+      return;
+    }
+    const queued = pending.length;
+    for (const event of acceptance.events) {
+      if (event.kind === "thread-removed") {
+        tracker.remove(environmentId, event.threadId);
+        continue;
+      }
+      if (event.kind !== "thread-upserted") continue;
+      const { thread } = event;
+      for (const pass of tracker.observe(environmentId, thread.id, thread.pullRequestWatches)) {
+        pending.push({ pass, threadTitle: thread.title });
+      }
+    }
+    // Accepted shells commit inside store mutation barriers; nothing reaches the user from there.
+    if (queued === 0 && pending.length > 0) void Promise.resolve().then(deliver);
+  });
+  syncConnections();
+
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    unsubscribeRegistry();
+    unsubscribeAcceptance();
+    connections.clear();
+    pending = [];
+    tracker.reset();
   };
 }
 
@@ -318,6 +427,7 @@ export function startThreadAlerts(
     }
   };
 
+  const stopPullRequestWatchPassToasts = startPullRequestWatchPassToasts(deps, platform);
   const unsubscribeSettings = deps.subscribeSettings(syncSettings);
   // Coming back to Ryco answers the notifications and the badge that called you there.
   const unsubscribeWindowFocus = platform.subscribeWindowFocus(() => {
@@ -338,6 +448,7 @@ export function startThreadAlerts(
     stop: () => {
       if (stopped) return;
       stopped = true;
+      stopPullRequestWatchPassToasts();
       unsubscribeSettings();
       unsubscribeWindowFocus();
       unsubscribeBadgeCleared();

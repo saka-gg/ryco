@@ -326,6 +326,10 @@ import type {
   SourceControlRepositorySearchInput,
   SourceControlRepositorySearchResult,
 } from "./sourceControl.ts";
+import type {
+  SourceControlSetPullRequestWatchInput,
+  SourceControlSetPullRequestWatchResult,
+} from "./pullRequestWatchRpc.ts";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -1481,6 +1485,13 @@ export interface EnvironmentApi {
     publishRepository: (
       input: SourceControlPublishRepositoryInput,
     ) => Promise<SourceControlPublishRepositoryResult>;
+    /**
+     * Auto-fix CI and the pull request watch of a thread. Every RPC-backed API has it;
+     * optional so hand-built test doubles may leave it out (callers treat absence as offline).
+     */
+    setPullRequestWatch?: (
+      input: SourceControlSetPullRequestWatchInput,
+    ) => Promise<SourceControlSetPullRequestWatchResult>;
   };
   vcs: {
     readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;

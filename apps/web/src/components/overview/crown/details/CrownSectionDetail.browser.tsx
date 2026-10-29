@@ -4,10 +4,15 @@ import "../../overview.css";
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
-import { EnvironmentId, ThreadId, WorktreeId } from "@ryco/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  WorktreeId,
+  type ThreadPullRequestWatchShell,
+} from "@ryco/contracts";
 import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 import { PaneFocusContext } from "../../../chat/PaneFocus";
@@ -26,6 +31,13 @@ import {
 } from "../crownTestFixtures";
 import { makeRuntimeAgent } from "../../../agents/agentRosterTestFixtures";
 import { agentStopRequests } from "../../../agents/agentStopRequests";
+import {
+  installPullRequestWatchNode,
+  pullRequestWatchSummary,
+  resetPullRequestWatchNode,
+} from "../../../pullRequests/testing/pullRequestWatchTestSupport";
+import { __resetEnvironmentApiOverridesForTests } from "~/environmentApi";
+import { AppAtomRegistryProvider } from "~/rpc/atomRegistry";
 
 const hosts: HTMLElement[] = [];
 
@@ -37,7 +49,13 @@ async function mountDetail(props: CrownSectionDetailProps) {
   host.style.boxSizing = "border-box";
   document.body.append(host);
   hosts.push(host);
-  return render(<CrownSectionDetail {...props} />, { container: host });
+  // The app's atom registry, as the app root provides it (server config, connection state).
+  return render(
+    <AppAtomRegistryProvider>
+      <CrownSectionDetail {...props} />
+    </AppAtomRegistryProvider>,
+    { container: host },
+  );
 }
 
 /**
@@ -701,5 +719,148 @@ describe("Crown Ship button", () => {
     // Enter in the field ships, like the rail button.
     await userEvent.keyboard("{Enter}");
     expect(binding.calls.ship).toBe(1);
+  });
+});
+
+describe("Checks: the pull request watch", () => {
+  const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
+  const THREAD_ID = ThreadId.make("thread-crown-watch");
+
+  beforeEach(async () => {
+    await page.viewport(1200, 800);
+  });
+
+  afterEach(() => {
+    for (const host of hosts.splice(0)) host.remove();
+    resetPullRequestWatchNode();
+    __resetEnvironmentApiOverridesForTests();
+  });
+
+  const layoutWith = (watches?: ThreadPullRequestWatchShell) =>
+    crownLayoutFixture({ pullRequestWatch: { threadId: THREAD_ID, watches } });
+
+  it("turns Auto-fix CI on from the card", async () => {
+    const { setPullRequestWatch } = installPullRequestWatchNode(ENVIRONMENT_ID);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: layoutWith(),
+    });
+
+    const toggle = page.getByRole("switch", { name: "Auto-fix CI" });
+    await expect.element(toggle).not.toBeChecked();
+    await toggle.click();
+    expect(setPullRequestWatch).toHaveBeenCalledWith({
+      threadId: THREAD_ID,
+      number: crownPullRequestFixture.number,
+      url: crownPullRequestFixture.url,
+      autoFix: true,
+    });
+    await expect.element(toggle).toBeChecked();
+  });
+
+  it("shows a running fix turn with Stop watching in the card, and only its status in the flyout", async () => {
+    const { setPullRequestWatch } = installPullRequestWatchNode(ENVIRONMENT_ID);
+    const layout = layoutWith({
+      active: [
+        pullRequestWatchSummary({
+          autoFix: { status: "fixing", pauseReason: null, attempts: 1, maxAttempts: 3 },
+        }),
+      ],
+      ended: [],
+    });
+    await mountDetail({ section: "checks", variant: "card", isGitRepo: true, layout });
+    await expect.element(page.getByText("Fixing CI · attempt 1 of 3")).toBeVisible();
+    await page.getByRole("button", { name: "Stop watching" }).click();
+    expect(setPullRequestWatch).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: THREAD_ID, news: false, autoFix: false }),
+    );
+
+    for (const host of hosts.splice(0)) host.remove();
+    await mountDetail({ section: "checks", variant: "flyout", isGitRepo: true, layout });
+    await expect.element(page.getByText("Fixing CI · attempt 1 of 3")).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Stop watching" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("offers no switch on a merged pull request, only why its watch ended", async () => {
+    installPullRequestWatchNode(ENVIRONMENT_ID);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({
+        pullRequest: { ...crownPullRequestFixture, state: "merged" },
+        pullRequestWatch: {
+          threadId: THREAD_ID,
+          watches: {
+            active: [],
+            ended: [
+              {
+                watchId: "github.com/ryco/ryco#683",
+                number: 683,
+                reason: "merged",
+                endedAt: "2026-10-28T11:00:00.000Z",
+              },
+            ],
+          },
+        },
+      }),
+    });
+    await expect.element(page.getByText("Stopped watching: merged")).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+  });
+
+  it("is not offered on the frozen phone tier", async () => {
+    installPullRequestWatchNode(ENVIRONMENT_ID);
+    await page.viewport(390, 844);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: layoutWith(),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+  });
+
+  it("offers nothing without server watches, without a thread, or for branch-only CI", async () => {
+    installPullRequestWatchNode(ENVIRONMENT_ID, { available: false });
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: layoutWith(),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+
+    for (const host of hosts.splice(0)) host.remove();
+    installPullRequestWatchNode(ENVIRONMENT_ID);
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture(),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
+
+    for (const host of hosts.splice(0)) host.remove();
+    const { number: _number, title: _title, ...branchOnly } = crownPullRequestFixture;
+    await mountDetail({
+      section: "checks",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({
+        pullRequest: branchOnly,
+        pullRequestWatch: { threadId: THREAD_ID, watches: undefined },
+      }),
+    });
+    await expect.element(page.getByRole("link", { name: "Format, Succeeded, 14s" })).toBeVisible();
+    await expect.element(page.getByRole("switch", { name: "Auto-fix CI" })).not.toBeInTheDocument();
   });
 });

@@ -23,3 +23,5 @@ export * from "./sidebarUndo.ts";
 export * from "./threadNotifications.ts";
 export * from "./threadNotificationFeed.ts";
 export * from "./usageLimit.ts";
+export * from "./pullRequestWatch.ts";
+export * from "./pullRequestWatchPasses.ts";

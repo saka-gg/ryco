@@ -27,6 +27,7 @@ import type {
   OverviewLayoutProps,
   OverviewPanelItem,
   OverviewPullRequestState,
+  OverviewPullRequestWatch,
 } from "../overview/overviewTypes";
 import type { PostPushWorkflowDiscoveryWatch } from "../postPushWorkflowDiscovery.logic";
 import { toastManager, stackedThreadToast } from "../ui/toast";
@@ -91,6 +92,8 @@ export interface ChatOverviewModelInput {
   onOpenAgentsWorkflow?: ((workflowId: string) => void) | undefined;
   /** Stop for the thread's native agents (desktop crown). */
   stopAgent?: SubagentStopAction | null | undefined;
+  /** The thread's pull request watches, for Auto-fix CI in the crown's Checks (desktop crown). */
+  pullRequestWatch?: OverviewPullRequestWatch | undefined;
   postPushWorkflowWatch: PostPushWorkflowDiscoveryWatch | null;
   onPostPushDiscoveryComplete: () => void;
 }
@@ -144,6 +147,7 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
     onOpenAgent,
     onOpenAgentsWorkflow,
     stopAgent,
+    pullRequestWatch,
     onPostPushDiscoveryComplete,
   } = input;
 
@@ -639,6 +643,7 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
       ...(onOpenAgent ? { onOpenAgent } : {}),
       ...(onOpenAgentsWorkflow ? { onOpenAgentsWorkflow } : {}),
       ...(stopAgent ? { stopAgent } : {}),
+      ...(pullRequestWatch ? { pullRequestWatch } : {}),
     },
     detectedChangeRequest,
     gitStatus: gitStatusQuery.data ?? null,

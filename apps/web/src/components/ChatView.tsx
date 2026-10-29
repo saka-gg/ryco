@@ -342,7 +342,10 @@ import {
   CROWN_RAIL_SLOT_WIDTH_PX,
 } from "./overview/crown/crownLayout";
 import type { WorktreeNotesTarget } from "./overview/notes/useWorktreeNotes";
-import type { OverviewPullRequestLinking } from "./overview/overviewTypes";
+import type {
+  OverviewPullRequestLinking,
+  OverviewPullRequestWatch,
+} from "./overview/overviewTypes";
 import { useChatGlobalShortcuts } from "./chat/useChatGlobalShortcuts";
 import { useChatPendingUserInput } from "./chat/useChatPendingUserInput";
 import { useChatWorkspacePanels } from "./chat/useChatWorkspacePanels";
@@ -3040,6 +3043,16 @@ export default function ChatView(props: ChatViewProps) {
       openPullRequestInApp,
       sourceControlCwd,
     ],
+  );
+  // The crown's Checks section turns Auto-fix CI on for the thread's pull request.
+  const watchingThreadId = activeThreadSummary?.id ?? null;
+  const activeThreadPullRequestWatches = activeThreadSummary?.pullRequestWatches;
+  const overviewPullRequestWatch = useMemo<OverviewPullRequestWatch | undefined>(
+    () =>
+      watchingThreadId === null
+        ? undefined
+        : { threadId: watchingThreadId, watches: activeThreadPullRequestWatches },
+    [activeThreadPullRequestWatches, watchingThreadId],
   );
   // On desktop the header's pull request opens in the workspace panel's PR tab;
   // elsewhere (and for issues and work items) it opens the linked-item dialog.
@@ -7232,6 +7245,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenSubagent={onOpenSubagentPanel}
                 onOpenPullRequestInApp={openPullRequestInApp}
                 pullRequestLinking={overviewPullRequestLinking}
+                pullRequestWatch={overviewPullRequestWatch}
                 agentPanelModel={agentPanelModel}
                 onOpenAgent={onOpenRuntimeAgentPanel}
                 onOpenAgentsWorkflow={onOpenAgentsWorkflowPanel}

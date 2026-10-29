@@ -22,7 +22,13 @@ vi.mock("~/rpc/useSourceControl", async (importOriginal) => {
 });
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { WorktreeId, type EnvironmentApi } from "@ryco/contracts";
+import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import {
+  ThreadId,
+  WorktreeId,
+  type EnvironmentApi,
+  type ThreadPullRequestWatchShell,
+} from "@ryco/contracts";
 
 import { toastManager } from "~/components/ui/toast";
 import { useComposerDraftStore, type DraftId } from "~/composerDraftStore";
@@ -49,6 +55,12 @@ import {
   resetPullRequestsTestState,
   sourceControlRpcMock,
 } from "~/components/pullRequests/testing/PullRequestsTestProvider";
+import { FIXTURE_REPOSITORY_URL } from "~/components/pullRequests/testing/pullRequestFixtures";
+import {
+  installPullRequestWatchNode,
+  pullRequestWatchSummary,
+  resetPullRequestWatchNode,
+} from "~/components/pullRequests/testing/pullRequestWatchTestSupport";
 
 const toasts: Array<{
   title: unknown;
@@ -574,5 +586,215 @@ describe("people in the band", () => {
         remove: [],
       }),
     );
+  });
+});
+
+describe("pull request watch", () => {
+  const THREAD_ID = ThreadId.make("thread-703-agent");
+  const WORKTREE_ID = WorktreeId.make("worktree-703-agent");
+  const PR_URL = `${FIXTURE_REPOSITORY_URL}/pull/703`;
+  const at = new Date(FIXTURE_NOW_MS).toISOString();
+
+  afterEach(() => {
+    resetPullRequestWatchNode();
+  });
+
+  /** A linked agent thread on the pull request's own workspace, with these watches. */
+  function seedAgentThread(pullRequestWatches?: ThreadPullRequestWatchShell, prNumber = 703) {
+    const base = selectEnvironmentState(useStore.getState(), FIXTURE_ENVIRONMENT_ID);
+    const thread: SidebarThreadSummary = {
+      id: THREAD_ID,
+      environmentId: FIXTURE_ENVIRONMENT_ID,
+      projectId: FIXTURE_PROJECT_ID,
+      title: "Fix the web tests",
+      interactionMode: "default",
+      session: null,
+      createdAt: at,
+      updatedAt: at,
+      archivedAt: null,
+      latestTurn: null,
+      branch: "pr-703",
+      worktreePath: "/worktrees/pr-703",
+      worktreeId: WORKTREE_ID,
+      latestUserMessageAt: at,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      ...(pullRequestWatches ? { pullRequestWatches } : {}),
+    };
+    useStore.setState({
+      environmentStateById: {
+        ...useStore.getState().environmentStateById,
+        [FIXTURE_ENVIRONMENT_ID]: {
+          ...base,
+          threadIdsByProjectId: { [FIXTURE_PROJECT_ID]: [THREAD_ID] },
+          sidebarThreadSummaryById: { [THREAD_ID]: thread },
+          worktreeIds: [WORKTREE_ID],
+          worktreeIdsByProjectId: { [FIXTURE_PROJECT_ID]: [WORKTREE_ID] },
+          worktreeById: {
+            [WORKTREE_ID]: {
+              id: WORKTREE_ID,
+              environmentId: FIXTURE_ENVIRONMENT_ID,
+              projectId: FIXTURE_PROJECT_ID,
+              branch: "pr-703",
+              worktreePath: "/worktrees/pr-703",
+              origin: "pr",
+              prNumber,
+              issueNumber: null,
+              prTitle: null,
+              issueTitle: null,
+              prState: "open",
+              prIsDraft: false,
+              issueState: null,
+              workItemProvider: null,
+              workItemKey: null,
+              workItemTitle: null,
+              workItemState: null,
+              workItemStateName: null,
+              workItemUrl: null,
+              createdAt: at,
+              updatedAt: at,
+              archivedAt: null,
+              manualPosition: 0,
+            },
+          },
+        },
+      },
+    });
+  }
+
+  const watch = (overrides: Parameters<typeof pullRequestWatchSummary>[0] = {}) =>
+    pullRequestWatchSummary({
+      watchId: "github.com/ryco-labs/ryco#703",
+      number: 703,
+      url: PR_URL,
+      worktreeId: WORKTREE_ID,
+      ...overrides,
+    });
+
+  it("turns Auto-fix CI on for the thread on the pull request's workspace", async () => {
+    const { setPullRequestWatch } = installPullRequestWatchNode(FIXTURE_ENVIRONMENT_ID);
+    seedAgentThread();
+    const screen = await renderRail(703);
+    const toggle = screen.getByRole("switch", { name: "Auto-fix CI" });
+    await expect.element(toggle).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Stop watching" }).elements()).toHaveLength(0);
+
+    await userEvent.click(toggle);
+    expect(setPullRequestWatch).toHaveBeenCalledWith({
+      threadId: THREAD_ID,
+      number: 703,
+      url: PR_URL,
+      autoFix: true,
+    });
+    // The switch follows the request until the thread's shell answers.
+    await expect.element(toggle).toBeChecked();
+
+    // The request went through but the watch ended meanwhile: the shell decides again.
+    seedAgentThread({
+      active: [],
+      ended: [
+        {
+          watchId: "github.com/ryco-labs/ryco#703",
+          number: 703,
+          reason: "unreadable",
+          endedAt: at,
+        },
+      ],
+    });
+    await expect.element(toggle).not.toBeChecked();
+    await expect
+      .element(screen.getByText("Stopped watching: could not read it several times in a row"))
+      .toBeVisible();
+  });
+
+  it("shows what the watch is doing, and resumes or stops it", async () => {
+    const { setPullRequestWatch } = installPullRequestWatchNode(FIXTURE_ENVIRONMENT_ID);
+    seedAgentThread({
+      active: [
+        watch({
+          autoFix: { status: "paused", pauseReason: "start-failed", attempts: 1, maxAttempts: 3 },
+        }),
+      ],
+      ended: [],
+    });
+    const screen = await renderRail(703);
+    await expect.element(screen.getByRole("switch", { name: "Auto-fix CI" })).toBeChecked();
+    await expect
+      .element(screen.getByText("Auto-fix paused: the fix turn did not start"))
+      .toBeVisible();
+
+    await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect(setPullRequestWatch).toHaveBeenLastCalledWith(
+      expect.objectContaining({ threadId: THREAD_ID, number: 703, autoFix: true }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Stop watching" }));
+    expect(setPullRequestWatch).toHaveBeenLastCalledWith({
+      threadId: THREAD_ID,
+      number: 703,
+      url: PR_URL,
+      news: false,
+      autoFix: false,
+    });
+  });
+
+  it("says a fix turn is running, and why watching stopped", async () => {
+    installPullRequestWatchNode(FIXTURE_ENVIRONMENT_ID);
+    seedAgentThread({
+      active: [
+        watch({ autoFix: { status: "fixing", pauseReason: null, attempts: 2, maxAttempts: 3 } }),
+      ],
+      ended: [],
+    });
+    const screen = await renderRail(703);
+    await expect.element(screen.getByText("Fixing CI · attempt 2 of 3")).toBeVisible();
+    await expect.element(screen.getByText("Waiting for the fix to be pushed")).toBeVisible();
+
+    seedAgentThread({
+      active: [],
+      ended: [
+        { watchId: "github.com/ryco-labs/ryco#703", number: 703, reason: "stopped", endedAt: at },
+      ],
+    });
+    await expect.element(screen.getByText("Stopped watching: you stopped the chat")).toBeVisible();
+    await expect.element(screen.getByRole("switch", { name: "Auto-fix CI" })).not.toBeChecked();
+  });
+
+  it("waits for the connection before it changes anything", async () => {
+    const { setPullRequestWatch } = installPullRequestWatchNode(FIXTURE_ENVIRONMENT_ID, {
+      connected: false,
+    });
+    seedAgentThread();
+    const screen = await renderRail(703);
+    await expect.element(screen.getByRole("switch", { name: "Auto-fix CI" })).toBeDisabled();
+    expect(setPullRequestWatch).not.toHaveBeenCalled();
+  });
+
+  it("offers no switch on a merged pull request, only why its watch ended", async () => {
+    installPullRequestWatchNode(FIXTURE_ENVIRONMENT_ID);
+    seedAgentThread(undefined, 690);
+    const screen = await renderRail(690);
+    await expect.element(screen.getByRole("region", { name: "Agents" })).toBeVisible();
+    expect(screen.getByRole("switch", { name: "Auto-fix CI" }).elements()).toHaveLength(0);
+
+    seedAgentThread(
+      {
+        active: [],
+        ended: [
+          { watchId: "github.com/ryco-labs/ryco#690", number: 690, reason: "merged", endedAt: at },
+        ],
+      },
+      690,
+    );
+    await expect.element(screen.getByText("Stopped watching: merged")).toBeVisible();
+    expect(screen.getByRole("switch", { name: "Auto-fix CI" }).elements()).toHaveLength(0);
+  });
+
+  it("offers nothing on a node without pull request watches", async () => {
+    installPullRequestWatchNode(FIXTURE_ENVIRONMENT_ID, { available: false });
+    seedAgentThread();
+    const screen = await renderRail(703);
+    await expect.element(screen.getByRole("region", { name: "Agents" })).toBeVisible();
+    expect(screen.getByRole("switch", { name: "Auto-fix CI" }).elements()).toHaveLength(0);
   });
 });
