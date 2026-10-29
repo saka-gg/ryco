@@ -8,7 +8,11 @@ import {
 
 import packageJson from "../../package.json" with { type: "json" };
 import { BUNDLED_MODEL_MANIFEST, type ModelManifestData } from "./ModelManifest.ts";
-import { MINIMUM_OPENCODE_VERSION, openCodeVersionFloor } from "./openCodeVersion.ts";
+import {
+  MINIMUM_OPENCODE_V2_VERSION,
+  MINIMUM_OPENCODE_VERSION,
+  openCodeVersionFloor,
+} from "./openCodeVersion.ts";
 import {
   applyProviderCompatibility,
   compatibilityPoliciesOf,
@@ -110,7 +114,7 @@ describe("selectCompatibilityPolicy", () => {
         rycoVersion: RYCO_VERSION,
       }),
     );
-    expect(policy?.rycoRange).toBe(">=0.1.30");
+    expect(policy?.rycoRange).toBe(">=0.1.30 <0.1.36");
   });
 
   it("matches a nightly Ryco version by its release triple", () => {
@@ -169,7 +173,7 @@ describe("ratePolicy", () => {
 });
 
 describe("hard compatibility floors", () => {
-  it("cannot be lifted by a manifest policy that calls OpenCode 2.x supported", () => {
+  it("cannot be lifted by a manifest policy that calls OpenCode 3.x or an old 2.x supported", () => {
     const manifest = manifestWith([
       {
         driver: "opencode",
@@ -177,9 +181,17 @@ describe("hard compatibility floors", () => {
         ranges: [{ range: ">=2.0.0", status: "supported" }],
       },
     ]);
-    expect(rateProviderVersion({ manifest, driver: OPENCODE, version: "2.0.0" })?.status).toBe(
+    expect(rateProviderVersion({ manifest, driver: OPENCODE, version: "2.0.0" })).toEqual({
+      status: "unsupported",
+      message: "OpenCode v2.0.0 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+    });
+    expect(rateProviderVersion({ manifest, driver: OPENCODE, version: "3.0.0" })?.status).toBe(
       "unsupported",
     );
+    // A 2.x this build runs is left to the manifest, like 1.x.
+    expect(
+      rateProviderVersion({ manifest, driver: OPENCODE, version: MINIMUM_OPENCODE_V2_VERSION }),
+    ).toEqual({ status: "supported", message: null });
 
     const rated = applyProviderCompatibility(
       snapshot({
@@ -292,25 +304,56 @@ describe("compatibilityPoliciesOf", () => {
 });
 
 describe("bundled OpenCode policy drift guard", () => {
-  const policy = selectCompatibilityPolicy({
-    manifest: BUNDLED_MODEL_MANIFEST,
-    driver: OPENCODE,
-    rycoVersion: packageJson.version,
-  });
+  /**
+   * The release that ships OpenCode 2 support, where the bundled manifest splits the OpenCode
+   * policy. Confirm it when that release is cut and change both together: the remote manifest on
+   * main rates every running release, and the ones before this keep refusing 2.x.
+   */
+  const FIRST_RYCO_WITH_OPENCODE_2 = "0.1.36";
+  const policyFor = (rycoVersion: string) =>
+    selectCompatibilityPolicy({ manifest: BUNDLED_MODEL_MANIFEST, driver: OPENCODE, rycoVersion });
 
   it("exists for this Ryco version", () => {
-    expect(policy).toBeDefined();
+    expect(policyFor(packageJson.version)).toBeDefined();
   });
 
-  it("agrees with the code-owned OpenCode floor", () => {
+  it("lists the newest policy first, from the release that ships OpenCode 2", () => {
+    const policies = compatibilityPoliciesOf(BUNDLED_MODEL_MANIFEST).filter(
+      (policy) => policy.driver === OPENCODE,
+    );
+    expect(policies.map((policy) => policy.rycoRange)).toEqual([
+      `>=${FIRST_RYCO_WITH_OPENCODE_2}`,
+      `>=0.1.30 <${FIRST_RYCO_WITH_OPENCODE_2}`,
+    ]);
+    expect(policyFor(FIRST_RYCO_WITH_OPENCODE_2)).toBe(policies[0]);
+    expect(policyFor("0.1.35")).toBe(policies[1]);
+  });
+
+  it("agrees with this build's code-owned OpenCode floor from that release on", () => {
+    const policy = policyFor(FIRST_RYCO_WITH_OPENCODE_2);
     const cases = [
       [MINIMUM_OPENCODE_VERSION, "supported"],
       ["1.99.99", "supported"],
       ["2.0.0", "unsupported"],
+      ["2.1.9", "unsupported"],
+      [MINIMUM_OPENCODE_V2_VERSION, "supported"],
+      ["2.99.0", "supported"],
+      ["3.0.0", "unsupported"],
     ] as const;
     for (const [version, status] of cases) {
       expect(ratePolicy(policy!, version).status, version).toBe(status);
       expect(openCodeVersionFloor(version) !== undefined, version).toBe(status === "unsupported");
     }
+  });
+
+  it("keeps refusing every 2.x for the releases before it", () => {
+    const policy = policyFor("0.1.30");
+    for (const version of ["2.0.0", MINIMUM_OPENCODE_V2_VERSION, "3.0.0"]) {
+      expect(ratePolicy(policy!, version), version).toEqual({
+        status: "unsupported",
+        message: "Ryco works with OpenCode 1.x; 2.x support is coming.",
+      });
+    }
+    expect(ratePolicy(policy!, MINIMUM_OPENCODE_VERSION).status).toBe("supported");
   });
 });

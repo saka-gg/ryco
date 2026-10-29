@@ -54,17 +54,30 @@ describe("classifyOpenCodeGeneration", () => {
 });
 
 describe("OpenCode 2 gate", () => {
-  it("is off until the 2.x client lands, with the pinned client's version as the minimum", () => {
-    assert.isFalse(OPENCODE_V2_RUNTIME_SUPPORTED);
+  it("is on, with the pinned client's version as the minimum", () => {
+    assert.isTrue(OPENCODE_V2_RUNTIME_SUPPORTED);
     assert.strictEqual(MINIMUM_OPENCODE_V2_VERSION, "2.2.0");
   });
 });
 
 describe("openCodeVersionFloor", () => {
   it("floors every parseable major of 2 or more while 2.x is off", () => {
-    assert.strictEqual(openCodeVersionFloor("v2.0.0"), OPENCODE_V2_ADVISORY_MESSAGE);
-    assert.strictEqual(openCodeVersionFloor(" 2.0.0-beta.1 "), OPENCODE_V2_ADVISORY_MESSAGE);
+    assert.strictEqual(openCodeVersionFloor("v2.0.0", false), OPENCODE_V2_ADVISORY_MESSAGE);
+    assert.strictEqual(openCodeVersionFloor(" 2.0.0-beta.1 ", false), OPENCODE_V2_ADVISORY_MESSAGE);
     assert.strictEqual(openCodeVersionFloor("2.9.0", false), OPENCODE_V2_ADVISORY_MESSAGE);
+    assert.strictEqual(
+      openCodeVersionFloor("3.1.0", false),
+      "OpenCode v3.1.0 is not supported by this Ryco release.",
+    );
+  });
+
+  it("floors 2.x below the minimum and 3.x and later in this build", () => {
+    assert.isUndefined(openCodeVersionFloor(MINIMUM_OPENCODE_V2_VERSION));
+    assert.isUndefined(openCodeVersionFloor("v2.4.0"));
+    assert.strictEqual(
+      openCodeVersionFloor(" 2.0.0-beta.1 "),
+      "OpenCode v2.0.0-beta.1 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+    );
     assert.strictEqual(
       openCodeVersionFloor("3.1.0"),
       "OpenCode v3.1.0 is not supported by this Ryco release.",
@@ -87,8 +100,8 @@ describe("openCodeVersionFloor", () => {
 });
 
 describe("describeUnsupportedOpenCodeVersion", () => {
-  it("explains a 2.x binary and names the 1.x packages", () => {
-    const message = describeUnsupportedOpenCodeVersion("2.0.18", "binary");
+  it("explains a 2.x binary and names the 1.x packages while 2.x is off", () => {
+    const message = describeUnsupportedOpenCodeVersion("2.0.18", "binary", false);
     assert.isNotNull(message);
     assert.include(message, "not supported yet");
     assert.include(message, "1.x");
@@ -96,12 +109,27 @@ describe("describeUnsupportedOpenCodeVersion", () => {
     assert.include(message, OPENCODE_V2_ADVISORY_MESSAGE);
   });
 
-  it("explains a 2.x server with the normalised version", () => {
-    assert.include(describeUnsupportedOpenCodeVersion("v2.0.18", "server"), "reports v2.0.18");
+  it("explains a 2.x server with the normalised version while 2.x is off", () => {
+    assert.include(
+      describeUnsupportedOpenCodeVersion("v2.0.18", "server", false),
+      "reports v2.0.18",
+    );
+  });
+
+  it("runs 2.x from the minimum in this build and names the upgrade below it", () => {
+    assert.isNull(describeUnsupportedOpenCodeVersion("2.2.0", "binary"));
+    assert.isNull(describeUnsupportedOpenCodeVersion("v2.9.1", "server"));
+    assert.strictEqual(
+      describeUnsupportedOpenCodeVersion("2.0.18", "binary"),
+      "OpenCode v2.0.18 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+    );
   });
 
   it("fails closed for unparseable versions", () => {
-    assert.include(describeUnsupportedOpenCodeVersion("garbage", "server"), "unrecognized version");
+    assert.strictEqual(
+      describeUnsupportedOpenCodeVersion("garbage", "server"),
+      'The OpenCode server reported an unrecognized version "garbage". Ryco requires OpenCode v1.14.19 or newer.',
+    );
     assert.strictEqual(
       describeUnsupportedOpenCodeVersion("garbage", "binary"),
       OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
@@ -163,10 +191,12 @@ describe("describeUnsupportedOpenCodeVersion", () => {
 
   it("never uses a keyword the probe error formatter rewrites", () => {
     const messages = [
-      describeUnsupportedOpenCodeVersion("2.0.18", "binary"),
-      describeUnsupportedOpenCodeVersion("2.0.18", "server"),
-      describeUnsupportedOpenCodeVersion("2.1.4", "binary", true),
+      describeUnsupportedOpenCodeVersion("2.0.18", "binary", false),
+      describeUnsupportedOpenCodeVersion("2.0.18", "server", false),
+      describeUnsupportedOpenCodeVersion("2.1.4", "binary"),
+      describeUnsupportedOpenCodeVersion("2.1.4", "server"),
       describeUnsupportedOpenCodeVersion("3.0.0", "server"),
+      openCodeVersionFloor("2.0.18", false) ?? null,
       openCodeVersionFloor("2.0.18") ?? null,
       describeUnsupportedOpenCodeVersion("garbage", "server"),
       describeUnsupportedOpenCodeVersion("garbage", "binary"),

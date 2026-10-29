@@ -1,22 +1,26 @@
 /**
  * The one OpenCode version policy of this build.
  *
- * Ryco speaks OpenCode 1.x (`opencode-ai`). OpenCode 2.x ships as a separate package
- * (`@opencode/cli`, Homebrew `opencode-v2`) that installs the same `opencode` binary, converts
- * the shared OpenCode database in place and speaks a different server API; it stays refused until
- * `OPENCODE_V2_RUNTIME_SUPPORTED`. Every entry point — the provider probe, the pre-spawn gate, the
- * server API detection and health check, the MCP config manager and the compatibility floor —
- * classifies versions through this module so they agree on one message set.
+ * Ryco speaks OpenCode 1.x (`opencode-ai`) and, from MINIMUM_OPENCODE_V2_VERSION, OpenCode 2.x: a
+ * separate package (npm `@opencode/cli`, homebrew-core `opencode`) that installs the same
+ * `opencode` binary, converts the shared OpenCode database to its own format on its first start and
+ * speaks a different server API (answered through the facade in `openCodeV2Client.ts`). Every entry
+ * point — the provider probe, the pre-spawn gate, the server API detection and health check, the
+ * MCP config manager and the compatibility floor — classifies versions through this module so they
+ * agree on one message set. Major 3 and later, 0.x and unparseable versions are refused.
  *
  * Pure: no SDK, process or filesystem imports, so any layer can depend on it.
  */
 import { compareCliReleases, parseCliRelease } from "./cliVersion.ts";
 
 export const MINIMUM_OPENCODE_VERSION = "1.14.19";
-/** The oldest 2.x this build runs once 2.x is supported: the pinned 2.x client's version. */
+/** The oldest 2.x this build runs: the pinned 2.x client's version. */
 export const MINIMUM_OPENCODE_V2_VERSION = "2.2.0";
-/** Off until the 2.x client lands: every 2.x binary and server is refused. */
-export const OPENCODE_V2_RUNTIME_SUPPORTED: boolean = false;
+/**
+ * Whether this build runs OpenCode 2.x. A kill switch: off, every 2.x binary and server is refused
+ * with the 1.x advisory before Ryco starts or calls it.
+ */
+export const OPENCODE_V2_RUNTIME_SUPPORTED: boolean = true;
 
 export type OpenCodeGeneration = "v1" | "v2";
 
@@ -53,8 +57,9 @@ export function classifyOpenCodeGeneration(
 
 /**
  * The code-owned compatibility floor (`providerCompatibility.ts`): why no manifest may rate
- * `version` compatible, or undefined. Only majors ≥ 2 are floored; 1.x and unparseable versions
- * are left to the manifest. Normalises itself, so "v2.0.0" and " 2.0.0-beta.1 " are floored.
+ * `version` compatible, or undefined. Only majors ≥ 2 are floored: 3.x and later, and 2.x below
+ * MINIMUM_OPENCODE_V2_VERSION (every 2.x with the gate off); 1.x and unparseable versions are left
+ * to the manifest. Normalises itself, so "v2.0.0" and " 2.0.0-beta.1 " are floored.
  */
 export function openCodeVersionFloor(
   version: string,
@@ -87,7 +92,7 @@ export function describeUnsupportedOpenCodeVersion(
   const release = parseCliRelease(version);
   if (release === null) {
     return source === "server"
-      ? `The OpenCode server reported an unrecognized version "${version.trim().slice(0, 40)}". Ryco requires OpenCode 1.x (v${MINIMUM_OPENCODE_VERSION} or newer).`
+      ? `The OpenCode server reported an unrecognized version "${version.trim().slice(0, 40)}". Ryco requires OpenCode v${MINIMUM_OPENCODE_VERSION} or newer.`
       : OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE;
   }
   const normalized = normalizeOpenCodeVersion(version);

@@ -204,6 +204,39 @@ describe("detectOpenCodeApi", () => {
     await expect(detect(broken, likely)).rejects.toThrow("The OpenCode server returned HTTP 502.");
   });
 
+  it("asks a server of an expected generation on that generation's route only", async () => {
+    // The other route is the server's catch-all, which can forward the password upstream, so it is
+    // never asked, also when the expected route answers with something else.
+    const both = { "/global/health": V1_HEALTH, "/api/info": V2_INFO };
+    const cases = [
+      ["v2", { ...both }, { generation: "v2", version: "2.2.0" }],
+      // Not a 2.x answer: 1.x, which the caller refuses for a 2.x binary.
+      ["v2", { ...both, "/api/info": html }, { generation: "v1" }],
+      ["v2", { ...both, "/api/info": () => empty(404) }, { generation: "v1" }],
+      ["v2", { ...both, "/api/info": () => empty(500) }, "The OpenCode server returned HTTP 500."],
+      ["v1", { ...both }, { generation: "v1" }],
+      // The 1.x client's strict health check names a 2xx answer that is not 1.x health.
+      ["v1", { ...both, "/global/health": html }, { generation: "v1" }],
+      [
+        "v1",
+        { ...both, "/global/health": () => empty(502) },
+        "The OpenCode server returned HTTP 502.",
+      ],
+    ] as const;
+    for (const [expectedGeneration, routes, outcome] of cases) {
+      const server = fakeServer(routes);
+      const detection = detect(server, { expectedGeneration, likelyGeneration: "v2" });
+      if (typeof outcome === "string") {
+        await expect(detection).rejects.toThrow(outcome);
+      } else {
+        await expect(detection).resolves.toEqual(outcome);
+      }
+      expect(server.paths()).toEqual([
+        expectedGeneration === "v2" ? "/api/info" : "/global/health",
+      ]);
+    }
+  });
+
   it("maps a network failure to fixed text", async () => {
     const fetch: Fetch = async (input) => {
       throw new TypeError(`fetch failed: connect ECONNREFUSED ${String(input)}`);

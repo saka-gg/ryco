@@ -27,6 +27,13 @@ import {
 import { createOpenCodeV2EventMapper, type OpenCodeV1Event } from "./openCodeV2Events.ts";
 import type { OpenCodeV2Form } from "./openCodeV2Mapping.ts";
 import { runOpenCodeSdk } from "./opencodeRuntime.ts";
+import {
+  fakeOpenCode2Server,
+  json,
+  noContent,
+  openCode2EventStream as eventStream,
+  type OpenCode2Route,
+} from "./testUtils/fakeOpenCode2Server.ts";
 
 const BASE_URL = "http://127.0.0.1:4096";
 const DIRECTORY = "<work>";
@@ -53,89 +60,13 @@ const [FORM_REPLIED] = eventsOf("question", "form.replied");
 const FORM = FORM_CREATED!.data.form as FormInfo;
 const [PERMISSION_ASKED] = eventsOf("permission", "permission.asked");
 
-interface Call {
-  readonly method: string;
-  readonly path: string;
-  readonly query: URLSearchParams;
-  readonly body: unknown;
-  readonly headers: Headers;
-}
-
-type Route = (call: Call, signal: AbortSignal | undefined) => Response | Promise<Response>;
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-const noContent = () => new Response(null, { status: 204 });
-
-/** A 2.x server in process, keyed by `METHOD /path`; an unknown route fails the request. */
-function fakeServer(routes: Readonly<Record<string, Route>>) {
-  const calls: Array<Call> = [];
-  const fetch = async (input: string | URL | Request, init: RequestInit = {}) => {
-    if (init.signal?.aborted) throw init.signal.reason;
-    const url = new URL(String(input));
-    const call: Call = {
-      method: init.method ?? "GET",
-      path: url.pathname,
-      query: url.searchParams,
-      body: typeof init.body === "string" ? JSON.parse(init.body) : undefined,
-      headers: new Headers(init.headers),
-    };
-    calls.push(call);
-    const route = routes[`${call.method} ${call.path}`];
-    if (!route) throw new Error(`Unexpected request: ${call.method} ${call.path}`);
-    return route(call, init.signal ?? undefined);
-  };
+/** A 2.x server in process whose facade is bound to the test's URL and directory. */
+function fakeServer(routes: Readonly<Record<string, OpenCode2Route>>) {
+  const server = fakeOpenCode2Server(routes);
   return {
-    calls,
-    requests: () => calls.map((call) => `${call.method} ${call.path}`),
+    ...server,
     api: (input: Partial<OpenCodeV2ApiInput> = {}) =>
-      makeOpenCodeV2Api({
-        baseUrl: BASE_URL,
-        directory: DIRECTORY,
-        fetch: fetch as typeof globalThis.fetch,
-        ...input,
-      }),
-  };
-}
-
-/**
- * An `/api/event` response the test writes to. Like undici's, its body errors once the request's
- * signal aborts.
- */
-function eventStream() {
-  const encoder = new TextEncoder();
-  let controller!: ReadableStreamDefaultController<Uint8Array>;
-  const state = { aborted: false, cancelled: false };
-  const body = new ReadableStream<Uint8Array>({
-    start: (streamController) => {
-      controller = streamController;
-    },
-    cancel: () => {
-      state.cancelled = true;
-    },
-  });
-  const write = (chunk: string | Uint8Array) =>
-    controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
-  const route: Route = (_call, signal) => {
-    signal?.addEventListener(
-      "abort",
-      () => {
-        state.aborted = true;
-        controller.error(signal.reason);
-      },
-      { once: true },
-    );
-    return new Response(body, { headers: { "content-type": "text/event-stream" } });
-  };
-  return {
-    route,
-    write,
-    emit: (event: unknown) => write(`data: ${JSON.stringify(event)}\n\n`),
-    end: () => controller.close(),
-    state,
+      makeOpenCodeV2Api({ baseUrl: BASE_URL, directory: DIRECTORY, fetch: server.fetch, ...input }),
   };
 }
 

@@ -12,15 +12,17 @@
  * Detection therefore asks first for the route of the generation it last detected at the same URL
  * in this process, and `/global/health` when it has none: that is the request Ryco always sent,
  * so a 1.x server never sees a new path. The memo only orders the requests; every answer is
- * checked again, so a server that changed generation costs one extra request. What remains is the
- * first detection of a 2.x server in a process, which still sends one `/global/health`. Once Ryco
- * spawns 2.x servers, an owned server's generation (known from its verified binary) should set the
- * order (`likelyGeneration`) instead.
+ * checked again, so a server that changed generation costs one extra request. A server Ryco
+ * started has its generation from its verified binary (`expectedGeneration`): it is asked on that
+ * generation's route only, also when the answer does not identify it, and must answer as that
+ * generation. What remains is the first detection of an external 2.x server in a process, which
+ * still sends one `/global/health`.
  *
  * Detection failures carry fixed text: underlying fetch errors can include the URL or its
  * credentials. Both read-only checks fail a session start when they expire, so they run on
  * stall-tolerant deadlines (`timeoutWhileResponsiveOption`). Loaded through `import()` by
- * `opencodeRuntime.ts`, so none of it is in the boot chunk.
+ * `opencodeRuntime.ts`, so none of it is in the boot chunk; the 2.x facade loads from here the same
+ * way, on the first 2.x server.
  */
 import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import { Effect, Option } from "effect";
@@ -37,7 +39,6 @@ import {
   describeUnsupportedOpenCodeVersion,
   normalizeOpenCodeVersion,
   OPENCODE_NON_JSON_HEALTH_MESSAGE,
-  OPENCODE_V2_ADVISORY_MESSAGE,
   type OpenCodeGeneration,
 } from "./openCodeVersion.ts";
 
@@ -110,8 +111,9 @@ const infoVersion = (json: unknown): string | undefined =>
  * Resolves the server's API generation; rejects with an `Error` whose message is fixed text (a
  * rejected password, an unreachable server, an unexpected status or a version this build
  * refuses). 1.x is returned whenever the server does not identify itself as 2.x: the 1.x client's
- * first request is the strict `/global/health` check, which names the problem. Has no deadline of
- * its own: `detectOpenCodeServerApi` applies one and aborts `signal`.
+ * first request is the strict `/global/health` check, which names the problem, and a caller with
+ * `expectedGeneration` "v2" refuses it. Has no deadline of its own: `detectOpenCodeServerApi`
+ * applies one and aborts `signal`.
  */
 export async function detectOpenCodeApi(input: {
   readonly baseUrl: string;
@@ -123,6 +125,11 @@ export async function detectOpenCodeApi(input: {
    * answer decides, never this hint.
    */
   readonly likelyGeneration?: OpenCodeGeneration | undefined;
+  /**
+   * The generation of the binary that started the server, when Ryco started it: only that
+   * generation's route is asked, because the other one is the server's catch-all.
+   */
+  readonly expectedGeneration?: OpenCodeGeneration | undefined;
 }): Promise<OpenCodeApiDetection> {
   const base = URL.parse(input.baseUrl.trim());
   if (base === null || (base.protocol !== "http:" && base.protocol !== "https:")) {
@@ -160,14 +167,22 @@ export async function detectOpenCodeApi(input: {
   };
 
   const order =
-    input.likelyGeneration === "v2" ? [INFO_PATH, HEALTH_PATH] : [HEALTH_PATH, INFO_PATH];
-  let infoStatus = 0;
+    input.expectedGeneration === "v1"
+      ? [HEALTH_PATH]
+      : input.expectedGeneration === "v2"
+        ? [INFO_PATH]
+        : input.likelyGeneration === "v2"
+          ? [INFO_PATH, HEALTH_PATH]
+          : [HEALTH_PATH, INFO_PATH];
+  let healthStatus: number | undefined;
+  let infoStatus: number | undefined;
   for (const path of order) {
     const { status, json } = await get(path);
     if (path === HEALTH_PATH) {
       if (isV1Health(json)) {
         return { generation: "v1" };
       }
+      healthStatus = status;
       continue;
     }
     infoStatus = status;
@@ -188,11 +203,13 @@ export async function detectOpenCodeApi(input: {
         "The OpenCode server reported a version this Ryco release does not support.",
     );
   }
-  // 1.x serves its web app (or a 404) for unknown paths.
-  if (infoStatus === 404 || infoStatus === 405 || (infoStatus >= 200 && infoStatus < 300)) {
+  // No route identified the server. 1.x serves its web app (or a 404) for unknown paths, so the
+  // `/api/info` status decides when it was asked, and the `/global/health` status otherwise.
+  const status = infoStatus ?? healthStatus ?? 0;
+  if (status === 404 || status === 405 || (status >= 200 && status < 300)) {
     return { generation: "v1" };
   }
-  throw new Error(`The OpenCode server returned HTTP ${infoStatus}.`);
+  throw new Error(`The OpenCode server returned HTTP ${status}.`);
 }
 
 /** URLs whose last detection found 2.x, oldest first; they only order the next detection. */
@@ -220,18 +237,21 @@ function rememberDetection(key: string | undefined, generation: OpenCodeGenerati
 }
 
 /**
- * `detectOpenCodeApi` within its stall-tolerant deadline, ordered by the generation last detected
- * at the same URL (see the module comment).
+ * `detectOpenCodeApi` within its stall-tolerant deadline, limited to `expectedGeneration`'s route
+ * or else ordered by `likelyGeneration` or the generation last detected at the same URL (see the
+ * module comment).
  */
 export const detectOpenCodeServerApi = (
-  input: Omit<Parameters<typeof detectOpenCodeApi>[0], "signal" | "likelyGeneration">,
+  input: Omit<Parameters<typeof detectOpenCodeApi>[0], "signal">,
 ): Effect.Effect<OpenCodeApiDetection, OpenCodeRuntimeError> => {
   const key = detectionKey(input.baseUrl);
+  const likelyGeneration =
+    input.likelyGeneration ?? (key !== undefined && detectedV2Urls.has(key) ? "v2" : undefined);
   return runOpenCodeSdk("api.detect", (signal) =>
     detectOpenCodeApi({
       ...input,
       signal,
-      ...(key !== undefined && detectedV2Urls.has(key) ? { likelyGeneration: "v2" } : {}),
+      ...(likelyGeneration !== undefined ? { likelyGeneration } : {}),
     }),
   ).pipe(
     timeoutWhileResponsiveOption(VERSION_CHECK_TIMEOUT_MS),
@@ -251,23 +271,47 @@ export const detectOpenCodeServerApi = (
 };
 
 const loadOpenCodeSdk = lazyOpenCodeModule("SDK", () => import("@opencode-ai/sdk/v2"));
+const loadOpenCodeV2Client = lazyOpenCodeModule(
+  "2.x client",
+  () => import("./openCodeV2Client.ts"),
+);
 
-/** `OpenCodeRuntimeShape.createOpenCodeSdkClient`: detects the API before returning a client. */
+/**
+ * `OpenCodeRuntimeShape.createOpenCodeSdkClient`: detects the API before returning a client.
+ * `expectedGeneration` is the generation of the binary that started the server, when Ryco started
+ * it: the server is asked on that generation's route only and refused if it does not answer as
+ * that generation.
+ */
 export const createOpenCodeApi = (
   input: Parameters<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>[0],
+  expectedGeneration?: OpenCodeGeneration,
 ): Effect.Effect<OpenCodeApi, OpenCodeRuntimeError> =>
   Effect.gen(function* () {
     const api = yield* detectOpenCodeServerApi({
       baseUrl: input.baseUrl,
       serverPassword: input.serverPassword,
+      expectedGeneration,
     });
-    // Refused before any client exists; the 2.x facade loads here once
-    // `OPENCODE_V2_RUNTIME_SUPPORTED` is on.
-    if (api.generation === "v2") {
+    if (expectedGeneration !== undefined && api.generation !== expectedGeneration) {
       return yield* new OpenCodeRuntimeError({
         operation: "createOpenCodeSdkClient",
-        detail:
-          describeUnsupportedOpenCodeVersion(api.version, "server") ?? OPENCODE_V2_ADVISORY_MESSAGE,
+        detail: `The OpenCode server Ryco started is not the OpenCode ${expectedGeneration === "v2" ? 2 : 1} its binary reported. Its binary may have changed; try again.`,
+      });
+    }
+    if (api.generation === "v2") {
+      // Refused before any client exists: a 2.x below its minimum, or every 2.x with the gate off.
+      const problem = describeUnsupportedOpenCodeVersion(api.version, "server");
+      if (problem !== null) {
+        return yield* new OpenCodeRuntimeError({
+          operation: "createOpenCodeSdkClient",
+          detail: problem,
+        });
+      }
+      const { makeOpenCodeV2Api } = yield* loadOpenCodeV2Client;
+      return makeOpenCodeV2Api({
+        baseUrl: input.baseUrl,
+        directory: input.directory,
+        serverPassword: input.serverPassword,
       });
     }
     const { createOpencodeClient } = yield* loadOpenCodeSdk;

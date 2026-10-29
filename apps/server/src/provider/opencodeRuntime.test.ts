@@ -77,13 +77,28 @@ describe("verifyOpenCodeServerVersion", () => {
     expect(error.detail).toContain("too old");
   });
 
-  it("rejects a 2.x server with an explicit reason", async () => {
-    expect(await failureDetail(clientWithVersion("2.0.18"))).toContain("reports v2.0.18");
+  it("accepts a supported 2.x server on the 2.x facade", async () => {
+    await expect(
+      Effect.runPromise(verifyOpenCodeServerVersion(clientWithVersion("v2.2.0", "v2"))),
+    ).resolves.toBe("2.2.0");
+  });
+
+  it("rejects a 2.x server below the minimum with the upgrade it needs", async () => {
+    for (const generation of [undefined, "v2"] as const) {
+      expect(await failureDetail(clientWithVersion("2.0.18", generation))).toBe(
+        "OpenCode v2.0.18 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+      );
+    }
+    expect(await failureDetail(clientWithVersion("3.0.0", "v2"))).toBe(
+      "OpenCode v3.0.0 is not supported by this Ryco release.",
+    );
   });
 
   it("refuses a 1.x client whose server reports 2.x before any mutation", async () => {
-    for (const version of ["2.0.18", "2.2.0", "2.9.0"]) {
-      expect(await failureDetail(clientWithVersion(version))).toContain(`reports v${version}`);
+    for (const version of ["2.2.0", "2.9.0"]) {
+      expect(await failureDetail(clientWithVersion(version))).toBe(
+        `The OpenCode server reports v${version} but did not identify itself as OpenCode 2.`,
+      );
     }
   });
 
@@ -94,7 +109,7 @@ describe("verifyOpenCodeServerVersion", () => {
   });
 
   it("rejects a v-prefixed 2.x server instead of passing it via string comparison", async () => {
-    expect(await failureDetail(clientWithVersion("v2.0.18"))).toContain("reports v2.0.18");
+    expect(await failureDetail(clientWithVersion("v2.9.0"))).toContain("reports v2.9.0");
   });
 
   it("fails closed for an unparseable server version", async () => {
@@ -154,21 +169,32 @@ describe("createOpenCodeSdkClient API detection", () => {
       });
     }).pipe(Effect.provide(recordingRuntimeLayer("").layer));
 
-  effectIt.live("refuses a 2.x server before creating any client", () => {
+  effectIt.live("returns the 2.x facade for a 2.x server", () => {
     const paths = stubServer({
       "/global/health": html,
       "/api/info": () => json({ version: "2.2.0", pid: 42 }),
     });
     return Effect.gen(function* () {
-      const error = yield* Effect.flip(create("http://127.0.0.1:4096"));
-      expect(error.detail).toBe(
-        "The OpenCode server reports v2.2.0. Ryco works with OpenCode 1.x servers; 2.x support is coming.",
-      );
+      const client = yield* create("http://127.0.0.1:4096");
+      expect(client.generation).toBe("v2");
       expect(paths).toEqual(["/global/health", "/api/info"]);
       // The next attempt asks the 2.x route first and sends nothing to the 2.x catch-all.
       paths.length = 0;
-      yield* Effect.flip(create("http://127.0.0.1:4096"));
+      expect((yield* create("http://127.0.0.1:4096")).generation).toBe("v2");
       expect(paths).toEqual(["/api/info"]);
+    });
+  });
+
+  effectIt.live("refuses a 2.x server below the minimum before creating any client", () => {
+    stubServer({
+      "/global/health": html,
+      "/api/info": () => json({ version: "2.1.4", pid: 42 }),
+    });
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(create("http://127.0.0.1:4099"));
+      expect(error.detail).toBe(
+        "OpenCode v2.1.4 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+      );
     });
   });
 
@@ -208,15 +234,27 @@ describe("assertSupportedOpenCodeBinary", () => {
     ).resolves.toBe("1.18.34");
   });
 
-  it("refuses a 2.x binary", async () => {
-    const error = await Effect.runPromise(
-      Effect.flip(
-        assertSupportedOpenCodeBinary(versionRunner("opencode v2.0.18\n"), {
+  it("returns a supported 2.x version", async () => {
+    await expect(
+      Effect.runPromise(
+        assertSupportedOpenCodeBinary(versionRunner("opencode v2.2.0\n"), {
           binaryPath: "opencode",
         }),
       ),
+    ).resolves.toBe("2.2.0");
+  });
+
+  it("refuses a 2.x binary below the minimum and any 3.x", async () => {
+    const detail = (stdout: string) =>
+      Effect.runPromise(
+        Effect.flip(
+          assertSupportedOpenCodeBinary(versionRunner(stdout), { binaryPath: "opencode" }),
+        ),
+      ).then((error) => error.detail);
+    expect(await detail("opencode v2.0.18\n")).toBe(
+      "OpenCode v2.0.18 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
     );
-    expect(error.detail).toContain("not supported yet");
+    expect(await detail("3.0.0\n")).toBe("OpenCode v3.0.0 is not supported by this Ryco release.");
   });
 
   it("refuses output without a version", async () => {
@@ -289,26 +327,29 @@ function recordingRuntimeLayer(versionStdout: string) {
 }
 
 describe("OpenCode pre-spawn version gate", () => {
-  effectIt.live("startOpenCodeServerProcess refuses a 2.x binary before spawning serve", () => {
-    const { layer, spawned } = recordingRuntimeLayer("opencode v2.0.18\n");
-    return Effect.gen(function* () {
-      const runtime = yield* OpenCodeRuntime;
-      const error = yield* runtime
-        .startOpenCodeServerProcess({ binaryPath: "opencode" })
-        .pipe(Effect.scoped, Effect.flip);
-      expect(error.detail).toContain("not supported yet");
-      expect(spawned).toEqual([["--version"]]);
-    }).pipe(Effect.provide(layer));
-  });
+  effectIt.live(
+    "startOpenCodeServerProcess refuses an old 2.x binary before spawning serve",
+    () => {
+      const { layer, spawned } = recordingRuntimeLayer("opencode v2.0.18\n");
+      return Effect.gen(function* () {
+        const runtime = yield* OpenCodeRuntime;
+        const error = yield* runtime
+          .startOpenCodeServerProcess({ binaryPath: "opencode" })
+          .pipe(Effect.scoped, Effect.flip);
+        expect(error.detail).toContain("is too old");
+        expect(spawned).toEqual([["--version"]]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
 
-  effectIt.live("connectToOpenCodeServer refuses a 2.x binary before spawning serve", () => {
+  effectIt.live("connectToOpenCodeServer refuses an old 2.x binary before spawning serve", () => {
     const { layer, spawned } = recordingRuntimeLayer("opencode v2.0.18\n");
     return Effect.gen(function* () {
       const runtime = yield* OpenCodeRuntime;
       const error = yield* runtime
         .connectToOpenCodeServer({ binaryPath: "opencode", serverUrl: "" })
         .pipe(Effect.scoped, Effect.flip);
-      expect(error.detail).toContain("not supported yet");
+      expect(error.detail).toContain("is too old");
       expect(spawned).toEqual([["--version"]]);
     }).pipe(Effect.provide(layer));
   });
@@ -338,7 +379,7 @@ describe("OpenCode pre-spawn version gate", () => {
       const error = yield* runtime
         .startOpenCodeServerProcess({ binaryPath: "opencode", verifiedBinaryVersion: "2.0.18" })
         .pipe(Effect.scoped, Effect.flip);
-      expect(error.detail).toContain("not supported yet");
+      expect(error.detail).toContain("is too old");
       expect(spawned).toEqual([["--version"]]);
     }).pipe(Effect.provide(layer));
   });
@@ -479,6 +520,268 @@ describe("OpenCode agent priority", () => {
         ["/usr/bin/nice", "-n"],
         ["opencode", "serve"],
       ]);
+    }).pipe(Effect.provide(layer));
+  });
+});
+
+describe("OpenCode server start by generation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  interface Spawn {
+    readonly args: ReadonlyArray<string>;
+    readonly env: Readonly<Record<string, string | undefined>>;
+  }
+
+  /**
+   * Answers `--version` with `version` and `serve` with `serveOutput`; a serve that `exits` ends
+   * right after its output, otherwise it runs until its scope closes. Records every argv and env.
+   */
+  function serveRuntimeLayer(input: {
+    readonly version: string;
+    readonly serveOutput: string;
+    readonly exits?: boolean;
+  }) {
+    const spawns: Array<Spawn> = [];
+    const encoder = new TextEncoder();
+    const spawner = ChildProcessSpawner.make((command) => {
+      const standard = command as unknown as {
+        readonly args: ReadonlyArray<string>;
+        readonly options: { readonly env?: Record<string, string | undefined> };
+      };
+      spawns.push({ args: [...standard.args], env: { ...standard.options.env } });
+      const version = standard.args.includes("--version");
+      const ends = version || input.exits === true;
+      return Effect.succeed(
+        ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(2_147_483_002),
+          // The exit waits for the output, as a real process's exit follows its last write.
+          exitCode: ends
+            ? Effect.sleep("20 millis").pipe(
+                Effect.as(ChildProcessSpawner.ExitCode(version ? 0 : 1)),
+              )
+            : Effect.never,
+          isRunning: Effect.succeed(!ends),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.make(encoder.encode(version ? `${input.version}\n` : input.serveOutput)),
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        }),
+      );
+    });
+    const layer = OpenCodeRuntimeLive.pipe(
+      Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+    );
+    const serveEnv = () => spawns.find((spawn) => spawn.args[0] === "serve")?.env ?? {};
+    return { layer, spawns, serveEnv };
+  }
+
+  const environment = { PATH: "/usr/bin", OPENCODE_SERVER_PASSWORD: "inherited-1x" };
+
+  effectIt.live("gives a 2.x server a generated password of its own under its variable", () => {
+    const { layer, serveEnv, spawns } = serveRuntimeLayer({
+      version: "opencode v2.2.0",
+      serveOutput: "OpenCode server listening on http://127.0.0.1:4196\n",
+    });
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const start = runtime.startOpenCodeServerProcess({
+        binaryPath: "opencode",
+        environment,
+        port: 4196,
+      });
+      const first = yield* start.pipe(Effect.scoped);
+      const env = serveEnv();
+      expect(first.url).toBe("http://127.0.0.1:4196");
+      expect(first.serverPassword).toMatch(/^[\w-]{43}$/u);
+      expect(env.OPENCODE_PASSWORD).toBe(first.serverPassword);
+      // 2.x would read the inherited 1.x variable as a second password source.
+      expect("OPENCODE_SERVER_PASSWORD" in env).toBe(false);
+      expect(env.PATH).toBe("/usr/bin");
+      expect(env.OPENCODE_CONFIG_CONTENT).toBe("{}");
+
+      spawns.length = 0;
+      const second = yield* start.pipe(Effect.scoped);
+      expect(second.serverPassword).not.toBe(first.serverPassword);
+    }).pipe(Effect.provide(layer));
+  });
+
+  effectIt.live("gives a 2.x server the configured password", () => {
+    const { layer, serveEnv } = serveRuntimeLayer({
+      version: "2.2.0",
+      serveOutput: "OpenCode server listening on http://127.0.0.1:4197\n",
+    });
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const server = yield* runtime
+        .startOpenCodeServerProcess({
+          binaryPath: "opencode",
+          verifiedBinaryVersion: "2.2.0",
+          serverPassword: "configured-secret",
+          environment,
+          port: 4197,
+        })
+        .pipe(Effect.scoped);
+      expect(server.serverPassword).toBe("configured-secret");
+      expect(serveEnv().OPENCODE_PASSWORD).toBe("configured-secret");
+      expect("OPENCODE_SERVER_PASSWORD" in serveEnv()).toBe(false);
+    }).pipe(Effect.provide(layer));
+  });
+
+  effectIt.live("keeps the 1.x environment and its inherited password", () => {
+    const { layer, serveEnv } = serveRuntimeLayer({
+      version: "1.18.34",
+      serveOutput: "opencode server listening on http://127.0.0.1:4198\n",
+    });
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const server = yield* runtime
+        .startOpenCodeServerProcess({ binaryPath: "opencode", environment, port: 4198 })
+        .pipe(Effect.scoped);
+      expect(server.url).toBe("http://127.0.0.1:4198");
+      expect(server.serverPassword).toBe("inherited-1x");
+      expect(serveEnv().OPENCODE_SERVER_PASSWORD).toBe("inherited-1x");
+      expect("OPENCODE_PASSWORD" in serveEnv()).toBe(false);
+    }).pipe(Effect.provide(layer));
+  });
+
+  effectIt.live("reads the ready line in either generation's casing", () =>
+    Effect.gen(function* () {
+      for (const [line, url] of [
+        ["opencode server listening on http://127.0.0.1:4096\n", "http://127.0.0.1:4096"],
+        ["INFO  OpenCode Server listening on http://[::1]:4097\n", "http://[::1]:4097"],
+        // Another server's line printed first (a plugin) is not the ready line.
+        [
+          "plugin proxy: server listening on http://127.0.0.1:9999\nopencode server listening on http://127.0.0.1:4098\n",
+          "http://127.0.0.1:4098",
+        ],
+      ] as const) {
+        const { layer } = serveRuntimeLayer({ version: "2.2.0", serveOutput: line });
+        const server = yield* Effect.gen(function* () {
+          const runtime = yield* OpenCodeRuntime;
+          return yield* runtime
+            .startOpenCodeServerProcess({ binaryPath: "opencode", port: 4096 })
+            .pipe(Effect.scoped);
+        }).pipe(Effect.provide(layer));
+        expect(server.url).toBe(url);
+      }
+    }),
+  );
+
+  effectIt.live("keeps the password out of a failed start's output", () => {
+    const { layer } = serveRuntimeLayer({
+      version: "2.2.0",
+      serveOutput: "Using password configured-secret\nError: database is locked\n",
+      exits: true,
+    });
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const error = yield* runtime
+        .startOpenCodeServerProcess({
+          binaryPath: "opencode",
+          serverPassword: "configured-secret",
+          port: 4199,
+        })
+        .pipe(Effect.scoped, Effect.flip);
+      expect(error.detail).toContain("exited before startup completed");
+      expect(error.detail).toContain("Using password <redacted>");
+      expect(JSON.stringify([error.detail, error.cause])).not.toContain("configured-secret");
+    }).pipe(Effect.provide(layer));
+  });
+
+  /** Stubs the global fetch with a server keyed by path, recording each path asked. */
+  function stubServer(routes: Readonly<Record<string, () => Response>>) {
+    const paths: Array<string> = [];
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      return routes[path]?.() ?? new Response(null, { status: 404 });
+    });
+    return paths;
+  }
+  const json = (body: unknown) =>
+    new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+
+  effectIt.live("asks a 2.x server it started on the 2.x route only", () => {
+    const { layer } = serveRuntimeLayer({
+      version: "2.2.0",
+      serveOutput: "OpenCode server listening on http://127.0.0.1:4296\n",
+    });
+    const paths = stubServer({ "/api/info": () => json({ version: "2.2.0", pid: 7 }) });
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const client = yield* Effect.gen(function* () {
+        const server = yield* runtime.startOpenCodeServerProcess({
+          binaryPath: "opencode",
+          port: 4296,
+        });
+        return yield* runtime.createOpenCodeSdkClient({
+          baseUrl: server.url,
+          directory: "/work",
+          ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
+        });
+      }).pipe(Effect.scoped);
+      expect(client.generation).toBe("v2");
+      // The 2.x catch-all never sees a request, so the password never leaves the machine.
+      expect(paths).toEqual(["/api/info"]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  effectIt.live("refuses a server it started that answers as the other generation", () => {
+    const { layer } = serveRuntimeLayer({
+      version: "2.2.0",
+      serveOutput: "OpenCode server listening on http://127.0.0.1:4297\n",
+    });
+    // The binary was swapped for 1.x between its version check and `serve`.
+    const paths = stubServer({
+      "/global/health": () => json({ healthy: true, version: "1.18.34" }),
+    });
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const error = yield* Effect.gen(function* () {
+        const server = yield* runtime.startOpenCodeServerProcess({
+          binaryPath: "opencode",
+          port: 4297,
+        });
+        return yield* runtime.createOpenCodeSdkClient({ baseUrl: server.url, directory: "/work" });
+      }).pipe(Effect.scoped, Effect.flip);
+      expect(error.detail).toBe(
+        "The OpenCode server Ryco started is not the OpenCode 2 its binary reported. Its binary may have changed; try again.",
+      );
+      expect(paths).toEqual(["/api/info"]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  effectIt.live("never asks a 2.x server it started on the 1.x route when /api/info fails", () => {
+    const { layer } = serveRuntimeLayer({
+      version: "2.2.0",
+      serveOutput: "OpenCode server listening on http://127.0.0.1:4298\n",
+    });
+    const paths = stubServer({
+      "/api/info": () => new Response(null, { status: 500 }),
+      "/global/health": () => json({ healthy: true, version: "1.18.34" }),
+    });
+    return Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const error = yield* Effect.gen(function* () {
+        const server = yield* runtime.startOpenCodeServerProcess({
+          binaryPath: "opencode",
+          port: 4298,
+        });
+        return yield* runtime.createOpenCodeSdkClient({
+          baseUrl: server.url,
+          directory: "/work",
+          ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
+        });
+      }).pipe(Effect.scoped, Effect.flip);
+      expect(error.detail).toBe("The OpenCode server returned HTTP 500.");
+      // The 2.x catch-all would get the password on /global/health.
+      expect(paths).toEqual(["/api/info"]);
     }).pipe(Effect.provide(layer));
   });
 });

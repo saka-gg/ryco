@@ -75,13 +75,29 @@ Semantics of the Claude adapter payloads:
 ## Provider compatibility (`compatibility`)
 
 The optional top-level `compatibility` array rates provider versions against
-the running Ryco release. The bundled file seeds OpenCode:
+the running Ryco release. The bundled file seeds OpenCode with two policies:
+one for the releases that run OpenCode 2 and, after it, one for the earlier
+releases, which keep refusing 2.x:
 
 ```jsonc
 "compatibility": [
   {
     "driver": "opencode",          // provider driver kind
-    "rycoRange": ">=0.1.30",       // Ryco releases this policy applies to
+    "rycoRange": ">=0.1.36",       // Ryco releases this policy applies to
+    "ranges": [
+      { "range": ">=3.0.0", "status": "unsupported" },
+      {
+        "range": ">=2.0.0 <2.2.0",
+        "status": "unsupported",
+        "message": "Upgrade OpenCode 2 to v2.2.0 or newer."
+      },
+      { "range": ">=2.2.0 <3.0.0", "status": "supported" },
+      { "range": ">=1.14.19 <2.0.0", "status": "supported" }
+    ]
+  },
+  {
+    "driver": "opencode",
+    "rycoRange": ">=0.1.30 <0.1.36",
     "ranges": [
       {
         "range": ">=2.0.0",
@@ -93,6 +109,13 @@ the running Ryco release. The bundled file seeds OpenCode:
   }
 ]
 ```
+
+`0.1.36` is the release that ships OpenCode 2 support. The remote copy on
+`main` rates every running release, so a release that moves the line must
+change the manifest and the drift guard (`FIRST_RYCO_WITH_OPENCODE_2` in
+`providerCompatibility.test.ts`) together. Until `apps/server/package.json`
+reaches that version, a development build selects the older policy and shows
+2.x as unsupported on the settings card even though it runs it.
 
 - **Ranges.** Comparator groups joined by `||`; whitespace-separated
   comparators in a group are ANDed. A comparator is `>=`, `>`, `<=`, `<`, `=`
@@ -126,10 +149,10 @@ the running Ryco release. The bundled file seeds OpenCode:
   rating, publish an explicit overriding policy for that `rycoRange`.
 - **Code-owned floors.** Limits of a build that no manifest can lift are rated
   before any policy, for both the installed and the latest version. In this
-  build that is OpenCode `>=2.0.0` (always `unsupported`; `openCodeVersionFloor`
-  in `openCodeVersion.ts`, which names 3.x and later separately). The bundled
-  OpenCode `>=2.0.0` range only repeats the floor for readers; a test pins the
-  two together.
+  build that is OpenCode `>=3.0.0` and `>=2.0.0 <2.2.0` (always `unsupported`;
+  `openCodeVersionFloor` in `openCodeVersion.ts`, with the minimum in
+  `MINIMUM_OPENCODE_V2_VERSION`). The bundled ranges for them only repeat the
+  floor for readers; a test pins the newest policy and the floor together.
 - **Lenient decoding.** Invalid entries are dropped one by one, and a malformed
   or non-array `compatibility` is ignored; it never rejects the manifest (and
   with it the remote Claude catalog). Older releases ignore the field.
@@ -140,7 +163,8 @@ the running Ryco release. The bundled file seeds OpenCode:
   no 2.x releases (2.x ships as `@opencode/cli`). In practice an OpenCode
   policy only blocks updates when it marks a specific 1.x release.
   Homebrew and native updaters are rated from the same npm number, as a
-  best-effort proxy.
+  best-effort proxy. An OpenCode 2 install is never offered that 1.x number
+  (it is older); updating 2.x stays manual (see [OpenCode](./opencode.md)).
 
 Code map: `providerCompatibility.ts` (policy schema, selection, floors,
 rating), `Layers/ProviderRegistry.ts` (rates snapshots, post-sync refresh),
