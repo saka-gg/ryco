@@ -54,6 +54,7 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
+import { DeviceThreadLifecycleLive } from "./device/Layers/DeviceThreadLifecycle.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
 import {
   HubConnectorDeferredLive,
@@ -673,6 +674,9 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(AgentControlWorkspacesLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
+  // Feeds the device manager each thread's running turn and thread removals,
+  // which end agent device holds and attachments (the simulator idle grace).
+  DeviceThreadLifecycleLive,
 ).pipe(
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.

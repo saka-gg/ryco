@@ -12,8 +12,14 @@
  * - The Ryco boot cap (`DEVICE_RYCO_BOOT_LIMIT`). Boot past the cap is
  *   refusable rather than fatal: the caller is handed the shutdown candidates
  *   so the pane can prompt.
- * - Shutdown triggers: app quit (`dispose`), thread removal
- *   (`handleThreadRemoved`), and an idle timeout after the last detach.
+ * - Shutdown triggers: app quit (`dispose`), switching a thread away from an
+ *   otherwise unused device, and an idle grace once a Ryco-owned device's last
+ *   consumer settles. Consumers are a boot in flight, a recording, an in-flight
+ *   manager call (pane RPC, agent tool, Agent Control action), a frame viewer,
+ *   a thread a person attached, and an agent's hold for the provider turn that
+ *   is still its thread's running turn. Agent attachments are metadata and
+ *   never keep a device up; thread removal (`handleThreadRemoved`) ends the
+ *   thread's attachment and holds. Only Ryco-owned boots are ever shut down.
  *
  * Everything the manager does to the device itself goes through DeviceBackend,
  * so the whole state machine is testable against `FakeDeviceBackend`.
@@ -61,7 +67,12 @@ import {
   type DeviceUiTargetMatch,
 } from "./uiTreeTargeting.ts";
 
-/** How long a Ryco-booted device stays up with no thread attached. */
+/**
+ * How long a Ryco-booted device stays up after its last consumer settles: no
+ * boot, recording, in-flight call, viewer, user attachment or running agent
+ * turn holding it. Agent attachments do not count. User-booted devices never
+ * get this grace.
+ */
 export const DEVICE_IDLE_SHUTDOWN_MS = 10 * 60 * 1000;
 /**
  * How long an agent's request to open the device pane waits for a client to
@@ -116,6 +127,9 @@ export const DEVICE_DEFAULT_MAX_SCROLLS = 8;
 
 export type DeviceEventListener = (event: DeviceEvent) => void;
 
+/** Who pointed a thread at a device. Only a person's choice keeps a Ryco-owned simulator running. */
+export type DeviceAttachmentSource = "user" | "agent";
+
 export interface DeviceManagerOptions {
   readonly backend: DeviceBackend;
   readonly transport?: DeviceFrameTransport;
@@ -133,6 +147,10 @@ export interface DeviceManagerOptions {
 interface ThreadAttachment {
   version: number;
   attachedDeviceUdid: string | null;
+  /** Set by every attach. Agent attachments are metadata: they never keep a device booted. */
+  attachmentSource: DeviceAttachmentSource;
+  /** Devices this thread's agent used, per provider turn, held until that turn stops being active. */
+  readonly agentDevicesByTurn: Map<string, Set<string>>;
   agentActiveCount: number;
   lastError: string | null;
   /** Non-null while the attachment is still coming up. */
@@ -173,6 +191,17 @@ export class DeviceManager {
   private recoveryTimer: NodeJS.Timeout | undefined;
   private recoveryWork: Promise<readonly string[]> | undefined;
   private readonly idleTimers = new Map<string, NodeJS.Timeout>();
+  /** The provider turn each thread is running, as the orchestration projection last reported it. */
+  private readonly activeAgentTurns = new Map<string, string>();
+  /**
+   * Threads archived, trashed or deleted since their last turn started. Agent work still in
+   * flight when one went away attaches nothing to it; its next turn or a user attach clears it.
+   */
+  private readonly removedThreads = new Set<string>();
+  /** In-flight manager calls per device: pane RPCs, agent tools and Agent Control actions. */
+  private readonly activeDeviceActions = new Map<string, number>();
+  /** Idle shutdowns already handed to the backend, or the boot restoring one; new use waits for them. */
+  private readonly idleShutdowns = new Map<string, Promise<void>>();
   private readonly streams = new Map<
     string,
     {
@@ -211,7 +240,7 @@ export class DeviceManager {
     this.now = options.now ?? Date.now;
     this.unsubscribeDisconnect = this.backend.onDisconnect?.((udids) => {
       for (const udid of udids) {
-        this.deviceGenerations.set(udid, (this.deviceGenerations.get(udid) ?? 0) + 1);
+        this.bumpDeviceGeneration(udid);
         const stream = this.streams.get(udid);
         if (stream) {
           stream.desired = false;
@@ -508,6 +537,10 @@ export class DeviceManager {
   }
 
   private async bootDevice(udid: string): Promise<DeviceBootResult> {
+    // Booting under a simctl shutdown races it; wait the shutdown out, then
+    // boot normally. Not the restoring wait: that one boots through `boot()`,
+    // which would hand this very boot back to it and deadlock.
+    await this.awaitIssuedIdleShutdown(udid);
     const recoveryShutdown = this.claimRecoveredDevice(udid);
     if (recoveryShutdown) await recoveryShutdown.catch(() => undefined);
     const discovery = await this.discoverForBoot(udid);
@@ -559,19 +592,52 @@ export class DeviceManager {
   }
 
   async shutdown(udid: string): Promise<void> {
+    // A grace firing during this shutdown would start a second one.
+    this.clearIdleTimer(udid);
+    // An idle shutdown already with simctl finishes first: a second shutdown
+    // would race it, and simctl refuses a device that is already off.
+    if (this.idleShutdowns.has(udid)) {
+      await this.awaitIssuedIdleShutdown(udid);
+      if (!this.rycoBooted.has(udid)) return;
+    }
+    // A refused shutdown does not start the grace: the SSH device host's
+    // manager only boots and shuts down, and a timer there would later power
+    // off a device the coding node is using. The caller sees the error.
+    await this.runShutdown(udid, false);
+  }
+
+  /**
+   * `onlyIfIdle` is the idle grace's shutdown: it gives up, and reports false,
+   * when a consumer arrived while the stream was being torn down.
+   */
+  private async runShutdown(udid: string, onlyIfIdle: boolean): Promise<boolean> {
     const resumeTesting = this.backend.suspendTesting(udid);
     try {
-      await this.shutdownDeviceResources(udid);
+      return await this.shutdownDeviceResources(udid, onlyIfIdle);
     } finally {
       resumeTesting();
     }
   }
 
-  private async shutdownDeviceResources(udid: string): Promise<void> {
-    this.deviceGenerations.set(udid, (this.deviceGenerations.get(udid) ?? 0) + 1);
+  private async shutdownDeviceResources(udid: string, onlyIfIdle: boolean): Promise<boolean> {
+    if (!onlyIfIdle) this.bumpDeviceGeneration(udid);
     await this.boots.get(udid)?.catch(() => undefined);
-    await this.stopRecordingIfActive(udid).catch(() => undefined);
+    // A recording makes the device busy, so an idle shutdown never has one to
+    // stop; one that started during the teardown below aborts it instead.
+    if (!onlyIfIdle) await this.stopRecordingIfActive(udid).catch(() => undefined);
     await this.stopStream(udid);
+    if (onlyIfIdle) {
+      // Stream teardown yielded: a tool, a user attachment or a viewer may have
+      // arrived. Only now is the shutdown certain, so only now are in-flight
+      // operations made stale; an aborted idle shutdown must not break them.
+      if (this.disposed || this.isDeviceBusy(udid) || !this.rycoBooted.has(udid)) return false;
+      this.bumpDeviceGeneration(udid);
+    }
+    // A thread that attaches while simctl shuts the device down keeps its
+    // attachment: its `attach` waits for this shutdown and boots the device again.
+    const attachTokens = onlyIfIdle
+      ? new Map(Array.from(this.threads, ([threadId, entry]) => [threadId, entry.attachToken]))
+      : null;
     await this.backend.shutdown(udid);
     this.rycoBooted.delete(udid);
     this.recoveryPending.delete(udid);
@@ -581,14 +647,19 @@ export class DeviceManager {
     // at a shut-down simulator.
     for (const [threadId, attachment] of this.threads) {
       if (attachment.attachedDeviceUdid !== udid) continue;
+      if (attachTokens !== null && attachTokens.get(threadId) !== attachment.attachToken) continue;
       attachment.attachedDeviceUdid = null;
       attachment.attachPhase = null;
+      // The pane no longer shows this device, so the agent's next use of it,
+      // once it is booted again, must attach and surface it again.
+      if (attachment.paneSurfacedUdid === udid) attachment.paneSurfacedUdid = null;
       // Stops a retry loop still waiting on this device's display: it is not
       // coming, and the loop would otherwise time out into a misleading error.
       attachment.attachToken += 1;
       await this.publish(threadId);
     }
     await this.publishAllThreads();
+    return true;
   }
 
   // ── Attachment ─────────────────────────────────────────────────────
@@ -602,37 +673,81 @@ export class DeviceManager {
    * simulator" and the screen blank for the whole wait. The stream comes up in
    * the background, pushing a phase per stage, and the pane renders the device
    * it was told to show from the first frame of the interaction.
+   *
+   * `source` says who chose the device. A person's attachment keeps a
+   * Ryco-owned device up; an agent's is metadata and lets it idle out.
    */
-  async attach(threadId: string, udid: string): Promise<ThreadDeviceState> {
-    if (this.disposed) throw new DeviceBackendError("Device manager disposed");
+  async attach(
+    threadId: string,
+    udid: string,
+    source: DeviceAttachmentSource = "user",
+  ): Promise<ThreadDeviceState> {
+    this.assertNotDisposed();
+    if (source === "user") this.removedThreads.delete(threadId);
     const recoveryShutdown = this.claimRecoveredDevice(udid);
     if (recoveryShutdown) {
       await recoveryShutdown.catch(() => undefined);
       const result = await this.boot(udid);
       if (result.kind !== "booted") throw new DeviceBackendError("Device boot limit reached");
-      if (this.disposed) throw new DeviceBackendError("Device manager disposed");
+      this.assertNotDisposed();
     }
     const attachment = this.threadState(threadId);
     const previous = attachment.attachedDeviceUdid;
     // Cleared before releasing: `releaseDevice` asks whether anyone still holds
     // the device, and this thread must no longer count as a holder.
     attachment.attachedDeviceUdid = udid;
+    // Never a downgrade: an agent attaching the device a person already picked
+    // (an approved Agent Control attach, say) leaves it theirs.
+    attachment.attachmentSource =
+      previous === udid && attachment.attachmentSource === "user" ? "user" : source;
     attachment.lastError = null;
     attachment.attachPhase = "connecting";
     const token = (attachment.attachToken += 1);
-    if (previous !== null && previous !== udid) await this.releaseDevice(previous, "switched");
     this.clearIdleTimer(udid);
+    try {
+      // Counted as an in-flight call until an idle shutdown already handed to
+      // the backend is waited out, so even an agent attachment, which holds
+      // nothing by itself, aborts that shutdown or gets the device booted again.
+      this.beginDeviceAction(udid);
+      try {
+        if (previous !== null && previous !== udid) await this.releaseDevice(previous, "switched");
+        await this.waitForIdleShutdown(udid);
+      } catch (error) {
+        // The device could not be brought back (the boot cap, say): the thread
+        // must not keep pointing at a shut-down simulator.
+        if (
+          !this.disposed &&
+          attachment.attachToken === token &&
+          this.threads.get(threadId) === attachment
+        ) {
+          attachment.attachedDeviceUdid = null;
+          attachment.attachPhase = null;
+          attachment.attachToken += 1;
+          attachment.lastError = errorMessage(error);
+          await this.publish(threadId).catch(() => undefined);
+        }
+        throw error;
+      } finally {
+        this.endDeviceAction(udid);
+      }
+      this.assertNotDisposed();
+      // Superseded while waiting: the newer attach or detach owns the state.
+      if (attachment.attachToken !== token) return await this.snapshot(threadId);
 
-    // Already streaming (another thread is watching the same device): there is
-    // nothing to wait for, so the phase clears without a round trip.
-    if (this.streams.get(udid)?.active) {
-      attachment.attachPhase = null;
-      return await this.publish(threadId);
+      // Already streaming (another thread is watching the same device): there is
+      // nothing to wait for, so the phase clears without a round trip.
+      if (this.streams.get(udid)?.active) {
+        attachment.attachPhase = null;
+        return await this.publish(threadId);
+      }
+
+      const state = await this.publish(threadId);
+      void this.bringStreamUp(threadId, udid, token);
+      return state;
+    } finally {
+      // A person's attachment cancels the grace; an agent's may start it.
+      this.updateIdleTimer(udid);
     }
-
-    const state = await this.publish(threadId);
-    void this.bringStreamUp(threadId, udid, token);
-    return state;
   }
 
   /**
@@ -708,15 +823,27 @@ export class DeviceManager {
    * because that attachment reflects a deliberate choice by the user and the
    * agent's device is still reachable through the picker. Idempotent, so
    * repeated launches on the same device cost nothing.
+   *
+   * The attachment is the agent's, so it never keeps the device booted: the
+   * agent's turn hold does that while the turn runs. A thread already on the
+   * same device keeps whoever chose it.
    */
   async ensureThreadAttached(threadId: string, udid: string): Promise<void> {
+    if (this.removedThreads.has(threadId)) return;
     const attached = this.threadState(threadId).attachedDeviceUdid;
     if (attached === udid) return;
     if (attached !== null) return;
-    await this.attach(threadId, udid);
+    await this.attach(threadId, udid, "agent");
   }
 
   async detach(threadId: string): Promise<ThreadDeviceState> {
+    return await this.detachThread(threadId, "detached");
+  }
+
+  private async detachThread(
+    threadId: string,
+    reason: "detached" | "removed",
+  ): Promise<ThreadDeviceState> {
     const attachment = this.threadState(threadId);
     const udid = attachment.attachedDeviceUdid;
     attachment.attachedDeviceUdid = null;
@@ -724,15 +851,35 @@ export class DeviceManager {
     // Abandons any attach still retrying in the background, so it cannot
     // resurrect a phase or an error on a thread that is no longer watching.
     attachment.attachToken += 1;
-    if (udid !== null) await this.releaseDevice(udid);
+    if (udid !== null) await this.releaseDevice(udid, reason);
     return await this.publish(threadId);
   }
 
-  /** Thread archive or deletion is terminal for its attachment; treat it as a detach. */
+  /**
+   * Thread archive, trash or deletion is terminal for its attachment and its
+   * agent's holds; treat it as a detach and let the grace decide the rest.
+   * Unlike a detach, it leaves a recording running while a person on another
+   * thread still watches the device (see `releaseDevice`).
+   */
   async handleThreadRemoved(threadId: string): Promise<void> {
-    if (!this.threads.has(threadId)) return;
-    await this.detach(threadId);
-    this.threads.delete(threadId);
+    this.removedThreads.add(threadId);
+    // Bounded: an id is forgotten after a thousand later removals.
+    if (this.removedThreads.size > 1_000) {
+      const oldest = this.removedThreads.values().next().value;
+      if (oldest !== undefined) this.removedThreads.delete(oldest);
+    }
+    // First: a thread can have a known turn and no device record yet.
+    this.activeAgentTurns.delete(threadId);
+    const attachment = this.threads.get(threadId);
+    if (!attachment) return;
+    const held = new Set<string>();
+    for (const devices of attachment.agentDevicesByTurn.values()) {
+      for (const udid of devices) held.add(udid);
+    }
+    attachment.agentDevicesByTurn.clear();
+    await this.detachThread(threadId, "removed");
+    if (this.threads.get(threadId) === attachment) this.threads.delete(threadId);
+    for (const udid of held) this.updateIdleTimer(udid);
   }
 
   // ── Streaming ──────────────────────────────────────────────────────
@@ -740,12 +887,28 @@ export class DeviceManager {
   /**
    * Register a WebSocket sink for a device's video. The backend stream is
    * started lazily and stopped when the last subscriber and attachment go away.
+   *
+   * A viewer keeps a Ryco-owned device up. One that arrives while an idle
+   * shutdown is already with the backend waits for it, and the device is booted
+   * again for it before the stream starts.
    */
   subscribeFrames(udid: string, sink: DeviceFrameSink): () => void {
+    if (this.disposed) return () => {};
     const unsubscribe = this.transport.subscribe(udid, sink);
-    void this.startStream(udid).catch(() => undefined);
+    this.clearIdleTimer(udid);
+    const start = () => {
+      if (this.disposed || this.transport.deviceSubscriberCount(udid) === 0) return;
+      void this.startStream(udid).catch(() => undefined);
+    };
+    // Synchronous when nothing is shutting down, exactly as before.
+    if (this.idleShutdowns.has(udid)) {
+      void this.waitForIdleShutdown(udid).then(start, () => undefined);
+    } else {
+      start();
+    }
     return () => {
       unsubscribe();
+      this.updateIdleTimer(udid);
       // Capture stops as soon as the last viewer goes, whether or not a thread
       // is still attached. Collapsing the pane closes the frame socket but
       // leaves the attachment, and gating this on the attachment too meant the
@@ -760,9 +923,23 @@ export class DeviceManager {
   }
 
   // ── Control plane ──────────────────────────────────────────────────
+  //
+  // Every control call below (input, install, launch, testing, open URL,
+  // screenshot, accessibility tree, starting a recording) goes through
+  // `withDeviceAction`: the call holds the device up while it runs, restarts
+  // the idle grace when it ends, and waits out an idle shutdown already handed
+  // to the backend instead of racing a half-shut simulator. A new control
+  // method must do the same.
+  //
+  // The other backend calls are lifecycle, not control, and are safe without
+  // it: `boot` waits out an issued idle shutdown itself, `shutdown` defers to
+  // one, `attach` and `subscribeFrames` wait before they start a stream,
+  // stream transitions are serialized and the idle shutdown tears the stream
+  // down before simctl runs (a keyframe request finds it inactive), and
+  // `stopRecording` only runs for a recording, which keeps the device busy.
 
   async tap(udid: string, x: number, y: number): Promise<void> {
-    await this.backend.tap(udid, x, y);
+    await this.withDeviceAction(udid, () => this.backend.tap(udid, x, y));
   }
 
   /**
@@ -780,7 +957,7 @@ export class DeviceManager {
     const assertCurrent = this.operationGuard(udid);
     const match = await this.scrollToElement(udid, target, options);
     assertCurrent();
-    await this.backend.tap(udid, match.point.x, match.point.y);
+    await this.withDeviceAction(udid, () => this.backend.tap(udid, match.point.x, match.point.y));
     return match;
   }
 
@@ -818,7 +995,7 @@ export class DeviceManager {
       if (step === null) return match as DeviceUiTargetMatch;
 
       assertCurrent();
-      await this.backend.swipe(udid, step);
+      await this.withDeviceAction(udid, () => this.backend.swipe(udid, step));
       assertCurrent();
       tree = await this.describeUi(udid);
       assertCurrent();
@@ -893,23 +1070,23 @@ export class DeviceManager {
   }
 
   async swipe(udid: string, gesture: DeviceSwipeGesture): Promise<void> {
-    await this.backend.swipe(udid, gesture);
+    await this.withDeviceAction(udid, () => this.backend.swipe(udid, gesture));
   }
 
   async typeText(udid: string, text: string): Promise<void> {
-    await this.backend.typeText(udid, text);
+    await this.withDeviceAction(udid, () => this.backend.typeText(udid, text));
   }
 
   async keyEvent(udid: string, event: DeviceKeyEvent): Promise<void> {
-    await this.backend.keyEvent(udid, event);
+    await this.withDeviceAction(udid, () => this.backend.keyEvent(udid, event));
   }
 
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
-    await this.backend.pressButton(udid, button);
+    await this.withDeviceAction(udid, () => this.backend.pressButton(udid, button));
   }
 
   async install(udid: string, appPath: string): Promise<DeviceInstallAppResult> {
-    return await this.backend.install(udid, appPath);
+    return await this.withDeviceAction(udid, () => this.backend.install(udid, appPath));
   }
 
   async launch(
@@ -917,43 +1094,57 @@ export class DeviceManager {
     bundleId: string,
     launchArguments?: readonly string[],
   ): Promise<DeviceLaunchAppResult> {
-    return await this.backend.launch(udid, bundleId, launchArguments);
+    return await this.withDeviceAction(udid, () =>
+      this.backend.launch(udid, bundleId, launchArguments),
+    );
   }
 
   async testing(input: DeviceTestingInput): Promise<void> {
-    await this.backend.testing(input);
+    await this.withDeviceAction(input.udid, () => this.backend.testing(input));
   }
 
   async openUrl(udid: string, url: string): Promise<void> {
-    await this.backend.openUrl(udid, url);
+    await this.withDeviceAction(udid, () => this.backend.openUrl(udid, url));
   }
 
   async screenshot(
     udid: string,
     options: { readonly save?: boolean } = {},
   ): Promise<DeviceScreenshotResult> {
-    return await this.backend.screenshot(udid, options);
+    return await this.withDeviceAction(udid, () => this.backend.screenshot(udid, options));
   }
 
+  /** A recording keeps a Ryco-owned device up until it is stopped. */
   async startRecording(udid: string): Promise<DeviceStartRecordingResult> {
+    this.assertNotDisposed();
     const alreadyTracked = this.recording.has(udid);
     this.recording.add(udid);
+    this.clearIdleTimer(udid);
     try {
-      return await this.backend.startRecording(udid);
+      return await this.withDeviceAction(udid, () => this.backend.startRecording(udid));
     } catch (error) {
       if (!alreadyTracked) this.recording.delete(udid);
+      this.updateIdleTimer(udid);
       throw error;
     }
   }
 
+  /**
+   * Forgets the recording even when the stop fails: the backend has ended it
+   * either way (simctl was interrupted, or nothing was recording), and a
+   * recording the manager still believed in would keep the device up for good.
+   */
   async stopRecording(udid: string): Promise<DeviceStopRecordingResult> {
-    const result = await this.backend.stopRecording(udid);
-    this.recording.delete(udid);
-    return result;
+    try {
+      return await this.backend.stopRecording(udid);
+    } finally {
+      this.recording.delete(udid);
+      this.updateIdleTimer(udid);
+    }
   }
 
   async describeUi(udid: string): Promise<DeviceDescribeUiResult> {
-    return await this.backend.describeUi(udid);
+    return await this.withDeviceAction(udid, () => this.backend.describeUi(udid));
   }
 
   // ── Agent integration ──────────────────────────────────────────────
@@ -962,17 +1153,117 @@ export class DeviceManager {
    * Wrap one agent-driven action so the pane can show its "agent is using this
    * device" badge for exactly as long as the action runs. Nested calls are
    * counted, so overlapping tool calls do not clear the badge early.
+   *
+   * With `deviceUse`, the action also holds that device: up while it runs, and
+   * afterwards for as long as the thread's provider turn is still running (see
+   * `observeThreadTurn`). It waits out an idle shutdown already handed to the
+   * backend, which boots the device again first.
+   *
+   * A call admitted before the projection reported any turn joins the turn
+   * running when it ends: a provider tool call always runs inside a turn, and
+   * the projection may lag behind it. `joinLateTurn: false` turns that off for
+   * actions that need not run inside one (an approved Agent Control proposal
+   * can execute after its turn ended, and must not hold a later, unrelated one).
    */
-  async withAgentActivity<A>(threadId: string, action: () => Promise<A>): Promise<A> {
+  async withAgentActivity<A>(
+    threadId: string,
+    action: () => Promise<A>,
+    deviceUse?: { readonly udid: string; readonly joinLateTurn?: boolean },
+  ): Promise<A> {
+    const udid = deviceUse?.udid;
+    if (udid !== undefined) this.assertNotDisposed();
     const attachment = this.threadState(threadId);
+    let held = false;
+    if (udid !== undefined) {
+      this.clearIdleTimer(udid);
+      this.beginDeviceAction(udid);
+      held = this.recordAgentUse(threadId, udid);
+    }
+    // Captured before any wait: overlapping calls may already be counted.
+    const becameActive = attachment.agentActiveCount === 0;
     attachment.agentActiveCount += 1;
-    if (attachment.agentActiveCount === 1) await this.publish(threadId);
     try {
+      if (udid !== undefined) await this.waitForIdleShutdown(udid);
+      // Removal or disposal during the wait: publishing would resurrect the record.
+      if (becameActive && !this.disposed && this.threads.get(threadId) === attachment) {
+        await this.publish(threadId);
+      }
+      if (udid !== undefined) this.assertNotDisposed();
       return await action();
     } finally {
       attachment.agentActiveCount = Math.max(0, attachment.agentActiveCount - 1);
-      if (attachment.agentActiveCount === 0) await this.publish(threadId);
+      if (udid !== undefined) {
+        this.endDeviceAction(udid);
+        // A call admitted just before the projection reported its turn joins it.
+        if (!held && (deviceUse?.joinLateTurn ?? true)) this.recordAgentUse(threadId, udid);
+        this.updateIdleTimer(udid);
+      }
+      if (
+        !this.disposed &&
+        this.threads.get(threadId) === attachment &&
+        attachment.agentActiveCount === 0
+      ) {
+        await this.publish(threadId);
+      }
     }
+  }
+
+  /**
+   * The orchestration projection's running turn for a thread, from every
+   * `thread.session-set`. Holds of every other turn end here: a turn that is
+   * no longer the running one holds nothing. Cheap when the thread holds no
+   * device, which is nearly always.
+   */
+  observeThreadTurn(threadId: string, activeTurnId: string | null): void {
+    if (this.disposed) return;
+    if (activeTurnId === null) this.activeAgentTurns.delete(threadId);
+    else {
+      this.activeAgentTurns.set(threadId, activeTurnId);
+      // A new turn: the thread is back (restored from the archive or the trash).
+      this.removedThreads.delete(threadId);
+    }
+    const attachment = this.threads.get(threadId);
+    if (!attachment || attachment.agentDevicesByTurn.size === 0) return;
+    const released = new Set<string>();
+    for (const [turnId, devices] of attachment.agentDevicesByTurn) {
+      // The running turn keeps its holds.
+      if (turnId === activeTurnId) continue;
+      attachment.agentDevicesByTurn.delete(turnId);
+      for (const udid of devices) released.add(udid);
+    }
+    for (const udid of released) this.updateIdleTimer(udid);
+  }
+
+  /**
+   * Run an agent action that does not go through `withAgentActivity` (an
+   * approved Agent Control boot or attach), holding `udid` for the provider
+   * turn the thread is running when the action starts, if the projection has
+   * reported one. Never a turn that starts while it runs: an approval can land
+   * after the turn that asked for it ended. When the action ends, the grace
+   * starts if nothing else holds the device.
+   */
+  async holdForAgentTurn<A>(threadId: string, udid: string, action: () => Promise<A>): Promise<A> {
+    this.recordAgentUse(threadId, udid);
+    try {
+      return await action();
+    } finally {
+      this.updateIdleTimer(udid);
+    }
+  }
+
+  private recordAgentUse(threadId: string, udid: string): boolean {
+    if (this.disposed) return false;
+    // Turn first: a removed thread has no known turn, so this never resurrects its record.
+    const turnId = this.activeAgentTurns.get(threadId);
+    if (turnId === undefined) return false;
+    // `threadState`, not `threads.get`: an Agent Control boot attaches nothing,
+    // so the thread may have no device record yet, and the boot must still be
+    // held for the running turn.
+    const attachment = this.threadState(threadId);
+    const devices = attachment.agentDevicesByTurn.get(turnId) ?? new Set<string>();
+    devices.add(udid);
+    attachment.agentDevicesByTurn.set(turnId, devices);
+    return true;
   }
 
   /** Auto-open the pane when an agent puts an app on a device. */
@@ -1016,6 +1307,8 @@ export class DeviceManager {
     udid: string,
     reason: DeviceOpenPaneReason,
   ): Promise<void> {
+    // Agent work that outlived its thread's archive, trash or deletion surfaces nothing.
+    if (this.removedThreads.has(threadId)) return;
     if (this.threadState(threadId).paneSurfacedUdid === udid) return;
     await this.ensureThreadAttached(threadId, udid).catch(() => undefined);
     this.requestOpenPane(threadId, udid, reason);
@@ -1048,6 +1341,10 @@ export class DeviceManager {
     await this.recoveryWork?.catch(() => undefined);
     for (const [, timer] of this.idleTimers) this.cancel(timer);
     this.idleTimers.clear();
+    // An idle shutdown already with the backend finishes first, so the loop
+    // below neither shuts that device down twice nor races it.
+    await Promise.allSettled(this.idleShutdowns.values());
+    this.activeAgentTurns.clear();
     this.unsubscribeDisconnect?.();
     await Promise.allSettled(this.boots.values());
     // Snapshotted: both loops mutate the set they are walking.
@@ -1080,6 +1377,8 @@ export class DeviceManager {
       attachment = {
         version: 0,
         attachedDeviceUdid: null,
+        attachmentSource: "user",
+        agentDevicesByTurn: new Map(),
         agentActiveCount: 0,
         lastError: null,
         attachPhase: null,
@@ -1106,6 +1405,16 @@ export class DeviceManager {
   private isAttachedAnywhere(udid: string): boolean {
     for (const [, attachment] of this.threads) {
       if (attachment.attachedDeviceUdid === udid) return true;
+    }
+    return false;
+  }
+
+  /** Whether a thread still has this device attached because a person chose it. */
+  private isAttachedByPerson(udid: string): boolean {
+    for (const [, attachment] of this.threads) {
+      if (attachment.attachedDeviceUdid === udid && attachment.attachmentSource === "user") {
+        return true;
+      }
     }
     return false;
   }
@@ -1221,8 +1530,9 @@ export class DeviceManager {
   }
 
   /**
-   * Nobody is watching this device any more. Stop the stream, and either shut
-   * the device down or start the idle countdown if Ryco booted it.
+   * A thread stopped pointing at this device. Stop the stream if nobody else
+   * needs it, and either shut the device down or let the idle grace decide if
+   * Ryco booted it.
    *
    * A switch shuts down immediately rather than waiting out the idle window.
    * The cap is three Ryco-booted devices, and each one costs a couple of GB
@@ -1233,33 +1543,42 @@ export class DeviceManager {
    * re-booting it costs a minute.
    *
    * User-booted devices are never touched by either path.
+   *
+   * A detach or a switch stops the device's recording: who started it is not
+   * tracked, and the leaving pane may be the only one that knows about it.
+   * Removing a thread (archive, trash, delete) is not a device action, so it
+   * leaves the recording running while a person on another thread still
+   * watches the device; that person's own detach stops it later. With only
+   * agent attachments left it stops, or it would keep the device up for good.
    */
   private async releaseDevice(
     udid: string,
-    reason: "detached" | "switched" = "detached",
+    reason: "detached" | "switched" | "removed" = "detached",
   ): Promise<void> {
-    await this.stopRecordingIfActive(udid).catch(() => undefined);
-    if (this.isAttachedAnywhere(udid)) return;
-    if (this.transport.deviceSubscriberCount(udid) === 0) {
+    if (reason !== "removed" || !this.isAttachedByPerson(udid)) {
+      await this.stopRecordingIfActive(udid).catch(() => undefined);
+    }
+    const attachedElsewhere = this.isAttachedAnywhere(udid);
+    if (!attachedElsewhere && this.transport.deviceSubscriberCount(udid) === 0) {
       await this.stopStream(udid).catch(() => undefined);
     }
     if (!this.rycoBooted.has(udid)) return;
-    if (reason === "switched") {
+    // Viewers are ignored here: the switching pane closes the old device's
+    // frame socket only after this attach resolves, so counting it would turn
+    // every switch into a ten-minute grace and refill the cap, the failure
+    // described above. Every other consumer still blocks the switch shutdown.
+    if (
+      reason === "switched" &&
+      !attachedElsewhere &&
+      !this.isDeviceBusy(udid, { countViewers: false })
+    ) {
       this.clearIdleTimer(udid);
       // Failure here is not the switch's problem: the new device is already
       // attached, and the idle sweep at quit still cleans this one up.
       await this.shutdown(udid).catch(() => undefined);
       return;
     }
-    this.clearIdleTimer(udid);
-    const timer = this.schedule(() => {
-      this.idleTimers.delete(udid);
-      void this.shutdownIfStillIdle(udid);
-    }, this.idleShutdownMs);
-    // A pending idle shutdown must not keep the process alive at exit; quit
-    // shuts these devices down anyway.
-    timer.unref?.();
-    this.idleTimers.set(udid, timer);
+    this.updateIdleTimer(udid);
   }
 
   private async stopRecordingIfActive(udid: string): Promise<void> {
@@ -1267,11 +1586,152 @@ export class DeviceManager {
     await this.stopRecording(udid);
   }
 
+  /** Never rejects: `waitForIdleShutdown` callers only need it to settle. */
   private async shutdownIfStillIdle(udid: string): Promise<void> {
-    if (this.disposed) return;
-    // Re-checked at fire time: a thread may have re-attached during the wait.
-    if (this.isAttachedAnywhere(udid) || !this.rycoBooted.has(udid)) return;
-    await this.shutdown(udid).catch(() => undefined);
+    // Re-checked at fire time: a consumer may have arrived during the grace.
+    if (this.disposed || this.isDeviceBusy(udid) || !this.rycoBooted.has(udid)) return;
+    try {
+      await this.runShutdown(udid, true);
+    } catch {
+      // simctl refused: the device is still Ryco's and still up, so the grace
+      // starts over instead of leaving it holding a boot slot until quit.
+      this.updateIdleTimer(udid);
+    }
+  }
+
+  /**
+   * Whether anything still needs this device up. Agent attachments are
+   * metadata: they do not keep a simulator alive after work ends; the agent's
+   * hold for its running turn does that. `countViewers: false` is only for the
+   * device-switch path (see `releaseDevice`).
+   */
+  private isDeviceBusy(udid: string, options: { readonly countViewers?: boolean } = {}): boolean {
+    if (this.boots.has(udid) || this.recording.has(udid) || this.activeDeviceActions.has(udid)) {
+      return true;
+    }
+    if ((options.countViewers ?? true) && this.transport.deviceSubscriberCount(udid) > 0) {
+      return true;
+    }
+    for (const attachment of this.threads.values()) {
+      if (attachment.attachedDeviceUdid === udid && attachment.attachmentSource === "user") {
+        return true;
+      }
+      for (const devices of attachment.agentDevicesByTurn.values()) {
+        if (devices.has(udid)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Start the idle grace when the last consumer of a Ryco-owned device goes;
+   * cancel it while one remains. A boot alone never starts it: the SSH device
+   * host's manager only boots and shuts down, and the consumer that follows a
+   * boot (an attachment, an agent hold) decides.
+   */
+  private updateIdleTimer(udid: string): void {
+    if (this.disposed || !this.rycoBooted.has(udid) || this.recoveryPending.has(udid)) return;
+    if (this.isDeviceBusy(udid)) {
+      this.clearIdleTimer(udid);
+      return;
+    }
+    if (this.idleTimers.has(udid)) return;
+    const timer = this.schedule(() => {
+      if (this.idleTimers.get(udid) !== timer) return;
+      this.idleTimers.delete(udid);
+      // The stored promise is the `finally`-wrapped one: `waitForIdleShutdown`
+      // relies on the entry being gone once it settles.
+      const shutdown = this.shutdownIfStillIdle(udid).finally(() => {
+        if (this.idleShutdowns.get(udid) === shutdown) this.idleShutdowns.delete(udid);
+      });
+      this.idleShutdowns.set(udid, shutdown);
+    }, this.idleShutdownMs);
+    // A pending idle shutdown must not keep the process alive at exit; quit
+    // shuts these devices down anyway.
+    timer.unref?.();
+    this.idleTimers.set(udid, timer);
+  }
+
+  /** Guard the shared native boundary, including pane RPCs that have no agent turn. */
+  private async withDeviceAction<A>(udid: string, action: () => Promise<A>): Promise<A> {
+    this.assertNotDisposed();
+    this.clearIdleTimer(udid);
+    this.beginDeviceAction(udid);
+    try {
+      await this.waitForIdleShutdown(udid);
+      this.assertNotDisposed();
+      return await action();
+    } finally {
+      this.endDeviceAction(udid);
+      this.updateIdleTimer(udid);
+    }
+  }
+
+  private beginDeviceAction(udid: string): void {
+    this.activeDeviceActions.set(udid, (this.activeDeviceActions.get(udid) ?? 0) + 1);
+  }
+
+  /** Only the count; callers decide when to revisit the grace. */
+  private endDeviceAction(udid: string): void {
+    const remaining = (this.activeDeviceActions.get(udid) ?? 1) - 1;
+    if (remaining <= 0) this.activeDeviceActions.delete(udid);
+    else this.activeDeviceActions.set(udid, remaining);
+  }
+
+  private assertNotDisposed(): void {
+    if (this.disposed) throw new DeviceBackendError("Device manager disposed");
+  }
+
+  /**
+   * Wait out an idle shutdown already handed to the backend: simctl cannot
+   * take it back. If the device went down and is still needed, boot it again,
+   * once for every consumer waiting, and within the boot cap.
+   *
+   * Reads the map synchronously on entry, and stores the restoration before it
+   * yields, so concurrent consumers share one boot.
+   */
+  private async waitForIdleShutdown(udid: string): Promise<void> {
+    const shutdown = this.idleShutdowns.get(udid);
+    if (!shutdown) return;
+    await shutdown;
+    this.assertNotDisposed();
+    // Another consumer resumed first and is already restoring the device.
+    const resuming = this.idleShutdowns.get(udid);
+    if (resuming !== undefined && resuming !== shutdown) {
+      await resuming;
+      this.assertNotDisposed();
+      return;
+    }
+    if (this.rycoBooted.has(udid) || !this.isDeviceBusy(udid)) return;
+    // `boot()` reads `idleShutdowns` (in `bootDevice`) before this entry is
+    // stored and after the finished shutdown removed its own, so it sees nothing.
+    const restoration: Promise<void> = this.boot(udid)
+      .then((result) => {
+        if (result.kind !== "booted") {
+          throw new DeviceBackendError(
+            "The Ryco-owned Simulator boot limit was reached while resuming device use.",
+          );
+        }
+      })
+      .finally(() => {
+        if (this.idleShutdowns.get(udid) === restoration) this.idleShutdowns.delete(udid);
+      });
+    this.idleShutdowns.set(udid, restoration);
+    await restoration;
+    this.assertNotDisposed();
+  }
+
+  /**
+   * Only the shutdown pending when called, for `bootDevice`. Never a newer
+   * entry: that may be a restoration sharing the very boot that is waiting.
+   */
+  private async awaitIssuedIdleShutdown(udid: string): Promise<void> {
+    const pending = this.idleShutdowns.get(udid);
+    if (pending) await pending.catch(() => undefined);
+  }
+
+  private bumpDeviceGeneration(udid: string): void {
+    this.deviceGenerations.set(udid, (this.deviceGenerations.get(udid) ?? 0) + 1);
   }
 
   private clearIdleTimer(udid: string): void {

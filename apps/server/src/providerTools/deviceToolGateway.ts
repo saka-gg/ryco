@@ -304,10 +304,15 @@ function asRecord(value: unknown): JsonRecord {
   return value as JsonRecord;
 }
 
+/** What a required string argument must be; shared so the device a call holds is the one it uses. */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function stringArg(args: JsonRecord, name: string, required = true): string | undefined {
   const value = args[name];
   if (value === undefined && !required) return undefined;
-  if (typeof value !== "string" || (required && value.trim().length === 0)) {
+  if (typeof value !== "string" || (required && !isNonEmptyString(value))) {
     throw new Error(
       `Argument ${JSON.stringify(name)} must be a${required ? " non-empty" : ""} string.`,
     );
@@ -355,7 +360,7 @@ async function executeDeviceTool(input: {
     return result;
   };
 
-  return manager.withAgentActivity(threadId, async () => {
+  const run = async (): Promise<unknown> => {
     switch (name) {
       case "device_list":
         return manager.list({ includeShutdown: args.includeShutdown === true });
@@ -494,7 +499,15 @@ async function executeDeviceTool(input: {
           };
         });
     }
-  });
+  };
+
+  // The device the call names is held while it runs and, after it, for the
+  // thread's running provider turn; `device_list` names none.
+  return manager.withAgentActivity(
+    threadId,
+    run,
+    isNonEmptyString(args.udid) ? { udid: args.udid } : undefined,
+  );
 }
 
 interface BindingRecord {

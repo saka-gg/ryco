@@ -117,6 +117,8 @@ export class FakeDeviceBackend implements DeviceBackend {
     string,
     { readonly path: string; readonly startedAt: string }
   >();
+  /** Set while `holdShutdowns` is in force: shutdowns wait on it before taking effect. */
+  private heldShutdowns: Promise<void> | null = null;
 
   constructor(options: FakeDeviceBackendOptions = {}) {
     this.availabilityValue = options.availability ?? { kind: "available" };
@@ -158,6 +160,23 @@ export class FakeDeviceBackend implements DeviceBackend {
     const device = this.requireDevice(udid);
     this.devices.set(udid, { ...device, state: "shutdown", bootSource: "user" });
     this.listeners.delete(udid);
+  }
+
+  /**
+   * Model a slow `simctl shutdown`: later `shutdown()` calls are recorded at
+   * once, then wait until the returned release runs before the device stops.
+   * Releasing twice is harmless.
+   */
+  holdShutdowns(): () => void {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.heldShutdowns = held;
+    return () => {
+      if (this.heldShutdowns === held) this.heldShutdowns = null;
+      release();
+    };
   }
 
   hasStream(udid: string): boolean {
@@ -215,6 +234,7 @@ export class FakeDeviceBackend implements DeviceBackend {
 
   async shutdown(udid: string): Promise<void> {
     this.record({ kind: "shutdown", udid });
+    if (this.heldShutdowns !== null) await this.heldShutdowns;
     const device = this.requireDevice(udid);
     this.devices.set(udid, { ...device, state: "shutdown", bootSource: "user" });
     await this.detachStream(udid);

@@ -61,7 +61,7 @@ import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { DeviceManager } from "../../device/DeviceManager.ts";
+import { DEVICE_IDLE_SHUTDOWN_MS, DeviceManager } from "../../device/DeviceManager.ts";
 import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
@@ -440,6 +440,131 @@ it.effect("only the accepted-proposal executor invokes a governed device action"
         udid: "FAKE-0001",
       });
     }
+    yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
+/** A device manager on captured timers, and an executor for approved device plans on it. */
+function makeDeviceIdleHarness() {
+  const backend = new FakeDeviceBackend();
+  const timers = new Map<number, { readonly ms: number }>();
+  let nextTimer = 0;
+  const manager = new DeviceManager({
+    backend,
+    attachDeadlineMs: 0,
+    setTimeout: (_handler, ms) => {
+      nextTimer += 1;
+      timers.set(nextTimer, { ms });
+      return nextTimer as unknown as NodeJS.Timeout;
+    },
+    clearTimeout: (handle) => {
+      timers.delete(handle as unknown as number);
+    },
+  });
+  const idleTimers = () =>
+    [...timers.values()].filter((timer) => timer.ms === DEVICE_IDLE_SHUTDOWN_MS);
+  const target = {
+    threadId: ThreadId.make("thread-origin"),
+    projectId,
+    expectedProjectUpdatedAt: now,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    udid: "FAKE-0001" as never,
+    expectedThreadDeviceVersion: 0,
+    expectedAttachedDeviceUdid: null,
+    expectedDeviceState: "shutdown" as const,
+    expectedDeviceBootSource: "user" as const,
+    expectedRecording: false,
+    riskClass: "device-lifecycle" as const,
+  };
+  const execute = (plan: AgentControlProposal["plan"]) =>
+    Effect.gen(function* () {
+      const proposal: AgentControlProposal = {
+        ...approvedProposal,
+        proposalId: AgentControlProposalId.make(`proposal-${plan.kind}`),
+        requestId: AgentControlRequestId.make(`request-${plan.kind}`),
+        plan,
+        planDigest: computeAgentControlPlanDigest(plan),
+      };
+      const stores = yield* makeExecutionStores(proposal);
+      const execution = yield* makeTestExecution({
+        proposalStore: stores.proposalStore,
+        operationStore: stores.operationStore,
+        commandApplication: {},
+        projections: {},
+        deviceService: { supported: true, manager },
+      });
+      yield* execution.executeApproved(proposal.proposalId);
+      assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    });
+  return { backend, manager, idleTimers, target, execute };
+}
+
+it.effect("holds an approved boot and attach for the running turn, not past it", () =>
+  Effect.gen(function* () {
+    const { manager, idleTimers, target, execute } = makeDeviceIdleHarness();
+    manager.observeThreadTurn("thread-origin", "turn-1");
+
+    yield* execute({
+      kind: "deviceBoot",
+      ...target,
+      executionSummary: "Boot iOS Simulator FAKE-0001",
+    });
+    // A pane tap ends with the grace unless something still holds the device.
+    yield* Effect.promise(() => manager.tap("FAKE-0001", 1, 1));
+    assert.lengthOf(idleTimers(), 0);
+    yield* execute({
+      kind: "deviceAttach",
+      ...target,
+      expectedDeviceState: "booted",
+      expectedDeviceBootSource: "ryco",
+      executionSummary: "Attach iOS Simulator FAKE-0001",
+    });
+    const state = yield* Effect.promise(() => manager.getThreadState("thread-origin"));
+    assert.strictEqual(state.attachedDeviceUdid, "FAKE-0001");
+    assert.lengthOf(idleTimers(), 0);
+
+    // The agent's attachment is metadata: once the turn ends, the grace starts.
+    manager.observeThreadTurn("thread-origin", null);
+    assert.lengthOf(idleTimers(), 1);
+    yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
+it.effect("does not hold an approved action for a turn that starts while it runs", () =>
+  Effect.gen(function* () {
+    // Approvals wait for a person, so the proposing turn may be over; a turn
+    // the user starts meanwhile has nothing to do with the approved action.
+    const { backend, manager, idleTimers, target, execute } = makeDeviceIdleHarness();
+    const boot = backend.boot.bind(backend);
+    backend.boot = async (udid) => {
+      const device = await boot(udid);
+      manager.observeThreadTurn("thread-origin", "turn-2");
+      return device;
+    };
+    yield* execute({
+      kind: "deviceBoot",
+      ...target,
+      executionSummary: "Boot iOS Simulator FAKE-0001",
+    });
+    assert.lengthOf(idleTimers(), 1);
+
+    manager.observeThreadTurn("thread-origin", null);
+    const tap = backend.tap.bind(backend);
+    backend.tap = async (udid, x, y) => {
+      await tap(udid, x, y);
+      manager.observeThreadTurn("thread-origin", "turn-3");
+    };
+    yield* execute({
+      kind: "deviceTap",
+      ...target,
+      expectedDeviceState: "booted",
+      expectedDeviceBootSource: "ryco",
+      riskClass: "device-control",
+      x: 10,
+      y: 10,
+      executionSummary: "Tap iOS Simulator FAKE-0001",
+    });
+    assert.lengthOf(idleTimers(), 1);
     yield* Effect.promise(() => manager.dispose());
   }),
 );
