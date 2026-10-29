@@ -10,6 +10,7 @@ import {
   type ProviderInstanceId,
 } from "@ryco/contracts/provider-instance";
 import { createModelCapabilities, normalizeModelSlug } from "@ryco/shared/model";
+import { findServerProviderModel } from "@ryco/shared/serverProviderModels";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -59,6 +60,21 @@ export function getProviderSupportsAskMode(
   provider: ProviderDriverKind,
 ): boolean {
   return getProviderSnapshot(providers, provider)?.supportsAskMode ?? false;
+}
+
+/**
+ * Why the `auto` runtime mode is unavailable for this instance's model, or null when it may run.
+ * Only an explicit `false` in the provider's own report refuses: absent support (an older server,
+ * a custom model, a report that does not cover it) is unknown, and the server decides.
+ */
+export function getAutoRuntimeModeUnavailableReason(
+  models: ReadonlyArray<ServerProviderModel>,
+  model: string | null | undefined,
+): string | null {
+  const entry = findServerProviderModel(models, model);
+  return entry?.supportsAutoMode === false
+    ? `${entry.name} can't run in Auto mode on this provider.`
+    : null;
 }
 
 export function isProviderEnabled(

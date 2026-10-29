@@ -5,6 +5,7 @@ import {
   isClaudeNativeCompaction,
 } from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
+import { getActiveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
 import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import { appendClaudeStderrTail, prepareClaudeCodeSpawn } from "../claudeCodeSpawn.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
@@ -119,6 +120,7 @@ import {
   resolvePromptInjectedEffort,
 } from "@ryco/shared/model";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
+import { findServerProviderModel } from "@ryco/shared/serverProviderModels";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
@@ -453,7 +455,13 @@ interface ClaudeSessionContext {
   agentControlHostContextDelivered: boolean;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
-  readonly basePermissionMode: PermissionMode | undefined;
+  /**
+   * The session's own permission mode, which a "default" interaction turn restores. Cleared when
+   * the CLI turns out to refuse Auto, so the turns never ask for it again.
+   */
+  basePermissionMode: PermissionMode | undefined;
+  /** The Auto-mode refusal warning was emitted; it is shown once per session. */
+  autoModeRefusedWarningEmitted: boolean;
   /**
    * The permission mode this process is known to be in: the start option, then each mode a
    * turn set. Undefined when unknown (no start option, or the CLI may have changed it), so the
@@ -636,9 +644,20 @@ export interface ClaudeAdapterLiveOptions {
    * `readClaudeTranscriptPresence` in the instance's config root.
    */
   readonly readTranscriptPresence?: (sessionId: string) => Promise<ClaudeTranscriptPresence>;
+  /**
+   * Whether this instance's Claude Code says a model (slug or alias) can run Auto mode, from the
+   * instance's snapshot. Undefined is unknown: the session keeps Auto.
+   */
+  readonly resolveAutoModeSupport?: (model: string) => Effect.Effect<boolean | undefined>;
 }
 
 const CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP = 256;
+
+function claudeAutoModeRefusedMessage(model: string | undefined): string {
+  const catalogModels = getActiveClaudeModelCatalog().models.map((entry) => entry.model);
+  const name = findServerProviderModel(catalogModels, model)?.name ?? model ?? "the selected model";
+  return `Claude Code reports that ${name} can't run in Auto mode, so this session asks before commands and file changes.`;
+}
 
 function rememberClaudeSubagentAttribution<A>(
   cache: Map<string, A>,
@@ -2749,6 +2768,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
+  const emitAutoModeRefusedWarning = Effect.fn("emitAutoModeRefusedWarning")(function* (
+    context: ClaudeSessionContext,
+    model: string | undefined,
+  ) {
+    if (context.autoModeRefusedWarningEmitted) return;
+    context.autoModeRefusedWarningEmitted = true;
+    yield* emitRuntimeWarning(context, claudeAutoModeRefusedMessage(model));
+  });
+
   const emitCompactionUnavailableWarning = Effect.fn("emitCompactionUnavailableWarning")(function* (
     context: ClaudeSessionContext,
   ) {
@@ -4284,6 +4312,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       message.subtype === "init" || message.subtype === "status"
         ? message.permissionMode
         : undefined;
+    // Defensive: a session launched in Auto whose first init reports the default mode was
+    // refused Auto by the CLI, so the turns stop asking for it. A plan or ask turn reports
+    // `plan`, which never counts.
+    if (
+      message.subtype === "init" &&
+      context.cliCapabilities === undefined &&
+      context.basePermissionMode === "auto" &&
+      context.currentPermissionMode === "auto" &&
+      reportedPermissionMode === "default"
+    ) {
+      context.basePermissionMode = undefined;
+      yield* Effect.logWarning("claude.auto-mode.refused-by-cli", {
+        threadId: context.session.threadId,
+        model: message.model,
+      });
+      yield* emitAutoModeRefusedWarning(context, context.session.model ?? message.model);
+    }
     if (
       reportedPermissionMode !== undefined &&
       reportedPermissionMode !== context.currentPermissionMode
@@ -6175,7 +6220,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       auto: "auto",
       "full-access": "bypassPermissions",
     };
-    const permissionMode = runtimeModeToPermission[input.runtimeMode];
+    // Fail closed when this instance's Claude Code says the model cannot run Auto: the session
+    // starts in the CLI's default mode and says so. Its runtime mode stays "auto", so the
+    // orchestrator never sees a mode change and restarts it. Unknown support keeps Auto.
+    const autoModeRefused =
+      input.runtimeMode === "auto" &&
+      modelSelection !== undefined &&
+      options?.resolveAutoModeSupport !== undefined &&
+      (yield* options.resolveAutoModeSupport(modelSelection.model)) === false;
+    const permissionMode = autoModeRefused ? undefined : runtimeModeToPermission[input.runtimeMode];
     const settings = {
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
       ...(fastMode ? { fastMode: true } : {}),
@@ -6278,6 +6331,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       "claude.query.model": apiModelId ?? "",
       "claude.query.effort": effectiveEffort ?? "",
       "claude.query.permission_mode": permissionMode ?? "",
+      "claude.query.auto_mode_refused": autoModeRefused,
       "claude.query.system_prompt_append_bytes": Buffer.byteLength(appendSystemPrompt, "utf8"),
       "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
       "claude.query.resume": existingResumeSessionId ?? "",
@@ -6389,6 +6443,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       streamFiber: undefined,
       startedAt,
       basePermissionMode: permissionMode,
+      autoModeRefusedWarningEmitted: false,
       currentPermissionMode: permissionMode,
       currentApiModelId: apiModelId,
       currentEffort: effectiveEffort ?? undefined,
@@ -6471,6 +6526,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       },
       providerRefs: {},
     });
+    if (autoModeRefused) yield* emitAutoModeRefusedWarning(context, modelSelection?.model);
 
     const readyStamp = yield* makeEventStamp();
     yield* offerRuntimeEventForContext(context, {

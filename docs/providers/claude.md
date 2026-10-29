@@ -315,6 +315,27 @@ so and Stop is offered again.
 Stop is only offered for agents the thread's current Claude session started. Workflows and their
 agents have no Stop of their own, and neither do other providers' agents.
 
+## Auto Mode
+
+Ryco starts a Claude session in Auto mode only when this provider's Claude Code can run the
+selected model that way. Claude Code reports which models support Auto mode (see
+[Claude Code's own model report](./model-manifest.md#claude-codes-own-model-report)). When it says
+the model can't, Ryco starts the session in Claude Code's default mode instead and warns once in
+the thread: Claude then asks before commands and file changes. The thread keeps Auto as its
+selected mode, so switching to a model that supports it brings Auto back with the next session.
+When the report is missing or doesn't cover the model (custom models included), Ryco starts in
+Auto as before.
+
+The access pickers read the same report, per provider: in the web composer and the mobile app,
+Auto is greyed out with the reason for such a model. If the thread is already in Auto, the web
+composer's access control says on hover that sessions ask before commands and file changes
+instead. Automations and the web phone layout still offer Auto; the session start above covers
+them.
+
+If Claude Code accepts the Auto session but its first report of the session shows the default
+mode, Ryco treats that as the same refusal: it warns once and stops asking for Auto in that
+session.
+
 ## Approvals
 
 When Claude asks before running a tool, the approval card leads with Decline and Approve once.

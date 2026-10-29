@@ -45,6 +45,8 @@ import {
   checkpointRevertUnsupportedMessage,
   deriveProviderSelectionPolicy,
   describeApprovalRedirectRefusal,
+  getAutoRuntimeModeUnavailableReason,
+  getProviderInstanceModels,
   getProviderInteractionModeToggle,
   getProviderSupportsAskMode,
   normalizeInteractionModeForProviderTarget,
@@ -847,10 +849,16 @@ export function ThreadDetailScreen(props: {
             askModeSupported: threadProviderDriver
               ? getProviderSupportsAskMode(providers, threadProviderDriver)
               : false,
+            autoModeUnavailableReason: selectedModelSelection
+              ? getAutoRuntimeModeUnavailableReason(
+                  getProviderInstanceModels(providers, selectedModelSelection.instanceId),
+                  selectedModelSelection.model,
+                )
+              : null,
             mutationBlockedReason: thread.archivedAt !== null ? "This task is archived." : null,
           })
         : null,
-    [providers, thread, threadProviderDriver],
+    [providers, selectedModelSelection, thread, threadProviderDriver],
   );
 
   const modelPicker = useMemo(

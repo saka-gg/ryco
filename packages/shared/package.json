@@ -176,6 +176,10 @@
       "types": "./src/model.ts",
       "import": "./src/model.ts"
     },
+    "./serverProviderModels": {
+      "types": "./src/serverProviderModels.ts",
+      "import": "./src/serverProviderModels.ts"
+    },
     "./git": {
       "types": "./src/git.ts",
       "import": "./src/git.ts"

@@ -29,6 +29,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   tokenMode?: AgentTokenMode;
   showInteractionModeToggle: boolean;
   askModeSupported: boolean;
+  /** Why the selected model cannot run Auto mode; the Auto item is disabled with it. */
+  autoModeUnavailableReason?: string | null | undefined;
   /**
    * Renders the mode, access, token, and plan sections. The phone tier passes
    * `false`: those axes move to the session-policy sheet there, and the
@@ -110,7 +112,18 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             >
               <MenuRadioItem value="approval-required">Supervised</MenuRadioItem>
               <MenuRadioItem value="auto-accept-edits">Auto-accept edits</MenuRadioItem>
-              <MenuRadioItem value="auto">Auto</MenuRadioItem>
+              <MenuRadioItem value="auto" disabled={Boolean(props.autoModeUnavailableReason)}>
+                {props.autoModeUnavailableReason ? (
+                  <span className="grid gap-0.5">
+                    <span>Auto</span>
+                    <span className="text-muted-foreground text-xs leading-4">
+                      {props.autoModeUnavailableReason}
+                    </span>
+                  </span>
+                ) : (
+                  "Auto"
+                )}
+              </MenuRadioItem>
               <MenuRadioItem value="full-access">Full access</MenuRadioItem>
             </MenuRadioGroup>
             <MenuDivider />

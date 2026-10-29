@@ -71,6 +71,9 @@ export const ServerProviderModel = Schema.Struct({
   isLegacy: Schema.optional(Schema.Boolean),
   isCustom: Schema.Boolean,
   capabilities: Schema.NullOr(ModelCapabilities),
+  // The provider CLI's own report; absent means unknown, false means the CLI says the model
+  // cannot run the `auto` runtime mode.
+  supportsAutoMode: Schema.optional(Schema.Boolean),
 });
 export type ServerProviderModel = typeof ServerProviderModel.Type;
 
