@@ -35,7 +35,7 @@ import {
   useStore,
 } from "../../state/threadsRuntime";
 import { findThreadWorktree } from "../threads/threadHeaderModel";
-import { useFileWorkspaceLayout } from "./FileWorkspaceLayout";
+import { useThreadWorkspaceLayout } from "../workspace/ThreadWorkspaceLayout";
 import { buildThreadFilesScreenModel } from "./threadFilesModel";
 import { useThreadWorkspaceRoot } from "./useThreadWorkspaceRoot";
 
@@ -182,7 +182,7 @@ export function ThreadFilesScreen(props: {
   const selectedPath = props.selectedPath ?? null;
   const navigation = useNavigation();
   const headerHeight = useHeaderHeight();
-  const { inspector } = useFileWorkspaceLayout();
+  const { inspector } = useThreadWorkspaceLayout();
   const hasPersistentFileInspector = inspector.supported;
   const iconColor = String(useThemeColor("--color-icon"));
   const mutedIconColor = String(useThemeColor("--color-icon-muted"));

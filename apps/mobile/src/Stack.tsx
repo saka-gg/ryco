@@ -16,8 +16,8 @@ import { useResolveClassNames } from "uniwind";
 import { AppText as Text } from "./components/AppText";
 import { NavigationHeaderButton } from "./components/NavigationHeaderButton";
 import { HardwareKeyboardCommandProvider } from "./features/keyboard/HardwareKeyboardCommandProvider";
-import { FileWorkspaceLayout } from "./features/files/FileWorkspaceLayout";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
+import { ThreadWorkspaceLayout } from "./features/workspace/ThreadWorkspaceLayout";
 import {
   AddProjectRouteScreen,
   ConnectionsNewRouteScreen,
@@ -305,7 +305,7 @@ function RootStackLayout(props: {
 
   return (
     <HardwareKeyboardCommandProvider pathname={pathname}>
-      <FileWorkspaceLayout>{props.children}</FileWorkspaceLayout>
+      <ThreadWorkspaceLayout>{props.children}</ThreadWorkspaceLayout>
     </HardwareKeyboardCommandProvider>
   );
 }

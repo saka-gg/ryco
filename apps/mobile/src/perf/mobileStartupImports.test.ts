@@ -229,9 +229,9 @@ describe("mobile launch graph boundaries", () => {
       specifier.startsWith("./features/"),
     );
     expect(featureImports.toSorted()).toEqual([
-      "./features/files/FileWorkspaceLayout",
       "./features/home/HomeRouteScreen",
       "./features/keyboard/HardwareKeyboardCommandProvider",
+      "./features/workspace/ThreadWorkspaceLayout",
     ]);
   });
 

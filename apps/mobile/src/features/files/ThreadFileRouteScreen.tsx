@@ -4,8 +4,11 @@ import { useCallback } from "react";
 import { routeFilePathParam, routeLineParam } from "@ryco/client-runtime/state/files";
 import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 
+import {
+  useRegisterThreadWorkspaceInspector,
+  useThreadWorkspaceLayout,
+} from "../workspace/ThreadWorkspaceLayout";
 import { ThreadFileScreen } from "./ThreadFileScreen";
-import { useFileWorkspaceLayout, useRegisterFileWorkspaceInspector } from "./FileWorkspaceLayout";
 import { ThreadFilesScreen } from "./ThreadFilesScreen";
 
 /**
@@ -33,7 +36,7 @@ export function ThreadFileRouteScreen(props: ThreadFileRouteScreenProps) {
   const threadId = threadIdRaw ? ThreadId.make(threadIdRaw) : null;
   const path = routeFilePathParam(props.route.params.path);
   const line = routeLineParam(props.route.params.line);
-  const { inspector } = useFileWorkspaceLayout();
+  const { inspector } = useThreadWorkspaceLayout();
   const renderInspector = useCallback(
     () =>
       environmentId !== null && threadId !== null ? (
@@ -46,7 +49,11 @@ export function ThreadFileRouteScreen(props: ThreadFileRouteScreenProps) {
       ) : null,
     [environmentId, path, threadId],
   );
-  useRegisterFileWorkspaceInspector(inspector.supported ? renderInspector : undefined);
+  useRegisterThreadWorkspaceInspector(
+    "files",
+    inspector.supported ? renderInspector : undefined,
+    "Workspace files",
+  );
 
   if (environmentId === null || threadId === null) return null;
 
