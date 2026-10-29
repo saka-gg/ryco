@@ -12,8 +12,9 @@
 import type { OrchestrationThreadShell, TurnId } from "@ryco/contracts";
 
 /**
- * A client sends its queued message as soon as the thread is idle; the continuation waits this
- * long after the fence first lets it through, so the person's message goes first.
+ * The continuation waits this long after the fence first lets it through, so a person's message
+ * goes first: an older client sends its own queued message as soon as the thread is idle. (A
+ * node's own follow-up queue holds the continuation at the fence while it has an entry.)
  */
 export const GOAL_CONTINUATION_GRACE_MS = 5_000;
 

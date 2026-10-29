@@ -178,6 +178,10 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   // Pull request watches: the seeded server would read the forge on its own and wake agents in
   // the copied chats.
   projection_thread_pull_request_watches: "clear",
+  // Follow-up queues: the seeded server would hold and then send the copied chats' queued
+  // messages.
+  projection_thread_queue_entries: "clear",
+  projection_thread_queue_holds: "clear",
   // Ownership and journals that move or delete real directories.
   storage_owned_entries: "clear",
   storage_usage_history: "clear",

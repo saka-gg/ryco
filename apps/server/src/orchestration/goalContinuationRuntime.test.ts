@@ -106,8 +106,13 @@ const harness = (
   const applied: ClientOrchestrationCommand[] = [];
   const dispatched: OrchestrationCommand[] = [];
   const fenceCalls: string[] = [];
+  const holdSources: Array<string | undefined> = [];
   const fence: ServerWakeFenceShape = {
-    holdReason: () => Effect.sync(() => hold),
+    holdReason: (_shell, _nowMs, source) =>
+      Effect.sync(() => {
+        holdSources.push(source);
+        return hold;
+      }),
     reverting: () => Effect.sync(() => reverting),
     coldStart: () => Effect.sync(() => cold),
     reserveColdSlot: (_threadId, messageId) =>
@@ -156,6 +161,7 @@ const harness = (
   return {
     continuation,
     applied,
+    holdSources,
     dispatched,
     fenceCalls,
     pass,
@@ -373,6 +379,9 @@ describe("goal continuation", () => {
       finishTurn(GOAL_CONTINUATION_MAX_CHAIN);
       yield* runOne;
       assert.strictEqual(turnStarts(h.applied).length, GOAL_CONTINUATION_MAX_CHAIN + 1);
+      // The goal asks the fence as a goal continuation, so the thread's queue holds it.
+      assert.isTrue(h.holdSources.length > 0);
+      assert.isTrue(h.holdSources.every((source) => source === "goal-continuation"));
 
       // Server wakes (its own continuations, delegated results) do not.
       for (let index = 1; index < GOAL_CONTINUATION_MAX_CHAIN; index += 1) {
@@ -515,3 +524,33 @@ it("mints its message ids under the prefix clients may not send", () => {
     RESERVED_GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
   );
 });
+
+it.effect("a message the thread's follow-up queue sends starts a new count too", () =>
+  Effect.gen(function* () {
+    const h = harness(shell());
+    let nowMs = T0;
+    const finishTurn = (index: number) => {
+      nowMs += 60_000;
+      h.setShell(shell({}, { id: `turn-${index}`, endedAtMs: nowMs }));
+    };
+    const runOne = Effect.gen(function* () {
+      yield* h.pass(nowMs + 1_000);
+      yield* h.pass(nowMs + 1_000 + GOAL_CONTINUATION_GRACE_MS, null);
+    });
+    for (let index = 0; index < GOAL_CONTINUATION_MAX_CHAIN; index += 1) {
+      finishTurn(index);
+      yield* runOne;
+    }
+    assert.strictEqual(turnStarts(h.applied).length, GOAL_CONTINUATION_MAX_CHAIN);
+    // The person typed while the last turn ran; the node's queue sent it as a wake.
+    h.continuation.observe(
+      event("thread.turn-start-requested", {
+        messageId: "queued-by-person",
+        delegationReturnGuard: { latestUserMessageId: null, source: "follow-up-queue" },
+      }),
+    );
+    finishTurn(GOAL_CONTINUATION_MAX_CHAIN);
+    yield* runOne;
+    assert.strictEqual(turnStarts(h.applied).length, GOAL_CONTINUATION_MAX_CHAIN + 1);
+  }),
+);

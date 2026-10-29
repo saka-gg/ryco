@@ -36,6 +36,8 @@ import {
   projectCreatedWorktreePullRequests,
   projectWorktreeSourceControlState,
 } from "./worktreePullRequestProjection.ts";
+import type { FollowUpQueueEventDraft, FollowUpQueueEventType } from "./followUpQueue.ts";
+import { loadFollowUpQueueRules } from "./followUpQueueLoader.ts";
 import { withThreadLineage } from "./threadLineage.ts";
 import { findThreadInArray, updateThreadInArray } from "./threadIndex.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
@@ -64,6 +66,13 @@ import {
   ThreadGoalUpdatedPayload,
   ThreadGoalClearedPayload,
   ThreadPullRequestWatchUpdatedPayload,
+  ThreadQueueEntriesRemovedPayload,
+  ThreadQueueEntryAddedPayload,
+  ThreadQueueEntryEditedPayload,
+  ThreadQueueEntryFailedPayload,
+  ThreadQueueHeldPayload,
+  ThreadQueueReleasedPayload,
+  ThreadQueueReorderedPayload,
   ThreadUnarchivedPayload,
   ThreadUnsettledPayload,
   ThreadRevertedPayload,
@@ -85,6 +94,16 @@ import {
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
+
+const FOLLOW_UP_QUEUE_PAYLOADS: Record<FollowUpQueueEventType, Schema.Schema<unknown>> = {
+  "thread.queue-entry-added": ThreadQueueEntryAddedPayload,
+  "thread.queue-entry-edited": ThreadQueueEntryEditedPayload,
+  "thread.queue-reordered": ThreadQueueReorderedPayload,
+  "thread.queue-entries-removed": ThreadQueueEntriesRemovedPayload,
+  "thread.queue-entry-failed": ThreadQueueEntryFailedPayload,
+  "thread.queue-held": ThreadQueueHeldPayload,
+  "thread.queue-released": ThreadQueueReleasedPayload,
+};
 
 type WorktreePatch = Partial<Omit<OrchestrationWorktreeShell, "worktreeId" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -509,6 +528,7 @@ export function projectEvent(
             updatedAt: payload.deletedAt,
             // The projection drops the row too; a later incarnation starts without watches.
             pullRequestWatchState: undefined,
+            followUpQueue: undefined,
           }),
         })),
       );
@@ -740,6 +760,37 @@ export function projectEvent(
           }),
         })),
       );
+
+    case "thread.queue-entry-added":
+    case "thread.queue-entry-edited":
+    case "thread.queue-reordered":
+    case "thread.queue-entries-removed":
+    case "thread.queue-entry-failed":
+    case "thread.queue-held":
+    case "thread.queue-released": {
+      // The queue is not thread activity: `updatedAt` stays, as in the projection.
+      const type = event.type;
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          FOLLOW_UP_QUEUE_PAYLOADS[type],
+          event.payload,
+          type,
+          "payload",
+        );
+        const rules = yield* loadFollowUpQueueRules;
+        const draft = { type, payload } as FollowUpQueueEventDraft;
+        return {
+          ...nextBase,
+          threads: updateThreadInArray(nextBase.threads, draft.payload.threadId, (thread) => ({
+            ...thread,
+            followUpQueue: rules.project(
+              thread.followUpQueue ?? { entries: [], hold: null },
+              draft,
+            ),
+          })),
+        };
+      });
+    }
 
     case "thread.message-sent":
       return Effect.gen(function* () {

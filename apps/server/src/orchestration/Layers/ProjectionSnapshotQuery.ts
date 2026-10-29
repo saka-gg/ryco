@@ -36,6 +36,7 @@ import {
   type OrchestrationThreadWindowSnapshot,
   type OrchestrationThreadActivity,
   type OrchestrationActivityPayloadMode,
+  type ThreadFollowUpQueue,
   EventId,
   OrchestrationThreadShell,
   OrchestrationWorktreeShell,
@@ -44,6 +45,8 @@ import {
   ProjectId,
   ThreadId,
   ThreadGoal,
+  FOLLOW_UP_QUEUE_HEAD_PREVIEW_MAX_CHARS,
+  ThreadFollowUpQueueShell,
   ThreadPullRequestWatches,
   ThreadPullRequestWatchShell,
   TrimmedNonEmptyString,
@@ -52,6 +55,7 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 import { pullRequestWatchShellAt } from "@ryco/shared/pullRequestWatchSummary";
+import { loadFollowUpQueueProjection } from "../../persistence/followUpQueueProjectionLoader.ts";
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import { Clock, Deferred, Effect, Layer, Option, Schema, type Scope, Struct } from "effect";
 import { backgroundWorkCheckpoint } from "@ryco/shared/backgroundWork";
@@ -143,6 +147,8 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     latestCompletedTurnAt: Schema.NullOr(IsoDateTime),
     // The projector's shell summary (`summary_json`), never the full watch state.
     pullRequestWatches: Schema.NullOr(Schema.fromJsonString(ThreadPullRequestWatchShell)),
+    // Computed by the query from the queue tables; null while the queue is empty.
+    followUpQueueSummary: Schema.NullOr(Schema.fromJsonString(ThreadFollowUpQueueShell)),
   }),
 );
 const ProjectionThreadShellDbRowSchema = ProjectionThreadDbRowSchema.mapFields(
@@ -174,6 +180,11 @@ const pullRequestWatchShellField = (
   const shell = pullRequestWatchShellAt(summary, nowMs);
   return shell === null ? {} : { pullRequestWatches: shell };
 };
+/** A thread shell's `followUpQueueSummary` key: left out while the queue is empty. */
+const followUpQueueSummaryField = (
+  summary: ThreadFollowUpQueueShell | null,
+): { readonly followUpQueueSummary?: ThreadFollowUpQueueShell } =>
+  summary === null ? {} : { followUpQueueSummary: summary };
 const PendingGoalSyncThreadRowSchema = Schema.Struct({
   threadId: ThreadId,
   goal: Schema.fromJsonString(ThreadGoal),
@@ -925,6 +936,34 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     SELECT watch_rows.summary_json FROM projection_thread_pull_request_watches watch_rows
     WHERE watch_rows.thread_id = projection_threads.thread_id
   )`;
+  // NULL while the thread's queue is empty: one indexed count, plus the head and the hold for
+  // the few threads that have one, so other shells pay a lookup and nothing more.
+  const followUpQueueSummaryColumn = sql`(
+    SELECT json_object(
+      'count', COUNT(*),
+      'hold', (
+        SELECT json(hold_rows.hold_json) FROM projection_thread_queue_holds hold_rows
+        WHERE hold_rows.thread_id = projection_threads.thread_id
+      ),
+      'headStatus', (
+        SELECT head.status FROM projection_thread_queue_entries head
+        WHERE head.thread_id = projection_threads.thread_id
+        ORDER BY head.position ASC LIMIT 1
+      ),
+      'headPreview', (
+        SELECT COALESCE(
+          substr(json_extract(head.payload_json, '$.text'), 1, ${FOLLOW_UP_QUEUE_HEAD_PREVIEW_MAX_CHARS}),
+          ''
+        )
+        FROM projection_thread_queue_entries head
+        WHERE head.thread_id = projection_threads.thread_id
+        ORDER BY head.position ASC LIMIT 1
+      )
+    )
+    FROM projection_thread_queue_entries queue_rows
+    WHERE queue_rows.thread_id = projection_threads.thread_id
+    HAVING COUNT(*) > 0
+  )`;
   const threadColumns = sql`
     thread_id AS "threadId",
     project_id AS "projectId",
@@ -960,7 +999,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     lineage_relationship AS "lineageRelationship",
     lineage_source_message_id AS "lineageSourceMessageId",
     lineage_source_turn_id AS "lineageSourceTurnId",
-    ${pullRequestWatchSummaryColumn} AS "pullRequestWatches"
+    ${pullRequestWatchSummaryColumn} AS "pullRequestWatches",
+    ${followUpQueueSummaryColumn} AS "followUpQueueSummary"
   `;
 
   // Every row, deleted ones included: the command read model and the full snapshot need them.
@@ -1330,6 +1370,38 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         ORDER BY messages.thread_id ASC, messages.created_at ASC, messages.rowid ASC
       `,
   });
+
+  // Follow-up queues, head first: every thread's for the command read model, or one thread's
+  // for its detail and window. One indexed probe first; the reads (`followUpQueueProjection.ts`)
+  // load only when a queue exists.
+  const readFollowUpQueues = (
+    operation: string,
+    threadId?: ThreadId,
+  ): Effect.Effect<ReadonlyMap<ThreadId, ThreadFollowUpQueue>, ProjectionRepositoryError> =>
+    Effect.gen(function* () {
+      const probe =
+        threadId === undefined
+          ? yield* sql`
+              SELECT 1 FROM projection_thread_queue_entries
+              UNION ALL SELECT 1 FROM projection_thread_queue_holds
+              LIMIT 1
+            `
+          : yield* sql`
+              SELECT 1 FROM projection_thread_queue_entries WHERE thread_id = ${threadId}
+              UNION ALL SELECT 1 FROM projection_thread_queue_holds WHERE thread_id = ${threadId}
+              LIMIT 1
+            `;
+      if (probe.length === 0) return new Map<ThreadId, ThreadFollowUpQueue>();
+      const projection = yield* loadFollowUpQueueProjection;
+      return yield* projection.readFollowUpQueues(sql, threadId);
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          `${operation}:listFollowUpQueues:query`,
+          `${operation}:listFollowUpQueues:decodeRows`,
+        ),
+      ),
+    );
 
   // Every thread's full watch state (active and ended), for the command read model only.
   const listThreadPullRequestWatchRows = SqlSchema.findAll({
@@ -1755,7 +1827,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           lineage_relationship AS "lineageRelationship",
           lineage_source_message_id AS "lineageSourceMessageId",
           lineage_source_turn_id AS "lineageSourceTurnId",
-          ${pullRequestWatchSummaryColumn} AS "pullRequestWatches"
+          ${pullRequestWatchSummaryColumn} AS "pullRequestWatches",
+          ${followUpQueueSummaryColumn} AS "followUpQueueSummary"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
@@ -2671,6 +2744,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
       Schema.Schema.Type<typeof ProjectionThreadSessionDbRowSchema>
     >;
     readonly pruneContextActivities?: boolean;
+    /** The thread's follow-up queue (thread detail and window); absent while empty. */
+    readonly followUpQueue?: ThreadFollowUpQueue | undefined;
   }) => {
     const activities = input.activityRows.map(mapActivityRow);
     return decodeThread(
@@ -2700,6 +2775,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           snoozedUntil: input.threadRow.snoozedUntil ?? null,
           snoozedAt: input.threadRow.snoozedAt ?? null,
           usageLimit: input.threadRow.usageLimit ?? null,
+          ...(input.followUpQueue === undefined ? {} : { followUpQueue: input.followUpQueue }),
           deletedAt: null,
           trashedAt: null,
           messages: input.messageRows.map(mapMessageRow),
@@ -3117,6 +3193,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               ),
             ),
           ),
+          readFollowUpQueues("ProjectionSnapshotQuery.getCommandReadModel"),
         ]),
       )
       .pipe(
@@ -3132,6 +3209,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             latestTurnRows,
             stateRows,
             pullRequestWatchRows,
+            followUpQueuesByThreadId,
           ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
@@ -3281,6 +3359,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                   continue;
                 }
                 const pullRequestWatchState = pullRequestWatchesByThread.get(row.threadId);
+                const followUpQueue = followUpQueuesByThreadId.get(row.threadId);
                 threads.push(
                   withThreadLineage(
                     {
@@ -3307,6 +3386,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                       snoozedAt: row.snoozedAt ?? null,
                       usageLimit: row.usageLimit ?? null,
                       ...(pullRequestWatchState === undefined ? {} : { pullRequestWatchState }),
+                      ...(followUpQueue === undefined ? {} : { followUpQueue }),
                       deletedAt: row.deletedAt,
                       trashedAt: row.trashedAt,
                       messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
@@ -3558,6 +3638,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                       row.threadId,
                     ),
                     ...pullRequestWatchShellField(row.pullRequestWatches, nowMs),
+                    ...followUpQueueSummaryField(row.followUpQueueSummary),
                   },
                   projectionThreadLineage(row),
                 ),
@@ -3986,6 +4067,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               threadRow.value.threadId,
             ),
             ...pullRequestWatchShellField(threadRow.value.pullRequestWatches, Date.now()),
+            ...followUpQueueSummaryField(threadRow.value.followUpQueueSummary),
           } satisfies OrchestrationThreadShell,
           projectionThreadLineage(threadRow.value),
         ),
@@ -4051,6 +4133,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         checkpointRows,
         latestTurnRow,
         sessionRow,
+        followUpQueues,
       ] = yield* Effect.all([
         getActiveThreadRowById({ threadId }).pipe(
           Effect.mapError(
@@ -4108,6 +4191,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             ),
           ),
         ),
+        readFollowUpQueues("ProjectionSnapshotQuery.getThreadDetailById", threadId),
       ]);
 
       if (Option.isNone(threadRow)) {
@@ -4123,6 +4207,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           checkpointRows,
           latestTurnRow,
           sessionRow,
+          followUpQueue: followUpQueues.get(threadId),
         }).pipe(
           Effect.mapError(
             toPersistenceDecodeError("ProjectionSnapshotQuery.getThreadDetailById:decodeThread"),
@@ -4188,6 +4273,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         latestTurnRow,
         sessionRow,
         stateRows,
+        followUpQueues,
       ] = yield* sql
         .withTransaction(
           // Issued together: on the read worker every statement is a round trip,
@@ -4278,6 +4364,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                   ),
                 ),
               ),
+              readFollowUpQueues("ProjectionSnapshotQuery.getThreadWindow", input.threadId),
             ],
             { concurrency: "unbounded" },
           ),
@@ -4315,6 +4402,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         latestTurnRow,
         sessionRow,
         pruneContextActivities: false,
+        followUpQueue: followUpQueues.get(input.threadId),
       }).pipe(
         Effect.mapError(
           toPersistenceDecodeError("ProjectionSnapshotQuery.getThreadWindow:decodeThread"),

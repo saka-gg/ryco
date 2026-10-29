@@ -146,6 +146,9 @@ import { dropThreadPriorityTables } from "./Migrations/DropThreadPriorityTables.
 import Migration0094, {
   ensurePullRequestWatchesTable,
 } from "./Migrations/094_PullRequestWatches.ts";
+import Migration0095, {
+  ensureThreadFollowUpQueueTables,
+} from "./Migrations/095_ThreadFollowUpQueue.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -251,6 +254,7 @@ export const migrationEntries = [
   [92, "LocalTaskDelegations", Migration0092],
   [93, "DropUnusedOrchestrationIndexes", Migration0093],
   [94, "PullRequestWatches", Migration0094],
+  [95, "ThreadFollowUpQueue", Migration0095],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -633,6 +637,16 @@ export const repairPullRequestWatchesTable = Effect.fn("repairPullRequestWatches
   },
 );
 
+// Follow-up queues: run 095 again as a repair when a later id was recorded first (parallel
+// branches claim the same next id).
+export const repairThreadFollowUpQueueTables = Effect.fn("repairThreadFollowUpQueueTables")(
+  function* () {
+    if (yield* ensureThreadFollowUpQueueTables) {
+      yield* Effect.log("Repaired follow-up queue tables");
+    }
+  },
+);
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -820,6 +834,7 @@ const compatibilityRepairs = [
     run: () => repairThreadPriorityTables(),
   },
   { key: "pull-request-watches", since: 94, run: () => repairPullRequestWatchesTable() },
+  { key: "follow-up-queue", since: 95, run: () => repairThreadFollowUpQueueTables() },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

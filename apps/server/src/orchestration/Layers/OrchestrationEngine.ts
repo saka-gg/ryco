@@ -161,6 +161,15 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.activity.append":
     case "thread.revert.complete":
     case "thread.pull-request-watch.update":
+    case "thread.queue.add":
+    case "thread.queue.edit":
+    case "thread.queue.move":
+    case "thread.queue.remove":
+    case "thread.queue.steer":
+    case "thread.queue.hold":
+    case "thread.queue.resume":
+    case "thread.queue.retry":
+    case "thread.queue.hold.record":
       return {
         aggregateKind: "thread",
         aggregateId: command.threadId,
@@ -545,26 +554,30 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                 }
 
                 const lastSavedEvent = committedEvents.at(-1) ?? null;
-                if (lastSavedEvent === null) {
+                // Only a follow-up queue command may change nothing (an add that was already
+                // queued or sent, a resume of a released hold): it is accepted as it is.
+                if (lastSavedEvent === null && !envelope.command.type.startsWith("thread.queue.")) {
                   return yield* new OrchestrationCommandInvariantError({
                     commandType: envelope.command.type,
                     detail: "Command produced no events.",
                   });
                 }
+                const resultSequence =
+                  lastSavedEvent?.sequence ?? commandReadModel.snapshotSequence;
 
                 yield* commandReceiptRepository.upsert({
                   commandId: envelope.command.commandId,
-                  aggregateKind: lastSavedEvent.aggregateKind,
-                  aggregateId: lastSavedEvent.aggregateId,
-                  acceptedAt: lastSavedEvent.occurredAt,
-                  resultSequence: lastSavedEvent.sequence,
+                  aggregateKind: lastSavedEvent?.aggregateKind ?? aggregateRef.aggregateKind,
+                  aggregateId: lastSavedEvent?.aggregateId ?? aggregateRef.aggregateId,
+                  acceptedAt: lastSavedEvent?.occurredAt ?? new Date().toISOString(),
+                  resultSequence,
                   status: "accepted",
                   error: null,
                 });
 
                 return {
                   committedEvents,
-                  lastSequence: lastSavedEvent.sequence,
+                  lastSequence: resultSequence,
                   nextCommandReadModel,
                   postCommitEffects,
                 } as const;

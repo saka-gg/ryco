@@ -51,6 +51,7 @@ import { ProjectionStateRepositoryLive } from "../../persistence/Layers/Projecti
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
+import { loadFollowUpQueueProjection } from "../../persistence/followUpQueueProjectionLoader.ts";
 import { ProjectionThreadPullRequestWatchRepositoryLive } from "../../persistence/Layers/ProjectionThreadPullRequestWatches.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
@@ -115,6 +116,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.deleted": [
     ORCHESTRATION_PROJECTOR_NAMES.threads,
     ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+    ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
   ],
   "thread.trashed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.untrashed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
@@ -135,6 +137,15 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   // Its own table only: watch progress is not thread activity, so `projection_threads` (and
   // its `updated_at`) stays untouched.
   "thread.pull-request-watch-updated": [ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches],
+  // Their own tables only: the queue is not thread activity, so `projection_threads` (and its
+  // `updated_at`) stays untouched; shells read the queue's summary from its tables.
+  "thread.queue-entry-added": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
+  "thread.queue-entry-edited": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
+  "thread.queue-reordered": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
+  "thread.queue-entries-removed": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
+  "thread.queue-entry-failed": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
+  "thread.queue-held": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
+  "thread.queue-released": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
   "thread.context-handoff-requested": [],
   "thread.turn-steer-requested": [],
   "thread.turn-steer-accepted": [],
@@ -495,7 +506,7 @@ function retainProjectionProposedPlansAfterRevert(
 
 function collectThreadAttachmentRelativePaths(
   threadId: string,
-  messages: ReadonlyArray<ProjectionThreadMessage>,
+  messages: ReadonlyArray<Pick<ProjectionThreadMessage, "attachments">>,
 ): Set<string> {
   const threadSegment = toSafeThreadAttachmentSegment(threadId);
   if (!threadSegment) {
@@ -1543,6 +1554,17 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       }
     });
 
+    /** A thread's queued follow-ups (a revert keeps their attachments); none without a queue. */
+    const readQueuedEntries = (threadId: ThreadId) =>
+      Effect.gen(function* () {
+        const any = yield* sql`SELECT 1 FROM projection_thread_queue_entries
+          WHERE thread_id = ${threadId} LIMIT 1`;
+        if (any.length === 0) return [];
+        const projection = yield* loadFollowUpQueueProjection;
+        const queues = yield* projection.readFollowUpQueues(sql, threadId);
+        return queues.get(threadId)?.entries ?? [];
+      }).pipe(Effect.mapError(toPersistenceSqlError("ProjectionPipeline.readQueuedEntries:query")));
+
     const applyThreadMessagesProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadMessagesProjection",
     )(function* (event, attachmentSideEffects) {
@@ -1613,9 +1635,11 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
               concurrency: 1,
             },
           ).pipe(Effect.asVoid);
+          // Queued follow-ups keep their attachments too: they are sent after the revert.
+          const queued = yield* readQueuedEntries(event.payload.threadId);
           attachmentSideEffects.prunedThreadRelativePaths.set(
             event.payload.threadId,
-            collectThreadAttachmentRelativePaths(event.payload.threadId, keptRows),
+            collectThreadAttachmentRelativePaths(event.payload.threadId, [...keptRows, ...queued]),
           );
           return;
         }
@@ -2503,6 +2527,48 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       }
     });
 
+    // Mirrors `projectFollowUpQueueEvent` (the in-memory projector); every write is idempotent.
+    // The writes load with the first queue event (`followUpQueueProjection.ts`).
+    const applyThreadFollowUpQueuesProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyThreadFollowUpQueuesProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "thread.queue-entry-added":
+        case "thread.queue-entry-edited":
+        case "thread.queue-reordered":
+        case "thread.queue-entries-removed":
+        case "thread.queue-entry-failed":
+        case "thread.queue-held":
+        case "thread.queue-released": {
+          const projection = yield* loadFollowUpQueueProjection;
+          yield* projection
+            .applyFollowUpQueueEvent(sql, event)
+            .pipe(
+              Effect.mapError(
+                toPersistenceSqlError(
+                  "ProjectionPipeline.applyThreadFollowUpQueuesProjection:query",
+                ),
+              ),
+            );
+          return;
+        }
+        case "thread.deleted":
+          yield* sql`DELETE FROM projection_thread_queue_entries
+            WHERE thread_id = ${event.payload.threadId}`.pipe(
+            Effect.andThen(sql`DELETE FROM projection_thread_queue_holds
+              WHERE thread_id = ${event.payload.threadId}`),
+            Effect.mapError(
+              toPersistenceSqlError(
+                "ProjectionPipeline.applyThreadFollowUpQueuesProjection:delete",
+              ),
+            ),
+          );
+          return;
+        default:
+          return;
+      }
+    });
+
     const projectors: ReadonlyArray<ProjectorDefinition> = [
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -2547,6 +2613,10 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
         apply: applyThreadPullRequestWatchesProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
+        apply: applyThreadFollowUpQueuesProjection,
       },
     ];
 

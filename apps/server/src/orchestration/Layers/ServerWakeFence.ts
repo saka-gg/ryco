@@ -18,6 +18,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { isCheckpointRevertEntryPending } from "../checkpointRevertPolicy.ts";
 import {
   COLD_WAKE_GRACE_MS,
+  followUpQueueHoldsWake,
   MAX_COLD_WAKES_IN_FLIGHT,
   queuedTurnIdleInputFromShell,
 } from "../serverWake.ts";
@@ -96,10 +97,12 @@ export const makeServerWakeFence = Effect.gen(function* () {
       ),
     );
 
-  const holdReason: ServerWakeFenceShape["holdReason"] = (shell, nowMs) =>
+  const holdReason: ServerWakeFenceShape["holdReason"] = (shell, nowMs, source) =>
     applicableUsageLimit(shell) !== null
       ? Effect.succeed("usage-limited" as const)
-      : idle(shell, nowMs).pipe(Effect.map((ready) => (ready ? null : ("busy" as const))));
+      : followUpQueueHoldsWake(shell, source)
+        ? Effect.succeed("busy" as const)
+        : idle(shell, nowMs).pipe(Effect.map((ready) => (ready ? null : ("busy" as const))));
 
   const reverting: ServerWakeFenceShape["reverting"] = (threadId, nowMs) =>
     projections.getLatestCheckpointRevert

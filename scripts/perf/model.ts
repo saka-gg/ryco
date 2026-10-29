@@ -367,7 +367,8 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * picked page elements as chat chips, Git actions that outlive a dropped
  * connection and pull request links from chat add about 5 KiB to the first
  * paint path. 527 KiB with the push alert device RPCs, whose schemas the
- * boot RPC client carries.
+ * boot RPC client carries. 528 KiB with the follow-up queue's commands and
+ * events in the orchestration contracts that boot decodes.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -376,7 +377,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 527 * KIB,
+      maxGzipBytes: 528 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,

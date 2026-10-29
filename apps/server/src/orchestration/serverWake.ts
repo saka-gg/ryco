@@ -1,8 +1,9 @@
 /**
  * Server wakes: queued turn starts the server sends on its own, with no person at the keyboard
- * (delegated results, pull request watch updates, goal continuations). Pure rules and wording shared by
- * every wake source, the decider and the provider reactor. The stateful part (pending-start
- * sightings, the cold-start budget) is `ServerWakeFence`.
+ * (delegated results, pull request watch updates, goal continuations, the thread's own queued
+ * follow-ups). Pure rules and wording shared by every wake source, the decider and the provider
+ * reactor. The stateful part (pending-start sightings, the cold-start budget) is
+ * `ServerWakeFence`.
  *
  * Pure module: no services, no I/O.
  *
@@ -67,6 +68,34 @@ export const serverWakeGuard = (
   ...(source === "delegation-return" ? {} : { source }),
 });
 
+/**
+ * A follow-up queue that will send its head at the next idle edge: non-empty, not held, its head
+ * ready. While one waits, other wake sources wait behind it, so the user's own follow-ups go
+ * first; a held queue (or one whose head waits for Retry) blocks nothing.
+ */
+export const followUpQueueWaiting = (
+  shell: Pick<OrchestrationThreadShell, "followUpQueueSummary">,
+) =>
+  shell.followUpQueueSummary !== undefined &&
+  shell.followUpQueueSummary.hold === null &&
+  shell.followUpQueueSummary.headStatus === "queued";
+
+/**
+ * Whether the thread's follow-up queue keeps a wake from `source` waiting: every other source
+ * waits while the queue will send its head. A goal's next turn also waits while queued
+ * follow-ups sit held or wait for Retry, so automatic goal turns never run past messages the
+ * person queued.
+ */
+export const followUpQueueHoldsWake = (
+  shell: Pick<OrchestrationThreadShell, "followUpQueueSummary">,
+  source: ServerWakeSource | undefined,
+): boolean =>
+  source === "follow-up-queue"
+    ? false
+    : source === "goal-continuation"
+      ? shell.followUpQueueSummary !== undefined
+      : followUpQueueWaiting(shell);
+
 /** The shared queued-turn idle rule's input, read from a thread shell. */
 export const queuedTurnIdleInputFromShell = (
   shell: OrchestrationThreadShell,
@@ -122,6 +151,25 @@ export const SERVER_WAKE_COPY: Record<ServerWakeSource, ServerWakeCopy> = {
       summary: "Delegated return delivery unconfirmed",
       detail:
         "Ryco restarted while submitting this delegated result. It may have reached the provider. Inspect the parent thread before sending it manually.",
+    },
+  },
+  "follow-up-queue": {
+    originChanged: "The chat changed while this queued message was being sent. It stays queued.",
+    usageLimited: "The chat hit its usage limit. The queued message waits until it is resumed.",
+    // Unreachable: a queued message may change the model, and its handoff runs like a send's.
+    handoffRefused: {
+      summary: "Queued message was not sent",
+      detail: "This queued message could not start a model handoff. Send it again.",
+    },
+    notSent: {
+      summary: "Queued message was not sent",
+      detail:
+        "Ryco restarted before this queued message reached the provider. Nothing was sent. Send it again to continue.",
+    },
+    uncertain: {
+      summary: "Queued message delivery unconfirmed",
+      detail:
+        "Ryco restarted while sending this queued message. It may have been received. Check the chat before sending it again.",
     },
   },
   "pull-request-watch": {

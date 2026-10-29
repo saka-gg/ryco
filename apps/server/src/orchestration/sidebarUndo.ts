@@ -39,7 +39,9 @@ function isProviderProgress(command: OrchestrationCommand) {
     command.type === "thread.activity.append" ||
     command.type === "thread.turn.diff.complete" ||
     command.type === "thread.proposed-plan.upsert" ||
-    (command.type === "thread.pull-request-watch.update" && command.wake === undefined)
+    (command.type === "thread.pull-request-watch.update" && command.wake === undefined) ||
+    // A hold the node records on the follow-up queue, which the sidebar does not show.
+    command.type === "thread.queue.hold.record"
   );
 }
 

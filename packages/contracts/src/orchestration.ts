@@ -782,6 +782,20 @@ const UploadChatAttachments = Schema.Array(UploadChatAttachment).check(
   Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
 );
 
+/** How many other threads one user message may mention for its agent to read. */
+export const MAX_THREAD_REFERENCES_PER_MESSAGE = 4;
+
+/**
+ * Threads a user message mentions (`@thread:<id>` chips). The server appends a
+ * bounded excerpt of each to the provider input, never to the stored message.
+ * Only the composer sets it: Agent Control and other server-built turns never
+ * do, so a mention cannot widen what an agent may read.
+ */
+export const ThreadReferences = Schema.Array(ThreadId).check(
+  Schema.isMaxLength(MAX_THREAD_REFERENCES_PER_MESSAGE),
+);
+export type ThreadReferences = typeof ThreadReferences.Type;
+
 export const ProjectScriptIcon = Schema.Literals([
   "play",
   "test",
@@ -1089,6 +1103,115 @@ export const ThreadLineage = Schema.Struct({
 });
 export type ThreadLineage = typeof ThreadLineage.Type;
 
+/** The most follow-ups one thread's server-owned queue holds. */
+export const MAX_FOLLOW_UP_QUEUE_ENTRIES = 20;
+/** How much of the head's text a thread shell carries (`ThreadFollowUpQueueShell.headPreview`). */
+export const FOLLOW_UP_QUEUE_HEAD_PREVIEW_MAX_CHARS = 120;
+
+export const FollowUpQueueEntryStatus = Schema.Literals(["queued", "steering", "failed"]);
+export type FollowUpQueueEntryStatus = typeof FollowUpQueueEntryStatus.Type;
+/** Who queued it. Clients always queue as the user; the node's own queuers name themselves. */
+export const FollowUpQueueEntryAuthor = Schema.Literals(["user", "agent", "automation"]);
+export type FollowUpQueueEntryAuthor = typeof FollowUpQueueEntryAuthor.Type;
+/** Why an entry waits for Retry or Remove instead of being sent. */
+export const FollowUpQueueEntryFailure = Schema.Struct({
+  /** `start-failed`: its turn start failed; `steer-uncertain`: the provider may have it. */
+  reason: Schema.Literals(["start-failed", "steer-uncertain"]),
+  detail: Schema.NullOr(Schema.String.check(Schema.isMaxLength(1_000))),
+});
+export type FollowUpQueueEntryFailure = typeof FollowUpQueueEntryFailure.Type;
+
+export const FollowUpQueueHoldReason = Schema.Literals([
+  "interrupted",
+  "error",
+  "limit",
+  "review",
+  "stalled",
+  "restart",
+  "paused",
+]);
+export type FollowUpQueueHoldReason = typeof FollowUpQueueHoldReason.Type;
+/** Limits of a hold a client hands over (`thread.queue.add`'s `hold`, the node's own records). */
+export const FOLLOW_UP_QUEUE_HOLD_DETAIL_MAX_CHARS = 1_000;
+export const FOLLOW_UP_QUEUE_CAUSE_KEY_MAX_CHARS = 512;
+export const FOLLOW_UP_QUEUE_MAX_CAUSE_KEYS = 32;
+/**
+ * A hold before it is recorded: the rules of `@ryco/shared/queueHold` merge it into the hold.
+ * `queueHoldInputOf` there turns any derived hold into one that fits.
+ */
+export const FollowUpQueueHoldInput = Schema.Struct({
+  reason: FollowUpQueueHoldReason,
+  detail: Schema.NullOr(
+    Schema.String.check(Schema.isMaxLength(FOLLOW_UP_QUEUE_HOLD_DETAIL_MAX_CHARS)),
+  ),
+  causeKeys: Schema.Array(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(FOLLOW_UP_QUEUE_CAUSE_KEY_MAX_CHARS)),
+  ).check(Schema.isMinLength(1), Schema.isMaxLength(FOLLOW_UP_QUEUE_MAX_CAUSE_KEYS)),
+});
+export type FollowUpQueueHoldInput = typeof FollowUpQueueHoldInput.Type;
+/**
+ * A recorded pause of a thread's follow-up queue: the drain sends nothing until Resume
+ * acknowledges its causes (a usage limit's cause also ends with the limit).
+ */
+export const FollowUpQueueHold = Schema.Struct({
+  reason: FollowUpQueueHoldReason,
+  detail: Schema.NullOr(Schema.String),
+  causeKeys: Schema.Array(Schema.String),
+  /** When its first cause was recorded. */
+  heldAt: IsoDateTime,
+});
+export type FollowUpQueueHold = typeof FollowUpQueueHold.Type;
+
+/**
+ * What a follow-up sends: the fields of the turn start it becomes. Composer source-control
+ * contexts are not among them: a turn start's are not passed on to the provider either.
+ */
+const FollowUpQueueEntryContentFields = {
+  text: Schema.String.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  tokenMode: Schema.optionalKey(AgentTokenMode),
+  threadReferences: Schema.optional(ThreadReferences),
+};
+
+/**
+ * One queued follow-up of a thread's server-owned queue. Its `messageId` becomes the user
+ * message of the turn it starts, so a client that queued it can tell when it was sent.
+ */
+export const QueuedFollowUp = Schema.Struct({
+  messageId: MessageId,
+  ...FollowUpQueueEntryContentFields,
+  /** Stored attachments (ids), as a dispatched turn start carries them. */
+  attachments: ChatAttachments,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  /** Raised by every change of the entry; edits and dispatches name the revision they saw. */
+  revision: PositiveInt,
+  status: FollowUpQueueEntryStatus,
+  failure: Schema.optional(FollowUpQueueEntryFailure),
+  author: FollowUpQueueEntryAuthor,
+});
+export type QueuedFollowUp = typeof QueuedFollowUp.Type;
+
+/** A thread's server-owned follow-up queue, head first. Absent while empty. */
+export const ThreadFollowUpQueue = Schema.Struct({
+  entries: Schema.Array(QueuedFollowUp),
+  hold: Schema.NullOr(FollowUpQueueHold),
+});
+export type ThreadFollowUpQueue = typeof ThreadFollowUpQueue.Type;
+
+/** What a thread shell shows of its follow-up queue while it is non-empty. */
+export const ThreadFollowUpQueueShell = Schema.Struct({
+  count: PositiveInt,
+  hold: Schema.NullOr(FollowUpQueueHold),
+  /** Whether the head can be sent (`queued`) or waits for the user (`failed`) or a steer. */
+  headStatus: FollowUpQueueEntryStatus,
+  /** The head's text, cut to `FOLLOW_UP_QUEUE_HEAD_PREVIEW_MAX_CHARS` characters. */
+  headPreview: Schema.String,
+});
+export type ThreadFollowUpQueueShell = typeof ThreadFollowUpQueueShell.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -1126,6 +1249,11 @@ export const OrchestrationThread = Schema.Struct({
    * carries it; clients read the summary (`OrchestrationThreadShell.pullRequestWatches`).
    */
   pullRequestWatchState: Schema.optional(ThreadPullRequestWatches),
+  /**
+   * The server-owned follow-up queue, full entries: the command read model, thread detail and
+   * the thread window carry it, never shells. Absent while empty and from older servers.
+   */
+  followUpQueue: Schema.optional(ThreadFollowUpQueue),
   /**
    * Hidden from every live view. A trashed thread also carries `trashedAt` and keeps
    * its history and assets; without `trashedAt` the deletion is permanent.
@@ -1231,6 +1359,12 @@ export const OrchestrationThreadShell = Schema.Struct({
    * within a day, so shells of other threads do not grow. Absent from older servers.
    */
   pullRequestWatches: Schema.optionalKey(ThreadPullRequestWatchShell),
+  /**
+   * The server-owned follow-up queue's summary: present only while it holds an entry, so shells
+   * of other threads do not grow. Absent from older servers. (Thread detail carries the
+   * entries as `followUpQueue`.)
+   */
+  followUpQueueSummary: Schema.optionalKey(ThreadFollowUpQueueShell),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
@@ -2025,6 +2159,7 @@ export const ServerWakeSource = Schema.Literals([
   "delegation-return",
   "pull-request-watch",
   "goal-continuation",
+  "follow-up-queue",
 ]);
 export type ServerWakeSource = typeof ServerWakeSource.Type;
 
@@ -2105,20 +2240,6 @@ export const SERVER_MINTED_MESSAGE_ID_PREFIXES: ReadonlyArray<string> = [
   GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
 ];
 
-/** How many other threads one user message may mention for its agent to read. */
-export const MAX_THREAD_REFERENCES_PER_MESSAGE = 4;
-
-/**
- * Threads a user message mentions (`@thread:<id>` chips). The server appends a
- * bounded excerpt of each to the provider input, never to the stored message.
- * Only the composer sets it: Agent Control and other server-built turns never
- * do, so a mention cannot widen what an agent may read.
- */
-export const ThreadReferences = Schema.Array(ThreadId).check(
-  Schema.isMaxLength(MAX_THREAD_REFERENCES_PER_MESSAGE),
-);
-export type ThreadReferences = typeof ThreadReferences.Type;
-
 /**
  * Asks the node to refuse this `thread.turn.start` with `modelSwitchBlockedByBackgroundWork`,
  * recording nothing, when its model switch would end native background tasks the thread's
@@ -2136,9 +2257,21 @@ const KeepBackgroundWork = Schema.optional(Schema.Literal(true));
  */
 const StopBackgroundWork = Schema.optional(Schema.Literal(true));
 
+/**
+ * Server-only (the follow-up queue drain): the turn start sends the queue's head, which must
+ * still be this entry at this revision. The entry leaves the queue in the same event batch, so
+ * it is never both queued and sent. Never part of `ClientThreadTurnStartCommand`.
+ */
+export const FollowUpQueueDispatch = Schema.Struct({
+  messageId: MessageId,
+  revision: PositiveInt,
+});
+export type FollowUpQueueDispatch = typeof FollowUpQueueDispatch.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   restartContinuationGuard: Schema.optional(RestartContinuationGuard),
+  queueDispatch: Schema.optional(FollowUpQueueDispatch),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Reject retired recall requests instead of silently stripping their context.
   projectMemory: Schema.optional(Schema.Never),
@@ -2243,6 +2376,138 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  /**
+   * A person's Stop: it also holds the thread's follow-up queue (`interrupted`), in the same
+   * event batch, so nothing queued starts after it. Agent Control interrupts leave it out.
+   */
+  holdQueue: Schema.optional(Schema.Literal(true)),
+  createdAt: IsoDateTime,
+});
+
+/** The fields a client sends to queue a follow-up; attachments differ by direction. */
+const FollowUpQueueEntryInputFields = {
+  messageId: MessageId,
+  ...FollowUpQueueEntryContentFields,
+  /** Queues it as failed (a device queue's entry whose delivery is unknown): never sent by itself. */
+  failure: Schema.optional(FollowUpQueueEntryFailure),
+};
+const FollowUpQueueAddFields = {
+  type: Schema.Literal("thread.queue.add"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  /** Tail by default. */
+  position: Schema.optional(Schema.Literals(["tail", "head"])),
+  /** Also holds the queue (a device queue's own hold when it moves to the node). */
+  hold: Schema.optional(FollowUpQueueHoldInput),
+  createdAt: IsoDateTime,
+};
+/**
+ * Queues a follow-up of the thread. Idempotent on `entry.messageId`: an id already queued,
+ * already a message of the thread, or already steered succeeds without a change.
+ */
+export const ThreadQueueAddCommand = Schema.Struct({
+  ...FollowUpQueueAddFields,
+  entry: Schema.Struct({ ...FollowUpQueueEntryInputFields, attachments: ChatAttachments }),
+  /** Server-only: who queued it (a client always queues as the user). */
+  author: Schema.optional(FollowUpQueueEntryAuthor),
+  /** Server-only: normalization found `entry.messageId` already a message of the thread. */
+  alreadySent: Schema.optional(Schema.Literal(true)),
+});
+export type ThreadQueueAddCommand = typeof ThreadQueueAddCommand.Type;
+const ClientThreadQueueAddCommand = Schema.Struct({
+  ...FollowUpQueueAddFields,
+  entry: Schema.Struct({ ...FollowUpQueueEntryInputFields, attachments: UploadChatAttachments }),
+});
+
+const FollowUpQueueEditFields = {
+  type: Schema.Literal("thread.queue.edit"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  /** The entry's revision the edit was made on; a newer one refuses it. */
+  expectedRevision: PositiveInt,
+  ...FollowUpQueueEntryContentFields,
+  /**
+   * The entry's stored attachments that stay, by id (absent: none); `attachments` adds new ones
+   * after them.
+   */
+  keptAttachmentIds: Schema.optional(
+    Schema.Array(ChatAttachmentId).check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS)),
+  ),
+  createdAt: IsoDateTime,
+};
+/** Replaces what one queued entry sends; its place, status and author stay. */
+export const ThreadQueueEditCommand = Schema.Struct({
+  ...FollowUpQueueEditFields,
+  attachments: ChatAttachments,
+});
+export type ThreadQueueEditCommand = typeof ThreadQueueEditCommand.Type;
+const ClientThreadQueueEditCommand = Schema.Struct({
+  ...FollowUpQueueEditFields,
+  attachments: UploadChatAttachments,
+});
+
+/** Moves an entry before another one (null: to the end). */
+const ThreadQueueMoveCommand = Schema.Struct({
+  type: Schema.Literal("thread.queue.move"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  beforeMessageId: Schema.NullOr(MessageId),
+  createdAt: IsoDateTime,
+});
+
+/** Removes entries; ids no longer queued are skipped. */
+const ThreadQueueRemoveCommand = Schema.Struct({
+  type: Schema.Literal("thread.queue.remove"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageIds: Schema.Array(MessageId).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(MAX_FOLLOW_UP_QUEUE_ENTRIES),
+  ),
+  createdAt: IsoDateTime,
+});
+
+/**
+ * Sends a queued entry into the running turn `expectedTurnId` as a steer. When that turn is no
+ * longer running the entry stays queued and goes as the next turn.
+ */
+const ThreadQueueSteerCommand = Schema.Struct({
+  type: Schema.Literal("thread.queue.steer"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  expectedTurnId: TurnId,
+  createdAt: IsoDateTime,
+});
+
+/** The Pause button: holds the queue (`paused`) until Resume. */
+const ThreadQueueHoldCommand = Schema.Struct({
+  type: Schema.Literal("thread.queue.hold"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
+/**
+ * Resume: releases the hold's causes the client showed. A cause recorded since stays held, so
+ * the user always sees why the queue waits before it sends.
+ */
+const ThreadQueueResumeCommand = Schema.Struct({
+  type: Schema.Literal("thread.queue.resume"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  acknowledgeCauseKeys: Schema.Array(Schema.String).check(Schema.isMaxLength(64)),
+  createdAt: IsoDateTime,
+});
+
+/** A failed entry is queued again. */
+const ThreadQueueRetryCommand = Schema.Struct({
+  type: Schema.Literal("thread.queue.retry"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
   createdAt: IsoDateTime,
 });
 
@@ -2516,6 +2781,14 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadTurnStartCommand,
   ThreadTurnSteerCommand,
   ThreadTurnInterruptCommand,
+  ThreadQueueAddCommand,
+  ThreadQueueEditCommand,
+  ThreadQueueMoveCommand,
+  ThreadQueueRemoveCommand,
+  ThreadQueueSteerCommand,
+  ThreadQueueHoldCommand,
+  ThreadQueueResumeCommand,
+  ThreadQueueRetryCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -2562,6 +2835,14 @@ export const ClientOrchestrationCommand = Schema.Union([
   ClientThreadTurnStartCommand,
   ClientThreadTurnSteerCommand,
   ThreadTurnInterruptCommand,
+  ClientThreadQueueAddCommand,
+  ClientThreadQueueEditCommand,
+  ThreadQueueMoveCommand,
+  ThreadQueueRemoveCommand,
+  ThreadQueueSteerCommand,
+  ThreadQueueHoldCommand,
+  ThreadQueueResumeCommand,
+  ThreadQueueRetryCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -2786,6 +3067,19 @@ const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
 export type ThreadPullRequestWatchUpdateCommand = typeof ThreadPullRequestWatchUpdateCommand.Type;
 
 /**
+ * Server-only (the follow-up queue drain): records a hold the node itself causes (a restart, a
+ * failed start of a sent entry, a Claude resume review). Merged into the current hold; a no-op
+ * while the queue is empty or the hold already covers its causes.
+ */
+const ThreadQueueHoldRecordCommand = Schema.Struct({
+  type: Schema.Literal("thread.queue.hold.record"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  hold: FollowUpQueueHoldInput,
+  createdAt: IsoDateTime,
+});
+
+/**
  * Server-originated only (`threads.fork`). Publishes a fork atomically: optional new worktree
  * record, the thread with "forked" lineage, its inherited history (fresh ids, original order and
  * timestamps), the `thread.forked` provenance activity, and the worktree attachment.
@@ -2852,6 +3146,7 @@ const InternalOrchestrationCommand = Schema.Union([
   WorktreePullRequestsUpdateCommand,
   WorktreeRelocateCommand,
   ThreadPullRequestWatchUpdateCommand,
+  ThreadQueueHoldRecordCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -2885,6 +3180,13 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.goal-updated",
   "thread.goal-cleared",
   "thread.pull-request-watch-updated",
+  "thread.queue-entry-added",
+  "thread.queue-entry-edited",
+  "thread.queue-reordered",
+  "thread.queue-entries-removed",
+  "thread.queue-entry-failed",
+  "thread.queue-held",
+  "thread.queue-released",
   "thread.context-handoff-requested",
   "thread.message-sent",
   "thread.turn-steer-requested",
@@ -3109,6 +3411,69 @@ export const ThreadPullRequestWatchUpdatedPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 export type ThreadPullRequestWatchUpdatedPayload = typeof ThreadPullRequestWatchUpdatedPayload.Type;
+
+/**
+ * Follow-up queue events. Only `added` and `edited` carry an entry (the full entry, so
+ * projecting is a plain replace); order, removal and holds carry ids, so no event carries the
+ * whole queue. None of them is thread activity: the thread's `updatedAt` stays.
+ */
+export const ThreadQueueEntryAddedPayload = Schema.Struct({
+  threadId: ThreadId,
+  entry: QueuedFollowUp,
+  /** The entry it was put before; null: at the end. */
+  beforeMessageId: Schema.NullOr(MessageId),
+});
+export type ThreadQueueEntryAddedPayload = typeof ThreadQueueEntryAddedPayload.Type;
+/** The entry after a change of its content or status. */
+export const ThreadQueueEntryEditedPayload = Schema.Struct({
+  threadId: ThreadId,
+  entry: QueuedFollowUp,
+});
+export type ThreadQueueEntryEditedPayload = typeof ThreadQueueEntryEditedPayload.Type;
+export const ThreadQueueReorderedPayload = Schema.Struct({
+  threadId: ThreadId,
+  /** Every queued entry, head first. */
+  order: Schema.Array(MessageId),
+  updatedAt: IsoDateTime,
+});
+export type ThreadQueueReorderedPayload = typeof ThreadQueueReorderedPayload.Type;
+export const FollowUpQueueRemovalReason = Schema.Literals([
+  "user",
+  "dispatched",
+  "steered",
+  "thread-ended",
+]);
+export type FollowUpQueueRemovalReason = typeof FollowUpQueueRemovalReason.Type;
+export const ThreadQueueEntriesRemovedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messageIds: Schema.Array(MessageId),
+  reason: FollowUpQueueRemovalReason,
+  updatedAt: IsoDateTime,
+});
+export type ThreadQueueEntriesRemovedPayload = typeof ThreadQueueEntriesRemovedPayload.Type;
+export const ThreadQueueEntryFailedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  /** The entry's revision after the failure. */
+  revision: PositiveInt,
+  failure: FollowUpQueueEntryFailure,
+  updatedAt: IsoDateTime,
+});
+export type ThreadQueueEntryFailedPayload = typeof ThreadQueueEntryFailedPayload.Type;
+/** The queue's hold after a cause was recorded or released (the whole hold). */
+export const ThreadQueueHeldPayload = Schema.Struct({
+  threadId: ThreadId,
+  hold: FollowUpQueueHold,
+  updatedAt: IsoDateTime,
+});
+export type ThreadQueueHeldPayload = typeof ThreadQueueHeldPayload.Type;
+/** The hold ended; it covered these causes. */
+export const ThreadQueueReleasedPayload = Schema.Struct({
+  threadId: ThreadId,
+  acknowledgedCauseKeys: Schema.Array(Schema.String),
+  updatedAt: IsoDateTime,
+});
+export type ThreadQueueReleasedPayload = typeof ThreadQueueReleasedPayload.Type;
 
 export const ThreadMessageSentPayload = Schema.Struct({
   threadId: ThreadId,
@@ -3524,6 +3889,41 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.pull-request-watch-updated"),
     payload: ThreadPullRequestWatchUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.queue-entry-added"),
+    payload: ThreadQueueEntryAddedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.queue-entry-edited"),
+    payload: ThreadQueueEntryEditedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.queue-reordered"),
+    payload: ThreadQueueReorderedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.queue-entries-removed"),
+    payload: ThreadQueueEntriesRemovedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.queue-entry-failed"),
+    payload: ThreadQueueEntryFailedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.queue-held"),
+    payload: ThreadQueueHeldPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.queue-released"),
+    payload: ThreadQueueReleasedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

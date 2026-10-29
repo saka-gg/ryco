@@ -59,7 +59,8 @@ export function threadSettlementInput(
     latestUserMessageAt: latestUserMessageAt(thread),
     hasPendingApprovals: pendingRequests.hasPendingApprovals,
     hasPendingUserInput: pendingRequests.hasPendingUserInput,
-    hasLocalQueuedMessage: false,
+    // The server-owned follow-up queue: a thread with queued follow-ups never settles.
+    hasLocalQueuedMessage: (thread.followUpQueue?.entries.length ?? 0) > 0,
     deliveryUnknown: false,
     pinned: false,
     backgroundLiveness: null,
@@ -100,7 +101,7 @@ export function threadShellSettlementInput(
     latestUserMessageAt: shell.latestUserMessageAt,
     hasPendingApprovals: shell.hasPendingApprovals,
     hasPendingUserInput: shell.hasPendingUserInput,
-    hasLocalQueuedMessage: false,
+    hasLocalQueuedMessage: shell.followUpQueueSummary !== undefined,
     deliveryUnknown: false,
     pinned: false,
     backgroundLiveness: shell.backgroundLiveness ?? null,
