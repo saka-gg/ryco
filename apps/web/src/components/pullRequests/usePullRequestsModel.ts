@@ -73,6 +73,11 @@ export function usePullRequestsModel(input: {
    * (the workspace panel) skips them; the selection reads its own detail.
    */
   readonly includeList?: boolean | undefined;
+  /**
+   * The selected change request's row from another list (All repositories), painted
+   * before its detail loads. Absent: the row from this repository's list.
+   */
+  readonly summary?: ChangeRequest | null | undefined;
 }): PullRequestsModel {
   const { repository, search } = input;
   const listEnabled = repository !== null && (input.includeList ?? true);
@@ -173,7 +178,14 @@ export function usePullRequestsModel(input: {
   // (waiting / unavailable) must never read `#N` through some other checkout.
   const selectedNumber = repository === null ? null : (search.pr ?? null);
   const reference = selectedNumber === null ? null : String(selectedNumber);
-  const summary = selectedNumber === null ? null : (list.byNumber.get(selectedNumber) ?? null);
+  const summary =
+    selectedNumber === null
+      ? null
+      : input.summary !== undefined
+        ? input.summary?.number === selectedNumber
+          ? input.summary
+          : null
+        : (list.byNumber.get(selectedNumber) ?? null);
   const detail = useSourceControlChangeRequestDetail(
     {
       environmentId,

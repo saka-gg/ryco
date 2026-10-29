@@ -1,5 +1,7 @@
 import type { ChangeRequest } from "@ryco/contracts";
 import type { ChangeRequestListGroupKey } from "@ryco/client-runtime/state/pull-request-review";
+import { getChangeRequestHostCapabilities } from "@ryco/shared/changeRequestHostCapabilities";
+import { resolveChangeRequestPresentationForKind } from "@ryco/shared/sourceControl";
 import { ChevronDownIcon } from "lucide-react";
 import {
   useCallback,
@@ -25,6 +27,10 @@ import { Button } from "../../ui/button";
 import { Skeleton } from "../../ui/skeleton";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { usePullRequestAgentHandoff } from "../agentHandoff";
+import {
+  crossRepositoryNotesMissRepositories,
+  type CrossRepositoryRow,
+} from "../crossRepository/crossRepositoryList.logic";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
 import { usePullRequestsLayoutStore } from "../pullRequestsLayoutStore";
 import { resolvePullRequestsStateFilter } from "../pullRequestsSearch";
@@ -65,13 +71,23 @@ interface InboxSection {
   /** Rows show author and size instead of readiness (the group says it already). */
   readonly reviewer: boolean;
   readonly items: ReadonlyArray<PullRequestListItem<ChangeRequest>>;
-  readonly readiness: ReadonlyMap<number, PullRequestReadiness>;
+  /** By row key (`rowKeyOf`). */
+  readonly readiness: ReadonlyMap<string, PullRequestReadiness>;
 }
 
 const ROW_BUTTON_SELECTOR = `[${PULL_REQUEST_ROW_BUTTON_ATTRIBUTE}]`;
 
-function rowNumber(button: Element): number {
-  return Number(button.getAttribute(PULL_REQUEST_ROW_BUTTON_ATTRIBUTE));
+/**
+ * A row's identity in the list: its number on one repository's list, `repository#number`
+ * (`CrossRepositoryRow.rowKey`) across repositories, where numbers collide.
+ */
+function rowKeyOf(entry: ChangeRequest): string {
+  const rowKey = (entry as Partial<Pick<CrossRepositoryRow, "rowKey">>).rowKey;
+  return typeof rowKey === "string" ? rowKey : String(entry.number);
+}
+
+function buttonRowKey(button: Element): string {
+  return button.getAttribute(PULL_REQUEST_ROW_BUTTON_ATTRIBUTE) ?? "";
 }
 
 /** Row buttons a person can reach: folded groups are inert. */
@@ -81,8 +97,8 @@ function visibleRowButtons(content: HTMLElement): HTMLButtonElement[] {
   );
 }
 
-function findRow(content: HTMLElement, number: number): HTMLElement | null {
-  const row = content.querySelector<HTMLElement>(`[data-pr-row="${number}"]`);
+function findRow(content: HTMLElement, rowKey: string): HTMLElement | null {
+  const row = content.querySelector<HTMLElement>(`[data-pr-row="${CSS.escape(rowKey)}"]`);
   return row && row.closest("[inert]") === null ? row : null;
 }
 
@@ -120,10 +136,19 @@ export function PullRequestInbox({
   readonly header?: ReactNode;
 }) {
   const { variant, search, onFocusSearch } = props;
-  const { model, nav, repository, repositoryStatus, selectionMotion } = usePullRequestsPage();
+  const { model, nav, repository, repositoryStatus, selectionMotion, crossRepository } =
+    usePullRequestsPage();
+  const cross = crossRepository ?? null;
+  const crossMode = cross !== null;
   const { list } = model;
-  const selected = nav.search.pr ?? null;
-  const grouped = list.involvementSupported;
+  const selected = crossMode
+    ? cross.selectedKey
+    : nav.search.pr === undefined
+      ? null
+      : String(nav.search.pr);
+  // All repositories always groups: every row there involves the viewer.
+  const grouped = crossMode || list.involvementSupported;
+  const isLoading = crossMode ? cross.isLoading : list.isLoading;
   const density: PullRequestRowDensity = variant === "fill" ? "wide" : "compact";
   const providerName = model.provider?.name ?? "the web";
   const foldedGroups = usePullRequestsLayoutStore((state) => state.foldedGroups);
@@ -132,7 +157,35 @@ export function PullRequestInbox({
   const viewerLogin = list.viewerLogin;
   const listReadiness = model.capabilities.listReadiness;
 
+  const crossGroups = cross?.groups ?? null;
   const sections = useMemo<ReadonlyArray<InboxSection>>(() => {
+    if (crossGroups !== null) {
+      return crossGroups.map((group) => ({
+        key: group.key,
+        label: group.label,
+        count: group.entries.length,
+        reviewer: group.key === "needs-your-review",
+        items: group.entries.map((row) => ({
+          kind: "row" as const,
+          key: `pr:${row.rowKey}`,
+          entry: row,
+          spine: null,
+        })),
+        readiness: new Map(
+          group.entries.map(
+            (row) =>
+              [
+                row.rowKey,
+                describePullRequestReadiness(row, {
+                  // An authored row is the viewer's own, whichever account read it.
+                  viewerLogin: row.involvements.has("authored") ? row.author : row.viewerLogin,
+                  readiness: getChangeRequestHostCapabilities(row.provider).listReadiness,
+                }),
+              ] as const,
+          ),
+        ),
+      }));
+    }
     // Stack feet read every loaded layer, including ones a filter hides.
     const allRows = [...list.byNumber.values()];
     return list.groups.map((group) => {
@@ -140,7 +193,7 @@ export function PullRequestInbox({
         group.entries.map(
           (entry) =>
             [
-              entry.number,
+              String(entry.number),
               describePullRequestReadiness(entry, { viewerLogin, readiness: listReadiness }),
             ] as const,
         ),
@@ -153,7 +206,7 @@ export function PullRequestInbox({
         items: buildPullRequestListItems(group.entries, {
           isLandable: (entry) =>
             (
-              readiness.get(entry.number) ??
+              readiness.get(String(entry.number)) ??
               describePullRequestReadiness(entry, { readiness: listReadiness })
             ).landable,
           allRows,
@@ -162,7 +215,7 @@ export function PullRequestInbox({
         readiness,
       };
     });
-  }, [detailStack, grouped, list.byNumber, list.groups, listReadiness, viewerLogin]);
+  }, [crossGroups, detailStack, grouped, list.byNumber, list.groups, listReadiness, viewerLogin]);
 
   const serverRows = search.server.results;
   const serverReadiness = useMemo(
@@ -171,7 +224,7 @@ export function PullRequestInbox({
         serverRows.map(
           (entry) =>
             [
-              entry.number,
+              String(entry.number),
               describePullRequestReadiness(entry, { viewerLogin, readiness: listReadiness }),
             ] as const,
         ),
@@ -185,17 +238,17 @@ export function PullRequestInbox({
   );
 
   // Roving focus: Tab lands on the selected row when it is visible, else the first.
-  const visibleNumbers = useMemo(() => {
-    const numbers: number[] = [];
+  const visibleKeys = useMemo(() => {
+    const keys: string[] = [];
     for (const section of sections) {
       if (isFolded(section.key)) continue;
-      for (const item of section.items) if (item.kind === "row") numbers.push(item.entry.number);
+      for (const item of section.items) if (item.kind === "row") keys.push(rowKeyOf(item.entry));
     }
-    for (const entry of serverRows) numbers.push(entry.number);
-    return numbers;
+    for (const entry of serverRows) keys.push(String(entry.number));
+    return keys;
   }, [isFolded, sections, serverRows]);
   const tabStop =
-    selected !== null && visibleNumbers.includes(selected) ? selected : (visibleNumbers[0] ?? null);
+    selected !== null && visibleKeys.includes(selected) ? selected : (visibleKeys[0] ?? null);
 
   // ── Motion: FLIP + enter for rows, and the selection plate ─────────
   const orderSignature = useMemo(
@@ -212,7 +265,7 @@ export function PullRequestInbox({
   const { listRef: contentRef, gateRef: motionGateRef } = useInboxListMotion({
     // The first paint of a list (and every reload of it) stays still; only
     // later changes move.
-    enabled: !list.isLoading && hasRows,
+    enabled: !isLoading && hasRows,
     orderSignature,
   });
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -283,7 +336,7 @@ export function PullRequestInbox({
 
   // Keep the selected row in view (J/K from the page, links, the reader), and
   // keep keyboard focus on it when focus was already in the rows.
-  const revealedRef = useRef<number | null>(null);
+  const revealedRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
     const content = contentRef.current;
@@ -317,11 +370,15 @@ export function PullRequestInbox({
 
   // Stable across URL changes (nav's actions are), so memoized rows only
   // re-render for their own props.
-  const { selectPullRequest } = nav;
-  const select = useCallback(
-    (number: number) => selectPullRequest(number, { push: true, via: "list" }),
-    [selectPullRequest],
+  const { selectPullRequest, selectCrossRepositoryRow } = nav;
+  const selectKey = useCallback(
+    (rowKey: string, options: { readonly push?: boolean }) =>
+      crossMode
+        ? selectCrossRepositoryRow(rowKey, { ...options, via: "list" })
+        : selectPullRequest(Number(rowKey), { ...options, via: "list" }),
+    [crossMode, selectCrossRepositoryRow, selectPullRequest],
   );
+  const select = useCallback((rowKey: string) => selectKey(rowKey, { push: true }), [selectKey]);
 
   useImperativeHandle(
     ref,
@@ -331,14 +388,14 @@ export function PullRequestInbox({
         if (!content) return;
         const buttons = visibleRowButtons(content);
         const target =
-          buttons.find((button) => selected !== null && rowNumber(button) === selected) ??
+          buttons.find((button) => selected !== null && buttonRowKey(button) === selected) ??
           buttons[0];
         if (target) focusButton(target);
       },
       openFirst: () => {
         const content = contentRef.current;
         const first = content ? visibleRowButtons(content)[0] : undefined;
-        if (first) select(rowNumber(first));
+        if (first) select(buttonRowKey(first));
       },
     }),
     [contentRef, focusButton, select, selected],
@@ -375,7 +432,7 @@ export function PullRequestInbox({
     if (!target) return;
     // Beside the reader the arrows move the selection (like J/K); in the
     // drawer and the full-page list they move focus and Enter opens.
-    if (variant === "docked") nav.selectPullRequest(rowNumber(target), { via: "list" });
+    if (variant === "docked") selectKey(buttonRowKey(target), {});
     focusButton(target);
   };
 
@@ -417,33 +474,70 @@ export function PullRequestInbox({
     canCheckout: model.capabilities.checkout,
   } as const;
 
+  // Across repositories each row names its repository and host, reads as its own account,
+  // and checks out only through the page's checkout (the selected row's).
+  const crossRowProps = (entry: ChangeRequest) => {
+    const row = entry as CrossRepositoryRow;
+    const ownCheckout = repository !== null && row.checkout?.key === repository.key;
+    return {
+      rowKey: row.rowKey,
+      repositoryLabel: row.repositoryLabel,
+      viewerLogin: row.involvements.has("authored") ? (row.author ?? null) : row.viewerLogin,
+      providerName: resolveChangeRequestPresentationForKind(row.provider).providerName,
+      onCheckoutWorktree: ownCheckout ? checkoutWorktree : undefined,
+      canCheckout: ownCheckout && getChangeRequestHostCapabilities(row.provider).checkout,
+    };
+  };
+
   const renderItems = (
     items: ReadonlyArray<PullRequestListItem<ChangeRequest>>,
-    readiness: ReadonlyMap<number, PullRequestReadiness>,
+    readiness: ReadonlyMap<string, PullRequestReadiness>,
     reviewer: boolean,
   ) =>
-    items.map((item) =>
-      item.kind === "row" ? (
+    items.map((item) => {
+      if (item.kind !== "row") {
+        return <StackFoot key={item.key} itemKey={item.key} foot={item.foot} />;
+      }
+      const rowKey = rowKeyOf(item.entry);
+      return (
         <PullRequestRow
           key={item.key}
           {...rowProps}
+          {...(crossMode ? crossRowProps(item.entry) : {})}
           entry={item.entry}
           itemKey={item.key}
-          selected={item.entry.number === selected}
-          tabStop={item.entry.number === tabStop}
-          readiness={readiness.get(item.entry.number) ?? FALLBACK_READINESS}
+          selected={rowKey === selected}
+          tabStop={rowKey === tabStop}
+          readiness={readiness.get(rowKey) ?? FALLBACK_READINESS}
           reviewer={reviewer}
           spine={item.spine}
         />
-      ) : (
-        <StackFoot key={item.key} itemKey={item.key} foot={item.foot} />
-      ),
-    );
+      );
+    });
 
   let body: ReactNode;
   // Rows kept through a rate-limit pause get one line above them saying so.
   let showsRows = false;
-  if (repository === null || repositoryStatus.kind !== "ready") {
+  if (crossMode) {
+    body = cross.isLoading ? (
+      <InboxSkeleton grouped />
+    ) : sections.length > 0 ? (
+      sections.map((section) => (
+        <InboxGroup
+          key={section.key}
+          label={section.label}
+          count={section.count}
+          folded={isFolded(section.key)}
+          onToggle={() => toggleGroupFolded(section.key)}
+          onSettled={settleLayout}
+        >
+          {renderItems(section.items, section.readiness, section.reviewer)}
+        </InboxGroup>
+      ))
+    ) : (
+      <EmptyList query={search.query} serverError={null} />
+    );
+  } else if (repository === null || repositoryStatus.kind !== "ready") {
     body =
       repositoryStatus.kind === "ready" ? (
         <ListMessage title="Choose a repository" />
@@ -502,9 +596,9 @@ export function PullRequestInbox({
             {...rowProps}
             entry={entry}
             itemKey={`pr:${entry.number}`}
-            selected={entry.number === selected}
-            tabStop={entry.number === tabStop}
-            readiness={serverReadiness.get(entry.number) ?? FALLBACK_READINESS}
+            selected={String(entry.number) === selected}
+            tabStop={String(entry.number) === tabStop}
+            readiness={serverReadiness.get(String(entry.number)) ?? FALLBACK_READINESS}
             reviewer={false}
             spine={null}
           />
@@ -519,7 +613,7 @@ export function PullRequestInbox({
     <div
       ref={scrollerRef}
       className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
-      aria-busy={list.isLoading || undefined}
+      aria-busy={isLoading || undefined}
     >
       {props.header}
       <InboxMotionContext.Provider value={motionGateRef}>
@@ -674,14 +768,21 @@ const STATE_EMPTY_TITLE = {
 
 /** Nothing to show: say why (query, filters, or simply none) and offer the way back. */
 function EmptyList(props: { readonly query: string; readonly serverError: string | null }) {
-  const { nav, model } = usePullRequestsPage();
-  const filtered = pullRequestFilterChips(nav.search, model.list.labels).length > 0;
+  const { nav, model, crossRepository } = usePullRequestsPage();
+  const labels = crossRepository?.labels ?? model.list.labels;
+  const filtered = pullRequestFilterChips(nav.search, labels).length > 0;
+  const state = resolvePullRequestsStateFilter(nav.search);
   const title =
     props.query.length > 0
       ? `Nothing matches “${props.query}”`
       : filtered
         ? "Nothing matches these filters"
-        : STATE_EMPTY_TITLE[resolvePullRequestsStateFilter(nav.search)];
+        : crossRepository && state === "open"
+          ? // The notes above say what could not be read; don't claim the whole answer.
+            crossRepositoryNotesMissRepositories(crossRepository.notes)
+            ? "Nothing needs you in the repositories Ryco could read"
+            : "Nothing needs you right now"
+          : STATE_EMPTY_TITLE[state];
   return (
     <ListMessage title={title} detail={props.serverError}>
       {filtered ? (

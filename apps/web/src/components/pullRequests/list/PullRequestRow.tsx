@@ -55,6 +55,13 @@ const READINESS_TONE_CLASS: Record<PullRequestReadinessTone, string> = {
 export interface PullRequestRowProps {
   readonly entry: ChangeRequest;
   readonly itemKey: string;
+  /**
+   * The row's identity in the list (`data-pr-row`, the button attribute, `onSelect`):
+   * the number on one repository's list (default), `repository#number` across repositories.
+   */
+  readonly rowKey?: string | undefined;
+  /** `acme/app` before `#12`, on a list that spans repositories. */
+  readonly repositoryLabel?: string | undefined;
   readonly selected: boolean;
   /** The one row Tab lands on (roving focus): the selected row, else the first. */
   readonly tabStop: boolean;
@@ -67,7 +74,7 @@ export interface PullRequestRowProps {
   readonly viewerLogin: string | null;
   /** The host's name, for "Open on GitHub". */
   readonly providerName: string;
-  readonly onSelect: (number: number) => void;
+  readonly onSelect: (rowKey: string) => void;
   readonly onCopyLink: (url: string) => void;
   /** Check this row's pull request out into a worktree; absent when unavailable. */
   readonly onCheckoutWorktree?: ((entry: ChangeRequest) => void) | undefined;
@@ -77,6 +84,7 @@ export interface PullRequestRowProps {
 
 export const PullRequestRow = memo(function PullRequestRow(props: PullRequestRowProps) {
   const { entry, readiness, spine } = props;
+  const rowKey = props.rowKey ?? String(entry.number);
   const overall = summarizeChangeRequestChecks(entry.checkRollup).overall;
   const ownRow =
     props.viewerLogin !== null &&
@@ -98,21 +106,25 @@ export const PullRequestRow = memo(function PullRequestRow(props: PullRequestRow
         // The list motion hook tracks rows (FLIP, enter) by this key; the
         // selection plate measures the same element.
         {...{ [INBOX_ROW_KEY_ATTRIBUTE]: props.itemKey }}
-        data-pr-row={entry.number}
+        data-pr-row={rowKey}
       >
         <button
           type="button"
-          {...{ [PULL_REQUEST_ROW_BUTTON_ATTRIBUTE]: entry.number }}
+          {...{ [PULL_REQUEST_ROW_BUTTON_ATTRIBUTE]: rowKey }}
           tabIndex={props.tabStop ? 0 : -1}
           aria-current={props.selected ? "true" : undefined}
-          aria-label={rowAccessibleName(entry, props.reviewer ? null : readiness.label)}
+          aria-label={rowAccessibleName(
+            entry,
+            props.reviewer ? null : readiness.label,
+            props.repositoryLabel,
+          )}
           data-stack-edge={spine?.edge}
           className={cn(
             ROW_GRID_CLASS,
             "group/pr-row relative rounded-lg text-left outline-hidden transition-colors duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
             props.selected ? "" : "hover:bg-accent/55",
           )}
-          onClick={() => props.onSelect(entry.number)}
+          onClick={() => props.onSelect(rowKey)}
         >
           {spine ? <StackSpine spine={spine} /> : null}
           <span className="relative flex items-center justify-center">
@@ -136,6 +148,11 @@ export const PullRequestRow = memo(function PullRequestRow(props: PullRequestRow
             <CheckStateGlyph key={overall} overall={overall} className="size-3" />
           </span>
           <span className="col-span-2 flex min-w-0 items-center gap-1.5 text-xs leading-4 text-muted-foreground">
+            {props.repositoryLabel ? (
+              <span className="max-w-[45%] min-w-0 shrink truncate text-muted-foreground/70">
+                {props.repositoryLabel}
+              </span>
+            ) : null}
             <span className="shrink-0 text-muted-foreground/70 tabular-nums">#{entry.number}</span>
             {props.reviewer ? (
               <>
@@ -191,8 +208,15 @@ export const PullRequestRow = memo(function PullRequestRow(props: PullRequestRow
   );
 });
 
-function rowAccessibleName(entry: ChangeRequest, readinessLabel: string | null): string {
-  const parts = [entry.title, `#${entry.number}`];
+function rowAccessibleName(
+  entry: ChangeRequest,
+  readinessLabel: string | null,
+  repositoryLabel: string | undefined,
+): string {
+  const parts = [
+    entry.title,
+    repositoryLabel ? `${repositoryLabel} #${entry.number}` : `#${entry.number}`,
+  ];
   const state = changeRequestStateLabel(entry);
   if ((entry.state !== "open" || entry.isDraft) && state !== readinessLabel) parts.push(state);
   parts.push(readinessLabel ?? `by ${entry.author ?? "unknown"}`);

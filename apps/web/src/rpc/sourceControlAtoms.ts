@@ -91,6 +91,13 @@ const CHANGE_REQUEST_SEARCH_FAMILY = "changeRequests:search";
 const CHANGE_REQUEST_DETAIL_FAMILY = "changeRequests:detail";
 const WORKFLOW_RUNS_FAMILY = "workflows:runs";
 const WORKFLOW_JOBS_FAMILY = "workflows:jobs";
+/**
+ * Pull requests that need the viewer across a node's repositories. The reads
+ * live with the pull requests page (`involvedChangeRequestsQuery.ts`); they span
+ * checkouts, so a change request change on any checkout drops the
+ * environment's entries.
+ */
+export const CHANGE_REQUEST_INVOLVED_FAMILY = "changeRequests:involved";
 
 const ISSUE_LIST_STALE_TIME_MS = 60_000;
 const CHANGE_REQUEST_LIST_STALE_TIME_MS = 60_000;
@@ -245,7 +252,7 @@ export type QueryBinding<TInput, TData> = import("@ryco/client-runtime/rpc").Key
   SourceControlQueryState<TData>
 >;
 
-interface SourceControlQueryDefinition<TInput, TData> {
+export interface SourceControlQueryDefinition<TInput, TData> {
   readonly label: string;
   readonly staleTime: number;
   readonly gcTime?: number;
@@ -256,7 +263,8 @@ interface SourceControlQueryDefinition<TInput, TData> {
   readonly run: (input: TInput) => Promise<TData>;
 }
 
-function defineQuery<TInput, TData>(
+/** A read in the shared source-control registry (admission, lifecycle, fencing, invalidation). */
+export function defineQuery<TInput, TData>(
   definition: SourceControlQueryDefinition<TInput, TData>,
 ): QueryBinding<TInput, TData> {
   return defineKeyedQueryByInput(
@@ -1441,9 +1449,16 @@ function invalidateKeys(compositeKeys: ReadonlyArray<string | null>): void {
   }
 }
 
+/** The environment's pull requests across repositories (they span every checkout). */
+function invalidateInvolvedChangeRequests(environmentId: EnvironmentId | null | undefined): void {
+  if (environmentId) invalidateFamilies({ environmentId }, [CHANGE_REQUEST_INVOLVED_FAMILY]);
+}
+
 /** Every source-control read of a checkout (or environment, or all of them). */
 export function invalidateSourceControl(input?: SourceControlInvalidationFilter): void {
   invalidateFamilies(input ?? {}, null);
+  // A checkout filter skips reads that span checkouts.
+  if (input?.cwd) invalidateInvolvedChangeRequests(input.environmentId);
   detailCache.invalidate({
     environmentId: input?.environmentId ?? null,
     cwd: input?.cwd ?? null,
@@ -1475,6 +1490,7 @@ export function invalidateSourceControlAfterWorkflowRerun(
     CHANGE_REQUEST_LIST_FAMILY,
     CHANGE_REQUEST_SEARCH_FAMILY,
   ]);
+  if (filter.cwd) invalidateInvolvedChangeRequests(filter.environmentId);
 }
 
 /** Retries one job log (and nothing else). */
@@ -1605,6 +1621,7 @@ function refreshAfterChangeRequestMutation(
   ]);
   if (scope.lists) {
     invalidateFamilies(target, [CHANGE_REQUEST_LIST_FAMILY, CHANGE_REQUEST_SEARCH_FAMILY]);
+    invalidateInvolvedChangeRequests(target.environmentId);
   }
 }
 
@@ -1947,6 +1964,7 @@ export async function createChangeRequest(
     CHANGE_REQUEST_LIST_FAMILY,
     CHANGE_REQUEST_SEARCH_FAMILY,
   ]);
+  invalidateInvolvedChangeRequests(environmentId);
   return result;
 }
 

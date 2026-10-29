@@ -16,18 +16,21 @@ import { usePullRequestsPage } from "./PullRequestsPageContext";
  * itself is missing and no list says so, the reason and a picker live here.
  */
 export function PullRequestsEmptyReader() {
-  const { layout, repository, repositoryStatus, model } = usePullRequestsPage();
+  const { layout, repository, repositoryStatus, model, crossRepository } = usePullRequestsPage();
+  // All repositories lists across nodes; one repository's list otherwise.
+  const ordered = crossRepository?.ordered ?? model.list.ordered;
+  const listLoading = crossRepository?.isLoading ?? model.list.isLoading;
   const insetClass = usePullRequestsLeadingInsetClass(layout.leadingRegion === "reader", "pl-3");
   // A visible list already explains itself (empty, loading, repository
   // status); say each thing once.
   const listShown = layout.listVisible || layout.listFillsPage;
   const status = repositoryStatus.kind === "ready" ? null : repositoryStatus;
   const message =
-    status !== null || repository === null
+    status !== null || (repository === null && !crossRepository)
       ? null
-      : model.list.isLoading
+      : listLoading
         ? null
-        : model.list.ordered.length === 0
+        : ordered.length === 0
           ? listShown
             ? null
             : "No pull requests match."
@@ -45,7 +48,7 @@ export function PullRequestsEmptyReader() {
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
           <GitPullRequestIcon aria-hidden className="size-5 text-muted-foreground/40" />
           {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
-          {model.list.ordered.length > 0 ? (
+          {ordered.length > 0 ? (
             <p className="flex items-center gap-3 text-[11px] text-muted-foreground/70">
               <span className="inline-flex items-center gap-1">
                 <KeyHint>J</KeyHint>

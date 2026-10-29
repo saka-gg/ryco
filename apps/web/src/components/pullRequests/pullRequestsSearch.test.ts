@@ -92,4 +92,20 @@ describe("parsePullRequestsSearch", () => {
     expect(parsePullRequestsSearch({ pr: 12 })).toEqual({ pr: 12 });
     expect(resolvePullRequestsTab({ pr: 12 })).toBe("conversation");
   });
+
+  it("reads the all-repositories scope and keeps it across pull requests", () => {
+    expect(parsePullRequestsSearch({ scope: "all", env: "e", project: "p", pr: 3 })).toEqual({
+      scope: "all",
+      env: "e",
+      project: "p",
+      pr: 3,
+    });
+    expect(parsePullRequestsSearch({ scope: "foo" })).toEqual({});
+    expect(selectPullRequestSearch({ scope: "all", env: "e", pr: 3, tab: "files" }, 4)).toEqual({
+      scope: "all",
+      env: "e",
+      pr: 4,
+      tab: "files",
+    });
+  });
 });

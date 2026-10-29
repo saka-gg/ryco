@@ -188,6 +188,47 @@ function updatedMillis(entry: ChangeRequest): number {
 }
 
 /**
+ * The list's "only" and label filters, shared by one repository's list and the list
+ * across repositories; each says who the viewer is in its own terms.
+ */
+export function pullRequestListFilter<T extends ChangeRequest>(
+  search: Pick<PullRequestsSearch, "only" | "label">,
+  viewer: {
+    readonly isReviewRequested: (entry: T) => boolean;
+    readonly isOwn: (entry: T) => boolean;
+  },
+): (entry: T) => boolean {
+  const labelFilter = new Set(search.label ?? []);
+  return (entry) => {
+    if (search.only === "review" && !viewer.isReviewRequested(entry)) return false;
+    if (search.only === "mine" && !viewer.isOwn(entry)) return false;
+    if (
+      search.only === "failing" &&
+      summarizeChangeRequestChecks(entry.checkRollup).overall !== "failing"
+    ) {
+      return false;
+    }
+    return (
+      labelFilter.size === 0 || (entry.labels ?? []).some((label) => labelFilter.has(label.name))
+    );
+  };
+}
+
+/** "Recently updated" orders each group by last activity; readiness (or relevance) otherwise. */
+export function sortPullRequestGroups<T extends ChangeRequest>(
+  groups: ReadonlyArray<ChangeRequestListGroup<T>>,
+  search: Pick<PullRequestsSearch, "sort" | "q">,
+): ReadonlyArray<ChangeRequestListGroup<T>> {
+  if (resolvePullRequestsSort(search) !== "updated" || search.q) return groups;
+  return groups.map((group) => ({
+    ...group,
+    entries: group.entries.toSorted(
+      (left, right) => updatedMillis(right) - updatedMillis(left) || right.number - left.number,
+    ),
+  }));
+}
+
+/**
  * Groups and filters the merged list reads. `authoredList` names the viewer
  * (any row's author) and `reviewRequestedList` decides "Needs your review";
  * without involvement support everything lands in one group.
@@ -210,38 +251,19 @@ export function derivePullRequestsList(input: {
   const all = [...byNumber.values()];
   const viewerLogin = input.authoredList?.find((entry) => entry.author)?.author ?? null;
   const isReviewRequested = reviewRequestedPredicate(input.reviewRequestedList);
-  const labelFilter = new Set(search.label ?? []);
-  const filtered = all.filter((entry) => {
-    if (search.only === "review" && !isReviewRequested(entry)) return false;
-    if (search.only === "mine" && (viewerLogin === null || entry.author !== viewerLogin)) {
-      return false;
-    }
-    if (
-      search.only === "failing" &&
-      summarizeChangeRequestChecks(entry.checkRollup).overall !== "failing"
-    ) {
-      return false;
-    }
-    if (
-      labelFilter.size > 0 &&
-      !(entry.labels ?? []).some((label) => labelFilter.has(label.name))
-    ) {
-      return false;
-    }
-    return true;
-  });
-  let groups = rankChangeRequests(filtered, input.involvementSupported ? viewerLogin : null, {
-    isReviewRequested,
-    ...(search.q ? { query: search.q } : {}),
-  });
-  if (resolvePullRequestsSort(search) === "updated" && !search.q) {
-    groups = groups.map((group) => ({
-      ...group,
-      entries: group.entries.toSorted(
-        (left, right) => updatedMillis(right) - updatedMillis(left) || right.number - left.number,
-      ),
-    }));
-  }
+  const filtered = all.filter(
+    pullRequestListFilter(search, {
+      isReviewRequested,
+      isOwn: (entry) => viewerLogin !== null && entry.author === viewerLogin,
+    }),
+  );
+  let groups = sortPullRequestGroups(
+    rankChangeRequests(filtered, input.involvementSupported ? viewerLogin : null, {
+      isReviewRequested,
+      ...(search.q ? { query: search.q } : {}),
+    }),
+    search,
+  );
   // Stacks read as one unit (top layer first) in their most urgent group, and
   // `ordered` follows that display order.
   groups = arrangePullRequestStacks(groups);

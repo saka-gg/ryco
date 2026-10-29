@@ -18,11 +18,9 @@ const CHIP_CLASS =
  * motion, keeping its last chips on screen while it closes.
  */
 export function ActiveFilterChips() {
-  const { nav, model } = usePullRequestsPage();
-  const chips = useMemo(
-    () => pullRequestFilterChips(nav.search, model.list.labels),
-    [model.list.labels, nav.search],
-  );
+  const { nav, model, crossRepository } = usePullRequestsPage();
+  const labels = crossRepository?.labels ?? model.list.labels;
+  const chips = useMemo(() => pullRequestFilterChips(nav.search, labels), [labels, nav.search]);
   // The last chips shown, remembered during render, so the row closes on them.
   const [lastChips, setLastChips] = useState<ReadonlyArray<PullRequestFilterChip>>(chips);
   if (chips.length > 0 && chips !== lastChips) setLastChips(chips);

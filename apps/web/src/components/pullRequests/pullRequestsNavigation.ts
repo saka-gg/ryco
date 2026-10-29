@@ -1,3 +1,4 @@
+import type { CrossRepositoryListModel } from "./crossRepository/crossRepositoryList.logic";
 import type { PullRequestSelectionMotion, PullRequestsNavigation } from "./PullRequestsPageContext";
 import {
   resolvePullRequestsTab,
@@ -39,6 +40,18 @@ export interface PullRequestsNavigationDeps {
    * (`jobRevealToken`) for the Checks tab to land again.
    */
   readonly onRevealJob?: () => void;
+  /**
+   * All repositories' rows (`ordered` for J/K, `byKey` to select one, the selected key);
+   * null or absent on one repository's list.
+   */
+  readonly getCrossRepositoryRows?: () => Pick<
+    CrossRepositoryListModel,
+    "ordered" | "byKey" | "selectedKey"
+  > | null;
+  /** Remembers All repositories (`all`) or one repository (`null`) for the next visit. */
+  readonly rememberScope?: (scope: "all" | null) => void;
+  /** Opens a row whose repository is not in Ryco on its host. */
+  readonly openExternal?: (url: string) => void;
   readonly now?: () => number;
 }
 
@@ -120,11 +133,69 @@ export function createPullRequestsNavigation(
     );
   };
 
+  const selectCrossRepositoryRow: PullRequestsNavigation["selectCrossRepositoryRow"] = (
+    rowKey,
+    options,
+  ) => {
+    deps.closeDrawer();
+    const rows = deps.getCrossRepositoryRows?.() ?? null;
+    const row = rows?.byKey.get(rowKey);
+    if (!rows || !row) return;
+    if (row.checkout === null) {
+      deps.openExternal?.(row.url);
+      return;
+    }
+    if (rows.selectedKey === rowKey) return;
+    const current = deps.getSearch();
+    const from =
+      rows.selectedKey === null
+        ? -1
+        : rows.ordered.findIndex((entry) => entry.rowKey === rows.selectedKey);
+    const to = rows.ordered.findIndex((entry) => entry.rowKey === rowKey);
+    deps.setSelectionMotion({
+      kind: "settle",
+      direction: from === -1 || to === -1 ? 0 : to > from ? 1 : -1,
+      token: now(),
+    });
+    deps.commit(
+      {
+        ...selectPullRequestSearch(current, row.number),
+        scope: "all",
+        env: row.checkout.environmentId,
+        project: row.checkout.projectId,
+        // A link (pasted, or `#123`) was typed into the search; it goes with the selection.
+        ...(options?.via === "link" ? { q: undefined } : {}),
+      },
+      { push: options?.push ?? false },
+    );
+  };
+
   return {
     setSearch: (patch, options) =>
       deps.commit({ ...deps.getSearch(), ...patch }, { push: options?.push ?? false }),
     selectPullRequest,
+    selectCrossRepositoryRow,
     stepPullRequest: (offset) => {
+      const cross = deps.getCrossRepositoryRows?.() ?? null;
+      if (cross) {
+        const rows = cross.ordered;
+        if (rows.length === 0) return;
+        const index =
+          cross.selectedKey === null
+            ? -1
+            : rows.findIndex((entry) => entry.rowKey === cross.selectedKey);
+        const nextIndex =
+          index === -1
+            ? offset === 1
+              ? 0
+              : rows.length - 1
+            : Math.min(rows.length - 1, Math.max(0, index + offset));
+        const nextRow = rows[nextIndex];
+        if (nextRow && nextRow.rowKey !== cross.selectedKey) {
+          selectCrossRepositoryRow(nextRow.rowKey, { via: "list" });
+        }
+        return;
+      }
       const ordered = deps.getModel().list.ordered;
       if (ordered.length === 0) return;
       const currentPr = deps.getSearch().pr;
@@ -205,11 +276,27 @@ export function createPullRequestsNavigation(
       }),
     selectRepository: (option) => {
       const current = deps.getSearch();
+      deps.rememberScope?.(null);
       deps.commit(
         {
           env: option.environmentId,
           project: option.projectId,
           ...(current.state ? { state: current.state } : {}),
+          ...(current.sort ? { sort: current.sort } : {}),
+        },
+        { push: true },
+      );
+    },
+    showAllRepositories: () => {
+      const current = deps.getSearch();
+      deps.closeDrawer();
+      deps.rememberScope?.("all");
+      deps.commit(
+        {
+          scope: "all",
+          ...(current.state ? { state: current.state } : {}),
+          ...(current.only ? { only: current.only } : {}),
+          ...(current.label ? { label: current.label } : {}),
           ...(current.sort ? { sort: current.sort } : {}),
         },
         { push: true },

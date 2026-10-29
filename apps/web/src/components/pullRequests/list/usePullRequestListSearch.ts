@@ -4,6 +4,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { openExternalLink } from "../../../lib/openExternalLink";
 import { useSourceControlChangeRequestSearch } from "../../../rpc/useSourceControl";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
+import {
+  findCrossRepositoryRowForReference,
+  type CrossRepositoryListModel,
+} from "../crossRepository/crossRepositoryList.logic";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
 import {
   PULL_REQUEST_SEARCH_DEBOUNCE_MS,
@@ -23,7 +27,10 @@ export interface PullRequestListSearch {
   readonly clear: () => void;
   /** Commit pending text now instead of after the debounce (Enter). */
   readonly flush: () => void;
-  /** Open a link or `#123` when the text is one; false for plain search text. */
+  /**
+   * Open a link or `#123` when the text is one; false for plain search text (and, in All
+   * repositories, for a `#123` that names no one row: the rows are searched for it).
+   */
   readonly openReference: (text: string) => boolean;
   /** The committed query (URL `q`), trimmed. */
   readonly query: string;
@@ -46,7 +53,7 @@ function hostLabel(url: string): string {
  * treats a pasted link or `#123` + Enter as "open this pull request".
  */
 export function usePullRequestListSearch(): PullRequestListSearch {
-  const { nav, model, repository, repositories } = usePullRequestsPage();
+  const { nav, model, repository, repositories, crossRepository } = usePullRequestsPage();
   const committed = nav.search.q ?? "";
   const [text, setTextState] = useState(committed);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,13 +140,37 @@ export function usePullRequestListSearch(): PullRequestListSearch {
 
   const knownUrlsRef = useRef<ReadonlyMap<number, ChangeRequest>>(model.list.byNumber);
   const repositoryRef = useRef({ repository, repositories });
+  const crossRef = useRef<Pick<CrossRepositoryListModel, "byKey" | "selectedKey"> | null>(null);
   useLayoutEffect(() => {
     knownUrlsRef.current = model.list.byNumber;
     repositoryRef.current = { repository, repositories };
+    crossRef.current = crossRepository ?? null;
   });
 
+  /** Opens what a link or `#123` names; false when it should be searched for instead. */
   const open = useCallback(
-    (target: PullRequestLinkTarget) => {
+    (target: PullRequestLinkTarget): boolean => {
+      const cross = crossRef.current;
+      if (cross !== null) {
+        // All repositories: a row the list holds opens in place.
+        const crossRow = findCrossRepositoryRowForReference(cross.byKey.values(), target);
+        if (crossRow !== null) {
+          if (timerRef.current !== null) clearTimeout(timerRef.current);
+          timerRef.current = null;
+          if (cross.selectedKey === crossRow.rowKey) {
+            clear();
+            return true;
+          }
+          // One navigation that also drops the query: a second one (clearing `q`) would
+          // start from the URL before this one lands and put the query back.
+          setTextState("");
+          lastCommittedRef.current = "";
+          navRef.current.selectCrossRepositoryRow(crossRow.rowKey, { push: true, via: "link" });
+          return true;
+        }
+        // `#123` that names no one row, with no repository open: search the rows for it.
+        if (target.kind === "number" && repositoryRef.current.repository === null) return false;
+      }
       const resolution = resolvePullRequestLink({
         target,
         current: repositoryRef.current.repository,
@@ -154,12 +185,12 @@ export function usePullRequestListSearch(): PullRequestListSearch {
           clearAfterSelectRef.current = resolution.number;
           navRef.current.selectPullRequest(resolution.number, { push: true, via: "link" });
           if (navRef.current.search.pr === resolution.number) clear();
-          return;
+          return true;
         case "switch":
           pendingSwitchRef.current = { key: resolution.repository.key, number: resolution.number };
           lastCommittedRef.current = "";
           navRef.current.selectRepository(resolution.repository);
-          return;
+          return true;
         case "external":
           clear();
           toastManager.add(
@@ -173,6 +204,7 @@ export function usePullRequestListSearch(): PullRequestListSearch {
               },
             }),
           );
+          return true;
       }
     },
     [clear],
@@ -181,16 +213,16 @@ export function usePullRequestListSearch(): PullRequestListSearch {
   const openReference = useCallback(
     (value: string) => {
       const target = parsePullRequestLinkTarget(value);
-      if (target === null) return false;
-      open(target);
-      return true;
+      return target !== null && open(target);
     },
     [open],
   );
 
   const query = committed.trim();
   const localEmpty = model.list.groups.length === 0;
+  // All repositories filters what every node returned; it never searches one host.
   const serverActive =
+    !crossRepository &&
     model.capabilities.search &&
     query.length >= PULL_REQUEST_SERVER_SEARCH_MIN_LENGTH &&
     localEmpty &&

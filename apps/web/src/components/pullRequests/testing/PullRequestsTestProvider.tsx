@@ -50,11 +50,16 @@
 import type {
   ChangeRequest,
   ChangeRequestActivity,
+  EnvironmentId,
   SourceControlChangeRequestDetail,
+  SourceControlInvolvedChangeRequestsResult,
   SourceControlProviderInfo,
   SourceControlProviderKind,
 } from "@ryco/contracts";
-import { reviewDraftKey } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  mergeCrossRepositoryChangeRequests,
+  reviewDraftKey,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { resolveChangeRequestPresentationForKind } from "@ryco/shared/sourceControl";
 import {
   getChangeRequestHostCapabilities,
@@ -62,10 +67,19 @@ import {
 } from "@ryco/shared/changeRequestHostCapabilities";
 import { useMemo, useReducer, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
+import type { ProjectCheckoutOption } from "../../../projectCheckouts.logic";
 import { usePullRequestReviewDraftStore } from "../../../pullRequestReviewDraftStore";
 import type { SourceControlQueryState } from "../../../rpc/sourceControlAtoms";
 import { AppAtomRegistryProvider } from "../../../rpc/atomRegistry";
 import { DiffWorkerPoolProvider } from "../../DiffWorkerPoolProvider";
+import {
+  attachCrossRepositoryCheckouts,
+  deriveCrossRepositoryList,
+  resolveCrossRepositorySelectedKey,
+  type CrossRepositoryListModel,
+  type CrossRepositoryNote,
+  type CrossRepositoryRow,
+} from "../crossRepository/crossRepositoryList.logic";
 import { SidebarProvider } from "../../ui/sidebar";
 import {
   PullRequestsPageContext,
@@ -323,6 +337,59 @@ export function buildTestPullRequestsModel(
   };
 }
 
+// ── All repositories ──────────────────────────────────────────────────
+
+/** All repositories for the test provider: the page's checkouts and every node's rows. */
+export interface PullRequestsTestCrossRepositoryInput {
+  /** Every checkout on the page (the switcher lists them; rows open through them). */
+  readonly repositories: ReadonlyArray<ProjectCheckoutOption>;
+  /** Rows as the page merges and ties them (`buildTestCrossRepositoryRows`). */
+  readonly rows: ReadonlyMap<string, CrossRepositoryRow>;
+  readonly notes?: ReadonlyArray<CrossRepositoryNote> | undefined;
+  readonly isLoading?: boolean | undefined;
+  readonly refresh?: (() => void) | undefined;
+}
+
+/** Nodes' answers merged and tied to checkouts exactly as the page does. */
+export function buildTestCrossRepositoryRows(
+  answers: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly result: SourceControlInvolvedChangeRequestsResult;
+  }>,
+  repositories: ReadonlyArray<ProjectCheckoutOption>,
+): ReadonlyMap<string, CrossRepositoryRow> {
+  return attachCrossRepositoryCheckouts({
+    rows: mergeCrossRepositoryChangeRequests(answers),
+    checkouts: repositories,
+    readable: new Set(repositories.map((option) => option.environmentId)),
+  });
+}
+
+/** The page's All repositories model for `search` (null outside `scope=all`). */
+export function buildTestCrossRepositoryModel(
+  input: PullRequestsTestCrossRepositoryInput,
+  search: PullRequestsSearch,
+  foldedGroups: ReadonlyArray<string>,
+): CrossRepositoryListModel | null {
+  if (search.scope !== "all") return null;
+  const derived = deriveCrossRepositoryList({ rows: input.rows, search, foldedGroups });
+  return {
+    groups: derived.groups,
+    ordered: derived.ordered,
+    byKey: derived.byKey,
+    labels: derived.labels,
+    selectedKey: resolveCrossRepositorySelectedKey({
+      search,
+      rows: derived.byKey,
+      checkouts: input.repositories,
+    }),
+    notes: input.notes ?? [],
+    isLoading: input.isLoading ?? false,
+    isFetching: false,
+    refresh: input.refresh ?? (() => undefined),
+  };
+}
+
 /** The review-draft store key the page uses for a fixture PR. */
 export function fixtureReviewDraftKey(number: number): string {
   return reviewDraftKey({ environmentId: FIXTURE_ENVIRONMENT_ID, cwd: FIXTURE_CWD, number });
@@ -365,6 +432,7 @@ export function resetPullRequestsTestState(): void {
     treeHidden: false,
     foldedGroups: [],
     lastRepositoryKey: null,
+    lastScope: null,
     drawerOpen: false,
     drawerOpener: null,
     shortcutsOpen: false,
@@ -384,6 +452,7 @@ export function resetPullRequestsTestState(): void {
 // ── Provider ──────────────────────────────────────────────────────────
 
 const READY: PullRequestsRepositoryStatus = { kind: "ready" };
+const FIXTURE_REPOSITORIES: ReadonlyArray<ProjectCheckoutOption> = [fixtureRepositoryOption];
 
 export interface PullRequestsTestProviderProps extends BuildTestPullRequestsModelInput {
   /** Page content width in px (excludes the app sidebar). Default 1280. */
@@ -404,6 +473,11 @@ export interface PullRequestsTestProviderProps extends BuildTestPullRequestsMode
   readonly onSearchChange?: ((search: PullRequestsSearch) => void) | undefined;
   readonly className?: string | undefined;
   readonly children: ReactNode;
+  /**
+   * All repositories: its checkouts and rows. The list spans them while the URL says
+   * `scope=all` (seed it with `search`, or choose All repositories in the switcher).
+   */
+  readonly crossRepository?: PullRequestsTestCrossRepositoryInput | undefined;
 }
 
 /**
@@ -443,6 +517,22 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
   );
   const tab = resolvePullRequestsTab(search);
   const repositoryReady = (repositoryStatus?.kind ?? "ready") === "ready";
+  const crossInput = props.crossRepository;
+  const crossRepository = useMemo(
+    () => (crossInput ? buildTestCrossRepositoryModel(crossInput, search, foldedGroups) : null),
+    [crossInput, foldedGroups, search],
+  );
+  const crossRef = useRef(crossRepository);
+  crossRef.current = crossRepository;
+  // All repositories: the page's repository is the selected row's checkout.
+  const repository =
+    crossRepository !== null
+      ? (crossInput?.repositories.find(
+          (option) => option.environmentId === search.env && option.projectId === search.project,
+        ) ?? null)
+      : repositoryReady
+        ? fixtureRepositoryOption
+        : null;
 
   // ── Layout (the page's own hook) ──
   const pageWidth = props.width ?? 1280;
@@ -469,10 +559,13 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
     const base = createPullRequestsNavigation({
       getSearch: () => searchRef.current,
       getModel: () => modelRef.current,
-      getRepositoryParams: () => ({
-        env: FIXTURE_ENVIRONMENT_ID,
-        project: fixtureRepositoryOption.projectId,
-      }),
+      getRepositoryParams: () =>
+        crossRef.current !== null
+          ? { env: searchRef.current.env, project: searchRef.current.project }
+          : { env: FIXTURE_ENVIRONMENT_ID, project: fixtureRepositoryOption.projectId },
+      getCrossRepositoryRows: () => crossRef.current,
+      rememberScope: (scope) => usePullRequestsLayoutStore.getState().setLastScope(scope),
+      openExternal: () => undefined,
       commit: (next) => {
         const cleaned = withoutUndefined(next);
         searchRef.current = cleaned;
@@ -506,29 +599,34 @@ export function PullRequestsTestProvider(props: PullRequestsTestProviderProps) {
     [actions, search, tab],
   );
 
-  const readerKey = model.selection
-    ? pullRequestReaderKey(fixtureRepositoryOption.key, model.selection.number)
-    : null;
+  const readerKey =
+    model.selection && repository
+      ? pullRequestReaderKey(repository.key, model.selection.number)
+      : null;
+  const repositories = crossInput?.repositories ?? FIXTURE_REPOSITORIES;
   const value = useMemo<PullRequestsPageContextValue>(
     () => ({
       surface: PULL_REQUESTS_PAGE_SURFACE,
-      repository: repositoryReady ? fixtureRepositoryOption : null,
+      repository,
       repositoryStatus: repositoryStatus ?? READY,
-      repositories: [fixtureRepositoryOption],
+      repositories,
       model,
       nav,
       layout,
       selectionMotion,
       readerKey,
       jobRevealToken,
+      crossRepository,
     }),
     [
+      crossRepository,
       jobRevealToken,
       layout,
       model,
       nav,
       readerKey,
-      repositoryReady,
+      repositories,
+      repository,
       repositoryStatus,
       selectionMotion,
     ],

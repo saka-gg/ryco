@@ -121,6 +121,11 @@ export interface RankChangeRequestsOptions<T> {
    * list query (see `reviewRequestedPredicate`).
    */
   readonly isReviewRequested?: (entry: T) => boolean;
+  /**
+   * Whether the row is the viewer's own. Overrides the `viewerLogin` comparison,
+   * for lists whose rows come from several accounts (pull requests across nodes).
+   */
+  readonly isOwn?: (entry: T) => boolean;
   /** When set, rows are filtered by and ranked on relevance to this query. */
   readonly query?: string;
 }
@@ -128,7 +133,8 @@ export interface RankChangeRequestsOptions<T> {
 /**
  * Groups a list for the viewer — needs your review, yours (drafts included,
  * ranked below ready work), others — and ranks each group by merge readiness.
- * Empty groups are omitted. Without a viewer login every row lands in others.
+ * Empty groups are omitted. Without a viewer login (or `isOwn`) no row is the
+ * viewer's own.
  */
 export function rankChangeRequests<T extends RankableChangeRequest & SearchableChangeRequest>(
   list: ReadonlyArray<T>,
@@ -143,8 +149,9 @@ export function rankChangeRequests<T extends RankableChangeRequest & SearchableC
   };
   const candidates =
     query.length > 0 ? list.filter((entry) => scoreChangeRequestMatch(entry, query) > 0) : list;
+  const isOwn = options?.isOwn ?? ((entry: T) => sameLogin(entry.author, viewerLogin));
   for (const entry of candidates) {
-    if (sameLogin(entry.author, viewerLogin)) buckets.yours.push(entry);
+    if (isOwn(entry)) buckets.yours.push(entry);
     else if (options?.isReviewRequested?.(entry) === true) buckets["needs-your-review"].push(entry);
     else buckets.others.push(entry);
   }
