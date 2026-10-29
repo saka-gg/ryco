@@ -45,6 +45,9 @@
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@opencode/client": "2.2.0",
+    "@opencode/protocol": "2.2.0",
+    "@opencode/schema": "2.2.0",
     "@ryco/client-runtime": "workspace:*",
     "@ryco/contracts": "workspace:*",
     "@ryco/shared": "workspace:*",

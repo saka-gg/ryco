@@ -63,8 +63,12 @@ interface ProbeResponse {
   readonly json: unknown;
 }
 
-/** UTF-8, as the 1.x SDK client sends it; `btoa` is Latin-1 and throws on other characters. */
-const basicAuthorization = (password: string) =>
+/**
+ * The `Authorization` header for a server password (both generations take Basic auth as user
+ * `opencode`). UTF-8, as the 1.x SDK client sends it; `btoa` is Latin-1 and throws on other
+ * characters.
+ */
+export const openCodeBasicAuthorization = (password: string) =>
   `Basic ${Buffer.from(`opencode:${password}`, "utf8").toString("base64")}`;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -126,7 +130,7 @@ export async function detectOpenCodeApi(input: {
   }
   const fetchImpl = input.fetch ?? globalThis.fetch;
   const headers: Record<string, string> = input.serverPassword
-    ? { Authorization: basicAuthorization(input.serverPassword) }
+    ? { Authorization: openCodeBasicAuthorization(input.serverPassword) }
     : {};
 
   const get = async (path: string): Promise<ProbeResponse> => {
@@ -271,7 +275,7 @@ export const createOpenCodeApi = (
       baseUrl: input.baseUrl,
       directory: input.directory,
       ...(input.serverPassword
-        ? { headers: { Authorization: basicAuthorization(input.serverPassword) } }
+        ? { headers: { Authorization: openCodeBasicAuthorization(input.serverPassword) } }
         : {}),
       throwOnError: true,
     });
