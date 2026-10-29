@@ -728,6 +728,8 @@ function deriveTurnFolds(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   terminalAssistantMessageIds: ReadonlySet<string>;
   latestTurn: TimelineLatestTurn | null;
+  /** See `deriveMessagesTimelineRows`' `latestTurnEndedBySession`. */
+  latestTurnEndedBySession: boolean;
   unsettledTurnId: TurnId | null;
   activeTurnStartedAt: string | null;
   /** See `deriveMessagesTimelineRows`' `launchTurnDurationStart`. */
@@ -831,13 +833,17 @@ function deriveTurnFolds(input: {
       const duration = elapsedMs === null ? null : formatDuration(elapsedMs);
       const interrupted =
         input.latestTurn?.turnId === turnId && input.latestTurn.state === "interrupted";
-      label = interrupted
+      label = !interrupted
         ? duration
-          ? `You stopped after ${duration}`
-          : "You stopped this response"
-        : duration
           ? `Worked for ${duration}`
-          : "Worked";
+          : "Worked"
+        : input.latestTurnEndedBySession
+          ? duration
+            ? `Interrupted after ${duration}`
+            : "Interrupted"
+          : duration
+            ? `You stopped after ${duration}`
+            : "You stopped this response";
     }
 
     foldsByAnchorEntryId.set(firstEntry.id, {
@@ -1094,6 +1100,11 @@ function withBareUserInputRows(
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestTurn?: TimelineLatestTurn | null;
+  /**
+   * The thread's session ended in an error (a restart released it, or its runtime was lost), so
+   * an interrupted latest turn was not the person's Stop: it reads "Interrupted", not "You stopped".
+   */
+  latestTurnEndedBySession?: boolean | undefined;
   runningTurnId?: TurnId | null;
   turnFoldExpandedById?: Readonly<Record<string, boolean>>;
   workGroupExpandedById?: Readonly<Record<string, boolean>>;
@@ -1162,6 +1173,7 @@ export function deriveMessagesTimelineRows(input: {
     timelineEntries,
     terminalAssistantMessageIds,
     latestTurn: input.latestTurn ?? null,
+    latestTurnEndedBySession: input.latestTurnEndedBySession ?? false,
     unsettledTurnId,
     activeTurnStartedAt: input.activeTurnStartedAt,
     launchTurnDurationStart: input.launchTurnDurationStart ?? null,
