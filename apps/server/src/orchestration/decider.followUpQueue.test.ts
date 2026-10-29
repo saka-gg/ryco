@@ -216,6 +216,24 @@ describe("follow-up queue decider: add", () => {
     );
   });
 
+  it("lets only the node's own agent add keep an Agent Control message id", async () => {
+    const agentAdd = addCommand("message-agent-control-op-2-send-message", {
+      author: "agent",
+    } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>);
+    const { model } = await apply(modelWith(), agentAdd);
+    const entry = model.threads[0]?.followUpQueue?.entries[0];
+    expect(entry?.messageId).toBe("message-agent-control-op-2-send-message");
+    expect(entry?.author).toBe("agent");
+    // Other reserved prefixes stay refused, also for the agent.
+    const delegated = await refusal(
+      modelWith(),
+      addCommand("delegation-result:child:1", {
+        author: "agent",
+      } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>),
+    );
+    expect(delegated.detail).toContain("reserved");
+  });
+
   it("keeps a device queue's failed entry failed and its hold, and a server author", async () => {
     const { events, model } = await apply(
       modelWith(),

@@ -130,11 +130,49 @@ export function queueDispatchRuntimeMode(
   return rank[threadRuntimeMode] < rank[head.runtimeMode] ? threadRuntimeMode : head.runtimeMode;
 }
 
-/** The turn start that sends `head`, with the modes it was queued with. */
+/** The model and modes a head is sent with (`queueDispatchModes`). */
+export interface QueueDispatchModes {
+  readonly modelSelection: QueuedFollowUp["modelSelection"];
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: QueuedFollowUp["interactionMode"];
+  readonly tokenMode?: QueuedFollowUp["tokenMode"];
+}
+
+/**
+ * A person's entry keeps the model and modes it was queued with, as a client's send of a queued
+ * message does. An agent's or an automation's entry takes the chat's current model and modes, so
+ * it never switches the chat back to what it was when the entry was queued, and never runs above
+ * the runtime mode it was queued with.
+ */
+export function queueDispatchModes(
+  head: QueuedFollowUp,
+  thread: Pick<
+    OrchestrationThreadShell,
+    "modelSelection" | "runtimeMode" | "interactionMode" | "tokenMode"
+  >,
+  rank: Readonly<Record<RuntimeMode, number>>,
+): QueueDispatchModes {
+  if (head.author === "user") {
+    return {
+      modelSelection: head.modelSelection,
+      runtimeMode: head.runtimeMode,
+      interactionMode: head.interactionMode,
+      ...(head.tokenMode === undefined ? {} : { tokenMode: head.tokenMode }),
+    };
+  }
+  return {
+    modelSelection: thread.modelSelection,
+    runtimeMode: queueDispatchRuntimeMode(head, thread.runtimeMode, rank),
+    interactionMode: thread.interactionMode,
+    ...(thread.tokenMode === undefined ? {} : { tokenMode: thread.tokenMode }),
+  };
+}
+
+/** The turn start that sends `head` with `modes` (`queueDispatchModes`). */
 export function queueDispatchCommand(input: {
   readonly threadId: ThreadId;
   readonly head: QueuedFollowUp;
-  readonly runtimeMode: RuntimeMode;
+  readonly modes: QueueDispatchModes;
   readonly guard: ThreadTurnStartCommand["delegationReturnGuard"];
   readonly attemptId: string;
   readonly createdAt: string;
@@ -150,10 +188,10 @@ export function queueDispatchCommand(input: {
       text: head.text,
       attachments: head.attachments,
     },
-    modelSelection: head.modelSelection,
-    runtimeMode: input.runtimeMode,
-    interactionMode: head.interactionMode,
-    ...(head.tokenMode === undefined ? {} : { tokenMode: head.tokenMode }),
+    modelSelection: input.modes.modelSelection,
+    runtimeMode: input.modes.runtimeMode,
+    interactionMode: input.modes.interactionMode,
+    ...(input.modes.tokenMode === undefined ? {} : { tokenMode: input.modes.tokenMode }),
     ...(head.threadReferences === undefined ? {} : { threadReferences: head.threadReferences }),
     ...(input.guard === undefined ? {} : { delegationReturnGuard: input.guard }),
     queueDispatch: { messageId: head.messageId, revision: head.revision },
@@ -265,9 +303,13 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
         if (yield* previousDispatchPending(threadId, nowMs)) return;
         const shell = yield* deps.getThreadShellById(threadId);
         if (Option.isNone(shell)) return;
-        // The usage limit that matters is the one of the instance the head targets.
+        const modes = queueDispatchModes(head, shell.value, deps.runtimeModePrivilegeRank);
+        // The pin first, then the idle check: a person's message accepted after the pin fails the
+        // decider's guard, and one accepted before it shows as a pending start here.
+        const latestUserMessageId = yield* fence.latestUserMessageId(threadId);
+        // The usage limit that matters is the one of the instance the head is sent to.
         const held = yield* fence.holdReason(
-          { ...shell.value, modelSelection: head.modelSelection },
+          { ...shell.value, modelSelection: modes.modelSelection },
           nowMs,
           "follow-up-queue",
         );
@@ -288,16 +330,8 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
           const command = queueDispatchCommand({
             threadId,
             head,
-            runtimeMode: queueDispatchRuntimeMode(
-              head,
-              shell.value.runtimeMode,
-              deps.runtimeModePrivilegeRank,
-            ),
-            guard: deps.serverWakeGuard(
-              shell.value,
-              yield* fence.latestUserMessageId(threadId),
-              "follow-up-queue",
-            ),
+            modes,
+            guard: deps.serverWakeGuard(shell.value, latestUserMessageId, "follow-up-queue"),
             attemptId: nextAttemptId(),
             createdAt: isoAt(nowMs),
           });

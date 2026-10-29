@@ -89,6 +89,8 @@ export const toReadThreadResult = (input: {
   readonly shell: ThreadSummarySource;
   readonly messages: ReadonlyArray<OrchestrationMessage>;
   readonly pageInfo: OrchestrationThreadHistoryPageInfo;
+  /** The thread's queued follow-ups, on a first page only. */
+  readonly followUpQueue?: AgentControlMcpReadThreadResult["followUpQueue"];
 }) =>
   Effect.gen(function* () {
     const messages =
@@ -99,5 +101,6 @@ export const toReadThreadResult = (input: {
       messages,
       hasMoreBefore: input.pageInfo.hasMoreBefore,
       nextCursor: input.pageInfo.hasMoreBefore ? input.pageInfo.oldestCursor : null,
+      ...(input.followUpQueue === undefined ? {} : { followUpQueue: input.followUpQueue }),
     });
   });

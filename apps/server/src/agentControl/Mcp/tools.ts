@@ -584,7 +584,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.readThread,
     description:
-      "Read one thread's status header and a bounded, newest-first page of its conversation messages (cursor pages older history). A message cut short carries version and nextOffsetChars: pass them with its messageId as message to read the rest.",
+      "Read one thread's status header and a bounded, newest-first page of its conversation messages (cursor pages older history). A message cut short carries version and nextOffsetChars: pass them with its messageId as message to read the rest. The first page also lists the thread's queued follow-ups, next first, and why the queue waits.",
     inputSchema: {
       type: "object",
       properties: {
@@ -691,7 +691,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.sendMessage,
     description:
-      "Queue or steer a message to a Ryco thread through the durable operation queue. Use a stable requestId for retries and read or wait for the returned receipt.",
+      "Queue or steer a message to a Ryco thread through the durable operation queue. A queued message joins the thread's follow-up queue, visible and editable in the chat, and is sent when the thread is idle, after follow-ups queued before it; the request completes once it is queued. Use a stable requestId for retries and read or wait for the returned receipt.",
     inputSchema: {
       type: "object",
       properties: {

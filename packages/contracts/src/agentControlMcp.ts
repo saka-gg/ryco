@@ -12,6 +12,7 @@
 import * as Schema from "effect/Schema";
 import {
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   PositiveInt,
   ProjectId,
@@ -23,6 +24,9 @@ import {
 } from "./baseSchemas.ts";
 import {
   AgentTokenMode,
+  FollowUpQueueEntryAuthor,
+  FollowUpQueueEntryStatus,
+  FollowUpQueueHoldReason,
   OrchestrationSessionStatus,
   OptionalProjectKind,
   RuntimeMode,
@@ -754,12 +758,43 @@ export const AgentControlMcpMessage = Schema.Struct({
 });
 export type AgentControlMcpMessage = typeof AgentControlMcpMessage.Type;
 
+/** Characters of a queued follow-up's text `ryco_read_thread` shows. */
+export const AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS = 500;
+
+/** One entry of a thread's follow-up queue as `ryco_read_thread` shows it. */
+export const AgentControlMcpQueuedFollowUp = Schema.Struct({
+  messageId: MessageId,
+  author: FollowUpQueueEntryAuthor,
+  status: FollowUpQueueEntryStatus,
+  text: Schema.String,
+  textTruncated: Schema.optional(Schema.Literal(true)),
+  attachmentCount: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+export type AgentControlMcpQueuedFollowUp = typeof AgentControlMcpQueuedFollowUp.Type;
+
 export const AgentControlMcpReadThreadResult = Schema.Struct({
   thread: AgentControlMcpThreadSummary,
   messages: Schema.Array(AgentControlMcpMessage),
   hasMoreBefore: Schema.Boolean,
   /** Cursor for the next-older page; `null` when history is exhausted. */
   nextCursor: Schema.NullOr(AgentControlMcpCursor),
+  /**
+   * The follow-ups queued to the thread, next first, and why the queue waits; on the first page
+   * only, absent while the queue is empty.
+   */
+  followUpQueue: Schema.optional(
+    Schema.Struct({
+      hold: Schema.NullOr(
+        Schema.Struct({
+          reason: FollowUpQueueHoldReason,
+          detail: Schema.NullOr(Schema.String),
+          heldAt: IsoDateTime,
+        }),
+      ),
+      entries: Schema.Array(AgentControlMcpQueuedFollowUp),
+    }),
+  ),
 });
 export type AgentControlMcpReadThreadResult = typeof AgentControlMcpReadThreadResult.Type;
 

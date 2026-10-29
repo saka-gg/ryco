@@ -76,6 +76,8 @@ export interface FollowUpQueueHost {
    * would read as a delegated result, an Agent Control message or a pull request update.
    */
   readonly serverMintedMessageIdPrefixes: ReadonlyArray<string>;
+  /** The one of them an Agent Control message takes; only the node's own agent adds may use it. */
+  readonly agentControlMessageIdPrefix: string;
 }
 type PlannedEvent = Omit<OrchestrationEvent, "sequence">;
 
@@ -221,8 +223,13 @@ function reservedMessageIdBlocker(
   host: FollowUpQueueHost,
   threadId: ThreadId,
   messageId: MessageId,
+  author: QueuedFollowUp["author"],
 ): string | null {
-  if (host.serverMintedMessageIdPrefixes.some((prefix) => messageId.startsWith(prefix))) {
+  // An Agent Control message queued by the node keeps its own id, so its turn reads as one.
+  const reserved = (prefix: string) =>
+    messageId.startsWith(prefix) &&
+    !(author === "agent" && prefix === host.agentControlMessageIdPrefix);
+  if (host.serverMintedMessageIdPrefixes.some(reserved)) {
     return `Message id '${messageId}' is reserved for messages the node sends.`;
   }
   return host.reservedForkItemIdBlocker(threadId, messageId);
@@ -348,7 +355,12 @@ export function decideFollowUpQueueCommand(
   switch (command.type) {
     case "thread.queue.add": {
       const messageId = command.entry.messageId;
-      const reserved = reservedMessageIdBlocker(host, thread.id, messageId);
+      const reserved = reservedMessageIdBlocker(
+        host,
+        thread.id,
+        messageId,
+        command.author ?? "user",
+      );
       if (reserved !== null) return refuse(reserved);
       // Idempotent: a retry after a lost reply, a second device's copy, or a device queue that
       // moves to the node after its own send went through never makes a second message.

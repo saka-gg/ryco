@@ -21,6 +21,7 @@ import {
   ServerProvider,
   RuntimeSessionId,
   ThreadId,
+  type ThreadQueueAddCommand,
   TurnId,
   WorktreeId,
   type AgentControlOperation,
@@ -826,7 +827,7 @@ it.effect("executes one accepted proposal exactly once under concurrent retries"
     assert.strictEqual(settled.result.execution?.commands.length, 1);
     assert.deepStrictEqual(settled.result.execution?.affectedThreadIds, [threadId]);
     assert.strictEqual(settled.result.execution?.delivery, "queued");
-    assert.strictEqual(settled.result.execution?.commands[0]?.commandType, "thread.turn.start");
+    assert.strictEqual(settled.result.execution?.commands[0]?.commandType, "thread.queue.add");
   }),
 );
 
@@ -1056,7 +1057,7 @@ for (const reason of [undefined, "deferred"] as const) {
 
           assert.deepStrictEqual(
             (yield* Ref.get(commands)).map((command) => command.type),
-            ["thread.turn.steer", "thread.turn.start"],
+            ["thread.turn.steer", "thread.queue.add"],
           );
           const settled = yield* Ref.get(stores.proposalRef);
           assert.strictEqual(settled.result?.outcome, "completed");
@@ -1304,64 +1305,27 @@ it.effect("does not re-read an interrupt target for its activity or messages", (
   }),
 );
 
-it.effect("queues a message once the busy target goes idle", () =>
+it.effect("queues a message to a busy thread's follow-up queue at once, as the agent's", () =>
   Effect.gen(function* () {
     const harness = yield* makeTargetWaitHarness(approvedProposal);
     const fiber = yield* Effect.forkChild(
       harness.execution.executeApproved(approvedProposal.proposalId),
     );
-    assert.isFalse(yield* awaitDone(fiber));
-    assert.deepStrictEqual(yield* Ref.get(harness.commands), []);
-
-    harness.setTarget(target);
-    yield* harness.publish("thread.session-set");
+    // No wait for the thread to go idle: the node's drain sends it then.
     assert.isTrue(yield* awaitDone(fiber));
-    assert.deepStrictEqual(
-      (yield* Ref.get(harness.commands)).map((command) => command.type),
-      ["thread.turn.start"],
-    );
+    const [queued] = yield* Ref.get(harness.commands);
+    assert.ok(queued?.type === "thread.queue.add");
+    const add = queued as unknown as ThreadQueueAddCommand;
+    assert.strictEqual(add.author, "agent");
+    assert.strictEqual(add.threadId, threadId);
+    assert.match(add.entry.messageId, /^message-agent-control-/);
+    assert.strictEqual(add.entry.text, plan.text);
+    assert.deepStrictEqual(add.entry.modelSelection, harness.running().modelSelection);
+    assert.strictEqual(add.entry.runtimeMode, harness.running().runtimeMode);
     const settled = yield* Ref.get(harness.stores.proposalRef);
     assert.strictEqual(settled.result?.outcome, "completed");
     if (settled.result?.outcome !== "completed") return;
     assert.strictEqual(settled.result.execution?.delivery, "queued");
-  }),
-);
-
-it.effect("fails an idle wait after 60 s with 13 checks instead of 600", () =>
-  Effect.gen(function* () {
-    const harness = yield* makeTargetWaitHarness(approvedProposal);
-    const fiber = yield* Effect.forkChild(
-      harness.execution.executeApproved(approvedProposal.proposalId),
-    );
-    assert.isFalse(yield* awaitDone(fiber));
-    yield* TestClock.adjust(59_999);
-    assert.isFalse(yield* awaitDone(fiber));
-    yield* TestClock.adjust(1);
-    assert.isTrue(yield* awaitDone(fiber));
-    const settled = yield* Ref.get(harness.stores.proposalRef);
-    assert.strictEqual(settled.result?.outcome, "failed");
-    // The target check, then checks at 0, 5, ..., 60 s.
-    assert.strictEqual(harness.reads(), 1 + 13);
-    assert.deepStrictEqual(yield* Ref.get(harness.commands), []);
-  }),
-);
-
-it.effect("fails a queue wait at once when the target is archived", () =>
-  Effect.gen(function* () {
-    const harness = yield* makeTargetWaitHarness(approvedProposal);
-    const fiber = yield* Effect.forkChild(
-      harness.execution.executeApproved(approvedProposal.proposalId),
-    );
-    assert.isFalse(yield* awaitDone(fiber));
-    // Archived while its turn still runs: only the archive can end this wait.
-    harness.setTarget({ ...harness.running(), archivedAt: now });
-    yield* harness.publish("thread.archived");
-    assert.isTrue(yield* awaitDone(fiber));
-    assert.strictEqual(yield* Clock.currentTimeMillis, 0);
-    assert.strictEqual(harness.reads(), 3);
-    const settled = yield* Ref.get(harness.stores.proposalRef);
-    assert.strictEqual(settled.result?.outcome, "failed");
-    assert.deepStrictEqual(yield* Ref.get(harness.commands), []);
   }),
 );
 it.effect(
