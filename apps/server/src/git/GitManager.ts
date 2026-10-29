@@ -68,8 +68,14 @@ import {
   type GitStatusDetails,
   type GitWorktreeCreationContext,
 } from "../vcs/GitVcsDriver.ts";
-import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
-import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
+import {
+  forgePausedUntil,
+  SourceControlProviderRegistry,
+} from "../sourceControl/SourceControlProviderRegistry.ts";
+import type {
+  SourceControlProviderContext,
+  SourceControlProviderShape,
+} from "../sourceControl/SourceControlProvider.ts";
 import {
   BRANCH_CHANGE_REQUEST_LIMIT,
   lookupIndexedChangeRequest,
@@ -77,7 +83,9 @@ import {
   pullRequestIndexRepositoryKey,
   type PullRequestIndexScope,
 } from "../sourceControl/pullRequestIndex.ts";
+import { pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
 import { makeRepositoryListCache } from "../sourceControl/repositoryListCache.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { makeCheckoutGenerations } from "./checkoutGenerations.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import type { ChangeRequest, PullRequestState, SourceControlProviderError } from "@ryco/contracts";
@@ -153,6 +161,11 @@ export interface GitManagerShape {
     readonly load: Effect.Effect<A, E, R>;
     /** Shorter lifetime for reads that go stale faster than lists (details). */
     readonly ttlMs?: number;
+    /**
+     * Keep the last good value for background readers while the forge is rate limiting
+     * (see `lastGoodWhilePaused`): for reads background readers make, not for large ones.
+     */
+    readonly lastGood?: boolean;
   }) => Effect.Effect<A, E, R>;
   /** Drops `cwd`'s repository's cached list reads (after a change request mutation). */
   readonly invalidateRepositoryLists: (cwd: string) => Effect.Effect<void>;
@@ -196,6 +209,11 @@ export interface VcsRefSummary {
   readonly hasUpstream: boolean;
   readonly sourceControlProvider: VcsStatusLocalResult["sourceControlProvider"] | null;
   readonly pr: VcsStatusRemoteResult["pr"];
+  /**
+   * `pr` was looked up in a listing served while the forge is rate limiting: it may be stale,
+   * so it is no proof for link writes or destructive decisions.
+   */
+  readonly prServedWhilePaused?: boolean;
 }
 
 export interface IndexedPullRequestState {
@@ -243,6 +261,13 @@ const pullRequestUpdatedAtDescOrder: Order.Order<PullRequestInfo> = Order.mapInp
 interface PullRequestIndexTarget {
   readonly repository: string;
   readonly provider: SourceControlProviderShape;
+  readonly context: SourceControlProviderContext;
+}
+
+/** A branch's change request, and whether a listing served while paused answered it. */
+interface LatestPullRequest {
+  readonly match: PullRequestInfo | null;
+  readonly servedWhilePaused: boolean;
 }
 
 interface ResolvedPullRequest {
@@ -1056,7 +1081,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
             upstreamRef: details.upstreamRef,
             isDefaultBranch: details.isDefaultBranch,
           }).pipe(
-            Effect.map((latest) => {
+            Effect.map(({ match: latest }) => {
               if (!latest) return null;
               // On the default branch, only surface open PRs.
               // Merged/closed matches are usually reverse-merge history, not the thread's PR context.
@@ -1254,6 +1279,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
                 remoteUrl: handle.context.remoteUrl,
               }),
               provider: handle.provider,
+              context: handle.context,
             },
       ),
       Effect.catch(() => Effect.succeed(null)),
@@ -1319,17 +1345,32 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
       Effect.succeed({ templates: [], generationTemplatePath: null }),
     );
 
+  /**
+   * Whether background reads to the target's forge are still paused after a rate limit. An
+   * invalidation keeps the forge's held rate-limited answers while they are (the periodic
+   * remote refresh would otherwise ask again every poll); a request of the user's that got
+   * through ends a guessed pause, and the next invalidation drops them.
+   */
+  const forgeStillPaused = (target: PullRequestIndexTarget) =>
+    inBackgroundProcessLane(forgePausedUntil(target.context)).pipe(
+      Effect.map((pausedUntil) => pausedUntil !== null),
+    );
+
   const invalidatePullRequestIndex = (cwd: string) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
         target === null
           ? Effect.void
-          : Effect.all(
-              [
-                pullRequestIndex.invalidate(target.repository),
-                repositoryListCache.invalidate(target.repository),
-              ],
-              { discard: true },
+          : Effect.cached(forgeStillPaused(target)).pipe(
+              Effect.flatMap((keepHeldWhile) =>
+                Effect.all(
+                  [
+                    pullRequestIndex.invalidate(target.repository, { keepHeldWhile }),
+                    repositoryListCache.invalidate(target.repository, { keepHeldWhile }),
+                  ],
+                  { discard: true },
+                ),
+              ),
             ),
       ),
     );
@@ -1353,7 +1394,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
   const invalidateRepositoryLists: GitManagerShape["invalidateRepositoryLists"] = (cwd) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
-        target === null ? Effect.void : repositoryListCache.invalidate(target.repository),
+        target === null
+          ? Effect.void
+          : repositoryListCache.invalidate(target.repository, {
+              keepHeldWhile: forgeStillPaused(target),
+            }),
       ),
     );
 
@@ -1367,6 +1412,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
               key: input.key,
               load: input.load,
               ...(input.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
+              ...(input.lastGood !== undefined ? { lastGood: input.lastGood } : {}),
             }),
       ),
     );
@@ -1376,15 +1422,18 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     target: PullRequestIndexTarget,
     headContext: BranchHeadContext,
     openOnly: boolean,
+    noteServed: <V>(value: V) => V,
   ) {
     return yield* lookupIndexedChangeRequest({
       readListing: (scope) =>
-        pullRequestIndex.read({
-          repository: target.repository,
-          scope,
-          cwd,
-          provider: target.provider,
-        }),
+        pullRequestIndex
+          .read({
+            repository: target.repository,
+            scope,
+            cwd,
+            provider: target.provider,
+          })
+          .pipe(Effect.map(noteServed)),
       matches: (item) => {
         const pr = toPullRequestInfo(item);
         return matchesBranchHeadContext(pr, headContext) ? pr : null;
@@ -1403,15 +1452,28 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     details: { branch: string; upstreamRef: string | null; isDefaultBranch: boolean },
   ) {
     const headContext = yield* resolveBranchHeadContext(cwd, details, { statusRead: true });
+    // A background reader may be answered from listings served while the forge
+    // is rate limiting; the answer then says so.
+    let servedWhilePaused = false;
+    const noteServed = <V>(value: V): V => {
+      if (pausedUntilOf(value) !== null) servedWhilePaused = true;
+      return value;
+    };
     // One listing per repository answers most branches; only a branch it
     // cannot answer for (older than the recent window) asks per head selector,
     // and those answers are cached per repository too. A failed listing fails
     // the lookup instead of fanning out into per-branch calls to the same host.
     const target = yield* resolvePullRequestIndexTarget(cwd);
     if (target !== null) {
-      const indexed = yield* findLatestPrInIndex(cwd, target, headContext, details.isDefaultBranch);
+      const indexed = yield* findLatestPrInIndex(
+        cwd,
+        target,
+        headContext,
+        details.isDefaultBranch,
+        noteServed,
+      );
       if (indexed.resolved) {
-        return indexed.match;
+        return { match: indexed.match, servedWhilePaused };
       }
     }
     const parsedByNumber = new Map<number, PullRequestInfo>();
@@ -1427,12 +1489,14 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
               includeStackSummary: false,
               fields: "summary",
             })
-          : yield* pullRequestIndex.readBranch({
-              repository: target.repository,
-              headSelector,
-              cwd,
-              provider: target.provider,
-            });
+          : yield* pullRequestIndex
+              .readBranch({
+                repository: target.repository,
+                headSelector,
+                cwd,
+                provider: target.provider,
+              })
+              .pipe(Effect.map(noteServed));
 
       for (const pr of pullRequests.map(toPullRequestInfo)) {
         if (!matchesBranchHeadContext(pr, headContext)) {
@@ -1445,10 +1509,10 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     const parsed = Arr.sort(parsedByNumber.values(), pullRequestUpdatedAtDescOrder);
 
     const latestOpenPr = parsed.find((pr) => pr.state === "open");
-    if (latestOpenPr) {
-      return latestOpenPr;
-    }
-    return parsed[0] ?? null;
+    return {
+      match: latestOpenPr ?? parsed[0] ?? null,
+      servedWhilePaused,
+    } satisfies LatestPullRequest;
   });
 
   const buildCompletionToast = Effect.fn("buildCompletionToast")(function* (
@@ -1996,22 +2060,19 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     // branch (an unpublished one only shares a name with someone else's, and
     // asking the forge about it is wasted) on a host the provider registry
     // recognizes, which includes self-hosted forges the remote URL alone does not.
-    const pr =
+    const latest =
       branch === null
         ? null
         : yield* Effect.gen(function* () {
             if ((yield* probeBranchPublished(cwd, branch, upstreamRef)) === false) return null;
             if ((yield* sourceControlProvider(cwd)).kind === "unknown") return null;
-            const latest = yield* findLatestPr(cwd, {
+            return yield* findLatestPr(cwd, {
               branch,
               upstreamRef,
               isDefaultBranch: isDefaultRef,
             });
-            if (!latest) return null;
-            // On the default branch, only surface open change requests.
-            if (isDefaultRef && latest.state !== "open") return null;
-            return toStatusPr(latest);
           }).pipe(Effect.catch(() => Effect.succeed(null)));
+    const match = latest?.match ?? null;
 
     return {
       isRepo: true,
@@ -2020,7 +2081,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
       hasPrimaryRemote: config.value.remoteNames.includes("origin"),
       hasUpstream: upstreamRef !== null,
       sourceControlProvider: hostingProvider,
-      pr,
+      // On the default branch, only surface open change requests.
+      pr: match === null || (isDefaultRef && match.state !== "open") ? null : toStatusPr(match),
+      ...(latest?.servedWhilePaused ? { prServedWhilePaused: true } : {}),
     } satisfies VcsRefSummary;
   });
 

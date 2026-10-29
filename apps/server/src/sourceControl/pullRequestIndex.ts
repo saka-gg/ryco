@@ -9,8 +9,13 @@
  * is full, every open one; a branch it cannot answer for falls back to a
  * per-branch query, cached here too: in a busy repository the same old or
  * PR-less branches miss the recent window on every read.
+ *
+ * While the forge is rate limiting (see `lastGoodWhilePaused`), background
+ * readers get the last good listing, marked, and the forge's rate-limited
+ * answer is held until its pause ends, through invalidations while the pause
+ * runs, so interactive readers share it instead of asking again.
  */
-import { Cache, Duration, Effect, Exit, Option } from "effect";
+import { Cache, Clock, Duration, Effect, Exit, Option } from "effect";
 import type {
   ChangeRequest,
   ChangeRequestState,
@@ -18,6 +23,12 @@ import type {
 } from "@ryco/contracts";
 
 import { isForgeRequestRefusedWhilePaused } from "./forgeRequestPaused.ts";
+import {
+  heldUntil,
+  type LastGood,
+  makeLastGood,
+  markServedWhilePaused,
+} from "./lastGoodWhilePaused.ts";
 import type { SourceControlProviderShape } from "./SourceControlProvider.ts";
 
 export const PULL_REQUEST_INDEX_LIMIT = 100;
@@ -71,6 +82,11 @@ export function pullRequestIndexRepositoryKey(input: {
 }
 
 export interface PullRequestIndex {
+  /**
+   * The repository's listing for `scope`. While the forge is rate limiting, a
+   * background reader may get the last good listing instead, marked (its
+   * `items` too) with the pause's end (`pausedUntilOf`).
+   */
   readonly read: (input: {
     readonly repository: string;
     readonly scope: PullRequestIndexScope;
@@ -80,7 +96,8 @@ export interface PullRequestIndex {
   /**
    * Change requests whose head matches one selector, for a branch the index
    * cannot answer for. Cached per repository and selector; dropped with the
-   * index on `invalidate`.
+   * index on `invalidate` (their last good answers and holds stay keyed by
+   * selector, like the index's).
    */
   readonly readBranch: (input: {
     readonly repository: string;
@@ -88,15 +105,33 @@ export interface PullRequestIndex {
     readonly cwd: string;
     readonly provider: SourceControlProviderShape;
   }) => Effect.Effect<ReadonlyArray<ChangeRequest>, SourceControlProviderError>;
-  /** Already-loaded listings only; never asks the forge. */
+  /**
+   * Listings loaded from the forge only (never one served while it is paused);
+   * never asks the forge.
+   */
   readonly peek: (
     repository: string,
   ) => Effect.Effect<ReadonlyArray<PullRequestIndexListing>, never>;
-  readonly invalidate: (repository: string) => Effect.Effect<void>;
+  /**
+   * Drops the repository's listings and branch answers. A held rate-limited
+   * answer stays when `keepHeldWhile` (asked only when one is held) says the
+   * forge's pause still runs.
+   */
+  readonly invalidate: (
+    repository: string,
+    options?: { readonly keepHeldWhile?: Effect.Effect<boolean> },
+  ) => Effect.Effect<void>;
 }
 
 const indexKey = (repository: string, scope: PullRequestIndexScope) =>
   `${scope}\u0000${repository}`;
+
+/** A listing served while paused: it and its rows carry the mark. */
+const markListing = (listing: PullRequestIndexListing, pausedUntilMs: number) =>
+  markServedWhilePaused(
+    { ...listing, items: markServedWhilePaused(listing.items, pausedUntilMs) },
+    pausedUntilMs,
+  );
 
 export const makePullRequestIndex = Effect.gen(function* () {
   // Who to ask for a repository's listing: the latest checkout and provider
@@ -106,13 +141,77 @@ export const makePullRequestIndex = Effect.gen(function* () {
     { readonly cwd: string; readonly provider: SourceControlProviderShape }
   >();
 
+  // Last good answers by index key and by branch key without the generation,
+  // so they outlive invalidations.
+  const lastGoodListings = makeLastGood<PullRequestIndexListing>(
+    PULL_REQUEST_INDEX_CAPACITY,
+    markListing,
+  );
+  const lastGoodBranches = makeLastGood<ReadonlyArray<ChangeRequest>>(BRANCH_CAPACITY);
+  // The forge's rate-limited answers, held until their pause ends: "i" + index
+  // key, "b" + branch key without the generation.
+  const holds = new Map<
+    string,
+    {
+      readonly repository: string;
+      readonly error: SourceControlProviderError;
+      readonly untilMs: number;
+    }
+  >();
+
+  /** Remembers a lookup's outcome: a success as last good, a rate limit as a hold. */
+  const learn = <V extends object>(
+    read: Effect.Effect<V, SourceControlProviderError>,
+    lastGood: LastGood<V>,
+    lastGoodKey: string,
+    holdKey: string,
+    repository: string,
+  ) =>
+    read.pipe(
+      Effect.tap((value) =>
+        Effect.map(Clock.currentTimeMillis, (nowMs) =>
+          lastGood.remember(lastGoodKey, value, nowMs),
+        ),
+      ),
+      Effect.tapError((error) =>
+        Effect.map(Clock.currentTimeMillis, (nowMs) => {
+          const untilMs = heldUntil(error, nowMs);
+          if (untilMs === null) return;
+          for (const [key, hold] of holds) if (hold.untilMs <= nowMs) holds.delete(key);
+          holds.set(holdKey, { repository, error, untilMs });
+        }),
+      ),
+    );
+
+  /**
+   * A cached read through a pause: a held answer instead of the read, then
+   * for a rate limit the last good value to a background reader.
+   */
+  const throughPause = <V extends object>(
+    read: Effect.Effect<V, SourceControlProviderError>,
+    lastGood: LastGood<V>,
+    lastGoodKey: string,
+    holdKey: string,
+  ) =>
+    Effect.flatMap(Clock.currentTimeMillis, (nowMs) => {
+      const hold = holds.get(holdKey);
+      return hold !== undefined && hold.untilMs > nowMs ? Effect.fail(hold.error) : read;
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.flatMap(Clock.currentTimeMillis, (nowMs) =>
+          lastGood.serve(lastGoodKey, error, nowMs),
+        ),
+      ),
+    );
+
   const listIndex = (key: string) =>
     Effect.suspend(() => {
       const separator = key.indexOf("\u0000");
       const scope = key.slice(0, separator) as PullRequestIndexScope;
-      const lookup = lookups.get(key.slice(separator + 1));
+      const repository = key.slice(separator + 1);
+      const lookup = lookups.get(repository);
       if (!lookup) return Effect.die(new Error("Change request index read without a checkout."));
-      return lookup.provider
+      const read = lookup.provider
         .listChangeRequests({
           cwd: lookup.cwd,
           headSelector: "",
@@ -127,6 +226,7 @@ export const makePullRequestIndex = Effect.gen(function* () {
             complete: items.length < PULL_REQUEST_INDEX_LIMIT,
           })),
         );
+      return learn(read, lastGoodListings, key, `i${key}`, repository);
     });
 
   const cache = yield* Cache.makeWith(listIndex, {
@@ -148,9 +248,10 @@ export const makePullRequestIndex = Effect.gen(function* () {
       const first = key.indexOf("\u0000");
       const second = key.indexOf("\u0000", first + 1);
       const headSelector = key.slice(first + 1, second);
-      const lookup = lookups.get(key.slice(second + 1));
+      const repository = key.slice(second + 1);
+      const lookup = lookups.get(repository);
       if (!lookup) return Effect.die(new Error("Change request branch read without a checkout."));
-      return lookup.provider.listChangeRequests({
+      const read = lookup.provider.listChangeRequests({
         cwd: lookup.cwd,
         headSelector,
         state: "all",
@@ -158,6 +259,8 @@ export const makePullRequestIndex = Effect.gen(function* () {
         includeStackSummary: false,
         fields: "summary",
       });
+      const stableKey = key.slice(first + 1);
+      return learn(read, lastGoodBranches, stableKey, `b${stableKey}`, repository);
     });
 
   const branchCache = yield* Cache.makeWith(listBranch, {
@@ -188,12 +291,19 @@ export const makePullRequestIndex = Effect.gen(function* () {
     read: (input) =>
       Effect.suspend(() => {
         rememberLookup(input);
-        return Cache.get(cache, indexKey(input.repository, input.scope));
+        const key = indexKey(input.repository, input.scope);
+        return throughPause(Cache.get(cache, key), lastGoodListings, key, `i${key}`);
       }),
     readBranch: (input) =>
       Effect.suspend(() => {
         rememberLookup(input);
-        return Cache.get(branchCache, branchKey(input.repository, input.headSelector));
+        const stableKey = `${input.headSelector}\u0000${input.repository}`;
+        return throughPause(
+          Cache.get(branchCache, branchKey(input.repository, input.headSelector)),
+          lastGoodBranches,
+          stableKey,
+          `b${stableKey}`,
+        );
       }),
     peek: (repository) =>
       Effect.forEach(["all", "open"] as const, (scope) =>
@@ -203,21 +313,24 @@ export const makePullRequestIndex = Effect.gen(function* () {
           listings.flatMap((listing) => (listing._tag === "Some" ? [listing.value] : [])),
         ),
       ),
-    invalidate: (repository) =>
-      Effect.suspend(() => {
+    invalidate: (repository, options?) =>
+      Effect.gen(function* () {
         generations.delete(repository);
         generations.set(repository, ++nextGeneration);
         for (const oldest of generations.keys()) {
           if (generations.size <= BRANCH_CAPACITY) break;
           generations.delete(oldest);
         }
-        return Effect.all(
-          [
-            Cache.invalidate(cache, indexKey(repository, "all")),
-            Cache.invalidate(cache, indexKey(repository, "open")),
-          ],
-          { discard: true },
+        yield* Cache.invalidate(cache, indexKey(repository, "all"));
+        yield* Cache.invalidate(cache, indexKey(repository, "open"));
+        const nowMs = yield* Clock.currentTimeMillis;
+        const holding = [...holds.values()].some(
+          (hold) => hold.repository === repository && hold.untilMs > nowMs,
         );
+        if (holding && options?.keepHeldWhile !== undefined && (yield* options.keepHeldWhile)) {
+          return;
+        }
+        for (const [key, hold] of holds) if (hold.repository === repository) holds.delete(key);
       }),
   } satisfies PullRequestIndex;
 });

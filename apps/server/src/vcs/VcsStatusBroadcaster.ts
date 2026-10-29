@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 
 import {
+  Cause,
   Clock,
   Context,
   Deferred,
@@ -9,6 +10,7 @@ import {
   Exit,
   Fiber,
   Layer,
+  Option,
   PubSub,
   Ref,
   Schedule,
@@ -25,6 +27,7 @@ import type {
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
 import { mergeGitStatusParts } from "@ryco/shared/git";
+import { readSourceControlFailure } from "@ryco/shared/sourceControl";
 
 import type { VcsRefSummary } from "../git/GitManager.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -176,6 +179,25 @@ export function remoteRefreshFailureDelay(
     VCS_STATUS_REFRESH_FAILURE_MAX_DELAY,
   );
   return Duration.max(configuredInterval, cappedBackoff);
+}
+
+/**
+ * How long a remote refresh that failed because the forge is rate limiting
+ * waits for the pause to end (at most the failure backoff's cap); zero for
+ * other failures. The poll then asks a paused forge once per pause instead of
+ * on every backoff step, and every poll of the repository shares the answer
+ * the caches hold until then.
+ */
+export function remoteRefreshPauseDelay(
+  cause: Cause.Cause<unknown>,
+  nowMs: number,
+): Duration.Duration {
+  const failure = readSourceControlFailure(Option.getOrUndefined(Cause.findErrorOption(cause)));
+  if (failure?.reason !== "rate-limited" || failure.retryAt === null) return Duration.zero;
+  return Duration.min(
+    Duration.millis(Math.max(0, failure.retryAt - nowMs)),
+    VCS_STATUS_REFRESH_FAILURE_MAX_DELAY,
+  );
 }
 
 /**
@@ -576,7 +598,10 @@ export const layer = Layer.effect(
           const consecutiveFailures = yield* Ref.updateAndGet(consecutiveFailuresRef, (count) =>
             Math.min(count + 1, MAX_REMOTE_REFRESH_CONSECUTIVE_FAILURES),
           );
-          const nextDelay = remoteRefreshFailureDelay(consecutiveFailures, configuredInterval);
+          const nextDelay = Duration.max(
+            remoteRefreshFailureDelay(consecutiveFailures, configuredInterval),
+            remoteRefreshPauseDelay(exit.cause, yield* Clock.currentTimeMillis),
+          );
           // Offline or signed out, every backoff step fails the same way.
           yield* logOnceEvery({
             key: `vcs.remoteStatusRefresh:${cwd}`,

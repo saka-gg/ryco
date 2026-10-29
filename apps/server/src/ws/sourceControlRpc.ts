@@ -30,6 +30,7 @@ import {
 } from "../sourceControl/SourceControlProvider.ts";
 import { withSourceControlBodyFile } from "../sourceControl/sourceControlBodyFile.ts";
 import { PULL_REQUEST_INDEX_LIMIT } from "../sourceControl/pullRequestIndex.ts";
+import { markServedWhilePaused, pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
@@ -268,7 +269,8 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
   /**
    * Picker rows: open and recent lists come from the repository's change request index (lean
    * rows shared with status and discovery reads, usually warm); other states ask the host for
-   * the same lean fields. Falls back to the host when the index cannot answer.
+   * the same lean fields. Falls back to the host when the index cannot answer, except while the
+   * host is rate limiting: it would answer the same list read the same way.
    */
   const listPickerChangeRequests = (
     provider: SourceControlProviderShape,
@@ -282,12 +284,19 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
       if (input.state === "open" || input.state === "all") {
         const indexed = yield* gitWorkflow
           .indexedChangeRequests({ cwd: input.cwd, scope: input.state })
-          .pipe(Effect.catch(() => Effect.succeed(null)));
+          .pipe(
+            Effect.catch((error) =>
+              error.reason === "rate-limited" ? Effect.fail(error) : Effect.succeed(null),
+            ),
+          );
         if (
           indexed !== null &&
           (indexed.length >= input.limit || indexed.length < PULL_REQUEST_INDEX_LIMIT)
         ) {
-          return indexed.slice(0, input.limit);
+          // Rows served while the forge is paused keep saying so.
+          const pausedUntil = pausedUntilOf(indexed);
+          const rows = indexed.slice(0, input.limit);
+          return pausedUntil === null ? rows : markServedWhilePaused(rows, pausedUntil);
         }
       }
       return yield* provider.listChangeRequests({
@@ -541,11 +550,15 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
             },
           }).pipe(
             Effect.tap((items) =>
-              refreshLinkedWorktreeSourceControlStates({
-                cwd,
-                reason: "sourceControl.listChangeRequests",
-                knownPullRequests: items,
-              }),
+              // Rows served while the forge is paused may be stale: they must not overwrite
+              // link states a live read wrote meanwhile.
+              pausedUntilOf(items) !== null
+                ? Effect.void
+                : refreshLinkedWorktreeSourceControlStates({
+                    cwd,
+                    reason: "sourceControl.listChangeRequests",
+                    knownPullRequests: items,
+                  }),
             ),
           ),
         ),
@@ -603,13 +616,15 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
             // Passive row glyphs: every visible row polls its change request,
             // which is several forge children each. They queue in the
             // background lane behind the focused surfaces, and rows of the
-            // same repository share one read for a few seconds.
+            // same repository share one read for a few seconds. While the
+            // forge is rate limiting, a row keeps its last good detail.
             return gitWorkflow
               .cachedRepositoryList({
                 cwd,
                 key: JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]),
                 load: read,
                 ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
+                lastGood: fullContent !== true,
               })
               .pipe(inBackgroundProcessLane);
           }),

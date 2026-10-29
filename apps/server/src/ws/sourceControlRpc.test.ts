@@ -26,6 +26,7 @@ import {
   type ProjectionWorktreeRepositoryShape,
 } from "../persistence/Services/ProjectionWorktrees.ts";
 import { ProcessLaneRef, type ProcessLane } from "../processGovernor.ts";
+import { markServedWhilePaused, pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
 import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
 import {
   makeRepositoryListCache,
@@ -83,6 +84,8 @@ function makeContext(
   options?: {
     /** The repository index's open/recent listing; null when it cannot answer. */
     readonly indexed?: ReadonlyArray<ChangeRequest> | null;
+    /** The repository index's listing fails with this instead. */
+    readonly indexedError?: SourceControlProviderError;
     /** A real repository list cache (one repository) instead of reading through. */
     readonly listCache?: RepositoryListCache;
   },
@@ -104,7 +107,10 @@ function makeContext(
         Effect.sync(() => listInvalidations.push(cwd)).pipe(
           Effect.andThen(listCache ? listCache.invalidate("repo") : Effect.void),
         ),
-      indexedChangeRequests: () => Effect.succeed(options?.indexed ?? null),
+      indexedChangeRequests: () =>
+        options?.indexedError
+          ? Effect.fail(options.indexedError)
+          : Effect.succeed(options?.indexed ?? null),
     },
     sourceControlRegistry: {
       resolve: () => Effect.succeed(resolved),
@@ -287,6 +293,107 @@ describe("pull request page handlers", () => {
         view: "picker",
       }).pipe(Effect.provide(handlerLayer));
       expect(listed.at(-1)).toMatchObject({ state: "open", limit: 20, fields: "summary" });
+    }),
+  );
+
+  it.effect("keeps rows served while the forge is paused marked and out of link writes", () =>
+    Effect.gen(function* () {
+      const indexed = markServedWhilePaused(
+        [1, 2, 3].map((number) => changeRequest({ number })),
+        1_000_000,
+      );
+      const { handlers, refreshes } = makeContext({}, undefined, { indexed });
+      const rows = yield* handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "open",
+        limit: 2,
+        view: "picker",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(rows.map((item) => item.number)).toEqual([1, 2]);
+      expect(pausedUntilOf(rows)).toBe(1_000_000);
+      expect(refreshes).not.toContain("worktrees:sourceControl.listChangeRequests");
+    }),
+  );
+
+  it.effect(
+    "does not ask a rate-limiting host again for picker rows the index could not read",
+    () =>
+      Effect.gen(function* () {
+        const listed: Array<unknown> = [];
+        const provider = {
+          listChangeRequests: (input: unknown) =>
+            Effect.sync(() => (listed.push(input), [changeRequest({ number: 9 })])),
+        } as Partial<SourceControlProviderShape>;
+        const readPicker = (indexedError: SourceControlProviderError) =>
+          makeContext(provider, undefined, { indexedError })
+            .handlers[WS_METHODS.sourceControlListChangeRequests]({
+              cwd: "/repo",
+              state: "open",
+              view: "picker",
+            })
+            .pipe(Effect.provide(handlerLayer));
+
+        const rateLimited = new SourceControlProviderError({
+          provider: "github",
+          operation: "listChangeRequests",
+          detail: "GitHub API rate limit exceeded.",
+          reason: "rate-limited",
+          retryAt: 1_000_000,
+        });
+        expect(yield* Effect.flip(readPicker(rateLimited))).toBe(rateLimited);
+        expect(listed).toEqual([]);
+
+        // Any other failed listing still falls back to lean host rows.
+        const offline = new SourceControlProviderError({
+          provider: "github",
+          operation: "listChangeRequests",
+          detail: "host unreachable",
+        });
+        expect((yield* readPicker(offline)).map((item) => item.number)).toEqual([9]);
+        expect(listed).toHaveLength(1);
+      }),
+  );
+
+  it.effect("keeps a row's last good detail while the forge is rate limiting", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let limited = false;
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            limited
+              ? Effect.fail(
+                  new SourceControlProviderError({
+                    provider: "github",
+                    operation: "getChangeRequestDetail",
+                    detail: "GitHub requests are paused after a rate limit.",
+                    reason: "rate-limited",
+                    retryAt: now + 60_000,
+                  }),
+                )
+              : Effect.succeed({ number: Number(input.reference) } as never),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = (fullContent?: boolean) =>
+        handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+          cwd: "/repo",
+          reference: "42",
+          view: "row",
+          ...(fullContent !== undefined ? { fullContent } : {}),
+        }).pipe(Effect.provide(handlerLayer));
+
+      yield* read();
+      yield* read(true);
+      limited = true;
+      now += 60_000;
+      const kept = yield* read();
+      expect(kept).toMatchObject({ number: 42 });
+      expect(pausedUntilOf(kept)).toBe(now + 60_000);
+      // A full-content detail is too large to keep.
+      expect(yield* Effect.flip(read(true))).toMatchObject({ reason: "rate-limited" });
     }),
   );
 

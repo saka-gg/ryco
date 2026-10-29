@@ -379,10 +379,14 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     /**
      * Finds the pull request a checkout's branch has now: from its ref summary
      * (HEAD, config and the repository's change request index, cached), not a
-     * full git status per swept workspace.
+     * full git status per swept workspace. Nothing while the forge is rate
+     * limiting and the summary came from its last good listing: stale rows
+     * must not create links.
      */
     const discoverPullRequest = (cwd: string) =>
-      gitWorkflow.refSummary(cwd).pipe(Effect.map((summary) => summary.pr));
+      gitWorkflow
+        .refSummary(cwd)
+        .pipe(Effect.map((summary) => (summary.prServedWhilePaused ? null : summary.pr)));
 
     /**
      * Which workspaces a source-control call's `cwd` speaks for: every one of a

@@ -6,6 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
 import { ChildProcessSpawner } from "effect/process";
+import { TestClock } from "effect/testing";
 import { describe, expect } from "vite-plus/test";
 import type {
   GitActionProgressEvent,
@@ -49,6 +50,13 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { githubDiscovery } from "../sourceControl/SourceControlProviderDiscoveryCatalog.ts";
+import {
+  ForgeRateLimitStore,
+  ForgeRateLimits,
+  withForgeRateLimitGuards,
+} from "../sourceControl/forgeRateLimit.ts";
+import { pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { makeGitManager, type MakeGitManagerOptions } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
@@ -81,8 +89,8 @@ interface FakeGhScenario {
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
   failWith?: GitHubCliError;
-  /** Fails only repository-wide `pr list` calls (no `--head`). */
-  failRepositoryListWith?: GitHubCliError;
+  /** Fails only repository-wide `pr list` calls (no `--head`); read per call when a function. */
+  failRepositoryListWith?: GitHubCliError | (() => GitHubCliError | undefined);
 }
 
 function fakeGhOutput(stdout: string): VcsProcess.VcsProcessOutput {
@@ -459,8 +467,12 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
         headSelectorIndex >= 0 && headSelectorIndex < args.length - 1
           ? args[headSelectorIndex + 1]
           : undefined;
-      if (headSelector === undefined && scenario.failRepositoryListWith) {
-        return Effect.fail(scenario.failRepositoryListWith);
+      const repositoryListFailure =
+        typeof scenario.failRepositoryListWith === "function"
+          ? scenario.failRepositoryListWith()
+          : scenario.failRepositoryListWith;
+      if (headSelector === undefined && repositoryListFailure) {
+        return Effect.fail(repositoryListFailure);
       }
       const mappedQueue =
         typeof headSelector === "string"
@@ -796,6 +808,8 @@ function makeManager(input?: {
   project?: OrchestrationProjectShell;
   /** Route through the production registry, which detects the provider from git remotes. */
   detectSourceControlFromRemotes?: boolean;
+  /** Wrap the provider in the forge rate-limit guards, as the production registry does. */
+  guardForgeRateLimits?: boolean;
   /** Wraps every git command the manager's driver runs (observe, delay or replace it). */
   gitExecute?: (
     input: GitVcsDriver.ExecuteGitInput,
@@ -881,7 +895,13 @@ function makeManager(input?: {
       Effect.flatMap((provider) =>
         input?.detectSourceControlFromRemotes
           ? SourceControlProviderRegistry.makeWithProviders([
-              { kind: "github", provider, discovery: githubDiscovery },
+              {
+                kind: "github",
+                provider: input.guardForgeRateLimits
+                  ? withForgeRateLimitGuards(provider)
+                  : provider,
+                discovery: githubDiscovery,
+              },
             ])
           : Effect.succeed(
               SourceControlProviderRegistry.SourceControlProviderRegistry.of({
@@ -1853,6 +1873,84 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       // The failed listing is remembered briefly instead of retried per read.
       expect(ghCalls.filter((call) => call.startsWith("pr list --state all "))).toHaveLength(1);
     }),
+  );
+
+  it.effect("asks a rate-limited forge once per pause and keeps badges on the last listing", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/indexed"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/indexed"]);
+      const worktreeDir = path.join(yield* makeTempDir("ryco-git-manager-wt-"), "second");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "feature/second", worktreeDir, "main"]);
+      yield* runGit(worktreeDir, ["push", "-u", "origin", "feature/second"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const listing = JSON.stringify([
+        indexedPullRequest({ number: 12, headRefName: "feature/indexed", state: "OPEN" }),
+        indexedPullRequest({ number: 11, headRefName: "feature/second", state: "MERGED" }),
+      ]);
+      const pauseEnd = 5 * 60_000;
+      let rateLimited: GitHubCliError | undefined;
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        guardForgeRateLimits: true,
+        ghScenario: {
+          prListSequence: [listing, listing],
+          failRepositoryListWith: () => rateLimited,
+        },
+      });
+      const listCalls = () =>
+        ghCalls.filter((call) => call.startsWith("pr list --state all ")).length;
+      /** One tick of a checkout's remote-status poll: invalidate, then read. */
+      const poll = (cwd: string) =>
+        manager
+          .invalidateRemoteStatus(cwd)
+          .pipe(Effect.andThen(manager.remoteStatus({ cwd })), Effect.flip);
+
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 12 });
+      expect(listCalls()).toBe(1);
+
+      // GitHub starts rate limiting until five minutes from now.
+      rateLimited = new GitHubCliError({
+        operation: "execute",
+        detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+        failureKind: "rate-limited",
+        retryAt: pauseEnd,
+      });
+      expect(yield* poll(repoDir)).toMatchObject({ reason: "rate-limited", retryAt: pauseEnd });
+      expect(listCalls()).toBe(2);
+
+      // Every poll of every checkout of the repository invalidates first; while
+      // the pause runs they share the held answer instead of asking again.
+      for (let tick = 0; tick < 9; tick += 1) {
+        yield* TestClock.adjust("30 seconds");
+        expect(yield* poll(repoDir)).toMatchObject({ reason: "rate-limited" });
+        expect(yield* poll(worktreeDir)).toMatchObject({ reason: "rate-limited" });
+      }
+      expect(listCalls()).toBe(2);
+
+      // Background badges keep the last listing, flagged so it creates no links.
+      const badge = yield* inBackgroundProcessLane(manager.refSummary(worktreeDir));
+      expect(badge).toMatchObject({ pr: { number: 11 }, prServedWhilePaused: true });
+      const rows = yield* inBackgroundProcessLane(
+        manager.indexedChangeRequests({ cwd: repoDir, scope: "all" }),
+      );
+      expect(rows?.map((row) => row.number)).toEqual([12, 11]);
+      expect(pausedUntilOf(rows)).toBe(pauseEnd);
+      expect((yield* manager.indexedPullRequestStates(repoDir)).size).toBe(0);
+      expect(listCalls()).toBe(2);
+
+      // The pause is over: the next poll asks again.
+      rateLimited = undefined;
+      yield* TestClock.adjust("31 seconds");
+      yield* manager.invalidateRemoteStatus(repoDir);
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 12 });
+      expect(listCalls()).toBe(3);
+      expect(yield* manager.refSummary(repoDir)).not.toHaveProperty("prServedWhilePaused");
+    }).pipe(Effect.provideService(ForgeRateLimits, new ForgeRateLimitStore())),
   );
 
   it.effect("summarizes a checkout's badge from HEAD, config and the index", () =>
