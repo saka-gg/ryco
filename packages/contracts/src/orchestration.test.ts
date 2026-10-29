@@ -772,6 +772,51 @@ it.effect("decodes thread archive and unarchive commands", () =>
   }),
 );
 
+it.effect("decodes branch-guarded thread and workspace metadata updates", () =>
+  Effect.gen(function* () {
+    const fromBranch = yield* decodeOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-branch-guarded",
+      threadId: "thread-1",
+      branch: "feat/agent",
+      expectedBranch: "ryco/1234abcd",
+    });
+    assert.deepInclude(fromBranch, { expectedBranch: "ryco/1234abcd" });
+    const fromNone = yield* decodeClientOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-branch-guarded-null",
+      threadId: "thread-1",
+      branch: "feat/agent",
+      expectedBranch: null,
+    });
+    assert.deepInclude(fromNone, { expectedBranch: null });
+    const workspace = yield* decodeOrchestrationCommand({
+      type: "worktree.meta.update",
+      commandId: "cmd-workspace-branch-guarded",
+      worktreeId: "worktree-1",
+      branch: "feat/agent",
+      expectedBranch: "ryco/1234abcd",
+      changedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepInclude(workspace, { expectedBranch: "ryco/1234abcd" });
+
+    // A workspace always records a branch, so its guard names one.
+    for (const expectedBranch of ["", "  ", null]) {
+      const refused = yield* Effect.exit(
+        decodeOrchestrationCommand({
+          type: "worktree.meta.update",
+          commandId: "cmd-workspace-branch-guard-invalid",
+          worktreeId: "worktree-1",
+          branch: "feat/agent",
+          expectedBranch,
+          changedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      assert.strictEqual(refused._tag, "Failure");
+    }
+  }),
+);
+
 it.effect("decodes thread archived and unarchived events", () =>
   Effect.gen(function* () {
     const archived = yield* decodeOrchestrationEvent({

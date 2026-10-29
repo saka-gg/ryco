@@ -11,8 +11,11 @@ import {
 } from "@ryco/contracts";
 import { Effect } from "effect";
 
+import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
+  branchPreconditionFailure,
   findThreadById,
+  isBranchPreconditionFailure,
   isThreadPristine,
   listThreadsByProjectId,
   requireNonNegativeInteger,
@@ -336,5 +339,84 @@ describe("commandInvariants", () => {
         }),
       ),
     ).rejects.toThrow("greater than or equal to 0");
+  });
+});
+
+describe("branch preconditions", () => {
+  const subject = "Thread 'thread-1'";
+
+  it.each([
+    { name: "no guard", current: "c", expected: undefined, next: "b" },
+    { name: "the expected branch", current: "a", expected: "a", next: "b" },
+    {
+      name: "the new branch already (the same change landed first)",
+      current: "b",
+      expected: "a",
+      next: "b",
+    },
+    { name: "no branch, as expected", current: null, expected: null, next: "b" },
+    {
+      name: "the expected branch, without a branch change",
+      current: "a",
+      expected: "a",
+      next: undefined,
+    },
+  ] as const)("applies when the record holds $name", ({ current, expected, next }) => {
+    expect(branchPreconditionFailure({ subject, current, expected, next })).toBeNull();
+  });
+
+  it.each([
+    {
+      current: "c",
+      expected: "a",
+      next: "b",
+      detail: "Thread 'thread-1' records branch 'c' now, but the update expected branch 'a'.",
+    },
+    {
+      current: "a",
+      expected: null,
+      next: "b",
+      detail: "Thread 'thread-1' records branch 'a' now, but the update expected no branch.",
+    },
+    {
+      current: null,
+      expected: "a",
+      next: "b",
+      detail: "Thread 'thread-1' records no branch now, but the update expected branch 'a'.",
+    },
+    {
+      current: "c",
+      expected: "a",
+      next: undefined,
+      detail: "Thread 'thread-1' records branch 'c' now, but the update expected branch 'a'.",
+    },
+  ] as const)(
+    "names the newer branch when $current replaced $expected",
+    ({ current, expected, next, detail }) => {
+      expect(branchPreconditionFailure({ subject, current, expected, next })).toBe(detail);
+    },
+  );
+
+  it("tells a lost branch race from other invariant failures of the same commands", () => {
+    expect(
+      isBranchPreconditionFailure(
+        new OrchestrationCommandInvariantError({
+          commandType: "thread.meta.update",
+          detail: "lost",
+          failedPrecondition: "expectedBranch",
+        }),
+      ),
+    ).toBe(true);
+    // Storage admission raises the same error type for a pending checkout relocation.
+    expect(
+      isBranchPreconditionFailure(
+        new OrchestrationCommandInvariantError({
+          commandType: "worktree.meta.update",
+          detail:
+            "Checkout relocation is pending. Reload the workspace before changing its metadata.",
+        }),
+      ),
+    ).toBe(false);
+    expect(isBranchPreconditionFailure(new Error("expectedBranch"))).toBe(false);
   });
 });

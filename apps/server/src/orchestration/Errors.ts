@@ -32,6 +32,11 @@ export class OrchestrationCommandInvariantError extends Schema.TaggedError<Orche
   {
     commandType: Schema.String,
     detail: Schema.String,
+    /**
+     * Set when only a compare-and-swap field of a valid command no longer held: the caller lost
+     * a race to a newer write (see `isBranchPreconditionFailure`), it did not send a bad command.
+     */
+    failedPrecondition: Schema.optional(Schema.Literal("expectedBranch")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {

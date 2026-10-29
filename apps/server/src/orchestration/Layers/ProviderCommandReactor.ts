@@ -148,6 +148,8 @@ import {
 } from "../Services/ProviderCommandReactor.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
+import { readCheckoutHead } from "../../vcs/gitCheckoutHead.ts";
+import { isBranchPreconditionFailure } from "../commandInvariants.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { withProviderGoalPrompt } from "../../provider/goalMode.ts";
 import {
@@ -1556,7 +1558,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
   /**
    * Renames a worktree's temporary branch once the agent stopped working, so a
-   * running turn never sees its branch move under its git commands.
+   * running turn never sees its branch move under its git commands. A branch
+   * checked out or recorded meanwhile wins: the rename never moves it, and
+   * never writes the generated name over it.
    */
   const renameWorktreeBranchWhenIdle = Effect.fn("renameWorktreeBranchWhenIdle")(function* (input: {
     readonly threadId: ThreadId;
@@ -1578,29 +1582,61 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     ) {
       return;
     }
+    // The checkout is on another branch (the agent made its own): that stays, and
+    // the abandoned temporary branch keeps its name. A detached HEAD or a layout
+    // the file read cannot follow (null) renames as before; git itself refuses
+    // while the branch is being rebased or bisected.
+    const head = yield* readCheckoutHead(input.worktreePath);
+    if (head !== null && head.branch !== null && head.branch !== input.oldBranch) return;
     const renamed = yield* gitWorkflow.renameBranch({
       cwd: input.worktreePath,
       oldBranch: input.oldBranch,
       newBranch: input.targetBranch,
     });
+    // git renamed the branch already, so each record that still holds the old
+    // name moves on its own: one that lost its guard to a newer branch must not
+    // leave the other on a branch that no longer exists.
+    const recordRename = (record: "workspace" | "thread") =>
+      Effect.catch((error: OrchestrationDispatchError) =>
+        isBranchPreconditionFailure(error)
+          ? Effect.logInfo("worktree branch rename kept a newer branch", {
+              threadId: input.threadId,
+              record,
+              detail: error.message,
+            })
+          : Effect.logWarning("worktree branch rename could not record the renamed branch", {
+              threadId: input.threadId,
+              record,
+              branch: renamed.branch,
+              detail: error.message,
+            }),
+      );
     // The worktree record moves first: clients trust a temporary live branch over
     // the thread's stored one only while the record still agrees with it.
     if (input.worktreeId !== null) {
-      yield* orchestrationEngine.dispatch({
-        type: "worktree.meta.update",
-        commandId: serverCommandId("worktree-branch-rename-meta"),
-        worktreeId: input.worktreeId,
-        branch: renamed.branch,
-        changedAt: new Date().toISOString(),
-      });
+      yield* orchestrationEngine
+        .dispatch({
+          type: "worktree.meta.update",
+          commandId: serverCommandId("worktree-branch-rename-meta"),
+          worktreeId: input.worktreeId,
+          branch: renamed.branch,
+          expectedBranch: input.oldBranch,
+          changedAt: new Date().toISOString(),
+        })
+        .pipe(Effect.asVoid, recordRename("workspace"));
     }
-    yield* orchestrationEngine.dispatch({
-      type: "thread.meta.update",
-      commandId: serverCommandId("worktree-branch-rename"),
-      threadId: input.threadId,
-      branch: renamed.branch,
-      worktreePath: input.worktreePath,
-    });
+    // Branch only: the guard covers the branch, and the thread's path was checked
+    // above, so writing it again could only put back a path that moved meanwhile.
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.meta.update",
+        commandId: serverCommandId("worktree-branch-rename"),
+        threadId: input.threadId,
+        branch: renamed.branch,
+        expectedBranch: input.oldBranch,
+      })
+      .pipe(Effect.asVoid, recordRename("thread"));
+    // Always: the checkout's branch changed even when a record kept a newer one.
     yield* vcsStatusBroadcaster
       .refreshStatus(input.worktreePath)
       .pipe(Effect.ignoreCause({ log: true }));

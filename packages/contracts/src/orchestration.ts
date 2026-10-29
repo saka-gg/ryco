@@ -1896,6 +1896,11 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /**
+   * Applies the update only while the thread records this branch (null: none), or already
+   * records `branch`: a late automatic branch write never overwrites a newer branch change.
+   */
+  expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
 
@@ -2291,6 +2296,8 @@ const WorktreeMetaUpdateCommand = Schema.Struct({
   worktreeId: WorktreeId,
   title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   branch: Schema.optional(TrimmedNonEmptyString),
+  /** Applies the update only while the workspace records this branch, or already records `branch`. */
+  expectedBranch: Schema.optional(TrimmedNonEmptyString),
   changedAt: IsoDateTime,
 });
 
