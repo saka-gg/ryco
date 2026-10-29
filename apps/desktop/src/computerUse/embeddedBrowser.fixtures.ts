@@ -34,9 +34,9 @@ export class FakeDebugger extends EventEmitter {
   /** Electron's `Debugger::Detach` emits "detach" ("target closed") for a self-initiated detach; false models a build that does not. */
   emitOnSelfDetach = true;
   /** Canned responses: a value, a thrown error, or a promise (one that never settles models a hung command). */
-  respond: (method: string, params: unknown) => unknown = () => ({});
-  /** Every command sent while attached, in order. */
-  readonly commands: Array<{ method: string; params: unknown }> = [];
+  respond: (method: string, params: unknown, sessionId?: string) => unknown = () => ({});
+  /** Every command sent while attached, in order; `sessionId` only on a child target's command. */
+  readonly commands: Array<{ method: string; params: unknown; sessionId?: string }> = [];
   private attached = false;
   private readonly pending = new Set<(error: Error) => void>();
   private readonly owner: { isDestroyed(): boolean };
@@ -63,33 +63,37 @@ export class FakeDebugger extends EventEmitter {
     return this.attached;
   }
 
-  readonly sendCommand = vi.fn((method: string, params: unknown = {}): Promise<unknown> => {
-    this.assertLive();
-    if (!this.attached) return Promise.reject(new Error("No target available"));
-    this.commands.push({ method, params });
-    return new Promise<unknown>((resolve, reject) => {
-      const fail = (error: Error) => reject(error);
-      this.pending.add(fail);
-      // A detach that already rejected this command wins over its response.
-      const settle = (complete: () => void) => {
-        if (this.pending.delete(fail)) complete();
-      };
-      queueMicrotask(() => {
-        if (!this.pending.has(fail)) return;
-        let response: unknown;
-        try {
-          response = this.respond(method, params);
-        } catch (error) {
-          settle(() => reject(error));
-          return;
-        }
-        Promise.resolve(response).then(
-          (value) => settle(() => resolve(value)),
-          (error: unknown) => settle(() => reject(error)),
-        );
+  readonly sendCommand = vi.fn(
+    (method: string, params: unknown = {}, sessionId?: string): Promise<unknown> => {
+      this.assertLive();
+      if (!this.attached) return Promise.reject(new Error("No target available"));
+      this.commands.push(
+        sessionId === undefined ? { method, params } : { method, params, sessionId },
+      );
+      return new Promise<unknown>((resolve, reject) => {
+        const fail = (error: Error) => reject(error);
+        this.pending.add(fail);
+        // A detach that already rejected this command wins over its response.
+        const settle = (complete: () => void) => {
+          if (this.pending.delete(fail)) complete();
+        };
+        queueMicrotask(() => {
+          if (!this.pending.has(fail)) return;
+          let response: unknown;
+          try {
+            response = this.respond(method, params, sessionId);
+          } catch (error) {
+            settle(() => reject(error));
+            return;
+          }
+          Promise.resolve(response).then(
+            (value) => settle(() => resolve(value)),
+            (error: unknown) => settle(() => reject(error)),
+          );
+        });
       });
-    });
-  });
+    },
+  );
 
   /** Electron ending the session (DevTools opened, target closed): rejects pending commands, emits "detach". */
   externalDetach(reason = "target closed"): void {

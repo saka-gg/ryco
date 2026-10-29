@@ -146,6 +146,11 @@
       "import": "./src/orchestration.ts",
       "require": "./src/orchestration.ts"
     },
+    "./project-browser": {
+      "types": "./src/projectBrowser.ts",
+      "import": "./src/projectBrowser.ts",
+      "require": "./src/projectBrowser.ts"
+    },
     "./provider-instance": {
       "types": "./src/providerInstance.ts",
       "import": "./src/providerInstance.ts",

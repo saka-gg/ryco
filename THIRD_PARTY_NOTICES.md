@@ -58,6 +58,13 @@ Xcode 27 SimulatorKit lookup and the dtuhidd input transport in the native helpe
 adapted from Synara commits `dbfb2ae1a` (#687) and `74e0b3654` (#1924) under the same license;
 Synara learned the dtuhidd wire format from facebook/idb's MIT-licensed FBSimulatorControl HID
 sources.
+Browser element picking heuristics (selector, role, accessible name, sensitive-element,
+sensitive-text and URL-redaction checks) and field limits in
+`packages/shared/src/browserElementPickScript.ts`, `packages/shared/src/browserElementReference.ts`
+and `packages/contracts/src/projectBrowser.ts` were adapted from Synara commit
+`299fd573b1d6520c323a87c78d30be74e87e53e1` (`apps/desktop/src/browserAnnotations/guestPreload.ts`,
+`protocol.ts`, `packages/shared/src/browserAnnotations.ts`,
+`packages/contracts/src/browserAnnotations.ts`) under the same license.
 
 ### MIT License
 

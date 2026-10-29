@@ -84,6 +84,7 @@ import type {
   ProjectBrowserState,
   ProjectBrowserCommand,
   ProjectBrowserSurface,
+  ProjectBrowserPickResult,
   DiscoveredProjectSite,
 } from "./projectBrowser.ts";
 import type {
@@ -844,6 +845,11 @@ export interface DesktopBridge {
     command(input: ProjectBrowserCommand): Promise<void>;
     surface(input: ProjectBrowserSurface): Promise<void>;
     capture(tab: string): Promise<string>;
+    /**
+     * Lets the user pick one element on a docked tab; settles when an element is picked or the pick
+     * ends. Optional: a desktop shell without it offers no picker.
+     */
+    pick?(tab: string): Promise<ProjectBrowserPickResult>;
     discover(cwd?: string): Promise<readonly DiscoveredProjectSite[]>;
     onFocusAddress(listener: (tab: string) => void): () => void;
     onState(listener: (state: ProjectBrowserState) => void): () => void;

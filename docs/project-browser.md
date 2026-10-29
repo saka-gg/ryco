@@ -34,16 +34,20 @@ Focused checks:
 
 ```sh
 bun run --cwd apps/desktop test src/browser src/computerUse
+bun run --cwd packages/shared test src/browserElementReference.test.ts
 bun run --cwd apps/web test src/browser/browserState.test.ts
-bun run --cwd apps/web test:browser src/browser/BrowserPanel.browser.tsx
+bun run --cwd apps/web test:browser src/browser/BrowserPanel.browser.tsx src/browser/browserElementPickScript.browser.tsx
 node apps/desktop/scripts/computer-use-smoke.mjs signin
 node apps/desktop/scripts/computer-use-smoke.mjs project
+node apps/desktop/scripts/computer-use-smoke.mjs picker
 node apps/desktop/scripts/computer-use-smoke.mjs browser
 node apps/desktop/scripts/computer-use-smoke.mjs integration
 node apps/desktop/scripts/computer-use-smoke.mjs tab-budget
 ```
 
 The project smoke uses disposable local pages and browser profiles to exercise docking, agent input, resize, stale-surface cleanup, popout/redock, guest isolation and shell reload. Its macOS window capture requires Screen Recording permission and captures only its own fixture window.
+
+The picker smoke docks a disposable local page in a hidden fixture window and exercises the element picker: Chromium's inspect overlay and the picked highlight (checked in captures of its own page), picking, form-value redaction, end-pick, agent reads and "Stop agent" keeping a pick, an agent click ending it and reaching the page, navigation, Escape, panel switch, replacement, and cross-site and same-site frames. It sends synthetic input into its own fixture page only, never shows or focuses a window and needs no permissions. Set `RYCO_SMOKE_SHOT_DIR` to keep its captures.
 
 The sign-in smoke runs two disposable loopback origins under a temporary Electron user-data directory. It exercises native popup POST, blank-to-provider navigation, redirect/opener callback, denial, shared Ryco/default-profile isolation, focus behavior, agent exclusion and lifecycle/crash cleanup. It uses only fixture cookies and never contacts a real identity provider. Run native smokes serially because they briefly focus fixture windows.
 

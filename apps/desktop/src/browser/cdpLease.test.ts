@@ -84,6 +84,27 @@ describe("CdpLease", () => {
     expect(methods()).toEqual(["Slow.step", "Page.handleJavaScriptDialog", "Page.reload"]);
   });
 
+  it("sends a child target's command on its flat session, after the page's ready steps", async () => {
+    const { debugger: api, lease } = setup();
+    api.respond = (method, _params, sessionId) =>
+      method === "DOM.enable" ? { session: sessionId ?? "page" } : {};
+    lease.onReady(async (send) => {
+      await send("Ready.step");
+    });
+    lease.acquire("picker");
+    await expect(lease.send("DOM.enable", {}, { sessionId: "frame-session" })).resolves.toEqual({
+      session: "frame-session",
+    });
+    await expect(lease.send("DOM.enable")).resolves.toEqual({ session: "page" });
+    expect(api.commands).toEqual([
+      { method: "Ready.step", params: {} },
+      { method: "DOM.enable", params: {}, sessionId: "frame-session" },
+      { method: "DOM.enable", params: {} },
+    ]);
+    // A page command keeps Electron's two-argument call.
+    expect(api.sendCommand).toHaveBeenLastCalledWith("DOM.enable", {});
+  });
+
   it("rejects the triggering command when a ready step fails and retries the steps next time", async () => {
     const { debugger: api, lease, methods } = setup();
     let failures = 1;
@@ -206,6 +227,18 @@ describe("CdpLease", () => {
     expect(received).toHaveBeenCalledTimes(1);
     expect(failing).toHaveBeenCalledTimes(2);
     expect(api.listenerCount("message")).toBe(1);
+  });
+
+  it("reports the page's own events, which Electron gives an empty sessionId, without a session", () => {
+    const { debugger: api, lease } = setup();
+    const received = vi.fn();
+    lease.onEvent(received);
+    api.message("Overlay.inspectNodeRequested", { backendNodeId: 7 }, "");
+    expect(received).toHaveBeenCalledWith(
+      "Overlay.inspectNodeRequested",
+      { backendNodeId: 7 },
+      undefined,
+    );
   });
 
   it("never attaches from send, times out, and rejects pending commands when the session ends", async () => {
