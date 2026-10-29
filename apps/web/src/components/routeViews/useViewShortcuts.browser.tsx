@@ -178,13 +178,19 @@ const shown = () => document.querySelector('output[aria-label="Panel"]')?.textCo
 const mac = isMacPlatform(navigator.platform);
 function press(
   key: "w" | "t",
-  options: { readonly shift?: boolean; readonly repeat?: boolean; readonly from?: Element } = {},
+  options: {
+    readonly shift?: boolean;
+    readonly alt?: boolean;
+    readonly repeat?: boolean;
+    readonly from?: Element;
+  } = {},
 ): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     key: options.shift ? key.toUpperCase() : key,
     code: `Key${key.toUpperCase()}`,
     metaKey: mac,
     ctrlKey: !mac,
+    altKey: options.alt === true,
     shiftKey: options.shift === true,
     repeat: options.repeat === true,
     bubbles: true,
@@ -237,6 +243,26 @@ it("closes the active tab, then the panel on its launcher, then leaves the key a
   expect(press("w").defaultPrevented).toBe(true);
   await expect.poll(shown).toBe("closed");
   // Nothing left to close: the window's Close command gets the key.
+  expect(press("w").defaultPrevented).toBe(false);
+});
+
+it("closes and reopens with the alt keys a browser tab lets through, and uses them up", async () => {
+  const { show } = await mount();
+  await show("files");
+  await show("review");
+
+  expect(press("w", { alt: true }).defaultPrevented).toBe(true);
+  await expect.poll(shown).toBe("files");
+  expect(press("t", { alt: true, shift: true }).defaultPrevented).toBe(true);
+  await expect.poll(shown).toBe("review");
+  press("w", { alt: true });
+  await expect.poll(shown).toBe("files");
+  press("w", { alt: true });
+  await expect.poll(shown).toBe("launcher");
+  press("w", { alt: true });
+  await expect.poll(shown).toBe("closed");
+  // Nothing left to close: unlike mod+w, the key never reaches the browser.
+  expect(press("w", { alt: true }).defaultPrevented).toBe(true);
   expect(press("w").defaultPrevented).toBe(false);
 });
 

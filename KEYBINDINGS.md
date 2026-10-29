@@ -205,12 +205,12 @@ These defaults live in the app, not on the node, so older apps have no keys for 
 
 #### Tabs and panes
 
-- `view.close`: close the active workspace tab, else the workspace panel when it shows only its launcher, else the focused split pane. It defaults to `mod+w` outside the terminal drawer, so a terminal tab in the workspace panel closes like any other tab; in the focused drawer terminal `mod+w` stays `terminal.close`. When there is nothing to close, the key goes on to the window's Close command (File > Close on macOS, the window menu on Windows and Linux). Holding the key closes one view. A tab holding text you have not sent or saved yet (a comment, a note, an edit) stays open until you finish or discard it.
-- `view.reopenClosed`: reopen the most recently closed tab or pane, opening its thread when you have moved on. A pane goes back to its place in the split, or beside the focused pane when the split has changed since. It defaults to `mod+shift+t` outside the terminal drawer. Each window remembers its last 20 closed tabs and panes until it reloads.
+- `view.close`: close the active workspace tab, else the workspace panel when it shows only its launcher, else the focused split pane. It defaults to `mod+w` and `mod+alt+w` outside the terminal drawer, so a terminal tab in the workspace panel closes like any other tab; in the focused drawer terminal `mod+w` stays `terminal.close`. When there is nothing to close, `mod+w` goes on to the window's Close command (File > Close on macOS, the window menu on Windows and Linux); other keys do nothing then. Holding the key closes one view. A tab holding text you have not sent or saved yet (a comment, a note, an edit) stays open until you finish or discard it.
+- `view.reopenClosed`: reopen the most recently closed tab or pane, opening its thread when you have moved on. A pane goes back to its place in the split, or beside the focused pane when the split has changed since. It defaults to `mod+shift+t` and `mod+alt+shift+t` outside the terminal drawer. Each window remembers its last 20 closed tabs and panes until it reloads.
 
-Both defaults live in the app, not on the node, so older apps have no keys for them. A regular
-browser tab keeps `mod+w` and `mod+shift+t` for the browser, so the defaults work in the desktop app
-and in an installed web app; in a browser tab, bind other keys.
+These defaults live in the app, not on the node, so older apps have no keys for them. A regular
+browser tab keeps `mod+w` and `mod+shift+t` for itself and never passes them to Ryco, so there use
+`mod+alt+w` and `mod+alt+shift+t`. The desktop app and an installed web app get all four.
 
 #### Scripts
 

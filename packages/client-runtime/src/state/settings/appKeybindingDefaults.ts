@@ -56,10 +56,14 @@ const NAVIGATION_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   { key: "mod+shift+c", command: "thread.copyReference", when: "!terminalFocus" },
 ];
 
-// Close and reopen views and tabs.
+// Close and reopen views and tabs. A browser tab keeps mod+w and mod+shift+t for itself and never
+// passes them to the page, so each command also has a key a tab does pass on, listed last so
+// shortcut labels show it, as chat.new's mod+shift+o does for the browser's mod+n.
 const VIEW_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   { key: "mod+w", command: "view.close", when: "!terminalFocus" },
   { key: "mod+shift+t", command: "view.reopenClosed", when: "!terminalFocus" },
+  { key: "mod+alt+w", command: "view.close", when: "!terminalFocus" },
+  { key: "mod+alt+shift+t", command: "view.reopenClosed", when: "!terminalFocus" },
 ];
 
 export const CLIENT_ONLY_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
