@@ -17,6 +17,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   checkpoints: "projection.checkpoints",
   pendingApprovals: "projection.pending-approvals",
   worktrees: "projection.worktrees",
+  threadPullRequestWatches: "projection.thread-pull-request-watches",
 } as const;
 
 export type ProjectorName =

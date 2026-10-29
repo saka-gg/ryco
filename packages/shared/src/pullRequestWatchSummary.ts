@@ -21,6 +21,10 @@ export const PULL_REQUEST_AUTO_FIX_MAX_ATTEMPTS = 3;
 export const PULL_REQUEST_WATCH_ENDED_KEPT = 4;
 /** Thread shells leave ended watches out after a day; the thread's full state keeps them. */
 export const PULL_REQUEST_WATCH_ENDED_SHELL_MS = 24 * 60 * 60_000;
+/** Pull requests one thread may watch at once (a stack's layers). */
+export const PULL_REQUEST_WATCHES_PER_THREAD = 8;
+/** Updates of one watch refused in a row before it ends (= completion returns' `MAX_DELIVERY_ATTEMPTS`). */
+export const PULL_REQUEST_WATCH_MAX_REJECTED_UPDATES = 5;
 
 export const EMPTY_PULL_REQUEST_WATCHES: ThreadPullRequestWatches = { active: [], ended: [] };
 
@@ -110,17 +114,23 @@ export function endPullRequestWatches(
   };
 }
 
-/** Put `next` in place of the active watch with its id, or add it at the end. */
+/**
+ * Put `next` in place of the active watch with its id, or add it at the end. Watching a pull
+ * request again drops its ended entries: why it stopped no longer applies.
+ */
 export function upsertPullRequestWatch(
   watches: ThreadPullRequestWatches,
   next: ThreadPullRequestWatch,
 ): ThreadPullRequestWatches {
   const index = watches.active.findIndex((watch) => watch.watchId === next.watchId);
+  if (index !== -1) {
+    return {
+      active: watches.active.map((watch, position) => (position === index ? next : watch)),
+      ended: watches.ended,
+    };
+  }
   return {
-    active:
-      index === -1
-        ? [...watches.active, next]
-        : watches.active.map((watch, position) => (position === index ? next : watch)),
-    ended: watches.ended,
+    active: [...watches.active, next],
+    ended: watches.ended.filter((entry) => entry.watchId !== next.watchId),
   };
 }

@@ -159,6 +159,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.turn.diff.complete":
     case "thread.activity.append":
     case "thread.revert.complete":
+    case "thread.pull-request-watch.update":
       return {
         aggregateKind: "thread",
         aggregateId: command.threadId,
@@ -385,7 +386,10 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                   : storageCommand.type === "thread.sidebar.undo" ||
                       storageCommand.type === "thread.turn.start" ||
                       storageCommand.type === "thread.turn.steer" ||
-                      storageCommand.type === "thread.goal.set"
+                      storageCommand.type === "thread.goal.set" ||
+                      // A pull request update's wake starts a turn in the thread's checkout.
+                      (storageCommand.type === "thread.pull-request-watch.update" &&
+                        storageCommand.wake !== undefined)
                     ? storageThreadPaths
                     : [];
         // ID attachment and legacy path metadata can coexist. Neither may

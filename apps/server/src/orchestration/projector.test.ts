@@ -2173,3 +2173,77 @@ describe("orchestration projector checkpoint revert", () => {
     expect(thread?.proposedPlans).toEqual([]);
   });
 });
+
+describe("orchestration projector pull request watches", () => {
+  const createdAt = "2026-10-04T10:00:00.000Z";
+  const watchState = (count: number) => ({
+    active: [],
+    ended: Array.from({ length: count }, (_, index) => ({
+      watchId: `github.com/o/r#${index + 1}`,
+      number: index + 1,
+      reason: "merged" as const,
+      endedAt: createdAt,
+    })),
+  });
+  const created = makeEvent({
+    sequence: 1,
+    type: "thread.created",
+    aggregateKind: "thread",
+    aggregateId: "thread-watch",
+    occurredAt: createdAt,
+    commandId: "cmd-create",
+    payload: {
+      threadId: "thread-watch",
+      projectId: "project-1",
+      title: "watch",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+      updatedAt: createdAt,
+    },
+  });
+  const updated = (sequence: number, watches: unknown) =>
+    makeEvent({
+      sequence,
+      type: "thread.pull-request-watch-updated",
+      aggregateKind: "thread",
+      aggregateId: "thread-watch",
+      occurredAt: "2026-10-04T11:00:00.000Z",
+      commandId: "server:pr-watch",
+      payload: {
+        threadId: "thread-watch",
+        watches,
+        changed: [],
+        updatedAt: "2026-10-04T11:00:00.000Z",
+      },
+    });
+
+  it("replaces the thread's watches without touching its updatedAt, and forgets them on deletion", async () => {
+    let model = await Effect.runPromise(projectEvent(createEmptyReadModel(createdAt), created));
+    model = await Effect.runPromise(projectEvent(model, updated(2, watchState(4))));
+    const thread = model.threads[0]!;
+    expect(thread.pullRequestWatchState).toEqual(watchState(4));
+    expect(thread.updatedAt).toBe(createdAt);
+
+    model = await Effect.runPromise(projectEvent(model, updated(3, watchState(1))));
+    expect(model.threads[0]!.pullRequestWatchState).toEqual(watchState(1));
+
+    model = await Effect.runPromise(
+      projectEvent(
+        model,
+        makeEvent({
+          sequence: 4,
+          type: "thread.deleted",
+          aggregateKind: "thread",
+          aggregateId: "thread-watch",
+          occurredAt: "2026-10-04T12:00:00.000Z",
+          commandId: "cmd-delete",
+          payload: { threadId: "thread-watch", deletedAt: "2026-10-04T12:00:00.000Z" },
+        }),
+      ),
+    );
+    expect(model.threads[0]!.pullRequestWatchState).toBeUndefined();
+  });
+});

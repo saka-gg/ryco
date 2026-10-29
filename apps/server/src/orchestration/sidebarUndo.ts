@@ -7,14 +7,19 @@ import type {
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
+  ThreadPullRequestWatches,
 } from "@ryco/contracts";
 
 type Thread = OrchestrationReadModel["threads"][number];
+type PlannedEvent = Omit<OrchestrationEvent, "sequence">;
 type Receipt = {
   before: Pick<
     Thread,
     "updatedAt" | "settledOverride" | "settledAt" | "snoozedUntil" | "snoozedAt"
-  >;
+  > & {
+    /** Settle and archive end the thread's watches; their Undo starts them again. */
+    readonly pullRequestWatchState: ThreadPullRequestWatches | undefined;
+  };
   threadId: Thread["id"];
   after: WeakRef<Thread>;
   restoredUpdatedAt: string;
@@ -25,14 +30,43 @@ type Receipt = {
 };
 
 // These commands are provider/internal-only. Client actions always invalidate the prior receipt.
+// A pull request watch update without a wake only records watch progress (a wake starts a turn,
+// which changes the sidebar state anyway).
 function isProviderProgress(command: OrchestrationCommand) {
   return (
     command.type === "thread.message.assistant.delta" ||
     command.type === "thread.message.assistant.complete" ||
     command.type === "thread.activity.append" ||
     command.type === "thread.turn.diff.complete" ||
-    command.type === "thread.proposed-plan.upsert"
+    command.type === "thread.proposed-plan.upsert" ||
+    (command.type === "thread.pull-request-watch.update" && command.wake === undefined)
   );
+}
+
+/**
+ * The watches Undo starts again: those the undone settle or archive ended, at a fresh revision
+ * so an update derived before the end is refused. Null when it ended none.
+ */
+function restoredPullRequestWatches(
+  before: ThreadPullRequestWatches | undefined,
+  current: ThreadPullRequestWatches | undefined,
+): {
+  readonly watches: ThreadPullRequestWatches;
+  readonly restarted: ReadonlyArray<string>;
+} | null {
+  if (before === undefined) return null;
+  const stillActive = new Map((current?.active ?? []).map((watch) => [watch.watchId, watch]));
+  const restarted = before.active.filter((watch) => !stillActive.has(watch.watchId));
+  if (restarted.length === 0) return null;
+  return {
+    watches: {
+      active: before.active.map(
+        (watch) => stillActive.get(watch.watchId) ?? { ...watch, revision: watch.revision + 1 },
+      ),
+      ended: before.ended,
+    },
+    restarted: restarted.map((watch) => watch.watchId),
+  };
 }
 function sameSidebarState(before: Thread, after: Thread) {
   return (
@@ -106,6 +140,7 @@ export function createSidebarUndoReceipts(now = Date.now) {
           settledAt: previous.settledAt,
           snoozedUntil: previous.snoozedUntil ?? null,
           snoozedAt: previous.snoozedAt ?? null,
+          pullRequestWatchState: previous.pullRequestWatchState,
         },
         threadId: current.id,
         after: new WeakRef(current),
@@ -121,7 +156,7 @@ export function createSidebarUndoReceipts(now = Date.now) {
     restore(
       command: Extract<OrchestrationCommand, { type: "thread.sidebar.undo" }>,
       model: OrchestrationReadModel,
-    ): Omit<OrchestrationEvent, "sequence"> | null {
+    ): ReadonlyArray<PlannedEvent> | null {
       prune();
       const receipt = receipts.get(command.undoCommandId);
       // Object identity is an engine-local revision: even ABA changes in the same millisecond
@@ -162,20 +197,44 @@ export function createSidebarUndoReceipts(now = Date.now) {
         metadata: {},
       };
       const payload = { threadId: command.threadId, updatedAt: receipt.restoredUpdatedAt };
-      if (receipt.type === "thread.archive") return { ...base, type: "thread.unarchived", payload };
       const restoredSidebarState = {
         settledOverride: receipt.before.settledOverride,
         settledAt: receipt.before.settledAt,
         snoozedUntil: receipt.before.snoozedUntil ?? null,
         snoozedAt: receipt.before.snoozedAt ?? null,
       };
-      return receipt.type === "thread.settle"
-        ? {
-            ...base,
-            type: "thread.unsettled",
-            payload: { ...payload, reason: "user", restoredSidebarState },
-          }
-        : { ...base, type: "thread.unsnoozed", payload: { ...payload, restoredSidebarState } };
+      const restoredEvent: PlannedEvent =
+        receipt.type === "thread.archive"
+          ? { ...base, type: "thread.unarchived", payload }
+          : receipt.type === "thread.settle"
+            ? {
+                ...base,
+                type: "thread.unsettled",
+                payload: { ...payload, reason: "user", restoredSidebarState },
+              }
+            : { ...base, type: "thread.unsnoozed", payload: { ...payload, restoredSidebarState } };
+      const watches =
+        receipt.type === "thread.snooze"
+          ? null
+          : restoredPullRequestWatches(
+              receipt.before.pullRequestWatchState,
+              after.pullRequestWatchState,
+            );
+      if (watches === null) return [restoredEvent];
+      return [
+        restoredEvent,
+        {
+          ...base,
+          eventId: crypto.randomUUID() as OrchestrationEvent["eventId"],
+          type: "thread.pull-request-watch-updated",
+          payload: {
+            threadId: command.threadId,
+            watches: watches.watches,
+            changed: watches.restarted.map((watchId) => ({ watchId, ended: null })),
+            updatedAt: occurredAt,
+          },
+        },
+      ];
     },
     consume(commandId: CommandId) {
       remove(commandId);

@@ -34,6 +34,12 @@ import { ThreadForkedActivityPayload } from "./threadFork.ts";
 import { SidebarAutoSettleAfterDays } from "./threadAutoSettlement.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./runtimeMode.ts";
 import {
+  PullRequestWatchEndReason,
+  ThreadPullRequestWatch,
+  ThreadPullRequestWatches,
+  ThreadPullRequestWatchShell,
+} from "./pullRequestWatch.ts";
+import {
   IssueState,
   PullRequestState,
   StatusBucket,
@@ -1105,6 +1111,11 @@ export const OrchestrationThread = Schema.Struct({
   /** Optional so mixed-version snapshots decode; older clients strip it. */
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   /**
+   * The thread's pull request watches, full state. Only the server's command read model
+   * carries it; clients read the summary (`OrchestrationThreadShell.pullRequestWatches`).
+   */
+  pullRequestWatchState: Schema.optional(ThreadPullRequestWatches),
+  /**
    * Hidden from every live view. A trashed thread also carries `trashedAt` and keeps
    * its history and assets; without `trashedAt` the deletion is permanent.
    */
@@ -1204,6 +1215,11 @@ export const OrchestrationThreadShell = Schema.Struct({
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
   /** Server-owned provenance; absent on root threads and from older servers. */
   lineage: Schema.optional(Schema.NullOr(ThreadLineage)),
+  /**
+   * What the thread's pull request watches show: present only while one is active or ended
+   * within a day, so shells of other threads do not grow. Absent from older servers.
+   */
+  pullRequestWatches: Schema.optionalKey(ThreadPullRequestWatchShell),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
@@ -2220,6 +2236,11 @@ const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
   threadId: ThreadId,
+  /**
+   * Set by the user's explicit "Stop session" action only: that stop also ends the thread's
+   * pull request watches. A workspace switch and the server's own stops leave it out.
+   */
+  userStop: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -2661,6 +2682,43 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/** Message ids of pull request watch wakes carry this prefix (`pull-request-watch:<thread>:<uuid>`). */
+export const PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX = "pull-request-watch:";
+
+/**
+ * Server-only (the pull request watch service). One revision-fenced change of one watch and,
+ * optionally, the wake it sends, decided and committed together: the watch event first, then
+ * the wake's own turn start, which passes the same decision as any `thread.turn.start`. A
+ * refusal rejects both, so progress is never recorded without its wake or the reverse.
+ */
+const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.pull-request-watch.update"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  watchId: TrimmedNonEmptyString,
+  /** The revision the change was derived from; null creates the watch (none may be active). */
+  expectedRevision: Schema.NullOr(PositiveInt),
+  /**
+   * The generation (`startedAt`) the change was derived from, null with a null revision. A
+   * watch stopped and started again restarts its revisions, so the revision alone cannot tell
+   * a stale pass from a current one.
+   */
+  expectedStartedAt: Schema.NullOr(IsoDateTime),
+  /** The watch after the change; null ends it with `endReason`. */
+  next: Schema.NullOr(ThreadPullRequestWatch),
+  endReason: Schema.optional(PullRequestWatchEndReason),
+  /** The queued turn this change sends to the thread's agent. */
+  wake: Schema.optional(
+    Schema.Struct({
+      messageId: MessageId,
+      text: Schema.String,
+      guard: DelegationReturnGuard,
+    }),
+  ),
+  createdAt: IsoDateTime,
+});
+export type ThreadPullRequestWatchUpdateCommand = typeof ThreadPullRequestWatchUpdateCommand.Type;
+
 /**
  * Server-originated only (`threads.fork`). Publishes a fork atomically: optional new worktree
  * record, the thread with "forked" lineage, its inherited history (fresh ids, original order and
@@ -2727,6 +2785,7 @@ const InternalOrchestrationCommand = Schema.Union([
   WorktreeCheckoutRestoreCommand,
   WorktreePullRequestsUpdateCommand,
   WorktreeRelocateCommand,
+  ThreadPullRequestWatchUpdateCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -2759,6 +2818,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.token-mode-set",
   "thread.goal-updated",
   "thread.goal-cleared",
+  "thread.pull-request-watch-updated",
   "thread.context-handoff-requested",
   "thread.message-sent",
   "thread.turn-steer-requested",
@@ -2965,6 +3025,24 @@ export const ThreadGoalClearedPayload = Schema.Struct({
   origin: ThreadGoalEventOrigin,
   updatedAt: IsoDateTime,
 });
+
+/**
+ * A thread's pull request watches after a change: the full list, so projecting is a plain
+ * replace and replaying is idempotent. `changed` names the watches the change touched.
+ */
+export const ThreadPullRequestWatchUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  watches: ThreadPullRequestWatches,
+  changed: Schema.Array(
+    Schema.Struct({
+      watchId: TrimmedNonEmptyString,
+      /** Why it ended; null when it changed and stays active. */
+      ended: Schema.NullOr(PullRequestWatchEndReason),
+    }),
+  ),
+  updatedAt: IsoDateTime,
+});
+export type ThreadPullRequestWatchUpdatedPayload = typeof ThreadPullRequestWatchUpdatedPayload.Type;
 
 export const ThreadMessageSentPayload = Schema.Struct({
   threadId: ThreadId,
@@ -3368,6 +3446,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.goal-cleared"),
     payload: ThreadGoalClearedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.pull-request-watch-updated"),
+    payload: ThreadPullRequestWatchUpdatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

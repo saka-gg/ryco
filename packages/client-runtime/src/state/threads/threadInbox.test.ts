@@ -481,6 +481,68 @@ describe("thread inbox", () => {
       expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([monitoring.id]);
     });
 
+    it("keeps a thread the node watches a pull request for active, even past a merge", () => {
+      const watching = {
+        active: [
+          {
+            watchId: "github.com/o/r#42",
+            number: 42,
+            url: "https://github.com/o/r/pull/42",
+            worktreeId,
+            startedAt: "2026-07-20T12:00:00.000Z",
+            startedBy: "agent" as const,
+            news: true,
+            autoFix: null,
+            headSha: null,
+            failingChecks: 0,
+            passed: false,
+            conflicting: false,
+            delivering: false,
+            lastChangeAt: null,
+          },
+        ],
+        ended: [],
+      };
+      const watched = makeThread(environmentA, "thread-watched", {
+        ...staleActivity,
+        worktreeId,
+        pullRequestWatches: watching,
+      });
+      const ended = makeThread(environmentA, "thread-watch-ended", {
+        ...staleActivity,
+        pullRequestWatches: {
+          active: [],
+          ended: [
+            {
+              watchId: "github.com/o/r#42",
+              number: 42,
+              reason: "unwatched",
+              endedAt: "2026-07-21T12:00:00.000Z",
+            },
+          ],
+        },
+      });
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 7,
+          threads: [watched, ended],
+          worktrees: [
+            makeWorktree(environmentA, {
+              prState: "merged",
+              prTerminalAt: "2026-07-21T09:00:00.000Z",
+            }),
+          ],
+        }),
+      );
+
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([watched.id]);
+      expect(inbox.active[0]?.lifecycle).toMatchObject({
+        autoSettlementBlocker: "pull-request-watch",
+        settlementBlocker: null,
+      });
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([ended.id]);
+    });
+
     it("keeps a PR worktree whose state is unknown active", () => {
       const thread = makeThread(environmentA, "thread-unknown-pr", {
         ...staleActivity,

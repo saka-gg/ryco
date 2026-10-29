@@ -563,6 +563,9 @@ function mapThreadSummary(
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     backgroundLiveness: thread.backgroundLiveness ?? null,
     lineage: thread.lineage ?? null,
+    ...(thread.pullRequestWatches === undefined
+      ? {}
+      : { pullRequestWatches: thread.pullRequestWatches }),
   };
 }
 
@@ -803,7 +806,11 @@ function sidebarThreadSummariesEqual(
     left.hasPendingUserInput === right.hasPendingUserInput &&
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     (left.backgroundLiveness ?? null) === (right.backgroundLiveness ?? null) &&
-    threadLineagesEqual(left.lineage, right.lineage)
+    threadLineagesEqual(left.lineage, right.lineage) &&
+    // Watch progress does not move the thread's `updatedAt` (it is not thread activity), so a
+    // shell whose only change is its watches must still compare unequal here. Plain wire data,
+    // compared whole so a field the summary gains later can never be missed.
+    plainDataEqual(left.pullRequestWatches, right.pullRequestWatches)
   );
 }
 

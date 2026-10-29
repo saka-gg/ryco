@@ -247,6 +247,10 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
     ),
   "drop-thread-priority-tables": (c) =>
     !THREAD_PRIORITY_TABLES.some((name) => c.has("table", name)),
+  // The table and its partial index; no backfill.
+  "pull-request-watches": (c) =>
+    c.has("table", "projection_thread_pull_request_watches") &&
+    c.has("index", "idx_projection_thread_pull_request_watches_active"),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

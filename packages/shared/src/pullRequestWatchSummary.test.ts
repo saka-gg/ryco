@@ -130,6 +130,25 @@ describe("thread watch lists", () => {
     ]);
     expect(upsertPullRequestWatch(EMPTY_PULL_REQUEST_WATCHES, next).active).toEqual([next]);
   });
+
+  it("drops a pull request's ended entries once it is watched again", () => {
+    const stopped = {
+      watchId: watch().watchId,
+      number: 1,
+      reason: "stopped" as const,
+      endedAt: NOW,
+    };
+    const merged = {
+      watchId: "github.com/o/r#2",
+      number: 2,
+      reason: "merged" as const,
+      endedAt: NOW,
+    };
+    const again = upsertPullRequestWatch({ active: [], ended: [stopped, merged] }, watch());
+    expect(again).toEqual({ active: [watch()], ended: [merged] });
+    // An update of an active watch leaves the ended list as it is.
+    expect(upsertPullRequestWatch(again, watch({ revision: 2 })).ended).toBe(again.ended);
+  });
 });
 
 describe("pullRequestWatchShellAt", () => {

@@ -166,6 +166,7 @@ describe("threadBusyReason", () => {
     deliveryUnknown: false,
     pinned: false,
     backgroundLiveness: null,
+    pullRequestWatched: false,
     prNumber: null,
     prState: null,
     prTerminalAt: null,

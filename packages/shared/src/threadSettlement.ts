@@ -37,6 +37,7 @@ export type ThreadSettlementBlocker =
 export type ThreadAutoSettlementBlocker =
   | "pinned"
   | "background-work"
+  | "pull-request-watch"
   | "pull-request-open"
   | "pull-request-unknown";
 
@@ -61,6 +62,12 @@ export interface ThreadSettlementInput {
   readonly pinned: boolean;
   /** Shell background liveness. Only "working" blocks automatic settlement. */
   readonly backgroundLiveness: "working" | "monitoring" | null;
+  /**
+   * The node watches a pull request for this thread: it wakes the agent on news, so the
+   * thread is not done, whatever its workspace link says. Manual settle stays allowed (and
+   * ends the watch).
+   */
+  readonly pullRequestWatched: boolean;
   readonly prNumber: number | null;
   readonly prState: PullRequestState | null;
   /**
@@ -220,6 +227,7 @@ export function getThreadAutoSettlementBlocker(
 ): ThreadAutoSettlementBlocker | null {
   if (input.pinned) return "pinned";
   if (input.backgroundLiveness === "working") return "background-work";
+  if (input.pullRequestWatched) return "pull-request-watch";
   if (input.prState === "open") return "pull-request-open";
   if (input.prState === null && input.prNumber !== null) return "pull-request-unknown";
   return null;

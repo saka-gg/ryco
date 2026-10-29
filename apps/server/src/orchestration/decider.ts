@@ -14,6 +14,7 @@ import type {
   OrchestrationEvent,
   OrchestrationMessage,
   OrchestrationReadModel,
+  PullRequestWatchEndReason,
   ThreadForkCreateCommand,
   ThreadLineage,
   ThreadUsageLimit,
@@ -40,6 +41,7 @@ import {
   readWorktreePullRequestLinks,
 } from "@ryco/shared/worktreePullRequests";
 import { canSettleThread, type ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
+import { endPullRequestWatches } from "@ryco/shared/pullRequestWatchSummary";
 import {
   TURN_STEER_FAILED_ACTIVITY_KIND,
   turnSteerRejectionActivityId,
@@ -77,7 +79,13 @@ import {
   requireNoPendingCheckpointRevert,
   requireThreadReadyForCheckpointRevert,
 } from "./checkpointRevertPolicy.ts";
+import { isUserOriginatedCommandId } from "./commandOrigin.ts";
 import { projectEvent } from "./projector.ts";
+import {
+  pullRequestWatchesAfterUpdate,
+  pullRequestWatchesOf,
+  pullRequestWatchUpdateBlocker,
+} from "./pullRequestWatchUpdates.ts";
 import { serverWakeCopy } from "./serverWake.ts";
 import { threadReferencesPayload } from "./threadReferences.ts";
 import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
@@ -458,6 +466,52 @@ type DecideOrchestrationCommandResult =
 const plannedEventList = (
   decided: DecideOrchestrationCommandResult,
 ): ReadonlyArray<PlannedOrchestrationEvent> => ("type" in decided ? [decided] : decided);
+
+/**
+ * Ends the thread's active pull request watches (only `watchIds` when given) inside the
+ * command that ends them, so a settle, archive, Trash, Stop or checkout removal and the end of
+ * its watches commit together. Null when none is active: commands of unwatched threads keep
+ * exactly their own events.
+ */
+function pullRequestWatchesEndedEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly thread: OrchestrationReadModel["threads"][number];
+  readonly reason: PullRequestWatchEndReason;
+  readonly occurredAt: string;
+  readonly watchIds?: ReadonlySet<string>;
+}): PlannedOrchestrationEvent | null {
+  const watches = pullRequestWatchesOf(input.thread);
+  const ending = watches.active.filter(
+    (watch) => input.watchIds === undefined || input.watchIds.has(watch.watchId),
+  );
+  if (ending.length === 0) return null;
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.thread.id,
+      occurredAt: input.occurredAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.pull-request-watch-updated",
+    payload: {
+      threadId: input.thread.id,
+      watches: endPullRequestWatches(watches, {
+        ...(input.watchIds === undefined ? {} : { watchIds: input.watchIds }),
+        reason: input.reason,
+        endedAt: input.occurredAt,
+      }),
+      changed: ending.map((watch) => ({ watchId: watch.watchId, ended: input.reason })),
+      updatedAt: input.occurredAt,
+    },
+  };
+}
+
+/** `decided` followed by `ended` when there is one. */
+const withPullRequestWatchesEnded = (
+  decided: DecideOrchestrationCommandResult,
+  ended: PlannedOrchestrationEvent | null,
+): DecideOrchestrationCommandResult =>
+  ended === null ? decided : [...plannedEventList(decided), ended];
 
 /**
  * A planned event as the projector sees it once committed. `Omit` over the event union loses
@@ -1088,7 +1142,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         reason: "archived",
         occurredAt,
       });
-      return limitCleared === null ? trashedEvent : [trashedEvent, limitCleared];
+      // A chat in Trash takes no turns, so its watches could never deliver anything.
+      return withPullRequestWatchesEnded(
+        limitCleared === null ? trashedEvent : [trashedEvent, limitCleared],
+        pullRequestWatchesEndedEvent({ command, thread, reason: "trashed", occurredAt }),
+      );
     }
 
     case "thread.untrash": {
@@ -1157,16 +1215,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: occurredAt,
         },
       };
-      const archivedThread = readModel.threads.find((thread) => thread.id === command.threadId);
-      const limitCleared = archivedThread
-        ? usageLimitClearedEvent({
-            command,
-            thread: archivedThread,
-            reason: "archived",
-            occurredAt,
-          })
-        : null;
-      return limitCleared === null ? archivedEvent : [archivedEvent, limitCleared];
+      const limitCleared = usageLimitClearedEvent({
+        command,
+        thread: target,
+        reason: "archived",
+        occurredAt,
+      });
+      return withPullRequestWatchesEnded(
+        limitCleared === null ? archivedEvent : [archivedEvent, limitCleared],
+        pullRequestWatchesEndedEvent({ command, thread: target, reason: "archived", occurredAt }),
+      );
     }
 
     case "thread.unarchive": {
@@ -1323,20 +1381,24 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       if (thread.settledOverride === "settled" && thread.settledAt !== null) {
-        return {
-          ...withEventBase({
-            aggregateKind: "thread",
-            aggregateId: command.threadId,
-            occurredAt: nowIso(),
-            commandId: command.commandId,
-          }),
-          type: "thread.settled",
-          payload: {
-            threadId: command.threadId,
-            settledAt: thread.settledAt,
-            updatedAt: thread.updatedAt,
+        const occurredAt = nowIso();
+        return withPullRequestWatchesEnded(
+          {
+            ...withEventBase({
+              aggregateKind: "thread",
+              aggregateId: command.threadId,
+              occurredAt,
+              commandId: command.commandId,
+            }),
+            type: "thread.settled",
+            payload: {
+              threadId: command.threadId,
+              settledAt: thread.settledAt,
+              updatedAt: thread.updatedAt,
+            },
           },
-        };
+          pullRequestWatchesEndedEvent({ command, thread, reason: "settled", occurredAt }),
+        );
       }
 
       const occurredAt = nowIso();
@@ -1352,20 +1414,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
 
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.settled",
-        payload: {
-          threadId: command.threadId,
-          settledAt: occurredAt,
-          updatedAt: occurredAt,
+      // Settling hands the work back: a watched chat never settles on its own, so a manual
+      // settle ends its watches (T3 Code 51f7f77f87).
+      return withPullRequestWatchesEnded(
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.settled",
+          payload: {
+            threadId: command.threadId,
+            settledAt: occurredAt,
+            updatedAt: occurredAt,
+          },
         },
-      };
+        pullRequestWatchesEndedEvent({ command, thread, reason: "settled", occurredAt }),
+      );
     }
 
     case "thread.unsettle": {
@@ -1654,6 +1721,64 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: command.createdAt,
         },
       };
+    }
+
+    case "thread.pull-request-watch.update": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const blocker = pullRequestWatchUpdateBlocker(readModel, thread, command);
+      if (blocker !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: blocker,
+        });
+      }
+      const watchEvent: PlannedOrchestrationEvent = {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.pull-request-watch-updated",
+        payload: {
+          threadId: command.threadId,
+          watches: pullRequestWatchesAfterUpdate(thread, command),
+          changed: [
+            {
+              watchId: command.watchId,
+              ended: command.next === null ? (command.endReason ?? null) : null,
+            },
+          ],
+          updatedAt: command.createdAt,
+        },
+      };
+      const wake = command.wake;
+      if (wake === undefined) return watchEvent;
+      // The wake is a queued turn start like a delegated result's: the same decision (active
+      // turn, usage limit, wake guard, pending revert, lifecycle) under the same command id.
+      // The watch event goes first, so the turn's events already see the recorded progress.
+      // Any refusal rejects the whole command: no progress without its wake.
+      const turnEvents = yield* decideOrchestrationCommand({
+        readModel,
+        command: {
+          type: "thread.turn.start",
+          commandId: command.commandId,
+          threadId: command.threadId,
+          message: {
+            messageId: wake.messageId,
+            role: "user",
+            text: wake.text,
+            attachments: [],
+          },
+          modelSelection: thread.modelSelection,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          ...(thread.tokenMode === undefined ? {} : { tokenMode: thread.tokenMode }),
+          delegationReturnGuard: { ...wake.guard, source: "pull-request-watch" },
+          createdAt: command.createdAt,
+        },
+      });
+      return [watchEvent, ...plannedEventList(turnEvents)];
     }
 
     case "thread.turn.start": {
@@ -2073,22 +2198,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const resolvedTurnId = command.turnId ?? targetThread.session?.activeTurnId ?? undefined;
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.turn-interrupt-requested",
-        payload: {
-          threadId: command.threadId,
-          ...(resolvedTurnId !== undefined && resolvedTurnId !== null
-            ? { turnId: resolvedTurnId }
-            : {}),
-          createdAt: command.createdAt,
+      // The user's Stop also stops watching (T3 Code): the agent is no longer to act on
+      // pull request news. Agent Control and the node's own interrupts leave watches alone.
+      return withPullRequestWatchesEnded(
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.turn-interrupt-requested",
+          payload: {
+            threadId: command.threadId,
+            ...(resolvedTurnId !== undefined && resolvedTurnId !== null
+              ? { turnId: resolvedTurnId }
+              : {}),
+            createdAt: command.createdAt,
+          },
         },
-      };
+        isUserOriginatedCommandId(command.commandId)
+          ? pullRequestWatchesEndedEvent({
+              command,
+              thread: targetThread,
+              reason: "stopped",
+              occurredAt: command.createdAt,
+            })
+          : null,
+      );
     }
 
     case "thread.approval.respond": {
@@ -2265,24 +2402,36 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.session.stop": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.session-stop-requested",
-        payload: {
-          threadId: command.threadId,
-          createdAt: command.createdAt,
+      // Only the explicit "Stop session" action ends watches: a workspace switch and the
+      // node's own stops (archive, checkout removal, chat promotion) also stop sessions.
+      return withPullRequestWatchesEnded(
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.session-stop-requested",
+          payload: {
+            threadId: command.threadId,
+            createdAt: command.createdAt,
+          },
         },
-      };
+        command.userStop === true && isUserOriginatedCommandId(command.commandId)
+          ? pullRequestWatchesEndedEvent({
+              command,
+              thread,
+              reason: "stopped",
+              occurredAt: command.createdAt,
+            })
+          : null,
+      );
     }
 
     case "worktree.create": {
@@ -2559,8 +2708,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           removedAt: command.removedAt,
         },
       };
-      if (worktree.archivedAt !== null) return removed;
+      // Watches end with the checkout: the chats working in it take no more turns, and a
+      // pull request linked to it lost the workspace it was read from. They end first, so the
+      // command's last event (its receipt) stays the workspace's.
+      const attachedThreadIds = new Set(
+        listThreadsByWorktree(readModel, worktree).map((thread) => thread.id),
+      );
+      const watchesEnded = readModel.threads.flatMap((thread) => {
+        const watches = thread.pullRequestWatchState?.active ?? [];
+        if (watches.length === 0) return [];
+        const ending = attachedThreadIds.has(thread.id)
+          ? undefined
+          : new Set(
+              watches
+                .filter((watch) => watch.worktreeId === command.worktreeId)
+                .map((watch) => watch.watchId),
+            );
+        const ended = pullRequestWatchesEndedEvent({
+          command,
+          thread,
+          reason: "unlinked",
+          occurredAt: command.removedAt,
+          ...(ending === undefined ? {} : { watchIds: ending }),
+        });
+        return ended === null ? [] : [ended];
+      });
+      if (worktree.archivedAt !== null) return [...watchesEnded, removed];
       return [
+        ...watchesEnded,
         removed,
         {
           ...withEventBase({

@@ -3,11 +3,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import * as Orchestration from "./orchestration.ts";
 import {
-  SourceControlSetPullRequestWatchInput,
   ThreadPullRequestWatch,
   ThreadPullRequestWatches,
   ThreadPullRequestWatchShell,
 } from "./pullRequestWatch.ts";
+import { SourceControlSetPullRequestWatchInput } from "./pullRequestWatchRpc.ts";
 import * as RuntimeModes from "./runtimeMode.ts";
 
 const watch = {

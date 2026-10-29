@@ -30,6 +30,7 @@ export * from "./vcs.ts";
 export * from "./sourceControl.ts";
 export * from "./changeRequestReview.ts";
 export * from "./pullRequestWatch.ts";
+export * from "./pullRequestWatchRpc.ts";
 export * from "./atlassian.ts";
 export * from "./workItems.ts";
 export * from "./threadGoal.ts";

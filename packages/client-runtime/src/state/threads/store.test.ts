@@ -3787,3 +3787,123 @@ describe("thread errors", () => {
     ).toBe("Provider exited (code 1)");
   });
 });
+
+describe("pull request watch summaries", () => {
+  const threadId = ThreadId.make("thread-watch");
+  const shell = (
+    pullRequestWatches?: OrchestrationThreadShell["pullRequestWatches"],
+  ): OrchestrationThreadShell => ({
+    id: threadId,
+    projectId: ProjectId.make("project-watch"),
+    title: "Watch",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    latestTurn: null,
+    goal: null,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    // Watch progress never moves the thread's own time.
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    ...(pullRequestWatches === undefined ? {} : { pullRequestWatches }),
+  });
+  const watching = (
+    autoFix: NonNullable<
+      OrchestrationThreadShell["pullRequestWatches"]
+    >["active"][number]["autoFix"],
+  ): NonNullable<OrchestrationThreadShell["pullRequestWatches"]> => ({
+    active: [
+      {
+        watchId: "github.com/o/r#12",
+        number: 12,
+        url: "https://github.com/o/r/pull/12",
+        worktreeId: WorktreeId.make("worktree-watch"),
+        startedAt: "2026-10-01T00:05:00.000Z",
+        startedBy: "user",
+        news: false,
+        autoFix,
+        headSha: "abc1234",
+        failingChecks: 1,
+        passed: false,
+        conflicting: false,
+        delivering: false,
+        lastChangeAt: null,
+      },
+    ],
+    ended: [],
+  });
+  const upsert = (sequence: number, thread: OrchestrationThreadShell) =>
+    ({ kind: "thread-upserted", sequence, thread }) as const;
+  const summaryOf = (state: AppState) =>
+    fullThreadEntry(localEnvironmentStateOf(state).sidebarThreadSummaryById[threadId]);
+
+  it("updates the summary when a thread-upserted changes only its watches", () => {
+    const unwatched = applyShellEvent(makeEmptyState(), upsert(1, shell()), localEnvironmentId);
+    expect(summaryOf(unwatched)?.pullRequestWatches).toBeUndefined();
+
+    const fixing = applyShellEvent(
+      unwatched,
+      upsert(
+        2,
+        shell(watching({ status: "fixing", pauseReason: null, attempts: 1, maxAttempts: 3 })),
+      ),
+      localEnvironmentId,
+    );
+    expect(summaryOf(fixing)?.pullRequestWatches?.active[0]?.autoFix?.status).toBe("fixing");
+
+    const paused = applyShellEvent(
+      fixing,
+      upsert(
+        3,
+        shell(watching({ status: "paused", pauseReason: "no-push", attempts: 1, maxAttempts: 3 })),
+      ),
+      localEnvironmentId,
+    );
+    expect(summaryOf(paused)?.pullRequestWatches?.active[0]?.autoFix).toEqual({
+      status: "paused",
+      pauseReason: "no-push",
+      attempts: 1,
+      maxAttempts: 3,
+    });
+
+    const ended = applyShellEvent(
+      paused,
+      upsert(
+        4,
+        shell({
+          active: [],
+          ended: [
+            {
+              watchId: "github.com/o/r#12",
+              number: 12,
+              reason: "stopped",
+              endedAt: "2026-10-01T01:00:00.000Z",
+            },
+          ],
+        }),
+      ),
+      localEnvironmentId,
+    );
+    expect(summaryOf(ended)?.pullRequestWatches?.ended[0]?.reason).toBe("stopped");
+  });
+
+  it("keeps the same summary object when the watches did not change", () => {
+    const watches = watching(null);
+    const first = applyShellEvent(makeEmptyState(), upsert(1, shell(watches)), localEnvironmentId);
+    const again = applyShellEvent(
+      first,
+      upsert(2, shell(structuredClone(watches))),
+      localEnvironmentId,
+    );
+    expect(summaryOf(again)).toBe(summaryOf(first));
+  });
+});
