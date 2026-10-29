@@ -228,6 +228,10 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.sourceControlSearchRepositories]: "operator",
   [WS_METHODS.subscribeAuthAccess]: "direct_owner",
   [WS_METHODS.authIssueLinkedDirectAccess]: "relay_native",
+  // A native device registers itself; the node reads which one from the channel.
+  [WS_METHODS.pushRegisterDevice]: "relay_native",
+  [WS_METHODS.pushUnregisterDevice]: "relay_native",
+  [WS_METHODS.pushSetPresence]: "relay_native",
   [WS_METHODS.subscribeServerConfig]: "viewer",
   [WS_METHODS.subscribeServerLifecycle]: "viewer",
   [WS_METHODS.subscribeTerminalEvents]: "operator",
@@ -420,6 +424,10 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.serverGetAdvertisedEndpoints]: "read",
   // Repeating it only issues another short-lived single-use code.
   [WS_METHODS.authIssueLinkedDirectAccess]: "read",
+  // The device's own alert preferences on this node, not workspace state.
+  [WS_METHODS.pushRegisterDevice]: "read",
+  [WS_METHODS.pushUnregisterDevice]: "read",
+  [WS_METHODS.pushSetPresence]: "read",
   [WS_METHODS.serverGetConfig]: "read",
   [WS_METHODS.serverGetDiagnosticsMetrics]: "read",
   [WS_METHODS.serverGetDiagnosticsSnapshot]: "read",

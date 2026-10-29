@@ -5,6 +5,7 @@ import { PullRequestWatchService } from "../sourceControl/PullRequestWatchServic
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
 import { ProviderSignIn } from "../provider/signIn/ProviderSignIn.ts";
+import { NodePushRegistry } from "../push/NodePushRegistry.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
 import { StorageService } from "../storage/StorageService.ts";
@@ -139,7 +140,12 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import { BootstrapCredentialService } from "../auth/Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
-import { type RpcPrincipal, rpcPrincipalOwnerKey, turnOriginOfPrincipal } from "./RpcPrincipal.ts";
+import {
+  type RelayChannelAuthority,
+  type RpcPrincipal,
+  rpcPrincipalOwnerKey,
+  turnOriginOfPrincipal,
+} from "./RpcPrincipal.ts";
 import { AtlassianConnectionService } from "../atlassian/AtlassianConnectionService.ts";
 import { JiraWorkItemService } from "../atlassian/JiraWorkItemService.ts";
 import { AdvertisedEndpointRegistry } from "../remote/Services/AdvertisedEndpointRegistry.ts";
@@ -277,6 +283,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // Optional for the route-test reason above; production provides it with the runtime.
     const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
     const providerSignIn = yield* Effect.serviceOption(ProviderSignIn);
+    const nodePushRegistry = yield* Effect.serviceOption(NodePushRegistry);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     // Optional: route tests without the orchestration runtime answer "skipped".
     const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
@@ -1438,6 +1445,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       worktreeNotesService,
       nodeUpdate,
       providerSignIn,
+      nodePushRegistry,
+      /** Who this relay channel's handshake authenticated; `none` off the relay. */
+      relayAuthority: (): RelayChannelAuthority =>
+        principal.relayAuthority?.() ?? { trustSource: "none" },
       config,
       lifecycleEvents,
       serverSettings,

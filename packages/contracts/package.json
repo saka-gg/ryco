@@ -16,6 +16,16 @@
       "import": "./src/threadReadCache.ts",
       "require": "./src/threadReadCache.ts"
     },
+    "./push": {
+      "types": "./src/push.ts",
+      "import": "./src/push.ts",
+      "require": "./src/push.ts"
+    },
+    "./push-hub": {
+      "types": "./src/pushHub.ts",
+      "import": "./src/pushHub.ts",
+      "require": "./src/pushHub.ts"
+    },
     "./settings": {
       "types": "./src/settings.ts",
       "import": "./src/settings.ts",
