@@ -9,6 +9,10 @@
       "types": "./src/hubSessionCodec.ts",
       "import": "./src/hubSessionCodec.ts"
     },
+    "./remoteEditorLink": {
+      "types": "./src/remoteEditorLink.ts",
+      "import": "./src/remoteEditorLink.ts"
+    },
     "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
     "./gitWritingStyle": "./src/gitWritingStyle.ts",
     "./terminalPaste": "./src/terminalPaste.ts",

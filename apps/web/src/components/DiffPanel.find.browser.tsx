@@ -42,7 +42,14 @@ import { findDiffLineElement } from "./pullRequests/files/diffReveal";
 const fixture = vi.hoisted(() => ({ patch: "", checkpointData: null as { diff: string } | null }));
 
 vi.mock("../composerDraftStore", () => import("@ryco/client-runtime/state/composer"));
-vi.mock("../editorPreferences", () => ({ openInPreferredEditor: vi.fn() }));
+vi.mock("../editorPreferences", () => ({
+  openInPreferredEditor: vi.fn(),
+  // Where a path opens (this machine, over SSH, or not at all) is `editorOpenRoute.test.ts`'s
+  // concern; here every path opens on this machine.
+  openPathInEditor: vi.fn(async () => "vscode"),
+  openPathInEditorWithToast: vi.fn(),
+  canOpenInEditor: () => true,
+}));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
   useParams: vi.fn((options?: { select?: (params: Record<string, string>) => unknown }) => {

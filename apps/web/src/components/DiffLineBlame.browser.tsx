@@ -43,6 +43,12 @@ const openInPreferredEditor = vi.hoisted(() => vi.fn().mockResolvedValue(undefin
 vi.mock("../composerDraftStore", () => import("@ryco/client-runtime/state/composer"));
 vi.mock("../editorPreferences", () => ({
   openInPreferredEditor,
+  // Where a path opens (this machine, over SSH, or not at all) is `editorOpenRoute.test.ts`'s
+  // concern; here every path opens on this machine.
+  openPathInEditor: (_environmentId: unknown, target: string) => openInPreferredEditor({}, target),
+  openPathInEditorWithToast: (_environmentId: unknown, target: string) =>
+    void openInPreferredEditor({}, target),
+  canOpenInEditor: () => true,
 }));
 
 vi.mock("@tanstack/react-router", () => ({

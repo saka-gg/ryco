@@ -74,7 +74,7 @@ import { ScrollArea } from "~/components/ui/scroll-area";
 import { Textarea } from "~/components/ui/textarea";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
-import { openInPreferredEditor } from "~/editorPreferences";
+import { openPathInEditor } from "~/editorPreferences";
 import {
   GIT_USER_ACTION_KIND,
   gitMutationTrackingKey,
@@ -1223,8 +1223,7 @@ export default function GitActionsControl({
 
   const openChangedFileInEditor = useCallback(
     (filePath: string) => {
-      const api = readLocalApi();
-      if (!api || !gitCwd) {
+      if (!gitCwd) {
         toastManager.add({
           type: "error",
           title: "Editor opening is unavailable.",
@@ -1233,7 +1232,7 @@ export default function GitActionsControl({
         return;
       }
       const target = resolvePathLinkTarget(filePath, gitCwd);
-      void openInPreferredEditor(api, target).catch((error) => {
+      void openPathInEditor(activeEnvironmentId, target).catch((error) => {
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -1244,7 +1243,7 @@ export default function GitActionsControl({
         );
       });
     },
-    [gitCwd, threadToastData],
+    [activeEnvironmentId, gitCwd, threadToastData],
   );
 
   const canPublishRepository = isRepo && gitStatusForActions !== null && !hasPrimaryRemote;

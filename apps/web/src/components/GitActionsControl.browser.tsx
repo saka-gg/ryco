@@ -102,6 +102,10 @@ vi.mock("~/components/ui/toast", () => ({
 
 vi.mock("~/editorPreferences", () => ({
   openInPreferredEditor: vi.fn(),
+  // Where a path opens (this machine, over SSH, or not at all) is `editorOpenRoute.test.ts`'s
+  // concern; here every path opens on this machine.
+  openPathInEditor: vi.fn(async () => "vscode"),
+  canOpenInEditor: () => true,
 }));
 
 vi.mock("~/rpc/useGit", () => ({

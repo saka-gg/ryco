@@ -16,13 +16,12 @@ import {
 } from "lucide-react";
 import { createElement, useRef, useState } from "react";
 
-import { openInPreferredEditor } from "../../../editorPreferences";
+import { canOpenInEditor, openPathInEditor } from "../../../editorPreferences";
 import { usePrimaryEnvironmentId } from "../../../environments/primary";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
 import { useGitStatus } from "../../../lib/gitStatusState";
 import { cn } from "../../../lib/utils";
-import { readLocalApi } from "../../../localApi";
 import {
   openProjectRemote,
   projectAvatarUploadUnavailableReason,
@@ -368,9 +367,8 @@ export function ProjectHero(props: { readonly canEdit: boolean }) {
   const sentinelRef = useHeroSentinel();
   const { handleNewThread } = useNewThreadHandler();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  // The editor bridge opens folders on this machine only.
-  const canOpenInEditor =
-    member.environmentId === primaryEnvironmentId && readLocalApi() !== undefined;
+  // This machine's folders, and folders on machines added over SSH.
+  const editorAvailable = canOpenInEditor(member.environmentId, primaryEnvironmentId);
   // Grouped checkouts are listed under a shared name; say so when it differs.
   const listedAs =
     snapshot.memberProjects.length > 1 && snapshot.displayName !== member.name
@@ -401,14 +399,12 @@ export function ProjectHero(props: { readonly canEdit: boolean }) {
           <SquarePenIcon className="size-3.5" />
           New thread
         </Button>
-        {canOpenInEditor ? (
+        {editorAvailable ? (
           <Button
             size="sm"
             variant="outline"
             onClick={() => {
-              const api = readLocalApi();
-              if (!api) return;
-              void openInPreferredEditor(api, member.cwd).catch((error: unknown) =>
+              void openPathInEditor(member.environmentId, member.cwd).catch((error: unknown) =>
                 toastFailure("Unable to open the project", error),
               );
             }}

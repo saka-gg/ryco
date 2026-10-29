@@ -40,7 +40,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ensureArchivedThreadShells } from "../../../environments/runtime/service";
 import { isArchivedThreadStub } from "../../../types";
 
-import { openInPreferredEditor } from "../../../editorPreferences";
+import { canOpenInEditor, openPathInEditor } from "../../../editorPreferences";
+import { usePrimaryEnvironmentId } from "../../../environments/primary";
 import { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
 import { useThreadActions } from "../../../hooks/useThreadActions";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
@@ -48,7 +49,6 @@ import { hostedCapabilityCopy } from "../../../hostedHub/switchTarget";
 import { cn } from "../../../lib/utils";
 import { buildPullRequestsPageLocation } from "../../../pullRequestsRoute";
 import type { SidebarProjectSnapshot } from "../../../sidebarProjectGrouping";
-import { readLocalApi } from "../../../localApi";
 import { renameThread } from "../../../threadMutations";
 import { buildThreadRouteParams } from "../../../threadRoutes";
 import {
@@ -429,8 +429,9 @@ function DevicePanel(props: {
   const router = useRouter();
   const nowMs = useNowMs();
   const [newWorktree, setNewWorktree] = useState(false);
-  // The editor bridge opens folders on this machine only.
-  const canOpenInEditor = detail.checkout.isPrimary && readLocalApi() !== undefined;
+  // This machine's checkouts, and checkouts on machines added over SSH.
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const editorAvailable = canOpenInEditor(detail.member.environmentId, primaryEnvironmentId);
   const status = detail.checkout.isPrimary
     ? "This device"
     : { online: "Online", connecting: "Connecting", offline: "Offline", unknown: "Unknown" }[
@@ -512,21 +513,20 @@ function DevicePanel(props: {
           <Settings2Icon className="size-3.5" />
           Settings
         </Button>
-        {canOpenInEditor ? (
+        {editorAvailable ? (
           <Button
             size="sm"
             variant="ghost"
             onClick={() => {
-              const api = readLocalApi();
-              if (!api) return;
-              void openInPreferredEditor(api, detail.checkout.cwd).catch((error: unknown) =>
-                toastManager.add(
-                  stackedThreadToast({
-                    type: "error",
-                    title: "Unable to open the project",
-                    description: error instanceof Error ? error.message : "An error occurred.",
-                  }),
-                ),
+              void openPathInEditor(detail.member.environmentId, detail.checkout.cwd).catch(
+                (error: unknown) =>
+                  toastManager.add(
+                    stackedThreadToast({
+                      type: "error",
+                      title: "Unable to open the project",
+                      description: error instanceof Error ? error.message : "An error occurred.",
+                    }),
+                  ),
               );
             }}
           >

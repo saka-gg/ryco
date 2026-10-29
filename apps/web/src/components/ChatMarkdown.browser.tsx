@@ -41,7 +41,7 @@ const {
     getSharedHighlighterMock: vi.fn(async () => ({
       codeToHtml: codeToHtmlMock,
     })),
-    openInPreferredEditorMock: vi.fn(async () => "vscode"),
+    openInPreferredEditorMock: vi.fn(async (_api: unknown, _target: string) => "vscode"),
     readFileBinaryMock: vi.fn(async () => ({
       relativePath: "assets/diagram.png",
       dataBase64: "aGVsbG8=",
@@ -65,6 +65,11 @@ vi.mock("../environmentApi", () => {
 
 vi.mock("../editorPreferences", () => ({
   openInPreferredEditor: openInPreferredEditorMock,
+  // Where a path opens (this machine, over SSH, or not at all) is `editorOpenRoute.test.ts`'s
+  // concern; here every path opens on this machine.
+  openPathInEditor: (_environmentId: unknown, target: string) =>
+    openInPreferredEditorMock({}, target),
+  canOpenInEditor: () => true,
 }));
 
 vi.mock("../localApi", () => ({

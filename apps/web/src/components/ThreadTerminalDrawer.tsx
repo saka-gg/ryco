@@ -35,7 +35,7 @@ import {
 } from "react";
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { type TerminalContextSelection } from "~/lib/terminalContext";
-import { openInPreferredEditor } from "../editorPreferences";
+import { openPathInEditor } from "../editorPreferences";
 import {
   followAppTerminalAppearance,
   readTerminalFontFamily,
@@ -632,7 +632,7 @@ export function TerminalViewport({
               }
 
               const target = resolvePathLinkTarget(match.text, cwd);
-              void openInPreferredEditor(localApi, target).catch((error) => {
+              void openPathInEditor(environmentId, target).catch((error) => {
                 writeBufferedSystemMessage(
                   latestTerminal,
                   error instanceof Error ? error.message : "Unable to open path",
