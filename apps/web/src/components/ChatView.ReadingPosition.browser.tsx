@@ -1,7 +1,9 @@
 import type { MessageId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useUiStateStore } from "../uiStateStore";
 import {
   readThreadReadingAnchor,
   rememberThreadReadingAnchor,
@@ -13,13 +15,16 @@ import {
   THREAD_ID,
   THREAD_KEY,
   THREAD_REF,
+  THREAD_TITLE,
   addThreadToSnapshot,
   createSnapshotForTargetUser,
+  createUserMessage,
   findScrollToBottomButton,
   findScrollableAncestor,
   mountChatView,
   serverThreadPath,
   setupChatViewBrowserSuite,
+  threadRefFor,
   waitForComposerEditor,
   waitForElement,
   waitForLayout,
@@ -170,6 +175,98 @@ describe("ChatView reading position (full app)", () => {
         expect(distanceFromEnd(reopened)).toBeLessThanOrEqual(1);
         expect(readThreadReadingAnchor(THREAD_KEY)).toBeNull();
       });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  // The real path: the thread is read with the wheel, the other one followed
+  // at its end, and the reader comes back by a sidebar click. Wheels and
+  // resizes that change nothing leave updates queued at their own priority,
+  // which the click's render skips; the thread must still reopen at its row.
+  it("reopens a thread where it was left after the other thread followed its end, from the sidebar", async () => {
+    // The Inbox lists both threads.
+    useUiStateStore.setState({ sidebarMode: "inbox" });
+    const snapshot = readingPositionSnapshot();
+    const otherThread = snapshot.threads.find((thread) => thread.id === OTHER_THREAD_ID)!;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: [
+          ...snapshot.threads.filter((thread) => thread !== otherThread),
+          {
+            ...otherThread,
+            messages: [
+              createUserMessage({
+                id: "msg-user-other-thread" as MessageId,
+                text: "other thread message",
+                offsetSeconds: 0,
+              }),
+            ],
+          },
+        ],
+      },
+    });
+    try {
+      const scroller = await waitForTranscript();
+      await vi.waitFor(() => expect(distanceFromEnd(scroller)).toBeLessThanOrEqual(1));
+      await sleep(500);
+      // Read a third of the way down, wheeling up as a reader does: every
+      // wheel turns live follow off, again and again.
+      const target = Math.round((scroller.scrollHeight - scroller.clientHeight) / 3);
+      await vi.waitFor(async () => {
+        scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -240, bubbles: true }));
+        scroller.scrollTop = target;
+        await waitForLayout();
+        expect(Math.abs(scroller.scrollTop - target)).toBeLessThan(50);
+        expect(readThreadReadingAnchor(THREAD_KEY)).not.toBeNull();
+      });
+      for (let wheel = 0; wheel < 3; wheel += 1) {
+        scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
+      }
+      await waitForLayout();
+      const anchor = readThreadReadingAnchor(THREAD_KEY)!;
+      const left = rowTop(scroller, anchor.rowId);
+      expect(left).not.toBeNull();
+
+      // The other thread opens at its end and keeps it while its composer
+      // grows: each resize pins the end and turns live follow on, already on.
+      await openThread(mounted, OTHER_THREAD_ID);
+      await waitForElement(
+        () => document.querySelector<HTMLElement>('[data-message-id="msg-user-other-thread"]'),
+        "The other thread's message should show.",
+      );
+      for (const lines of [3, 6, 2, 5]) {
+        useComposerDraftStore
+          .getState()
+          .setPrompt(
+            threadRefFor(OTHER_THREAD_ID),
+            Array.from({ length: lines }, (_, line) => `Line ${line + 1}`).join("\n"),
+          );
+        await sleep(150);
+      }
+
+      // Back through the sidebar: a click, rendered at its own priority.
+      await page.getByTestId("inbox-thread-row").filter({ hasText: THREAD_TITLE }).click();
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath(THREAD_ID),
+        `Thread ${THREAD_ID} should open.`,
+      );
+      const reopened = await waitForTranscript();
+      await vi.waitFor(
+        () => {
+          const top = rowTop(reopened, anchor.rowId);
+          expect(top).not.toBeNull();
+          expect(Math.abs(top! - left!)).toBeLessThanOrEqual(TOLERANCE_PX);
+        },
+        { timeout: 5_000 },
+      );
+      await sleep(600);
+      expect(Math.abs(rowTop(reopened, anchor.rowId)! - left!)).toBeLessThanOrEqual(TOLERANCE_PX);
+      expect(distanceFromEnd(reopened)).toBeGreaterThan(200);
+      expect(readThreadReadingAnchor(THREAD_KEY)?.rowId).toBe(anchor.rowId);
     } finally {
       await mounted.cleanup();
     }
