@@ -7,7 +7,8 @@ status, opens the existing project picker, and introduces tasks, review, and Set
 Use **Provider settings** to configure an instance. Provider authentication uses each provider's
 own sign-in. **Sign in** on a provider's row opens it below the list, and it starts only when you
 click **Sign in** there: for Codex, Ryco runs its device-code login on this computer and shows the
-code to enter on the sign-in page. Other providers still sign in with their own CLI. A row offers
+code to enter on the sign-in page; for Claude, Cursor, Grok and OpenCode it runs the provider's own
+login in a terminal shown there. Other providers still sign in with their own CLI. A row offers
 **Sign in** only while its instance reports no sign-in and needs one: not for a Codex instance on a
 custom model provider, and never for a Claude instance whose environment uses other credentials,
 such as a CLIProxyAPI hub. The sign-in runs on this computer, not in the dialog, so skipping or

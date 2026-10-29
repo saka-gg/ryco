@@ -30,6 +30,8 @@ import { TestClock } from "effect/testing";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { PtyAdapter } from "../../terminal/Services/PTY.ts";
+import { FakePtyAdapter } from "../../terminal/testUtils/fakePty.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import type { ProviderSignInShape } from "./ProviderSignIn.ts";
 import { makeProviderSignInRuntime } from "./providerSignInRuntime.ts";
@@ -111,6 +113,8 @@ const makeHarness = (
           Layer.succeed(ServerConfig, {
             stateDir: path.join(dir, "state"),
           } as ServerConfig["Service"]),
+          // Device-code flows never open a terminal.
+          Layer.succeed(PtyAdapter, new FakePtyAdapter()),
         ),
       ),
       (make) => (options.scope ? Scope.provide(make, options.scope) : make),
@@ -198,7 +202,7 @@ describe("provider sign-in runtime", () => {
         },
         codex_invalid: { driver: "codex", config: { binaryPath: 42 } },
         registry: { driver: "acpRegistry", config: { agentId: "agent", version: "1.0.0" } },
-        claude_hub: { driver: "claudeAgent" },
+        copilot: { driver: "copilot" },
       }));
       const idle = (instanceId: string) =>
         reach("idle", ProviderInstanceId.make(instanceId)).pipe(
@@ -226,7 +230,7 @@ describe("provider sign-in runtime", () => {
         method: null,
         unavailableReason: "Use ACP Registry authentication below.",
       });
-      assert.deepEqual(yield* idle("claude_hub"), {
+      assert.deepEqual(yield* idle("copilot"), {
         method: null,
         unavailableReason:
           "Sign-in from Ryco is not available for this provider yet. Run its login on the node.",
@@ -235,7 +239,7 @@ describe("provider sign-in runtime", () => {
         method: null,
         unavailableReason: "This provider instance is not configured on the node.",
       });
-      const refused = yield* runtime.start(ProviderInstanceId.make("claude_hub")).pipe(Effect.flip);
+      const refused = yield* runtime.start(ProviderInstanceId.make("copilot")).pipe(Effect.flip);
       assert.equal(
         refused.message,
         "Sign-in from Ryco is not available for this provider yet. Run its login on the node.",

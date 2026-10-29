@@ -28,6 +28,7 @@ import type { ChildProcessSpawner } from "effect/process";
 
 import type { ServerConfig } from "../../config.ts";
 import type { ServerSettingsService } from "../../serverSettings.ts";
+import type { PtyAdapter } from "../../terminal/Services/PTY.ts";
 import type { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 
 export interface ProviderSignInShape {
@@ -56,6 +57,7 @@ export type ProviderSignInServices =
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | Path.Path
+  | PtyAdapter
   | Scope.Scope;
 
 export const ProviderSignInLive = Layer.effect(

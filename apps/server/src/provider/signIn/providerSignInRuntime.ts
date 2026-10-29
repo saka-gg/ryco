@@ -8,6 +8,9 @@
  * instance must still resolve to the binary, store and environment the flow started with. An
  * ended flow stays visible for two minutes, then the instance shows idle again.
  *
+ * A terminal flow's output goes to the owners following the instance as deltas; each subscription
+ * starts with the retained tail (`reset`), so a client that comes back sees the terminal as it is.
+ *
  * Nothing is persisted and nothing a person types or reads (codes, URLs, output) is logged.
  *
  * @module providerSignInRuntime
@@ -21,7 +24,7 @@ import {
   type ProviderInstanceConfig,
   type ProviderInstanceId,
   ProviderSignInError,
-  type ProviderSignInInteraction,
+  type ProviderSignInEvent,
   type ProviderSignInMethod,
   type ProviderSignInPhase,
   type ProviderSignInState,
@@ -36,6 +39,7 @@ import {
   type FileSystem,
   Option,
   type Path,
+  PubSub,
   Schema,
   Scope,
   Stream,
@@ -43,14 +47,21 @@ import {
 } from "effect";
 import type { ChildProcessSpawner } from "effect/process";
 import * as Semaphore from "effect/Semaphore";
-import { providerReportsSignIn } from "@ryco/shared/providerSignIn";
+import { providerSignInSettled } from "@ryco/shared/providerSignIn";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { providerInstanceConfigFor, resolveInstanceEnabled } from "../providerInstanceConfig.ts";
+import type { PtyAdapter } from "../../terminal/Services/PTY.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { prepareCodexDeviceCodeSignIn } from "./codexDeviceCodeSignIn.ts";
 import type { ProviderSignInServices, ProviderSignInShape } from "./ProviderSignIn.ts";
+import { planTerminalSignIn, type TerminalSignInLaunch } from "./signInCommands.ts";
+import {
+  prepareTerminalSignIn,
+  type SignInTerminal,
+  type TerminalSignInHooks,
+} from "./terminalSignIn.ts";
 
 /** A device code lives 15 minutes, and so does every flow. */
 export const PROVIDER_SIGN_IN_DEADLINE = Duration.minutes(15);
@@ -58,6 +69,10 @@ export const PROVIDER_SIGN_IN_DEADLINE = Duration.minutes(15);
 export const PROVIDER_SIGN_IN_RETENTION = Duration.minutes(2);
 const VERIFY_TIMEOUT = Duration.seconds(20);
 const MAX_RUNNING_FLOWS = 3;
+/** Terminal output a flow keeps for followers that (re)subscribe. */
+export const PROVIDER_SIGN_IN_OUTPUT_TAIL = 32 * 1024;
+/** Output events a lagging follower may fall behind before it misses the oldest. */
+const OUTPUT_BACKLOG = 256;
 
 const ENDED_PHASES: ReadonlySet<ProviderSignInPhase> = new Set([
   "succeeded",
@@ -67,7 +82,11 @@ const ENDED_PHASES: ReadonlySet<ProviderSignInPhase> = new Set([
 ]);
 const isRunning = (phase: ProviderSignInPhase) => phase !== "idle" && !ENDED_PHASES.has(phase);
 
-type MethodServices = ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path;
+type MethodServices =
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+  | Path.Path
+  | PtyAdapter;
 
 /** A sign-in method resolved for one instance, ready to run. */
 interface PreparedSignIn {
@@ -79,9 +98,19 @@ interface PreparedSignIn {
   readonly currentBinding: (
     settings: ServerSettings,
   ) => Effect.Effect<string | undefined, never, Path.Path>;
-  readonly run: (hooks: {
-    readonly waiting: (interaction: ProviderSignInInteraction) => Effect.Effect<void>;
-  }) => Effect.Effect<{ readonly message: string | null }, ProviderSignInError, MethodServices>;
+  readonly run: (
+    hooks: TerminalSignInHooks,
+  ) => Effect.Effect<{ readonly message: string | null }, ProviderSignInError, MethodServices>;
+}
+
+/** A terminal flow's terminal and output, updated in place while the flow runs. */
+interface FlowTerminal {
+  /** Set once the login waits for its person; it takes their input from then on. */
+  input: SignInTerminal | undefined;
+  /** The last `PROVIDER_SIGN_IN_OUTPUT_TAIL` characters of output. */
+  tail: string;
+  /** The transcript offset just past the last output. */
+  end: number;
 }
 
 interface Flow {
@@ -96,6 +125,7 @@ interface Flow {
   readonly cancel: Deferred.Deferred<void>;
   /** Completes once the flow ended and the process it ran is gone. */
   readonly ended: Deferred.Deferred<void>;
+  readonly terminal: FlowTerminal;
   readonly state: ProviderSignInState;
 }
 
@@ -110,16 +140,26 @@ const NO_LONGER_ACTIVE = "This sign-in is no longer active.";
 
 type Availability =
   | {
-      readonly method: ProviderSignInMethod;
+      readonly method: "codexDeviceCode";
       readonly reason: null;
       readonly instance: ProviderInstanceConfig;
     }
+  | {
+      readonly method: "terminal";
+      readonly reason: null;
+      readonly instance: ProviderInstanceConfig;
+      readonly launch: TerminalSignInLaunch;
+    }
   | { readonly method: null; readonly reason: string };
 
+const NOT_FROM_RYCO =
+  "Sign-in from Ryco is not available for this provider yet. Run its login on the node.";
+
 /**
- * Whether Start can run for the instance, from the settings alone: no process starts. Whether it
- * is enabled is decided as the registry decides it, from the config decoded with the driver's
- * schema, so a driver's default applies.
+ * Whether Start can run for the instance, from the settings and the node's environment alone: no
+ * process starts. Whether it is enabled is decided as the registry decides it, from the config
+ * decoded with the driver's schema, so a driver's default applies. Codex signs in by device code;
+ * Claude, Cursor, Grok and OpenCode by their own login in a terminal (`signInCommands.ts`).
  */
 export const signInAvailability = (
   settings: ServerSettings | undefined,
@@ -133,9 +173,21 @@ export const signInAvailability = (
     return unavailable("Use ACP Registry authentication below.");
   }
   if (instance.driver !== "codex") {
-    return unavailable(
-      "Sign-in from Ryco is not available for this provider yet. Run its login on the node.",
-    );
+    const plan = planTerminalSignIn(instance);
+    switch (plan?._tag) {
+      case undefined:
+        return unavailable(NOT_FROM_RYCO);
+      case "invalid":
+        return unavailable(
+          `Fix this ${PROVIDER_DISPLAY_NAMES[instance.driver] ?? "provider"} instance's settings to sign in.`,
+        );
+      case "disabled":
+        return unavailable("Enable this provider instance to sign in.");
+      case "refused":
+        return unavailable(plan.reason);
+      case "ready":
+        return { method: "terminal", reason: null, instance, launch: plan };
+    }
   }
   const codex = Schema.decodeUnknownOption(CodexSettings)(instance.config ?? {});
   if (Option.isNone(codex)) return unavailable("Fix this Codex instance's settings to sign in.");
@@ -177,6 +229,10 @@ export const makeProviderSignInRuntime: Effect.Effect<
   const services = yield* Effect.context<MethodServices>();
   const flows = yield* SubscriptionRef.make<ReadonlyMap<ProviderInstanceId, Flow>>(new Map());
   const admission = yield* Semaphore.make(1);
+  const outputs = yield* PubSub.sliding<{
+    readonly instanceId: ProviderInstanceId;
+    readonly event: ProviderSignInEvent;
+  }>(OUTPUT_BACKLOG);
 
   const readSettings = serverSettings.getSettings.pipe(Effect.orElseSucceed(() => undefined));
 
@@ -194,6 +250,33 @@ export const makeProviderSignInRuntime: Effect.Effect<
       const updated = new Map(current);
       updated.set(flow.instanceId, { ...active, state: { ...active.state, ...next } });
       return [true, updated] as const;
+    });
+
+  /**
+   * Keeps a terminal flow's output and sends it to its followers. The tail moves first, so a
+   * follower that reads it after subscribing never misses this delta.
+   */
+  const appendOutput = (flow: Flow, data: string) =>
+    Effect.suspend(() => {
+      const terminal = flow.terminal;
+      const offset = terminal.end;
+      terminal.end += data.length;
+      terminal.tail = (terminal.tail + data).slice(-PROVIDER_SIGN_IN_OUTPUT_TAIL);
+      return PubSub.publish(outputs, {
+        instanceId: flow.instanceId,
+        event: { type: "output", flowId: flow.flowId, offset, data },
+      });
+    }).pipe(Effect.asVoid);
+
+  /** Shows every follower the terminal's new size while the flow still waits on it. */
+  const resized = (flow: Flow, cols: number, rows: number) =>
+    SubscriptionRef.update(flows, (current) => {
+      const active = current.get(flow.instanceId);
+      if (active?.flowId !== flow.flowId || active.state.phase !== "waiting") return current;
+      return new Map(current).set(flow.instanceId, {
+        ...active,
+        state: { ...active.state, interaction: { type: "terminal", cols, rows } },
+      });
     });
 
   const end = (flow: Flow, outcome: Outcome) =>
@@ -246,12 +329,12 @@ export const makeProviderSignInRuntime: Effect.Effect<
       const provider = Option.getOrUndefined(
         yield* read.pipe(
           Effect.flatMap((first) =>
-            first !== undefined && providerReportsSignIn(first) ? Effect.succeed(first) : read,
+            first !== undefined && providerSignInSettled(first) ? Effect.succeed(first) : read,
           ),
           Effect.timeoutOption(VERIFY_TIMEOUT),
         ),
       );
-      if (provider === undefined || !providerReportsSignIn(provider)) {
+      if (provider === undefined || !providerSignInSettled(provider)) {
         return {
           phase: "failed",
           message: `The login finished, but ${flow.name} still reports no sign-in. Refresh providers.`,
@@ -267,7 +350,13 @@ export const makeProviderSignInRuntime: Effect.Effect<
   const runFlow = (flow: Flow, prepared: PreparedSignIn) =>
     Effect.gen(function* () {
       const result = yield* prepared
-        .run({ waiting: (interaction) => transition(flow, { phase: "waiting", interaction }) })
+        .run({
+          waiting: (interaction, terminal) => {
+            flow.terminal.input = terminal;
+            return transition(flow, { phase: "waiting", interaction }).pipe(Effect.asVoid);
+          },
+          output: (data) => appendOutput(flow, data),
+        })
         .pipe(
           Effect.map((success): Outcome => ({ phase: "succeeded", message: success.message })),
           Effect.catch((error) =>
@@ -321,11 +410,11 @@ export const makeProviderSignInRuntime: Effect.Effect<
         const availability = signInAvailability(settings, instanceId);
         if (availability.method === null) return yield* signInError(availability.reason);
         const { instance } = availability;
-        const prepared: PreparedSignIn = yield* prepareCodexDeviceCodeSignIn(
-          settings,
-          instanceId,
-          privateCwd(instanceId),
-        ).pipe(Effect.provideContext(services));
+        const preparing: Effect.Effect<PreparedSignIn, ProviderSignInError, MethodServices> =
+          availability.method === "terminal"
+            ? prepareTerminalSignIn(availability.launch, instanceId, privateCwd(instanceId))
+            : prepareCodexDeviceCodeSignIn(settings, instanceId, privateCwd(instanceId));
+        const prepared = yield* preparing.pipe(Effect.provideContext(services));
 
         const running = [...current.values()].filter((flow) => isRunning(flow.state.phase));
         if (running.some((flow) => flow.credentialKey === prepared.credentialKey)) {
@@ -350,6 +439,7 @@ export const makeProviderSignInRuntime: Effect.Effect<
           startedAtMs,
           cancel: yield* Deferred.make<void>(),
           ended: yield* Deferred.make<void>(),
+          terminal: { input: undefined, tail: "", end: 0 },
           state: {
             instanceId,
             phase: "starting",
@@ -387,13 +477,28 @@ export const makeProviderSignInRuntime: Effect.Effect<
           return;
         }
         case "input":
-        case "resize":
-          return yield* signInError("This sign-in does not take terminal input.");
+        case "resize": {
+          if (flow.method !== "terminal") {
+            return yield* signInError("This sign-in does not take terminal input.");
+          }
+          const terminal = flow.terminal.input;
+          if (terminal === undefined || flow.state.phase !== "waiting") {
+            return yield* signInError(NO_LONGER_ACTIVE);
+          }
+          const { action } = input;
+          const applied =
+            action.type === "input"
+              ? yield* terminal.write(action.data)
+              : yield* terminal.resize(action.cols, action.rows);
+          if (!applied) return yield* signInError(NO_LONGER_ACTIVE);
+          if (action.type === "resize") yield* resized(flow, action.cols, action.rows);
+          return;
+        }
       }
     });
 
   /** Every state of the instance's flows; while none runs, what the settings make available. */
-  const subscribe: ProviderSignInShape["subscribe"] = (instanceId) =>
+  const states = (instanceId: ProviderInstanceId) =>
     Stream.unwrap(
       Effect.gen(function* () {
         // Folded in one ordered step, so no state of a flow is skipped.
@@ -414,10 +519,45 @@ export const makeProviderSignInRuntime: Effect.Effect<
             return latest.flow?.state ?? idleState(instanceId, latest.settings);
           }),
           Stream.changesWith(sameState),
-          Stream.map((state) => ({ type: "state" as const, state })),
+          Stream.map((state): ProviderSignInEvent => ({ type: "state", state })),
         );
       }),
     );
+
+  /**
+   * The output of the instance's terminal flows: the tail of the one it holds (`reset`), then each
+   * delta. Subscribed before the tail is read, so no delta is missed; one that arrives in between
+   * comes twice, and clients skip what they hold by its offset.
+   */
+  const outputEvents = (instanceId: ProviderInstanceId) =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(outputs);
+        const flow = (yield* SubscriptionRef.get(flows)).get(instanceId);
+        const retained: Array<ProviderSignInEvent> =
+          flow?.method === "terminal"
+            ? [
+                {
+                  type: "output",
+                  flowId: flow.flowId,
+                  offset: flow.terminal.end - flow.terminal.tail.length,
+                  data: flow.terminal.tail,
+                  reset: true,
+                },
+              ]
+            : [];
+        return Stream.concat(
+          Stream.fromIterable(retained),
+          Stream.fromSubscription(subscription).pipe(
+            Stream.filter((output) => output.instanceId === instanceId),
+            Stream.map((output) => output.event),
+          ),
+        );
+      }),
+    );
+
+  const subscribe: ProviderSignInShape["subscribe"] = (instanceId) =>
+    Stream.merge(states(instanceId), outputEvents(instanceId));
 
   return { subscribe, start, respond } satisfies ProviderSignInShape;
 });

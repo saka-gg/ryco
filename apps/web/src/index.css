@@ -3871,7 +3871,7 @@ label:has(> select#reasoning-effort) select {
 }
 
 /* Terminals follow the glass: their xterm theme resolves a clear background
-   (ThreadTerminalDrawer.tsx), and xterm backs its viewport with black. */
+   (components/terminal/terminalTheme.ts), and xterm backs its viewport with black. */
 :root[data-window-translucency="window"] .xterm .xterm-viewport {
   background-color: transparent;
 }

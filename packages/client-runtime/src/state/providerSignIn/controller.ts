@@ -49,6 +49,11 @@ export interface ProviderSignInSnapshot {
 /** Terminal output as it arrives: `reset` replaces everything shown before, otherwise it appends. */
 export interface ProviderSignInOutput {
   readonly reset: boolean;
+  /**
+   * Output that was live before: the tail a node resends to a new subscription. Queries in it were
+   * answered (or timed out) back then, so a terminal must not answer them again.
+   */
+  readonly replay: boolean;
   readonly data: string;
 }
 
@@ -214,7 +219,7 @@ export function createProviderSignInController(instanceId: ProviderInstanceId) {
     awaitingResetFor = null;
     if (transcript.flowId === null && transcript.text === "") return;
     transcript = NO_TRANSCRIPT;
-    emitOutput({ reset: true, data: "" });
+    emitOutput({ reset: true, replay: false, data: "" });
   };
 
   const applyState = (state: ProviderSignInState) => {
@@ -247,7 +252,7 @@ export function createProviderSignInController(instanceId: ProviderInstanceId) {
         text: event.data.slice(-OUTPUT_TAIL),
         end: event.offset + event.data.length,
       };
-      emitOutput({ reset: true, data: event.data });
+      emitOutput({ reset: true, replay: true, data: event.data });
       return;
     }
     if (event.flowId === awaitingResetFor) return;
@@ -262,7 +267,7 @@ export function createProviderSignInController(instanceId: ProviderInstanceId) {
       text: ((newFlow ? "" : transcript.text) + data).slice(-OUTPUT_TAIL),
       end: eventEnd,
     };
-    emitOutput({ reset: newFlow, data });
+    emitOutput({ reset: newFlow, replay: false, data });
   };
 
   const follow = (current: ProviderSignInApi): Following => {
@@ -401,7 +406,10 @@ export function createProviderSignInController(instanceId: ProviderInstanceId) {
         outputListeners.delete(listener);
       };
     },
-    /** The retained raw output of the current flow, for a terminal that mounts late. */
+    /**
+     * The retained raw output of the current flow, for a terminal that mounts late. It was live
+     * before that terminal existed, so the terminal takes it as a replay.
+     */
     output: (): string => transcript.text,
     /** The current flow's output as plain text, its last 16 KiB. */
     transcriptText: (): string => readableTranscript(transcript.text).slice(-TRANSCRIPT_TAIL),

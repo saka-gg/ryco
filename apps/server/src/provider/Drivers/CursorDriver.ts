@@ -38,9 +38,9 @@ import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import {
   cursorAgentCommandCandidates,
-  resolveCursorMaintenanceCapabilities,
   resolveCursorAgentCommand,
 } from "../acp/CursorAgentCommand.ts";
+import { resolveCursorMaintenanceCapabilities } from "../acp/CursorAgentMaintenance.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 

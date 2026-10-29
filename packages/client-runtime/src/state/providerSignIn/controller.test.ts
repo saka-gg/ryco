@@ -427,15 +427,21 @@ describe("terminal output", () => {
     fake.emitOutput("flow-1", 0, "Open https://exa");
     fake.emitOutput("flow-1", 16, "mple.com\r\n");
     expect(controller.output()).toBe("Open https://example.com\r\n");
+    // The first output of a flow starts its terminal over, but is live.
     expect(outputs).toEqual([
-      { reset: true, data: "Open " },
-      { reset: false, data: "https://example.com" },
-      { reset: false, data: "\r\n" },
+      { reset: true, replay: false, data: "Open " },
+      { reset: false, replay: false, data: "https://example.com" },
+      { reset: false, replay: false, data: "\r\n" },
     ]);
 
+    // The tail a node resends was live before: a terminal must not answer its queries again.
     fake.emitOutput("flow-1", 2, "en https://example.com\r\nCode: ", true);
     expect(controller.output()).toBe("en https://example.com\r\nCode: ");
-    expect(outputs.at(-1)).toEqual({ reset: true, data: "en https://example.com\r\nCode: " });
+    expect(outputs.at(-1)).toEqual({
+      reset: true,
+      replay: true,
+      data: "en https://example.com\r\nCode: ",
+    });
   });
 
   it("drops what an old subscription left after a re-subscribe until the reset arrives", () => {
@@ -455,7 +461,11 @@ describe("terminal output", () => {
     fake.emitOutput("flow-1", 0, "one\r\ntwo\r\n", true);
     fake.emitOutput("flow-1", 10, "three");
     expect(controller.output()).toBe("one\r\ntwo\r\nthree");
-    expect(outputs.map((output) => output.reset)).toEqual([true, true, false]);
+    expect(outputs.map(({ reset, replay }) => ({ reset, replay }))).toEqual([
+      { reset: true, replay: false },
+      { reset: true, replay: true },
+      { reset: false, replay: false },
+    ]);
   });
 
   it("starts over for a new flow and clears once the flow is gone", () => {
@@ -473,10 +483,10 @@ describe("terminal output", () => {
     fake.emitState(state());
     expect(controller.output()).toBe("");
     expect(outputs).toEqual([
-      { reset: true, data: "first" },
-      { reset: true, data: "" },
-      { reset: true, data: "second" },
-      { reset: true, data: "" },
+      { reset: true, replay: false, data: "first" },
+      { reset: true, replay: false, data: "" },
+      { reset: true, replay: false, data: "second" },
+      { reset: true, replay: false, data: "" },
     ]);
   });
 

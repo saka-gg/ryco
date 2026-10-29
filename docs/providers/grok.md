@@ -30,6 +30,15 @@ For a remote or headless server, use device authentication:
 grok login --device-auth
 ```
 
+You can also sign in from Ryco, on any node you own: when Grok cannot start on a node, its instance
+shows **Account sign-in** in **Settings → Providers**. **Sign in** runs `grok login --device-auth`
+on that node, with the instance's environment variables, in a terminal shown in Settings; open its
+sign-in link on the device you use and follow the steps there, so a remote or headless node needs no
+browser of its own. The login keeps running if you close Settings, and ends when it exits, after 15
+minutes, with **Cancel**, or when the node restarts. One sign-in runs per Grok store (`GROK_HOME`, by
+default `~/.grok`) at a time. Grok does not report which account it uses, so once the login finishes
+and Grok starts, Settings shows it as signed in.
+
 You can instead add `XAI_API_KEY` in the Grok provider instance's **Environment variables** section
 under **Settings → Providers**. Mark it sensitive so Ryco stores it as a server secret and does not
 send the value back to clients after saving.

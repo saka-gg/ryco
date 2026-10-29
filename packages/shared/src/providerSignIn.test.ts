@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
 
-import { providerNeedsSignIn, providerReportsSignIn } from "./providerSignIn.ts";
+import {
+  providerNeedsSignIn,
+  providerReportsSignIn,
+  providerSignInSettled,
+} from "./providerSignIn.ts";
 
 type Snapshot = Pick<
   ServerProvider,
@@ -45,6 +49,33 @@ describe("providerReportsSignIn", () => {
   });
 });
 
+describe("providerSignInSettled", () => {
+  it("settles a reported sign-in, and a ready instance that knows of no account", () => {
+    expect(
+      providerSignInSettled(
+        snapshot("cursor", { status: "authenticated", email: "a@example.com" }),
+      ),
+    ).toBe(true);
+    // Grok never reports its account: once it starts, its login took.
+    expect(
+      providerSignInSettled(snapshot("grok", { status: "unknown" }, { status: "ready" })),
+    ).toBe(true);
+    expect(
+      providerSignInSettled(snapshot("grok", { status: "unknown" }, { status: "error" })),
+    ).toBe(false);
+    expect(
+      providerSignInSettled(
+        snapshot("opencode", { status: "unknown", type: "opencode" }, { status: "warning" }),
+      ),
+    ).toBe(false);
+    expect(
+      providerSignInSettled(
+        snapshot("claudeAgent", { status: "authenticated" }, { status: "ready" }),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("providerNeedsSignIn", () => {
   it("offers a sign-in for a running Codex instance that reports none", () => {
     expect(providerNeedsSignIn(snapshot("codex", { status: "unauthenticated" }))).toBe(true);
@@ -74,9 +105,24 @@ describe("providerNeedsSignIn", () => {
     );
   });
 
-  it("offers none for a driver the node cannot sign in yet", () => {
-    expect(providerNeedsSignIn(snapshot("claudeAgent", { status: "authenticated" }))).toBe(false);
-    expect(providerNeedsSignIn(snapshot("cursor", { status: "unauthenticated" }))).toBe(false);
+  it("offers the drivers that sign in in a terminal", () => {
+    // Claude reports authenticated whenever it starts; only an account shows its login.
+    expect(providerNeedsSignIn(snapshot("claudeAgent", { status: "authenticated" }))).toBe(true);
+    expect(
+      providerNeedsSignIn(
+        snapshot("claudeAgent", { status: "authenticated", email: "a@example.com" }),
+      ),
+    ).toBe(false);
+    expect(providerNeedsSignIn(snapshot("cursor", { status: "unauthenticated" }))).toBe(true);
+    expect(providerNeedsSignIn(snapshot("opencode", { status: "unknown" }))).toBe(true);
+    expect(providerNeedsSignIn(snapshot("grok", { status: "unknown" }))).toBe(true);
+    expect(providerNeedsSignIn(snapshot("grok", { status: "unknown" }, { status: "ready" }))).toBe(
+      false,
+    );
+  });
+
+  it("offers none for a driver the node cannot sign in", () => {
     expect(providerNeedsSignIn(snapshot("acpRegistry", { status: "unauthenticated" }))).toBe(false);
+    expect(providerNeedsSignIn(snapshot("copilot", { status: "unauthenticated" }))).toBe(false);
   });
 });

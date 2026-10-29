@@ -33,13 +33,7 @@ import { expect } from "vite-plus/test";
 
 import { makeWorkspaceAccessPolicy } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
 import type { TerminalManagerShape } from "../Services/Manager.ts";
-import {
-  type PtyAdapterShape,
-  type PtyExitEvent,
-  type PtyProcess,
-  type PtySpawnInput,
-  PtySpawnError,
-} from "../Services/PTY.ts";
+import { FakePtyAdapter, GatedPtyAdapter } from "../testUtils/fakePty.ts";
 import { createWorkspaceCommitFence } from "../../orchestration/workspaceCommitFence.ts";
 import { storageLifecycleLock } from "../../storage/lifecycle.ts";
 import { createEmptyReadModel } from "../../orchestration/projector.ts";
@@ -48,123 +42,6 @@ import {
   makeTerminalSubscriberOffer,
   releaseTerminalSubscriberEvent,
 } from "../../ws/terminalRpc.ts";
-
-class FakePtyProcess implements PtyProcess {
-  readonly writes: string[] = [];
-  readonly resizeCalls: Array<{ cols: number; rows: number }> = [];
-  readonly killSignals: Array<string | undefined> = [];
-  readonly pid: number;
-  private readonly dataListeners = new Set<(data: string) => void>();
-  private readonly exitListeners = new Set<(event: PtyExitEvent) => void>();
-  killed = false;
-  /** Present only on PTYs that can name their foreground process. */
-  foregroundProcessName?: () => string | undefined;
-
-  constructor(pid: number) {
-    this.pid = pid;
-  }
-
-  write(data: string): void {
-    this.writes.push(data);
-  }
-
-  resize(cols: number, rows: number): void {
-    this.resizeCalls.push({ cols, rows });
-  }
-
-  kill(signal?: string): void {
-    this.killed = true;
-    this.killSignals.push(signal);
-  }
-
-  onData(callback: (data: string) => void): () => void {
-    this.dataListeners.add(callback);
-    return () => {
-      this.dataListeners.delete(callback);
-    };
-  }
-
-  onExit(callback: (event: PtyExitEvent) => void): () => void {
-    this.exitListeners.add(callback);
-    return () => {
-      this.exitListeners.delete(callback);
-    };
-  }
-
-  emitData(data: string): void {
-    for (const listener of this.dataListeners) {
-      listener(data);
-    }
-  }
-
-  emitExit(event: PtyExitEvent): void {
-    for (const listener of this.exitListeners) {
-      listener(event);
-    }
-  }
-}
-
-class FakePtyAdapter implements PtyAdapterShape {
-  readonly spawnInputs: PtySpawnInput[] = [];
-  readonly processes: FakePtyProcess[] = [];
-  readonly spawnFailures: Error[] = [];
-  /** By pid: spawned PTYs with an entry can name their foreground process. */
-  readonly foregroundReaders = new Map<number, () => string | undefined>();
-  private readonly mode: "sync" | "async";
-  private nextPid = 9000;
-
-  constructor(mode: "sync" | "async" = "sync") {
-    this.mode = mode;
-  }
-
-  spawn(input: PtySpawnInput): Effect.Effect<PtyProcess, PtySpawnError> {
-    this.spawnInputs.push(input);
-    const failure = this.spawnFailures.shift();
-    if (failure) {
-      return Effect.fail(
-        new PtySpawnError({
-          adapter: "fake",
-          message: "Failed to spawn PTY process",
-          cause: failure,
-        }),
-      );
-    }
-    const process = new FakePtyProcess(this.nextPid++);
-    const foregroundReader = this.foregroundReaders.get(process.pid);
-    if (foregroundReader) process.foregroundProcessName = foregroundReader;
-    this.processes.push(process);
-    if (this.mode === "async") {
-      return Effect.tryPromise({
-        try: async () => process,
-        catch: (cause) =>
-          new PtySpawnError({
-            adapter: "fake",
-            message: "Failed to spawn PTY process",
-            cause,
-          }),
-      });
-    }
-    return Effect.succeed(process);
-  }
-}
-
-/** Holds each spawn until the test opens its gate, after signalling that it was reached. */
-class GatedPtyAdapter extends FakePtyAdapter {
-  entered = Deferred.makeUnsafe<void>();
-  gate = Deferred.makeUnsafe<void>();
-
-  override spawn(input: PtySpawnInput): Effect.Effect<PtyProcess, PtySpawnError> {
-    return Deferred.succeed(this.entered, undefined).pipe(
-      Effect.andThen(Deferred.await(this.gate)),
-      Effect.andThen(Effect.suspend(() => super.spawn(input))),
-    );
-  }
-
-  rearm(): void {
-    this.entered = Deferred.makeUnsafe<void>();
-    this.gate = Deferred.makeUnsafe<void>();
-  }
-}
 
 const waitFor = <E, R>(
   predicate: Effect.Effect<boolean, E, R>,

@@ -37,6 +37,39 @@ Claude HOME path: empty
 
 An empty `Claude HOME path` means Ryco uses your normal home directory.
 
+## Sign In From Settings
+
+A Claude instance that has no claude.ai login shows **Account sign-in** in its provider settings.
+Click **Sign in** and Ryco runs `claude auth login` on the machine the instance runs on, which can
+be this computer or a remote node, in a terminal shown in Settings:
+
+1. Follow Claude Code's prompts in that terminal: choose how to log in, open the sign-in page it
+   shows, and paste the code back into the terminal if it asks for one. Clicking an `https` link in
+   the terminal opens it on the device you are using, not on the node.
+2. When the login finishes, the node checks the instance again, and every connected app shows the
+   account.
+
+The login runs with the instance's own environment variables and `Claude HOME path`, so it signs in
+exactly the account that instance uses: a work and a personal instance each sign in on their own.
+Two instances that share one Claude configuration directory cannot sign in at the same time.
+
+The sign-in runs on the node, so closing Settings does not stop it; come back to see how it went.
+It ends when the login exits, after 15 minutes, with **Cancel**, or when the node restarts. Only
+owners of a node can sign its providers in, and what the terminal shows or receives is never logged.
+
+Ryco offers no sign-in for an instance that Claude Code would not use a login for: one with an API
+key or token (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`), another
+endpoint (`ANTHROPIC_BASE_URL`, such as a router, OpenRouter or a CLIProxyAPI hub), or a Bedrock,
+Vertex or Foundry flag. The variable counts whether the instance's environment variables or the
+node's own environment set it. An instance whose own variables set it shows no sign-in at all; for
+one where only the node's environment does, Settings names the variable, never its value. Either
+way Ryco runs no login and touches no stored login for that instance.
+
+If the login fails, the terminal stays in Settings with what it printed, so you can read why.
+If the login finishes but Settings says Claude still reports no sign-in, refresh the provider. On a
+Mac without a logged-in desktop session, Claude Code may not be able to save its login to the
+Keychain; run `claude auth login` on that Mac instead.
+
 ## I Want Work And Personal Claude Accounts
 
 Use a different Claude home for each account.
@@ -221,7 +254,8 @@ configuration steps: <https://github.com/musistudio/claude-code-router>.
 CLIProxyAPI pools several Claude Code subscriptions behind one proxy. Route a Claude provider
 through it with the same environment variables as a router, and connect the hub itself under
 Settings → Providers → CLIProxyAPI hubs to see each subscription's usage on Statistics → Limits.
-See [CLIProxyAPI hubs](./cliproxyapi.md).
+See [CLIProxyAPI hubs](./cliproxyapi.md). A Claude provider routed through the hub offers no sign-in
+from Settings: its accounts sign in on the hub.
 
 ## I Want Different Claude Settings, Not A Different Account
 

@@ -1,5 +1,4 @@
 import { CodexResetCredits } from "../usage/CodexResetCredits";
-import { PROVIDER_SIGN_IN_DRIVERS } from "@ryco/shared/providerSignIn";
 import { updateInstanceModelFavorites } from "@ryco/client-runtime/state/composer";
 import { LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useRef, useState, type KeyboardEvent } from "react";
@@ -59,6 +58,7 @@ import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { CliProxyHubSettings } from "./CliProxyHubSettings";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { ProviderInstanceListItem } from "./ProviderInstanceListItem";
+import { instanceOffersSignIn } from "./ProviderSignInOffer.logic";
 import { ProviderSignInSection } from "./ProviderSignInSection";
 import { getDriverOption } from "./providerDriverMeta";
 import {
@@ -607,7 +607,7 @@ export function ProvidersSettingsPanel() {
               <ProviderInstanceCard
                 usageAvailable={settingsTarget?.connected === true}
                 signInNode={
-                  PROVIDER_SIGN_IN_DRIVERS.has(selectedRow.instance.driver) ? (
+                  instanceOffersSignIn(selectedRow.instance.driver, selectedRow.instance) ? (
                     <ProviderSignInSection
                       environmentId={settingsTarget?.environmentId ?? null}
                       nodeLabel={settingsTarget?.nodeLabel ?? "this computer"}
