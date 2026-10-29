@@ -292,6 +292,12 @@ export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(funct
       (loaded) => loaded.getChangeRequestWatchFingerprint,
       () => Effect.succeed(null),
     ),
+    // Without a thread read, a long review thread stays unread past its first page (null).
+    getChangeRequestReviewThread: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.getChangeRequestReviewThread,
+      () => Effect.succeed(null),
+    ),
     getChangeRequestFileContents: lazyOptionalMethod(
       provider,
       (loaded) => loaded.getChangeRequestFileContents,
@@ -556,6 +562,14 @@ export function bindProviderContext(
       ? {
           getChangeRequestWatchFingerprint: withProviderContext(
             provider.getChangeRequestWatchFingerprint,
+            context,
+          ),
+        }
+      : {}),
+    ...(provider.getChangeRequestReviewThread
+      ? {
+          getChangeRequestReviewThread: withProviderContext(
+            provider.getChangeRequestReviewThread,
             context,
           ),
         }

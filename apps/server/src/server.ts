@@ -16,6 +16,7 @@ import { RestartContinuationRepositoryLive } from "./persistence/Layers/RestartC
 import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuation.ts";
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
 import { ServerWakeFenceLive } from "./orchestration/Layers/ServerWakeFence.ts";
+import { PullRequestWatchServiceLive } from "./sourceControl/PullRequestWatchService.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Duration, Effect, Layer } from "effect";
@@ -604,6 +605,15 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
   Layer.provideMerge(RuntimeBaseDependenciesLive),
 );
 
+/**
+ * The pull request watch with the startup it waits on (its sweep starts once commands are
+ * admitted) and the command application its updates go through.
+ */
+const PullRequestWatchLayerLive = PullRequestWatchServiceLive.pipe(
+  Layer.provideMerge(ServerRuntimeStartupLive),
+  Layer.provideMerge(OrchestrationCommandApplicationLive),
+);
+
 // The private Agent Control MCP listener joins the runtime services here:
 // it consumes projections, proposals, provider snapshots, and the session
 // registry from the runtime dependencies, and its endpoint never touches
@@ -679,6 +689,10 @@ const RuntimeServicesLive = Layer.mergeAll(
   // which end agent device holds and attachments (the simulator idle grace).
   DeviceThreadLifecycleLive,
 ).pipe(
+  // Pull request watches, beneath the services: the source-control RPC and Agent Control's
+  // execution share one instance (its read cache and per-chat lock). First in this list, so
+  // the startup it waits on is built with every service below (chat folders, the fork ledger).
+  Layer.provideMerge(PullRequestWatchLayerLive),
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.
   Layer.provideMerge(ChatFoldersLive),

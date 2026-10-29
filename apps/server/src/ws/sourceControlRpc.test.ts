@@ -6,6 +6,7 @@ import { Effect, FileSystem, Layer, Option, Schema } from "effect";
 import {
   AuthSessionId,
   SourceControlProviderError,
+  ThreadId,
   WorktreeId,
   WS_METHODS,
   type ChangeRequest,
@@ -903,6 +904,46 @@ describe("checkout without a recognized hosting provider", () => {
       expect(
         yield* failureDetail(handlers[WS_METHODS.sourceControlListWorkflowRuns]({ cwd: "/repo" })),
       ).toBe("gh: authentication required");
+    }),
+  );
+});
+
+describe("pull request watch", () => {
+  const threadId = ThreadId.make("thread-watch");
+  const watchContext = (service: Option.Option<unknown>) => {
+    const ctx = { ownerEffect, pullRequestWatch: service } as unknown as WsRpcContext;
+    return makeSourceControlHandlers(ctx);
+  };
+
+  it.effect("starts the watch as the user's switch", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = [];
+      const handlers = watchContext(
+        Option.some({
+          setWatch: (input: unknown) =>
+            Effect.sync(() => {
+              calls.push(input);
+              return { watch: null, now: "All 3 checks passed." };
+            }),
+        }),
+      );
+      const result = yield* handlers[WS_METHODS.sourceControlSetPullRequestWatch]({
+        threadId,
+        autoFix: true,
+      });
+      expect(result.now).toBe("All 3 checks passed.");
+      expect(calls).toEqual([{ threadId, autoFix: true, origin: "user" }]);
+    }),
+  );
+
+  it.effect("answers plainly on a node without pull request watches", () =>
+    Effect.gen(function* () {
+      const handlers = watchContext(Option.none());
+      const error = yield* handlers[WS_METHODS.sourceControlSetPullRequestWatch]({
+        threadId,
+        news: true,
+      }).pipe(Effect.flip);
+      expect(error).toMatchObject({ _tag: "PullRequestWatchError", reason: "unsupported" });
     }),
   );
 });

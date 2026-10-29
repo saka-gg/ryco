@@ -2,6 +2,7 @@ import { Context, Effect, type DateTime } from "effect";
 import {
   SourceControlProviderError,
   type ChangeRequestActivity,
+  type ChangeRequestReviewThread,
   type ChangeRequestActivityInput,
   type ChangeRequestFileContents,
   type ChangeRequestFileContentsInput,
@@ -339,6 +340,17 @@ export interface SourceControlProviderShape {
     /** The change request's web URL (`ChangeRequest.url`), which names its repository and host. */
     readonly url: string;
   }) => Effect.Effect<ChangeRequestWatchFingerprint | null, SourceControlProviderError>;
+  /**
+   * One review thread with every comment the host returns for it (GitHub: up to 100), for a
+   * pull request watch whose activity read carried only the first page of a long thread. Null
+   * when the host has no such read; the watch then treats that conversation as not read whole.
+   */
+  readonly getChangeRequestReviewThread?: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+    readonly reference: string;
+    readonly threadId: string;
+  }) => Effect.Effect<ChangeRequestReviewThread | null, SourceControlProviderError>;
   readonly getChangeRequestFileContents?: (
     input: ChangeRequestFileContentsInput & { readonly context?: SourceControlProviderContext },
   ) => Effect.Effect<ChangeRequestFileContents, SourceControlProviderError>;

@@ -52,6 +52,14 @@ describe("shared RPC access policy", () => {
     expect(rpcAccessFor(WS_METHODS.sourceControlMergeChangeRequest)).toBe("operator");
   });
 
+  it("lets operators, not viewers, start or stop a pull request watch, as a mutation", () => {
+    const method = WS_METHODS.sourceControlSetPullRequestWatch;
+    expect(rpcAccessFor(method)).toBe("operator");
+    expect(rpcDeliveryEffectFor(method)).toBe("mutation");
+    expect(hostedRoleAllows("viewer", method)).toBe(false);
+    expect(hostedRoleAllows("operator", method)).toBe(true);
+  });
+
   it("keeps chat-folder methods at the project-mutation tier", () => {
     for (const method of [
       WS_METHODS.projectsPromoteChatPreview,

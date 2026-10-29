@@ -368,6 +368,11 @@ import {
   SourceControlWorkflowRunListResult,
 } from "./sourceControl.ts";
 import {
+  PullRequestWatchError,
+  SourceControlSetPullRequestWatchInput,
+  SourceControlSetPullRequestWatchResult,
+} from "./pullRequestWatchRpc.ts";
+import {
   ChangeRequestActivity,
   ChangeRequestActivityInput,
   ChangeRequestCreateInput,
@@ -614,6 +619,7 @@ export const WS_METHODS = {
   sourceControlCreateChangeRequest: "sourceControl.createChangeRequest",
   sourceControlLinkWorktreePullRequest: "sourceControl.linkWorktreePullRequest",
   sourceControlDismissWorktreePullRequest: "sourceControl.dismissWorktreePullRequest",
+  sourceControlSetPullRequestWatch: "sourceControl.setPullRequestWatch",
 
   // Text generation methods
   textGenerationGenerateIssueContent: "textGeneration.generateIssueContent",
@@ -1535,6 +1541,16 @@ export const WsSourceControlDismissWorktreePullRequestRpc = Rpc.make(
   {
     payload: DismissWorktreePullRequestInput,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+/** Start, change or stop the server's watch of a thread's pull request (Auto-fix CI included). */
+export const WsSourceControlSetPullRequestWatchRpc = Rpc.make(
+  WS_METHODS.sourceControlSetPullRequestWatch,
+  {
+    payload: SourceControlSetPullRequestWatchInput,
+    success: SourceControlSetPullRequestWatchResult,
+    error: Schema.Union([PullRequestWatchError, AuthRpcError]),
   },
 );
 
@@ -2576,6 +2592,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlCreateChangeRequestRpc
   | typeof WsSourceControlLinkWorktreePullRequestRpc
   | typeof WsSourceControlDismissWorktreePullRequestRpc
+  | typeof WsSourceControlSetPullRequestWatchRpc
   | typeof WsTextGenerationAskSideQuestionRpc
   | typeof WsTextGenerationCancelSideQuestionRpc
   | typeof WsTextGenerationGenerateIssueContentRpc
@@ -2798,6 +2815,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlCreateChangeRequestRpc,
   WsSourceControlLinkWorktreePullRequestRpc,
   WsSourceControlDismissWorktreePullRequestRpc,
+  WsSourceControlSetPullRequestWatchRpc,
   WsTextGenerationAskSideQuestionRpc,
   WsTextGenerationCancelSideQuestionRpc,
   WsTextGenerationGenerateIssueContentRpc,

@@ -42,6 +42,22 @@ function azureOrganization(host: string, segments: ReadonlyArray<string>): strin
  * URL does not name a change request.
  */
 export function changeRequestRepositoryKey(value: string): string | null {
+  return parseChangeRequestUrl(value)?.repository ?? null;
+}
+
+/** The change request number a URL names (the segment after pull/merge request); null otherwise. */
+export function changeRequestNumberFromUrl(value: string): number | null {
+  return parseChangeRequestUrl(value)?.number ?? null;
+}
+
+const positiveNumber = (segment: string | undefined): number | null => {
+  const number = segment !== undefined && /^\d+$/u.test(segment) ? Number(segment) : Number.NaN;
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+};
+
+function parseChangeRequestUrl(
+  value: string,
+): { readonly repository: string; readonly number: number | null } | null {
   let url: URL;
   try {
     url = new URL(value.trim());
@@ -56,17 +72,25 @@ export function changeRequestRepositoryKey(value: string): string | null {
   if (organization !== undefined && gitIndex !== -1) {
     const repository = segments[gitIndex + 1];
     if (!repository || !/^pullrequest$/iu.test(segments[gitIndex + 2] ?? "")) return null;
-    return azureRepositoryKey(
-      organization,
-      segments.slice(hostname === "dev.azure.com" ? 1 : 0, gitIndex),
-      repository,
-    );
+    return {
+      repository: azureRepositoryKey(
+        organization,
+        segments.slice(hostname === "dev.azure.com" ? 1 : 0, gitIndex),
+        repository,
+      ),
+      number: positiveNumber(segments[gitIndex + 3]),
+    };
   }
   const match =
-    /^(.*?)\/(?:-\/)?(?:pull|pulls|pull-requests|pullrequest|pullrequests|merge_requests)\/\d+(?:\/.*)?$/iu.exec(
+    /^(.*?)\/(?:-\/)?(?:pull|pulls|pull-requests|pullrequest|pullrequests|merge_requests)\/(\d+)(?:\/.*)?$/iu.exec(
       url.pathname,
     );
-  return match?.[1] ? `${host}${decodeSegment(match[1])}`.toLowerCase() : null;
+  return match?.[1]
+    ? {
+        repository: `${host}${decodeSegment(match[1])}`.toLowerCase(),
+        number: positiveNumber(match[2]),
+      }
+    : null;
 }
 
 /** `user@host:path` (scp-like SSH) as an `ssh://` URL, so one parser reads every remote. */

@@ -1,6 +1,7 @@
 import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { isRemovedChatFolder, restoreChatFolder } from "../project/chatFolderRestore.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
+import { PullRequestWatchService } from "../sourceControl/PullRequestWatchService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
@@ -262,6 +263,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
     const workspaceChangeSummary = yield* Effect.serviceOption(WorkspaceChangeSummary);
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
+    // Optional for the route-test reason above; without it the node offers no pull request watch.
+    const pullRequestWatch = yield* Effect.serviceOption(PullRequestWatchService);
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     // Optional for the route-test reason above; production provides it with the runtime.
     const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
@@ -1225,6 +1228,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           ? { workspaceAccessRoot: config.workspaceAccessRoot }
           : {}),
         ...(chats !== undefined ? { chats } : {}),
+        ...(Option.isSome(pullRequestWatch) ? { pullRequestWatch: { available: true } } : {}),
         usageContractVersion: USAGE_CONTRACT_VERSION,
         keybindingsConfigPath: config.keybindingsConfigPath,
         keybindings: keybindingsConfig.keybindings,
@@ -1416,6 +1420,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       dailyRecapQuery,
       sessionPrewarm,
       localTaskService,
+      pullRequestWatch,
       worktreeNotesService,
       nodeUpdate,
       config,

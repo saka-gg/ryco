@@ -746,6 +746,44 @@ describe("change request page forwarding", () => {
         );
       }),
     );
+
+    it.effect("reads the rest of a long review thread through a resolved registry handle", () =>
+      Effect.gen(function* () {
+        const asked: Array<unknown> = [];
+        const reviewThread = { id: "PRRT_1", comments: [], totalComments: 0 };
+        const registry = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+          githubCli: {
+            getPullRequestReviewThread: (input) =>
+              Effect.sync(() => {
+                asked.push(input);
+                return reviewThread as never;
+              }),
+          },
+        });
+        const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+        const read = handle.provider.getChangeRequestReviewThread;
+        assert.ok(read, "the thread read must survive the lazy provider and the context binding");
+        assert.deepStrictEqual(
+          yield* read({ cwd: "/repo", reference: "7", threadId: "PRRT_1" }),
+          reviewThread as never,
+        );
+        assert.deepStrictEqual(asked, [{ cwd: "/repo", reference: "7", threadId: "PRRT_1" }]);
+
+        // A host without the read answers null: the conversation stays "not read whole".
+        const gitlab = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@gitlab.com:group/project.git" }],
+        });
+        const gitlabHandle = yield* gitlab.resolveHandle({ cwd: "/repo" });
+        assert.isNull(
+          yield* gitlabHandle.provider.getChangeRequestReviewThread!({
+            cwd: "/repo",
+            reference: "7",
+            threadId: "t",
+          }),
+        );
+      }),
+    );
   });
 });
 

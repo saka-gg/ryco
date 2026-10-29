@@ -212,6 +212,8 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.sourceControlCreateChangeRequest]: "operator",
   [WS_METHODS.sourceControlLinkWorktreePullRequest]: "operator",
   [WS_METHODS.sourceControlDismissWorktreePullRequest]: "operator",
+  // Wakes the thread's agent later, with the thread's permissions: an operator mutation.
+  [WS_METHODS.sourceControlSetPullRequestWatch]: "operator",
   [WS_METHODS.sourceControlSearchChangeRequests]: "operator",
   [WS_METHODS.sourceControlSearchIssues]: "operator",
   [WS_METHODS.sourceControlSearchRepositories]: "operator",
@@ -481,6 +483,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.sourceControlCreateChangeRequest]: "mutation",
   [WS_METHODS.sourceControlLinkWorktreePullRequest]: "mutation",
   [WS_METHODS.sourceControlDismissWorktreePullRequest]: "mutation",
+  [WS_METHODS.sourceControlSetPullRequestWatch]: "mutation",
   [WS_METHODS.sourceControlSearchChangeRequests]: "read",
   [WS_METHODS.sourceControlSearchIssues]: "read",
   [WS_METHODS.sourceControlSearchRepositories]: "read",

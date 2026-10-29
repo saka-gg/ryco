@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   azureRemoteRepositoryKey,
+  changeRequestNumberFromUrl,
   changeRequestRepositoryKey,
 } from "./changeRequestRepositoryKey.ts";
 
@@ -37,6 +38,22 @@ describe("changeRequestRepositoryKey", () => {
     expect(changeRequestRepositoryKey("https://dev.azure.com/acme/_git/shop/pullrequest/9")).toBe(
       "azure:acme/shop/shop",
     );
+  });
+});
+
+describe("changeRequestNumberFromUrl", () => {
+  it("reads the number from the same URL forms the repository key reads", () => {
+    expect(changeRequestNumberFromUrl("https://github.com/Acme/Repo/pull/5/files")).toBe(5);
+    expect(
+      changeRequestNumberFromUrl("https://gitlab.example.com/group/proj/-/merge_requests/12?x=1"),
+    ).toBe(12);
+    expect(changeRequestNumberFromUrl("https://bitbucket.org/w/r/pull-requests/9#c")).toBe(9);
+    expect(
+      changeRequestNumberFromUrl("https://dev.azure.com/acme/Shop%20App/_git/shop/pullrequest/9"),
+    ).toBe(9);
+    expect(changeRequestNumberFromUrl("https://github.com/o/r/pull/0")).toBeNull();
+    expect(changeRequestNumberFromUrl("https://github.com/o/r/issues/4")).toBeNull();
+    expect(changeRequestNumberFromUrl("not a url")).toBeNull();
   });
 });
 

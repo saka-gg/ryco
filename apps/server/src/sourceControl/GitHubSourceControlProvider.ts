@@ -1041,6 +1041,14 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         })
         .pipe(Effect.mapError((cause) => providerError("getChangeRequestWatchFingerprint", cause)));
     },
+    getChangeRequestReviewThread: (input) =>
+      github
+        .getPullRequestReviewThread({
+          cwd: input.cwd,
+          reference: input.reference,
+          threadId: input.threadId,
+        })
+        .pipe(Effect.mapError((error) => providerError("getChangeRequestReviewThread", error))),
     getChangeRequestFileContents: ({ context: _context, ...input }) =>
       github
         .getPullRequestFileContents(input)
