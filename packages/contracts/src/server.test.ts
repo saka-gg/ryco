@@ -168,6 +168,39 @@ describe("ServerProvider", () => {
       ).toThrow();
     });
   });
+
+  describe("updateRequiredModels", () => {
+    const base = {
+      instanceId: "claudeAgent",
+      driver: "claudeAgent",
+      enabled: true,
+      installed: true,
+      version: "2.1.218",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-28T00:00:00.000Z",
+      models: [],
+    };
+
+    it("decodes the models a CLI update unlocks", () => {
+      const parsed = decodeServerProvider({
+        ...base,
+        updateRequiredModels: [
+          { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
+          { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" },
+        ],
+      });
+
+      expect(parsed.updateRequiredModels).toEqual([
+        { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
+        { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" },
+      ]);
+    });
+
+    it("leaves the key absent for snapshots from servers that never send it", () => {
+      expect("updateRequiredModels" in decodeServerProvider(base)).toBe(false);
+    });
+  });
 });
 
 describe("provider status deltas", () => {

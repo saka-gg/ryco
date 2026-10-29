@@ -44,6 +44,7 @@ import {
   setActiveClaudeModelCatalog,
 } from "../ClaudeModelCatalog.ts";
 import type { ModelManifest } from "../ModelManifest.ts";
+import { resolveClaudeUpdateRequiredModels } from "../claudeUpdateRequiredModels.ts";
 import {
   applyClaudeCliModelInfo,
   type ClaudeCliModelInfo,
@@ -559,6 +560,14 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
   const upgradeMessage = formatClaudeVersionUpgradeMessage(catalog, parsedVersion) ?? "";
+  // Pickers name the update that unlocks these; the registry merge also keeps them out of
+  // `models` when an earlier, ungated snapshot (the boot placeholder) still lists them. A custom
+  // model with the same slug is offered as it is, so it needs no notice.
+  const updateRequiredModels = resolveClaudeUpdateRequiredModels(catalog, parsedVersion).filter(
+    (gated) => !manifestModels.some((model) => model.slug === gated.slug),
+  );
+  const withUpdateRequired = (draft: ServerProviderDraft): ServerProviderDraft =>
+    updateRequiredModels.length > 0 ? { ...draft, updateRequiredModels } : draft;
 
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings, parsedVersion).pipe(
@@ -582,37 +591,41 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
   if (!capabilities) {
-    return buildServerProvider({
-      presentation: CLAUDE_PRESENTATION,
-      enabled: claudeSettings.enabled,
-      checkedAt,
-      models,
-      slashCommands: dedupedSlashCommands,
-      probe: {
-        installed: true,
-        version: parsedVersion,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Could not verify Claude authentication status from initialization result.",
-      },
-    });
+    return withUpdateRequired(
+      buildServerProvider({
+        presentation: CLAUDE_PRESENTATION,
+        enabled: claudeSettings.enabled,
+        checkedAt,
+        models,
+        slashCommands: dedupedSlashCommands,
+        probe: {
+          installed: true,
+          version: parsedVersion,
+          status: "warning",
+          auth: { status: "unknown" },
+          message: "Could not verify Claude authentication status from initialization result.",
+        },
+      }),
+    );
   }
 
   if (claudeProbeSignedOut(capabilities)) {
-    return buildServerProvider({
-      presentation: CLAUDE_PRESENTATION,
-      enabled: claudeSettings.enabled,
-      checkedAt,
-      models,
-      slashCommands: dedupedSlashCommands,
-      probe: {
-        installed: true,
-        version: parsedVersion,
-        status: "error",
-        auth: { status: "unauthenticated" },
-        message: "Claude Code is not signed in. Run `claude auth login` and try again.",
-      },
-    });
+    return withUpdateRequired(
+      buildServerProvider({
+        presentation: CLAUDE_PRESENTATION,
+        enabled: claudeSettings.enabled,
+        checkedAt,
+        models,
+        slashCommands: dedupedSlashCommands,
+        probe: {
+          installed: true,
+          version: parsedVersion,
+          status: "error",
+          auth: { status: "unauthenticated" },
+          message: "Claude Code is not signed in. Run `claude auth login` and try again.",
+        },
+      }),
+    );
   }
 
   // Usage is read only from the store of the claude.ai login this instance's Claude Code reports
@@ -632,25 +645,27 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     subscriptionType: capabilities.subscriptionType,
     authMethod: capabilities.tokenSource,
   });
-  return buildServerProvider({
-    presentation: CLAUDE_PRESENTATION,
-    enabled: claudeSettings.enabled,
-    checkedAt,
-    models,
-    slashCommands: dedupedSlashCommands,
-    ...(rateLimits ? { rateLimits } : {}),
-    probe: {
-      installed: true,
-      version: parsedVersion,
-      status: "ready",
-      auth: {
-        status: "authenticated",
-        ...(capabilities.email ? { email: capabilities.email } : {}),
-        ...(authMetadata ? authMetadata : {}),
+  return withUpdateRequired(
+    buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: claudeSettings.enabled,
+      checkedAt,
+      models,
+      slashCommands: dedupedSlashCommands,
+      ...(rateLimits ? { rateLimits } : {}),
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "ready",
+        auth: {
+          status: "authenticated",
+          ...(capabilities.email ? { email: capabilities.email } : {}),
+          ...(authMetadata ? authMetadata : {}),
+        },
+        ...(upgradeMessage ? { message: upgradeMessage } : {}),
       },
-      ...(upgradeMessage ? { message: upgradeMessage } : {}),
-    },
-  });
+    }),
+  );
 });
 
 /**

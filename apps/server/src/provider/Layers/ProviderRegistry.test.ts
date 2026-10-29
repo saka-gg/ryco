@@ -690,6 +690,62 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ]);
       });
 
+      it("never brings back a model the next probe gated out by CLI version", () => {
+        const placeholderModel = (slug: string, name: string, isLegacy?: true) => ({
+          slug,
+          name,
+          isCustom: false,
+          capabilities: null,
+          ...(isLegacy ? { isLegacy } : {}),
+        });
+        // The boot placeholder publishes the whole catalog without version gates.
+        const placeholder = {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          status: "warning",
+          enabled: true,
+          installed: false,
+          auth: { status: "unknown" },
+          checkedAt: "2026-10-28T00:00:00.000Z",
+          version: null,
+          models: [
+            placeholderModel("claude-opus-5-5", "Claude Opus 5.5"),
+            placeholderModel("claude-opus-5", "Claude Opus 5"),
+            placeholderModel("claude-opus-4-8", "Claude Opus 4.8", true),
+            placeholderModel("claude-opus-4-6", "Claude Opus 4.6", true),
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const probed = {
+          ...placeholder,
+          status: "ready",
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-10-28T00:01:00.000Z",
+          version: "2.1.150",
+          // Opus 4.8 is gated too; as a legacy model it is not listed as update-required.
+          models: [
+            placeholderModel("claude-opus-5-5", "Claude Opus 5.5"),
+            placeholderModel("claude-opus-4-6", "Claude Opus 4.6", true),
+          ],
+          updateRequiredModels: [
+            { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
+          ],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(placeholder, probed).models.map((model) => model.slug),
+          ["claude-opus-5-5", "claude-opus-4-6"],
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(placeholder, { ...probed, models: [] }).models.map(
+            (model) => model.slug,
+          ),
+          ["claude-opus-5-5"],
+        );
+      });
+
       it("fills missing capabilities from the previous provider snapshot", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("cursor"),
@@ -2489,6 +2545,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             status.message,
             "Claude Code v2.1.218 is too old for Claude Opus 5. Upgrade to v2.1.219 or newer to access it.",
           );
+          assert.deepStrictEqual(status.updateRequiredModels, [
+            { slug: "claude-opus-5", name: "Claude Opus 5", minVersion: "2.1.219" },
+            { slug: "claude-fable-5-1", name: "Claude Fable 5.1", minVersion: "2.1.257" },
+          ]);
         }).pipe(
           Effect.provide(
             mockSpawnerLayer((args) => {
@@ -2500,6 +2560,82 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                   stderr: "",
                   code: 0,
                 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect(
+        "lists the models an update unlocks when the initialization result is unavailable",
+        () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+            );
+            assert.strictEqual(status.status, "warning");
+            assert.deepStrictEqual(
+              status.updateRequiredModels?.map((model) => model.slug),
+              ["claude-opus-5", "claude-fable-5-1"],
+            );
+            assert.strictEqual(
+              status.models.some((model) => model.slug === "claude-opus-5"),
+              false,
+            );
+          }).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") return { stdout: "2.1.218\n", stderr: "", code: 0 };
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          ),
+      );
+
+      it.effect("needs no update notice for a gated model the user added as a custom model", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            { ...defaultClaudeSettings, customModels: ["claude-opus-5"] },
+            claudeCapabilities(),
+          );
+          assert.deepStrictEqual(
+            status.models.find((model) => model.slug === "claude-opus-5")?.isCustom,
+            true,
+          );
+          assert.deepStrictEqual(
+            status.updateRequiredModels?.map((model) => model.slug),
+            ["claude-fable-5-1"],
+          );
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "2.1.218\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect("leaves out the update-required key once Claude Code runs every model", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities(),
+          );
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual("updateRequiredModels" in status, false);
+          assert.strictEqual(
+            status.models.some((model) => model.slug === "claude-fable-5-1"),
+            true,
+          );
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "2.1.257\n", stderr: "", code: 0 };
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),

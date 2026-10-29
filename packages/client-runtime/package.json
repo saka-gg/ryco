@@ -194,6 +194,10 @@
       "types": "./src/state/composer/index.ts",
       "import": "./src/state/composer/index.ts"
     },
+    "./state/composer/providerUpdateRequiredNotice": {
+      "types": "./src/state/composer/providerUpdateRequiredNotice.ts",
+      "import": "./src/state/composer/providerUpdateRequiredNotice.ts"
+    },
     "./state/files": {
       "types": "./src/state/files/index.ts",
       "import": "./src/state/files/index.ts"
