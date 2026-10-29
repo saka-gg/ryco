@@ -70,7 +70,18 @@ Semantics of the Claude adapter payloads:
   format parity; Ryco reads live window sizes from runtime usage events.
 - model `adapter.claudeCode.minVersion` / `maxVersionExclusive` — hide the
   model on incompatible Claude Code versions. The provider check surfaces an
-  upgrade message naming the model with the lowest unmet minimum.
+  upgrade message naming the model with the lowest unmet minimum. Each
+  instance's snapshot also lists its gated `current` models in
+  `updateRequiredModels` (sorted by `minVersion`, computed from that
+  instance's own `claude --version`), so pickers can say "Update Claude Code
+  to vX or newer to use …". `legacy` models are never listed there, and a
+  model gated only by `maxVersionExclusive` is not either, since an update
+  cannot unlock it. Models listed in `updateRequiredModels` and gated `legacy`
+  models stay out of the instance's `models` even when an earlier snapshot,
+  such as the boot placeholder, still lists them. Two cases are not covered
+  yet: a `current` model gated only by `maxVersionExclusive`, and gated models
+  when `claude --version` cannot be parsed. No bundled entry uses
+  `maxVersionExclusive` today.
 
 ### Claude Code's own model report
 

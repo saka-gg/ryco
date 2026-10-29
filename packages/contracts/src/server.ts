@@ -77,6 +77,14 @@ export const ServerProviderModel = Schema.Struct({
 });
 export type ServerProviderModel = typeof ServerProviderModel.Type;
 
+/** A current catalog model this instance's CLI is too old to run. It is never also listed in `models`. */
+export const ServerProviderUpdateRequiredModel = Schema.Struct({
+  slug: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  minVersion: TrimmedNonEmptyString,
+});
+export type ServerProviderUpdateRequiredModel = typeof ServerProviderUpdateRequiredModel.Type;
+
 export const ServerProviderSlashCommandInput = Schema.Struct({
   hint: TrimmedNonEmptyString,
 });
@@ -289,6 +297,9 @@ export const ServerProvider = Schema.Struct({
   // Surfaces in the UI alongside the missing-driver affordance.
   unavailableReason: Schema.optional(TrimmedNonEmptyString),
   models: Schema.Array(ServerProviderModel),
+  // Sorted by `minVersion` ascending, so the last entry names the update that unlocks them all.
+  // Absent when there are none; older clients drop the unknown key on decode.
+  updateRequiredModels: Schema.optionalKey(Schema.Array(ServerProviderUpdateRequiredModel)),
   slashCommands: Schema.Array(ServerProviderSlashCommand).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
