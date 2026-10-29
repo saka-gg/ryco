@@ -9,6 +9,11 @@ import {
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { classifyForgeFailure, type ForgeFailureKind } from "./forgeFailure.ts";
 import { forgeFailureFields } from "./forgeHttpRateLimit.ts";
+import {
+  forgeChildAdmission,
+  forgeRequestPausedFailure,
+  forgeRequestPausedRefusal,
+} from "./forgeRateLimit.ts";
 import * as AzureDevOpsPullRequests from "./azureDevOpsPullRequests.ts";
 import * as AzureDevOpsWorkItems from "./azureDevOpsWorkItems.ts";
 import type {
@@ -244,6 +249,15 @@ function normalizeAzureDevOpsCliError(
   operation: "execute",
   error: VcsError | unknown,
 ): AzureDevOpsCliError {
+  // Refused before it ran: Azure DevOps was paused after a rate limit while it queued.
+  const refusal = forgeRequestPausedRefusal(error);
+  if (refusal !== null) {
+    return new AzureDevOpsCliError({
+      operation,
+      ...forgeRequestPausedFailure(refusal),
+      cause: refusal,
+    });
+  }
   const text = errorText(error);
   const lower = text.toLowerCase();
   const forge = classifyForgeFailure(error);
@@ -417,6 +431,7 @@ export const make = Effect.fn("makeAzureDevOpsCli")(function* () {
         cwd: input.cwd,
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         env: { LC_ALL: "C" },
+        admit: forgeChildAdmission,
       })
       .pipe(Effect.mapError((error) => normalizeAzureDevOpsCliError("execute", error)));
 

@@ -3,13 +3,16 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DateTime, Effect, Layer, Option, Ref, Schema } from "effect";
 import { SourceControlProviderError } from "@ryco/contracts";
 import { ChildProcessSpawner } from "effect/process";
+import { TestClock } from "effect/testing";
 
 import { ServerConfig } from "../config.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
 import type * as VcsDriver from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
 import * as BitbucketApi from "./BitbucketApi.ts";
+import { ForgeRateLimitStore, ForgeRateLimits } from "./forgeRateLimit.ts";
 import * as ForgejoApi from "./ForgejoApi.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 import * as GitLabCli from "./GitLabCli.ts";
@@ -841,5 +844,80 @@ describe("unsupported change request options", () => {
         "diff",
       );
     }),
+  );
+});
+
+describe("forge rate-limit pause", () => {
+  const T0 = 1_000_000_000_000;
+  const contextFor = (host: string): SourceControlProvider.SourceControlProviderContext => ({
+    provider: { kind: "github", name: "GitHub", baseUrl: `https://${host}` },
+    remoteName: "origin",
+    remoteUrl: `git@${host}:acme/repo.git`,
+  });
+
+  /** A GitHub provider whose first list read hits a rate limit; counts the reads that reach it. */
+  function rateLimitedOnce(calls: { count: number }) {
+    return {
+      kind: "github",
+      listChangeRequests: () =>
+        Effect.suspend(() => {
+          calls.count += 1;
+          return calls.count === 1
+            ? Effect.fail(
+                new SourceControlProviderError({
+                  provider: "github",
+                  operation: "listChangeRequests",
+                  detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+                  reason: "rate-limited",
+                }),
+              )
+            : Effect.succeed([]);
+        }),
+    } as unknown as SourceControlProvider.SourceControlProviderShape;
+  }
+
+  it.effect("pauses background reads for the host after a rate limit", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const calls = { count: 0 };
+      const lazy = yield* SourceControlProviderRegistry.makeLazyProvider(
+        "github",
+        Effect.succeed(rateLimitedOnce(calls)),
+      );
+      const read = (host: string) =>
+        SourceControlProviderRegistry.bindProviderContext(
+          lazy,
+          contextFor(host),
+        ).listChangeRequests({ cwd: "/repo", headSelector: "", state: "open" });
+
+      const first = yield* read("github.com").pipe(inBackgroundProcessLane, Effect.flip);
+      assert.strictEqual(first.retryAt, T0 + 30_000);
+      for (let index = 0; index < 20; index += 1) {
+        const refused = yield* read("github.com").pipe(inBackgroundProcessLane, Effect.flip);
+        assert.strictEqual(refused.reason, "rate-limited");
+        assert.strictEqual(refused.retryAt, T0 + 30_000);
+      }
+      assert.strictEqual(calls.count, 1, "no background read reached the forge while paused");
+      assert.strictEqual(
+        yield* SourceControlProviderRegistry.forgePausedUntil(contextFor("github.com")).pipe(
+          inBackgroundProcessLane,
+        ),
+        T0 + 30_000,
+      );
+
+      // Another host is not paused; what a user asked for is never refused.
+      yield* read("ghe.corp.example").pipe(inBackgroundProcessLane);
+      assert.strictEqual(calls.count, 2);
+      yield* read("github.com");
+      assert.strictEqual(calls.count, 3);
+      // That interactive success ended the guessed pause.
+      yield* read("github.com").pipe(inBackgroundProcessLane);
+      assert.strictEqual(calls.count, 4);
+      assert.isNull(
+        yield* SourceControlProviderRegistry.forgePausedUntil(contextFor("github.com")).pipe(
+          inBackgroundProcessLane,
+        ),
+      );
+    }).pipe(Effect.provideService(ForgeRateLimits, new ForgeRateLimitStore())),
   );
 });

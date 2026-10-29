@@ -13,6 +13,7 @@ import type * as BitbucketApi from "./BitbucketApi.ts";
 import * as ForgejoApi from "./ForgejoApi.ts";
 import type * as GitHubCli from "./GitHubCli.ts";
 import type * as GitLabCli from "./GitLabCli.ts";
+import type { ForgeRateLimitTarget } from "./forgeRateLimit.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import {
   azureDevOpsDiscovery,
@@ -181,13 +182,41 @@ function withProviderContext<
   return (input) => method({ ...input, context: input.context ?? context });
 }
 
-/** Exported for registry forwarding tests. */
+/** The forge rate-limit pause; it loads with the first provider, off the boot path. */
+const loadForgeRateLimit = () => import("./forgeRateLimit.ts");
+
+/**
+ * Until when a forge call to `target` from the current process lane must wait
+ * for a rate-limit pause to end (epoch ms), or null when it may go. Boot-safe:
+ * services that poll a forge on a timer can skip a tick instead of being
+ * refused, without importing the pause statically.
+ */
+export const forgePausedUntil = (target: ForgeRateLimitTarget): Effect.Effect<number | null> =>
+  Effect.tryPromise(loadForgeRateLimit).pipe(
+    Effect.flatMap((module) => module.pausedUntilFor(target)),
+    // The pause cannot load, so nothing was ever paused.
+    Effect.orElseSucceed(() => null),
+  );
+
+/**
+ * Exported for registry forwarding tests. The loaded provider is wrapped in
+ * the forge rate-limit guards: after a rate limit, background calls to that
+ * host fail fast until the pause ends.
+ */
 export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(function* (
   kind: SourceControlProviderKind,
   load: Effect.Effect<SourceControlProvider.SourceControlProviderShape, SourceControlProviderError>,
   options: LazyProviderOptions = {},
 ) {
-  const provider = yield* Effect.cached(load);
+  const provider = yield* Effect.cached(
+    Effect.zipWith(
+      load,
+      loadModule(kind, loadForgeRateLimit),
+      (loaded, rateLimit) => rateLimit.withForgeRateLimitGuards(loaded),
+      // Both are chunk imports on the first call: fetch them side by side.
+      { concurrent: true },
+    ),
+  );
 
   return SourceControlProvider.SourceControlProvider.of({
     kind,

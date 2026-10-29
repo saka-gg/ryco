@@ -369,6 +369,11 @@ Counters tell you volume and failure rate:
 - `ryco_provider_turns_total`
 - `ryco_git_commands_total`
 - `ryco_db_queries_total`
+- `ryco_forge_rate_limit_pauses_total` (pauses of background forge reads after a rate limit, by
+  provider and by whether the forge named the end, `source="forge"`, or Ryco guessed it,
+  `source="fallback"`)
+- `ryco_forge_rate_limit_refused_total` (background forge reads refused during such a pause
+  without contacting the forge, by provider)
 
 Use metrics when the question is:
 

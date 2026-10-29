@@ -2,9 +2,10 @@ import { assert, it, afterEach, expect, vi } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
-import { VcsProcessExitError } from "@ryco/contracts";
+import { VcsProcessExitError, VcsProcessSpawnError } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { ForgeRequestPausedError, forgeChildAdmission } from "./forgeRateLimit.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 
 const mockedRun = vi.fn<VcsProcess.VcsProcessShape["run"]>();
@@ -680,6 +681,42 @@ layer("GitLabCli.layer", (it) => {
       assert.strictEqual(error.status, 429);
       assert.strictEqual(error.failureKind, "rate-limited");
       assert.strictEqual(error.detail, "GitLab is rate limiting requests (HTTP 429).");
+    }),
+  );
+
+  it.effect("checks the rate-limit pause after the forge permit and reports a refusal", () =>
+    Effect.gen(function* () {
+      const refused = Effect.fail(
+        new VcsProcessSpawnError({
+          operation: "GitLabCli.execute",
+          command: "glab mr list",
+          cwd: "/repo",
+          cause: new ForgeRequestPausedError({
+            provider: "gitlab",
+            host: "gitlab.com",
+            retryAt: 1_000_000_030_000,
+          }),
+        }),
+      );
+      mockedRun.mockReturnValueOnce(refused).mockReturnValueOnce(refused);
+      const glab = yield* GitLabCli.GitLabCli;
+      const viaExecute = yield* glab
+        .execute({ cwd: "/repo", args: ["mr", "list"] })
+        .pipe(Effect.flip);
+      const viaApi = yield* glab
+        .api({
+          cwd: "/repo",
+          operation: "listChangeRequests",
+          request: { method: "GET", endpoint: "projects/:fullpath/merge_requests" },
+        })
+        .pipe(Effect.flip);
+      for (const error of [viaExecute, viaApi]) {
+        assert.strictEqual(error.failureKind, "rate-limited");
+        assert.strictEqual(error.retryAt, 1_000_000_030_000);
+        assert.strictEqual(error.detail, "GitLab requests are paused after a rate limit.");
+      }
+      const admits = mockedRun.mock.calls.slice(-2).map(([input]) => input.admit);
+      assert.deepStrictEqual(admits, [forgeChildAdmission, forgeChildAdmission]);
     }),
   );
 });

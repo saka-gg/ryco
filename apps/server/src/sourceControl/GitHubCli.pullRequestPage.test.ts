@@ -10,6 +10,7 @@ import {
 } from "@ryco/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { ForgeRequestPausedError, forgeChildAdmission } from "./forgeRateLimit.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 import * as GitHubPullRequestActivity from "./gitHubPullRequestActivity.ts";
 import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
@@ -201,6 +202,33 @@ describe("GitHub CLI error normalization", () => {
         .pipe(Effect.flip);
       expect(error.operation).toBe("rerunFailedWorkflowJobs");
       expect(error.failureKind).toBe("rate-limited");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("checks the rate-limit pause after the forge permit and reports a refusal", () =>
+    Effect.gen(function* () {
+      const paused = new ForgeRequestPausedError({
+        provider: "github",
+        host: "github.com",
+        retryAt: 1_000_000_030_000,
+      });
+      mockRun.mockReturnValueOnce(
+        Effect.fail(
+          new VcsProcessSpawnError({
+            operation: "GitHubCli.execute",
+            command: "gh pr list",
+            cwd: "/repo",
+            cause: paused,
+          }),
+        ),
+      );
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh.execute({ cwd: "/repo", args: ["pr", "list"] }).pipe(Effect.flip);
+      expect(error.failureKind).toBe("rate-limited");
+      expect(error.retryAt).toBe(1_000_000_030_000);
+      expect(error.detail).toBe("GitHub requests are paused after a rate limit.");
+      expect(error.cause).toBe(paused);
+      expect(mockRun.mock.calls.at(-1)?.[0].admit).toBe(forgeChildAdmission);
     }).pipe(Effect.provide(layer)),
   );
 

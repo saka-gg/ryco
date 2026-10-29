@@ -10,19 +10,32 @@
  * per-branch query, cached here too: in a busy repository the same old or
  * PR-less branches miss the recent window on every read.
  */
-import { Cache, Duration, Effect, Exit } from "effect";
+import { Cache, Duration, Effect, Exit, Option } from "effect";
 import type {
   ChangeRequest,
   ChangeRequestState,
   SourceControlProviderError,
 } from "@ryco/contracts";
 
+import { isForgeRequestRefusedWhilePaused } from "./forgeRequestPaused.ts";
 import type { SourceControlProviderShape } from "./SourceControlProvider.ts";
 
 export const PULL_REQUEST_INDEX_LIMIT = 100;
 const PULL_REQUEST_INDEX_TTL = Duration.seconds(60);
 /** A failed listing (offline, no auth) is retried after a short pause, not on every read. */
 const PULL_REQUEST_INDEX_FAILURE_TTL = Duration.seconds(10);
+
+/**
+ * How long a failed listing is kept. A read Ryco refused itself while the
+ * forge was paused after a rate limit is not kept: it reached no forge, and the
+ * cache runs a lookup in the lane of the reader that started it, so a refused
+ * background read would otherwise answer interactive readers, which the pause
+ * lets through.
+ */
+const failureTimeToLive = (exit: Exit.Exit<unknown, unknown>) =>
+  isForgeRequestRefusedWhilePaused(Option.getOrUndefined(Exit.findErrorOption(exit)))
+    ? Duration.zero
+    : PULL_REQUEST_INDEX_FAILURE_TTL;
 const PULL_REQUEST_INDEX_CAPACITY = 256;
 
 export const BRANCH_CHANGE_REQUEST_LIMIT = 20;
@@ -118,8 +131,7 @@ export const makePullRequestIndex = Effect.gen(function* () {
 
   const cache = yield* Cache.makeWith(listIndex, {
     capacity: PULL_REQUEST_INDEX_CAPACITY,
-    timeToLive: (exit) =>
-      Exit.isSuccess(exit) ? PULL_REQUEST_INDEX_TTL : PULL_REQUEST_INDEX_FAILURE_TTL,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? PULL_REQUEST_INDEX_TTL : failureTimeToLive(exit)),
   });
 
   // Invalidation bumps the repository's generation, which every branch key
@@ -151,7 +163,7 @@ export const makePullRequestIndex = Effect.gen(function* () {
   const branchCache = yield* Cache.makeWith(listBranch, {
     capacity: BRANCH_CAPACITY,
     timeToLive: (exit) => {
-      if (!Exit.isSuccess(exit)) return PULL_REQUEST_INDEX_FAILURE_TTL;
+      if (!Exit.isSuccess(exit)) return failureTimeToLive(exit);
       if (exit.value.length === 0) return BRANCH_NONE_TTL;
       return exit.value.some((item) => item.state === "open")
         ? BRANCH_OPEN_TTL

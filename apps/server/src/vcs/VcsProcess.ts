@@ -57,7 +57,18 @@ export interface VcsProcessShape {
     input: VcsProcessInput,
     use: (handle: VcsProcessHandle) => Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | VcsError, R>;
-  readonly run: (input: VcsProcessInput) => Effect.Effect<VcsProcessOutput, VcsError>;
+  readonly run: (input: VcsProcessRunInput) => Effect.Effect<VcsProcessOutput, VcsError>;
+}
+
+export interface VcsProcessRunInput extends VcsProcessInput {
+  /**
+   * Runs after the child's process-governor permit is granted and before it
+   * spawns. When it fails, nothing starts, the permit goes back, and `run`
+   * fails with a `VcsProcessSpawnError` whose `cause` is that failure. The
+   * forge rate-limit pause checks here, so a background read that queued
+   * before a rate limit does not fire.
+   */
+  readonly admit?: Effect.Effect<void, Error>;
 }
 
 export class VcsProcess extends Context.Service<VcsProcess, VcsProcessShape>()(
@@ -168,12 +179,25 @@ export const make = Effect.fn("makeVcsProcess")(function* () {
   const withProcess: VcsProcessShape["withProcess"] = (input, use) =>
     Effect.scoped(spawn(input).pipe(Effect.flatMap(use)));
 
-  const run = Effect.fn("VcsProcess.run")(function* (input: VcsProcessInput) {
+  const run = Effect.fn("VcsProcess.run")(function* (input: VcsProcessRunInput) {
     const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     const label = commandLabel(input.command, input.args);
 
     const runProcess = Effect.gen(function* () {
+      if (input.admit !== undefined) {
+        yield* input.admit.pipe(
+          Effect.mapError(
+            (cause) =>
+              new VcsProcessSpawnError({
+                operation: input.operation,
+                command: label,
+                cwd: input.cwd,
+                cause,
+              }),
+          ),
+        );
+      }
       const [stdout, stderr, exitCode] = yield* withProcess(input, (child) =>
         Effect.all(
           [
