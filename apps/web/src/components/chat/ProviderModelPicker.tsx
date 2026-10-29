@@ -30,12 +30,31 @@ import { setModelPickerOpen } from "../../modelPickerOpenState";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 
 /**
+ * The composer's tuning dial. It only ever renders in the picker's footer, so
+ * it loads with the picker body rather than with every thread. The composer
+ * builds the element (`renderProviderModelTuning`); the body's loader below
+ * settles only once this has loaded too, so the dial renders without
+ * suspending in the same commit as the body.
+ */
+export const LazyComposerModelTuning = preloadableLazy(() =>
+  import("./ModelTuningDial").then((module) => module.ComposerModelTuning),
+);
+
+/**
  * The popover body (search, grouping, the tuning footer) only renders once the
  * picker opens, so it loads as its own chunk instead of with every thread. The
  * popover opens once the chunk has landed, so it never commits a fallback.
+ * A failed dial load fails the body's load too, so the picker's toast and
+ * Retry cover both.
  */
 const LazyModelPickerContent = preloadableLazy(() =>
-  import("./ModelPickerContent").then((module) => module.ModelPickerContent),
+  Promise.all([import("./ModelPickerContent"), LazyComposerModelTuning.preload()]).then(
+    ([module]) => {
+      const tuningFailure = LazyComposerModelTuning.loadFailure();
+      if (tuningFailure) throw tuningFailure.error;
+      return module.ModelPickerContent;
+    },
+  ),
 );
 
 /** Hover or focus on the trigger: have the body loaded before the click lands. */

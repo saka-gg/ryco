@@ -11,7 +11,8 @@ import {
   INBOX_ROW_KEY_ATTRIBUTE,
   useInboxListMotion,
 } from "../../inboxSidebar/useInboxListMotion";
-import { ProjectScriptDialog, ScriptIcon } from "../../ProjectScriptDialog";
+import { ProjectScriptDialog } from "../../ProjectScriptDialog";
+import { ScriptIcon } from "../../ScriptIcon";
 import { SettingsEmpty } from "../../settings/settingsLayout";
 import { Button } from "../../ui/button";
 import type { SurfaceMorph } from "../../ui/surfaceMorph";

@@ -6588,6 +6588,7 @@ export default function ChatView(props: ChatViewProps) {
         ) : (
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
+            activeThreadRef={activeThreadRef}
             activeThreadTitle={activeThread.title}
             // An unsent chat draft has no project yet but is already a chat.
             activeProjectName={isChatContext ? CHAT_PROJECT_LABEL : activeProject?.name}

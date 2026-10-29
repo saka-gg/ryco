@@ -17,9 +17,9 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 
-import { ProviderModelPicker } from "./ProviderModelPicker";
+import { LazyComposerModelTuning, ProviderModelPicker } from "./ProviderModelPicker";
 import { ModelTuningDial } from "./ModelTuningDial";
 import { resolveModelTuning, type ModelTuningSummary } from "./modelTuning.logic";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
@@ -280,6 +280,8 @@ async function mountPicker(props: {
   editingScope?: "all" | "node";
   open?: boolean;
   triggerVariant?: "ghost" | "outline";
+  /** Mounts the picker in a Suspense boundary with this fallback, as in the app. */
+  suspenseFallback?: ReactNode;
   savedModelOptionsByInstance?:
     | Readonly<Partial<Record<string, ReadonlyArray<ProviderOptionSelection>>>>
     | undefined;
@@ -321,16 +323,21 @@ async function mountPicker(props: {
       />
     </SettingsEditingScopeProvider>
   );
+  const tree = props.insideOpenDialog ? (
+    <Dialog open>
+      <DialogPopup>
+        <DialogTitle>Settings</DialogTitle>
+        {picker}
+      </DialogPopup>
+    </Dialog>
+  ) : (
+    picker
+  );
   const screen = await render(
-    props.insideOpenDialog ? (
-      <Dialog open>
-        <DialogPopup>
-          <DialogTitle>Settings</DialogTitle>
-          {picker}
-        </DialogPopup>
-      </Dialog>
+    props.suspenseFallback === undefined ? (
+      tree
     ) : (
-      picker
+      <Suspense fallback={props.suspenseFallback}>{tree}</Suspense>
     ),
     { container: host },
   );
@@ -371,6 +378,40 @@ function getSidebarProviderOrder() {
   );
 }
 
+/** The composer's code-split dial for a model with a two-step effort. */
+function TestComposerModelTuning(props: { onModelOptionsChange: (nextOptions: unknown) => void }) {
+  return (
+    <LazyComposerModelTuning
+      provider={ProviderDriverKind.make("claudeAgent")}
+      model="tuning-model"
+      models={[
+        {
+          slug: "tuning-model",
+          name: "Tuning Model",
+          isCustom: false,
+          capabilities: createModelCapabilities({
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Reasoning",
+                type: "select",
+                options: [
+                  { id: "low", label: "Low" },
+                  { id: "high", label: "High", isDefault: true },
+                ],
+              },
+            ],
+          }),
+        },
+      ]}
+      modelOptions={undefined}
+      prompt=""
+      onPromptChange={() => {}}
+      onModelOptionsChange={props.onModelOptionsChange}
+    />
+  );
+}
+
 describe("ProviderModelPicker", () => {
   beforeEach(async () => {
     // Reset test environment before each test
@@ -380,6 +421,54 @@ describe("ProviderModelPicker", () => {
   afterEach(async () => {
     document.body.innerHTML = "";
     await __resetLocalApiForTests();
+  });
+
+  // First in the file on purpose: neither the picker body nor the dial has
+  // loaded yet. The Suspense boundary stands in for the app's: without one, a
+  // dial that suspended would only hold React's commit and the list would still
+  // appear with its dial, so only the fallback shows the regression.
+  it("docks the composer's code-split dial without suspending on a cold open", async () => {
+    expect(LazyComposerModelTuning.isLoaded()).toBe(false);
+    const onModelOptionsChange = vi.fn();
+    let fallbackShown = false;
+    let dialWithFirstList: boolean | null = null;
+    // Mutation records, not the DOM: a fallback swapped out again before the
+    // callback runs still shows up in them.
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node instanceof HTMLElement && node.dataset.testid === "picker-fallback") {
+            fallbackShown = true;
+          }
+        }
+      }
+      if (dialWithFirstList !== null || !document.querySelector(".model-picker-list")) return;
+      dialWithFirstList = document.querySelector('[data-slot="model-tuning-dial"]') !== null;
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: null,
+      suspenseFallback: <span data-testid="picker-fallback" />,
+      tuning: <TestComposerModelTuning onModelOptionsChange={onModelOptionsChange} />,
+    });
+
+    try {
+      await page.getByRole("button").first().click();
+      await vi.waitFor(() => expect(dialWithFirstList).not.toBeNull());
+      // The body's load settled only with the dial's, so the dial never
+      // suspended and the list never showed without its footer.
+      expect(dialWithFirstList).toBe(true);
+      expect(fallbackShown).toBe(false);
+      await expect.element(page.getByPlaceholder("Search models...")).toHaveFocus();
+      await userEvent.keyboard("{ArrowLeft}");
+      expect(onModelOptionsChange).toHaveBeenLastCalledWith([{ id: "effort", value: "low" }]);
+      expect(fallbackShown).toBe(false);
+    } finally {
+      observer.disconnect();
+      await mounted.cleanup();
+    }
   });
 
   it("persists client favorites when the picker is embedded in node settings", async () => {
