@@ -58,6 +58,7 @@ export {
   selectThreadExistsByRef,
   selectThreadIdsByProjectRef,
   selectThreadShellsAcrossEnvironments,
+  selectWorkingDelegatedDescendants,
   selectThreadsAcrossEnvironments,
   selectThreadsForEnvironment,
   setActiveEnvironmentId,

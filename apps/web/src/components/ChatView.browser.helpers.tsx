@@ -755,6 +755,7 @@ function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
     settledOverride: thread.settledOverride,
     settledAt: thread.settledAt,
     session: thread.session,
+    ...(thread.lineage ? { lineage: thread.lineage } : {}),
     latestUserMessageAt:
       thread.messages.findLast((message) => message.role === "user")?.createdAt ?? null,
     hasPendingApprovals: false,

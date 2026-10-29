@@ -33,6 +33,7 @@ import {
   evictThreadBodies,
   hydrateEnvironmentStateFromCache,
   selectDelegatedChildThreadsForThreadRef,
+  selectWorkingDelegatedDescendants,
   removeEnvironmentState,
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
@@ -3167,6 +3168,48 @@ describe("thread lineage", () => {
         scopeThreadRef(localEnvironmentId, parentId),
       ).map((child) => child.id),
     ).toEqual([childId, laterChildId]);
+  });
+
+  it("lists working delegated descendants for a Stop, deepest first", () => {
+    const idleChildId = ThreadId.make("thread-lineage-idle-child");
+    const grandchildId = ThreadId.make("thread-lineage-grandchild");
+    const busyBackgroundId = ThreadId.make("thread-lineage-background");
+    const running: NonNullable<OrchestrationThreadShell["session"]> = {
+      threadId: childId,
+      status: "running",
+      providerName: "codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "full-access",
+      activeTurnId: TurnId.make("turn-running"),
+      lastError: null,
+      updatedAt: "2026-10-01T00:00:00.000Z",
+    };
+    const threads = [
+      shellThread(parentId),
+      shellThread(childId, { lineage, session: running }),
+      shellThread(idleChildId, { lineage, createdAt: "2026-10-01T00:00:03.000Z" }),
+      shellThread(grandchildId, {
+        lineage: { parentThreadId: childId, rootThreadId: parentId, relationship: "delegated" },
+        session: { ...running, threadId: grandchildId },
+      }),
+      shellThread(busyBackgroundId, {
+        lineage: { parentThreadId: idleChildId, rootThreadId: parentId, relationship: "delegated" },
+        backgroundLiveness: "working",
+      }),
+    ];
+    let state = makeEmptyState();
+    threads.forEach((thread, index) => {
+      state = applyShellEvent(state, upsert(index + 1, thread), localEnvironmentId);
+    });
+
+    expect(
+      selectWorkingDelegatedDescendants(state, scopeThreadRef(localEnvironmentId, parentId)).map(
+        (ref) => ref.threadId,
+      ),
+    ).toEqual([grandchildId, busyBackgroundId, childId]);
+    expect(
+      selectWorkingDelegatedDescendants(state, scopeThreadRef(localEnvironmentId, idleChildId)),
+    ).toEqual([scopeThreadRef(localEnvironmentId, busyBackgroundId)]);
   });
 });
 

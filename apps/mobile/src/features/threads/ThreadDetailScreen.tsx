@@ -165,6 +165,7 @@ import {
   selectSubscribedClaudeReviewState,
   selectThreadByRef,
   selectThreadDetailLoaded,
+  selectWorkingDelegatedDescendants,
   useStore,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
@@ -2187,6 +2188,7 @@ export function ThreadDetailScreen(props: {
                 held.undo();
                 throw error;
               }
+              offerToStopDelegatedTasks(environmentId, threadId);
             });
           }}
           onCompact={() => {
@@ -2257,5 +2259,57 @@ export function ThreadDetailScreen(props: {
         />
       ) : null}
     </KeyboardAvoidingView>
+  );
+}
+
+/**
+ * A Stop ends this chat's turn and the automatic return of its delegated results, but its
+ * delegated tasks keep working. Offer to stop those too, deepest first, each like a Stop of
+ * its own chat (its outbox holds).
+ */
+function offerToStopDelegatedTasks(environmentId: EnvironmentId, threadId: ThreadId): void {
+  const working = selectWorkingDelegatedDescendants(
+    useStore.getState(),
+    scopeThreadRef(environmentId, threadId),
+  );
+  if (working.length === 0) return;
+  const count = working.length;
+  Alert.alert(
+    "Stopped",
+    count === 1
+      ? "A task this chat delegated is still working."
+      : `${count} tasks this chat delegated are still working.`,
+    [
+      { text: "Keep it running", style: "cancel" },
+      {
+        text: count === 1 ? "Stop it too" : "Stop them too",
+        style: "destructive",
+        onPress: () => {
+          void (async () => {
+            let failed = 0;
+            for (const ref of working) {
+              const held = holdThreadOutboxForInterrupt(
+                scopedThreadKey(ref),
+                selectThreadByRef(useStore.getState(), ref)?.session?.activeTurnId ?? null,
+              );
+              try {
+                await interruptThreadTurn(ensureEnvironmentApi(ref.environmentId), ref.threadId);
+              } catch {
+                held.undo();
+                failed += 1;
+              }
+            }
+            if (failed > 0) {
+              Alert.alert(
+                failed === 1
+                  ? "A task could not be stopped"
+                  : `${failed} tasks could not be stopped`,
+                "Open the task to stop it there.",
+              );
+            }
+          })();
+        },
+      },
+    ],
   );
 }

@@ -78,6 +78,7 @@ import {
   MAX_THREAD_PROPOSED_PLANS,
 } from "./limits.ts";
 import { getThreadsRuntimeConfiguration, type CheckoutRelocation } from "./runtime.ts";
+import { scopeThreadRef } from "../../scoped.ts";
 import { selectDelegatedChildThreads, threadLineagesEqual } from "./threadLineage.ts";
 
 export interface EnvironmentState {
@@ -3857,6 +3858,49 @@ export function selectDelegatedChildThreadsForThreadRef(
   }
   byParent.set(ref.threadId, rows);
   return rows;
+}
+
+/** How deep and how many delegated descendants a Stop looks through. */
+const DELEGATED_DESCENDANTS_MAX_DEPTH = 8;
+const DELEGATED_DESCENDANTS_MAX = 64;
+
+/**
+ * The delegated descendants of a thread that are still working (a running or starting
+ * turn, or working background agents), deepest first: stopping a child before its own
+ * children would let them report into a chat that no longer waits for them.
+ */
+export function selectWorkingDelegatedDescendants(
+  state: AppState,
+  ref: ScopedThreadRef,
+): ScopedThreadRef[] {
+  const levels: SidebarThreadOrStub[][] = [];
+  let frontier: ScopedThreadRef[] = [ref];
+  let seen = 0;
+  for (let depth = 0; depth < DELEGATED_DESCENDANTS_MAX_DEPTH && frontier.length > 0; depth += 1) {
+    const level = frontier.flatMap((parent) =>
+      selectDelegatedChildThreadsForThreadRef(state, parent),
+    );
+    seen += level.length;
+    if (level.length === 0 || seen > DELEGATED_DESCENDANTS_MAX) break;
+    levels.push(level);
+    frontier = level.map((child) => scopeThreadRef(child.environmentId, child.id));
+  }
+  return levels
+    .toReversed()
+    .flat()
+    .filter(isDelegatedTaskWorking)
+    .map((child) => scopeThreadRef(child.environmentId, child.id));
+}
+
+function isDelegatedTaskWorking(thread: SidebarThreadOrStub): boolean {
+  if (!("session" in thread)) return false;
+  const status = thread.session?.orchestrationStatus;
+  return (
+    status === "running" ||
+    status === "starting" ||
+    thread.latestTurn?.state === "running" ||
+    thread.backgroundLiveness === "working"
+  );
 }
 
 export const selectSidebarThreadsForProjectRefs: (
