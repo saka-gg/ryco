@@ -25,6 +25,8 @@ export interface SleepInhibitorCommand {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly description: string;
+  /** A weaker hold to take instead when the OS refuses this one ({@link sleepInhibitorRefused}). */
+  readonly fallback?: SleepInhibitorCommand;
 }
 
 /** What a hold is for: the whole run of this process, or only while agents work. */
@@ -41,7 +43,10 @@ export type SleepInhibitorPurpose = "lifetime" | "agent-work";
  *
  * Linux: both holds take logind's `sleep:idle` block lock. Besides idle suspend it also refuses an
  * unprivileged explicit suspend while it is held; a closed lid still suspends under logind's
- * default `LidSwitchIgnoreInhibited=yes`.
+ * default `LidSwitchIgnoreInhibited=yes`. polkit grants the sleep lock only to local active sessions
+ * by default, so a node in an SSH session or a service falls back to the `idle` lock, which polkit
+ * grants to any user. Without polkit (minimal Debian has no `polkitd`) logind refuses both to
+ * non-root users.
  */
 export function sleepInhibitorCommand(
   platform: NodeJS.Platform,
@@ -62,10 +67,10 @@ export function sleepInhibitorCommand(
         };
   }
   if (platform === "linux") {
-    return {
+    const inhibit = (what: "sleep:idle" | "idle", description: string): SleepInhibitorCommand => ({
       command: "systemd-inhibit",
       args: [
-        "--what=sleep:idle",
+        `--what=${what}`,
         "--who=Ryco",
         purpose === "lifetime"
           ? "--why=Keeping this Ryco node reachable"
@@ -76,7 +81,11 @@ export function sleepInhibitorCommand(
         "-f",
         "/dev/null",
       ],
-      description: "systemd-inhibit (sleep and idle blocked)",
+      description,
+    });
+    return {
+      ...inhibit("sleep:idle", "systemd-inhibit (sleep and idle blocked)"),
+      fallback: inhibit("idle", "systemd-inhibit (idle blocked)"),
     };
   }
   return null;
@@ -88,6 +97,8 @@ export type SleepInhibitorChildEnd =
       readonly kind: "exit";
       readonly code: number | null;
       readonly signal: NodeJS.Signals | null;
+      /** What the tool printed on stderr (bounded), the only place it says why it ended. */
+      readonly stderr?: string;
     }
   | { readonly kind: "error"; readonly error: NodeJS.ErrnoException };
 
@@ -109,19 +120,65 @@ export type SpawnSleepInhibitor = (
   events: SleepInhibitorChildEvents,
 ) => SleepInhibitorChild;
 
-/** Starts the tool detached from this process's stdio and event loop. */
+/** How much of the tool's stderr an end keeps. */
+const SLEEP_INHIBITOR_STDERR_MAX_CHARS = 1_000;
+/** After the tool exits, how long to wait for the rest of its stderr. */
+const SLEEP_INHIBITOR_STDERR_DRAIN_MS = 250;
+
+/** Whether the OS refused the hold (`Failed to inhibit: Access denied`), rather than the tool failing. */
+export function sleepInhibitorRefused(end: SleepInhibitorChildEnd): boolean {
+  return (
+    end.kind === "exit" &&
+    end.code !== 0 &&
+    /access denied|interactive authentication required|not authorized|permission denied/i.test(
+      end.stderr ?? "",
+    )
+  );
+}
+
+/** What to do when logind refuses even the weakest lock, for the log line that says so. */
+export const LINUX_SLEEP_INHIBITOR_REMEDY =
+  "logind gives non-root users the idle lock only through polkit (Debian: install polkitd); the sleep lock needs root or a polkit rule for org.freedesktop.login1.inhibit-block-sleep";
+
+/** Starts the tool detached from this process's stdin, stdout and event loop. */
 export const startSleepInhibitorChild: SpawnSleepInhibitor = (command, events) => {
-  const child = spawn(command.command, [...command.args], { stdio: "ignore" });
+  const child = spawn(command.command, [...command.args], { stdio: ["ignore", "ignore", "pipe"] });
   let ended = false;
   const end = (value: SleepInhibitorChildEnd) => {
     if (ended) return;
     ended = true;
     events.onEnd?.(value);
   };
+  let stderr = "";
+  let stderrEnded = false;
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => {
+    if (stderr.length < SLEEP_INHIBITOR_STDERR_MAX_CHARS) {
+      stderr = (stderr + chunk).slice(0, SLEEP_INHIBITOR_STDERR_MAX_CHARS);
+    }
+  });
+  child.stderr?.once("end", () => {
+    stderrEnded = true;
+  });
+  // The held tool's own child (`tail`) shares the pipe for as long as it runs.
+  (child.stderr as { unref?: () => void } | null)?.unref?.();
   child.once("spawn", () => events.onSpawn?.());
   // Kept for the child's life: an `error` without a listener (a failed kill) would throw.
   child.on("error", (error) => end({ kind: "error", error }));
-  child.once("exit", (code, signal) => end({ kind: "exit", code, signal }));
+  child.once("exit", (code, signal) => {
+    const report = () => {
+      const text = stderr.trim();
+      end({ kind: "exit", code, signal, ...(text ? { stderr: text } : {}) });
+    };
+    if (stderrEnded || !child.stderr) return report();
+    // `exit` can come before the last stderr chunk.
+    const timer = setTimeout(report, SLEEP_INHIBITOR_STDERR_DRAIN_MS);
+    timer.unref();
+    child.stderr.once("end", () => {
+      clearTimeout(timer);
+      report();
+    });
+  });
   child.unref();
   return {
     stop: () => {
@@ -143,20 +200,46 @@ export const SleepInhibitorLive = Layer.effectDiscard(
     }
     // The tool's callbacks log through this server's loggers, so the line reaches server.log.
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
+    let stopped = false;
+    let current: SleepInhibitorChild | null = null;
+    const start = (held: SleepInhibitorCommand): SleepInhibitorChild =>
+      startSleepInhibitorChild(held, {
+        onEnd: (end) => {
+          if (stopped) return;
+          if (sleepInhibitorRefused(end) && held.fallback) {
+            runFork(
+              Effect.logInfo(
+                "Sleep prevention: the OS refused the sleep lock; holding a weaker one",
+                {
+                  via: held.fallback.description,
+                  ...describeEnd(end),
+                },
+              ),
+            );
+            try {
+              current = start(held.fallback);
+            } catch {}
+            return;
+          }
+          runFork(
+            Effect.logWarning(
+              end.kind === "error" ? "Sleep prevention could not start" : "Sleep prevention ended",
+              {
+                command: held.command,
+                ...describeEnd(end),
+                ...(sleepInhibitorRefused(end) && process.platform === "linux"
+                  ? { remedy: LINUX_SLEEP_INHIBITOR_REMEDY }
+                  : {}),
+              },
+            ),
+          );
+        },
+      });
     yield* Effect.acquireRelease(
       Effect.sync((): SleepInhibitorChild | null => {
         try {
-          return startSleepInhibitorChild(command, {
-            onEnd: (end) => {
-              if (end.kind !== "error") return;
-              runFork(
-                Effect.logWarning("Sleep prevention could not start", {
-                  command: command.command,
-                  error: end.error.message,
-                }),
-              );
-            },
-          });
+          current = start(command);
+          return { stop: () => current?.stop() };
         } catch {
           return null;
         }
@@ -169,7 +252,11 @@ export const SleepInhibitorLive = Layer.effectDiscard(
               }),
         ),
       ),
-      (child) => Effect.sync(() => child?.stop()),
+      (child) =>
+        Effect.sync(() => {
+          stopped = true;
+          child?.stop();
+        }),
     );
   }),
 );
@@ -300,10 +387,11 @@ interface AgentWorkHold {
  */
 const monotonicMillis = Effect.map(Clock.monotonicTimeNanos, (nanos) => Number(nanos / 1_000_000n));
 
-const describeEnd = (end: SleepInhibitorChildEnd) =>
-  end.kind === "error"
+function describeEnd(end: SleepInhibitorChildEnd) {
+  return end.kind === "error"
     ? { error: end.error.message, ...(end.error.code ? { code: end.error.code } : {}) }
-    : { exitCode: end.code, signal: end.signal };
+    : { exitCode: end.code, signal: end.signal, ...(end.stderr ? { stderr: end.stderr } : {}) };
+}
 
 /**
  * Holds an idle-sleep assertion while {@link AgentWorkActivity} says to keep the machine awake,
@@ -322,14 +410,16 @@ const describeEnd = (end: SleepInhibitorChildEnd) =>
 export const makeAgentWorkSleepInhibitor = (runtime: AgentWorkSleepInhibitorRuntime) =>
   Effect.gen(function* () {
     const activity = yield* AgentWorkActivity;
-    const command = sleepInhibitorCommand(runtime.platform, runtime.pid, "agent-work");
-    if (command === null) {
+    const initialCommand = sleepInhibitorCommand(runtime.platform, runtime.pid, "agent-work");
+    if (initialCommand === null) {
       yield* Effect.logDebug(
         "Keeping this machine awake while agents work is not supported on this platform",
         { platform: runtime.platform },
       );
       return;
     }
+    // A weaker fallback replaces it if the OS refuses it.
+    let command: SleepInhibitorCommand = initialCommand;
 
     // Wake-ups coalesce: one pending wake-up covers any number of changes, and offering never blocks.
     const wake = yield* Queue.sliding<void>(1);
@@ -381,7 +471,27 @@ export const makeAgentWorkSleepInhibitor = (runtime: AgentWorkSleepInhibitorRunt
         const nowMs = yield* monotonicMillis;
         if (nowMs - startedAtMs >= AGENT_WORK_HOLD_HEALTHY_MS) failures = 0;
         failures += 1;
-        if (end.kind === "error" && end.error.code === "ENOENT") {
+        if (sleepInhibitorRefused(end) && command.fallback) {
+          // Not the tool failing: a weaker hold the OS grants is taken at once instead.
+          failures -= 1;
+          yield* Effect.logInfo(
+            "Keeping this machine awake while agents work: the OS refused the sleep lock; holding a weaker one",
+            { via: command.fallback.description, ...describeEnd(end) },
+          );
+          command = command.fallback;
+          // The refused start may already have been announced; announce the hold that is taken.
+          announced = false;
+        } else if (sleepInhibitorRefused(end)) {
+          gaveUp = true;
+          yield* Effect.logWarning(
+            "Keeping this machine awake while agents work is not available: the OS refused it",
+            {
+              via: command.description,
+              ...describeEnd(end),
+              ...(runtime.platform === "linux" ? { remedy: LINUX_SLEEP_INHIBITOR_REMEDY } : {}),
+            },
+          );
+        } else if (end.kind === "error" && end.error.code === "ENOENT") {
           gaveUp = true;
           yield* Effect.logInfo(
             "Keeping this machine awake while agents work is not available: its tool was not found",

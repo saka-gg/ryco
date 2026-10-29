@@ -20,6 +20,8 @@ import {
   type SleepInhibitorChildEvents,
   type SleepInhibitorCommand,
   sleepInhibitorCommand,
+  sleepInhibitorRefused,
+  startSleepInhibitorChild,
 } from "./sleepInhibitor.ts";
 
 describe("sleepInhibitorCommand", () => {
@@ -45,6 +47,15 @@ describe("sleepInhibitorCommand", () => {
       args?.filter((arg) => !arg.startsWith("--why="));
     assert.deepStrictEqual(withoutWhy(agentWork?.args), withoutWhy(lifetime?.args));
     assert.include([...(agentWork?.args ?? [])], "--pid=42");
+  });
+
+  it("falls back to logind's idle lock on Linux", () => {
+    const command = sleepInhibitorCommand("linux", 42, "agent-work");
+    assert.include([...(command?.args ?? [])], "--what=sleep:idle");
+    assert.include([...(command?.fallback?.args ?? [])], "--what=idle");
+    assert.include([...(command?.fallback?.args ?? [])], "--pid=42");
+    assert.isUndefined(command?.fallback?.fallback);
+    assert.isUndefined(sleepInhibitorCommand("darwin", 42, "agent-work")?.fallback);
   });
 
   it("is not supported elsewhere", () => {
@@ -133,6 +144,46 @@ describe("pmsetReportsBatteryPower", () => {
     );
     assert.isFalse(pmsetReportsBatteryPower("Now drawing from 'UPS Power'\n"));
     assert.isFalse(pmsetReportsBatteryPower(""));
+  });
+});
+
+describe("sleepInhibitorRefused", () => {
+  it("tells the OS refusing the hold from the tool failing", () => {
+    const exit = (code: number, stderr?: string): SleepInhibitorChildEnd => ({
+      kind: "exit",
+      code,
+      signal: null,
+      ...(stderr ? { stderr } : {}),
+    });
+    assert.isTrue(sleepInhibitorRefused(exit(1, "Failed to inhibit: Access denied")));
+    assert.isTrue(
+      sleepInhibitorRefused(exit(1, "Failed to inhibit: Interactive authentication required.")),
+    );
+    assert.isFalse(sleepInhibitorRefused(exit(1, "Failed to inhibit: Connection timed out")));
+    assert.isFalse(sleepInhibitorRefused(exit(1)));
+    assert.isFalse(sleepInhibitorRefused(exit(0, "Access denied")));
+  });
+});
+
+describe("startSleepInhibitorChild", () => {
+  it("reports what the tool printed on stderr when it ends", async () => {
+    const end = await new Promise<SleepInhibitorChildEnd>((resolve) => {
+      startSleepInhibitorChild(
+        {
+          command: "sh",
+          args: ["-c", "echo 'Failed to inhibit: Access denied' >&2; exit 1"],
+          description: "test",
+        },
+        { onEnd: resolve },
+      );
+    });
+    assert.deepStrictEqual(end, {
+      kind: "exit",
+      code: 1,
+      signal: null,
+      stderr: "Failed to inhibit: Access denied",
+    });
+    assert.isTrue(sleepInhibitorRefused(end));
   });
 });
 
@@ -349,6 +400,54 @@ describe("makeAgentWorkSleepInhibitor", () => {
       yield* Scope.close(scope, Exit.void);
     }).pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
   });
+
+  it.effect(
+    "holds logind's idle lock when the sleep lock is refused, and stops if that is too",
+    () => {
+      const warnings: Array<{ message: string; annotations: unknown }> = [];
+      const infos: string[] = [];
+      const logger = Logger.make(({ logLevel, message }) => {
+        const [text, annotations] = Array.isArray(message) ? message : [message];
+        if (logLevel === "Warn") warnings.push({ message: String(text), annotations });
+        if (logLevel === "Info") infos.push(String(text));
+      });
+      const refused: SleepInhibitorChildEnd = {
+        kind: "exit",
+        code: 1,
+        signal: null,
+        stderr: "Failed to inhibit: Access denied",
+      };
+      return Effect.gen(function* () {
+        const fake = fakeRuntime({ platform: "linux" });
+        const scope = yield* Scope.make();
+        const hold = yield* startHold(fake.runtime, scope);
+        yield* hold.report(working);
+        assert.include([...(fake.children[0]?.command.args ?? [])], "--what=sleep:idle");
+
+        // Refused: the idle lock is taken at once, without a backoff or a warning.
+        yield* fake.end(refused);
+        assert.strictEqual(fake.children.length, 2);
+        assert.include([...(fake.children[1]?.command.args ?? [])], "--what=idle");
+        assert.deepStrictEqual(warnings, []);
+        assert.isTrue(infos.some((message) => message.includes("weaker")));
+        // The hold that is really taken is announced after the refused one.
+        assert.strictEqual(infos.at(-1), "Keeping this machine awake while agents work");
+
+        // Refused again (no polkit): one warning with the tool's reason, and no more starts.
+        yield* fake.end(refused);
+        yield* hold.advance(AGENT_WORK_HOLD_RETRY_BASE_MS * 10);
+        yield* hold.report(IDLE_AGENT_WORK);
+        yield* hold.report(working);
+        yield* hold.advance(AGENT_WORK_HOLD_RETRY_BASE_MS * 10);
+        assert.strictEqual(fake.children.length, 2);
+        assert.strictEqual(warnings.length, 1);
+        assert.include(warnings[0]?.message, "refused");
+        assert.include(JSON.stringify(warnings[0]?.annotations), "Access denied");
+        assert.include(JSON.stringify(warnings[0]?.annotations), "polkitd");
+        yield* Scope.close(scope, Exit.void);
+      }).pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+    },
+  );
 
   it.effect("counts a start that throws as a failure and tries again", () =>
     Effect.gen(function* () {
