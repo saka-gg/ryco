@@ -6,13 +6,13 @@
  * path) checks another `claude` binary instead.
  *
  * No inference: every session gets a temporary HOME and CLAUDE_CONFIG_DIR (so it never reads
- * ~/.claude, and its keychain item name is unique to that directory), no setting sources, tools,
- * MCP servers or hooks, a fake API key, and a loopback API endpoint that rejects every request and
- * records only its path. Context usage is read with `detail: "summary"`, which makes no
- * token-count calls.
+ * ~/.claude, and its keychain item name is unique to that directory), no setting sources (one check
+ * reads a user settings file it writes into that temporary directory), tools, MCP servers or hooks,
+ * a fake API key, and a loopback API endpoint that rejects every request and records only its path.
+ * Context usage is read with `detail: "summary"`, which makes no token-count calls.
  */
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,12 +23,18 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { CLAUDE_AUTO_COMPACT_WINDOW_MIN } from "@ryco/shared/claudeAutoCompact";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 import { claudeInitAdvertisesNativeCompaction } from "./claudeNativeCompaction.ts";
 import { claudeEchoedPromptUuids } from "./claudeSteering.ts";
-import { CONTEXT_COMPACTION_TRIGGER_RATIO } from "./contextCompactionPolicy.ts";
+import {
+  CONTEXT_COMPACTION_TRIGGER_RATIO,
+  NATIVE_AUTO_COMPACT_MIN_LEAD_TOKENS,
+  NATIVE_AUTO_COMPACT_RESERVE_TOKENS,
+  nativeAutoCompactWindowBehindTrigger,
+} from "./contextCompactionPolicy.ts";
 
 const PROBE_MODEL = "claude-opus-5-5";
 
@@ -64,8 +70,14 @@ describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")("Claude Code compac
     }
   });
 
-  /** A session whose prompt stream yields only what `send` pushes. */
-  const startSession = (settings: Record<string, unknown> = {}) => {
+  /**
+   * A session whose prompt stream yields only what `send` pushes. `settings` are flag settings,
+   * as the adapter passes them; `settingSources: ["user"]` also reads the temporary user settings.
+   */
+  const startSession = (
+    settings: Record<string, unknown> = {},
+    settingSources: Array<"user"> = [],
+  ) => {
     const pending: SDKUserMessage[] = [];
     let wake: (() => void) | undefined;
     let closed = false;
@@ -99,7 +111,7 @@ describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")("Claude Code compac
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
           DISABLE_AUTOUPDATER: "1",
         },
-        settingSources: [],
+        settingSources,
         tools: [],
         mcpServers: {},
         strictMcpConfig: true,
@@ -164,6 +176,94 @@ describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")("Claude Code compac
       expect(applied.autoCompactThreshold).toBeLessThan(before.autoCompactThreshold ?? Infinity);
     } finally {
       spawned.close();
+    }
+  });
+
+  // Why the adapter passes a configured window (`autoCompactWindow`) without forcing
+  // `autoCompactEnabled`: forcing it would override a user who turned auto-compact off.
+  it("applies a start-up auto-compact window without autoCompactEnabled", async () => {
+    const plain = startSession();
+    let before: Awaited<ReturnType<typeof readWindow>>;
+    try {
+      before = await readWindow(plain.runtime);
+    } finally {
+      plain.close();
+    }
+    const windowTokens = Math.max(
+      CLAUDE_AUTO_COMPACT_WINDOW_MIN,
+      Math.floor(before.maxTokens * CONTEXT_COMPACTION_TRIGGER_RATIO),
+    );
+    expect(windowTokens).toBeLessThan(before.maxTokens);
+
+    const windowed = startSession({ autoCompactWindow: windowTokens });
+    try {
+      const applied = await readWindow(windowed.runtime);
+      expect(applied.maxTokens).toBe(windowTokens);
+      expect(applied.autoCompactThreshold).toBeLessThan(before.autoCompactThreshold ?? Infinity);
+    } finally {
+      windowed.close();
+    }
+  });
+
+  // Why the adapter raises a small window under Ryco's policy: Claude Code compacts (mid-turn) a
+  // reserve below its window, so the smallest window as given would compact before Ryco's 80%
+  // mark. Should it no longer, re-audit `nativeAutoCompactWindowBehindTrigger`.
+  it("compacts a reserve below the window, so a raised small window stays behind Ryco", async () => {
+    const windowTokens = CLAUDE_AUTO_COMPACT_WINDOW_MIN;
+    const trigger = windowTokens * CONTEXT_COMPACTION_TRIGGER_RATIO;
+    const readStartedWith = async (autoCompactWindow: number) => {
+      const session = startSession({ autoCompactWindow });
+      try {
+        return await readWindow(session.runtime);
+      } finally {
+        session.close();
+      }
+    };
+
+    const given = await readStartedWith(windowTokens);
+    expect(given.maxTokens).toBe(windowTokens);
+    expect(given.autoCompactThreshold).toBeGreaterThanOrEqual(
+      windowTokens - NATIVE_AUTO_COMPACT_RESERVE_TOKENS,
+    );
+    expect(given.autoCompactThreshold).toBeLessThan(trigger);
+
+    const raised = await readStartedWith(nativeAutoCompactWindowBehindTrigger(windowTokens));
+    expect(raised.autoCompactThreshold).toBeGreaterThanOrEqual(
+      trigger + NATIVE_AUTO_COMPACT_MIN_LEAD_TOKENS,
+    );
+  });
+
+  it("lets a start-up window override the user's own, but not turn auto-compact back on", async () => {
+    const configDir = join(root, ".claude");
+    const userSettingsPath = join(configDir, "settings.json");
+    const readWithUserSettings = async (
+      userSettings: Record<string, unknown>,
+      settings: Record<string, unknown>,
+    ) => {
+      await mkdir(configDir, { recursive: true });
+      await writeFile(userSettingsPath, JSON.stringify(userSettings));
+      const session = startSession(settings, ["user"]);
+      try {
+        return await readWindow(session.runtime);
+      } finally {
+        session.close();
+      }
+    };
+    try {
+      // What `/autocompact` saves for a model.
+      const perModel = { modelSettings: { [PROBE_MODEL]: { autoCompactWindow: 300_000 } } };
+      expect((await readWithUserSettings(perModel, {})).maxTokens).toBe(300_000);
+      expect((await readWithUserSettings(perModel, { autoCompactWindow: 150_000 })).maxTokens).toBe(
+        150_000,
+      );
+
+      const disabled = await readWithUserSettings(
+        { autoCompactEnabled: false },
+        { autoCompactWindow: 150_000 },
+      );
+      expect(disabled.autoCompactThreshold).toBeUndefined();
+    } finally {
+      await rm(userSettingsPath, { force: true });
     }
   });
 

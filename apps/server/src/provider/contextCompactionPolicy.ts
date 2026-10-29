@@ -24,6 +24,48 @@ export interface ContextCompactionConclusion {
   readonly unavailable: boolean;
 }
 
+/**
+ * Claude Code auto-compacts on its own once the context reaches its auto-compact window minus this
+ * reserve: up to 20,000 tokens for the reply and a 13,000-token buffer. The opt-in probe
+ * (claudeCompactionCliProbe.test.ts) checks it against the pinned CLI.
+ */
+export const NATIVE_AUTO_COMPACT_RESERVE_TOKENS = 33_000;
+
+/**
+ * How far at least Claude Code's own threshold stays above the trigger under a configured window:
+ * as far as on a 200,000-token model by default (167,000 against 160,000).
+ */
+export const NATIVE_AUTO_COMPACT_MIN_LEAD_TOKENS = 7_000;
+
+/**
+ * The auto-compact window to start Claude Code with while this policy compacts within
+ * `windowTokens`. Claude Code compacts in the middle of a turn, so its threshold has to stay above
+ * the between-turn trigger or it would compact first: below 200,000 tokens the window it gets is
+ * raised until its threshold is that lead above 80% of `windowTokens`. The policy itself keeps
+ * using `windowTokens`, and the result never exceeds 1,000,000 for a window that does not.
+ */
+export function nativeAutoCompactWindowBehindTrigger(windowTokens: number): number {
+  return Math.max(
+    windowTokens,
+    Math.ceil(windowTokens * CONTEXT_COMPACTION_TRIGGER_RATIO) +
+      NATIVE_AUTO_COMPACT_RESERVE_TOKENS +
+      NATIVE_AUTO_COMPACT_MIN_LEAD_TOKENS,
+  );
+}
+
+const isUsableWindow = (tokens: number | undefined): tokens is number =>
+  tokens !== undefined && Number.isFinite(tokens) && tokens > 0;
+
+/** The smaller usable window of the two, or undefined when neither is usable. */
+function effectiveCompactionWindow(
+  reported: number | undefined,
+  configured: number | undefined,
+): number | undefined {
+  if (!isUsableWindow(configured)) return reported;
+  if (!isUsableWindow(reported)) return configured;
+  return Math.min(reported, configured);
+}
+
 export function initialContextCompactionPolicyState(
   generation: number,
 ): ContextCompactionPolicyState {
@@ -41,19 +83,24 @@ export function initialContextCompactionPolicyState(
  * creating another request after a completed or interrupted compaction. A
  * generation mismatch is always ignored so a late observation from a replaced
  * provider session cannot mutate the active one.
+ *
+ * Both ratios apply to the smaller of the reported window and `windowTokens`
+ * (a configured compaction window), whichever of them is known.
  */
 export function observeContextCompaction(
   state: ContextCompactionPolicyState,
   input: {
     readonly generation: number;
     readonly usage: ThreadTokenUsageSnapshot;
+    readonly windowTokens?: number | undefined;
   },
 ): ContextCompactionDecision {
   if (input.generation !== state.generation || state.phase === "disabled") {
     return { state, trigger: false };
   }
 
-  const { usedTokens, maxTokens } = input.usage;
+  const { usedTokens } = input.usage;
+  const maxTokens = effectiveCompactionWindow(input.usage.maxTokens, input.windowTokens);
   if (
     maxTokens === undefined ||
     !Number.isFinite(maxTokens) ||

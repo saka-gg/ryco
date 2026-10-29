@@ -130,6 +130,8 @@ function createBaseServerConfig(): ServerConfig {
           homePath: "",
           customModels: [],
           launchArgs: "",
+          autoCompact: "ryco",
+          autoCompactWindow: "",
         },
         copilot: {
           enabled: true,
