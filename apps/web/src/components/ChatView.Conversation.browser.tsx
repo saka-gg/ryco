@@ -996,6 +996,52 @@ describe("ChatView Conversation (full app)", () => {
     }
   });
 
+  it("Stop offers to stop the chat's working delegated tasks too", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "stop-cascade-existing" as MessageId,
+      targetText: "Existing turn",
+      sessionStatus: "running",
+    });
+    const parent = snapshot.threads[0]!;
+    const childId = "thread-delegated-child" as ThreadId;
+    const withChild = {
+      ...snapshot,
+      threads: [
+        ...snapshot.threads,
+        {
+          ...parent,
+          id: childId,
+          title: "Delegated research",
+          lineage: {
+            parentThreadId: parent.id,
+            rootThreadId: parent.id,
+            relationship: "delegated",
+          },
+          session: parent.session ? { ...parent.session, threadId: childId } : parent.session,
+          messages: [],
+        },
+      ],
+    } as typeof snapshot;
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot: withChild });
+    try {
+      await waitForComposerEditor();
+      const dispatch = recordingDispatch(withChild);
+      await page.getByRole("button", { name: "Stop generation" }).click();
+      await expect
+        .element(page.getByText("A task this chat delegated is still working."))
+        .toBeVisible();
+      await page.getByRole("button", { name: "Stop it too" }).click();
+      await vi.waitFor(() =>
+        expect(dispatch.commands).toContainEqual(
+          expect.objectContaining({ type: "thread.turn.interrupt", threadId: childId }),
+        ),
+      );
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
   it("an error end holds the queue", async () => {
     const snapshot = createSnapshotForTargetUser({
       targetMessageId: "error-hold-existing" as MessageId,

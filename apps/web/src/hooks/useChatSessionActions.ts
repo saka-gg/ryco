@@ -11,7 +11,7 @@ import {
   requestNativeCompaction,
 } from "@ryco/client-runtime/state/composer";
 import type { ApprovalResponseIdentity } from "@ryco/contracts";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 import {
   type ApprovalRequestId,
   type ProviderApprovalDecision,
@@ -24,7 +24,7 @@ import { readEnvironmentApi } from "../environmentApi";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { newCommandId, randomUUID } from "../lib/utils";
 import { holdMessageQueueForInterrupt } from "../messageQueueDrain";
-import { selectThreadByRef, useStore } from "../store";
+import { selectThreadByRef, selectWorkingDelegatedDescendants, useStore } from "../store";
 import {
   interruptThreadTurn,
   respondToThreadApproval,
@@ -87,6 +87,7 @@ export function useChatSessionActions(input: {
       held.undo();
       throw error;
     }
+    offerToStopDelegatedTasks(environmentId, activeThreadId);
   }, [activeThreadId, environmentId]);
 
   /**
@@ -265,4 +266,64 @@ export function useChatSessionActions(input: {
     respondingUserInputRequestIds,
     isRevertingCheckpoint,
   };
+}
+
+/**
+ * A Stop ends this chat's turn and the automatic return of its delegated results, but its
+ * delegated tasks keep working. Offer to stop those too, deepest first, each like a Stop of
+ * its own chat (its follow-up queue holds).
+ */
+function offerToStopDelegatedTasks(environmentId: EnvironmentId, threadId: ThreadId): void {
+  const working = selectWorkingDelegatedDescendants(
+    useStore.getState(),
+    scopeThreadRef(environmentId, threadId),
+  );
+  if (working.length === 0) return;
+  const count = working.length;
+  const toastId = toastManager.add(
+    stackedThreadToast({
+      type: "info",
+      title: "Stopped",
+      description:
+        count === 1
+          ? "A task this chat delegated is still working."
+          : `${count} tasks this chat delegated are still working.`,
+      timeout: 15_000,
+      actionProps: {
+        children: count === 1 ? "Stop it too" : "Stop them too",
+        onClick: () => {
+          toastManager.close(toastId);
+          void stopDelegatedTasks(working);
+        },
+      },
+    }),
+  );
+}
+
+async function stopDelegatedTasks(refs: ReadonlyArray<ScopedThreadRef>): Promise<void> {
+  let failed = 0;
+  for (const ref of refs) {
+    const api = readEnvironmentApi(ref.environmentId);
+    if (!api) {
+      failed += 1;
+      continue;
+    }
+    const held = holdMessageQueueForInterrupt(ref.environmentId, ref.threadId);
+    try {
+      await interruptThreadTurn(api, ref.threadId);
+    } catch {
+      held.undo();
+      failed += 1;
+    }
+  }
+  if (failed > 0) {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title:
+          failed === 1 ? "A task could not be stopped" : `${failed} tasks could not be stopped`,
+        description: "Open the task to stop it there.",
+      }),
+    );
+  }
 }
