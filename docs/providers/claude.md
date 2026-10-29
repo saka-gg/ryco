@@ -336,6 +336,32 @@ If Claude Code accepts the Auto session but its first report of the session show
 mode, Ryco treats that as the same refusal: it warns once and stops asking for Auto in that
 session.
 
+## Plan Panel
+
+Claude's task list fills the thread's plan: the Plan panel and the plan in the overview and the
+crown. Claude Code plans with its Task tools (TaskCreate, TaskUpdate, TaskGet and TaskList), or
+with TodoWrite when the Task tools are off. Ryco updates the plan from each call's result, so a
+change Claude Code rejected never shows. Subagents write to the session's task list, so their
+task changes update the same plan; a subagent's TodoWrite list is its own and is not shown. The
+calls stay in the work log as tool rows such as "TaskUpdate: #2 → completed".
+
+The plan keeps working after the server restarts, after an idle session is stopped, and after a
+checkpoint revert: Ryco stores each task's number, subject and status with the thread's Claude
+session, never its description. A revert rewinds the conversation but not Claude's task list, so
+right after one the plan shows the list as it was at that checkpoint; Claude's next task call brings
+it back to Claude's current list. A new Claude session (after a revert to the start, a fork or a
+handoff) starts with an empty task list.
+
+Claude Code decides which models get planning tools. As of Claude Code 2.1.296 these are Opus 4.5
+to 4.7, Sonnet 4.6, Haiku 4.5 and older models, model ids Claude Code does not know (a router's
+own names, for example), and background sessions. Newer models (Opus 4.8, the 5.x models and Fable)
+get none by default, so their plan stays empty. Environment variables on the Claude provider
+instance change this:
+
+- `CLAUDE_CODE_ENABLE_TODO_TOOLS=true` gives every model planning tools. They add tool definitions
+  and task reminders to the prompt, so they cost tokens and change how the model works.
+- `CLAUDE_CODE_ENABLE_TASKS=false` makes Claude plan with TodoWrite instead of the Task tools.
+
 ## Approvals
 
 When Claude asks before running a tool, the approval card leads with Decline and Approve once.

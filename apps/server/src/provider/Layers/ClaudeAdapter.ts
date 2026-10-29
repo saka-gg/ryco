@@ -96,6 +96,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
+  type RuntimePlanStep,
   DEFAULT_AGENT_TOKEN_MODE,
   RuntimeItemId,
   RuntimeRequestId,
@@ -173,6 +174,13 @@ import {
   type ClaudeChainPositionBeforePrompt,
   claudeEntryBeforePrompt,
 } from "../claudeTranscriptCutoff.ts";
+import {
+  CLAUDE_PLAN_TOOL_NAMES,
+  ClaudePlanTaskTracker,
+  claudePlanToolDetail,
+  planTasksCursorField,
+  readClaudePlanTasksFromCursor,
+} from "../claudePlanTasks.ts";
 import {
   type ClaudeTranscriptPresence,
   readClaudeTranscriptPresence,
@@ -484,6 +492,12 @@ interface ClaudeSessionContext {
   /** Completed turn ids only (resume `turnCount`, `readThread`); never message bodies. */
   readonly completedTurnIds: Array<TurnId>;
   readonly inFlightTools: Map<number, ToolInFlight>;
+  /**
+   * The session's Task tool list (TaskCreate/TaskUpdate/TaskGet/TaskList), shown as the plan and
+   * carried in the resume cursor. Unlike `inFlightTools`, its pending calls outlive the turn: a
+   * background subagent's result can land after the turn settled.
+   */
+  readonly planTasks: ClaudePlanTaskTracker;
   /**
    * Block indexes of dropped subagent narration, keyed by parent_tool_use_id.
    * Block indexes are per-message, so a suppressed block's
@@ -1327,6 +1341,12 @@ function makeClaudeTaskSubagentRef(
 }
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
+  // Planning tools before the substring rules: TaskCreate ("create") and TodoWrite ("write")
+  // would otherwise read as file changes and count as edits. Their rows stay in the work log,
+  // only relabelled; hiding them would be a client change.
+  if (CLAUDE_PLAN_TOOL_NAMES.has(toolName)) {
+    return "dynamic_tool_call";
+  }
   const normalized = toolName.toLowerCase();
   if (normalized.includes("agent")) {
     return "collab_agent_tool_call";
@@ -1398,12 +1418,7 @@ function isTodoTool(toolName: string): boolean {
   return toolName.toLowerCase().includes("todowrite");
 }
 
-type PlanStep = {
-  step: string;
-  status: "pending" | "inProgress" | "completed";
-};
-
-function extractPlanStepsFromTodoInput(input: Record<string, unknown>): PlanStep[] | null {
+function extractPlanStepsFromTodoInput(input: Record<string, unknown>): RuntimePlanStep[] | null {
   // TodoWrite format: { todos: [{ content, status, activeForm? }] }
   const todos = input.todos;
   if (!Array.isArray(todos) || todos.length === 0) {
@@ -1429,6 +1444,9 @@ function summarizeToolRequest(toolName: string, input: Record<string, unknown>):
   // Ryco's HTML tools carry a whole page; name the page instead of dumping it.
   const htmlRender = resolveHtmlRenderToolPresentation({ toolName, input });
   if (htmlRender) return htmlRender.detail ? `${toolName}: ${htmlRender.detail}` : toolName;
+
+  const planDetail = claudePlanToolDetail(toolName, input);
+  if (planDetail) return planDetail;
 
   const commandValue = input.command ?? input.cmd;
   const command = typeof commandValue === "string" ? commandValue : undefined;
@@ -2462,6 +2480,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.pendingRewind ? { rewind: { at: context.pendingRewind.at } } : {}),
       turnCount: context.completedTurnIds.length,
       ...transcriptSeenMarker(context),
+      // A resumed session must still know the tasks an update names only by id.
+      ...planTasksCursorField(context.planTasks, context.resumeSessionId),
     };
     context.session = { ...context.session, resumeCursor, updatedAt };
   });
@@ -2802,6 +2822,33 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (context.autoModeRefusedWarningEmitted) return;
     context.autoModeRefusedWarningEmitted = true;
     yield* emitRuntimeWarning(context, claudeAutoModeRefusedMessage(model));
+  });
+
+  /**
+   * The thread plan from TodoWrite input or the Task tool list. Stamped with the open turn, else
+   * the last completed one: a background subagent's update after its turn settled must not go
+   * out turnless, or clients would keep preferring that turn's older plan.
+   */
+  const emitPlanUpdated = Effect.fn("emitPlanUpdated")(function* (
+    context: ClaudeSessionContext,
+    plan: ReadonlyArray<RuntimePlanStep>,
+    raw?: { readonly method: string; readonly payload: unknown },
+  ) {
+    const turnId = context.turnState?.turnId ?? context.completedTurnIds.at(-1);
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "turn.plan.updated",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      ...(turnId ? { turnId: asCanonicalTurnId(turnId) } : {}),
+      payload: { plan },
+      providerRefs: nativeProviderRefs(context),
+      ...(raw
+        ? { raw: { source: "claude.sdk.message", method: raw.method, payload: raw.payload } }
+        : {}),
+    });
   });
 
   const emitCompactionUnavailableWarning = Effect.fn("emitCompactionUnavailableWarning")(function* (
@@ -3457,6 +3504,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (nextTool.itemType === "collab_agent_tool_call" && parsedInput) {
           rememberClaudeSubagentLaunch(context, nextTool.itemId, parsedInput);
         }
+        if (parsedInput) {
+          context.planTasks.noteToolUse(nextTool.itemId, nextTool.toolName, parsedInput);
+        }
 
         if (
           !parsedInput ||
@@ -3507,27 +3557,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        // Emit plan update when TodoWrite input is parsed
-        if (parsedInput && isTodoTool(nextTool.toolName)) {
+        // TodoWrite carries its whole list in its input. The CLI keeps one TodoWrite list per
+        // agent, so a subagent's list must not replace the root's plan.
+        if (parsedInput && isTodoTool(nextTool.toolName) && !nextTool.parentToolUseId) {
           const planSteps = extractPlanStepsFromTodoInput(parsedInput);
           if (planSteps && planSteps.length > 0) {
-            const planStamp = yield* makeEventStamp();
-            yield* offerRuntimeEventForContext(context, {
-              type: "turn.plan.updated",
-              eventId: planStamp.eventId,
-              provider: PROVIDER,
-              createdAt: planStamp.createdAt,
-              threadId: context.session.threadId,
-              ...(context.turnState
-                ? {
-                    turnId: asCanonicalTurnId(context.turnState.turnId),
-                  }
-                : {}),
-              payload: {
-                plan: planSteps,
-              },
-              providerRefs: nativeProviderRefs(context),
-            });
+            yield* emitPlanUpdated(context, planSteps);
           }
         }
       }
@@ -3610,6 +3645,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (itemType === "collab_agent_tool_call") {
         rememberClaudeSubagentLaunch(context, itemId, toolInput);
       }
+      context.planTasks.noteToolUse(itemId, toolName, toolInput);
 
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEventForContext(context, {
@@ -3692,7 +3728,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    for (const toolResult of toolResultBlocksFromUserMessage(message)) {
+    const toolResults = toolResultBlocksFromUserMessage(message);
+    for (const toolResult of toolResults) {
+      // Before the in-flight lookup: subagent calls seen only in snapshots are never in flight.
+      // A subagent's result updates the session's shared list too. Known gap: a discarded steer
+      // segment's frames never get here (routeSteerFrame), so its task changes show up only at the
+      // next TaskList.
+      const plan = context.planTasks.applyResult({
+        toolUseId: toolResult.toolUseId,
+        text: toolResult.text,
+        isError: toolResult.isError,
+        structured: toolResults.length === 1 ? readClaudeToolUseResult(message) : undefined,
+      });
+      if (plan) {
+        yield* emitPlanUpdated(context, plan, { method: "claude/user", payload: message });
+        // The live cursor is what a stop persists; a background result may be the last frame.
+        yield* updateResumeCursor(context);
+      }
+
       const toolEntry = Array.from(context.inFlightTools.entries()).find(
         ([, tool]) => tool.itemId === toolResult.toolUseId,
       );
@@ -3950,14 +4003,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           block.id,
           assistantParentToolUseId,
         );
-        if (
-          classifyToolItemType(block.name) === "collab_agent_tool_call" &&
-          block.input !== null &&
-          typeof block.input === "object" &&
-          !Array.isArray(block.input)
-        ) {
-          rememberClaudeSubagentLaunch(context, block.id, block.input as Record<string, unknown>);
+        if (block.input === null || typeof block.input !== "object" || Array.isArray(block.input)) {
+          continue;
         }
+        const blockInput = block.input as Record<string, unknown>;
+        if (classifyToolItemType(block.name) === "collab_agent_tool_call") {
+          rememberClaudeSubagentLaunch(context, block.id, blockInput);
+        }
+        // Subagents write to the session's task list, so their Task calls feed the plan too.
+        context.planTasks.noteToolUse(block.id, block.name, blockInput);
       }
       context.lastAssistantUuid = message.uuid;
       yield* updateResumeCursor(context);
@@ -4024,7 +4078,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           name?: unknown;
           input?: unknown;
         };
-        if (toolUse.type !== "tool_use" || toolUse.name !== "ExitPlanMode") {
+        if (toolUse.type !== "tool_use") {
+          continue;
+        }
+        // The snapshot's input is final; it overrides what streaming noted.
+        if (
+          typeof toolUse.id === "string" &&
+          typeof toolUse.name === "string" &&
+          toolUse.input !== null &&
+          typeof toolUse.input === "object" &&
+          !Array.isArray(toolUse.input)
+        ) {
+          context.planTasks.noteToolUse(
+            toolUse.id,
+            toolUse.name,
+            toolUse.input as Record<string, unknown>,
+          );
+        }
+        if (toolUse.name !== "ExitPlanMode") {
           continue;
         }
         const planMarkdown = extractExitPlanModePlan(toolUse.input);
@@ -6437,6 +6508,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
+    // A resumed session continues its task list; any other start (a fresh policy, a handoff, a
+    // native fork's new session id) begins empty. No plan event: the thread already shows the
+    // list's last plan, or, after a revert, gets it with the next task result. A fresh start
+    // replaces a session whose list the thread may still show, so its list starts unshown and its
+    // first task result is sent even when it finds no tasks.
+    const planTasks = new ClaudePlanTaskTracker(
+      input.resumePolicy === "fresh"
+        ? { tasks: [], shown: false }
+        : readClaudePlanTasksFromCursor(effectiveResumeCursor, existingResumeSessionId),
+    );
     const session: ProviderSession = {
       threadId,
       provider: PROVIDER,
@@ -6457,6 +6538,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         turnCount: resumeState?.turnCount ?? 0,
         ...(resumeState?.transcriptSeen ? { transcriptSeen: true } : {}),
+        ...planTasksCursorField(planTasks, sessionId),
       },
       createdAt: startedAt,
       updatedAt: startedAt,
@@ -6497,6 +6579,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       pendingUserInputs,
       completedTurnIds: [],
       inFlightTools,
+      planTasks,
       suppressedSubagentBlocks: new Map(),
       taskAgents: new Map(),
       subagentLaunchInputByToolUseId: new Map(),
@@ -7264,6 +7347,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
         const previousTurnCount =
           readClaudeResumeState(previousCursor)?.turnCount ?? context.completedTurnIds.length;
+        // A revert does not rewind Claude's task store, so the rewound session keeps its list;
+        // the fresh branch is a new session whose list starts empty. The revert does drop the
+        // reverted turns' plans, so the thread may show an older list: marked unshown, the list
+        // goes out with the next task result even when that result changes nothing.
         const nextCursor =
           rewindPlan.kind === "fresh" || context.resumeSessionId === undefined
             ? { threadId }
@@ -7273,6 +7360,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 rewind: { at: rewindPlan.at },
                 turnCount: Math.max(0, previousTurnCount - input.numTurns),
                 ...transcriptSeenMarker(context),
+                ...planTasksCursorField(context.planTasks, context.resumeSessionId, {
+                  shown: false,
+                }),
               };
         const reopenInput: ProviderSessionStartInput = {
           ...context.startInput,
