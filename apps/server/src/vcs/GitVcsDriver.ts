@@ -205,6 +205,13 @@ export interface ExecuteGitProgress {
    * meter prints its final newline.
    */
   readonly splitStderrAtCarriageReturn?: boolean;
+  /**
+   * Keep calling `onStdoutLine` / `onStderrLine` after the collected output
+   * reached `maxOutputBytes` with `truncateOutputAtMaxBytes`. The collected
+   * text stays capped; only the callbacks see the rest (a long clone's
+   * progress meter).
+   */
+  readonly keepLineCallbacksAfterTruncation?: boolean;
   readonly onHookStarted?: (hookName: string) => Effect.Effect<void, never>;
   readonly onHookFinished?: (input: {
     hookName: string;

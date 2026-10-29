@@ -756,6 +756,9 @@ export function parseGitCheckoutProgressPercent(line: string): number | null {
   return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
 }
 
+/** How much of an unfinished line `collectOutput` keeps for the callbacks past the cap. */
+const MAX_LINE_BUFFER_CHARS_PAST_CAP = 64 * 1024;
+
 const collectOutput = Effect.fn("collectOutput")(function* <E>(
   input: Pick<GitVcsDriver.ExecuteGitInput, "operation" | "cwd" | "args">,
   stream: Stream.Stream<Uint8Array, E>,
@@ -763,8 +766,13 @@ const collectOutput = Effect.fn("collectOutput")(function* <E>(
   truncateOutputAtMaxBytes: boolean,
   onLine: ((line: string) => Effect.Effect<void, never>) | undefined,
   splitAtCarriageReturn = false,
+  keepLineCallbacksAfterTruncation = false,
 ): Effect.fn.Return<{ readonly text: string; readonly truncated: boolean }, GitCommandError> {
   const decoder = new TextDecoder();
+  // Past the cap the decoder keeps streaming for `onLine` only; `text` never receives those
+  // bytes. One decoder for both, so a character the cap splits reaches `onLine` whole.
+  const keepLinesPastCap =
+    truncateOutputAtMaxBytes && keepLineCallbacksAfterTruncation && onLine !== undefined;
   let bytes = 0;
   let text = "";
   let lineBuffer = "";
@@ -806,8 +814,20 @@ const collectOutput = Effect.fn("collectOutput")(function* <E>(
     }
   });
 
+  // Past the cap, a line that never ends must not grow without bound: keep its end. Runs after
+  // the complete lines went out, so it only ever shortens the unfinished one.
+  const capUnfinishedLine = () => {
+    if (lineBuffer.length > MAX_LINE_BUFFER_CHARS_PAST_CAP) {
+      lineBuffer = lineBuffer.slice(-MAX_LINE_BUFFER_CHARS_PAST_CAP);
+    }
+  };
+
   const processChunk = Effect.fn("processChunk")(function* (chunk: Uint8Array) {
     if (truncateOutputAtMaxBytes && truncated) {
+      if (!keepLinesPastCap) return;
+      lineBuffer += decoder.decode(chunk, { stream: true });
+      yield* emitCompleteLines(false);
+      capUnfinishedLine();
       return;
     }
     const nextBytes = bytes + chunk.byteLength;
@@ -827,18 +847,23 @@ const collectOutput = Effect.fn("collectOutput")(function* <E>(
     bytes += chunkToDecode.byteLength;
     truncated = truncateOutputAtMaxBytes && nextBytes > maxOutputBytes;
 
-    const decoded = decoder.decode(chunkToDecode, { stream: !truncated });
+    const decoded = decoder.decode(chunkToDecode, { stream: !truncated || keepLinesPastCap });
     text += decoded;
     lineBuffer += decoded;
+    const linesPastCap = truncated && keepLinesPastCap;
+    if (linesPastCap) {
+      lineBuffer += decoder.decode(chunk.subarray(chunkToDecode.byteLength), { stream: true });
+    }
     yield* emitCompleteLines(false);
+    if (linesPastCap) capUnfinishedLine();
   });
 
   yield* Stream.runForEach(stream, processChunk).pipe(
     Effect.mapError(toGitCommandError(input, "output stream failed.")),
   );
 
-  const remainder = truncated ? "" : decoder.decode();
-  text += remainder;
+  const remainder = truncated && !keepLinesPastCap ? "" : decoder.decode();
+  if (!truncated) text += remainder;
   lineBuffer += remainder;
   yield* emitCompleteLines(true);
   return {
@@ -1054,6 +1079,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                   maxOutputBytes,
                   truncateOutputAtMaxBytes,
                   input.progress?.onStdoutLine,
+                  false,
+                  input.progress?.keepLineCallbacksAfterTruncation === true,
                 ).pipe(Effect.map((output) => ({ ...output, bytes: undefined }))),
             collectOutput(
               commandInput,
@@ -1062,6 +1089,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               truncateOutputAtMaxBytes,
               input.progress?.onStderrLine,
               input.progress?.splitStderrAtCarriageReturn === true,
+              input.progress?.keepLineCallbacksAfterTruncation === true,
             ),
             child.exitCode.pipe(
               Effect.mapError(toGitCommandError(commandInput, "failed to report exit code.")),

@@ -23,6 +23,8 @@
  *
  * Use it for deadlines whose expiry fails work or a request: fail a session
  * start or a turn, fail a user's interrupt or stop request, kill a git child.
+ * `makeResponsiveIdleDeadline` is the same budget started over by each sign of
+ * life, for a watch that fails work gone quiet (a clone that prints nothing).
  * Do not use it where the timer's job is to notice that time passed
  * (heartbeats, liveness probes, retry backoff, debounces), nor for waits whose
  * expiry only escalates cleanup that is already under way (give a closing
@@ -56,36 +58,65 @@ export const responsiveDeadlineTickMs = (budgetMs: number): number =>
 const NANOS_PER_MILLI = 1_000_000;
 
 /**
+ * A deadline for a quiet spell, started over by every sign of life: `expired`
+ * completes once the event loop has been free to run for `budget` without a
+ * `touch`. Time is charged as by `sleepWhileResponsive`, so a stalled or
+ * suspended gap costs at most one tick, and output that a blocked loop or a
+ * machine sleep held back still arrives before the deadline rather than after
+ * it. `touch` is synchronous and cheap enough to call for every line a child
+ * prints. Run `expired` once.
+ */
+export interface ResponsiveIdleDeadline {
+  readonly touch: () => void;
+  readonly expired: Effect.Effect<void>;
+}
+
+export const makeResponsiveIdleDeadline = (
+  budget: Duration.Input,
+): Effect.Effect<ResponsiveIdleDeadline> =>
+  Clock.clockWith((clock) =>
+    Effect.sync(() => {
+      const budgetMs = Duration.toMillis(Duration.fromInputUnsafe(budget));
+      let spentMs = 0;
+      let lastNanos = clock.monotonicTimeNanosUnsafe();
+      let touchedDuringStep = false;
+      const touch = () => {
+        spentMs = 0;
+        lastNanos = clock.monotonicTimeNanosUnsafe();
+        touchedDuringStep = true;
+      };
+      if (budgetMs === Number.POSITIVE_INFINITY) return { touch, expired: Effect.never };
+      if (!(budgetMs > 0)) return { touch, expired: Effect.yieldNow };
+      const tickMs = responsiveDeadlineTickMs(budgetMs);
+      const tick = (): Effect.Effect<void> =>
+        Effect.suspend(() => {
+          touchedDuringStep = false;
+          const stepMs = Math.min(tickMs, budgetMs - spentMs);
+          return Effect.flatMap(clock.sleep(Duration.millis(stepMs)), () => {
+            const nowNanos = clock.monotonicTimeNanosUnsafe();
+            const elapsedMs = Number(nowNanos - lastNanos) / NANOS_PER_MILLI;
+            lastNanos = nowNanos;
+            // A timer can fire early by the loop's cached time, so charge what
+            // really passed (since the last touch); a stall or sleep charges one
+            // step, not its length. A clock that did not move at all is charged
+            // the whole step, or the loop would spin: TestClock keeps float
+            // milliseconds, so at a large timestamp a tiny remainder rounds away
+            // and its sleep returns at once. Unless a touch just started the
+            // budget over: then nothing has passed since.
+            spentMs += elapsedMs > 0 ? Math.min(elapsedMs, stepMs) : touchedDuringStep ? 0 : stepMs;
+            return spentMs < budgetMs ? tick() : Effect.void;
+          });
+        });
+      return { touch, expired: tick() };
+    }),
+  );
+
+/**
  * Completes once the event loop has been free to run for `budget`. A budget of
  * zero or less completes after one yield; an infinite one never completes.
  */
 export const sleepWhileResponsive = (budget: Duration.Input): Effect.Effect<void> =>
-  Effect.suspend(() => {
-    const budgetMs = Duration.toMillis(Duration.fromInputUnsafe(budget));
-    if (budgetMs === Number.POSITIVE_INFINITY) return Effect.never;
-    if (!(budgetMs > 0)) return Effect.yieldNow;
-    const tickMs = responsiveDeadlineTickMs(budgetMs);
-    return Clock.clockWith((clock) => {
-      let spentMs = 0;
-      let lastNanos = clock.monotonicTimeNanosUnsafe();
-      const tick = (): Effect.Effect<void> => {
-        const stepMs = Math.min(tickMs, budgetMs - spentMs);
-        return Effect.flatMap(clock.sleep(Duration.millis(stepMs)), () => {
-          const nowNanos = clock.monotonicTimeNanosUnsafe();
-          const elapsedMs = Number(nowNanos - lastNanos) / NANOS_PER_MILLI;
-          lastNanos = nowNanos;
-          // A timer can fire early by the loop's cached time, so charge what
-          // really passed; a stall or sleep charges one step, not its length.
-          // A clock that did not move at all is charged the whole step, or the
-          // loop would spin: TestClock keeps float milliseconds, so at a large
-          // timestamp a tiny remainder rounds away and its sleep returns at once.
-          spentMs += elapsedMs > 0 ? Math.min(elapsedMs, stepMs) : stepMs;
-          return spentMs < budgetMs ? tick() : Effect.void;
-        });
-      };
-      return tick();
-    });
-  });
+  Effect.flatMap(makeResponsiveIdleDeadline(budget), (deadline) => deadline.expired);
 
 /**
  * `Effect.timeoutOption`, but only time the event loop was free to run counts

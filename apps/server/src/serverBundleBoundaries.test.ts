@@ -253,6 +253,14 @@ describe("server boot import boundaries", () => {
       ),
     ).toEqual([]);
   });
+
+  it("loads the repository clone runner with the first clone", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain(
+      "apps/server/src/sourceControl/SourceControlRepositoryService.ts",
+    );
+    expect(graph.files).not.toContain("apps/server/src/sourceControl/gitCloneRun.ts");
+  });
 });
 
 /** Static imports of a built ES chunk (rolldown output keeps them at top level). */

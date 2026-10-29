@@ -10,6 +10,7 @@ import * as Option from "effect/Option";
 import { TestClock } from "effect/testing";
 
 import {
+  makeResponsiveIdleDeadline,
   RESPONSIVE_DEADLINE_MAX_TICK_MS,
   responsiveDeadlineTickMs,
   sleepWhileResponsive,
@@ -169,6 +170,62 @@ describe("sleepWhileResponsive", () => {
       yield* TestClock.adjust(Duration.days(365));
       assert.isFalse(yield* isDone(forever));
       yield* Fiber.interrupt(forever);
+    }),
+  );
+});
+
+describe("makeResponsiveIdleDeadline", () => {
+  it.effect("starts the budget over on every touch and expires a whole budget after the last", () =>
+    Effect.gen(function* () {
+      // 2 s budget: 500 ms ticks.
+      const deadline = yield* makeResponsiveIdleDeadline("2 seconds");
+      const fiber = yield* deadline.expired.pipe(Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust(Duration.millis(1_900));
+      deadline.touch();
+      // Touches between ticks, not on them.
+      yield* TestClock.adjust(Duration.millis(1_250));
+      deadline.touch();
+      yield* TestClock.adjust(Duration.millis(1_999));
+      assert.isFalse(yield* isDone(fiber));
+      yield* TestClock.adjust(Duration.millis(1));
+      assert.isTrue(yield* isDone(fiber));
+    }),
+  );
+
+  it.effect(
+    "charges a suspended gap one tick, and output it held back starts the budget over",
+    () =>
+      Effect.gen(function* () {
+        const clock = yield* makeObservedClock();
+        const deadline = yield* clock.provide(makeResponsiveIdleDeadline("2 seconds"));
+        const fiber = yield* deadline.expired.pipe(Effect.forkChild({ startImmediately: true }));
+        yield* TestClock.adjust(Duration.millis(1_400));
+        // The machine sleeps for 10 minutes inside the third tick, which fires late on wake.
+        clock.jump(600_000);
+        yield* TestClock.adjust(Duration.millis(100));
+        assert.isFalse(yield* isDone(fiber));
+        // Then the output that arrived meanwhile is read.
+        deadline.touch();
+        yield* TestClock.adjust(Duration.millis(1_999));
+        assert.isFalse(yield* isDone(fiber));
+        yield* TestClock.adjust(Duration.millis(1));
+        assert.isTrue(yield* isDone(fiber));
+      }),
+  );
+
+  it.effect("charges nothing for a step that ends at the moment of a touch", () =>
+    Effect.gen(function* () {
+      const clock = yield* makeObservedClock();
+      const deadline = yield* clock.provide(makeResponsiveIdleDeadline("2 seconds"));
+      const fiber = yield* deadline.expired.pipe(Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust(Duration.millis(300));
+      deadline.touch();
+      // The first tick fires 200 ms early by the monotonic clock: at the touch's own time.
+      clock.jump(-200);
+      yield* TestClock.adjust(Duration.millis(2_199));
+      assert.isFalse(yield* isDone(fiber));
+      yield* TestClock.adjust(Duration.millis(1));
+      assert.isTrue(yield* isDone(fiber));
     }),
   );
 });
