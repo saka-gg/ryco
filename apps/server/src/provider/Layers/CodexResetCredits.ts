@@ -10,6 +10,7 @@ import {
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import { expandHomePath } from "../../pathExpansion.ts";
+import { codexRuntimeBinding } from "../codexRuntimeBinding.ts";
 import {
   timeoutWhileResponsive,
   timeoutWhileResponsiveOrElse,
@@ -73,15 +74,7 @@ const CreditSnapshot = Schema.Struct({
     Schema.NullOr(CodexSchema.V2GetAccountRateLimitsResponse__RateLimitResetCreditsSummary),
   ),
 });
-export const runtimeBinding = (input: ResetCreditRuntime) =>
-  hash(
-    JSON.stringify([
-      input.instanceId,
-      input.binaryPath,
-      input.homePath,
-      Object.entries(input.environment).toSorted(([a], [b]) => a.localeCompare(b)),
-    ]),
-  );
+export const runtimeBinding = (input: ResetCreditRuntime) => codexRuntimeBinding(input);
 const accountBinding = (runtime: string, accountId: string, email: string) =>
   hash(JSON.stringify([runtime, accountId, email]));
 const readClientAccount = (client: CodexClient.CodexAppServerClientShape) =>

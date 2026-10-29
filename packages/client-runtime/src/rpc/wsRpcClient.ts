@@ -10,6 +10,7 @@ import type {
   LocalApi,
   OpinionatedPluginCheckInput,
   OpinionatedPluginInstallInput,
+  ProviderSignInWireEvent,
   ServerSettingsPatch,
 } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
@@ -504,6 +505,16 @@ export interface WsRpcClient {
     readonly subscribeConfig: RpcStreamMethod<typeof WS_METHODS.subscribeServerConfig>;
     readonly subscribeLifecycle: RpcStreamMethod<typeof WS_METHODS.subscribeServerLifecycle>;
     readonly subscribeAuthAccess: RpcStreamMethod<typeof WS_METHODS.subscribeAuthAccess>;
+  };
+  /** Owner-only; a node without it answers "Unknown request tag" (`isUnsupportedRpcError`). */
+  readonly providerSignIn: {
+    readonly subscribe: (
+      input: RpcInput<typeof WS_METHODS.providerSignInSubscribe>,
+      listener: (event: ProviderSignInWireEvent) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    readonly start: RpcUnaryMethod<typeof WS_METHODS.providerSignInStart>;
+    readonly respond: RpcUnaryMethod<typeof WS_METHODS.providerSignInRespond>;
   };
   readonly keybindings: {
     readonly replaceCustom: RpcUnaryMethod<typeof WS_METHODS.keybindingsReplaceCustom>;
@@ -1153,6 +1164,18 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           ...options,
           tag: WS_METHODS.subscribeAuthAccess,
         }),
+    },
+    providerSignIn: {
+      subscribe: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.providerSignInSubscribe](input),
+          listener,
+          { ...options, tag: WS_METHODS.providerSignInSubscribe },
+        ),
+      start: (input) =>
+        transport.request((client) => client[WS_METHODS.providerSignInStart](input)),
+      respond: (input) =>
+        transport.request((client) => client[WS_METHODS.providerSignInRespond](input)),
     },
     keybindings: {
       replaceCustom: (input) =>

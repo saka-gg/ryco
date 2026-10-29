@@ -44,6 +44,7 @@ import { Effect, Equal, Exit, PubSub, Ref, Schema, Scope, Stream } from "effect"
 import * as Semaphore from "effect/Semaphore";
 
 import { trackStartupPhase } from "../../startupStallMonitor.ts";
+import { resolveInstanceEnabled } from "../providerInstanceConfig.ts";
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
 import type {
   ConfiguredProviderIdentity,
@@ -132,22 +133,11 @@ const orderChanged = <A>(previousOrder: ReadonlyArray<A>, nextOrder: ReadonlyArr
   return false;
 };
 
-const decodedConfigEnabled = (config: unknown): boolean | undefined => {
-  if (!config || typeof config !== "object" || globalThis.Array.isArray(config)) {
-    return undefined;
-  }
-  const enabled = (config as { readonly enabled?: unknown }).enabled;
-  return typeof enabled === "boolean" ? enabled : undefined;
-};
-
 /** Decode an envelope's opaque config; the single decode path for builds and boot seeding. */
 const decodeInstanceConfig = <R>(driver: AnyProviderDriver<R>, entry: ProviderInstanceConfig) =>
   Schema.decodeUnknownEffect(driver.configSchema)(entry.config ?? driver.defaultConfig()).pipe(
     Effect.result,
   );
-
-const resolveInstanceEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown): boolean =>
-  entry.enabled ?? decodedConfigEnabled(typedConfig) ?? true;
 
 /** The configured identity of a built instance. */
 export const configuredIdentityOfInstance = (

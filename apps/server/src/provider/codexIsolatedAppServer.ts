@@ -13,9 +13,9 @@
  */
 import { realpath } from "node:fs/promises";
 
-import { Effect, Layer, Schema } from "effect";
+import { type Duration, Effect, Layer, Schema } from "effect";
 import type * as CodexClient from "effect-codex-app-server/client";
-import { ChildProcessSpawner } from "effect/process";
+import type { ChildProcessSpawner } from "effect/process";
 import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 
 import { loadCodexAppServerModule } from "./codexAppServerModule.ts";
@@ -48,6 +48,13 @@ export interface IsolatedCodexAppServerInput {
   readonly cwd: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly binaryPath: string;
+  /** The whole job's budget; `CODEX_ISOLATED_APP_SERVER_TIMEOUT` unless a job waits on a person. */
+  readonly timeout?: Duration.Input;
+  /**
+   * Called once the process ended or its streams broke. Pending requests fail on their own; a job
+   * that waits on a notification needs this to stop waiting.
+   */
+  readonly onTermination?: CodexClient.CodexAppServerClientOptions["onTermination"];
 }
 
 const unavailable = (detail: string) => (cause: unknown) =>
@@ -78,6 +85,7 @@ export const withIsolatedCodexAppServer = <A, E, R>(
           cwd: input.cwd,
           env: { ...codexProcessEnvironment(input.layout, input.environment), CODEX_HOME: home },
           timeoutOrElse: timeoutWhileResponsiveOrElse,
+          onTermination: input.onTermination,
         }),
       ).pipe(Effect.mapError(unavailable("Codex could not start.")));
       const client = yield* Effect.service(codexAppServer.CodexClient.CodexAppServerClient).pipe(
@@ -107,7 +115,7 @@ export const withIsolatedCodexAppServer = <A, E, R>(
     }),
   ).pipe(
     timeoutWhileResponsiveOrElse({
-      duration: CODEX_ISOLATED_APP_SERVER_TIMEOUT,
+      duration: input.timeout ?? CODEX_ISOLATED_APP_SERVER_TIMEOUT,
       orElse: () =>
         Effect.fail(
           new CodexIsolatedAppServerError({

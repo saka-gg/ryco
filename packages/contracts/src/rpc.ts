@@ -45,6 +45,13 @@ import {
 } from "./sessionImport.ts";
 import { ThreadForkError, ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
 import {
+  ProviderSignInError,
+  ProviderSignInInput,
+  ProviderSignInRespondInput,
+  ProviderSignInState,
+  ProviderSignInWireEvent,
+} from "./providerSignIn.ts";
+import {
   WorktreeSetupCancelInput,
   WorktreeSetupCancelResult,
   WorktreeSetupSnapshot,
@@ -563,6 +570,9 @@ export const WS_METHODS = {
   notesCommand: "notes.command",
 
   serverRefreshProviders: "server.refreshProviders",
+  providerSignInSubscribe: "provider.signIn.subscribe",
+  providerSignInStart: "provider.signIn.start",
+  providerSignInRespond: "provider.signIn.respond",
   providerPrewarmSession: "provider.prewarmSession",
   providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
@@ -1055,6 +1065,26 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
   }),
   success: ServerProviderUpdatedPayload,
   error: AuthRpcError,
+});
+
+/** Follows an instance's sign-in: its state, and a terminal flow's output. Owners only. */
+export const WsProviderSignInSubscribeRpc = Rpc.make(WS_METHODS.providerSignInSubscribe, {
+  payload: ProviderSignInInput,
+  success: ProviderSignInWireEvent,
+  error: Schema.Union([ProviderSignInError, AuthRpcError]),
+  stream: true,
+});
+
+/** Starts a sign-in, or answers the running one's state; one flow per instance. */
+export const WsProviderSignInStartRpc = Rpc.make(WS_METHODS.providerSignInStart, {
+  payload: ProviderSignInInput,
+  success: ProviderSignInState,
+  error: Schema.Union([ProviderSignInError, AuthRpcError]),
+});
+
+export const WsProviderSignInRespondRpc = Rpc.make(WS_METHODS.providerSignInRespond, {
+  payload: ProviderSignInRespondInput,
+  error: Schema.Union([ProviderSignInError, AuthRpcError]),
 });
 
 export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
@@ -2586,6 +2616,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
+  | typeof WsProviderSignInSubscribeRpc
+  | typeof WsProviderSignInStartRpc
+  | typeof WsProviderSignInRespondRpc
   | typeof WsProviderPrewarmSessionRpc
   | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
@@ -2813,6 +2846,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
+  WsProviderSignInSubscribeRpc,
+  WsProviderSignInStartRpc,
+  WsProviderSignInRespondRpc,
   WsProviderPrewarmSessionRpc,
   WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,

@@ -4,6 +4,7 @@ import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { PullRequestWatchService } from "../sourceControl/PullRequestWatchService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
+import { ProviderSignIn } from "../provider/signIn/ProviderSignIn.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
 import { StorageService } from "../storage/StorageService.ts";
@@ -274,6 +275,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     // Optional for the route-test reason above; production provides it with the runtime.
     const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
+    const providerSignIn = yield* Effect.serviceOption(ProviderSignIn);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     // Optional: route tests without the orchestration runtime answer "skipped".
     const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
@@ -1427,6 +1429,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       pullRequestWatch,
       worktreeNotesService,
       nodeUpdate,
+      providerSignIn,
       config,
       lifecycleEvents,
       serverSettings,

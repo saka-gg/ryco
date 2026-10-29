@@ -15,6 +15,7 @@ import {
   WsGitResumeStackedActionRpc,
   WsGitRunStackedActionRpc,
   WsHostedRpcGroup,
+  WsProviderSignInSubscribeRpc,
   WsOrchestrationReplayEventsPageRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationSubscribeShellRpc,
@@ -30,6 +31,7 @@ import {
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
 } from "./rpc.ts";
+import { ProviderSignInEvent, ProviderSignInWireEvent } from "./providerSignIn.ts";
 import { ServerConfigStreamEvent, ServerConfigStreamWireEvent } from "./server.ts";
 import { TerminalEvent, TerminalWireEvent } from "./terminal.ts";
 
@@ -59,6 +61,20 @@ const futureEvent = {
   payload: { pinnedBy: "someone" },
 };
 const terminal = { threadId: "thread-1", terminalId: "default", createdAt: at };
+const signInState = {
+  instanceId: "codex",
+  phase: "waiting",
+  flowId: "flow-1",
+  method: "codexDeviceCode",
+  unavailableReason: null,
+  interaction: {
+    type: "deviceCode",
+    verificationUrl: "https://auth.example.test/device",
+    userCode: "ABCD-1234",
+  },
+  expiresAt: at,
+  message: null,
+};
 
 const placeholder = (tag: string, value: string, kept: object = {}) =>
   Object.assign(new UnknownUnionMember(tag, value), kept);
@@ -173,6 +189,37 @@ const cases: ReadonlyArray<WireUnionCase> = [
     known: [{ ...terminal, type: "output", data: "ls\n" }],
     broken: [{ ...terminal, type: "output", data: 42 }],
     unknown: [{ wire: { ...terminal, type: "bell" }, decoded: placeholder("type", "bell") }],
+  },
+  {
+    name: "provider sign-in events",
+    schema: ProviderSignInWireEvent,
+    strict: {
+      schema: ProviderSignInEvent,
+      rejects: { type: "prompt", flowId: "flow-1", text: "Press Enter" },
+    },
+    rpc: WsProviderSignInSubscribeRpc,
+    known: [
+      { type: "state", state: signInState },
+      { type: "output", flowId: "flow-1", offset: 0, data: "Paste the code:", reset: true },
+    ],
+    broken: [
+      { type: "output", flowId: "flow-1", offset: -1, data: "x" },
+      { type: "state", state: { ...signInState, phase: "paused" } },
+    ],
+    unknown: [
+      {
+        wire: { type: "prompt", flowId: "flow-1", text: "Press Enter" },
+        decoded: placeholder("type", "prompt"),
+      },
+      // A way to sign in a newer node adds shows as a placeholder inside a known state.
+      {
+        wire: { type: "state", state: { ...signInState, interaction: { type: "qrCode" } } },
+        decoded: {
+          type: "state",
+          state: { ...signInState, interaction: placeholder("type", "qrCode") },
+        },
+      },
+    ],
   },
 ];
 
