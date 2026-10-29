@@ -1,6 +1,9 @@
-import type { AuthSessionId, RelayEffectiveRole } from "@ryco/contracts";
+import type * as Http from "node:http";
+import type { AuthSessionId, RelayEffectiveRole, TurnOrigin } from "@ryco/contracts";
+import type { HttpServerRequest } from "effect/http";
 
 import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
+import { isDirectLoopbackUpgrade } from "../webSocketCompression.ts";
 
 export type RpcPrincipalRole = "viewer" | "operator" | "owner";
 
@@ -30,6 +33,11 @@ export interface RpcPrincipal {
   readonly directSessionId?: AuthSessionId;
   /** The direct session's pairing (rotation chain); every renewal of the pairing shares it. */
   readonly directChainId?: AuthSessionId;
+  /**
+   * Direct connections only: a process on this machine (`local`: a loopback connection without
+   * forwarding headers) or another machine (`remote`). Absent when the address is unknown.
+   */
+  readonly peer?: "local" | "remote";
   readonly canManageLocalAccess: boolean;
   /** Relay channels only; see {@link RelayChannelAuthority}. */
   readonly relayAuthority?: () => RelayChannelAuthority;
@@ -97,3 +105,25 @@ export function rpcPrincipalOwnerKey(principal: RpcPrincipal): string {
     ? RELAY_UNIDENTIFIED_OWNER_KEY
     : `relay-device:${Buffer.from(authority.clientIdentityFingerprint).toString("hex")}`;
 }
+
+/** Where a turn sent over this connection comes from; undefined when the peer is unknown. */
+export const turnOriginOfPrincipal = (principal: RpcPrincipal): TurnOrigin | undefined =>
+  principal.transport === "relay"
+    ? { connection: "relay" }
+    : principal.peer === undefined
+      ? undefined
+      : { connection: principal.peer };
+
+/**
+ * The locality of a direct connection's peer, from its upgrade request: a loopback connection
+ * without forwarding headers is a process on this machine; a local reverse proxy (Tailscale
+ * Serve, say) that relays a remote client marks it with forwarding headers. Nothing when the
+ * runtime gives no socket address.
+ */
+export const directPeerOf = (
+  request: HttpServerRequest.HttpServerRequest,
+): Pick<RpcPrincipal, "peer"> => {
+  const source = request.source as Partial<Http.IncomingMessage> | undefined;
+  if (source?.socket?.remoteAddress === undefined || source.headers === undefined) return {};
+  return { peer: isDirectLoopbackUpgrade(source as Http.IncomingMessage) ? "local" : "remote" };
+};

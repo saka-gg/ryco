@@ -2055,6 +2055,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: targetThread.interactionMode,
           tokenMode: normalizeTokenMode(targetThread.tokenMode),
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          ...(command.origin !== undefined ? { origin: command.origin } : {}),
           ...(isContextHandoff
             ? {
                 contextHandoff: {
@@ -2191,6 +2192,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           expectedTurnId: command.expectedTurnId,
           message: command.message,
           ...threadReferencesPayload(command.threadReferences, command.threadId),
+          ...(command.origin !== undefined ? { origin: command.origin } : {}),
           createdAt: command.createdAt,
           requestedAt: command.requestedAt,
         },

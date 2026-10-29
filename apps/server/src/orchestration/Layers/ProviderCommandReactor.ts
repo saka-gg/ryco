@@ -75,6 +75,7 @@ import {
   type RuntimeMode,
   type AgentTokenMode,
   type TurnId,
+  type TurnOrigin,
   type TurnSteerRejectionReason,
   type WorktreeId,
 } from "@ryco/contracts";
@@ -156,6 +157,7 @@ import { readCheckoutHead } from "../../vcs/gitCheckoutHead.ts";
 import { isBranchPreconditionFailure } from "../commandInvariants.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { withProviderGoalPrompt } from "../../provider/goalMode.ts";
+import { withTurnOriginLine } from "../turnOrigin.ts";
 import {
   type ProviderFailureActivityInput,
   providerFailureActivityCommand,
@@ -1366,6 +1368,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     readonly messageText: string;
     /** Excerpts of the threads the message mentions; provider input only. */
     readonly referenceContext?: string;
+    /** Where the user sent the turn from (`turnOrigin`): another device adds one line. */
+    readonly origin?: TurnOrigin;
     readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -1422,16 +1426,19 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
-    const normalizedInput = appendThreadReferenceContext(
-      withProviderGoalPrompt({
-        message: toNonEmptyProviderInput(
-          input.computerUse
-            ? (parseComputerInvocation(input.messageText)?.prompt ?? input.messageText)
-            : input.messageText,
-        ),
-        goal: native ? null : goal,
-      }),
-      input.referenceContext,
+    const normalizedInput = withTurnOriginLine(
+      appendThreadReferenceContext(
+        withProviderGoalPrompt({
+          message: toNonEmptyProviderInput(
+            input.computerUse
+              ? (parseComputerInvocation(input.messageText)?.prompt ?? input.messageText)
+              : input.messageText,
+          ),
+          goal: native ? null : goal,
+        }),
+        input.referenceContext,
+      ),
+      input.origin,
     );
     const normalizedAttachments = input.attachments ?? [];
     const customSystemPrompt = project?.customSystemPrompt?.trim() || undefined;
@@ -2291,6 +2298,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       turnMessage: { id: message.id, createdAt: message.createdAt },
       messageText: message.text,
       ...(referenceContext !== undefined ? { referenceContext } : {}),
+      ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
@@ -2773,9 +2781,15 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   ) {
     const key = turnStartKeyForEvent(event);
     if (yield* hasHandledRecently(key)) return;
-    const steerInput = appendThreadReferenceContext(
-      toNonEmptyProviderInput(event.payload.message.text),
-      yield* resolveThreadReferenceContext(projectionSnapshotQuery, event.payload.threadReferences),
+    const steerInput = withTurnOriginLine(
+      appendThreadReferenceContext(
+        toNonEmptyProviderInput(event.payload.message.text),
+        yield* resolveThreadReferenceContext(
+          projectionSnapshotQuery,
+          event.payload.threadReferences,
+        ),
+      ),
+      event.payload.origin,
     );
     const steer = Effect.suspend(() =>
       providerService.steerTurn({

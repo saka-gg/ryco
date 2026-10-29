@@ -1411,6 +1411,40 @@ describe("ProviderCommandReactor", () => {
     );
   });
 
+  it("tells the agent a relayed turn comes from another device, in the input only", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-relayed"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-relayed"),
+          role: "user",
+          text: "Open the preview",
+          attachments: [],
+        },
+        origin: { connection: "relay" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const input =
+      (harness.sendTurn.mock.calls[0]?.[0] as { readonly input?: string } | undefined)?.input ?? "";
+    expect(input.startsWith("<ryco_sent_from>")).toBe(true);
+    expect(input).toContain("localhost or 127.0.0.1");
+    expect(input.endsWith("</ryco_sent_from>\n\nOpen the preview")).toBe(true);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.messages.find((entry) => entry.role === "user")?.text).toBe("Open the preview");
+  });
+
   it("refuses delayed goal recovery after cleanup claims or removes a checkout", async () => {
     const harness = await createHarness({ startReactor: false });
     const checkout = await canonicalStoragePath(path.join(harness.stateDir, "missing-checkout"));
