@@ -42,12 +42,16 @@ const DEVICE_LIST_JSON = JSON.stringify({
   },
 });
 
-const probePayload = (capabilities: Record<string, unknown>): string =>
+const probePayload = (
+  capabilities: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+): string =>
   JSON.stringify({
     ok: Object.values(capabilities).every((value) => value === "ok"),
     protocolVersion: 1,
     capabilities,
     toolchain: { xcodeVersion: "26.3", xcodeBuild: "17D1", macOS: "Version 26.3" },
+    ...extra,
   });
 
 const ALL_OK = {
@@ -109,7 +113,10 @@ async function capabilityCacheKey(): Promise<string> {
  * A backend wired to a cache directory containing a fake helper binary, so
  * `cachedHelperPath()` resolves and the probe runs.
  */
-async function makeBackend(capabilities: Record<string, unknown>) {
+async function makeBackend(
+  capabilities: Record<string, unknown>,
+  probeExtra: Record<string, unknown> = {},
+) {
   const cacheRoot = await mkdtemp(path.join(tmpdir(), "ryco-capability-"));
   // The directory name must match the key the backend derives, or the cache
   // lookup misses and no probe runs. That key is the stubbed `xcodebuild
@@ -137,7 +144,7 @@ async function makeBackend(capabilities: Record<string, unknown>) {
       const probeIndex = args.indexOf(binaryPath);
       if (command === binaryPath || (command.endsWith("sandbox-exec") && probeIndex !== -1)) {
         probeCalls.push(command === binaryPath ? args : args.slice(probeIndex + 1));
-        return ok(probePayload(capabilities));
+        return ok(probePayload(capabilities, probeExtra));
       }
       if (command === "xcode-select") return ok("/Applications/Xcode.app/Contents/Developer");
       if (command === "xcodebuild") {
@@ -239,7 +246,19 @@ describe("a broken input path", () => {
     await expect(backend.tap(DEVICE, 1, 1)).rejects.toThrow(
       /Touch and keyboard input is unavailable.*IndigoHIDMessageForButton/u,
     );
+    await expect(backend.tap(DEVICE, 1, 1)).rejects.not.toThrow(/dtuhidd/u);
     await expect(backend.describeUi(DEVICE)).resolves.toMatchObject({ udid: DEVICE });
+  });
+
+  it("names the dtuhidd transport when that is the input path that broke", async () => {
+    const { backend } = await makeBackend(
+      { ...ALL_OK, hid: { missingSymbol: "xpc_endpoint_create_mach_port_4sim" } },
+      { inputTransport: "dtuhid" },
+    );
+
+    await expect(backend.tap(DEVICE, 1, 1)).rejects.toThrow(
+      "Touch and keyboard input is unavailable with Xcode 26.3 (17D1). The device helper could not resolve 'xpc_endpoint_create_mach_port_4sim' (dtuhidd input transport).",
+    );
   });
 
   it("keeps screenshots working even when the framebuffer path is broken", async () => {

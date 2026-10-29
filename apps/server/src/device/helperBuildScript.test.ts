@@ -163,7 +163,12 @@ describe.skipIf(process.platform === "win32")("device helper build.sh", () => {
       });
     // Order matters only for readability; the list must name every .m file,
     // so a new bridge cannot be left out of the build.
-    expect(clangSources).toEqual(["AXBridge.m", "CoreSimulatorVersion.m", "HIDBridge.m"]);
+    expect(clangSources).toEqual([
+      "AXBridge.m",
+      "CoreSimulatorVersion.m",
+      "DTUHIDTransport.m",
+      "HIDBridge.m",
+    ]);
     expect(clangSources).toEqual(sourceFiles(".m"));
 
     const swiftc = calls.filter((argv) => argv[0] === "swiftc");

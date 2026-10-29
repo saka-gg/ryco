@@ -37,8 +37,6 @@ import type {
   DeviceSetupStep,
   DeviceStartRecordingResult,
   DeviceStopRecordingResult,
-  DeviceUiNode,
-  DeviceUiPoint,
 } from "@ryco/contracts";
 
 import {
@@ -67,14 +65,17 @@ import {
   availabilityFromProbe,
   capabilityUnavailableMessage,
   parseHelperProbe,
+  type HelperInputTransport,
   type HelperProbeResult,
 } from "./helperCapabilities.ts";
 import { HELPER_METHODS, HelperClient, type DeviceHelperError } from "./helperClient.ts";
+import { inputRetryFor, type InputRetry } from "./helperInputErrors.ts";
 import {
   SANDBOX_OPT_OUT_ENV,
   sandboxedHelperCommand,
   type HelperSandboxCommand,
 } from "./helperSandbox.ts";
+import { normalizeUiNode } from "./uiTreeTargeting.ts";
 
 const SIMCTL_TIMEOUT_MS = 30_000;
 /**
@@ -105,6 +106,12 @@ const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
  * new Xcode builds at once; a fix that keeps the Xcode is retried after this.
  */
 const HELPER_BUILD_RETRY_MS = 60_000;
+/**
+ * Characters per `text` RPC. The helper paces keystrokes at roughly 36 ms each
+ * and every RPC shares a 15 s deadline (13 s of it for input), so a long
+ * string sent whole timed out and the retry typed it a second time.
+ */
+const TEXT_CHUNK_LENGTH = 120;
 
 export const DEVICE_HELPER_CACHE_ROOT = path.join(homedir(), ...DEVICE_HELPER_CACHE_SEGMENTS);
 
@@ -289,6 +296,10 @@ export class IosSimulatorBackend implements DeviceBackend {
   ) => HelperClient;
   /** One warning per backend when the helper runs unconfined. */
   private warnedUnsandboxed = false;
+  /** Input transports already logged, so each is named once per backend. */
+  private readonly loggedInputTransports = new Set<HelperInputTransport>();
+  /** Settles when the last queued helper call has; see serializeHelper. */
+  private helperTail: Promise<void> = Promise.resolve();
   private readonly spawnProcess: SpawnRecordingProcess;
   private readonly recordingDirectoryOverride: string | undefined;
   private readonly now: () => number;
@@ -473,12 +484,12 @@ export class IosSimulatorBackend implements DeviceBackend {
    * Cached for the process lifetime, keyed on the helper binary path: a new
    * selected Xcode or new helper sources produce a different cache key and
    * therefore a different path. The one input it cannot see is the system-wide
-   * CoreSimulator, which the helper's `hid` answer depends on: installing a
-   * newer Xcode while the server runs upgrades it under the same path. Until
-   * the next restart the pane can then show input as available, while the
-   * helper refuses each input call and names the CoreSimulator version in the
-   * error, so nothing is acked and lost. Returns null when no helper is built
-   * yet, since there is nothing to probe.
+   * CoreSimulator, which picks the input transport: installing a newer Xcode
+   * while the server runs upgrades it under the same path. The helper itself
+   * chooses the transport at each attach, so input follows the new
+   * CoreSimulator at once; only the cached `inputTransport` (and with it the
+   * symbols `hid` was checked against) stays stale until the next restart.
+   * Returns null when no helper is built yet, since there is nothing to probe.
    */
   private async probeHelperCapabilities(): Promise<HelperProbeResult | null> {
     const binaryPath = await this.cachedHelperPath();
@@ -521,7 +532,21 @@ export class IosSimulatorBackend implements DeviceBackend {
     if (probe === null) return;
     const status = probe.capabilities.find((entry) => entry.id === capability);
     if (!status || status.ok) return;
-    throw new DeviceBackendError(capabilityUnavailableMessage(status, probe.toolchain));
+    const message = capabilityUnavailableMessage(status, probe.toolchain);
+    if (capability !== "hid" || probe.inputTransport !== "dtuhid") {
+      throw new DeviceBackendError(message);
+    }
+    // Name the path that failed: on Xcode 27 the symbols checked are the
+    // dtuhidd ones, not the Indigo builders a reader may expect.
+    const sentence = message.endsWith(".") ? message.slice(0, -1) : message;
+    throw new DeviceBackendError(`${sentence} (dtuhidd input transport).`);
+  }
+
+  /** Logs which transport carries input, once per transport per backend. */
+  private noteInputTransport(transport: HelperInputTransport | null | undefined): void {
+    if (!transport || this.loggedInputTransports.has(transport)) return;
+    this.loggedInputTransports.add(transport);
+    console.info(`[device] iOS Simulator input goes through ${transport} on this Xcode`);
   }
 
   // ── Discovery and lifecycle ────────────────────────────────────────
@@ -742,61 +767,115 @@ export class IosSimulatorBackend implements DeviceBackend {
    * Ryco, SimulatorKit dropped the connection) the injection silently
    * vanishes. The helper now reports that instead of acking it, and a forced
    * re-attach rebuilds the client, so the retry lands on a live one.
+   *
+   * Only an operation the helper says sent nothing ("nothing was sent:") is
+   * repeated, and how is decided by `inputRetryFor`: replaying a partially
+   * delivered one would type text twice or repeat half a gesture. The rule is
+   * per helper RPC. A caller that builds on it (agent tools, the pane) sees
+   * "nothing was sent" only when its whole call sent nothing; `typeText`
+   * rewords a failure after its first chunk (see `partlyTypedError`).
    */
   private async injectInput(
     udid: string,
     method: string,
     buildParams: (helper: HelperClient) => Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<unknown> {
     await this.assertCapability("hid");
     const helper = await this.attachedHelper(udid);
+    let retry: InputRetry = "none";
     try {
-      await this.helperRequest(method, buildParams(helper));
-      return;
+      return await this.helperRequest(helper, method, buildParams(helper));
     } catch (error) {
-      if (!isInputNotDeliveredError(error)) throw error;
+      retry = inputRetryFor(error, helper.attachedDevice?.inputTransport);
+      if (retry === "none") throw error;
     }
-    const rebound = await this.attachedHelper(udid, { force: true });
-    await this.helperRequest(method, buildParams(rebound));
+    const target =
+      retry === "same-attachment" ? helper : await this.attachedHelper(udid, { force: true });
+    return await this.helperRequest(target, method, buildParams(target));
+  }
+
+  /**
+   * Runs one call that binds the helper at a time, for every device, in call
+   * order. The helper holds one attachment and its input and read methods take
+   * no udid, so an attach for another device between a call's attach and its
+   * request sends that request to the wrong simulator. `typeText` also spans
+   * one helper RPC per chunk and a key chord one per key; without this a pane
+   * tap or another thread's input could land between them, and the rest of
+   * the text would go to whatever has focus by then. The helper's own queue
+   * only serializes single RPCs. Waiting here also keeps a queued call's 15 s
+   * request timer from starting before its turn.
+   */
+  private async serializeHelper<A>(operation: () => Promise<A>): Promise<A> {
+    const result = this.helperTail.then(operation);
+    this.helperTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await result;
   }
 
   async tap(udid: string, x: number, y: number): Promise<void> {
-    await this.injectInput(udid, HELPER_METHODS.tap, (helper) => helper.normalize(x, y));
+    await this.serializeHelper(() =>
+      this.injectInput(udid, HELPER_METHODS.tap, (helper) => helper.normalize(x, y)),
+    );
   }
 
   async swipe(udid: string, gesture: DeviceSwipeGesture): Promise<void> {
-    await this.injectInput(udid, HELPER_METHODS.swipe, (helper) => {
-      const start = helper.normalize(gesture.fromX, gesture.fromY);
-      const end = helper.normalize(gesture.toX, gesture.toY);
-      return {
-        startX: start.x,
-        startY: start.y,
-        endX: end.x,
-        endY: end.y,
-        durationMs: gesture.durationMs,
-      };
-    });
+    await this.serializeHelper(() =>
+      this.injectInput(udid, HELPER_METHODS.swipe, (helper) => {
+        const start = helper.normalize(gesture.fromX, gesture.fromY);
+        const end = helper.normalize(gesture.toX, gesture.toY);
+        return {
+          startX: start.x,
+          startY: start.y,
+          endX: end.x,
+          endY: end.y,
+          durationMs: gesture.durationMs,
+        };
+      }),
+    );
   }
 
+  /**
+   * Types `text` in chunks of at most TEXT_CHUNK_LENGTH characters, in order,
+   * with no other input to the device in between. A failure stops at that
+   * chunk. If it is the first, the helper's error stands; after that the call
+   * was partially delivered whatever the helper says about the failed chunk,
+   * so the error says how much was typed and not to replay it whole.
+   */
   async typeText(udid: string, text: string): Promise<void> {
-    await this.injectInput(udid, HELPER_METHODS.text, () => ({ text }));
+    await this.serializeHelper(async () => {
+      let typed = "";
+      for (const chunk of textChunks(text, TEXT_CHUNK_LENGTH)) {
+        try {
+          await this.injectInput(udid, HELPER_METHODS.text, () => ({ text: chunk }));
+        } catch (error) {
+          if (typed.length === 0) throw error;
+          throw partlyTypedError(error, typed, text, chunk);
+        }
+        typed += chunk;
+      }
+    });
   }
 
   async keyEvent(udid: string, event: DeviceKeyEvent): Promise<void> {
     // The helper takes one USB HID usage per call and tracks held modifiers
-    // itself, so a chord is sent as its modifier keys around the main key.
-    for (const modifier of event.modifiers) {
-      const usage = HID_MODIFIER_USAGES[modifier];
-      if (usage === undefined) continue;
+    // itself, so a chord is sent as its modifier keys around the main key,
+    // with no other input in between.
+    await this.serializeHelper(async () => {
+      for (const modifier of event.modifiers) {
+        const usage = HID_MODIFIER_USAGES[modifier];
+        if (usage === undefined) continue;
+        await this.injectInput(udid, HELPER_METHODS.key, () => ({
+          usage,
+          phase: event.direction,
+        }));
+      }
       await this.injectInput(udid, HELPER_METHODS.key, () => ({
-        usage,
+        usage: event.keyCode,
         phase: event.direction,
       }));
-    }
-    await this.injectInput(udid, HELPER_METHODS.key, () => ({
-      usage: event.keyCode,
-      phase: event.direction,
-    }));
+    });
   }
 
   async pressButton(udid: string, button: DeviceHardwareButton): Promise<void> {
@@ -818,13 +897,16 @@ export class IosSimulatorBackend implements DeviceBackend {
       );
     }
     await this.assertCapability("hid");
-    await this.injectInput(udid, HELPER_METHODS.button, () => ({ name: button }));
+    await this.serializeHelper(() =>
+      this.injectInput(udid, HELPER_METHODS.button, () => ({ name: button })),
+    );
   }
 
   async describeUi(udid: string): Promise<DeviceDescribeUiResult> {
     await this.assertCapability("accessibility");
-    await this.attachedHelper(udid);
-    const result = await this.helperRequest(HELPER_METHODS.describeUi, {});
+    const result = await this.serializeHelper(async () =>
+      this.helperRequest(await this.attachedHelper(udid), HELPER_METHODS.describeUi, {}),
+    );
     const tree = (result as { tree?: unknown } | null)?.tree;
     if (typeof tree !== "object" || tree === null) {
       throw new DeviceBackendError("Device helper returned no accessibility tree");
@@ -849,8 +931,10 @@ export class IosSimulatorBackend implements DeviceBackend {
     // one of the reads around every action, so it tries a failed build again at once: the user
     // may just have fixed what the error named.
     this.failedHelperBuild = null;
-    const helper = await this.attachedHelper(udid);
-    await helper.startStream(udid, onFrame);
+    await this.serializeHelper(async () => {
+      const helper = await this.attachedHelper(udid);
+      await helper.startStream(udid, onFrame);
+    });
   }
 
   async detachStream(udid: string): Promise<void> {
@@ -1241,8 +1325,12 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   // ── Helper lifecycle ───────────────────────────────────────────────
 
-  private async helperRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
-    const helper = await this.requireHelper();
+  /** Sent to the helper the caller attached, never to one started since. */
+  private async helperRequest(
+    helper: HelperClient,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
     try {
       return await helper.request(method, params);
     } catch (error) {
@@ -1261,8 +1349,9 @@ export class IosSimulatorBackend implements DeviceBackend {
 
   /**
    * The helper is bound to one simulator at a time and every input and read
-   * method acts on that binding, so each call re-asserts it. `attach` is a
-   * no-op when the device is already the attached one.
+   * method acts on that binding, so each call re-asserts it, inside
+   * serializeHelper so no other device can rebind it before the request.
+   * `attach` is a no-op when the device is already the attached one.
    */
   private async attachedHelper(
     udid: string,
@@ -1277,6 +1366,7 @@ export class IosSimulatorBackend implements DeviceBackend {
           pointHeight: attachment.pointHeight,
           scale: attachment.scale,
         });
+        this.noteInputTransport(attachment.inputTransport);
       }
     };
     try {
@@ -1298,6 +1388,7 @@ export class IosSimulatorBackend implements DeviceBackend {
     return helper;
   }
 
+  /** Called only inside serializeHelper, so two first calls start one helper. */
   private async requireHelper(): Promise<HelperClient> {
     if (this.helper?.running) return this.helper;
     const binaryPath = await this.compileHelperIfNeeded();
@@ -1466,6 +1557,56 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Splits `text` into pieces of at most `size` UTF-16 code units, never inside a
+ * surrogate pair: a lone surrogate is not valid in the helper's JSON, so that
+ * request would go unanswered until it timed out. Always at least one piece,
+ * so an empty string still reaches the helper, which refuses it as before.
+ */
+export function textChunks(text: string, size: number): readonly string[] {
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + size, text.length);
+    const last = text.charCodeAt(end - 1);
+    // A high surrogate at the cut belongs with the low one after it.
+    if (end < text.length && end - start > 1 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks.length === 0 ? [text] : chunks;
+}
+
+/**
+ * The error for a `typeText` chunk that failed after earlier chunks were
+ * typed. The helper's "nothing was sent" is true of that chunk only; passed on
+ * as is, it would tell a caller the whole call is safe to repeat, and the
+ * repeat would type the delivered part a second time. So it is reworded, and
+ * the message says how much was typed and not to replay the text whole.
+ * Characters are counted as code points, as a reader counts them.
+ */
+export function partlyTypedError(
+  error: unknown,
+  typed: string,
+  text: string,
+  chunk: string,
+): DeviceBackendError {
+  const detail = errorText(error);
+  // "nothing was sent" speaks for the failing chunk: the count is exact. Otherwise part of that
+  // chunk may have landed too, so the count is a range.
+  const done = Array.from(typed).length;
+  const count = /nothing was sent/iu.test(detail)
+    ? `the first ${done}`
+    : `at least the first ${done} (at most ${done + Array.from(chunk).length})`;
+  const cause = detail.replace(/nothing was sent/giu, "the rest was not sent");
+  return new DeviceBackendError(
+    `Typed ${count} of ${Array.from(text).length} characters, ` +
+      `then input stopped: the text was partially delivered; do not replay it whole, ` +
+      `check the field and send only what is missing. ${cause}`,
+    { cause: error },
+  );
+}
+
 function isMissingPathError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }
@@ -1500,16 +1641,6 @@ function waitForProcessExit(
  * previous boot? The helper reports it as a missing framebuffer surface, since
  * from its side the descriptor is valid but has nothing behind it.
  */
-/**
- * Did the helper accept an injection it could not deliver? Distinct from a
- * stale descriptor: the attachment is live enough to answer, but its HID client
- * is bound to a boot that is gone, so the fix is to rebind and retry once.
- */
-export function isInputNotDeliveredError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /not delivered to the simulator/iu.test(message);
-}
-
 export function isStaleDescriptorError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /framebuffer surface|display has no|not attached/iu.test(message);
@@ -1522,51 +1653,6 @@ const HID_MODIFIER_USAGES: Partial<Record<DeviceKeyModifier, number>> = {
   option: 0xe2,
   command: 0xe3,
 };
-
-/**
- * The helper omits absent accessibility attributes rather than sending nulls,
- * and its frames are in display coordinates. Fill in the contract's shape so
- * the pane and the agent see one predictable node type.
- */
-export function normalizeUiNode(raw: unknown): DeviceUiNode {
-  const node = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
-  const frame =
-    typeof node.frame === "object" && node.frame !== null
-      ? (node.frame as Record<string, unknown>)
-      : {};
-  const readFrameValue = (key: string): number => {
-    const value = frame[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : 0;
-  };
-  const readText = (key: string): string | null => {
-    const value = node[key];
-    return typeof value === "string" && value.length > 0 ? value : null;
-  };
-  // Only a complete pair of finite coordinates is worth surfacing: half a point
-  // would aim taps at (0, y) instead of the control.
-  const readActivationPoint = (): DeviceUiPoint | null => {
-    const raw = node.activationPoint;
-    if (typeof raw !== "object" || raw === null) return null;
-    const { x, y } = raw as Record<string, unknown>;
-    if (typeof x !== "number" || !Number.isFinite(x)) return null;
-    if (typeof y !== "number" || !Number.isFinite(y)) return null;
-    return { x, y };
-  };
-  return {
-    role: typeof node.role === "string" ? node.role : "Unknown",
-    subrole: readText("subrole"),
-    label: readText("label"),
-    value: readText("value"),
-    frame: {
-      x: readFrameValue("x"),
-      y: readFrameValue("y"),
-      width: Math.max(0, readFrameValue("width")),
-      height: Math.max(0, readFrameValue("height")),
-    },
-    activationPoint: readActivationPoint(),
-    children: Array.isArray(node.children) ? node.children.map(normalizeUiNode) : [],
-  };
-}
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 

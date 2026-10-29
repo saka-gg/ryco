@@ -26,12 +26,31 @@ export const DEVICE_CAPABILITY_IDS = [
   "encoder",
 ] as const satisfies readonly DeviceCapabilityId[];
 
+/**
+ * How the helper delivers HID input: `dtuhid` (the guest's dtuhidd service,
+ * CoreSimulator 1155.4+ / Xcode 27) or `indigo` (SimulatorKit's legacy
+ * messages). Server-internal for now: logs and error messages only.
+ */
+export type HelperInputTransport = "dtuhid" | "indigo";
+
+/** The helper's `inputTransport` field; anything else is unknown. */
+export const parseHelperInputTransport = (value: unknown): HelperInputTransport | undefined =>
+  value === "dtuhid" || value === "indigo" ? value : undefined;
+
 export interface HelperProbeResult {
   readonly ok: boolean;
   readonly capabilities: readonly DeviceCapabilityStatus[];
   readonly toolchain: DeviceToolchain | undefined;
   /** A whole-helper failure (frameworks would not load, CoreSimulator unreachable). */
   readonly error: string | undefined;
+  /** The transport `attach` will use on this host; absent from older helpers. */
+  readonly inputTransport?: HelperInputTransport | undefined;
+  /**
+   * The host's CoreSimulator version. It is system-wide and installed by the
+   * newest Xcode, so it can be newer than the selected Xcode, and it is what
+   * picks the input transport.
+   */
+  readonly coreSimulatorVersion?: string | undefined;
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -41,6 +60,14 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
 
 const asNonEmptyString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+
+/** Diagnostics the probe reports next to the capabilities. */
+const parseInputDiagnostics = (
+  record: Record<string, unknown>,
+): Pick<HelperProbeResult, "inputTransport" | "coreSimulatorVersion"> => ({
+  inputTransport: parseHelperInputTransport(record["inputTransport"]),
+  coreSimulatorVersion: asNonEmptyString(asRecord(record["toolchain"])?.["coreSimulatorVersion"]),
+});
 
 const parseToolchain = (value: unknown): DeviceToolchain | undefined => {
   const record = asRecord(value);
@@ -126,6 +153,7 @@ export const parseHelperProbe = (stdout: string): HelperProbeResult => {
       capabilities: [],
       toolchain: parseToolchain(record["toolchain"]),
       error: ok ? undefined : (error ?? "The device helper preflight failed."),
+      ...parseInputDiagnostics(record),
     };
   }
 
@@ -138,6 +166,7 @@ export const parseHelperProbe = (stdout: string): HelperProbeResult => {
     capabilities,
     toolchain: parseToolchain(record["toolchain"]),
     error,
+    ...parseInputDiagnostics(record),
   };
 };
 

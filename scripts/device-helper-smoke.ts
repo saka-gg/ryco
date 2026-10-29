@@ -8,6 +8,13 @@
 //                     refused unless --allow-booted is also given
 //   --allow-booted    with --udid, reuse that simulator if it is already booted
 //                     (it is then left running)
+//   --screenshot-out <path>
+//                     copy the run's screenshot there (Settings with a random
+//                     token typed into its search field, unless the input check
+//                     is off)
+//   --skip-input-check
+//                     skip the check that buttons, touches and keys reach the
+//                     guest (for unusual home screens or Settings layouts)
 //
 // Without --udid the smoke prefers an already-booted simulator, which suits a
 // developer's machine but not an agent sharing one: agents pass --udid.
@@ -20,7 +27,15 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { createServer, type Server, type Socket } from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -34,18 +49,35 @@ import {
   readDeviceHelperSourceRevision,
 } from "@ryco/shared/deviceHelperCache";
 
-import { parseHelperProbe } from "../apps/server/src/device/helperCapabilities.ts";
+import {
+  parseHelperInputTransport,
+  parseHelperProbe,
+  type HelperInputTransport,
+} from "../apps/server/src/device/helperCapabilities.ts";
+import { inputRetryFor } from "../apps/server/src/device/helperInputErrors.ts";
 import { sandboxedHelperCommand } from "../apps/server/src/device/helperSandbox.ts";
 import {
   parseSmokeOptions,
   selectSmokeSimulator,
   type SimctlDevice,
 } from "./lib/device-helper-smoke-options.ts";
+import {
+  findSearchField,
+  isTransientUiTreeError,
+  layoutStableToken,
+  mentions,
+  normalizedTapPoint,
+  readUiTree,
+  rootLabel,
+  showsAnotherApp,
+  visibleLabels,
+} from "./lib/device-helper-smoke-ui.ts";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helperDir = join(repoRoot, "apps/server/native/device-helper");
 const requiredFrames = 30;
+const settingsBundleId = "com.apple.Preferences";
 
 let stepNumber = 0;
 const step = (message: string): void => console.log(`[device-smoke] ${++stepNumber}. ${message}`);
@@ -131,6 +163,8 @@ class HelperClient {
   private buffer = "";
   private nextId = 1;
   readonly stderr: string[] = [];
+  /** The attachment's input transport, from `attach`; picks the retry rule. */
+  inputTransport: HelperInputTransport | null = null;
 
   constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child;
@@ -202,6 +236,23 @@ class HelperClient {
       });
       this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
+  }
+
+  /**
+   * One input RPC, sent once more exactly when the server would retry it on
+   * the same attachment (dtuhidd still starting after a cold boot, above
+   * all). A freshly created device's first boot can outlast the helper's 9 s
+   * readiness wait, and without this its first swipe failed the run.
+   * Anything the server would surface, or re-attach for, fails the run.
+   */
+  async input(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    try {
+      return await this.call(method, params);
+    } catch (error) {
+      if (inputRetryFor(error, this.inputTransport) !== "same-attachment") throw error;
+      info(`retrying ${method} once, as the server would: ${(error as Error).message}`);
+      return await this.call(method, params);
+    }
   }
 }
 
@@ -294,7 +345,6 @@ function naluTypes(payload: Uint8Array): number[] {
 /** Probe fields that only feed the log, not the verdict; null when not JSON. */
 function readProbeDiagnostics(raw: string): {
   readonly deviceCount: number | undefined;
-  readonly coreSimulatorVersion: string | undefined;
 } | null {
   let parsed: unknown;
   try {
@@ -303,16 +353,9 @@ function readProbeDiagnostics(raw: string): {
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
-  const record = parsed as {
-    deviceCount?: unknown;
-    toolchain?: { coreSimulatorVersion?: unknown };
-  };
+  const record = parsed as { deviceCount?: unknown };
   return {
     deviceCount: typeof record.deviceCount === "number" ? record.deviceCount : undefined,
-    coreSimulatorVersion:
-      typeof record.toolchain?.coreSimulatorVersion === "string"
-        ? record.toolchain.coreSimulatorVersion
-        : undefined,
   };
 }
 
@@ -324,6 +367,147 @@ function describeCapability(
   return capability.missingSymbol === undefined
     ? detail
     : `missing ${capability.missingSymbol} (${detail})`;
+}
+
+type UiTree = ReturnType<typeof readUiTree>;
+
+/**
+ * One `describe-ui`, read again (up to 5 times, 1.5 s apart) while the
+ * accessibility translator finds no frontmost application. That happens while
+ * SpringBoard starts after a device's first boot and while an app launches on
+ * a loaded machine, and it clears up by itself.
+ */
+async function describeUi(client: HelperClient, maxDepth: number): Promise<UiTree> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return readUiTree((await client.call("describe-ui", { maxDepth })).tree);
+    } catch (error) {
+      if (attempt >= 5 || !isTransientUiTreeError(error)) throw error;
+      info(`describe-ui: ${(error as Error).message}; reading again`);
+      await sleep(1_500);
+    }
+  }
+}
+
+/**
+ * Proves that a hardware button, a touch and keystrokes reach the guest, by
+ * the accessibility tree changing in response. On CoreSimulator 1155.4+ an
+ * input path that only looks healthy (Indigo there) acks every call and
+ * changes nothing, which the earlier steps cannot tell apart from success.
+ */
+async function checkInputReachesGuest(
+  client: HelperClient,
+  target: {
+    readonly udid: string;
+    readonly env: NodeJS.ProcessEnv;
+    readonly pointWidth: number;
+    readonly pointHeight: number;
+  },
+): Promise<void> {
+  const describe = (): Promise<UiTree> => describeUi(client, 12);
+  // Reads until `accept` holds, at most 8 times a second apart (an app launch
+  // or the home transition can take seconds on a loaded machine); the last
+  // read either way.
+  const describeUntil = async (accept: (tree: UiTree) => boolean): Promise<UiTree> => {
+    let tree = await describe();
+    for (let read = 1; read < 8 && !accept(tree); read += 1) {
+      await sleep(1_000);
+      tree = await describe();
+    }
+    return tree;
+  };
+  const launchSettings = (): void => {
+    execFileSync("xcrun", ["simctl", "launch", target.udid, settingsBundleId], {
+      env: target.env,
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+  };
+  // Settings resumed from the background on iOS 26.5 exposes its bottom
+  // toolbar as one element without the search field inside it; a fresh launch
+  // exposes the field.
+  const quitSettings = (): void => {
+    try {
+      execFileSync("xcrun", ["simctl", "terminate", target.udid, settingsBundleId], {
+        env: target.env,
+        stdio: "ignore",
+      });
+    } catch {
+      // Not running: nothing to quit.
+    }
+  };
+
+  // 1. A known app in front. SpringBoard's root has no name, so the read
+  // waits for one.
+  await client.input("button", { name: "home" });
+  await sleep(1_500);
+  launchSettings();
+  await sleep(2_500);
+  const settingsTree = await describeUntil((tree) => rootLabel(tree) !== undefined);
+  const settingsRoot = rootLabel(settingsTree);
+  // Without a label to compare, the home-button check below proves nothing.
+  assert(
+    settingsRoot !== undefined,
+    `the frontmost app after launching Settings has no label; visible labels: ${
+      visibleLabels(settingsTree).join(", ") || "(none)"
+    }`,
+  );
+  info(`frontmost after launching Settings: ${settingsRoot}`);
+
+  // 2. The home button takes it away: another app, or SpringBoard (whose
+  // root label is blank), with elements of its own is in front.
+  await client.input("button", { name: "home" });
+  await sleep(1_500);
+  const homeTree = await describeUntil((tree) => showsAnotherApp(tree, settingsRoot));
+  assert(
+    showsAnotherApp(homeTree, settingsRoot),
+    `the home button did not reach the guest: frontmost was '${settingsRoot}', after home '${
+      rootLabel(homeTree) ?? "(no label)"
+    }'; visible labels: ${visibleLabels(homeTree).join(", ") || "(none)"}`,
+  );
+  info(`home button reached the guest (frontmost now ${rootLabel(homeTree) ?? "the home screen"})`);
+
+  // 3. A tap focuses Settings' search field and keystrokes fill it. The pull
+  // down below must land in Settings, not on the home screen (where it opens
+  // Spotlight), so the read waits for Settings to be in front again.
+  quitSettings();
+  launchSettings();
+  await sleep(2_500);
+  let tree = await describeUntil((candidate) => rootLabel(candidate) === settingsRoot);
+  assert(
+    rootLabel(tree) === settingsRoot,
+    `Settings did not come back to the front: frontmost is '${rootLabel(tree) ?? "(no label)"}'`,
+  );
+  let field = findSearchField(tree);
+  if (field === undefined) {
+    // The search field hides until the list is pulled down a little.
+    await client.input("swipe", {
+      startX: 0.5,
+      startY: 0.3,
+      endX: 0.5,
+      endY: 0.6,
+      durationMs: 350,
+    });
+    await sleep(1_000);
+    tree = await describe();
+    field = findSearchField(tree);
+  }
+  assert(
+    field !== undefined,
+    `no search field in Settings; visible labels: ${visibleLabels(tree).join(", ") || "(none)"}`,
+  );
+  const point = normalizedTapPoint(field, target.pointWidth, target.pointHeight);
+  assert(point !== undefined, "the search field's tap point is not on the screen");
+  await client.input("tap", point);
+  await sleep(800);
+  const token = layoutStableToken();
+  await client.input("text", { text: token });
+  await sleep(800);
+  tree = await describe();
+  assert(
+    mentions(tree, token),
+    `typed "${token}" but no element shows it; visible labels: ${visibleLabels(tree).join(", ") || "(none)"}`,
+  );
+  info(`tap and keystrokes reached the guest ("${token}" is in the search field)`);
 }
 
 async function main(): Promise<void> {
@@ -402,9 +586,9 @@ async function main(): Promise<void> {
   );
   assert(probe.ok, `helper preflight failed: ${probe.error ?? "unknown error"}`);
   info(
-    `CoreSimulator ${diagnostics.coreSimulatorVersion ?? "(version not reported)"} reachable, ${
+    `CoreSimulator ${probe.coreSimulatorVersion ?? "(version not reported)"} reachable, ${
       diagnostics.deviceCount ?? "?"
-    } devices`,
+    } devices; input transport ${probe.inputTransport ?? "(not reported)"}`,
   );
   if (options.probeOnly) {
     console.log("\n[device-smoke] PASS (probe only; no simulator was booted)");
@@ -554,6 +738,16 @@ async function main(): Promise<void> {
         typeof degraded.hid === "string" ? degraded.hid : "no reason given"
       }`,
     );
+    // The probe and attach read the same version gate; a mismatch means the
+    // probe checked the symbols of a transport attach does not use.
+    assert(
+      attached.inputTransport === probe.inputTransport,
+      `attach uses input transport ${String(attached.inputTransport)}, the probe reported ${String(
+        probe.inputTransport,
+      )}`,
+    );
+    info(`input transport: ${String(attached.inputTransport)}`);
+    client.inputTransport = parseHelperInputTransport(attached.inputTransport) ?? null;
 
     step(`Streaming at least ${requiredFrames} frames`);
     const socketDir = mkdtempSync(join(tmpdir(), "ryco-device-smoke-"));
@@ -567,7 +761,7 @@ async function main(): Promise<void> {
         collector.decodeError === undefined,
         `frame failed to decode: ${collector.decodeError}`,
       );
-      await client.call("swipe", {
+      await client.input("swipe", {
         startX: 0.8,
         startY: 0.5,
         endX: 0.2,
@@ -575,7 +769,7 @@ async function main(): Promise<void> {
         durationMs: 350,
       });
       await sleep(400);
-      await client.call("swipe", {
+      await client.input("swipe", {
         startX: 0.2,
         startY: 0.5,
         endX: 0.8,
@@ -613,12 +807,23 @@ async function main(): Promise<void> {
     info(`${collector.frames.length} frames; Annex B, SPS, and IDR verified`);
 
     step("Injecting input and inspecting accessibility");
-    await client.call("tap", { x: 0.5, y: 0.92 });
-    await client.call("button", { name: "home" });
+    await client.input("tap", { x: 0.5, y: 0.92 });
+    await client.input("button", { name: "home" });
     await sleep(1_000);
-    const described = await client.call("describe-ui", { maxDepth: 6 });
-    const tree = described.tree as { children?: unknown[] } | undefined;
-    assert(Boolean(tree?.children?.length), "accessibility tree has no children");
+    const tree = await describeUi(client, 6);
+    assert(tree.children.length > 0, "accessibility tree has no children");
+
+    if (options.skipInputCheck) {
+      info("input check skipped (--skip-input-check)");
+    } else {
+      step("Checking that input reaches the guest");
+      await checkInputReachesGuest(client, {
+        udid: device.udid,
+        env: toolchainEnv,
+        pointWidth: Number(attached.pointWidth),
+        pointHeight: Number(attached.pointHeight),
+      });
+    }
 
     step("Taking a screenshot");
     const screenshotPath = join(socketDir, "screen.png");
@@ -629,6 +834,15 @@ async function main(): Promise<void> {
       magic.every((byte, index) => png[index] === byte),
       "screenshot is not a PNG",
     );
+    if (options.screenshotOut !== undefined) {
+      mkdirSync(dirname(options.screenshotOut), { recursive: true });
+      copyFileSync(screenshotPath, options.screenshotOut);
+      info(`screenshot copied to ${options.screenshotOut}`);
+    }
+    if (!options.skipInputCheck) {
+      // Leaves the device on the home screen rather than in Settings.
+      await client.input("button", { name: "home" });
+    }
     await client.call("stream.stop");
     console.log("\n[device-smoke] PASS");
   } catch (error) {

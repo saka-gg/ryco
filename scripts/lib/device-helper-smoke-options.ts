@@ -12,6 +12,10 @@ export interface SmokeOptions {
   readonly cacheRoot: string | undefined;
   readonly udid: string | undefined;
   readonly allowBooted: boolean;
+  /** Where to copy the run's screenshot (absolute), for a PR or a report. */
+  readonly screenshotOut: string | undefined;
+  /** Skip the check that buttons, touches and keys reach the guest. */
+  readonly skipInputCheck: boolean;
 }
 
 export interface SimctlDevice {
@@ -33,8 +37,8 @@ export type SmokeResult<T> =
 
 const PREFERRED_DEVICES = ["iPhone 17 Pro", "iPhone 16 Pro", "iPhone 15 Pro", "iPhone"];
 
-const VALUE_FLAGS = new Set(["--cache-dir", "--udid"]);
-const SWITCH_FLAGS = new Set(["--probe-only", "--allow-booted"]);
+const VALUE_FLAGS = new Set(["--cache-dir", "--udid", "--screenshot-out"]);
+const SWITCH_FLAGS = new Set(["--probe-only", "--allow-booted", "--skip-input-check"]);
 
 /**
  * Strict on purpose: an argument this parser does not understand fails the
@@ -68,12 +72,13 @@ export function parseSmokeOptions(argv: readonly string[]): SmokeResult<SmokeOpt
     } else {
       return {
         ok: false,
-        error: `unknown argument '${argument}' (expected --probe-only, --cache-dir <dir>, --udid <udid>, --allow-booted)`,
+        error: `unknown argument '${argument}' (expected --probe-only, --cache-dir <dir>, --udid <udid>, --allow-booted, --screenshot-out <path>, --skip-input-check)`,
       };
     }
   }
   const cacheDir = values.get("--cache-dir");
   const udid = values.get("--udid");
+  const screenshotOut = values.get("--screenshot-out");
   const allowBooted = switches.has("--allow-booted");
   if (allowBooted && udid === undefined) {
     return { ok: false, error: "--allow-booted only applies together with --udid" };
@@ -85,6 +90,8 @@ export function parseSmokeOptions(argv: readonly string[]): SmokeResult<SmokeOpt
       cacheRoot: cacheDir === undefined ? undefined : resolve(cacheDir),
       udid,
       allowBooted,
+      screenshotOut: screenshotOut === undefined ? undefined : resolve(screenshotOut),
+      skipInputCheck: switches.has("--skip-input-check"),
     },
   };
 }

@@ -16,9 +16,78 @@
  *   frame is still in the tree with off-screen coordinates, and tapping it
  *   would hit whatever happens to be at that position instead.
  *
+ * The helper's raw `describe-ui` nodes are read into the contract's shape here
+ * too (`normalizeUiNode`), because what a node's frame and activation point
+ * end up as decides where a tap on it lands.
+ *
  * @module device/uiTreeTargeting
  */
 import type { DeviceUiNode, DeviceUiPoint } from "@ryco/contracts";
+
+const FRAME_KEYS = ["x", "y", "width", "height"] as const;
+
+/**
+ * The helper omits absent accessibility attributes rather than sending nulls,
+ * and its frames are in display coordinates. Fill in the contract's shape so
+ * the pane and the agent see one predictable node type.
+ *
+ * The helper also leaves out a frame it cannot represent (NaN or infinite,
+ * which SwiftUI reports for off-screen and lazily laid-out elements). Such a
+ * node gets a zero frame and no activation point either, so `isTargetable`
+ * rules it out: a tap aimed at it would land on the screen's top-left corner.
+ */
+export function normalizeUiNode(raw: unknown): DeviceUiNode {
+  const node = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const frame =
+    typeof node.frame === "object" && node.frame !== null
+      ? (node.frame as Record<string, unknown>)
+      : {};
+  const isFiniteNumber = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value);
+  const framed = FRAME_KEYS.every((key) => isFiniteNumber(frame[key]));
+  const readFrameValue = (key: (typeof FRAME_KEYS)[number]): number => {
+    const value = frame[key];
+    return isFiniteNumber(value) ? value : 0;
+  };
+  const readText = (key: string): string | null => {
+    const value = node[key];
+    return typeof value === "string" && value.length > 0 ? value : null;
+  };
+  // Only a complete pair of finite coordinates is worth surfacing: half a point
+  // would aim taps at (0, y) instead of the control.
+  const readActivationPoint = (): DeviceUiPoint | null => {
+    const raw = node.activationPoint;
+    if (typeof raw !== "object" || raw === null) return null;
+    const { x, y } = raw as Record<string, unknown>;
+    if (!isFiniteNumber(x) || !isFiniteNumber(y)) return null;
+    return { x, y };
+  };
+  return {
+    role: typeof node.role === "string" ? node.role : "Unknown",
+    subrole: readText("subrole"),
+    label: readText("label"),
+    value: readText("value"),
+    frame: {
+      x: readFrameValue("x"),
+      y: readFrameValue("y"),
+      width: Math.max(0, readFrameValue("width")),
+      height: Math.max(0, readFrameValue("height")),
+    },
+    activationPoint: framed ? readActivationPoint() : null,
+    children: Array.isArray(node.children) ? node.children.map(normalizeUiNode) : [],
+  };
+}
+
+/**
+ * Whether a tap could ever land on this node: it has an area, or a control
+ * point of its own. A node with neither (no area and no activation point,
+ * which is also how a node without a usable frame arrives) would aim at its
+ * frame's origin, the screen's top-left corner, which is somebody else's
+ * control. Such nodes are never matched or listed as candidates.
+ */
+export function isTargetable(node: DeviceUiNode): boolean {
+  return (node.frame.width > 0 && node.frame.height > 0) || node.activationPoint !== null;
+}
 
 /** What the caller asked for. At least a label; role narrows an ambiguous one. */
 export interface DeviceUiTarget {
@@ -75,11 +144,16 @@ export function flattenUiTree(root: DeviceUiNode): DeviceUiNode[] {
   return out;
 }
 
+/** Only a targetable node with a label of its own can be named, or usefully listed back. */
+function labelledNodes(root: DeviceUiNode): DeviceUiNode[] {
+  return flattenUiTree(root).filter(
+    (node) => node.label !== null && node.label.length > 0 && isTargetable(node),
+  );
+}
+
 /** Every label currently rendered, used to tell a moving list from a stuck one. */
 export function visibleLabels(root: DeviceUiNode): string[] {
-  return flattenUiTree(root)
-    .filter((node) => node.label !== null && node.label.length > 0)
-    .map((node) => node.label as string);
+  return labelledNodes(root).map((node) => node.label as string);
 }
 
 /** Where a tap on this node lands: its own control point, else the frame centre. */
@@ -136,9 +210,7 @@ export function findTarget(root: DeviceUiNode, target: DeviceUiTarget): DeviceUi
     throw new DeviceUiTargetError("A tap target needs a non-empty label.");
   }
 
-  const labelled = flattenUiTree(root).filter(
-    (node) => node.label !== null && node.label.length > 0,
-  );
+  const labelled = labelledNodes(root);
   const byRole =
     target.role === undefined
       ? labelled

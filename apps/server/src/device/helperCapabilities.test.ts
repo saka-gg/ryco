@@ -86,6 +86,74 @@ describe("parseHelperProbe", () => {
     expect(probe.ok).toBe(true);
     expect(probe.capabilities).toEqual([]);
   });
+
+  it("reads the input transport and the CoreSimulator version", () => {
+    const probe = parseHelperProbe(
+      healthyProbe({
+        inputTransport: "dtuhid",
+        toolchain: {
+          xcodeVersion: "27.1",
+          xcodeBuild: "27A9275",
+          coreSimulatorVersion: "1174.9.2",
+        },
+      }),
+    );
+
+    expect(probe.inputTransport).toBe("dtuhid");
+    expect(probe.coreSimulatorVersion).toBe("1174.9.2");
+    // The contract's toolchain stays as it was: these are server-internal.
+    expect(probe.toolchain).toEqual({
+      xcodeVersion: "27.1",
+      xcodeBuild: "27A9275",
+      macOS: undefined,
+    });
+    expect(parseHelperProbe(healthyProbe({ inputTransport: "indigo" })).inputTransport).toBe(
+      "indigo",
+    );
+  });
+
+  it("reads them from a helper too old to report capabilities", () => {
+    const probe = parseHelperProbe(
+      JSON.stringify({
+        ok: true,
+        inputTransport: "indigo",
+        toolchain: { coreSimulatorVersion: "1051.17" },
+      }),
+    );
+
+    expect(probe.inputTransport).toBe("indigo");
+    expect(probe.coreSimulatorVersion).toBe("1051.17");
+  });
+
+  it("leaves them undefined when missing", () => {
+    const probe = parseHelperProbe(healthyProbe());
+
+    expect(probe.inputTransport).toBeUndefined();
+    expect(probe.coreSimulatorVersion).toBeUndefined();
+  });
+
+  it("ignores values that are not a known transport or a version string", () => {
+    for (const inputTransport of ["DTUHID", "hid", "", 1, null, { name: "dtuhid" }]) {
+      expect(parseHelperProbe(healthyProbe({ inputTransport })).inputTransport).toBeUndefined();
+    }
+    for (const coreSimulatorVersion of [1174.9, "", "   ", null, ["1174.9.2"]]) {
+      expect(
+        parseHelperProbe(
+          healthyProbe({ toolchain: { xcodeVersion: "27.1", coreSimulatorVersion } }),
+        ).coreSimulatorVersion,
+      ).toBeUndefined();
+    }
+    expect(
+      parseHelperProbe(healthyProbe({ toolchain: "1174.9.2" })).coreSimulatorVersion,
+    ).toBeUndefined();
+  });
+
+  it("leaves them out of a probe whose output is unreadable", () => {
+    const probe = parseHelperProbe("not json at all");
+
+    expect(probe.inputTransport).toBeUndefined();
+    expect(probe.coreSimulatorVersion).toBeUndefined();
+  });
 });
 
 describe("availabilityFromProbe", () => {

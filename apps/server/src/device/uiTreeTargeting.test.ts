@@ -5,10 +5,13 @@ import type { DeviceUiNode } from "@ryco/contracts";
 import {
   DeviceUiTargetError,
   findTarget,
+  isTargetable,
+  normalizeUiNode,
   planScrollStep,
   readTapRequest,
   resolveTapTarget,
   tapPointForNode,
+  visibleLabels,
 } from "./uiTreeTargeting.ts";
 
 function node(partial: Partial<DeviceUiNode> & { readonly role: string }): DeviceUiNode {
@@ -268,5 +271,141 @@ describe("finding a target that is off screen", () => {
       ],
     });
     expect(findTarget(screen, { label: "Row" }).node.frame.y).toBe(400);
+  });
+});
+
+describe("accessibility tree normalization", () => {
+  it("fills in the attributes the helper omits rather than sending as null", () => {
+    // The helper leaves absent accessibility attributes out of the object
+    // entirely; the contract wants explicit nulls and a complete frame.
+    expect(normalizeUiNode({ role: "Button" })).toEqual({
+      role: "Button",
+      subrole: null,
+      label: null,
+      value: null,
+      frame: { x: 0, y: 0, width: 0, height: 0 },
+      activationPoint: null,
+      children: [],
+    });
+  });
+
+  it("keeps a switch's own activation point, which is not its row centre", () => {
+    // The exact shape of a UIKit settings row: one merged element whose frame
+    // spans the row, so tapping the frame centre (x=201) does nothing and only
+    // the activation point (x=336.5) flips the switch.
+    const node = normalizeUiNode({
+      role: "CheckBox",
+      subrole: "Switch",
+      label: "Dark Appearance",
+      value: "0",
+      frame: { x: 36, y: 184, width: 330, height: 28 },
+      activationPoint: { x: 336.5, y: 198 },
+    });
+
+    expect(node).toMatchObject({
+      role: "CheckBox",
+      subrole: "Switch",
+      value: "0",
+      activationPoint: { x: 336.5, y: 198 },
+    });
+  });
+
+  it("drops an activation point that is not a complete pair of coordinates", () => {
+    // Half a point would aim taps at (0, y): worse than having none at all.
+    expect(normalizeUiNode({ activationPoint: { x: 12 } }).activationPoint).toBeNull();
+    expect(
+      normalizeUiNode({ activationPoint: { x: Number.NaN, y: 4 } }).activationPoint,
+    ).toBeNull();
+    expect(normalizeUiNode({ activationPoint: "336,198" }).activationPoint).toBeNull();
+  });
+
+  it("keeps the attributes the helper does send", () => {
+    const node = normalizeUiNode({
+      role: "TextField",
+      label: "Email",
+      value: "a@b.c",
+      frame: { x: 12, y: 34, width: 200, height: 44 },
+    });
+
+    expect(node).toMatchObject({
+      role: "TextField",
+      label: "Email",
+      value: "a@b.c",
+      frame: { x: 12, y: 34, width: 200, height: 44 },
+    });
+  });
+
+  it("normalizes the whole subtree", () => {
+    const node = normalizeUiNode({
+      role: "Window",
+      children: [{ role: "Button", children: [{ label: "Deep" }] }],
+    });
+
+    expect(node.children[0]?.children[0]).toMatchObject({ role: "Unknown", label: "Deep" });
+  });
+
+  it("clamps negative sizes and survives a shapeless node", () => {
+    expect(normalizeUiNode({ frame: { width: -5, height: 10 } }).frame).toEqual({
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 10,
+    });
+    expect(normalizeUiNode(null).role).toBe("Unknown");
+  });
+
+  it("gives a node without a usable frame no tap point at all", () => {
+    // The helper leaves out NaN or infinite frames (SwiftUI reports them for
+    // off-screen elements). An activation point next to such a frame is not a
+    // place to tap either.
+    const node = normalizeUiNode({
+      role: "Button",
+      label: "Save",
+      activationPoint: { x: 120, y: 900 },
+    });
+    expect(node.frame).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+    expect(node.activationPoint).toBeNull();
+    expect(isTargetable(node)).toBe(false);
+    expect(
+      normalizeUiNode({
+        frame: { x: 1, y: 2, width: Number.POSITIVE_INFINITY, height: 4 },
+        activationPoint: { x: 3, y: 4 },
+      }).activationPoint,
+    ).toBeNull();
+  });
+});
+
+describe("nodes a tap cannot land on", () => {
+  // An off-screen SwiftUI element whose frame the helper left out: a zero
+  // frame at the origin, no activation point.
+  const unframedSave = normalizeUiNode({ role: "Button", label: "Save" });
+
+  it("are neither matched nor listed", () => {
+    const screen = node({ role: "Application", children: [unframedSave] });
+    // Before, this tapped (0, 0): the status bar, or whatever sits there.
+    expect(() => findTarget(screen, { label: "Save" })).toThrow(/No element labelled "Save"/);
+    expect(visibleLabels(screen)).toEqual([]);
+  });
+
+  it("do not make a visible element with the same label ambiguous", () => {
+    const visibleSave = node({
+      role: "Button",
+      label: "Save",
+      frame: { x: 300, y: 60, width: 80, height: 44 },
+    });
+    const screen = node({ role: "Application", children: [unframedSave, visibleSave] });
+    expect(resolveTapTarget(screen, { label: "Save" }).point).toEqual({ x: 340, y: 82 });
+  });
+
+  it("still include a zero-size element that has its own activation point", () => {
+    const pinned = node({
+      role: "Button",
+      label: "Pinned",
+      frame: { x: 40, y: 300, width: 0, height: 0 },
+      activationPoint: { x: 40, y: 300 },
+    });
+    expect(isTargetable(pinned)).toBe(true);
+    const screen = node({ role: "Application", children: [pinned] });
+    expect(resolveTapTarget(screen, { label: "Pinned" }).point).toEqual({ x: 40, y: 300 });
   });
 });
