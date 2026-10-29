@@ -154,6 +154,10 @@ export function renderSystemdUserUnit(spec: NodeServiceSpec): string {
     .toSorted(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `Environment=${quoteSystemd(`${key}=${value}`)}`)
     .join("\n");
+  // OOMPolicy=continue: when the kernel's OOM killer ends one process of the unit (a provider
+  // CLI, a build an agent runs), systemd's default stops the whole unit, node included. The
+  // node handles its children exiting itself; if the node is the one killed, Restart=always
+  // brings it back.
   return `[Unit]
 Description=Ryco node (${spec.label})
 After=network-online.target
@@ -166,6 +170,7 @@ WorkingDirectory=${quoteSystemd(spec.workingDirectory)}
 ${environment}
 Restart=always
 RestartSec=${RESTART_THROTTLE_SECONDS}
+OOMPolicy=continue
 StandardOutput=append:${spec.logPath}
 StandardError=append:${spec.logPath}
 

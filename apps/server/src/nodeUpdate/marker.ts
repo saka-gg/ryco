@@ -7,27 +7,108 @@
  * back on the target release, and deletes it. Markers older than a day are ignored:
  * nobody is waiting for that answer any more.
  *
+ * A CLI update also records how to undo it (`rollback`): the boot guard (bootGuard.ts)
+ * counts the target's starts in `bootAttempts` until the server marks it `readyAt`, and
+ * after too many it reinstalls the previous release, restores the database snapshot and
+ * records `rolledBack`, which the previous release then reports. Every field added for
+ * that is optional, so markers from earlier releases (and desktop updates) still decode.
+ *
  * @module nodeUpdate/marker
  */
-import { IsoDateTime, type NodeUpdateRun, TrimmedNonEmptyString } from "@ryco/contracts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  type NodeUpdateRun,
+  PositiveInt,
+  TrimmedNonEmptyString,
+} from "@ryco/contracts";
 import { Duration, Effect, FileSystem, Option, Schema } from "effect";
 
 import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { NODE_UPDATE_MARKER_FILE_NAME, NODE_UPDATE_MARKER_MAX_AGE_MS } from "./updateProtocol.ts";
 
-export const NODE_UPDATE_MARKER_FILE_NAME = "node-update.json";
-export const NODE_UPDATE_MARKER_MAX_AGE = Duration.hours(24);
+export { NODE_UPDATE_MARKER_FILE_NAME };
+export const NODE_UPDATE_MARKER_MAX_AGE = Duration.millis(NODE_UPDATE_MARKER_MAX_AGE_MS);
+
+/** The shape `bootGuard.ts` reads without Effect: keep the two in step. */
+export const NodeUpdateRollbackPlan = Schema.Struct({
+  /** Reinstalls `fromVersion` into the installation the update changed. */
+  install: Schema.Struct({
+    command: TrimmedNonEmptyString,
+    args: Schema.Array(Schema.String),
+    timeoutMs: PositiveInt,
+  }),
+  databasePath: TrimmedNonEmptyString,
+  /** The database as it was right before the restart. */
+  snapshotPath: TrimmedNonEmptyString,
+});
+export type NodeUpdateRollbackPlan = typeof NodeUpdateRollbackPlan.Type;
+
+/** Written by the boot guard once the previous release is reinstalled. */
+export const NodeUpdateRolledBack = Schema.Struct({
+  at: IsoDateTime,
+  /** Starts of the target that never got ready. */
+  failedBoots: NonNegativeInt,
+  databaseRestored: Schema.Boolean,
+  databaseError: Schema.optional(Schema.String),
+  /** The tail of what the reinstall printed. */
+  output: Schema.optional(Schema.String),
+});
 
 export const NodeUpdateMarker = Schema.Struct({
   requestId: TrimmedNonEmptyString,
   fromVersion: TrimmedNonEmptyString,
   targetVersion: TrimmedNonEmptyString,
   startedAt: IsoDateTime,
+  rollback: Schema.optional(NodeUpdateRollbackPlan),
+  bootAttempts: Schema.optional(NonNegativeInt),
+  readyAt: Schema.optional(IsoDateTime),
+  rolledBack: Schema.optional(NodeUpdateRolledBack),
 });
 export type NodeUpdateMarker = typeof NodeUpdateMarker.Type;
 
 const NodeUpdateMarkerJson = Schema.fromJsonString(NodeUpdateMarker);
 const decodeMarker = Schema.decodeUnknownEffect(NodeUpdateMarkerJson);
 const encodeMarker = Schema.encodeEffect(NodeUpdateMarkerJson);
+
+const isStale = (marker: NodeUpdateMarker, nowMs: number) => {
+  const startedAtMs = Date.parse(marker.startedAt);
+  return (
+    !Number.isFinite(startedAtMs) ||
+    nowMs - startedAtMs > Duration.toMillis(NODE_UPDATE_MARKER_MAX_AGE)
+  );
+};
+
+/**
+ * Whether this process is the update's target, restarted with a rollback plan and not yet
+ * ready: the boot guard counts its starts until the server confirms it is ready.
+ */
+export function markerAwaitsBootReady(input: {
+  readonly marker: NodeUpdateMarker;
+  readonly runningVersion: string;
+  readonly nowMs: number;
+}): boolean {
+  const { marker } = input;
+  return (
+    marker.rollback !== undefined &&
+    marker.readyAt === undefined &&
+    marker.rolledBack === undefined &&
+    input.runningVersion === marker.targetVersion &&
+    !isStale(marker, input.nowMs)
+  );
+}
+
+const rollbackMessage = (
+  marker: NodeUpdateMarker,
+  rolledBack: typeof NodeUpdateRolledBack.Type,
+) => {
+  const attempts =
+    rolledBack.failedBoots === 1 ? "1 attempt" : `${rolledBack.failedBoots} attempts`;
+  const failure = `Ryco ${marker.targetVersion} did not finish starting (${attempts}), so the node rolled back to ${marker.fromVersion}`;
+  return rolledBack.databaseRestored
+    ? `${failure} and restored the database from before the update.`
+    : `${failure}, but could not restore the database from before the update: ${rolledBack.databaseError ?? "unknown error"}.`;
+};
 
 /**
  * The run a restarted process reports for `marker`, or `null` when the marker is too
@@ -38,23 +119,25 @@ export function bootRunFromMarker(input: {
   readonly runningVersion: string;
   readonly nowMs: number;
 }): NodeUpdateRun | null {
-  const startedAtMs = Date.parse(input.marker.startedAt);
-  if (!Number.isFinite(startedAtMs)) return null;
-  if (input.nowMs - startedAtMs > Duration.toMillis(NODE_UPDATE_MARKER_MAX_AGE)) return null;
-  const succeeded = input.runningVersion === input.marker.targetVersion;
+  const { marker } = input;
+  if (isStale(marker, input.nowMs)) return null;
+  const rolledBack = marker.rolledBack;
+  const succeeded = rolledBack === undefined && input.runningVersion === marker.targetVersion;
   return {
     status: succeeded ? "succeeded" : "failed",
-    requestId: input.marker.requestId,
-    fromVersion: input.marker.fromVersion,
-    targetVersion: input.marker.targetVersion,
-    startedAt: input.marker.startedAt,
+    requestId: marker.requestId,
+    fromVersion: marker.fromVersion,
+    targetVersion: marker.targetVersion,
+    startedAt: marker.startedAt,
     finishedAt: new Date(input.nowMs).toISOString(),
     restartAt: null,
     progressPercent: null,
     message: succeeded
       ? null
-      : `Restarted on ${input.runningVersion} instead of ${input.marker.targetVersion}.`,
-    output: null,
+      : rolledBack !== undefined
+        ? rollbackMessage(marker, rolledBack)
+        : `Restarted on ${input.runningVersion} instead of ${marker.targetVersion}.`,
+    output: rolledBack?.output ?? null,
   };
 }
 

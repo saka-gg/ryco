@@ -100,6 +100,10 @@ ryco service install --tailscale-serve --hub ~/code
 ryco service status
 ```
 
+A node that runs as a service updates itself from the apps. It checks the new release against a
+copy of its database before it restarts into it, and rolls back a release that fails to start,
+database included. See [node-updates.md](../../docs/node-updates.md).
+
 Link the node to your Ryco account so the apps reach it from anywhere through the Hub relay:
 
 ```bash

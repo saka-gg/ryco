@@ -251,63 +251,6 @@ export function nodeUpdateCapability(input: {
   return { canUpdate: true, manualReason: null, manualCommand: null };
 }
 
-export interface NodeUpdateCommand {
-  readonly command: string;
-  readonly args: ReadonlyArray<string>;
-  readonly timeout: Duration.Input;
-}
-
-export const NODE_INSTALL_TIMEOUT = Duration.minutes(10);
-export const NODE_VERIFY_TIMEOUT = Duration.seconds(60);
-
-/**
- * Installs exactly `version` into the installation this process runs from: npm into its
- * own prefix (not whichever `npm` the PATH finds first), bun with the running bun.
- */
-export function nodeInstallCommand(
-  installation: DetectedNodeInstallation,
-  version: string,
-  execPath: string,
-): NodeUpdateCommand | null {
-  const target = `${RYCO_CLI_PACKAGE}@${version}`;
-  switch (installation.kind) {
-    case "npm-global":
-      return installation.npmPrefix === null
-        ? null
-        : {
-            command: "npm",
-            args: ["install", "-g", "--prefix", installation.npmPrefix, target],
-            timeout: NODE_INSTALL_TIMEOUT,
-          };
-    case "bun-global": {
-      const runtime = execPath.split(/[\\/]/u).at(-1) ?? "";
-      return {
-        command: /^bun(?:\.exe)?$/iu.test(runtime) ? execPath : "bun",
-        args: ["add", "-g", target],
-        timeout: NODE_INSTALL_TIMEOUT,
-      };
-    }
-    case "pnpm-global":
-      return { command: "pnpm", args: ["add", "-g", target], timeout: NODE_INSTALL_TIMEOUT };
-    default:
-      return null;
-  }
-}
-
-/** Runs the installed entry script once; it must report the release that was installed. */
-export function nodeVerifyCommand(
-  installation: DetectedNodeInstallation,
-  execPath: string,
-): NodeUpdateCommand | null {
-  return installation.entryScript === null
-    ? null
-    : {
-        command: execPath,
-        args: [installation.entryScript, "--version"],
-        timeout: NODE_VERIFY_TIMEOUT,
-      };
-}
-
 const ROOT_PACKAGE_NAME = "@ryco/monorepo";
 const RootPackageJson = Schema.fromJsonString(
   Schema.Struct({ name: Schema.optional(Schema.String) }),

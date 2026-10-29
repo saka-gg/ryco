@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import type { NodeUpdateState } from "@ryco/contracts";
+import { NodeUpdateError, type NodeUpdateState } from "@ryco/contracts";
 import type {
   DesktopAppUpdateRequestFrame,
   DesktopAppUpdateSnapshot,
@@ -8,10 +8,19 @@ import type {
 import { Deferred, Duration, Effect, FileSystem, Option, Path, Stream } from "effect";
 
 import type { DesktopAppUpdateBridge } from "../desktopAppUpdateBridge.ts";
-import type { DetectedNodeInstallation, NodeUpdateCommand } from "./installation.ts";
+import type { DetectedNodeInstallation } from "./installation.ts";
 import { type NodeUpdateMarker, readNodeUpdateMarker, writeNodeUpdateMarker } from "./marker.ts";
 import { makeNodeUpdateService, type NodeUpdateRuntime } from "./NodeUpdateService.ts";
-import type { NodeServiceRestartTarget, NodeUpdateCommandResult } from "./processes.ts";
+import {
+  NODE_UPDATE_PREFLIGHT_ARG,
+  NODE_UPDATE_PREFLIGHT_PASSED,
+  NODE_UPDATE_PREFLIGHT_STARTED,
+} from "./updateProtocol.ts";
+import type {
+  NodeServiceRestartTarget,
+  NodeUpdateCommand,
+  NodeUpdateCommandResult,
+} from "./processes.ts";
 
 const serviceNpm: DetectedNodeInstallation = {
   kind: "npm-global",
@@ -37,15 +46,18 @@ const ok = (stdout = ""): NodeUpdateCommandResult => ({
   stdout,
   stderr: "",
 });
-const exited = (exitCode: number, stderr: string): NodeUpdateCommandResult => ({
+const exited = (exitCode: number, stderr: string, stdout = ""): NodeUpdateCommandResult => ({
   exitCode,
   timedOut: false,
   spawnError: null,
-  stdout: "",
+  stdout,
   stderr,
 });
+const passedPreflight = (version: string) =>
+  ok(`${NODE_UPDATE_PREFLIGHT_STARTED}\n${NODE_UPDATE_PREFLIGHT_PASSED} ${version}\n`);
+const isPreflight = (command: NodeUpdateCommand) => command.args[1] === NODE_UPDATE_PREFLIGHT_ARG;
 
-/** A healthy machine: every install works and the installed CLI reports its release. */
+/** A healthy machine: every install works and the installed CLI passes its preflight. */
 const healthy =
   (installedVersion: { value: string }) =>
   (command: NodeUpdateCommand): Effect.Effect<NodeUpdateCommandResult> =>
@@ -55,6 +67,7 @@ const healthy =
         installedVersion.value = spec.slice("ryco-cli@".length);
         return ok("added 1 package");
       }
+      if (isPreflight(command)) return passedPreflight(installedVersion.value);
       return ok(`ryco v${installedVersion.value}`);
     });
 
@@ -114,6 +127,8 @@ interface HarnessOptions {
   readonly restartGrace?: Duration.Input;
   readonly marker?: NodeUpdateMarker;
   readonly dir?: string;
+  /** Replaces the database copy; the default writes `copy of <database>`. */
+  readonly copyDatabase?: NodeUpdateRuntime["copyDatabase"];
 }
 
 const makeHarness = (options: HarnessOptions = {}) =>
@@ -122,7 +137,10 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const path = yield* Path.Path;
     const dir = options.dir ?? (yield* fs.makeTempDirectoryScoped({ prefix: "node-update-" }));
     const markerPath = path.join(dir, "node-update.json");
+    const databasePath = path.join(dir, "state.sqlite");
+    const updateDirectory = path.join(dir, "node-update");
     if (options.marker) yield* writeNodeUpdateMarker(markerPath, options.marker);
+    const copies: Array<string> = [];
     const commands: Array<NodeUpdateCommand> = [];
     const restarts: Array<NodeServiceRestartTarget> = [];
     const restarted = yield* Deferred.make<void>();
@@ -137,6 +155,18 @@ const makeHarness = (options: HarnessOptions = {}) =>
       execPath: "/opt/homebrew/bin/node",
       detectInstallation: Effect.succeed(options.installation ?? serviceNpm),
       markerPath,
+      databasePath,
+      updateDirectory,
+      copyDatabase: (destination) =>
+        Effect.suspend(() => {
+          copies.push(destination);
+          return options.copyDatabase
+            ? options.copyDatabase(destination)
+            : fs.makeDirectory(path.dirname(destination), { recursive: true }).pipe(
+                Effect.andThen(fs.writeFileString(destination, `copy of ${databasePath}`)),
+                Effect.mapError((error) => new NodeUpdateError({ reason: error.message })),
+              );
+        }),
       latestCachePath: path.join(dir, "caches", "_node-latest-release.json"),
       fetchLatestVersion: () =>
         Effect.sync(() => {
@@ -175,6 +205,9 @@ const makeHarness = (options: HarnessOptions = {}) =>
       desktop,
       dir,
       markerPath,
+      databasePath,
+      updateDirectory,
+      copies,
       waitFor,
     };
   });
@@ -194,22 +227,146 @@ describe("node self-update (CLI service)", () => {
       });
       yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
 
+      const preflightCopy = `${harness.updateDirectory}/preflight.sqlite`;
+      const snapshot = `${harness.updateDirectory}/pre-0.1.35.sqlite`;
       expect(harness.commands.map((command) => [command.command, ...command.args])).toEqual([
         ["npm", "install", "-g", "--prefix", "/opt/homebrew", "ryco-cli@0.1.36"],
         [
           "/opt/homebrew/bin/node",
           "/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs",
-          "--version",
+          "node-update-preflight",
+          "--database",
+          preflightCopy,
         ],
       ]);
+      // The preflight's copy, then the snapshot right before the restart.
+      expect(harness.copies).toEqual([preflightCopy, snapshot]);
+      const fs = yield* FileSystem.FileSystem;
+      expect(yield* fs.exists(preflightCopy)).toBe(false);
+      expect(yield* fs.readFileString(snapshot)).toBe(`copy of ${harness.databasePath}`);
       expect(harness.restarts).toEqual([{ manager: "launchd", label: "space.ryco.node" }]);
       expect((yield* harness.service.current).run.status).toBe("restarting");
       const marker = yield* readNodeUpdateMarker(harness.markerPath);
-      expect(Option.getOrThrow(marker)).toMatchObject({
+      expect(Option.getOrThrow(marker)).toEqual({
         requestId: "update-1",
         fromVersion: "0.1.35",
         targetVersion: "0.1.36",
+        startedAt: accepted.run.startedAt,
+        rollback: {
+          install: {
+            command: "npm",
+            args: ["install", "-g", "--prefix", "/opt/homebrew", "ryco-cli@0.1.35"],
+            timeoutMs: 600_000,
+          },
+          databasePath: harness.databasePath,
+          snapshotPath: snapshot,
+        },
       });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("keeps only the newest snapshot in the update directory", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "node-update-" });
+      yield* fs.makeDirectory(`${dir}/node-update`, { recursive: true });
+      yield* fs.writeFileString(`${dir}/node-update/pre-0.1.34.sqlite`, "older snapshot");
+      yield* fs.writeFileString(`${dir}/node-update/failed-0.1.35.sqlite`, "rolled back");
+      const harness = yield* makeHarness({ dir });
+      yield* harness.service.update(update);
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      expect(yield* fs.readDirectory(harness.updateDirectory)).toEqual(["pre-0.1.35.sqlite"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("checks a release that predates the preflight with --version", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        runCommand: (command) =>
+          Effect.succeed(
+            isPreflight(command)
+              ? exited(1, "ERROR\n  Unrecognized flag: --database in command ryco", "USAGE ...")
+              : command.args.at(-1) === "--version"
+                ? ok("ryco v0.1.36")
+                : ok("added 1 package"),
+          ),
+      });
+      yield* harness.service.update(update);
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      expect(harness.commands.map((command) => command.args.at(-1))).toEqual([
+        "ryco-cli@0.1.36",
+        `${harness.updateDirectory}/preflight.sqlite`,
+        "--version",
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("reinstalls the previous release when the preflight fails", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        runCommand: (command) =>
+          Effect.succeed(
+            isPreflight(command)
+              ? exited(
+                  1,
+                  "Ryco 0.1.36 could not migrate the database copy: SqliteError: no such column",
+                  `${NODE_UPDATE_PREFLIGHT_STARTED}\n`,
+                )
+              : ok("added 1 package"),
+          ),
+      });
+      yield* harness.service.update(update);
+      const failed = yield* harness.waitFor((state) => state.run.status === "failed");
+
+      expect(failed.run.message).toBe(
+        "node exited with code 1 while checking 0.1.36. Reinstalled 0.1.35.",
+      );
+      expect(failed.run.output).toContain("no such column");
+      // No --version fallback: this release knows the preflight, and it failed.
+      expect(harness.commands.map((command) => command.args.at(-1))).toEqual([
+        "ryco-cli@0.1.36",
+        `${harness.updateDirectory}/preflight.sqlite`,
+        "ryco-cli@0.1.35",
+      ]);
+      expect(harness.restarts).toEqual([]);
+      expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+      const fs = yield* FileSystem.FileSystem;
+      expect(yield* fs.exists(`${harness.updateDirectory}/preflight.sqlite`)).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("fails a preflight that times out instead of falling back to --version", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        runCommand: (command) =>
+          Effect.succeed(
+            isPreflight(command)
+              ? { exitCode: null, timedOut: true, spawnError: null, stdout: "", stderr: "" }
+              : ok("added 1 package"),
+          ),
+      });
+      yield* harness.service.update(update);
+      const failed = yield* harness.waitFor((state) => state.run.status === "failed");
+      expect(failed.run.message).toBe("node timed out while checking 0.1.36. Reinstalled 0.1.35.");
+      expect(harness.commands.some((command) => command.args.at(-1) === "--version")).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("reinstalls the previous release when the database cannot be copied", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        copyDatabase: (destination) =>
+          destination.endsWith("pre-0.1.35.sqlite")
+            ? Effect.fail(new NodeUpdateError({ reason: "Not enough free space." }))
+            : Effect.void,
+      });
+      yield* harness.service.update(update);
+      const failed = yield* harness.waitFor((state) => state.run.status === "failed");
+      expect(failed.run.message).toBe(
+        "Could not save the database before restarting: Not enough free space. Reinstalled 0.1.35.",
+      );
+      expect(harness.restarts).toEqual([]);
+      expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -244,15 +401,15 @@ describe("node self-update (CLI service)", () => {
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         runCommand: (command) =>
-          Effect.succeed(command.args.at(-1) === "--version" ? ok("ryco v0.1.35") : ok()),
+          Effect.succeed(isPreflight(command) ? passedPreflight("0.1.35") : ok()),
       });
       yield* harness.service.update(update);
       const failed = yield* harness.waitFor((state) => state.run.status === "failed");
 
       expect(failed.run.message).toBe(
-        "The installed release did not report 0.1.36. Reinstalled 0.1.35.",
+        "The installed release is 0.1.35, not 0.1.36. Reinstalled 0.1.35.",
       );
-      expect(failed.run.output).toBe("ryco v0.1.35");
+      expect(failed.run.output).toContain(`${NODE_UPDATE_PREFLIGHT_PASSED} 0.1.35`);
       expect(harness.commands.at(-1)?.args.at(-1)).toBe("ryco-cli@0.1.35");
       expect(harness.restarts).toEqual([]);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -289,7 +446,7 @@ describe("node self-update (CLI service)", () => {
         runCommand: (command) =>
           command.args.at(-1) === "ryco-cli@0.1.36"
             ? Deferred.await(release).pipe(Effect.as(ok()))
-            : Effect.succeed(ok("ryco v0.1.36")),
+            : Effect.succeed(passedPreflight("0.1.36")),
       });
       yield* harness.service.update(update);
       const error = yield* Effect.flip(
@@ -363,6 +520,76 @@ describe("node update after a restart", () => {
         status: "failed",
         message: "Restarted on 0.1.35 instead of 0.1.36.",
       });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  const rollback: NonNullable<NodeUpdateMarker["rollback"]> = {
+    install: {
+      command: "npm",
+      args: ["install", "-g", "--prefix", "/opt/homebrew", "ryco-cli@0.1.35"],
+      timeoutMs: 600_000,
+    },
+    databasePath: "/Users/me/.ryco/userdata/state.sqlite",
+    snapshotPath: "/Users/me/.ryco/userdata/node-update/pre-0.1.35.sqlite",
+  };
+
+  it.live("reports an update it can roll back once the server says the node is ready", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        packageVersion: "0.1.36",
+        marker: { ...marker, rollback, bootAttempts: 1 },
+      });
+      expect(yield* harness.service.awaitsBootReady).toBe(true);
+      const pending = yield* harness.service.current;
+      expect(pending.run).toMatchObject({ status: "restarting", requestId: "update-1" });
+      // Until then the marker stays, so the boot guard keeps counting starts.
+      expect(Option.isSome(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+      expect((yield* Effect.flip(harness.service.update(update))).reason).toBe(
+        "An update is already running on this node.",
+      );
+
+      yield* harness.service.confirmBootReady;
+      const state = yield* harness.waitFor((value) => value.run.status === "succeeded");
+      expect(state.run).toMatchObject({ requestId: "update-1", message: null });
+      expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("needs no confirmation without a marker, or for one without a rollback plan", () =>
+    Effect.gen(function* () {
+      expect(yield* (yield* makeHarness()).service.awaitsBootReady).toBe(false);
+      const old = yield* makeHarness({ packageVersion: "0.1.36", marker });
+      expect(yield* old.service.awaitsBootReady).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("reports a rollback from the previous release", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        packageVersion: "0.1.35",
+        marker: {
+          ...marker,
+          rollback,
+          bootAttempts: 3,
+          rolledBack: {
+            at: new Date().toISOString(),
+            failedBoots: 2,
+            databaseRestored: true,
+            output: "added 1 package",
+          },
+        },
+      });
+      expect(yield* harness.service.awaitsBootReady).toBe(false);
+      const state = yield* harness.waitFor((value) => value.run.status !== "idle");
+      expect(state.run).toMatchObject({
+        status: "failed",
+        fromVersion: "0.1.35",
+        targetVersion: "0.1.36",
+        message:
+          "Ryco 0.1.36 did not finish starting (2 attempts), so the node rolled back to 0.1.35 and restored the database from before the update.",
+        output: "added 1 package",
+      });
+      expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

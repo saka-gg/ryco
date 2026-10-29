@@ -124,12 +124,35 @@ describe("server boot import boundaries", () => {
 
   it("keeps the process entry free of the server graph", () => {
     const graph = staticGraph("src/bin.ts");
+    // A node update's preflight handshake and the service-start check that loads the boot guard
+    // (bootGuard.ts, through import()) run before the server graph: node builtins only.
     expect(graph.files.toSorted()).toEqual([
       "apps/server/src/agentControl/stdioProxyProtocol.ts",
       "apps/server/src/bin.ts",
       "apps/server/src/compileCache.ts",
+      "apps/server/src/nodeUpdate/updateProtocol.ts",
+      "apps/server/src/service/nodeServiceManager.ts",
     ]);
-    expect(graph.externals).toEqual(["node:module"]);
+    expect(graph.externals.toSorted()).toEqual(["node:fs", "node:module"]);
+  });
+
+  it("rolls back a node update without loading what it guards", () => {
+    // The boot guard runs before the server graph, so that a release that cannot load it is
+    // still rolled back; the update itself (cliUpdate.ts) stays off the serve path.
+    const guard = staticGraph("src/nodeUpdate/bootGuard.ts");
+    expect(guard.files.toSorted()).toEqual([
+      "apps/server/src/nodeUpdate/bootGuard.ts",
+      "apps/server/src/nodeUpdate/updateProtocol.ts",
+    ]);
+    expect(guard.externals.every((specifier) => specifier.startsWith("node:"))).toBe(true);
+    const serve = staticGraph("src/cliMain.ts");
+    expect(
+      serve.files.filter((file) =>
+        /^apps\/server\/src\/nodeUpdate\/(?:bootGuard|cliUpdate|preflight|processes)\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
   });
 
   it("loads the Agent Control stdio proxy without the server graph", () => {
@@ -403,6 +426,18 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // A type name only the generated Codex protocol schema defines.
       expect(readFileSync(chunk, "utf8")).not.toContain("V2ListMcpServerStatusResponse");
     }
+  });
+
+  it("loads the node update boot guard with nothing but the entry chunk", () => {
+    const guardChunk = readFileSync(builtEntry, "utf8").match(
+      /import\("(\.\/bootGuard[^"]+)"\)/u,
+    )?.[1];
+    expect(guardChunk).toBeDefined();
+    const guard = builtStaticClosure(path.resolve(serverRoot, "dist", guardChunk!));
+    expect(guard.chunks.map((chunk) => path.basename(chunk)).toSorted()).toEqual(
+      [path.basename(guardChunk!), "bin.mjs"].toSorted(),
+    );
+    expect(guard.externals.every((specifier) => specifier.startsWith("node:"))).toBe(true);
   });
 
   it("bundles effect and the platform packages instead of resolving them per file", () => {
