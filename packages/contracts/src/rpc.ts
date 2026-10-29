@@ -171,6 +171,11 @@ import {
 } from "./filesystem.ts";
 import {
   GitActionProgressEvent,
+  GitActionResultUnavailableError,
+  GitActionStoppedError,
+  GitCancelStackedActionInput,
+  GitCancelStackedActionResult,
+  GitResumeStackedActionInput,
   VcsSwitchRefInput,
   VcsSwitchRefResult,
   GitCommandError,
@@ -485,6 +490,8 @@ export const WS_METHODS = {
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
+  gitResumeStackedAction: "git.resumeStackedAction",
+  gitCancelStackedAction: "git.cancelStackedAction",
   gitResolvePullRequest: "git.resolvePullRequest",
   gitPreparePullRequestThread: "git.preparePullRequestThread",
   gitCreateWorktreeForProject: "git.createWorktreeForProject",
@@ -1864,8 +1871,27 @@ export const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
 export const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
   payload: GitRunStackedActionInput,
   success: GitActionProgressEvent,
-  error: Schema.Union([GitManagerServiceError, AuthRpcError]),
+  // Only a recoverable action can be stopped, and only clients that know the error start one.
+  error: Schema.Union([GitManagerServiceError, GitActionStoppedError, AuthRpcError]),
   stream: true,
+});
+
+export const WsGitResumeStackedActionRpc = Rpc.make(WS_METHODS.gitResumeStackedAction, {
+  payload: GitResumeStackedActionInput,
+  success: GitActionProgressEvent,
+  error: Schema.Union([
+    GitManagerServiceError,
+    GitActionStoppedError,
+    GitActionResultUnavailableError,
+    AuthRpcError,
+  ]),
+  stream: true,
+});
+
+export const WsGitCancelStackedActionRpc = Rpc.make(WS_METHODS.gitCancelStackedAction, {
+  payload: GitCancelStackedActionInput,
+  success: GitCancelStackedActionResult,
+  error: AuthRpcError,
 });
 
 export const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
@@ -2632,6 +2658,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsVcsPullRpc
   | typeof WsVcsRefreshStatusRpc
   | typeof WsGitRunStackedActionRpc
+  | typeof WsGitResumeStackedActionRpc
+  | typeof WsGitCancelStackedActionRpc
   | typeof WsGitResolvePullRequestRpc
   | typeof WsGitPreparePullRequestThreadRpc
   | typeof WsStorageScanRpc
@@ -2855,6 +2883,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,
+  WsGitResumeStackedActionRpc,
+  WsGitCancelStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
   WsStorageScanRpc,

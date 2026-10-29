@@ -363,7 +363,10 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * (644 KiB before), RootAppShell beyond boot 367 KiB (538 KiB before),
  * ChatThreadRouteView beyond boot 974 KiB. The thread route's target is
  * 700 KiB; its budget sits just above today's size so it blocks growth until
- * the thread route is split further.
+ * the thread route is split further. Boot 526 KiB on 2026-10-29 (520 before):
+ * picked page elements as chat chips, Git actions that outlive a dropped
+ * connection and pull request links from chat add about 5 KiB to the first
+ * paint path.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -372,7 +375,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 520 * KIB,
+      maxGzipBytes: 526 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,

@@ -79,6 +79,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.cliProxyHubs).toBe(true);
       expect(second.capabilities.cliProxyCloudflareAccess).toBe(true);
       expect(second.capabilities.stagedOnlyCommit).toBe(true);
+      expect(second.capabilities.recoverableGitActions).toBe(true);
     }),
   );
 

@@ -275,7 +275,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
   // it, before and after.
   const revokeSessionRows = SqlSchema.findAll({
     Request: RevokeAuthSessionInput,
-    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    Result: Schema.Struct({ sessionId: AuthSessionId, chainId: AuthSessionId }),
     execute: ({ sessionId, revokedAt }) =>
       sql`
         UPDATE auth_sessions
@@ -286,7 +286,9 @@ const makeAuthSessionRepository = Effect.gen(function* () {
             WHERE session_id = ${sessionId}
           )
           AND revoked_at IS NULL
-        RETURNING session_id AS "sessionId"
+        RETURNING
+          session_id AS "sessionId",
+          COALESCE(chain_id, session_id) AS "chainId"
       `,
   });
 
@@ -382,7 +384,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           "AuthSessionRepository.revoke:decodeRows",
         ),
       ),
-      Effect.map((rows) => rows.map((row) => row.sessionId)),
+      Effect.map((rows) => rows.map((row) => ({ sessionId: row.sessionId, chainId: row.chainId }))),
     );
 
   const revokeAllExcept: AuthSessionRepositoryShape["revokeAllExcept"] = (input) =>
