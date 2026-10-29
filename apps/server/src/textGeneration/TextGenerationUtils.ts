@@ -182,6 +182,55 @@ export function normalizeCliError(
   });
 }
 
+/** Bound on the part of a failed CLI run's output that a failure shows. */
+const CLI_FAILURE_DETAIL_MAX_CHARS = 400;
+const CLI_FAILURE_DETAIL_LINES = 2;
+const CLI_ERROR_LINE =
+  /\b(error|fatal|failed|unauthori[sz]ed|forbidden|denied|not logged in|log ?in)\b/i;
+const CLI_LOG_PREFIX = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+/;
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+/**
+ * The detail of a failed CLI text-generation run, safe to show in the UI.
+ *
+ * CLIs echo their input (`codex exec` prints the whole prompt under "user"),
+ * and the prompt carries the staged patch, file names and the user's own
+ * instructions. Every output line that is also a prompt line is dropped, and
+ * of the rest only the last error lines are kept, bounded in length.
+ */
+export function cliFailureDetail(
+  cliName: string,
+  input: { stdout: string; stderr: string; exitCode: number; prompt: string },
+): string {
+  const promptLines = new Set(
+    input.prompt
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  );
+  const outputLines = (output: string) =>
+    output
+      .replace(ANSI_ESCAPE, "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !promptLines.has(line))
+      .map((line) => line.replace(CLI_LOG_PREFIX, ""));
+  const lines = outputLines(input.stderr);
+  const candidates = lines.length > 0 ? lines : outputLines(input.stdout);
+  const errorLines = candidates.filter((line) => CLI_ERROR_LINE.test(line));
+  const shown = [
+    ...new Set((errorLines.length > 0 ? errorLines : candidates).slice(-CLI_FAILURE_DETAIL_LINES)),
+  ].join(" ");
+  const label = cliName.charAt(0).toUpperCase() + cliName.slice(1);
+  if (shown.length === 0) return `${label} CLI command failed with code ${input.exitCode}.`;
+  const bounded =
+    shown.length > CLI_FAILURE_DETAIL_MAX_CHARS
+      ? `${limitUnicode(shown, CLI_FAILURE_DETAIL_MAX_CHARS - 1)}…`
+      : shown;
+  return `${label} CLI command failed: ${bounded}`;
+}
+
 /** Bound on a workspace change summary shown in the Delete dialog. */
 const WORKSPACE_CHANGES_SUMMARY_MAX_CHARS = 400;
 

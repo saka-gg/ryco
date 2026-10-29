@@ -53,6 +53,7 @@ async function commitStagedChanges(
         cwd: commit.cwd,
         action: "commit",
         stagedOnly: { expectedRevision: commit.expectedRevision },
+        ...(commit.commitMessage ? { commitMessage: commit.commitMessage } : {}),
       },
       {
         onProgress: (event) => {
@@ -101,13 +102,15 @@ export function useLocalChanges(
     selectStagedOnlyCommit,
   );
   const commitStaged = useCallback(
-    async (toastData?: ThreadToastData) => {
-      if (!environmentId || !cwd) return;
-      const committed = await controller.commitStaged((commit) =>
-        commitStagedChanges(environmentId, commit, toastData),
+    async (toastData?: ThreadToastData, commitMessage?: string) => {
+      if (!environmentId || !cwd) return false;
+      const committed = await controller.commitStaged(
+        (commit) => commitStagedChanges(environmentId, commit, toastData),
+        commitMessage,
       );
       // After the controller's own refresh: other reads of this checkout (comparisons, refs).
       if (committed) invalidateScopes([gitScopeKey(cwd)]);
+      return committed;
     },
     [controller, environmentId, cwd],
   );

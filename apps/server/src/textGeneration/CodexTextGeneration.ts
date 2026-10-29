@@ -31,6 +31,7 @@ import {
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  cliFailureDetail,
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
@@ -281,15 +282,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       );
 
       if (exitCode !== 0) {
-        const stderrDetail = stderr.trim();
-        const stdoutDetail = stdout.trim();
-        const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
         return yield* new TextGenerationError({
           operation,
-          detail:
-            detail.length > 0
-              ? `Codex CLI command failed: ${detail}`
-              : `Codex CLI command failed with code ${exitCode}.`,
+          detail: cliFailureDetail("codex", { stdout, stderr, exitCode, prompt }),
         });
       }
     });

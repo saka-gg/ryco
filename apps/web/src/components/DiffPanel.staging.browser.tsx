@@ -309,6 +309,48 @@ describe("staged and unstaged review", () => {
     await screen.unmount();
   });
 
+  it("keeps the review when the message cannot be generated and commits a typed one", async () => {
+    await page.viewport(1100, 850);
+    fixture.stagedOnlyCommit = true;
+    fixture.read.mockResolvedValue(snapshot("1".repeat(64), patch, "", "d".repeat(64)));
+    fixture.commit.mockRejectedValueOnce(
+      Object.assign(new Error("Text generation failed in generateCommitMessage"), {
+        _tag: "TextGenerationError",
+        operation: "generateCommitMessage",
+        detail: "Codex CLI command failed: ERROR: unexpected status 401 Unauthorized",
+      }),
+    );
+    const screen = await render(<App />);
+    await screen.getByRole("button", { name: "Staged changes", exact: true }).click();
+    await expect
+      .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
+      .toBeVisible();
+    await screen.getByRole("button", { name: "Commit staged" }).click();
+    await expect
+      .element(screen.getByRole("alert"))
+      .toMatchTextContent(/could not be generated .*401 Unauthorized.*Type a message/);
+    expect(fixture.commit.mock.calls[0]?.[0]).not.toHaveProperty("commitMessage");
+    // Nothing was written, so the review stays and can be committed with a typed message.
+    await expect
+      .element(screen.getByRole("button", { name: "Unstage file a/file.ts" }))
+      .toBeVisible();
+    fixture.commit.mockResolvedValue({
+      toast: { title: "Committed 89abcde", description: "Fix the greeting" },
+    });
+    fixture.read.mockResolvedValue(snapshot("2".repeat(64), "", "", "e".repeat(64)));
+    await screen.getByRole("textbox", { name: "Commit message" }).fill("Fix the greeting");
+    await screen.getByRole("button", { name: "Commit staged" }).click();
+    await expect
+      .poll(() => fixture.commit.mock.calls[1]?.[0])
+      .toMatchObject({
+        action: "commit",
+        stagedOnly: { expectedRevision: "d".repeat(64) },
+        commitMessage: "Fix the greeting",
+      });
+    await expect.element(screen.getByRole("textbox", { name: "Commit message" })).toHaveValue("");
+    await screen.unmount();
+  });
+
   it("hides the staged commit when the node does not advertise it", async () => {
     fixture.stagedOnlyCommit = false;
     fixture.read.mockResolvedValue(snapshot("1".repeat(64), patch, ""));

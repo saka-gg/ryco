@@ -105,6 +105,37 @@ describe("local changes controller", () => {
       isCommitting: false,
     });
   });
+  it("keeps the review when the commit message could not be generated, then commits a typed one", async () => {
+    const generationFailed = Object.assign(new Error("Text generation failed"), {
+      _tag: "TextGenerationError",
+      operation: "generateCommitMessage",
+      detail: "Codex CLI command failed: ERROR: unexpected status 401 Unauthorized.",
+    });
+    const commit = vi.fn(async (): Promise<void> => {
+      throw generationFailed;
+    });
+    const read = vi.fn(async () => stagedSnapshot("reviewed"));
+    const c = createLocalChangesController({ cwd: "/repo", read, apply: vi.fn() });
+    await c.refresh();
+    expect(await c.commitStaged(commit, "  ")).toBe(false);
+    expect(commit).toHaveBeenCalledWith({ cwd: "/repo", expectedRevision: "reviewed" });
+    expect(c.getSnapshot()).toMatchObject({
+      error: null,
+      isCommitting: false,
+      commitError:
+        "No commit: the commit message could not be generated (Codex CLI command failed: ERROR: unexpected status 401 Unauthorized). Type a message and commit again.",
+    });
+    expect(c.getSnapshot().data?.stagedRevision).toBe("reviewed");
+    commit.mockResolvedValue(undefined);
+    expect(await c.commitStaged(commit, " Fix the greeting ")).toBe(true);
+    expect(commit).toHaveBeenLastCalledWith({
+      cwd: "/repo",
+      expectedRevision: "reviewed",
+      commitMessage: "Fix the greeting",
+    });
+    expect(c.getSnapshot().commitError).toBeNull();
+    expect(read).toHaveBeenCalledTimes(2);
+  });
   it("ignores reads and write completion from an invalidated connection generation", async () => {
     let resolveRead!: (data: GitLocalChangesResult) => void;
     let resolveWrite!: () => void;

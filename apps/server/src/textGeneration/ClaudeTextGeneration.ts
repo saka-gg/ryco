@@ -34,6 +34,7 @@ import {
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  cliFailureDetail,
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
@@ -73,6 +74,14 @@ const CLAUDE_TIMEOUT_DETAIL = "Claude CLI request timed out.";
 const ClaudeOutputEnvelope = Schema.Struct({
   structured_output: Schema.Unknown,
 });
+
+/**
+ * The same wrapper for a failed run: no `structured_output`, and the error
+ * message in `result` (e.g. "Not logged in · Please run /login").
+ */
+const decodeClaudeErrorEnvelope = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ is_error: Schema.Literal(true), result: Schema.String })),
+);
 
 export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(function* (
   claudeSettings: ClaudeSettings,
@@ -225,15 +234,19 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       );
 
       if (exitCode !== 0) {
-        const stderrDetail = stderr.trim();
-        const stdoutDetail = stdout.trim();
-        const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
+        // The envelope's message, when stdout has one, rather than the envelope itself.
+        const result = decodeClaudeErrorEnvelope(stdout.trim()).pipe(
+          Option.map((envelope) => envelope.result),
+          Option.filter((message) => message.trim().length > 0),
+        );
         return yield* new TextGenerationError({
           operation,
-          detail:
-            detail.length > 0
-              ? `Claude CLI command failed: ${detail}`
-              : `Claude CLI command failed with code ${exitCode}.`,
+          detail: cliFailureDetail(
+            "claude",
+            Option.isSome(result)
+              ? { stdout: result.value, stderr: "", exitCode, prompt }
+              : { stdout, stderr, exitCode, prompt },
+          ),
         });
       }
 
