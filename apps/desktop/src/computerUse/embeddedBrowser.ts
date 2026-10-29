@@ -5,15 +5,24 @@ import type {
   ProjectBrowserSurface,
 } from "@ryco/contracts";
 import { browserUrl, type BrowserTab, type BrowserTransport } from "./browser.ts";
+import { CdpLease } from "../browser/cdpLease.ts";
 import { SignInPopups } from "../browser/signInPopups.ts";
 
+/** One page of a tab: its view, hidden host window and shared debugger session. */
+interface LivePage {
+  readonly view: WebContentsView;
+  readonly host: BrowserWindow;
+  readonly cdp: CdpLease;
+}
 interface TabEntry {
-  view: WebContentsView;
-  host: BrowserWindow;
+  /** The tab's page. Null only while it is created or torn down (browser-tab-budget adds suspension). */
+  live: LivePage | null;
   project: string;
   presentation: "background" | "panel" | "window";
   error: string | null;
   requestedUrl: string;
+  /** Agent CDP calls in flight (withAgentCdp). browser-picker refuses to start a pick and browser-tab-budget pins the tab while > 0. */
+  agentBusy: number;
 }
 
 /** One tab owner shared by manual preview and the consent-gated agent transport. */
@@ -29,9 +38,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     return () => this.focusListeners.delete(listener);
   }
   private mounted: { owner: string; tab: string; window: BrowserWindow } | null = null;
-  private fitHost(entry: TabEntry): void {
-    const [width = 1280, height = 850] = entry.host.getContentSize();
-    entry.view.setBounds({ x: 0, y: 0, width, height });
+  private fitHost(page: LivePage): void {
+    const [width = 1280, height = 850] = page.host.getContentSize();
+    page.view.setBounds({ x: 0, y: 0, width, height });
   }
   private getProfile(): Electron.Session {
     if (this.profile) return this.profile;
@@ -49,7 +58,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   state(): ProjectBrowserState {
     return {
       tabs: [...this.entries].map(([id, entry]) => {
-        const wc = entry.view.webContents;
+        const wc = this.liveOf(entry).view.webContents;
         return {
           id,
           project: entry.project,
@@ -74,16 +83,12 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     signal.throwIfAborted();
     return this.state().tabs.map(({ id, title, url }) => ({ id, title, url }));
   }
-  async open(
-    url: string,
-    _visible: boolean,
-    signal: AbortSignal,
-    project = "",
-  ): Promise<BrowserTab> {
-    signal.throwIfAborted();
-    const target = browserUrl(url);
-    if (this.entries.size >= 24)
-      throw new Error("Close a browser tab before opening another (24 tab limit).");
+  /**
+   * Creates a page for `entry`: its hidden host window, its view with the isolated profile, its
+   * debugger session and every per-page listener. Every unit creates its per-page objects here, and
+   * every per-page listener that touches the tab returns early unless this page is still current.
+   */
+  private createPage(entry: TabEntry, existingId?: string): { id: string; page: LivePage } {
     const host = new BrowserWindow({
       width: 1280,
       height: 850,
@@ -102,27 +107,40 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       },
     });
     const wc = view.webContents;
-    const id = String(wc.id);
-    const entry: TabEntry = {
-      view,
-      host,
-      project,
-      presentation: "background",
-      error: null,
-      requestedUrl: target,
+    // Tab ids are the tab's first page's webContents id: the smoke scripts call
+    // webContents.fromId(Number(tab.id)), and Electron never reuses ids. existingId keeps the id
+    // when a tab gets a new page (browser-tab-budget's revival); open() never passes it.
+    const id = existingId ?? String(wc.id);
+    const cdp = new CdpLease(wc);
+    // Activate the page inside Chromium, without focusing its host window or changing the
+    // user's selected tab/application. Once per debugger session, whoever opened it.
+    cdp.onReady((send) =>
+      send("Emulation.setFocusEmulationEnabled", { enabled: true }).then(() => undefined),
+    );
+    const page: LivePage = { view, host, cdp };
+    // Only the tab's current page may change the tab. Electron destroys contents asynchronously, so
+    // a page that was torn down (closed, or replaced when the tab gets a new page) can still emit
+    // events; every listener below that touches the tab starts with this check.
+    const current = () => entry.live === page;
+    const publish = () => {
+      if (current()) this.publish();
     };
-    this.entries.set(id, entry);
-    host.once("closed", () => this.destroy(id, "host"));
-    wc.once("destroyed", () => this.destroy(id, "guest"));
+    host.once("closed", () => {
+      if (current()) this.destroy(id, "host");
+    });
+    wc.once("destroyed", () => {
+      if (current()) this.destroy(id, "guest");
+    });
     host.contentView.addChildView(view);
-    this.fitHost(entry);
+    this.fitHost(page);
     host.on("resize", () => {
-      if (entry.presentation === "panel") return;
-      this.fitHost(entry);
+      if (!current() || entry.presentation === "panel") return;
+      this.fitHost(page);
     });
     host.on("close", (event) => {
       // Closing a detached preview returns it to the browser's tab strip.
       event.preventDefault();
+      if (!current()) return;
       this.signIn.cancel(id);
       host.hide();
       entry.presentation = "background";
@@ -130,11 +148,12 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     });
     this.signIn.install(id, wc, () => this.foreground(id));
     wc.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
+      if (!current()) return;
       if (mainFrame && !inPlace) this.signIn.cancel(id);
       if (mainFrame && /^https?:/u.test(url)) entry.requestedUrl = url;
     });
     wc.on("before-input-event", (event, input) => {
-      if (input.type !== "keyDown") return;
+      if (!current() || input.type !== "keyDown") return;
       const commandKey = process.platform === "darwin" ? input.meta : input.control;
       if (commandKey && !input.alt && input.key.toLowerCase() === "l") {
         event.preventDefault();
@@ -147,6 +166,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         this.destroy(id);
       }
     });
+    // Navigation validation guards every page, current or not; it changes nothing on the tab.
     const validateNavigation = (event: Electron.Event, navigation: string) => {
       try {
         browserUrl(navigation);
@@ -157,24 +177,51 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     wc.on("will-navigate", validateNavigation);
     wc.on("will-redirect", validateNavigation);
     wc.on("did-start-loading", () => {
+      if (!current()) return;
       entry.error = null;
       this.publish();
     });
-    wc.on("did-stop-loading", () => this.publish());
-    wc.on("did-navigate", () => this.publish());
-    wc.on("did-navigate-in-page", () => this.publish());
-    wc.on("page-title-updated", () => this.publish());
+    wc.on("did-stop-loading", publish);
+    wc.on("did-navigate", publish);
+    wc.on("did-navigate-in-page", publish);
+    wc.on("page-title-updated", publish);
     wc.on("did-fail-load", (_event, code, description, _url, mainFrame) => {
-      if (mainFrame && code !== -3) {
+      if (current() && mainFrame && code !== -3) {
         entry.error = description;
         this.publish();
       }
     });
     wc.on("render-process-gone", () => {
+      if (!current()) return;
       this.signIn.fail(id);
       entry.error = "This page stopped responding. Reload to recover.";
       this.publish();
     });
+    return { id, page };
+  }
+  async open(
+    url: string,
+    _visible: boolean,
+    signal: AbortSignal,
+    project = "",
+  ): Promise<BrowserTab> {
+    signal.throwIfAborted();
+    const target = browserUrl(url);
+    if (this.entries.size >= 24)
+      throw new Error("Close a browser tab before opening another (24 tab limit).");
+    const entry: TabEntry = {
+      live: null,
+      project,
+      presentation: "background",
+      error: null,
+      requestedUrl: target,
+      agentBusy: 0,
+    };
+    // No Electron event can fire before the entry is registered.
+    const { id, page } = this.createPage(entry);
+    entry.live = page;
+    this.entries.set(id, entry);
+    const wc = page.view.webContents;
     const abort = () => this.destroy(id);
     signal.addEventListener("abort", abort, { once: true });
     this.publish();
@@ -198,21 +245,33 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       signal.removeEventListener("abort", abort);
     }
   }
-  private foreground(id: string): boolean {
+  /** The window showing this tab: the Ryco window it is mounted in, or its popped-out host. */
+  private presentedWindow(id: string): BrowserWindow | null {
     const entry = this.entries.get(id);
-    if (!entry) return false;
-    const window =
-      entry.presentation === "panel" && this.mounted?.tab === id
-        ? this.mounted.window
-        : entry.presentation === "window"
-          ? entry.host
-          : null;
+    if (!entry?.live) return null;
+    if (entry.presentation === "panel" && this.mounted?.tab === id) return this.mounted.window;
+    return entry.presentation === "window" ? entry.live.host : null;
+  }
+  /** Shown to the user: mounted in a visible, non-minimized Ryco window, or a visible pop-out. */
+  presented(id: string): boolean {
+    const window = this.presentedWindow(id);
+    return Boolean(window && !window.isDestroyed() && window.isVisible() && !window.isMinimized());
+  }
+  private foreground(id: string): boolean {
+    const window = this.presentedWindow(id);
     return Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused());
   }
   private entry(id: string): TabEntry {
     const entry = this.entries.get(id);
-    if (!entry || entry.view.webContents.isDestroyed()) throw new Error("Browser tab closed.");
+    if (!entry) throw new Error("Browser tab closed.");
+    this.liveOf(entry);
     return entry;
+  }
+  /** The tab's live page, or "Browser tab closed." when it has none or its contents are gone. */
+  private liveOf(entry: TabEntry): LivePage {
+    const page = entry.live;
+    if (!page || page.view.webContents.isDestroyed()) throw new Error("Browser tab closed.");
+    return page;
   }
   private unmount(): void {
     const mounted = this.mounted;
@@ -221,10 +280,13 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.signIn.cancel(mounted.tab);
     const entry = this.entries.get(mounted.tab);
     if (!entry) return;
-    if (!mounted.window.isDestroyed()) mounted.window.contentView.removeChildView(entry.view);
-    if (!entry.host.isDestroyed()) entry.host.contentView.addChildView(entry.view);
-    const { width, height } = entry.view.getBounds();
-    entry.view.setBounds({ x: 0, y: 0, width, height });
+    const page = entry.live;
+    if (page) {
+      if (!mounted.window.isDestroyed()) mounted.window.contentView.removeChildView(page.view);
+      if (!page.host.isDestroyed()) page.host.contentView.addChildView(page.view);
+      const { width, height } = page.view.getBounds();
+      page.view.setBounds({ x: 0, y: 0, width, height });
+    }
     entry.presentation = "background";
   }
   surface(input: ProjectBrowserSurface, ownerWindow: BrowserWindow): void {
@@ -250,6 +312,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       });
     }
     const entry = this.entry(input.tab);
+    const page = this.liveOf(entry);
     if (entry.presentation === "window") return;
     const [windowWidth = 0, windowHeight = 0] = ownerWindow.getContentSize();
     // Renderer rectangles use CSS pixels; native view bounds use device-independent pixels.
@@ -271,13 +334,13 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const changed = this.mounted?.tab !== input.tab || this.mounted?.owner !== input.owner;
     if (changed) {
       this.unmount();
-      entry.host.hide();
-      entry.host.contentView.removeChildView(entry.view);
-      ownerWindow.contentView.addChildView(entry.view);
+      page.host.hide();
+      page.host.contentView.removeChildView(page.view);
+      ownerWindow.contentView.addChildView(page.view);
       this.mounted = { owner: input.owner, tab: input.tab, window: ownerWindow };
       entry.presentation = "panel";
     }
-    entry.view.setBounds({
+    page.view.setBounds({
       x: Math.round(x),
       y: Math.round(y),
       width: Math.round(width),
@@ -298,15 +361,25 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     // must never be reparented or asked to close again from its own destroyed callback.
     this.entries.delete(tab);
     this.signIn.cancel(tab);
+    const page = entry.live;
+    entry.live = null;
     if (this.mounted?.tab === tab) {
       const { window } = this.mounted;
       this.mounted = null;
-      if (!window.isDestroyed()) window.contentView.removeChildView(entry.view);
+      if (page && !window.isDestroyed()) window.contentView.removeChildView(page.view);
     }
-    if (destroyed !== "guest" && !entry.view.webContents.isDestroyed())
-      entry.view.webContents.close({ waitForBeforeUnload: false });
-    if (destroyed !== "host" && !entry.host.isDestroyed()) entry.host.destroy();
+    if (page) this.teardownPage(tab, page, destroyed);
     this.publish();
+  }
+  /**
+   * The single place a page's per-page state ends: every unit's per-page teardown, then its
+   * debugger session, then the page itself. `destroyed` names the side Electron already destroyed.
+   */
+  private teardownPage(id: string, page: LivePage, destroyed?: "guest" | "host"): void {
+    page.cdp.dispose();
+    const wc = page.view.webContents;
+    if (destroyed !== "guest" && !wc.isDestroyed()) wc.close({ waitForBeforeUnload: false });
+    if (destroyed !== "host" && !page.host.isDestroyed()) page.host.destroy();
   }
   async close(tab: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
@@ -314,7 +387,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   }
   async command(input: ProjectBrowserCommand): Promise<void> {
     const entry = this.entry(input.tab),
-      wc = entry.view.webContents;
+      page = this.liveOf(entry),
+      wc = page.view.webContents;
     switch (input.action) {
       case "allow-sign-in":
         if (!this.foreground(input.tab))
@@ -353,13 +427,13 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       case "popout":
         if (this.mounted?.tab === input.tab) this.unmount();
         entry.presentation = "window";
-        this.fitHost(entry);
-        entry.host.show();
+        this.fitHost(page);
+        page.host.show();
         break;
       case "dock":
         this.signIn.cancel(input.tab);
         if (entry.presentation === "window") {
-          entry.host.hide();
+          page.host.hide();
           entry.presentation = "background";
         }
         break;
@@ -367,41 +441,44 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.publish();
   }
   async capture(tab: string): Promise<string> {
-    const image = await this.entry(tab).view.webContents.capturePage();
+    const image = await this.liveOf(this.entry(tab)).view.webContents.capturePage();
     return image.resize({ width: 640 }).toDataURL();
   }
-  async send(
-    tab: string,
-    method: string,
-    params: Record<string, unknown>,
-    signal: AbortSignal,
-  ): Promise<unknown> {
-    signal.throwIfAborted();
+  /** Sign-in rules for agent control: an open popup refuses it; an armed grant is cancelled. */
+  private guard(tab: string): void {
     if (this.signIn.state(tab) === "open")
       throw new Error("Finish or close the sign-in popup before agent browser control resumes.");
     if (this.signIn.state(tab) === "armed") this.signIn.cancel(tab);
-    const wc = this.entry(tab).view.webContents;
-    const debuggerApi = wc.debugger;
-    const attaching = !debuggerApi.isAttached();
-    if (attaching) debuggerApi.attach("1.3");
-    const abort = () => {
-      if (!wc.isDestroyed() && debuggerApi.isAttached()) debuggerApi.detach();
-    };
-    signal.addEventListener("abort", abort, { once: true });
+  }
+  /**
+   * Agent CDP work on one tab: sign-in rules, the page's shared session held as "agent", its ready
+   * steps, the 15 s guard and abort. Every agent path into a page's debugger goes through here.
+   */
+  private async withAgentCdp<T>(
+    tab: string,
+    signal: AbortSignal,
+    run: (cdp: CdpLease) => Promise<T>,
+  ): Promise<T> {
+    signal.throwIfAborted();
+    this.guard(tab);
+    const entry = this.entry(tab);
+    const { cdp } = this.liveOf(entry);
+    const first = cdp.acquire("agent");
+    // Only the agent's own hold ends: another holder (a user's pick) keeps the session.
+    const release = () => cdp.release("agent");
+    signal.addEventListener("abort", release, { once: true });
+    entry.agentBusy++;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const value = await Promise.race([
         (async () => {
-          // Activate the page inside Chromium, without focusing its host window
-          // or changing the user's selected tab/application.
-          if (attaching)
-            await debuggerApi.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+          await cdp.ready(); // Focus emulation (and other units' steps), once per attachment.
           signal.throwIfAborted();
-          return debuggerApi.sendCommand(method, params);
+          return run(cdp);
         })(),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => {
-            abort();
+            release();
             reject(new Error("Browser command timed out."));
           }, 15_000);
         }),
@@ -409,20 +486,30 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       signal.throwIfAborted();
       return value;
     } catch (error) {
-      if (attaching) abort();
+      if (first) release();
       throw error;
     } finally {
       clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
+      signal.removeEventListener("abort", release);
+      entry.agentBusy--;
     }
   }
+  async send(
+    tab: string,
+    method: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    return this.withAgentCdp(tab, signal, (cdp) => cdp.send(method, params));
+  }
   stop(): void {
-    for (const [id, { view }] of this.entries) {
+    for (const [id, entry] of this.entries) {
       this.signIn.cancel(id);
-      const wc = view.webContents;
-      if (wc.isDestroyed()) continue;
-      wc.stop();
-      if (wc.debugger.isAttached()) wc.debugger.detach();
+      const page = entry.live;
+      if (!page || page.view.webContents.isDestroyed()) continue;
+      page.view.webContents.stop();
+      // Emergency stop ends the agent's hold only; another holder keeps its session.
+      page.cdp.release("agent");
     }
   }
   dispose(): void {
