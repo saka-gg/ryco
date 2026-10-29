@@ -375,6 +375,18 @@
       "types": "./src/worktreePullRequests.ts",
       "import": "./src/worktreePullRequests.ts"
     },
+    "./changeRequestChecks": {
+      "types": "./src/changeRequestChecks.ts",
+      "import": "./src/changeRequestChecks.ts"
+    },
+    "./pullRequestWatch": {
+      "types": "./src/pullRequestWatch.ts",
+      "import": "./src/pullRequestWatch.ts"
+    },
+    "./pullRequestWatchSummary": {
+      "types": "./src/pullRequestWatchSummary.ts",
+      "import": "./src/pullRequestWatchSummary.ts"
+    },
     "./providerCapabilities": {
       "types": "./src/providerCapabilities.ts",
       "import": "./src/providerCapabilities.ts"
