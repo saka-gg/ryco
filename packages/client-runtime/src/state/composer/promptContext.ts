@@ -1,4 +1,10 @@
 import {
+  AGENT_CONTROL_MESSAGE_ID_PREFIX,
+  AGENT_SENT_MESSAGE_ID_SUFFIX,
+  DELEGATION_RESULT_MESSAGE_ID_PREFIX,
+} from "@ryco/contracts/orchestration";
+
+import {
   BROWSER_CONTEXT_CLOSE_TAG,
   BROWSER_CONTEXT_DESCRIPTION,
   type BrowserElementReference,
@@ -308,4 +314,64 @@ export function deriveDisplayedUserMessageContext(prompt: string): DisplayedUser
     fileReferences: extracted.fileReferences,
     browserElements: extracted.browserElements,
   };
+}
+
+/** A user-role message no person typed, shown folded to one line until it is opened. */
+export interface AgentMessageFold {
+  readonly kind: "delegation-result" | "agent-message";
+  /** "Results from 2 delegated tasks" · "Message from another agent" */
+  readonly label: string;
+  /** "2 completed, 1 interrupted" · the message's first line. */
+  readonly summary: string;
+}
+
+const FOLD_SUMMARY_MAX_CHARS = 120;
+const DELEGATION_TASK_COUNT = /^(\d+) task\(s\) you delegated/m;
+const DELEGATION_SECTION_STATE =
+  /^Delegated (?:initial-run result|result|task notice) \(([a-z-]+)[,)]/gm;
+
+function firstLine(text: string): string {
+  const line =
+    text
+      .split("\n")
+      .find((candidate) => candidate.trim().length > 0)
+      ?.trim() ?? "";
+  return line.length > FOLD_SUMMARY_MAX_CHARS
+    ? `${line.slice(0, FOLD_SUMMARY_MAX_CHARS - 1)}…`
+    : line;
+}
+
+/**
+ * How a server-written user-role message folds, from its id (the server mints those ids
+ * and refuses them from clients): a delegated task's result waking its parent, or another
+ * agent's message to this thread. Null for a message a person typed.
+ */
+export function agentMessageFoldOf(message: {
+  readonly id?: string;
+  readonly role: string;
+  readonly text: string;
+}): AgentMessageFold | null {
+  const id = message.id;
+  if (message.role !== "user" || id === undefined) return null;
+  if (id.startsWith(DELEGATION_RESULT_MESSAGE_ID_PREFIX)) {
+    const count = Number(DELEGATION_TASK_COUNT.exec(message.text)?.[1] ?? 1);
+    const states = new Map<string, number>();
+    for (const match of message.text.matchAll(DELEGATION_SECTION_STATE)) {
+      const state = match[1]!;
+      states.set(state, (states.get(state) ?? 0) + 1);
+    }
+    return {
+      kind: "delegation-result",
+      label: count === 1 ? "Result from a delegated task" : `Results from ${count} delegated tasks`,
+      summary: [...states].map(([state, n]) => `${n} ${state}`).join(", "),
+    };
+  }
+  if (id.startsWith(AGENT_CONTROL_MESSAGE_ID_PREFIX) && id.endsWith(AGENT_SENT_MESSAGE_ID_SUFFIX)) {
+    return {
+      kind: "agent-message",
+      label: "Message from another agent",
+      summary: firstLine(message.text),
+    };
+  }
+  return null;
 }

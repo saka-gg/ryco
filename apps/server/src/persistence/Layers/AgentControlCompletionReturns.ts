@@ -1,4 +1,5 @@
 import {
+  DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   AgentControlCompletionReturn,
   AgentControlProposalId,
   AgentControlTaskNoticeOutcome,
@@ -26,7 +27,7 @@ import {
 } from "../serverWakeQueries.ts";
 
 /** Wake message ids carry this prefix; the turn they start is a delegation-wake turn. */
-export const DELEGATION_WAKE_MESSAGE_PREFIX = "delegation-result:";
+export const DELEGATION_WAKE_MESSAGE_PREFIX = DELEGATION_RESULT_MESSAGE_ID_PREFIX;
 /** Wake command ids carry this prefix (user-stop attribution). */
 export const DELEGATION_WAKE_COMMAND_PREFIX = "delegation-return:";
 

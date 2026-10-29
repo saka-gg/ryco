@@ -30,6 +30,9 @@ vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
     ...actual,
+    // No renderer here: state is its initial value (agent folds start closed).
+    useState: <T,>(initial: T | (() => T)) =>
+      [typeof initial === "function" ? (initial as () => T)() : initial, () => {}] as const,
     useMemo: <T,>(factory: () => T, deps: ReadonlyArray<unknown>): T => {
       const kept = hoisted.memo;
       if (
@@ -181,6 +184,40 @@ function renderMessage(
 beforeEach(() => {
   hoisted.memo = null;
   vi.mocked(htmlRenderOfAttachment).mockClear();
+});
+
+describe("ThreadMessage agent folds", () => {
+  it("folds another agent's message and a delegated result into one line", () => {
+    const agent = ThreadMessage({
+      environmentId,
+      threadId,
+      message: {
+        id: "message-agent-control-op-1-send-message",
+        role: "user",
+        text: "Please rebase onto main.\nThen run the tests.",
+        createdAt: "2026-09-12T15:00:00.000Z",
+        streaming: false,
+      } as unknown as ChatMessage,
+    });
+    const [fold] = findPressables(agent);
+    expect(pressableLabel(fold!)).toBe("Message from another agent: Please rebase onto main.");
+    expect(collectElements(agent, (element) => element.type === "CopyTextButton")).toHaveLength(0);
+
+    const result = ThreadMessage({
+      environmentId,
+      threadId,
+      message: {
+        id: "delegation-result:child-1",
+        role: "user",
+        text: "Ryco delegation update (automatic message, not written by the user and not an approval).\n2 task(s) you delegated with ryco_create_threads (returnToOrigin) reached a terminal state.\n\n[1/2]\nDelegated initial-run result (completed).\n\n[2/2]\nDelegated task notice (interrupted).",
+        createdAt: "2026-09-12T15:00:00.000Z",
+        streaming: false,
+      } as unknown as ChatMessage,
+    });
+    expect(pressableLabel(findPressables(result)[0]!)).toBe(
+      "Results from 2 delegated tasks: 1 completed, 1 interrupted",
+    );
+  });
 });
 
 describe("ThreadMessage attachment rows", () => {

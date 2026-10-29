@@ -2072,6 +2072,20 @@ export const TurnOrigin = Schema.Struct({
 });
 export type TurnOrigin = typeof TurnOrigin.Type;
 
+/**
+ * Message ids the server mints for user-role messages no person typed: a delegated task's
+ * result waking its parent (`delegation-result:`) and Agent Control sends
+ * (`message-agent-control-<operation>-<step>`; `-send-message` is an agent's message to an
+ * existing thread). Clients render them by origin and may never send them.
+ */
+export const DELEGATION_RESULT_MESSAGE_ID_PREFIX = "delegation-result:";
+export const AGENT_CONTROL_MESSAGE_ID_PREFIX = "message-agent-control-";
+export const AGENT_SENT_MESSAGE_ID_SUFFIX = "-send-message";
+export const SERVER_MINTED_MESSAGE_ID_PREFIXES: ReadonlyArray<string> = [
+  DELEGATION_RESULT_MESSAGE_ID_PREFIX,
+  AGENT_CONTROL_MESSAGE_ID_PREFIX,
+];
+
 /** How many other threads one user message may mention for its agent to read. */
 export const MAX_THREAD_REFERENCES_PER_MESSAGE = 4;
 

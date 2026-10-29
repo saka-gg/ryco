@@ -130,6 +130,7 @@ import { usePendingQuoteHighlight } from "./usePendingQuoteHighlight";
 import type { NumberedQuoteCitation } from "@ryco/shared/quoteCitations";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
+  agentMessageFoldOf,
   browserElementReferenceKey,
   deriveDisplayedUserMessageContext,
   fileReferenceKey,
@@ -1406,6 +1407,9 @@ function renderChapterEntryPanel(entry: TimelineWorkEntry, panelId: string) {
 }
 
 function TimelineRowContent({ row }: { row: TimelineRow }) {
+  // A delegated result or another agent's message reads as one line until opened.
+  const agentFold = row.kind === "message" ? agentMessageFoldOf(row.message) : null;
+  const [agentFoldOpen, setAgentFoldOpen] = useState(false);
   // This row renderer reads both contexts (it depends on streaming + stable
   // fields), so it re-renders on streaming transitions as before. The merged
   // object is local — it does not propagate through any context boundary.
@@ -1552,8 +1556,43 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         <UserInputExchangeRow exchange={row.exchange} timestampFormat={ctx.timestampFormat} />
       )}
 
+      {row.kind === "message" && row.message.role === "user" && agentFold && !agentFoldOpen ? (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="flex min-w-0 max-w-[80%] items-center gap-2 rounded-xl border border-border/60 px-3 py-1.5 text-left text-muted-foreground text-xs transition-colors hover:bg-foreground/5"
+            aria-expanded={false}
+            data-agent-message-fold={agentFold.kind}
+            onClick={() => setAgentFoldOpen(true)}
+          >
+            <BotIcon className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="shrink-0 font-medium text-foreground/80">{agentFold.label}</span>
+            {agentFold.summary ? (
+              <span className="min-w-0 truncate">{agentFold.summary}</span>
+            ) : null}
+            <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+
+      {row.kind === "message" && row.message.role === "user" && agentFold && agentFoldOpen ? (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="mb-1 flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground"
+            aria-expanded={true}
+            onClick={() => setAgentFoldOpen(false)}
+          >
+            <BotIcon className="size-3.5" aria-hidden="true" />
+            {agentFold.label}
+            <ChevronDownIcon className="size-3.5 rotate-180" aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+
       {row.kind === "message" &&
         row.message.role === "user" &&
+        (!agentFold || agentFoldOpen) &&
         (() => {
           const userImages = row.message.attachments ?? [];
           const displayedUserMessage = deriveDisplayedUserMessageForTier(

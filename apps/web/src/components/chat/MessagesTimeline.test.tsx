@@ -239,6 +239,37 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("yoo what&#x27;s ");
   }, 20_000);
 
+  it("folds another agent's message into one line and keeps a typed message open", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const message = (id: string, text: string) => ({
+      id,
+      kind: "message" as const,
+      createdAt: "2026-03-17T19:12:28.000Z",
+      message: {
+        id: MessageId.make(id),
+        role: "user" as const,
+        text,
+        createdAt: "2026-03-17T19:12:28.000Z",
+        streaming: false,
+      },
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          message("message-agent-control-op-1-send-message", "Rebase onto main.\nThen test."),
+          message("message-typed", "Hello from a person"),
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('data-agent-message-fold="agent-message"');
+    expect(markup).toContain("Message from another agent");
+    expect(markup).toContain("Rebase onto main.");
+    expect(markup).not.toContain("Then test.");
+    expect(markup).toContain("Hello from a person");
+  }, 20_000);
+
   it("renders context compaction entries as timeline markers", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(

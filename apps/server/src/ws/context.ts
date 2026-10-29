@@ -69,6 +69,7 @@ import { Open, resolveAvailableEditors } from "../open.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../orchestration/Services/ThreadDeletionReactor.ts";
 import { OrchestrationModelSwitchBlockedError } from "../orchestration/Errors.ts";
+import { refuseServerMintedMessageId } from "../orchestration/Normalizer.ts";
 import { ContextHandoffInspection } from "../orchestration/Services/ContextHandoffInspection.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { StatisticsQuery } from "../statistics/StatisticsQuery.ts";
@@ -1148,6 +1149,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const dispatchNormalizedCommand = (
       normalizedCommand: OrchestrationCommand,
     ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
+      // Every caller of this dispatcher carries a client's command.
+      const refused = refuseServerMintedMessageId(normalizedCommand);
       const dispatchEffect =
         normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
           ? dispatchBootstrapTurnStart(normalizedCommand)
@@ -1162,13 +1165,17 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               ),
             );
 
-      return startup
-        .enqueueCommand(dispatchEffect)
-        .pipe(
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-          ),
-        );
+      return refused.pipe(
+        Effect.andThen(
+          startup
+            .enqueueCommand(dispatchEffect)
+            .pipe(
+              Effect.mapError((cause) =>
+                toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+              ),
+            ),
+        ),
+      );
     };
 
     /** Runs a mutation once startup admits commands, exactly as `dispatchNormalizedCommand`. */

@@ -6,6 +6,7 @@ import {
   OrchestrationDispatchCommandError,
   ProjectMetadataDir,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
+  SERVER_MINTED_MESSAGE_ID_PREFIXES,
   type UploadChatAttachment,
   type UploadChatFileAttachment,
   type UploadChatImageAttachment,
@@ -36,6 +37,24 @@ function isKnownUploadAttachment(
 ): attachment is UploadChatImageAttachment | UploadChatFileAttachment {
   return attachment.type === "image" || attachment.type === "file";
 }
+
+/**
+ * A person's turn start or steer may not use an id the server mints for messages nobody
+ * typed (`SERVER_MINTED_MESSAGE_ID_PREFIXES`): clients show those as another agent's message
+ * or a delegated result. Checked where a client's command enters, not here, because the
+ * server's own wakes pass through this normalizer too.
+ */
+export const refuseServerMintedMessageId = (
+  command: OrchestrationCommand,
+): Effect.Effect<void, OrchestrationDispatchCommandError> =>
+  (command.type === "thread.turn.start" || command.type === "thread.turn.steer") &&
+  SERVER_MINTED_MESSAGE_ID_PREFIXES.some((prefix) => command.message.messageId.startsWith(prefix))
+    ? Effect.fail(
+        new OrchestrationDispatchCommandError({
+          message: "This message id is reserved for messages Ryco sends.",
+        }),
+      )
+    : Effect.void;
 
 export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
   Effect.gen(function* () {
