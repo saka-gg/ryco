@@ -2,17 +2,22 @@ import type { ComputerUseResult } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   BROWSER_DIALOG_SCOPE_SLACK_MS,
+  BROWSER_MUTATING_ACTIONS,
   BROWSER_SNAPSHOT_SCRIPT,
   BrowserComputerDriver,
   REVIVED_TAB_ERROR,
   REVIVED_TAB_NOTE,
+  RYCO_BROWSER_SNAPSHOT_SCRIPT,
   type BrowserDialogPolicy,
+  type BrowserFileChooser,
   type BrowserHandledDialog,
   type BrowserPendingDialog,
   type BrowserTabAutomation,
   type BrowserTabRevival,
   type BrowserTransport,
+  type BrowserUploads,
   type ExpectedAgentInput,
+  type ResolvedBrowserUpload,
 } from "./browser.ts";
 import { result } from "./native.ts";
 import type { ComputerOperationContext } from "./policy.ts";
@@ -469,12 +474,17 @@ interface RycoState {
   emulated: { viewport?: { width: number; height: number }; colorScheme?: "dark" | "light" };
   /** The page is live (false: suspended or gone, so `automation(tab)` has none). */
   live: boolean;
+  /** The file chooser the page opened (intercepted), and whether a result mentioned it. */
+  chooser: BrowserFileChooser | null;
+  chooserReported: boolean;
+  /** DOM.setFileInputFiles fails (after reaching the page, as far as the driver can tell). */
+  failSetFiles: boolean;
 }
 
 /** A Ryco-like transport whose automation is a controllable stub; `evaluate` answers Runtime.evaluate. */
 function rycoFixture(
   evaluate: (expression: string, state: RycoState) => unknown = () => true,
-  options: { automation?: boolean } = {},
+  options: { automation?: boolean; uploads?: boolean } = {},
 ) {
   const state: RycoState = {
     epoch: 0,
@@ -488,6 +498,9 @@ function rycoFixture(
     zoom: 1,
     emulated: {},
     live: true,
+    chooser: null,
+    chooserReported: false,
+    failSetFiles: false,
   };
   const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
   let worlds = 0;
@@ -523,7 +536,35 @@ function rycoFixture(
     })),
     recordEmulation: vi.fn(),
     emulation: vi.fn(() => state.emulated),
+    peekFileChooser: vi.fn(() => state.chooser),
+    takeFileChooser: vi.fn(() => {
+      const chooser = state.chooser;
+      state.chooser = null;
+      return chooser;
+    }),
+    noteFileChooser: vi.fn((): { mode: BrowserFileChooser["mode"]; answerable?: false } | null => {
+      if (!state.chooser || state.chooserReported) return null;
+      state.chooserReported = true;
+      return { mode: state.chooser.mode };
+    }),
   } satisfies BrowserTabAutomation;
+  // The desktop's upload store: accepts whatever the request carries.
+  const uploads = {
+    resolve: vi.fn(
+      async (tab: string, uploadId: unknown, files: unknown): Promise<ResolvedBrowserUpload> => {
+        const paths = files as string[];
+        return {
+          tab,
+          dir: `/uploads/${String(uploadId)}`,
+          files: paths,
+          names: paths.map((file) => file.split("/").at(-1)!),
+          bytes: 12 * paths.length,
+        };
+      },
+    ),
+    retain: vi.fn((_upload: ResolvedBrowserUpload) => undefined),
+    discard: vi.fn(async (_dir: string) => undefined),
+  } satisfies BrowserUploads;
   const transport: BrowserTransport = {
     tabs: vi.fn(async () => [{ id: "1", url: state.url, title: "Test" }]),
     open: vi.fn(),
@@ -537,9 +578,18 @@ function rycoFixture(
         return { frameTree: { frame: { id: "frame", loaderId: loader } } };
       }
       if (method === "Page.createIsolatedWorld") return { executionContextId: ++worlds };
+      if (method === "Runtime.evaluate" && params.returnByValue === false) {
+        // A remote object (upload's file input); an Error stands for the script throwing.
+        const value = evaluate(String(params.expression), state);
+        return value instanceof Error
+          ? { exceptionDetails: { text: value.message } }
+          : { result: { type: "object", subtype: "node", objectId: "input-1" } };
+      }
       if (method === "Runtime.evaluate")
         return { result: { value: evaluate(String(params.expression), state) } };
       if (method === "Page.captureScreenshot") return { data: "png" };
+      if (method === "DOM.setFileInputFiles" && state.failSetFiles)
+        throw new Error("Browser command timed out.");
       return {};
     }),
     ...(options.automation === false
@@ -555,18 +605,22 @@ function rycoFixture(
     claim: vi.fn(),
     activity: vi.fn(),
   };
-  const driver = new BrowserComputerDriver(new Map([["ryco", transport]]));
+  const driver = new BrowserComputerDriver(
+    new Map([["ryco", transport]]),
+    options.uploads === false ? {} : { uploads: () => uploads },
+  );
   const run = (args: Record<string, unknown>) =>
     driver.execute(
       { ...context, request: { ...context.request, args: { tab: "1", ...args } } },
       "ryco",
     );
   const methods = () => sent.map(({ method }) => method);
-  return { state, sent, methods, automation, transport, context, run, release, end };
+  return { state, sent, methods, automation, transport, context, run, release, end, uploads };
 }
 /** Answers the snapshot, the click's target point and every other evaluate. */
 function page(expression: string): unknown {
-  if (expression === BROWSER_SNAPSHOT_SCRIPT) return { title: "Test", elements: [] };
+  if (expression === BROWSER_SNAPSHOT_SCRIPT || expression === RYCO_BROWSER_SNAPSHOT_SCRIPT)
+    return { title: "Test", elements: [] };
   if (expression.includes("const {x,y}=") && expression.includes("return {x,y}"))
     return { x: 50, y: 60 };
   return true;
@@ -889,7 +943,7 @@ describe("dialogs", () => {
 });
 
 describe("Ryco-only actions", () => {
-  it.each(["console", "network", "resize", "appearance"])(
+  it.each(["console", "network", "resize", "appearance", "upload"])(
     "refuses %s for other browsers before claiming the tab",
     async (action) => {
       const { run, context } = rycoFixture(() => true, { automation: false });
@@ -1053,5 +1107,208 @@ describe("Ryco-only actions", () => {
     });
     expect(automation.recordEmulation).toHaveBeenLastCalledWith({ colorScheme: null });
     await expect(run({ action: "appearance", scheme: "sepia" })).rejects.toThrow("Invalid scheme.");
+  });
+});
+
+describe("upload", () => {
+  const files = ["/uploads/u-0123456789abcdef/0/a.txt"];
+  const upload = { action: "upload", files, uploadId: "u-0123456789abcdef" };
+  const resolved = (paths = files): ResolvedBrowserUpload => ({
+    tab: "1",
+    dir: "/uploads/u-0123456789abcdef",
+    files: paths,
+    names: paths.map((file) => file.split("/").at(-1)!),
+    bytes: 12 * paths.length,
+  });
+
+  it("puts the copies into an observed file input by ref and keeps them with the page", async () => {
+    const { run, sent, methods, uploads, automation } = rycoFixture(page);
+    await run({ action: "observe" });
+    const value = await run({ ...upload, ref: "e2" });
+    expect(texts(value)).toEqual([
+      { uploaded: ["a.txt"], verify: "Observe the page to verify the selection." },
+    ]);
+    expect(uploads.resolve).toHaveBeenCalledWith("1", "u-0123456789abcdef", files);
+    expect(methods().slice(-3)).toEqual([
+      "Runtime.evaluate",
+      "DOM.setFileInputFiles",
+      "Runtime.releaseObject",
+    ]);
+    const [target, setFiles, releaseObject] = sent.slice(-3);
+    // The element itself, from the observed world, never a value copy.
+    expect(target?.params).toMatchObject({ contextId: 1, returnByValue: false });
+    expect(String(target?.params.expression)).toContain('get("e2")');
+    expect(String(target?.params.expression)).toContain("el.type !== 'file'");
+    expect(setFiles?.params).toEqual({ files, objectId: "input-1" });
+    expect(releaseObject?.params).toEqual({ objectId: "input-1" });
+    expect(uploads.retain).toHaveBeenCalledWith(resolved());
+    expect(uploads.discard).not.toHaveBeenCalled();
+    // A mutating action: its change handlers' dialogs are answered.
+    expect(BROWSER_MUTATING_ACTIONS.has("upload")).toBe(true);
+    expect(automation.begin).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an unobserved document before it validates the copies", async () => {
+    const { run, uploads, methods } = rycoFixture(page);
+    await expect(run({ ...upload, ref: "e2" })).rejects.toThrow("Observe this document");
+    // The desktop removes them when the request ends (settle).
+    expect(uploads.resolve).not.toHaveBeenCalled();
+    expect(methods()).not.toContain("DOM.setFileInputFiles");
+  });
+
+  it("drops the copies when the target is wrong or the user used the tab meanwhile", async () => {
+    let target: unknown = true;
+    const fixture = rycoFixture((expression, state) => {
+      if (!expression.includes("not a file input")) return page(expression);
+      if (target === "user") state.epoch += 1; // The user clicked while the target was checked.
+      return target;
+    });
+    await fixture.run({ action: "observe" });
+    target = new Error("not a file input");
+    await expect(fixture.run({ ...upload, ref: "e2" })).rejects.toThrow(
+      "That element is not an enabled file input for these files. Observe again.",
+    );
+    expect(fixture.uploads.discard).toHaveBeenLastCalledWith("/uploads/u-0123456789abcdef");
+    target = "user";
+    await expect(fixture.run({ ...upload, ref: "e2" })).rejects.toThrow("Observe it again");
+    expect(fixture.uploads.discard).toHaveBeenCalledTimes(2);
+    expect(fixture.methods()).not.toContain("DOM.setFileInputFiles");
+    expect(fixture.methods().at(-1)).toBe("Runtime.releaseObject");
+    // An epoch that changed after observe refuses before the copies are validated.
+    target = true;
+    await fixture.run({ action: "observe" });
+    fixture.state.epoch += 1;
+    await expect(fixture.run({ ...upload, ref: "e2" })).rejects.toThrow("Observe it again");
+    expect(fixture.uploads.resolve).toHaveBeenCalledTimes(2);
+    expect(fixture.uploads.retain).not.toHaveBeenCalled();
+  });
+
+  it("keeps the copies with the page when setting the files failed after dispatch", async () => {
+    const { run, state, uploads } = rycoFixture(page);
+    await run({ action: "observe" });
+    state.failSetFiles = true;
+    await expect(run({ ...upload, ref: "e2" })).rejects.toThrow("Browser command timed out.");
+    expect(uploads.retain).toHaveBeenCalledWith(resolved());
+    expect(uploads.discard).not.toHaveBeenCalled();
+  });
+
+  it("answers the file chooser the page opened in the hidden tab when no ref is given", async () => {
+    const { run, state, sent, uploads, automation } = rycoFixture(page);
+    const two = ["/uploads/u-0123456789abcdef/0/a.txt", "/uploads/u-0123456789abcdef/1/b.png"];
+    state.chooser = { backendNodeId: 42, mode: "selectMultiple" };
+    const value = await run({ ...upload, files: two });
+    expect(texts(value)).toEqual([
+      { uploaded: ["a.txt", "b.png"], verify: "Observe the page to verify the selection." },
+    ]);
+    expect(sent.at(-1)).toEqual({
+      method: "DOM.setFileInputFiles",
+      params: { files: two, backendNodeId: 42 },
+    });
+    expect(automation.takeFileChooser).toHaveBeenCalledTimes(1);
+    expect(state.chooser).toBeNull();
+    expect(uploads.retain).toHaveBeenCalledWith(resolved(two));
+    // Only one upload answers a chooser; nothing to answer refuses before the copies are checked.
+    await expect(run(upload)).rejects.toThrow(
+      "Pass the file input's ref, or click its upload button first",
+    );
+    state.chooser = { backendNodeId: 43, mode: "selectSingle" };
+    await expect(run({ ...upload, files: two })).rejects.toThrow(
+      "This file chooser accepts one file.",
+    );
+    expect(uploads.resolve).toHaveBeenCalledTimes(1);
+    expect(state.chooser).toEqual({ backendNodeId: 43, mode: "selectSingle" });
+  });
+
+  it("tells the agent once about a file chooser its click opened", async () => {
+    const { run, state } = rycoFixture(page);
+    await run({ action: "observe" });
+    state.chooser = { backendNodeId: 42, mode: "selectSingle" };
+    const clicked = await run({ action: "click", ref: "e1" });
+    expect(texts(clicked)).toEqual([
+      { delivered: "background", verify: "Observe the page to verify the result." },
+      {
+        fileChooser: { mode: "selectSingle" },
+        next: "Call upload with paths and no ref to answer it.",
+      },
+    ]);
+    expect(texts(await run({ action: "observe" }))).toHaveLength(1);
+    // A chooser a page opens late is mentioned by the next read.
+    state.chooser = { backendNodeId: 44, mode: "selectMultiple" };
+    state.chooserReported = false;
+    expect(texts(await run({ action: "observe" }))[1]).toMatchObject({
+      fileChooser: { mode: "selectMultiple" },
+    });
+  });
+
+  it("tells the agent when the picker its click opened cannot be answered by upload", async () => {
+    const { run, automation } = rycoFixture(page);
+    await run({ action: "observe" });
+    automation.noteFileChooser.mockReturnValueOnce({ mode: "selectSingle", answerable: false });
+    const clicked = await run({ action: "click", ref: "e1" });
+    expect(texts(clicked)[1]).toEqual({
+      fileChooser: { mode: "selectSingle", answerable: false },
+      next: "This picker has no file input, so upload cannot answer it. Upload into an <input type=file> from observe by ref, or tell the user this site's picker is not supported.",
+    });
+  });
+
+  it("is refused while the user works in the tab and without the desktop's upload directory", async () => {
+    const held = rycoFixture(page);
+    held.state.hold = 5_000;
+    await expect(held.run({ ...upload, ref: "e2" })).rejects.toThrow(
+      "The user is working in this tab.",
+    );
+    expect(held.context.claim).not.toHaveBeenCalled();
+    const { run, state } = rycoFixture(page, { uploads: false });
+    state.chooser = { backendNodeId: 42, mode: "selectSingle" };
+    await expect(run(upload)).rejects.toThrow(
+      "Browser upload is unavailable in this desktop session.",
+    );
+  });
+
+  it("lists hidden file inputs only where upload works: the Ryco browser", async () => {
+    const { run, sent } = rycoFixture(page);
+    await run({ action: "observe" });
+    expect(sent.find(({ method }) => method === "Runtime.evaluate")?.params.expression).toBe(
+      RYCO_BROWSER_SNAPSHOT_SCRIPT,
+    );
+    expect(RYCO_BROWSER_SNAPSHOT_SCRIPT).toContain("(!visible(el) && !file)");
+    expect(RYCO_BROWSER_SNAPSHOT_SCRIPT).toContain("type: 'file'");
+    const expressions: string[] = [];
+    const chrome: BrowserTransport = {
+      tabs: vi.fn(async () => [{ id: "1", url: "https://example.com/", title: "Test" }]),
+      open: vi.fn(),
+      show: vi.fn(),
+      close: vi.fn(),
+      stop: vi.fn(),
+      send: vi.fn(async (_tab: string, method: string, params: Record<string, unknown>) => {
+        if (method === "Page.getFrameTree")
+          return { frameTree: { frame: { id: "frame", loaderId: "doc" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        expressions.push(String(params.expression));
+        return { result: { value: { title: "Test", elements: [] } } };
+      }),
+    };
+    const driver = new BrowserComputerDriver(new Map([["chrome", chrome]]));
+    await driver.execute(
+      {
+        request: {
+          sessionId: "s",
+          threadId: "t",
+          turnId: "u",
+          tool: "browser",
+          args: { action: "observe", tab: "1" },
+        },
+        signal: new AbortController().signal,
+        check: vi.fn(),
+        authorizeApp: vi.fn(),
+        authorizeForeground: vi.fn(),
+        claim: vi.fn(),
+        activity: vi.fn(),
+      },
+      "chrome",
+    );
+    expect(expressions).toEqual([BROWSER_SNAPSHOT_SCRIPT]);
+    expect(BROWSER_SNAPSHOT_SCRIPT).not.toContain("type: 'file'");
+    expect(BROWSER_SNAPSHOT_SCRIPT).toContain("if (!visible(el) ||");
   });
 });

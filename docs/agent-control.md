@@ -43,8 +43,9 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   allowlist. Provider credentials, connection settings and Agent Control policy are excluded.
 - `ryco_browser`, `ryco_computer`: browser tabs and native app interaction when the desktop bridge
   and the corresponding user permissions are available. Browser `open` accepts `visible: true`.
-  Browser `wait` works in every browser; `console`, `network`, `resize` and `appearance`, network
-  idle waits and automatic page-dialog answers (`dialog`/`promptText`) are Ryco-browser only.
+  Browser `wait` works in every browser; `console`, `network`, `resize`, `appearance` and `upload`
+  (files from the thread's workspace, as copies), network idle waits and automatic page-dialog
+  answers (`dialog`/`promptText`) are Ryco-browser only.
 - `ryco_device`: tap, swipe, type, hardware buttons, scroll to an element, launch an installed app
   and simulator settings on the simulator or emulator attached to the caller's thread (and to no
   other thread), plus describe, wait and app logs. Inputs return the settled screen as text. The

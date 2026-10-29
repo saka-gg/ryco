@@ -150,6 +150,19 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.focusListeners.add(listener);
     return () => this.focusListeners.delete(listener);
   }
+  private readonly tabResetListeners = new Set<(tab: string) => void>();
+  /**
+   * The tab's page lost every file an agent uploaded into it: its main frame navigated to a new
+   * document, its renderer crashed, or the page was torn down (closed, or suspended by the tab
+   * budget).
+   */
+  onTabReset(listener: (tab: string) => void): () => void {
+    this.tabResetListeners.add(listener);
+    return () => this.tabResetListeners.delete(listener);
+  }
+  private resetTab(tab: string): void {
+    for (const listener of this.tabResetListeners) listener(tab);
+  }
   private mounted: { owner: string; tab: string; window: BrowserWindow } | null = null;
   private fitHost(page: LivePage): void {
     const [width = 1280, height = 850] = page.host.getContentSize();
@@ -356,6 +369,11 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     });
     wc.on("did-stop-loading", publish);
     wc.on("did-navigate", publish);
+    // A new main document (Electron's did-navigate is main frame only; in-page navigations keep the
+    // document and the files its inputs hold).
+    wc.on("did-navigate", () => {
+      if (current()) this.resetTab(id);
+    });
     wc.on("did-navigate-in-page", publish);
     wc.on("page-title-updated", () => {
       if (!current()) return;
@@ -377,6 +395,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     wc.on("render-process-gone", () => {
       if (!current()) return;
       void this.picker.end(id, "destroyed");
+      // The crashed renderer took the document and every file its inputs held.
+      this.resetTab(id);
       this.signIn.fail(id);
       entry.error = "This page stopped responding. Reload to recover.";
       this.publish();
@@ -628,6 +648,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     // Settles a pending pick before the session it runs on goes away.
     void this.picker.end(id, "destroyed");
     page.automation.dispose();
+    this.resetTab(id);
     page.cdp.dispose();
     const wc = page.view.webContents;
     if (destroyed !== "guest" && !wc.isDestroyed()) wc.close({ waitForBeforeUnload: false });
@@ -1154,5 +1175,6 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.focusListeners.clear();
     this.picker.dispose();
     for (const id of this.entries.keys()) this.destroy(id);
+    this.tabResetListeners.clear();
   }
 }

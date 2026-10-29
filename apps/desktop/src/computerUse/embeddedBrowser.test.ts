@@ -31,10 +31,14 @@ function newBrowser(): EmbeddedComputerBrowser {
   return browser;
 }
 const signal = () => new AbortController().signal;
-/** Every session's ready steps: groundwork's focus emulation, then browser-agent-control's domains. */
+/**
+ * Every session's ready steps: groundwork's focus emulation, then browser-agent-control's domains
+ * with browser-agent-upload's file chooser interception right after Page.enable.
+ */
 const READY = [
   "Emulation.setFocusEmulationEnabled",
   "Page.enable",
+  "Page.setInterceptFileChooserDialog",
   "Network.enable",
   "Runtime.enable",
   "Log.enable",
@@ -127,6 +131,8 @@ describe("agent CDP", () => {
     expect(api.commands).toEqual([
       { method: "Emulation.setFocusEmulationEnabled", params: { enabled: true } },
       { method: "Page.enable", params: {} },
+      // A background tab: its file choosers wait for the agent.
+      { method: "Page.setInterceptFileChooserDialog", params: { enabled: true } },
       {
         method: "Network.enable",
         params: {
@@ -214,7 +220,10 @@ describe("agent CDP", () => {
       expect(api.detach).toHaveBeenCalledTimes(1);
       await browser.send(tab.id, "Page.reload", {}, signal());
       expect(api.attach).toHaveBeenCalledTimes(2);
-      expect(api.commands.slice(-6).map(({ method }) => method)).toEqual([...READY, "Page.reload"]);
+      expect(api.commands.slice(-READY.length - 1).map(({ method }) => method)).toEqual([
+        ...READY,
+        "Page.reload",
+      ]);
       // The memory budget's timer and the automation's idle quiesce timer; dispose() clears both.
       browser.dispose();
       expect(vi.getTimerCount()).toBe(0);
@@ -576,6 +585,7 @@ describe("agent automation", () => {
       "Emulation.setFocusEmulationEnabled",
       "Network.enable",
       "Page.enable",
+      "Page.setInterceptFileChooserDialog",
       "Runtime.enable",
       "Log.enable",
     ]);
@@ -629,6 +639,7 @@ describe("agent automation", () => {
       "Emulation.setFocusEmulationEnabled",
       "Network.enable",
       "Page.enable",
+      "Page.setInterceptFileChooserDialog",
       "Runtime.enable",
       "Log.enable",
     ]);
@@ -1610,10 +1621,9 @@ describe("element picker", () => {
     const pending = browser.pick(id);
     await flush();
     expect(picker(browser, id)).toBe("picking");
-    expect(contents.debugger.commands.slice(0, 6).map(({ method }) => method)).toEqual([
-      ...READY,
-      "DOM.enable",
-    ]);
+    expect(
+      contents.debugger.commands.slice(0, READY.length + 1).map(({ method }) => method),
+    ).toEqual([...READY, "DOM.enable"]);
     await browser.send(id, "Runtime.evaluate", { expression: "1" }, signal());
     expect(contents.debugger.attach).toHaveBeenCalledTimes(1);
     expect(
@@ -1859,5 +1869,65 @@ describe("element picker", () => {
     const event = fakeEvent();
     contents.emit("before-input-event", event, { type: "keyDown", key: "Escape" });
     expect(event.defaultPrevented).toBe(false);
+  });
+});
+
+describe("uploaded files", () => {
+  it("resets a tab when its main frame commits a new document or its page is torn down", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const reset = vi.fn<(tab: string) => void>();
+    browser.onTabReset(reset);
+    const old = fakeTab(tab.id).contents;
+    // Same document: the page keeps the files its inputs hold.
+    old.emit("did-navigate-in-page", fakeEvent(), "https://example.com/#step-2", true);
+    expect(reset).not.toHaveBeenCalled();
+    old.emit("did-navigate", fakeEvent(), "https://example.com/next", 200, "OK");
+    expect(reset).toHaveBeenLastCalledWith(tab.id);
+    // browser-tab-budget's suspension tears the page down: after the automation is disposed,
+    // before the debugger session ends.
+    const inner = internals(browser);
+    const entry = inner.entries.get(tab.id)!;
+    const page = entry.live!;
+    const automationDispose = vi.spyOn(browser.automation(tab.id)!, "dispose");
+    const cdpDispose = vi.spyOn(page.cdp, "dispose");
+    entry.live = null;
+    inner.teardownPage(tab.id, page);
+    expect(reset).toHaveBeenCalledTimes(2);
+    expect(automationDispose.mock.invocationCallOrder[0]).toBeLessThan(
+      reset.mock.invocationCallOrder[1]!,
+    );
+    expect(reset.mock.invocationCallOrder[1]).toBeLessThan(cdpDispose.mock.invocationCallOrder[0]!);
+    entry.live = inner.createPage(entry, tab.id).page;
+    // The torn-down page's late events reach nothing; the new page's do.
+    old.emit("did-navigate", fakeEvent(), "https://stale.example/", 200, "OK");
+    expect(reset).toHaveBeenCalledTimes(2);
+    fakeElectronState.views
+      .at(-1)!
+      .webContents.emit("did-navigate", fakeEvent(), "https://x/", 200);
+    expect(reset).toHaveBeenCalledTimes(3);
+    await browser.close(tab.id, signal());
+    expect(reset).toHaveBeenCalledTimes(4);
+    // Every remaining tab is reset when the browser goes away; unsubscribed listeners hear nothing.
+    const other = await browser.open("https://example.org/", false, signal(), "project");
+    const late = vi.fn();
+    browser.onTabReset(late)();
+    browser.dispose();
+    expect(reset).toHaveBeenLastCalledWith(other.id);
+    expect(late).not.toHaveBeenCalled();
+  });
+
+  it("resets a tab whose renderer crashed, so its copies stop counting against the quotas", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const reset = vi.fn<(tab: string) => void>();
+    browser.onTabReset(reset);
+    fakeTab(tab.id).contents.emit("render-process-gone", fakeEvent(), {
+      reason: "crashed",
+      exitCode: 1,
+    });
+    expect(reset).toHaveBeenCalledExactlyOnceWith(tab.id);
+    // The tab itself stays (the user can reload it).
+    expect((await browser.tabs(signal())).map(({ id }) => id)).toContain(tab.id);
   });
 });

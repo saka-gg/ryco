@@ -313,6 +313,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded when the external Agent Control integration first starts.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);
+      // Loaded with the first Ryco browser upload.
+      expect(source).not.toMatch(/^\/\/#region src\/agentControl\/Mcp\/browserUploadTool\.ts$/mu);
+      expect(source).not.toMatch(
+        /^\/\/#region src\/agentControl\/Mcp\/browserUploadStaging\.ts$/mu,
+      );
       // Loaded with the first SIGUSR2 and the first Diagnostics snapshot.
       expect(source).not.toMatch(/^\/\/#region src\/observability\/HeapSnapshot\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/observability\/EventLoopStallHistory\.ts$/mu);

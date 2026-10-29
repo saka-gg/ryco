@@ -165,6 +165,8 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
       : {}),
     policy,
     registry,
+    projections,
+    ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
   });
   // The native Computer stack (CUA backend, UI tree, browser tools) is only
   // loaded when Desktop hands over a native bridge; other servers never

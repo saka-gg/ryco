@@ -68,7 +68,10 @@ and `packages/contracts/src/browserElementLimits.ts` were adapted from Synara co
 The built-in browser's console/network diagnostics, network idle window, page-dialog policy and dialog
 shim, and expected agent input matching (`apps/desktop/src/computerUse/browserDiagnostics.ts` and
 `browserTabAutomation.ts`) were adapted from Synara commit `8f6521a67` (v0.6.4, PR #444) and main
-`299fd573b` under the same license.
+`299fd573b` under the same license, and the browser upload staging rules
+(`apps/desktop/src/computerUse/browserUploads.ts` and
+`apps/server/src/agentControl/Mcp/browserUploadStaging.ts`) from `workspaceUpload.ts` of the same
+Synara commit `8f6521a67`.
 
 ### MIT License
 

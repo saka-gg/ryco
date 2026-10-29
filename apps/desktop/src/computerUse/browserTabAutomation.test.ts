@@ -8,6 +8,7 @@ import {
   DIAGNOSTICS_IDLE_QUIESCE_MS,
   DIALOG_SHIM_MAX_MS,
   EmbeddedTabAutomation,
+  FILE_CHOOSER_TTL_MS,
   MAX_DIALOGS_PER_COMMAND,
   dialogShimInstall,
   normalizeDialog,
@@ -15,7 +16,14 @@ import {
 } from "./browserTabAutomation.ts";
 import { DIAGNOSTICS_OUTPUT_MAX_BYTES } from "./browserDiagnostics.ts";
 
-const READY = ["Page.enable", "Network.enable", "Runtime.enable", "Log.enable"];
+/** This unit's ready step; browser-agent-upload's file chooser interception follows Page.enable. */
+const READY = [
+  "Page.enable",
+  "Page.setInterceptFileChooserDialog",
+  "Network.enable",
+  "Runtime.enable",
+  "Log.enable",
+];
 const FINISH = "function () { this.restore(); return this.drain(); }";
 const RESTORE = "function () { return this.restore(); }";
 /** The shim budget the driver gives an input action. */
@@ -90,7 +98,7 @@ describe("session ready step", () => {
     await cdp.send("Page.getFrameTree");
     await cdp.send("Runtime.evaluate", { expression: "1" });
     expect(methods()).toEqual([...READY, "Page.getFrameTree", "Runtime.evaluate"]);
-    expect(wc.debugger.commands[1]).toEqual({
+    expect(wc.debugger.commands[2]).toEqual({
       method: "Network.enable",
       params: { maxTotalBufferSize: 1_048_576, maxResourceBufferSize: 262_144, maxPostDataSize: 0 },
     });
@@ -100,13 +108,13 @@ describe("session ready step", () => {
     expect(wc.debugger.isAttached()).toBe(false);
     cdp.acquire("picker");
     await cdp.send("DOM.enable");
-    expect(methods().slice(-5)).toEqual([...READY, "DOM.enable"]);
+    expect(methods().slice(-READY.length - 1)).toEqual([...READY, "DOM.enable"]);
     // Electron's own detach resets the capture state; the next session enables again.
     wc.debugger.externalDetach();
     expect(automation.networkIdle()).toEqual({ idle: false, inFlight: 0, quietMs: 0 });
     cdp.acquire("agent");
     await cdp.ready();
-    expect(methods().slice(-4)).toEqual(READY);
+    expect(methods().slice(-READY.length)).toEqual(READY);
   });
 
   it("turns network capture on before an agent tab's first load and keeps what it recorded", async () => {
@@ -139,7 +147,13 @@ describe("session ready step", () => {
     });
     await cdp.ready();
     // The ready step waited for the early Network.enable instead of sending its own.
-    expect(methods()).toEqual(["Network.enable", "Page.enable", "Runtime.enable", "Log.enable"]);
+    expect(methods()).toEqual([
+      "Network.enable",
+      "Page.enable",
+      "Page.setInterceptFileChooserDialog",
+      "Runtime.enable",
+      "Log.enable",
+    ]);
     const read = await automation.diagnostics("network", 10, signal());
     expect(read.entries).toEqual([
       expect.objectContaining({ phase: "request", url: "https://app.test/", method: "GET" }),
@@ -150,7 +164,7 @@ describe("session ready step", () => {
     cdp.release("agent");
     cdp.acquire("agent");
     await cdp.ready();
-    expect(methods().slice(-4)).toEqual(READY);
+    expect(methods().slice(-READY.length)).toEqual(READY);
   });
 
   it("enables Network in the ready step when the early enable failed or belongs to an old session", async () => {
@@ -170,7 +184,7 @@ describe("session ready step", () => {
     wc.debugger.externalDetach();
     cdp.acquire("agent");
     await cdp.ready();
-    expect(methods().slice(-4)).toEqual(READY);
+    expect(methods().slice(-READY.length)).toEqual(READY);
   });
 
   it("tracks network idle only once the session is ready", async () => {
@@ -644,6 +658,7 @@ describe("dialog backstop", () => {
     await flush();
     expect(wc.debugger.commands.map(({ method }) => method)).toEqual([
       "Page.enable",
+      "Page.setInterceptFileChooserDialog",
       "Network.enable",
     ]);
     wc.debugger.message("Page.javascriptDialogOpening", { type: "alert", message: "blocked" });
@@ -652,6 +667,7 @@ describe("dialog backstop", () => {
     await flush();
     expect(wc.debugger.commands.map(({ method }) => method)).toEqual([
       "Page.enable",
+      "Page.setInterceptFileChooserDialog",
       "Network.enable",
       "Page.handleJavaScriptDialog",
       "Emulation.clearDeviceMetricsOverride",
@@ -835,8 +851,8 @@ describe("console capture quiesce", () => {
     await vi.advanceTimersByTimeAsync(DIAGNOSTICS_IDLE_QUIESCE_MS - 1);
     expect(methods()).toEqual(READY);
     await vi.advanceTimersByTimeAsync(1);
-    await vi.waitFor(() => expect(methods()).toHaveLength(8));
-    expect(methods().slice(4)).toEqual([
+    await vi.waitFor(() => expect(methods()).toHaveLength(READY.length + 4));
+    expect(methods().slice(READY.length)).toEqual([
       "Runtime.disable",
       "Log.disable",
       "Runtime.discardConsoleEntries",
@@ -845,9 +861,9 @@ describe("console capture quiesce", () => {
     // Never another owner's domains.
     expect(methods().some((method) => /^(DOM|Overlay)\./u.test(method))).toBe(false);
     await automation.activate();
-    expect(methods().slice(8)).toEqual(["Runtime.enable", "Log.enable"]);
+    expect(methods().slice(READY.length + 4)).toEqual(["Runtime.enable", "Log.enable"]);
     await automation.activate();
-    expect(methods()).toHaveLength(10);
+    expect(methods()).toHaveLength(READY.length + 6);
     expect(vi.getTimerCount()).toBe(1);
     cdp.release("agent");
     cdp.release("picker");
@@ -865,8 +881,8 @@ describe("console capture quiesce", () => {
       request: { url: "https://app.test/a", method: "GET" },
     });
     await vi.advanceTimersByTimeAsync(DIAGNOSTICS_IDLE_QUIESCE_MS);
-    await vi.waitFor(() => expect(methods()).toHaveLength(9));
-    expect(methods().slice(4)).toEqual([
+    await vi.waitFor(() => expect(methods()).toHaveLength(READY.length + 5));
+    expect(methods().slice(READY.length)).toEqual([
       "Runtime.disable",
       "Log.disable",
       "Runtime.discardConsoleEntries",
@@ -877,8 +893,12 @@ describe("console capture quiesce", () => {
     advance(1_000);
     expect(automation.networkIdle()).toEqual({ idle: false, inFlight: 0, quietMs: 0 });
     await automation.activate();
-    expect(methods().slice(9)).toEqual(["Network.enable", "Runtime.enable", "Log.enable"]);
-    expect(wc.debugger.commands[9]?.params).toEqual({
+    expect(methods().slice(READY.length + 5)).toEqual([
+      "Network.enable",
+      "Runtime.enable",
+      "Log.enable",
+    ]);
+    expect(wc.debugger.commands[READY.length + 5]?.params).toEqual({
       maxTotalBufferSize: 1_048_576,
       maxResourceBufferSize: 262_144,
       maxPostDataSize: 0,
@@ -886,6 +906,157 @@ describe("console capture quiesce", () => {
     // The request from before the pause never reports its end; it no longer counts.
     advance(500);
     expect(automation.networkIdle()).toEqual({ idle: true, inFlight: 0, quietMs: 500 });
+  });
+});
+
+describe("file choosers", () => {
+  const INTERCEPT = "Page.setInterceptFileChooserDialog";
+  const interceptions = (wc: FakeWebContents) =>
+    wc.debugger.commands.flatMap(({ method, params }) =>
+      method === INTERCEPT ? [(params as { enabled: boolean }).enabled] : [],
+    );
+  const opened = (wc: FakeWebContents, params: Record<string, unknown> = {}) =>
+    wc.debugger.message("Page.fileChooserOpened", {
+      frameId: "main",
+      mode: "selectSingle",
+      backendNodeId: 7,
+      ...params,
+    });
+
+  it("intercepts choosers in hidden tabs right after Page.enable, on every attachment", async () => {
+    const { cdp, wc, view, methods } = setup();
+    cdp.acquire("agent");
+    await cdp.ready();
+    expect(methods().slice(0, 2)).toEqual(["Page.enable", INTERCEPT]);
+    expect(wc.debugger.commands[1]?.params).toEqual({ enabled: true });
+    cdp.release("agent");
+    // A session opened on a shown tab (a user's element pick) keeps the native picker.
+    view.presented = true;
+    cdp.acquire("picker");
+    await cdp.ready();
+    expect(interceptions(wc)).toEqual([true, false]);
+    wc.debugger.externalDetach();
+    view.presented = false;
+    cdp.acquire("agent");
+    await cdp.ready();
+    expect(interceptions(wc)).toEqual([true, false, true]);
+  });
+
+  it("follows presentation without waiting for ready steps, only on change and only while attached", async () => {
+    const { cdp, wc, view, automation } = setup();
+    cdp.acquire("agent");
+    await cdp.ready();
+    const send = vi.spyOn(cdp, "send");
+    automation.presentationChanged({ resized: false });
+    expect(interceptions(wc)).toEqual([true]);
+    // Shown: the user's clicks open the native picker; hidden again: choosers wait for the agent.
+    view.presented = true;
+    automation.presentationChanged({ resized: false });
+    automation.presentationChanged({ resized: true });
+    view.presented = false;
+    automation.presentationChanged({ resized: false });
+    expect(interceptions(wc)).toEqual([true, false, true]);
+    expect(send).toHaveBeenCalledWith(INTERCEPT, { enabled: false }, { skipReady: true });
+    // No session, nothing to send; the next session starts from the presentation again.
+    cdp.release("agent");
+    view.presented = true;
+    automation.presentationChanged({ resized: false });
+    expect(interceptions(wc)).toEqual([true, false, true]);
+    cdp.acquire("agent");
+    await cdp.ready();
+    expect(interceptions(wc)).toEqual([true, false, true, false]);
+  });
+
+  it("catches up at the next agent call and on the user's input when no presentation hook ran", async () => {
+    const { cdp, wc, view, automation } = setup();
+    cdp.acquire("agent");
+    await cdp.ready();
+    // The Ryco window was minimized and restored, which reaches no presentation hook.
+    view.presented = true;
+    await automation.activate();
+    expect(interceptions(wc)).toEqual([true, false]);
+    view.presented = false;
+    await automation.activate();
+    expect(interceptions(wc)).toEqual([true, false, true]);
+    // Shown again: the user's click turns interception off before the page opens a chooser.
+    view.presented = true;
+    wc.emit("before-mouse-event", fakeEvent(), { type: "mouseDown", x: 5, y: 5, button: "left" });
+    expect(interceptions(wc)).toEqual([true, false, true, false]);
+  });
+
+  it("keeps one chooser for one upload, mentions it once, and drops it with its document", async () => {
+    const { cdp, wc, automation, advance } = setup();
+    cdp.acquire("agent");
+    await cdp.ready();
+    expect(automation.peekFileChooser()).toBeNull();
+    opened(wc);
+    expect(automation.peekFileChooser()).toEqual({ backendNodeId: 7, mode: "selectSingle" });
+    expect(automation.noteFileChooser()).toEqual({ mode: "selectSingle" });
+    expect(automation.noteFileChooser()).toBeNull();
+    expect(automation.takeFileChooser()).toEqual({ backendNodeId: 7, mode: "selectSingle" });
+    expect(automation.takeFileChooser()).toBeNull();
+    // A newer chooser replaces an older one; unknown modes count as single.
+    opened(wc, { backendNodeId: 8, mode: "selectMultiple" });
+    opened(wc, { backendNodeId: 9, mode: "upload" });
+    expect(automation.peekFileChooser()).toEqual({ backendNodeId: 9, mode: "selectSingle" });
+    // Another frame's navigation keeps it; its own frame's or the main frame's ends it.
+    wc.debugger.message("Page.frameNavigated", { frame: { id: "ad", parentId: "main" } });
+    expect(automation.peekFileChooser()).not.toBeNull();
+    wc.debugger.message("Page.frameNavigated", { frame: { id: "main" } });
+    expect(automation.peekFileChooser()).toBeNull();
+    opened(wc, { frameId: "form" });
+    wc.debugger.message("Page.frameNavigated", { frame: { id: "form", parentId: "main" } });
+    expect(automation.peekFileChooser()).toBeNull();
+    // Choosers without an input element (showOpenFilePicker) cannot be answered; the agent hears
+    // so once instead of clicking again and again.
+    opened(wc, { backendNodeId: undefined, mode: "selectMultiple" });
+    expect(automation.peekFileChooser()).toBeNull();
+    expect(automation.noteFileChooser()).toEqual({ mode: "selectMultiple", answerable: false });
+    expect(automation.noteFileChooser()).toBeNull();
+    expect(automation.takeFileChooser()).toBeNull();
+    // A newer chooser with an input replaces it.
+    opened(wc, { backendNodeId: undefined });
+    opened(wc, { backendNodeId: 10 });
+    expect(automation.noteFileChooser()).toEqual({ mode: "selectSingle" });
+    wc.debugger.message("Page.frameNavigated", { frame: { id: "main" } });
+    expect(automation.peekFileChooser()).toBeNull();
+    // Child targets are not this page.
+    wc.debugger.message(
+      "Page.fileChooserOpened",
+      { frameId: "x", mode: "selectSingle", backendNodeId: 3 },
+      "child-session",
+    );
+    expect(automation.peekFileChooser()).toBeNull();
+    opened(wc);
+    advance(FILE_CHOOSER_TTL_MS + 1);
+    expect(automation.peekFileChooser()).toBeNull();
+    expect(automation.noteFileChooser()).toBeNull();
+    opened(wc);
+    wc.emit("did-navigate");
+    expect(automation.peekFileChooser()).toBeNull();
+    opened(wc);
+    wc.debugger.externalDetach();
+    expect(automation.peekFileChooser()).toBeNull();
+  });
+
+  it("leaves a chooser in a tab the user can see to the user unless an agent action opened it", async () => {
+    const { cdp, wc, view, automation } = setup();
+    cdp.acquire("agent");
+    await cdp.ready();
+    // Shown, but interception is still on (no hook ran yet): the user's click opened nothing.
+    view.presented = true;
+    opened(wc);
+    expect(automation.peekFileChooser()).toBeNull();
+    // Their next click gets the native picker.
+    expect(interceptions(wc)).toEqual([true, false]);
+    // During an agent action that is not handed back, the chooser is the agent's.
+    const scope = await automation.begin({}, signal(), SCOPE_MS);
+    opened(wc, { backendNodeId: 11 });
+    expect(automation.peekFileChooser()).toEqual({ backendNodeId: 11, mode: "selectSingle" });
+    await scope.end();
+    // The user's input in the tab takes it over: the agent may no longer answer it.
+    wc.emit("before-mouse-event", fakeEvent(), { type: "mouseDown", x: 5, y: 5, button: "left" });
+    expect(automation.peekFileChooser()).toBeNull();
   });
 });
 
