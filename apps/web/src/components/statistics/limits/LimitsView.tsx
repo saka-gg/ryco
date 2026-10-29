@@ -11,6 +11,8 @@ import {
   hubKeysByDirectAccount,
   listCliProxyApiKeys,
   listDirectProviderAccounts,
+  rateLimitsObservedAt,
+  staleRateLimitsReason,
   type CliProxyAccountHealth,
   type CliProxyApiKeyRow,
   type CliProxyHubAccountEntry,
@@ -70,7 +72,7 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
 const secondsToMs = (seconds: number | undefined) =>
   seconds === undefined ? undefined : seconds * 1000;
 
-/** The instants the view reads against now: checks, resets and hub retry times. */
+/** The instants the view reads against now: checks, stale reads, resets and hub retry times. */
 function limitsLabelInstants(
   accounts: ReadonlyArray<DirectProviderAccount>,
   hubs: ReadonlyArray<HubWithEnvironment>,
@@ -78,6 +80,9 @@ function limitsLabelInstants(
   const instants: Array<number | undefined> = [];
   for (const account of accounts) {
     instants.push(Date.parse(account.snapshot.checkedAt));
+    if (account.snapshot.rateLimits?.stale) {
+      instants.push(Date.parse(rateLimitsObservedAt(account.snapshot)));
+    }
     for (const { window } of account.windows) instants.push(secondsToMs(window.resetsAt));
   }
   for (const { hub } of hubs) {
@@ -561,6 +566,8 @@ function DirectAccountCard({
   const details = [account.plan, where].filter(Boolean).join(" · ");
   const credits = snapshot.rateLimits?.credits;
   const resets = account.resetCredits?.availableCount;
+  const observedAt = rateLimitsObservedAt(snapshot);
+  const staleReason = staleRateLimitsReason(snapshot.rateLimits);
   return (
     <AccountCard
       source="direct"
@@ -575,7 +582,9 @@ function DirectAccountCard({
       }
       footer={
         <>
-          checked {formatRelativeTimeLabel(snapshot.checkedAt, now)}
+          {staleReason
+            ? `usage from ${formatRelativeTimeLabel(observedAt, now)} · ${staleReason}`
+            : `checked ${formatRelativeTimeLabel(snapshot.checkedAt, now)}`}
           {nodes.length > 1 ? ` · signed in on ${nodes.length} nodes` : ""}
           {alsoIn.length > 0 ? ` · also in ${alsoIn.join(", ")}` : ""}
           {resets ? ` · ${pluralize(resets, "banked reset")}` : ""}
@@ -590,7 +599,7 @@ function DirectAccountCard({
           key={label}
           window={window}
           label={label}
-          checkedAt={snapshot.checkedAt}
+          checkedAt={observedAt}
           available={account.available}
           now={now}
           compact

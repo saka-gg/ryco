@@ -1,7 +1,11 @@
 import { isHostedHubMode } from "../../env";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
-import { formatCliProxyPlan, isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
+import {
+  formatCliProxyPlan,
+  isRateLimitSnapshotAvailable,
+  rateLimitsObservedAt,
+} from "@ryco/client-runtime/usage";
 import type {
   ApprovalRequestId,
   ComposerSourceControlContext,
@@ -3469,11 +3473,12 @@ export const ChatComposer = memo(
                 contextWindowUsage={contextWindowUsage}
                 contextWindowRateLimits={contextWindowRateLimits}
                 contextWindowRateLimitsCheckedAt={
+                  selectedProviderStatus &&
                   isRateLimitSnapshotAvailable(
                     selectedProviderStatus,
                     environmentUnavailable === null,
                   )
-                    ? selectedProviderStatus?.checkedAt
+                    ? rateLimitsObservedAt(selectedProviderStatus)
                     : undefined
                 }
                 contextWindowAccount={contextWindowAccount}

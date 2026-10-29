@@ -22,7 +22,7 @@ import { makeOpenCodeTextGeneration } from "../../textGeneration/OpenCodeTextGen
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeOpenCodeAdapter } from "../Layers/OpenCodeAdapter.ts";
-import { probeOpenCodeGoUsageRateLimits } from "../Layers/OpenCodeGoUsage.ts";
+import { planOpenCodeGoUsageRead } from "../Layers/OpenCodeGoUsage.ts";
 import {
   checkOpenCodeProviderStatus,
   makePendingOpenCodeProvider,
@@ -47,6 +47,7 @@ import {
   type HomebrewInstall,
 } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
+import { makeUsageReadGate } from "../usageReadGate.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("opencode");
@@ -162,10 +163,16 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         ...(serverOwner ? { serverOwner } : {}),
       });
 
+      // Probes and usage re-reads share one gate: a throttled read re-serves the last good
+      // numbers to both, and neither calls the usage API again until its cooldown ends.
+      const usageGate = yield* makeUsageReadGate();
+      const probeUsage = (probeEnvironment: NodeJS.ProcessEnv) =>
+        usageGate.read(planOpenCodeGoUsageRead(probeEnvironment));
       const checkProvider = checkOpenCodeProviderStatus(
         effectiveConfig,
         serverConfig.cwd,
         processEnv,
+        probeUsage,
       ).pipe(Effect.map(stampIdentity), Effect.provideService(OpenCodeRuntime, openCodeRuntime));
 
       const snapshot = yield* makeManagedServerProvider<OpenCodeSettings>({
@@ -178,7 +185,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         checkProvider,
         // An adopted snapshot's Go usage is re-read over HTTP alone: no `opencode serve`.
         refreshUsage: (current) =>
-          probeOpenCodeGoUsageRateLimits(processEnv).pipe(
+          probeUsage(processEnv).pipe(
             Effect.map((rateLimits) => withProviderRateLimits(current, rateLimits)),
           ),
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>

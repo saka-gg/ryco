@@ -62,6 +62,7 @@ import {
   normalizeCommandPath,
 } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
+import { makeUsageReadGate } from "../usageReadGate.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   makeClaudeCapabilitiesCacheKey,
@@ -240,7 +241,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         effectiveConfig,
         processEnv,
       );
-      const probeUsage = yield* makeCachedClaudeUsageProbe(USAGE_PROBE_TTL);
+      // Probes and usage re-reads share one gate: a throttled read re-serves the last good
+      // numbers to both, and neither calls the usage API again until its cooldown ends.
+      const probeUsage = yield* makeCachedClaudeUsageProbe(
+        USAGE_PROBE_TTL,
+        yield* makeUsageReadGate(),
+      );
       const cliModelMemory = yield* makeClaudeCliModelMemory();
 
       const checkProvider = checkClaudeProviderStatus(

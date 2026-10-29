@@ -1,4 +1,9 @@
-import type { ServerProvider, ServerProviderRateLimitWindow } from "@ryco/contracts";
+import type {
+  CliProxyQuotaWindow,
+  ServerProvider,
+  ServerProviderRateLimits,
+  ServerProviderRateLimitWindow,
+} from "@ryco/contracts";
 const SHORT_WINDOW_MAX_MINUTES = 360;
 const WEEK_MINUTES = 7 * 24 * 60;
 const MONTH_MINUTES = 30 * 24 * 60;
@@ -61,6 +66,13 @@ export function describeRateLimitWindow(window: ServerProviderRateLimitWindow): 
   }
   const hours = Math.max(1, Math.round(minutes / 60));
   return { label: `${hours}h`, bucket: "other" };
+}
+
+/** `5h`, `Weekly`, `Weekly · Opus`, or just the scope for windows without a duration. */
+export function limitWindowLabel(window: CliProxyQuotaWindow): string {
+  if (window.windowDurationMins === undefined) return window.scope ?? "Window";
+  const cadence = describeRateLimitWindow(window).label;
+  return window.scope ? `${cadence} · ${window.scope}` : cadence;
 }
 
 /** A comparison of one reported allowance at its snapshot time; never a forecast. */
@@ -135,6 +147,54 @@ export function isRateLimitSnapshotAvailable(
 export interface LabelledLimitWindow {
   readonly label: string;
   readonly window: ServerProviderRateLimitWindow;
+}
+
+const LEGACY_LIMIT_SLOTS = [
+  ["primary", "Short window"],
+  ["secondary", "Weekly"],
+  ["tertiary", "Monthly"],
+] as const;
+
+/**
+ * A provider's reported windows, labelled: its `windows` list, or the legacy slots from servers
+ * that send none, where a slot without a valid duration takes the slot's name. Labels are unique,
+ * so they can key rows: a repeated one gets the window's id appended.
+ */
+export function rateLimitWindowList(
+  limits: ServerProviderRateLimits | undefined,
+): LabelledLimitWindow[] {
+  if (!limits) return [];
+  const entries: ReadonlyArray<LabelledLimitWindow & { readonly id: string }> =
+    limits.windows && limits.windows.length > 0
+      ? limits.windows.map((window) => ({ id: window.id, label: limitWindowLabel(window), window }))
+      : LEGACY_LIMIT_SLOTS.flatMap(([slot, fallback]) => {
+          const window = limits[slot];
+          if (!window) return [];
+          const { label } = describeRateLimitWindow(window);
+          return [{ id: slot, label: label === "Window" ? fallback : label, window }];
+        });
+  const labels = new Set<string>();
+  return entries.map(({ id, label, window }) => {
+    let unique = labels.has(label) ? `${label} · ${id}` : label;
+    for (let copy = 2; labels.has(unique); copy += 1) unique = `${label} · ${id} ${copy}`;
+    labels.add(unique);
+    return { label: unique, window };
+  });
+}
+
+/** When a provider's limits were read: their own read time, else the snapshot's check. */
+export function rateLimitsObservedAt(
+  provider: Pick<ServerProvider, "checkedAt" | "rateLimits">,
+): string {
+  return provider.rateLimits?.observedAt ?? provider.checkedAt;
+}
+
+/** Why the server re-served earlier limits, worded to follow a read time; null when fresh. */
+export function staleRateLimitsReason(limits: ServerProviderRateLimits | undefined): string | null {
+  if (limits?.stale !== true) return null;
+  return limits.staleReason === "rateLimited"
+    ? "the provider is limiting usage reads"
+    : "the latest usage read failed";
 }
 
 export interface PooledLimitWindow {

@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { ServerAuthDescriptor } from "./auth.ts";
+import { CliProxyQuotaWindow } from "./cliProxy.ts";
 import {
   ForwardCompatibleUnion,
   IsoDateTime,
@@ -168,7 +169,9 @@ export type ServerProviderRateLimitCredits = typeof ServerProviderRateLimitCredi
  * Account-scoped rate-limit snapshot attached to a provider. Populated by the
  * drivers that can surface usage limits (Codex, Claude, and OpenCode Go);
  * each instance yields one snapshot since accounts differ per instance.
- * Other drivers leave it absent.
+ * Other drivers leave it absent. The primary/secondary/tertiary slots hold
+ * the account-wide windows older clients render; `windows` lists every
+ * window, model-scoped ones included.
  */
 export const ServerProviderRateLimits = Schema.Struct({
   limitId: Schema.optional(TrimmedNonEmptyString),
@@ -181,6 +184,15 @@ export const ServerProviderRateLimits = Schema.Struct({
   credits: Schema.optional(ServerProviderRateLimitCredits),
   resetCredits: Schema.optional(CodexResetCredits),
   rateLimitReachedType: Schema.optional(TrimmedNonEmptyString),
+  // Every window the provider reported, the legacy slots included. When present, clients render
+  // this list instead of primary/secondary/tertiary; servers still fill the slots for older clients.
+  windows: Schema.optionalKey(Schema.Array(CliProxyQuotaWindow)),
+  // When these numbers were read from the provider. Absent: same as ServerProvider.checkedAt.
+  observedAt: Schema.optionalKey(IsoDateTime),
+  // The last read failed or was throttled; these are the last good numbers, as of observedAt.
+  stale: Schema.optionalKey(Schema.Boolean),
+  // Why, as free text ("rateLimited", "unreachable"). Free text keeps old clients decoding.
+  staleReason: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type ServerProviderRateLimits = typeof ServerProviderRateLimits.Type;
 
@@ -307,7 +319,8 @@ export const ServerProvider = Schema.Struct({
   // Optional and provider-driven. Populated only when the driver knows
   // how to surface usage limits (Codex, Claude, OpenCode Go today).
   // Consumers must treat an absent value as "no live data", not "no
-  // limits configured".
+  // limits configured". Its `observedAt` may be newer than `checkedAt`:
+  // usage is re-read without a full probe.
   rateLimits: Schema.optional(ServerProviderRateLimits),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   // Server-computed on every registry upsert; older clients drop the unknown key on decode.

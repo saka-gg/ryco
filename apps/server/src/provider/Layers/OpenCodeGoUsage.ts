@@ -8,7 +8,8 @@
  * secondary, monthly → tertiary).
  *
  * Every failure path degrades to `undefined` — a missing Go key or an
- * unreachable API must never make the provider snapshot probe fail.
+ * unreachable API must never make the provider snapshot probe fail. Behind
+ * a `UsageReadGate`, a throttled or failed read re-serves the last good one.
  *
  * @module provider/Layers/OpenCodeGoUsage
  */
@@ -18,6 +19,8 @@ import * as NodePath from "node:path";
 
 import type { ServerProviderRateLimits, ServerProviderRateLimitWindow } from "@ryco/contracts";
 import { Effect } from "effect";
+
+import { requestUsage, usageAccountKey, type UsageReadPlan } from "../usageReadGate.ts";
 
 const OPENCODE_GO_USAGE_API = "https://opencode.ai/zen/go/v1/usage";
 const OPENCODE_GO_USAGE_TIMEOUT_MS = 5_000;
@@ -52,7 +55,9 @@ export function resolveOpenCodeDataDirPath(environment: NodeJS.ProcessEnv = proc
   return NodePath.join(base, "opencode");
 }
 
-async function readOpenCodeGoApiKey(environment: NodeJS.ProcessEnv): Promise<string | undefined> {
+async function readOpenCodeGoLogin(
+  environment: NodeJS.ProcessEnv,
+): Promise<{ readonly authPath: string; readonly apiKey: string } | undefined> {
   try {
     const authPath = NodePath.join(resolveOpenCodeDataDirPath(environment), "auth.json");
     const store = JSON.parse(await NodeFS.readFile(authPath, "utf8")) as OpenCodeAuthStore;
@@ -61,14 +66,16 @@ async function readOpenCodeGoApiKey(environment: NodeJS.ProcessEnv): Promise<str
     if (typeof key !== "string" || key.trim().length === 0) {
       return undefined;
     }
-    return key.trim();
+    return { authPath, apiKey: key.trim() };
   } catch {
     return undefined;
   }
 }
 
+/** The usage response as rate limits, read at `nowMs`. */
 export function parseOpenCodeGoUsageRateLimits(
   data: unknown,
+  nowMs: number,
 ): ServerProviderRateLimits | undefined {
   const windows = (data as OpenCodeGoUsageResponse | null | undefined)?.usage;
   if (!windows || typeof windows !== "object") {
@@ -108,40 +115,32 @@ export function parseOpenCodeGoUsageRateLimits(
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
     ...(tertiary ? { tertiary } : {}),
+    observedAt: new Date(nowMs).toISOString(),
   };
 }
 
-async function fetchOpenCodeGoUsageRateLimits(input: {
-  readonly environment: NodeJS.ProcessEnv;
-  readonly fetchImpl: typeof globalThis.fetch;
-}): Promise<ServerProviderRateLimits | undefined> {
-  const apiKey = await readOpenCodeGoApiKey(input.environment);
-  if (!apiKey) {
-    return undefined;
-  }
-
-  const response = await input.fetchImpl(OPENCODE_GO_USAGE_API, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-    },
-    signal: AbortSignal.timeout(OPENCODE_GO_USAGE_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    return undefined;
-  }
-
-  return parseOpenCodeGoUsageRateLimits(await response.json());
-}
-
-export const probeOpenCodeGoUsageRateLimits = Effect.fn("probeOpenCodeGoUsageRateLimits")(
-  function* (
-    environment: NodeJS.ProcessEnv = process.env,
-    fetchImpl: typeof globalThis.fetch = fetch,
-  ): Effect.fn.Return<ServerProviderRateLimits | undefined> {
-    return yield* Effect.tryPromise({
-      try: () => fetchOpenCodeGoUsageRateLimits({ environment, fetchImpl }),
-      catch: () => undefined,
-    }).pipe(Effect.orElseSucceed(() => undefined));
-  },
-);
+/**
+ * The Go usage read of the `opencode-go` key in the CLI's `auth.json`: its account key and the one
+ * usage request, or undefined without a Go key.
+ */
+export const planOpenCodeGoUsageRead = Effect.fn("planOpenCodeGoUsageRead")(function* (
+  environment: NodeJS.ProcessEnv = process.env,
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Effect.fn.Return<UsageReadPlan | undefined> {
+  const login = yield* Effect.promise(() => readOpenCodeGoLogin(environment));
+  if (!login) return undefined;
+  return {
+    accountKey: usageAccountKey("opencode-go", login.authPath, login.apiKey),
+    fetch: requestUsage(
+      () =>
+        fetchImpl(OPENCODE_GO_USAGE_API, {
+          headers: {
+            Authorization: `Bearer ${login.apiKey}`,
+            Accept: "application/json",
+          },
+          signal: AbortSignal.timeout(OPENCODE_GO_USAGE_TIMEOUT_MS),
+        }),
+      parseOpenCodeGoUsageRateLimits,
+    ),
+  };
+});

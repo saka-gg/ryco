@@ -562,6 +562,88 @@ describe("LimitsView", () => {
     expect(document.body.textContent).not.toContain("Pace unavailable");
   });
 
+  it("judges pace at the time the usage was read, not the provider's last check", async () => {
+    const observedAtMs = Date.now() - 1_000;
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        hubs: [],
+        providers: [
+          provider({
+            ...codex,
+            // The full probe ran 100 minutes before this usage re-read.
+            checkedAt: new Date(observedAtMs - 100 * 60_000).toISOString(),
+            rateLimits: {
+              planType: "pro",
+              // Half of the 5-hour window has passed at the read.
+              primary: {
+                usedPercent: 23,
+                windowDurationMins: 300,
+                resetsAt: (observedAtMs + 150 * 60_000) / 1000,
+              },
+              observedAt: new Date(observedAtMs).toISOString(),
+            },
+          }),
+        ],
+      },
+    ]);
+    mounted = await render(view());
+
+    await expect
+      .element(page.getByRole("button", { name: /27 percentage points below even pace/ }))
+      .toBeVisible();
+  });
+
+  it("lists a direct account's model-scoped windows and notes re-served usage", async () => {
+    const claude = provider({
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude",
+      auth: { status: "authenticated", label: "Claude Max Subscription" },
+      rateLimits: {
+        limitId: "claude-oauth",
+        primary: { usedPercent: 42, windowDurationMins: 300 },
+        secondary: { usedPercent: 7, windowDurationMins: 10_080 },
+        windows: [
+          { id: "five_hour", usedPercent: 42, windowDurationMins: 300 },
+          { id: "seven_day", usedPercent: 7, windowDurationMins: 10_080 },
+          { id: "seven_day_opus", scope: "Opus", usedPercent: 12, windowDurationMins: 10_080 },
+        ],
+        observedAt: new Date(Date.parse(checkedAt) - 12 * 60_000).toISOString(),
+        stale: true,
+        staleReason: "rateLimited",
+      },
+    });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        hubs: [],
+        providers: [claude],
+      },
+    ]);
+    harness.result = { ...harness.result!, receivedAtMs: Date.parse(checkedAt) };
+    mounted = await render(view());
+
+    for (const label of ["5h", "Weekly", "Weekly · Opus"]) {
+      await expect.element(page.getByText(label, { exact: true })).toBeVisible();
+    }
+    await expect.element(page.getByText("12% used")).toBeVisible();
+    await expect
+      .element(
+        page.getByText("usage from 12m ago · the provider is limiting usage reads", {
+          exact: false,
+        }),
+      )
+      .toBeVisible();
+    // The card says how old the usage is instead of when the instance was checked; only the
+    // summary line still names the check.
+    expect(document.body.textContent?.match(/checked /g)).toHaveLength(1);
+  });
+
   it("words every time label against the view's clock", async () => {
     // Both hub accounts' 5-hour windows reset 62 minutes after the reads.
     const resetsAt = (Date.parse(checkedAt) + 62 * 60_000) / 1000;

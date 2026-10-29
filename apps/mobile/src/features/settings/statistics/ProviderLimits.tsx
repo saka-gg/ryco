@@ -9,6 +9,8 @@ import {
   listDirectProviderAccounts,
   nextLimitResetAtMs,
   rateLimitPace,
+  rateLimitsObservedAt,
+  staleRateLimitsReason,
   type DirectAccountLocation,
 } from "@ryco/client-runtime/usage";
 import { AppText as Text } from "../../../components/AppText";
@@ -66,7 +68,7 @@ function LimitWindow({
   );
 }
 
-/** One account or instance: icon, plan or status, devices, last check, then its limits. */
+/** One account or instance: icon, plan or status, devices, last check or read, then its limits. */
 function LimitsPanel({
   title,
   snapshot,
@@ -81,13 +83,18 @@ function LimitsPanel({
   children: ReactNode;
 }) {
   const limits = snapshot.rateLimits;
+  const staleReason = staleRateLimitsReason(limits);
   return (
     <Panel title={title}>
       <View className="flex-row items-center gap-3">
         <ProviderIcon provider={snapshot.driver} size={22} />
         <View className="flex-1">
           <Text className="text-sm text-foreground-secondary">{detail}</Text>
-          <Note>Checked {new Date(snapshot.checkedAt).toLocaleString()}</Note>
+          <Note>
+            {staleReason
+              ? `Usage from ${new Date(rateLimitsObservedAt(snapshot)).toLocaleString()}; ${staleReason}.`
+              : `Checked ${new Date(snapshot.checkedAt).toLocaleString()}`}
+          </Note>
         </View>
       </View>
       {resets}
@@ -230,7 +237,7 @@ export function ProviderLimits({
                   key={label}
                   label={label}
                   window={window}
-                  checkedAt={account.snapshot.checkedAt}
+                  checkedAt={rateLimitsObservedAt(account.snapshot)}
                   available={account.available}
                   now={now}
                 />

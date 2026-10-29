@@ -8,6 +8,8 @@ import {
   findCliProxyRouteForInstance,
   formatCliProxyPlan,
   poolCliProxyWindows,
+  rateLimitWindowList,
+  staleRateLimitsReason,
 } from "@ryco/client-runtime/usage";
 import type {
   ClaudeCacheObservation,
@@ -15,7 +17,6 @@ import type {
   EnvironmentId,
   ProviderInstanceId,
   ServerProviderRateLimits,
-  ServerProviderRateLimitWindow,
 } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon } from "lucide-react";
@@ -26,7 +27,6 @@ import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contex
 import { useQuery } from "~/rpc/queryClient";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { describeRateLimitWindow } from "../settings/codexUsageLimits";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -59,6 +59,7 @@ export interface ContextWindowCompactNow {
 
 interface ContextWindowMeterProps {
   usage: ContextWindowUsage;
+  /** When the provider read `rateLimits`; absent while they are not live, which disables pace. */
   checkedAt?: string | undefined;
   available?: boolean | undefined;
   rateLimits?: ServerProviderRateLimits | undefined;
@@ -106,19 +107,6 @@ function MeterBar(props: { readonly percent: number | null }) {
       />
     </div>
   );
-}
-
-function UsageLimitRow(props: {
-  readonly window: ServerProviderRateLimitWindow;
-  readonly fallbackLabel: string;
-  readonly checkedAt: string | undefined;
-  readonly available: boolean;
-  readonly now: number;
-}) {
-  const descriptor = describeRateLimitWindow(props.window);
-  const label =
-    props.window.windowDurationMins === undefined ? props.fallbackLabel : descriptor.label;
-  return <ProviderLimitWindow {...props} label={label} compact />;
 }
 
 /** The instance and login the composer sends with. The web phone tier is frozen without it. */
@@ -304,17 +292,19 @@ function CliProxyRouteSection(props: {
 const secondsToMs = (seconds: number | undefined) =>
   seconds === undefined ? undefined : seconds * 1000;
 
-/** The instants the popup labels relative to now: resets, the last cache read, the hub's last use. */
+/**
+ * The instants the popup labels relative to now: resets, a stale read, the last cache read, the
+ * hub's last use.
+ */
 export function contextWindowLabelInstants(
   rateLimits: ServerProviderRateLimits | undefined,
   claudeCache: ClaudeCacheObservation | null | undefined,
   route: CliProxyHubSnapshot | undefined,
 ): ReadonlyArray<number | undefined> {
-  const instants: Array<number | undefined> = [
-    secondsToMs(rateLimits?.primary?.resetsAt),
-    secondsToMs(rateLimits?.secondary?.resetsAt),
-    secondsToMs(rateLimits?.tertiary?.resetsAt),
-  ];
+  const instants = rateLimitWindowList(rateLimits).map(({ window }) =>
+    secondsToMs(window.resetsAt),
+  );
+  if (rateLimits?.stale && rateLimits.observedAt) instants.push(Date.parse(rateLimits.observedAt));
   if (claudeCache) instants.push(Date.parse(claudeCache.observedAt));
   for (const hubAccount of route?.accounts ?? []) {
     if (hubAccount.lastUsedAt) instants.push(Date.parse(hubAccount.lastUsedAt));
@@ -351,9 +341,9 @@ function ContextWindowDetails(
     ),
   );
   // A routed instance's own limits describe no account the hub uses.
-  const showUsageLimits =
-    route === undefined &&
-    Boolean(rateLimits && (rateLimits.primary || rateLimits.secondary || rateLimits.tertiary));
+  const limitWindows = route === undefined ? rateLimitWindowList(rateLimits) : [];
+  const staleReason = staleRateLimitsReason(rateLimits);
+  const observedAt = rateLimits?.observedAt ?? props.checkedAt;
 
   return (
     <>
@@ -416,38 +406,29 @@ function ContextWindowDetails(
           Couldn't read CLIProxyAPI hubs: {hubsQuery.error.message}
         </div>
       ) : null}
-      {showUsageLimits && rateLimits ? (
+      {limitWindows.length > 0 ? (
         <div className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2 leading-tight">
           <SectionLabel>Usage limits</SectionLabel>
           <div className="grid gap-1">
-            {rateLimits.primary ? (
-              <UsageLimitRow
+            {limitWindows.map(({ label, window }) => (
+              <ProviderLimitWindow
+                key={label}
+                window={window}
+                label={label}
                 checkedAt={props.checkedAt}
                 available={props.available === true}
                 now={now}
-                window={rateLimits.primary}
-                fallbackLabel="Short window"
+                compact
               />
-            ) : null}
-            {rateLimits.secondary ? (
-              <UsageLimitRow
-                checkedAt={props.checkedAt}
-                available={props.available === true}
-                now={now}
-                window={rateLimits.secondary}
-                fallbackLabel="Weekly"
-              />
-            ) : null}
-            {rateLimits.tertiary ? (
-              <UsageLimitRow
-                checkedAt={props.checkedAt}
-                available={props.available === true}
-                now={now}
-                window={rateLimits.tertiary}
-                fallbackLabel="Monthly"
-              />
-            ) : null}
+            ))}
           </div>
+          {staleReason ? (
+            <div className="text-[11px] text-muted-foreground first-letter:uppercase">
+              {observedAt
+                ? `Last read ${formatRelativeTimeLabel(observedAt, now)}; ${staleReason}.`
+                : `${staleReason}.`}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {rateLimits?.resetCredits ? (

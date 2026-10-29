@@ -176,6 +176,86 @@ describe("listDirectProviderAccounts", () => {
     ]);
   });
 
+  it("keeps the newer usage read over re-served numbers from a newer probe", () => {
+    const claude = (checkedAt: string, rateLimits: ServerProvider["rateLimits"]) =>
+      provider({
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        auth: { status: "authenticated", email: "a@example.com" },
+        checkedAt,
+        rateLimits,
+      });
+    // M5 probed last, but its usage read was throttled, so it re-serves numbers from 50 min ago.
+    const throttled = claude("2026-10-22T09:58:00.000Z", {
+      planType: "max",
+      observedAt: "2026-10-22T09:10:00.000Z",
+      stale: true,
+      staleReason: "rateLimited",
+      primary: fiveHour(10),
+    });
+    const reread = claude("2026-10-22T09:40:00.000Z", {
+      planType: "max",
+      observedAt: "2026-10-22T09:59:00.000Z",
+      primary: fiveHour(80),
+    });
+    const { accounts } = listDirectProviderAccounts([
+      { environmentId: "m5", label: "M5", connected: true, providers: [throttled], hubs: [] },
+      { environmentId: "m4", label: "M4", connected: true, providers: [reread], hubs: [] },
+    ]);
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]!.snapshot).toBe(reread);
+    expect(accounts[0]!.windows.map(({ window }) => window.usedPercent)).toEqual([80]);
+    expect(
+      accounts[0]!.locations.map(({ environmentId, observedAt, stale }) => ({
+        environmentId,
+        observedAt,
+        stale,
+      })),
+    ).toEqual([
+      { environmentId: "m5", observedAt: "2026-10-22T09:10:00.000Z", stale: true },
+      { environmentId: "m4", observedAt: "2026-10-22T09:59:00.000Z", stale: false },
+    ]);
+  });
+
+  it("ranks by the usage read, not the probe, and a fresh read over re-served ones of the same time", () => {
+    const signedIn = (checkedAt: string, observedAt: string, usedPercent: number, stale = false) =>
+      provider({
+        instanceId: ProviderInstanceId.make("codex"),
+        auth: { status: "authenticated", email: "a@example.com" },
+        checkedAt,
+        rateLimits: { observedAt, ...(stale ? { stale } : {}), primary: fiveHour(usedPercent) },
+      });
+    const snapshotOf = (providers: ServerProvider[]) =>
+      listDirectProviderAccounts(
+        providers.map((snapshot, index) => ({
+          environmentId: `node-${index}`,
+          label: `Node ${index}`,
+          connected: true,
+          providers: [snapshot],
+          hubs: [],
+        })),
+      ).accounts[0]!.snapshot;
+
+    const newerProbe = signedIn("2026-10-22T10:30:00.000Z", "2026-10-22T10:30:00.000Z", 10);
+    const newerRead = signedIn("2026-10-22T10:00:00.000Z", "2026-10-22T10:40:00.000Z", 20);
+    expect(snapshotOf([newerProbe, newerRead])).toBe(newerRead);
+    // Re-served numbers dated after a fresh read still win: their read is the newer one.
+    const newerReserved = signedIn(
+      "2026-10-22T10:00:00.000Z",
+      "2026-10-22T10:50:00.000Z",
+      30,
+      true,
+    );
+    expect(snapshotOf([newerRead, newerReserved])).toBe(newerReserved);
+    const sameTimeReserved = signedIn(
+      "2026-10-22T10:45:00.000Z",
+      "2026-10-22T10:40:00.000Z",
+      40,
+      true,
+    );
+    expect(snapshotOf([sameTimeReserved, newerRead])).toBe(newerRead);
+  });
+
   it("keeps one email on two plans apart and joins a planless snapshot only when unambiguous", () => {
     const signedIn = (instanceId: string, planType?: string) =>
       provider({
@@ -324,6 +404,49 @@ describe("listDirectProviderAccounts", () => {
         authenticated: true,
         reason: "No usage yet",
       }),
+    ]);
+  });
+
+  it("lists every reported window of a direct account, model-scoped ones included", () => {
+    const claude = provider({
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      auth: { status: "authenticated", email: "me@example.com" },
+      rateLimits: {
+        limitId: "claude-oauth",
+        primary: fiveHour(42),
+        secondary: { usedPercent: 7, windowDurationMins: 10_080 },
+        windows: [
+          { id: "five_hour", ...fiveHour(42) },
+          { id: "seven_day", usedPercent: 7, windowDurationMins: 10_080 },
+          { id: "seven_day_opus", scope: "Opus", usedPercent: 12, windowDurationMins: 10_080 },
+          { id: "cloud_session_credits", scope: "Cloud session credits", usedPercent: 3 },
+        ],
+      },
+    });
+    // A server that reports only `windows`, without the legacy slots.
+    const windowsOnly = provider({
+      instanceId: ProviderInstanceId.make("windows-only"),
+      rateLimits: { windows: [{ id: "credits", scope: "Credits", usedPercent: 50 }] },
+    });
+    const { accounts, withoutLimits } = listDirectProviderAccounts([
+      {
+        environmentId: "m5",
+        label: "M5",
+        connected: true,
+        hubs: [],
+        providers: [claude, windowsOnly],
+      },
+    ]);
+    expect(withoutLimits).toEqual([]);
+    expect(
+      accounts.map((account) => [
+        account.snapshot.instanceId,
+        account.windows.map(({ label }) => label),
+      ]),
+    ).toEqual([
+      ["claudeAgent", ["5h", "Weekly", "Weekly · Opus", "Cloud session credits"]],
+      ["windows-only", ["Credits"]],
     ]);
   });
 });

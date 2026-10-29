@@ -123,6 +123,84 @@ describe("ServerProvider", () => {
     expect(parsed.rateLimits).toBeUndefined();
   });
 
+  describe("rateLimits windows and read time", () => {
+    const base = {
+      instanceId: "claudeAgent",
+      driver: "claudeAgent",
+      enabled: true,
+      installed: true,
+      version: "2.1.296",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-04-10T00:00:00.000Z",
+      models: [],
+    };
+
+    it("decodes every reported window, the read time and the stale marker", () => {
+      const parsed = decodeServerProvider({
+        ...base,
+        rateLimits: {
+          limitId: "claude-oauth",
+          primary: { usedPercent: 42, windowDurationMins: 300 },
+          windows: [
+            { id: "five_hour", usedPercent: 42, windowDurationMins: 300 },
+            {
+              id: "seven_day_opus",
+              scope: "Opus",
+              usedPercent: 12,
+              resetsAt: 1_700_000_000,
+              windowDurationMins: 10_080,
+            },
+          ],
+          observedAt: "2026-04-10T00:20:00.000Z",
+          stale: true,
+          staleReason: "rateLimited",
+        },
+      });
+
+      expect(parsed.rateLimits).toEqual({
+        limitId: "claude-oauth",
+        primary: { usedPercent: 42, windowDurationMins: 300 },
+        windows: [
+          { id: "five_hour", usedPercent: 42, windowDurationMins: 300 },
+          {
+            id: "seven_day_opus",
+            scope: "Opus",
+            usedPercent: 12,
+            resetsAt: 1_700_000_000,
+            windowDurationMins: 10_080,
+          },
+        ],
+        observedAt: "2026-04-10T00:20:00.000Z",
+        stale: true,
+        staleReason: "rateLimited",
+      });
+    });
+
+    it("leaves the new keys absent on a payload from an older server", () => {
+      const parsed = decodeServerProvider({
+        ...base,
+        rateLimits: { limitId: "claude-oauth", primary: { usedPercent: 42 } },
+      });
+
+      expect(parsed.rateLimits).toEqual({ limitId: "claude-oauth", primary: { usedPercent: 42 } });
+      for (const key of ["windows", "observedAt", "stale", "staleReason"]) {
+        expect(key in parsed.rateLimits!).toBe(false);
+      }
+    });
+
+    it("drops keys a newer server adds inside a window", () => {
+      const parsed = decodeServerProvider({
+        ...base,
+        rateLimits: {
+          windows: [{ id: "credits", usedPercent: 3, unit: "credits", tier: { name: "x" } }],
+        },
+      });
+
+      expect(parsed.rateLimits?.windows).toEqual([{ id: "credits", usedPercent: 3 }]);
+    });
+  });
+
   describe("compatibilityAdvisory", () => {
     const base = {
       instanceId: "codex",
