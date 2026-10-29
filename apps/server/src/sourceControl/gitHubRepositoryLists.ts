@@ -9,7 +9,9 @@
  * each row's stack summary. Nodes are flattened into `gh`'s `--json` shape so the
  * existing decoders normalize them exactly as before.
  *
- * Everything here is pure; `GitHubCli` sends the documents over stdin.
+ * Everything here is pure; `GitHubCli` sends the documents over HTTPS, or to
+ * `gh api graphql` over stdin when the API cannot be used (no token for the
+ * host, a proxy Node.js would not use, an unreachable API).
  */
 import { Result, Schema } from "effect";
 import type {
@@ -44,6 +46,12 @@ export interface GitHubPullRequestListFields {
   readonly checks: boolean;
   /** `stackEntry` / `stack` (native stacks), absent on hosts without them. */
   readonly stack: boolean;
+  /**
+   * Only identity, branches, state and timestamps: what status lookups, the
+   * change request index and branch lookups read. Selects neither checks nor
+   * stacks, whatever `checks` and `stack` say.
+   */
+  readonly summary?: boolean;
 }
 
 // Same selections (and limits) `gh pr list --json <list fields>` asks for,
@@ -56,12 +64,21 @@ const PULL_REQUEST_ROW_FIELDS = `number title url baseRefName headRefName headRe
       headRepository { nameWithOwner }
       headRepositoryOwner { login }`;
 
+// Exactly the fields `gh pr list --json <summary fields>` reads
+// (`GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS`): no comments, checks,
+// mergeability (which makes GitHub compute it), reviews or stacks.
+const PULL_REQUEST_SUMMARY_FIELDS = `number title url baseRefName headRefName state mergedAt closedAt updatedAt createdAt isDraft isCrossRepository
+      author { __typename login }
+      headRepository { nameWithOwner }
+      headRepositoryOwner { login }`;
+
 const PULL_REQUEST_CHECK_FIELDS = `commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { __typename ... on StatusContext { context state targetUrl createdAt } ... on CheckRun { name checkSuite { workflowRun { workflow { name } } } status conclusion startedAt completedAt detailsUrl } } } } } } }`;
 
 const PULL_REQUEST_STACK_FIELDS = `stackEntry { position }
       stack { number size baseRefName }`;
 
 function pullRequestRowSelection(fields: GitHubPullRequestListFields): string {
+  if (fields.summary === true) return PULL_REQUEST_SUMMARY_FIELDS;
   return [
     PULL_REQUEST_ROW_FIELDS,
     ...(fields.checks ? [PULL_REQUEST_CHECK_FIELDS] : []),

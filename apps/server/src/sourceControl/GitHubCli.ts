@@ -483,12 +483,6 @@ export interface GitHubCliShape {
   }) => Effect.Effect<ReadonlyArray<GitHubPullRequestSummary>, GitHubCliError>;
 
   /**
-   * The repository's pull request list as list rows show it, in one GraphQL
-   * request per 100 rows: comment counts (not bodies), checks, review state,
-   * diff stats and each row's stack summary. `involvement` makes it the same
-   * GitHub search `gh pr list --search` runs.
-   */
-  /**
    * States of several pull requests and issues of `cwd`'s repository: one GraphQL request
    * per 50 numbers. Numbers GitHub does not resolve are absent.
    */
@@ -498,14 +492,26 @@ export interface GitHubCliShape {
     readonly issues: ReadonlyArray<number>;
   }) => Effect.Effect<GitHubRepositoryLists.GitHubLinkStates, GitHubCliError>;
 
+  /**
+   * The repository's pull request list as list rows show it, in one GraphQL
+   * request per 100 rows: comment counts (not bodies), checks, review state,
+   * diff stats and each row's stack summary. `involvement` makes it the same
+   * GitHub search `gh pr list --search` runs.
+   */
   readonly listPullRequests: (input: {
     readonly cwd: string;
     readonly state: GitHubRepositoryLists.GitHubPullRequestListState;
     readonly headSelector?: string;
     readonly involvement?: ChangeRequestInvolvement;
     readonly limit?: number;
-    /** Ask for stack summaries in the same request (default `true`). */
+    /** Ask for stack summaries in the same request (default `true`; never for `summary`). */
     readonly includeStackSummary?: boolean;
+    /**
+     * `summary`: identity, branches, state and timestamps only (the fields of
+     * `gh pr list --json <summary fields>`), for the change request index and
+     * branch lookups. Default `full`, the list row fields.
+     */
+    readonly fields?: "full" | "summary";
   }) => Effect.Effect<ReadonlyArray<GitHubPullRequestListItem>, GitHubCliError>;
 
   /**
@@ -1500,6 +1506,11 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     return true;
   };
 
+  /**
+   * A list, one GraphQL page at a time. Each page goes over HTTPS when it can
+   * and through gh when it cannot, so a list that loses the API part way
+   * finishes through gh: the same token, so the cursor stays valid.
+   */
   const readListPages = <T>(input: {
     readonly cwd: string;
     readonly host: string;
@@ -1527,7 +1538,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           GitHubRepositoryLists.GITHUB_REPOSITORY_LIST_PAGE_SIZE,
           input.limit - items.length,
         );
-        const raw: string = yield* graphqlDocument({
+        const raw: string = yield* graphqlRead({
           cwd: input.cwd,
           host: input.host,
           operation: input.operation,
@@ -1628,6 +1639,15 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           decode: (raw) =>
             GitHubRepositoryLists.decodeGitHubPullRequestListPageJson(raw, { search }),
         });
+      const toItems = (rows: ReadonlyArray<GitHubRepositoryLists.GitHubPullRequestListRow>) =>
+        rows.map((row): GitHubPullRequestListItem => ({
+          summary: withPresentUpdatedAt(row.record),
+          stackSummary: row.stackSummary,
+        }));
+      if (input.fields === "summary") {
+        // Neither checks nor stacks are selected, so neither retry below applies.
+        return toItems(yield* read({ checks: false, stack: false, summary: true }));
+      }
       const stack =
         input.includeStackSummary !== false &&
         hostHasStacks(repository.host, yield* Clock.currentTimeMillis);
@@ -1651,10 +1671,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
             ),
         ),
       );
-      return rows.map((row): GitHubPullRequestListItem => ({
-        summary: withPresentUpdatedAt(row.record),
-        stackSummary: row.stackSummary,
-      }));
+      return toItems(rows);
     });
 
   const searchInvolvedPullRequests: GitHubCliShape["searchInvolvedPullRequests"] = (input) =>

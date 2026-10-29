@@ -4,7 +4,17 @@ import { spawnSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
+import {
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  PlatformError,
+  Result,
+  Scope,
+} from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
 import { describe, expect } from "vite-plus/test";
@@ -29,6 +39,7 @@ import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { type GitManagerShape } from "./GitManager.ts";
 import {
   GitHubCliError,
+  GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
   GITHUB_PULL_REQUEST_SUMMARY_JSON_FIELDS,
   GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS,
   type GitHubCliShape,
@@ -36,6 +47,7 @@ import {
   GitHubCli,
   formatGitHubJsonFields,
 } from "../sourceControl/GitHubCli.ts";
+import { decodeGitHubPullRequestListJson } from "../sourceControl/gitHubPullRequests.ts";
 import {
   makeTextGenerationFromRegistry,
   type TextGenerationShape,
@@ -608,7 +620,40 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       updatePullRequest: () => Effect.die("unused"),
       getPullRequestFileContents: () => Effect.die("unused"),
       execute,
-      listPullRequests: () => Effect.die("unused"),
+      // Lists (the change request index and branch lookups read summary rows)
+      // answer from the same `pr list` scenarios, logged as the `gh pr list`
+      // call each one stands for, and decode the way gh's list output does.
+      listPullRequests: (input) =>
+        execute({
+          cwd: input.cwd,
+          args: [
+            "pr",
+            "list",
+            ...(input.headSelector ? ["--head", input.headSelector] : []),
+            "--state",
+            input.state,
+            "--limit",
+            String(input.limit ?? 20),
+            "--json",
+            formatGitHubJsonFields(
+              input.fields === "summary"
+                ? GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS
+                : GITHUB_PULL_REQUEST_LIST_JSON_FIELDS,
+            ),
+          ],
+        }).pipe(
+          Effect.flatMap((result) => {
+            const decoded = decodeGitHubPullRequestListJson(result.stdout.trim() || "[]");
+            return Result.isSuccess(decoded)
+              ? Effect.succeed(decoded.success.map((summary) => ({ summary, stackSummary: null })))
+              : Effect.fail(
+                  new GitHubCliError({
+                    operation: "listPullRequests",
+                    detail: "Invalid fake pull request list JSON.",
+                  }),
+                );
+          }),
+        ),
       searchInvolvedPullRequests: () => Effect.die("unused"),
       getLinkStates: () => Effect.die("unused"),
       listOpenPullRequests: (input) =>

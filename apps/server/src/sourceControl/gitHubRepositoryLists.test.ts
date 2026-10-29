@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Option, Result } from "effect";
 
+import { GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS } from "./GitHubCli.ts";
+import { decodeGitHubPullRequestListJson } from "./gitHubPullRequests.ts";
 import {
   buildGitHubInvolvedPullRequestSearchQuery,
   buildGitHubPullRequestInvolvementSearch,
@@ -15,6 +17,32 @@ import {
 } from "./gitHubRepositoryLists.ts";
 
 const repository = { host: "github.com", owner: "owner", name: "repo" };
+
+/** The top-level field names a list document selects per pull request node. */
+const nodeFields = (query: string): string[] => {
+  const fields: string[] = [];
+  let depth = 0;
+  let inArguments = false;
+  let token = "";
+  const flush = () => {
+    if (depth === 0 && token.length > 0) fields.push(token);
+    token = "";
+  };
+  for (const char of query.slice(query.indexOf("nodes {") + "nodes {".length)) {
+    if (inArguments || char === "(") {
+      inArguments = char !== ")";
+    } else if (char === "{" || char === "}") {
+      flush();
+      if (char === "}" && depth === 0) break;
+      depth += char === "{" ? 1 : -1;
+    } else if (/\s/u.test(char)) {
+      flush();
+    } else if (depth === 0) {
+      token += char;
+    }
+  }
+  return fields;
+};
 
 const node = (overrides: Record<string, unknown> = {}) => ({
   number: 12,
@@ -97,6 +125,159 @@ describe("gitHubRepositoryLists", () => {
     const lean = buildGitHubPullRequestListQuery({ search: false, checks: false, stack: false });
     assert.notInclude(lean, "statusCheckRollup");
     assert.notInclude(lean, "stackEntry");
+  });
+
+  it("asks for exactly gh's summary fields in the summary view, whatever checks and stack say", () => {
+    for (const search of [false, true]) {
+      const query = buildGitHubPullRequestListQuery({
+        search,
+        checks: true,
+        stack: true,
+        summary: true,
+      });
+      for (const field of [
+        "comments",
+        "commits",
+        "statusCheckRollup",
+        "mergeable",
+        "reviewDecision",
+        "stack",
+        "stackEntry",
+        "assignees",
+        "labels",
+        "additions",
+        "headRefOid",
+      ]) {
+        assert.notMatch(query, new RegExp(`\\b${field}\\b`, "u"), field);
+      }
+      assert.include(query, "author { __typename login }");
+    }
+    // The node selection's top-level fields are the `gh pr list --json` summary fields.
+    const query = buildGitHubPullRequestListQuery({ search: false, checks: false, stack: false });
+    const summary = buildGitHubPullRequestListQuery({
+      search: false,
+      checks: false,
+      stack: false,
+      summary: true,
+    });
+    assert.deepStrictEqual(
+      nodeFields(summary).toSorted(),
+      [...GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS].toSorted(),
+    );
+    assert.include(nodeFields(query), "comments");
+  });
+
+  it("decodes summary rows exactly as gh pr list --json <summary fields> does", () => {
+    const shared = (number: number) => ({
+      number,
+      title: `Change ${number}`,
+      url: `https://github.com/owner/repo/pull/${number}`,
+      baseRefName: "main",
+      headRefName: `feature/${number}`,
+      updatedAt: "2026-10-01T10:00:00Z",
+      createdAt: "2026-09-30T10:00:00Z",
+    });
+    const graphQlNodes = [
+      {
+        ...shared(12),
+        state: "OPEN",
+        mergedAt: null,
+        closedAt: null,
+        isDraft: true,
+        isCrossRepository: false,
+        author: { __typename: "User", login: "octocat" },
+        headRepository: { nameWithOwner: "owner/repo" },
+        headRepositoryOwner: { login: "owner" },
+      },
+      {
+        ...shared(13),
+        state: "MERGED",
+        mergedAt: "2026-10-02T10:00:00Z",
+        closedAt: "2026-10-02T10:00:00Z",
+        isDraft: false,
+        isCrossRepository: true,
+        author: { __typename: "Bot", login: "dependabot" },
+        headRepository: { nameWithOwner: "fork/repo" },
+        headRepositoryOwner: { login: "fork" },
+      },
+      {
+        ...shared(14),
+        state: "CLOSED",
+        mergedAt: null,
+        closedAt: "2026-10-03T10:00:00Z",
+        isDraft: false,
+        isCrossRepository: true,
+        author: { __typename: "User", login: "hubot" },
+        headRepository: null,
+        headRepositoryOwner: { login: "gone" },
+      },
+    ];
+    // What gh prints for the same pull requests: `author{login,...on User{id,name}}`
+    // with bots as `app/<login>`, `headRepository{id,name,nameWithOwner}`,
+    // `headRepositoryOwner{id,login,...on User{name}}`.
+    const ghJson = [
+      {
+        ...shared(12),
+        state: "OPEN",
+        mergedAt: null,
+        closedAt: null,
+        isDraft: true,
+        isCrossRepository: false,
+        author: { id: "U_1", is_bot: false, login: "octocat", name: "The Octocat" },
+        headRepository: { id: "R_1", name: "repo", nameWithOwner: "owner/repo" },
+        headRepositoryOwner: { id: "O_1", login: "owner", name: "Owner" },
+      },
+      {
+        ...shared(13),
+        state: "MERGED",
+        mergedAt: "2026-10-02T10:00:00Z",
+        closedAt: "2026-10-02T10:00:00Z",
+        isDraft: false,
+        isCrossRepository: true,
+        author: { is_bot: true, login: "app/dependabot" },
+        headRepository: { id: "R_2", name: "repo", nameWithOwner: "fork/repo" },
+        headRepositoryOwner: { id: "O_2", login: "fork" },
+      },
+      {
+        ...shared(14),
+        state: "CLOSED",
+        mergedAt: null,
+        closedAt: "2026-10-03T10:00:00Z",
+        isDraft: false,
+        isCrossRepository: true,
+        author: { id: "U_2", is_bot: false, login: "hubot", name: "" },
+        headRepository: null,
+        headRepositoryOwner: { id: "O_3", login: "gone", name: "" },
+      },
+    ];
+    const viaGraphQl = decodeGitHubPullRequestListPageJson(
+      JSON.stringify({
+        data: {
+          repository: {
+            pullRequests: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: graphQlNodes,
+            },
+          },
+        },
+      }),
+      { search: false },
+    );
+    const viaGh = decodeGitHubPullRequestListJson(JSON.stringify(ghJson));
+    assert.isTrue(Result.isSuccess(viaGraphQl));
+    assert.isTrue(Result.isSuccess(viaGh));
+    if (!Result.isSuccess(viaGraphQl) || !Result.isSuccess(viaGh)) return;
+    assert.lengthOf(viaGh.success, 3);
+    assert.deepStrictEqual(
+      viaGraphQl.success.items.map((row) => row.record),
+      viaGh.success,
+    );
+    assert.deepStrictEqual(
+      viaGraphQl.success.items.map((row) => row.stackSummary),
+      [null, null, null],
+    );
+    assert.strictEqual(viaGraphQl.success.items[1]?.record.author, "app/dependabot");
+    assert.strictEqual(viaGraphQl.success.items[1]?.record.state, "merged");
   });
 
   it("maps states and involvement searches the way gh pr list does", () => {

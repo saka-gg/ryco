@@ -347,4 +347,335 @@ describe("GitHubCli over the direct API", () => {
   );
 });
 
+/** One page of the repository's pull request list, in GitHub's GraphQL shape. */
+function pullRequestPage(
+  numbers: ReadonlyArray<number>,
+  pageInfo: { readonly hasNextPage: boolean; readonly endCursor: string | null } = {
+    hasNextPage: false,
+    endCursor: null,
+  },
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    data: {
+      repository: {
+        pullRequests: {
+          pageInfo,
+          nodes: numbers.map((number) => ({
+            number,
+            title: `PR ${number}`,
+            url: `https://github.com/acme/web/pull/${number}`,
+            baseRefName: "main",
+            headRefName: `feature/${number}`,
+            state: "OPEN",
+            comments: { totalCount: 2 },
+            commits: {
+              nodes: [
+                {
+                  commit: {
+                    statusCheckRollup: {
+                      contexts: {
+                        nodes: [{ __typename: "CheckRun", name: "ci", status: "COMPLETED" }],
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          })),
+        },
+      },
+    },
+    ...extra,
+  };
+}
+
+const variablesOf = (request: FakeGitHubRequest | string) =>
+  (
+    JSON.parse(typeof request === "string" ? request : request.body) as {
+      variables: Record<string, unknown>;
+    }
+  ).variables;
+
+describe("GitHubCli lists over the direct API", () => {
+  it.effect("pages pull request lists over HTTPS without starting gh for the pages", () =>
+    withDirectApi(
+      (request) =>
+        variablesOf(request).after === null
+          ? {
+              body: pullRequestPage(
+                Array.from({ length: 100 }, (_, index) => index + 1),
+                { hasNextPage: true, endCursor: "cursor-1" },
+              ),
+            }
+          : { body: pullRequestPage([101, 102]) },
+      { GH_TOKEN: SENTINEL },
+      (gh, server) =>
+        Effect.gen(function* () {
+          scriptGh();
+          const rows = yield* gh.listPullRequests({ cwd: "/repo", state: "closed", limit: 150 });
+          assert.lengthOf(rows, 102);
+          assert.strictEqual(rows[0]?.summary.commentsCount, 2);
+          assert.strictEqual(rows[0]?.summary.checkRollup?.length, 1);
+          assert.deepStrictEqual(server.requests.map(variablesOf), [
+            {
+              owner: "acme",
+              name: "web",
+              first: 100,
+              after: null,
+              states: ["CLOSED", "MERGED"],
+              head: null,
+            },
+            {
+              owner: "acme",
+              name: "web",
+              first: 50,
+              after: "cursor-1",
+              states: ["CLOSED", "MERGED"],
+              head: null,
+            },
+          ]);
+          for (const request of server.requests) {
+            assert.strictEqual(request.headers.authorization, `token ${SENTINEL}`);
+          }
+          assert.deepStrictEqual(ghCalls(), [REPO_VIEW]);
+        }),
+    ),
+  );
+
+  it.effect("reads the summary list and branch lookups over HTTPS with only summary fields", () =>
+    withDirectApi(
+      () => ({ body: pullRequestPage([7]) }),
+      { GH_TOKEN: SENTINEL },
+      (gh, server) =>
+        Effect.gen(function* () {
+          scriptGh();
+          const indexed = yield* gh.listPullRequests({
+            cwd: "/repo",
+            state: "all",
+            limit: 100,
+            fields: "summary",
+            includeStackSummary: false,
+          });
+          yield* gh.listPullRequests({
+            cwd: "/repo",
+            state: "all",
+            headSelector: "feature/7",
+            limit: 20,
+            fields: "summary",
+          });
+          assert.strictEqual(indexed[0]?.summary.number, 7);
+          assert.strictEqual(indexed[0]?.stackSummary, null);
+          assert.lengthOf(server.requests, 2);
+          assert.deepStrictEqual(variablesOf(server.requests[1]!), {
+            owner: "acme",
+            name: "web",
+            first: 20,
+            after: null,
+            states: ["OPEN", "CLOSED", "MERGED"],
+            head: "feature/7",
+          });
+          for (const request of server.requests) {
+            const query = queryOf(request);
+            assert.include(query, "headRefName");
+            for (const field of ["comments", "statusCheckRollup", "mergeable", "stackEntry"]) {
+              assert.notInclude(query, field);
+            }
+          }
+          assert.deepStrictEqual(ghCalls(), [REPO_VIEW]);
+        }),
+    ),
+  );
+
+  it.effect("reads the summary list through gh api graphql on the gh-only client", () =>
+    Effect.gen(function* () {
+      scriptGh({ graphql: () => output(JSON.stringify(pullRequestPage([7]))) });
+      const rows = yield* Effect.gen(function* () {
+        return yield* (yield* GitHubCli.GitHubCli).listPullRequests({
+          cwd: "/repo",
+          state: "all",
+          headSelector: "feature/7",
+          limit: 20,
+          fields: "summary",
+        });
+      }).pipe(Effect.provide(ghOnlyLayer));
+      assert.strictEqual(rows[0]?.summary.number, 7);
+      // The same summary document over stdin, not `gh pr list`.
+      assert.deepStrictEqual(ghCalls(), [REPO_VIEW, GH_GRAPHQL]);
+      const stdin = mockRun.mock.calls[1]![0].stdin ?? "{}";
+      assert.strictEqual(
+        queryOf(stdin),
+        GitHubRepositoryLists.buildGitHubPullRequestListQuery({
+          search: false,
+          checks: false,
+          stack: false,
+          summary: true,
+        }),
+      );
+      assert.deepStrictEqual(variablesOf(stdin), {
+        owner: "acme",
+        name: "web",
+        first: 20,
+        after: null,
+        states: ["OPEN", "CLOSED", "MERGED"],
+        head: "feature/7",
+      });
+    }),
+  );
+
+  it.effect("drops stack fields on hosts without native stacks and remembers it, as on gh", () =>
+    withDirectApi(
+      (request) =>
+        queryOf(request).includes("stackEntry")
+          ? {
+              // GitHub answers a schema error with 200 and no data.
+              body: {
+                errors: [
+                  {
+                    message: "Field 'stack' doesn't exist on type 'PullRequest'",
+                    extensions: { code: "undefinedField" },
+                  },
+                ],
+              },
+            }
+          : { body: pullRequestPage([1]) },
+      { GH_TOKEN: SENTINEL },
+      (gh, server) =>
+        Effect.gen(function* () {
+          scriptGh();
+          const first = yield* gh.listPullRequests({ cwd: "/repo", state: "open" });
+          const second = yield* gh.listPullRequests({ cwd: "/repo", state: "open" });
+          assert.strictEqual(first[0]?.summary.number, 1);
+          assert.strictEqual(second[0]?.summary.number, 1);
+          assert.deepStrictEqual(
+            server.requests.map((request) => queryOf(request).includes("stackEntry")),
+            [true, false, false],
+          );
+          assert.deepStrictEqual(ghCalls(), [REPO_VIEW]);
+        }),
+    ),
+  );
+
+  it.effect("drops checks from every row when the token may not read the check rollup", () =>
+    withDirectApi(
+      () => ({
+        body: pullRequestPage([1, 2], undefined, {
+          errors: [
+            {
+              type: "FORBIDDEN",
+              message: "Resource not accessible by personal access token",
+              path: [
+                "repository",
+                "pullRequests",
+                "nodes",
+                0,
+                "commits",
+                "nodes",
+                0,
+                "commit",
+                "statusCheckRollup",
+              ],
+            },
+          ],
+        }),
+      }),
+      { GH_TOKEN: SENTINEL },
+      (gh, server) =>
+        Effect.gen(function* () {
+          scriptGh();
+          const rows = yield* gh.listPullRequests({ cwd: "/repo", state: "open" });
+          assert.lengthOf(rows, 2);
+          for (const row of rows) assert.strictEqual(row.summary.checkRollup, undefined);
+          assert.lengthOf(server.requests, 1);
+          assert.deepStrictEqual(ghCalls(), [REPO_VIEW]);
+        }),
+    ),
+  );
+
+  it.effect("lists issues over HTTPS and gives gh's wording when issues are disabled", () =>
+    Effect.gen(function* () {
+      let issuesEnabled = true;
+      yield* withDirectApi(
+        () => ({
+          body: {
+            data: {
+              repository: {
+                hasIssuesEnabled: issuesEnabled,
+                issues: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: issuesEnabled
+                    ? [
+                        {
+                          number: 42,
+                          title: "Bug",
+                          url: "https://github.com/acme/web/issues/42",
+                          state: "OPEN",
+                          comments: { totalCount: 7 },
+                        },
+                      ]
+                    : [],
+                },
+              },
+            },
+          },
+        }),
+        { GH_TOKEN: SENTINEL },
+        (gh, server) =>
+          Effect.gen(function* () {
+            scriptGh();
+            const issues = yield* gh.listIssues({ cwd: "/repo", state: "open" });
+            assert.strictEqual(issues[0]?.number, 42);
+            assert.strictEqual(issues[0]?.commentsCount, 7);
+            assert.strictEqual(variablesOf(server.requests[0]!).first, 50);
+            issuesEnabled = false;
+            const error = yield* gh.listIssues({ cwd: "/repo", state: "open" }).pipe(Effect.flip);
+            assert.include(error.message, "the 'acme/web' repository has disabled issues");
+            assert.lengthOf(server.requests, 2);
+            assert.deepStrictEqual(ghCalls(), [REPO_VIEW]);
+          }),
+      );
+    }),
+  );
+
+  it.effect("finishes a list through gh when the API is lost part way, with the same cursor", () =>
+    Effect.gen(function* () {
+      let fetches = 0;
+      // The first page answers over HTTPS; then the connection is refused.
+      const losing = ((...args: Parameters<typeof globalThis.fetch>) => {
+        fetches += 1;
+        return fetches === 1
+          ? globalThis.fetch(...args)
+          : Promise.reject(new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } }));
+      }) as typeof globalThis.fetch;
+      scriptGh({ graphql: () => output(JSON.stringify(pullRequestPage([101, 102]))) });
+      yield* withDirectApi(
+        () => ({
+          body: pullRequestPage(
+            Array.from({ length: 100 }, (_, index) => index + 1),
+            { hasNextPage: true, endCursor: "cursor-1" },
+          ),
+        }),
+        { GH_TOKEN: SENTINEL },
+        (gh, server) =>
+          Effect.gen(function* () {
+            const rows = yield* gh
+              .listPullRequests({ cwd: "/repo", state: "open", limit: 150 })
+              .pipe(Effect.provideService(FetchHttpClient.Fetch, losing));
+            assert.lengthOf(rows, 102);
+            assert.lengthOf(server.requests, 1);
+            assert.deepStrictEqual(ghCalls(), [REPO_VIEW, GH_GRAPHQL]);
+            assert.deepStrictEqual(variablesOf(mockRun.mock.calls[1]![0].stdin ?? "{}"), {
+              owner: "acme",
+              name: "web",
+              first: 50,
+              after: "cursor-1",
+              states: ["OPEN"],
+              head: null,
+            });
+          }),
+      );
+    }),
+  );
+});
+
 const sleepReal = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

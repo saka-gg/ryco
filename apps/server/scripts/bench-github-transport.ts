@@ -22,7 +22,9 @@
  *   (`gh pr view` + stack + merge settings + required checks + reactions) every
  *   AUTOMATIC_ACTIVE_REFRESH_MS through a CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS shared cache.
  * An interactive probe reads one link state every 2 s. Exact queue waits come from wrapping
- * `ProcessPool.prototype.request` (every admission, zero waits included).
+ * `ProcessPool.prototype.request` (every admission, zero waits included). `indexMiss` and
+ * `branchMiss` time only the index reads that reached GitHub; 20 uncached summary lists (what
+ * the index lists) and 20 150-number link-state batches run idle and again under load.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -138,7 +140,15 @@ if (values.compare) {
       (run) => `${run.inFlight.api.mean} / ${run.inFlight.api.peak}`,
     ),
   );
-  for (const kind of ["linkStates", "pullRequestState", "rowDetail", "index", "branch"] as const) {
+  for (const kind of [
+    "linkStates",
+    "pullRequestState",
+    "rowDetail",
+    "index",
+    "branch",
+    "indexMiss",
+    "branchMiss",
+  ] as const) {
     console.log(row(`${kind} p50/p95/max ms`, (run) => fmt(run.latency[kind])));
   }
   console.log(row("interactive probe p50/p95/max ms", (run) => fmt(run.latency.probe)));
@@ -152,6 +162,19 @@ if (values.compare) {
     row(
       "link-state batch (150 numbers) loaded p50/p95 ms",
       (run) => `${run.batch.loaded.p50} / ${run.batch.loaded.p95}`,
+    ),
+  );
+  // Results from before the summary-list measure have no `summaryList`.
+  const pair = (value: { p50: number; p95: number } | undefined) =>
+    value === undefined ? "-" : `${value.p50} / ${value.p95}`;
+  console.log(
+    row("summary list (index, 100 asked) idle p50/p95 ms", (run) =>
+      pair((run as Partial<BenchResult>).summaryList?.idle),
+    ),
+  );
+  console.log(
+    row("summary list (index, 100 asked) loaded p50/p95 ms", (run) =>
+      pair((run as Partial<BenchResult>).summaryList?.loaded),
     ),
   );
   console.log(
@@ -326,7 +349,32 @@ const pullRequestSummary = (repo: string, number: number) => ({
   headRepositoryOwner: { login: "acme" },
 });
 
-const answerGraphQl = (query: string) => {
+const answerGraphQl = (query: string, variables: Record<string, unknown>) => {
+  if (query.includes("pullRequests(states: $states")) {
+    // The repository's pull request list (the index's summary rows, branch lookups, list rows).
+    count(
+      query.includes("comments { totalCount }")
+        ? "graphql:pullRequestList"
+        : "graphql:pullRequestSummaryList",
+    );
+    const repo = String(variables.name);
+    const head = typeof variables.head === "string" ? variables.head : null;
+    const nodes =
+      head !== null
+        ? head.startsWith("feature/")
+          ? [pullRequestSummary(repo, Number(head.slice("feature/".length)))]
+          : []
+        : Array.from({ length: Math.min(listSize, Number(variables.first)) }, (_, index) =>
+            pullRequestSummary(repo, index + 1),
+          );
+    return {
+      data: {
+        repository: {
+          pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes },
+        },
+      },
+    };
+  }
   if (/[pi]\d+: (?:pullRequest|issue)\(number:/u.test(query)) {
     count("graphql:linkStates");
     const repository: Record<string, unknown> = {};
@@ -415,9 +463,13 @@ const handle = (request: FakeGitHubRequest) => {
   }
   if (request.method === "POST" && request.url.endsWith("/graphql")) {
     serverCounts.graphql += 1;
+    const document = JSON.parse(request.body) as {
+      readonly query: string;
+      readonly variables?: Record<string, unknown>;
+    };
     return {
       headers: { ...rateHeaders, "x-ratelimit-resource": "graphql" },
-      body: answerGraphQl(JSON.parse(request.body).query as string),
+      body: answerGraphQl(document.query, document.variables ?? {}),
     };
   }
   if (request.method !== "GET" || !/^\/api\/v3\/repos\/[^/]+\/[^/]+$/u.test(request.url)) {
@@ -523,28 +575,47 @@ const latencies: Record<string, number[]> = {
   rowDetail: [],
   index: [],
   branch: [],
+  indexMiss: [],
+  branchMiss: [],
   probe: [],
+};
+// The index asks its provider only on a miss: these time just the reads that reach GitHub.
+const indexProvider: typeof provider = {
+  ...provider,
+  listChangeRequests: (input) =>
+    Effect.suspend(() => {
+      const started = performance.now();
+      return provider.listChangeRequests(input).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            latencies[input.headSelector.length > 0 ? "branchMiss" : "indexMiss"]?.push(
+              performance.now() - started,
+            );
+          }),
+        ),
+      );
+    }),
 };
 let failures = 0;
 const failureKinds: Record<string, number> = {};
+const recordFailure = (kind: string) => (error: unknown) => {
+  failures += 1;
+  const name = `${kind}: ${String((error as { message?: string })?.message ?? error)
+    .split("\n")[0]
+    ?.slice(0, 120)}`;
+  failureKinds[name] = (failureKinds[name] ?? 0) + 1;
+};
 const timed = <A, E>(
   kind: string,
   effect: Effect.Effect<A, E>,
   lane: "background" | "interactive" = "background",
 ) => {
   const started = performance.now();
-  return runtime.runPromise(lane === "background" ? inBackgroundProcessLane(effect) : effect).then(
-    () => {
+  return runtime
+    .runPromise(lane === "background" ? inBackgroundProcessLane(effect) : effect)
+    .then(() => {
       latencies[kind]?.push(performance.now() - started);
-    },
-    (error: unknown) => {
-      failures += 1;
-      const name = `${kind}: ${String((error as { message?: string })?.message ?? error)
-        .split("\n")[0]
-        ?.slice(0, 120)}`;
-      failureKinds[name] = (failureKinds[name] ?? 0) + 1;
-    },
-  );
+    }, recordFailure(kind));
 };
 
 const rowCache = new Map<
@@ -582,12 +653,17 @@ for (const repo of repos) {
   every(AUTOMATIC_DISCOVERY_REFRESH_MS, () => {
     void timed(
       "index",
-      index.read({ repository: repo.key, scope: "all", cwd: repo.cwd, provider }),
+      index.read({ repository: repo.key, scope: "all", cwd: repo.cwd, provider: indexProvider }),
     );
     for (const branch of ["chore/no-pr-1", "chore/no-pr-2"]) {
       void timed(
         "branch",
-        index.readBranch({ repository: repo.key, headSelector: branch, cwd: repo.cwd, provider }),
+        index.readBranch({
+          repository: repo.key,
+          headSelector: branch,
+          cwd: repo.cwd,
+          provider: indexProvider,
+        }),
       );
     }
   });
@@ -632,6 +708,27 @@ const batch = () => {
     .then(() => performance.now() - started);
 };
 
+// One uncached change request index listing (the summary list the index, branch lookups and
+// pickers read), outside the index's cache. It asks for 100 rows; the fake answers `--list-size`.
+// The 20 loaded runs count in the run's gh and request rates (20 / --minutes per minute).
+const summaryList = () => {
+  const started = performance.now();
+  return runtime
+    .runPromise(
+      inBackgroundProcessLane(
+        provider.listChangeRequests({
+          cwd: probeRepo.cwd,
+          headSelector: "",
+          state: "all",
+          limit: 100,
+          includeStackSummary: false,
+          fields: "summary",
+        }),
+      ),
+    )
+    .then(() => performance.now() - started);
+};
+
 // Warm the repository resolutions, then the idle batch timings.
 await Promise.all(
   repos.map((repo) =>
@@ -642,6 +739,8 @@ await Promise.all(
 );
 const idleBatch: number[] = [];
 for (let run = 0; run < 20; run += 1) idleBatch.push(await batch());
+const idleSummaryList: number[] = [];
+for (let run = 0; run < 20; run += 1) idleSummaryList.push(await summaryList());
 
 // ── Run ───────────────────────────────────────────────────────────────
 
@@ -657,6 +756,7 @@ const forgeBefore = processGovernorStats().find((stats) => stats.pool === "forge
 const cpuBefore = process.cpuUsage();
 const samples = { forge: [] as number[], forgeQueued: [] as number[], api: [] as number[] };
 const loadedBatch: number[] = [];
+const loadedSummaryList: number[] = [];
 recording = true;
 const startedAt = Date.now();
 await new Promise<void>((resolve) => {
@@ -683,7 +783,9 @@ await new Promise<void>((resolve) => {
     }
     if (elapsed >= nextBatchAt && loadedBatch.length < 20) {
       nextBatchAt += Math.max(3_000, (durationMs - 10_000) / 20);
-      void batch().then((ms) => loadedBatch.push(ms));
+      // A failed loaded read counts as a failure instead of ending the run.
+      void batch().then((ms) => loadedBatch.push(ms), recordFailure("linkStateBatch"));
+      void summaryList().then((ms) => loadedSummaryList.push(ms), recordFailure("summaryList"));
     }
   }, 50);
 });
@@ -759,6 +861,7 @@ const result = {
     Object.entries(latencies).map(([kind, values]) => [kind, summary(values)]),
   ) as Record<string, ReturnType<typeof summary>>,
   batch: { idle: summary(idleBatch), loaded: summary(loadedBatch) },
+  summaryList: { idle: summary(idleSummaryList), loaded: summary(loadedSummaryList) },
   server: {
     graphqlPerMinute: perMinute(serverCounts.graphql - serverBefore.graphql),
     restPerMinute: perMinute(serverCounts.rest - serverBefore.rest),
