@@ -159,6 +159,15 @@ it takes the same `systemd-inhibit` lock as `--prevent-sleep`, which also holds 
 suspend while agents work (a closed lid still suspends with logind's defaults); without
 `systemd-inhibit` the server logs one line and carries on.
 
+logind decides who may take that lock, through polkit. A desktop session gets it. A node in an SSH
+session or running as a service gets only the weaker idle lock, which Ryco takes instead: it still
+holds off idle suspend, not an explicit one. Without polkit at all (a minimal Debian server has no
+`polkitd`), logind refuses both to non-root users; the server then logs the refusal and why
+(`Failed to inhibit: Access denied`) once and carries on. Most such servers never idle-suspend
+(logind's `IdleAction` defaults to `ignore`). If yours does, install `polkitd` for the idle lock, or
+add a polkit rule that allows `org.freedesktop.login1.inhibit-block-sleep` for the node's user for
+the full lock.
+
 ### Node settings
 
 The node's settings live in `~/.ryco/userdata/node.json`. `ryco setup` and `ryco service install`
