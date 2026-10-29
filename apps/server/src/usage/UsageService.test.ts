@@ -152,6 +152,10 @@ it("deduplicates same-account exports from multiple instances and keeps failed r
       responseCount: 1,
       estimatedCostUsd: 0.2018232,
     });
+    // Reported cost of a model without a published rate cannot be split by token type.
+    expect(
+      first.buckets.find((bucket) => bucket.provider === "cursor")?.costBreakdown,
+    ).toBeUndefined();
     expect(first.buckets.find((bucket) => bucket.provider === "cursor")?.exportRecordId).toMatch(
       /^[a-f0-9]{64}$/,
     );
@@ -258,6 +262,14 @@ it("scans large histories past the old byte/line limits, then reuses them with c
       expect(summary.buckets[0]?.tokens.totalTokens).toBe(575);
       expect(summary.buckets[0]?.estimatedCostUsd).toBeCloseTo(305);
       expect(summary.buckets[0]?.estimatedCacheSavingsUsd).toBeCloseTo(900);
+      // Fast mode doubles every rate: half of the cost is its premium.
+      expect(summary.buckets[0]?.costBreakdown).toEqual({
+        inputUsd: 20,
+        cacheReadUsd: 100,
+        cacheWriteUsd: 125,
+        outputUsd: 60,
+        speedPremiumUsd: 152.5,
+      });
     }
     expect(warm.sources.find((source) => source.provider === "claude")?.reusedCacheFileCount).toBe(
       5,

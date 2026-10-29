@@ -2,6 +2,7 @@ import type { EnvironmentId } from "@ryco/contracts";
 import {
   USAGE_CONTRACT_VERSION,
   type UsageCalendarDate,
+  type UsageCostBreakdown,
   type UsageCostSource,
   type UsageDailyBucket,
   type UsageImportedMetric,
@@ -101,6 +102,16 @@ function resolveMergedCostSource(
   return pricedSources.values().next().value ?? "unpriced";
 }
 
+type MutableCostBreakdown = { -readonly [K in keyof UsageCostBreakdown]-?: number };
+
+function addCostBreakdown(target: MutableCostBreakdown, split: UsageCostBreakdown): void {
+  target.inputUsd += split.inputUsd;
+  target.cacheReadUsd += split.cacheReadUsd;
+  target.cacheWriteUsd += split.cacheWriteUsd;
+  target.outputUsd += split.outputUsd;
+  target.speedPremiumUsd += split.speedPremiumUsd ?? 0;
+}
+
 interface MutableMergedBucket {
   date: UsageCalendarDate;
   provider: UsageDailyBucket["provider"];
@@ -114,10 +125,20 @@ interface MutableMergedBucket {
   estimatedCacheSavingsUsd: number;
   hasCost: boolean;
   hasCacheSavings: boolean;
+  // Summed over the merged buckets that carry one; the others' cost stays unsplit.
+  costBreakdown: MutableCostBreakdown;
+  hasCostBreakdown: boolean;
   pricedTokenCount: number;
   unpricedTokenCount: number;
   costSources: Set<UsageCostSource>;
   sourceIds: Set<string>;
+}
+
+function finishCostBreakdown({
+  speedPremiumUsd,
+  ...parts
+}: MutableCostBreakdown): UsageCostBreakdown {
+  return speedPremiumUsd > 0 ? { ...parts, speedPremiumUsd } : parts;
 }
 
 export function mergeUsageEnvironmentResults(
@@ -196,6 +217,14 @@ export function mergeUsageEnvironmentResults(
           estimatedCacheSavingsUsd: 0,
           hasCost: false,
           hasCacheSavings: false,
+          costBreakdown: {
+            inputUsd: 0,
+            cacheReadUsd: 0,
+            cacheWriteUsd: 0,
+            outputUsd: 0,
+            speedPremiumUsd: 0,
+          },
+          hasCostBreakdown: false,
           pricedTokenCount: 0,
           unpricedTokenCount: 0,
           costSources: new Set(),
@@ -216,6 +245,10 @@ export function mergeUsageEnvironmentResults(
       if (bucket.estimatedCacheSavingsUsd !== undefined) {
         merged.estimatedCacheSavingsUsd += bucket.estimatedCacheSavingsUsd;
         merged.hasCacheSavings = true;
+      }
+      if (bucket.costBreakdown !== undefined) {
+        addCostBreakdown(merged.costBreakdown, bucket.costBreakdown);
+        merged.hasCostBreakdown = true;
       }
       merged.pricedTokenCount += bucket.pricedTokenCount;
       merged.unpricedTokenCount += bucket.unpricedTokenCount;
@@ -245,6 +278,7 @@ export function mergeUsageEnvironmentResults(
         bucket.rawModel === undefined ? {} : { rawModel: bucket.rawModel },
         bucket.hasCost ? { estimatedCostUsd: bucket.estimatedCostUsd } : {},
         bucket.hasCacheSavings ? { estimatedCacheSavingsUsd: bucket.estimatedCacheSavingsUsd } : {},
+        bucket.hasCostBreakdown ? { costBreakdown: finishCostBreakdown(bucket.costBreakdown) } : {},
       ),
     )
     .toSorted(

@@ -1,4 +1,4 @@
-import type { UsageTokenTotals } from "@ryco/contracts";
+import type { UsageCostBreakdown, UsageTokenTotals } from "@ryco/contracts";
 
 import type { UsageRecordPrice } from "./usageAggregation.ts";
 import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
@@ -152,13 +152,28 @@ type UsageTokenCounts = Pick<
   "uncachedInputTokens" | "cachedInputTokens" | "cacheCreationInputTokens" | "outputTokens"
 >;
 
+type UsageCostParts = Omit<UsageCostBreakdown, "speedPremiumUsd">;
+
+/** Cost per token type; cache tokens without a published rate cost the input rate. */
+export function estimateUsageCostParts(
+  rate: UsageTokenRate,
+  totals: UsageTokenCounts,
+): UsageCostParts {
+  return {
+    inputUsd: totals.uncachedInputTokens * rate.inputCostPerToken,
+    cacheReadUsd: totals.cachedInputTokens * (rate.cacheReadCostPerToken ?? rate.inputCostPerToken),
+    cacheWriteUsd:
+      totals.cacheCreationInputTokens * (rate.cacheCreationCostPerToken ?? rate.inputCostPerToken),
+    outputUsd: totals.outputTokens * rate.outputCostPerToken,
+  };
+}
+
+function sumUsageCostParts(parts: UsageCostParts): number {
+  return parts.inputUsd + parts.cacheReadUsd + parts.cacheWriteUsd + parts.outputUsd;
+}
+
 export function estimateUsageCost(rate: UsageTokenRate, totals: UsageTokenCounts): number {
-  return (
-    totals.uncachedInputTokens * rate.inputCostPerToken +
-    totals.cachedInputTokens * (rate.cacheReadCostPerToken ?? rate.inputCostPerToken) +
-    totals.cacheCreationInputTokens * (rate.cacheCreationCostPerToken ?? rate.inputCostPerToken) +
-    totals.outputTokens * rate.outputCostPerToken
-  );
+  return sumUsageCostParts(estimateUsageCostParts(rate, totals));
 }
 
 export function estimateUsageCacheSavings(
@@ -173,36 +188,6 @@ export function estimateUsageCacheSavings(
     totals.cachedInputTokens *
       (rate.inputCostPerToken - (rate.cacheReadCostPerToken ?? rate.inputCostPerToken)),
   );
-}
-
-export function priceUsageRecord(rates: UsageRateTable, record: UsageRecord): UsageRecordPrice {
-  const rate = resolveSpeedRate(lookupUsageModelRate(rates, record.model), record.speed);
-  if (record.reportedCostUsd !== null) {
-    return {
-      estimatedCostUsd: record.reportedCostUsd,
-      estimatedCacheSavingsUsd:
-        rate === null ? null : estimateUsageCacheSavings(rate, record.totals),
-      pricedTokenCount: record.totals.totalTokens,
-      unpricedTokenCount: 0,
-      costSource: "provider-reported",
-    };
-  }
-  if (rate === null) {
-    return {
-      estimatedCostUsd: null,
-      estimatedCacheSavingsUsd: null,
-      pricedTokenCount: 0,
-      unpricedTokenCount: record.totals.totalTokens,
-      costSource: "unpriced",
-    };
-  }
-  return {
-    estimatedCostUsd: estimateUsageCost(rate, record.totals),
-    estimatedCacheSavingsUsd: estimateUsageCacheSavings(rate, record.totals),
-    pricedTokenCount: record.totals.totalTokens,
-    unpricedTokenCount: 0,
-    costSource: "litellm",
-  };
 }
 
 /** Summed usage of responses sharing a model, speed and cost kind (see `usageFileAggregate`). */
@@ -222,15 +207,27 @@ export interface UsageSlotTotals {
   readonly reportedCostUsd: number;
 }
 
-function resolveSpeedRate(
-  standard: UsageModelRate | null,
-  speed: UsageSpeed | undefined,
-): UsageTokenRate | null {
-  if (standard === null) return null;
+/** A speed without its own published tier is billed at standard rates. */
+function resolveSpeedRate(standard: UsageModelRate, speed: UsageSpeed | undefined): UsageTokenRate {
   return (
     (speed === "fast" ? standard.fast : speed === "ultrafast" ? standard.ultrafast : null) ??
     standard
   );
+}
+
+/**
+ * {@link estimateUsageCostParts} at the billed rate, with what a fast/ultrafast tier added over
+ * the standard rates of the same tokens (absent at standard rates).
+ */
+function estimateUsageCostBreakdown(
+  standard: UsageModelRate,
+  billed: UsageTokenRate,
+  totals: UsageTokenCounts,
+): UsageCostBreakdown {
+  const parts = estimateUsageCostParts(billed, totals);
+  if (billed === standard) return parts;
+  const premium = sumUsageCostParts(parts) - estimateUsageCost(standard, totals);
+  return premium > 0 ? { ...parts, speedPremiumUsd: premium } : parts;
 }
 
 /** {@link estimateUsageCacheSavings} summed over a slot's responses (it is linear per response). */
@@ -242,6 +239,55 @@ function estimateSlotCacheSavings(rate: UsageTokenRate, totals: UsageSlotTotals)
   return Math.max(
     0,
     totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken),
+  );
+}
+
+/** Provider-reported cost takes precedence; a known rate still prices savings and the split. */
+function priceUsageTokens<Totals extends UsageTokenCounts & { readonly totalTokens: number }>(
+  standard: UsageModelRate | null,
+  speed: UsageSpeed | undefined,
+  totals: Totals,
+  reportedCostUsd: number | null,
+  cacheSavings: (rate: UsageTokenRate, totals: Totals) => number | null,
+): UsageRecordPrice {
+  if (standard === null) {
+    return reportedCostUsd === null
+      ? {
+          estimatedCostUsd: null,
+          estimatedCacheSavingsUsd: null,
+          listCostBreakdown: null,
+          pricedTokenCount: 0,
+          unpricedTokenCount: totals.totalTokens,
+          costSource: "unpriced",
+        }
+      : {
+          estimatedCostUsd: reportedCostUsd,
+          estimatedCacheSavingsUsd: null,
+          listCostBreakdown: null,
+          pricedTokenCount: totals.totalTokens,
+          unpricedTokenCount: 0,
+          costSource: "provider-reported",
+        };
+  }
+  const rate = resolveSpeedRate(standard, speed);
+  const listCostBreakdown = estimateUsageCostBreakdown(standard, rate, totals);
+  return {
+    estimatedCostUsd: reportedCostUsd ?? sumUsageCostParts(listCostBreakdown),
+    estimatedCacheSavingsUsd: cacheSavings(rate, totals),
+    listCostBreakdown,
+    pricedTokenCount: totals.totalTokens,
+    unpricedTokenCount: 0,
+    costSource: reportedCostUsd === null ? "litellm" : "provider-reported",
+  };
+}
+
+export function priceUsageRecord(rates: UsageRateTable, record: UsageRecord): UsageRecordPrice {
+  return priceUsageTokens(
+    lookupUsageModelRate(rates, record.model),
+    record.speed,
+    record.totals,
+    record.reportedCostUsd,
+    estimateUsageCacheSavings,
   );
 }
 
@@ -258,30 +304,11 @@ export function priceUsageSlot(
   },
   totals: UsageSlotTotals,
 ): UsageRecordPrice {
-  const rate = resolveSpeedRate(lookupUsageModelRate(rates, slot.model), slot.speed);
-  if (slot.reported) {
-    return {
-      estimatedCostUsd: totals.reportedCostUsd,
-      estimatedCacheSavingsUsd: rate === null ? null : estimateSlotCacheSavings(rate, totals),
-      pricedTokenCount: totals.totalTokens,
-      unpricedTokenCount: 0,
-      costSource: "provider-reported",
-    };
-  }
-  if (rate === null) {
-    return {
-      estimatedCostUsd: null,
-      estimatedCacheSavingsUsd: null,
-      pricedTokenCount: 0,
-      unpricedTokenCount: totals.totalTokens,
-      costSource: "unpriced",
-    };
-  }
-  return {
-    estimatedCostUsd: estimateUsageCost(rate, totals),
-    estimatedCacheSavingsUsd: estimateSlotCacheSavings(rate, totals),
-    pricedTokenCount: totals.totalTokens,
-    unpricedTokenCount: 0,
-    costSource: "litellm",
-  };
+  return priceUsageTokens(
+    lookupUsageModelRate(rates, slot.model),
+    slot.speed,
+    totals,
+    slot.reported ? totals.reportedCostUsd : null,
+    estimateSlotCacheSavings,
+  );
 }
