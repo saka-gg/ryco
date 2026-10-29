@@ -72,6 +72,7 @@ import {
   startPromotedServerThreadViaDomainEvent,
   threadKeyFor,
   threadRefFor,
+  triggerChatNewShortcutUntilPath,
   waitForCommandPaletteInput,
   waitForCommandPaletteShortcutLabel,
   waitForComposerEditor,
@@ -608,6 +609,30 @@ describe("ChatView Navigation (full app)", () => {
 
     try {
       await createDraftFromChatNewShortcut(mounted);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("creates a new thread from the chat.new shortcut outside the chat routes", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-chat-shortcut-settings-test" as MessageId,
+        targetText: "chat shortcut settings test",
+      }),
+      configureFixture: enableChatNewShortcut,
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      await mounted.router.navigate({ to: "/settings" });
+      await waitForURL(mounted.router, (path) => path === "/settings", "Settings should open.");
+      await triggerChatNewShortcutUntilPath(
+        mounted.router,
+        (path) => UUID_ROUTE_RE.test(path),
+        "The shortcut should start a new draft thread from the settings page.",
+      );
     } finally {
       await mounted.cleanup();
     }

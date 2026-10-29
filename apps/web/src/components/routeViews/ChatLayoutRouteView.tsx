@@ -1,17 +1,11 @@
 import { useAppKeybindings } from "../../appKeybindings";
-import { Outlet } from "@tanstack/react-router";
+import { Outlet, useParams } from "@tanstack/react-router";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { UnifiedSettings } from "@ryco/contracts/settings";
 import { useEffect, useEffectEvent } from "react";
 
 import { useChatPanesStore } from "../../chatPanesStore";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
-import { useHandleNewThread } from "../../hooks/useHandleNewThread";
-import {
-  startNewChatFromContext,
-  startNewLocalThreadFromContext,
-  startNewThreadFromContext,
-} from "../../lib/chatThreadActions";
 import { isComposerFocused } from "../../lib/composerFocus";
 import { isTerminalFocused } from "../../lib/terminalFocus";
 import { useModelPickerOpen } from "../../modelPickerOpenState";
@@ -21,28 +15,23 @@ import {
   shouldIgnoreGlobalNavigationShortcut,
   shouldIgnoreSplitViewShortcut,
 } from "../../keybindings";
+import { selectThreadByRef, useStore } from "../../store";
 import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
-import { resolveSidebarNewThreadEnvMode } from "~/components/Sidebar.logic";
+import { resolveThreadRouteTarget } from "../../threadRoutes";
 import { useSettings } from "~/hooks/useSettings";
 import { toggleThreadPin } from "../../threadPinning";
 
-const selectDefaultThreadEnvMode = (settings: UnifiedSettings) => settings.defaultThreadEnvMode;
 const selectConfirmThreadUnpin = (settings: UnifiedSettings) => settings.confirmThreadUnpin;
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const selectedThreadKeysSize = useThreadSelectionStore((state) => state.selectedThreadKeys.size);
-  const {
-    activeContextIsChat,
-    activeDraftThread,
-    activeThread,
-    chatTarget,
-    defaultProjectRef,
-    handleNewChat,
-    handleNewThread,
-    routeThreadRef,
-  } = useHandleNewThread();
+  const routeTarget = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteTarget(params),
+  });
+  const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
   const keybindings = useAppKeybindings();
   const terminalOpen = useTerminalStateStore((state) =>
     routeThreadRef
@@ -50,7 +39,6 @@ function ChatRouteGlobalShortcuts() {
       : false,
   );
   const modelPickerOpen = useModelPickerOpen();
-  const defaultThreadEnvMode = useSettings(selectDefaultThreadEnvMode);
   const confirmThreadUnpin = useSettings(selectConfirmThreadUnpin);
 
   // The handler always sees the latest render's values, so the window
@@ -105,6 +93,7 @@ function ChatRouteGlobalShortcuts() {
     }
 
     if (command === "thread.pinToggle") {
+      const activeThread = selectThreadByRef(useStore.getState(), routeThreadRef);
       if (!activeThread) return;
       event.preventDefault();
       event.stopPropagation();
@@ -113,42 +102,6 @@ function ChatRouteGlobalShortcuts() {
         threadTitle: activeThread.title,
         confirmUnpin: confirmThreadUnpin,
       });
-      return;
-    }
-
-    const threadActionContext = {
-      activeContextIsChat,
-      activeDraftThread,
-      activeThread,
-      chatTarget,
-      defaultProjectRef,
-      defaultThreadEnvMode: resolveSidebarNewThreadEnvMode({
-        defaultEnvMode: defaultThreadEnvMode,
-      }),
-      handleNewChat,
-      handleNewThread,
-    };
-
-    if (command === "chat.newWithoutProject") {
-      // Unavailable chats leave the key to the focused control.
-      if (!chatTarget) return;
-      event.preventDefault();
-      event.stopPropagation();
-      void startNewChatFromContext(threadActionContext);
-      return;
-    }
-
-    if (command === "chat.newLocal") {
-      event.preventDefault();
-      event.stopPropagation();
-      void startNewLocalThreadFromContext(threadActionContext);
-      return;
-    }
-
-    if (command === "chat.new") {
-      event.preventDefault();
-      event.stopPropagation();
-      void startNewThreadFromContext(threadActionContext);
     }
   });
 
@@ -165,7 +118,9 @@ function ChatRouteGlobalShortcuts() {
 /**
  * The `/_chat` layout body: the chat-wide keyboard shortcuts around the
  * outlet. It lives outside the route file so the stores and thread actions the
- * shortcuts read load with the shell graph instead of the boot chunk.
+ * shortcuts read load with the shell graph instead of the boot chunk. The
+ * new-chat shortcuts work on every page, so the app shell owns them
+ * (`NewChatShortcuts`).
  */
 export function ChatLayoutRoute() {
   return (

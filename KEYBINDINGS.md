@@ -110,6 +110,9 @@ Invalid imports are rejected without changing local preferences. The same shared
 - `chat.newWithoutProject`: start a chat without a project, in its own Ryco-managed folder (see [docs/chats.md](docs/chats.md)). It defaults to `mod+alt+n` outside the terminal. The default lives in the app, not on the node, so older apps have no key for it. It does nothing when the node does not offer chats, and the key goes to the focused control instead.
 - `composer.stash`: stash prompt text and images, or open the stash picker when the composer is empty
 
+The three new-chat commands work on every page, such as Tasks, Settings or Pull requests, not only
+in a chat.
+
 #### Editor
 
 - `editor.openFavorite`: open current project/worktree in the last-used editor

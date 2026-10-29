@@ -6,6 +6,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { OnboardingCoordinator } from "./onboarding/OnboardingCoordinator";
 import { AppSidebarLayout } from "./AppSidebarLayout";
 import { CommandPalette, preloadCommandPaletteDialog } from "./CommandPalette";
+import { NewChatShortcuts } from "./NewChatShortcuts";
 import {
   expectsPrimaryShellPaint,
   resolveCanonicalPrimaryEnvironmentId,
@@ -125,6 +126,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
   // flip must not remount the workspace); only the sidebar chrome forks.
   const appShell = (
     <CommandPalette>
+      <NewChatShortcuts />
       <AppSidebarLayout>
         <Outlet />
       </AppSidebarLayout>
