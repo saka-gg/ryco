@@ -659,6 +659,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             stopped: false,
           };
 
+          // Fork into the session scope, not the calling fiber: ProviderService runs
+          // `startSession` in its own detached fiber that ends once the session has
+          // started, and Effect interrupts a fiber's `forkChild` children when it
+          // ends, which dropped every `session/update` (text, tools, plans).
           const nf = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
@@ -767,7 +771,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 }
               }),
             ),
-          ).pipe(Effect.forkChild);
+          ).pipe(Effect.forkIn(sessionScope));
 
           ctx.notificationFiber = nf;
           sessions.set(input.threadId, ctx);
