@@ -439,6 +439,25 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
     }),
   );
 
+  it.effect("maps the API detection's unreachable and timeout texts to the friendly message", () =>
+    Effect.gen(function* () {
+      for (const detail of [
+        "Couldn't reach the OpenCode server.",
+        "Timed out while checking the OpenCode server version.",
+      ]) {
+        runtimeMock.state.inventoryError = new Error(detail);
+        const snapshot = yield* checkOpenCodeProviderStatus(
+          makeOpenCodeSettings({ serverUrl: "http://127.0.0.1:9999" }),
+          process.cwd(),
+        );
+        assert.equal(
+          snapshot.message,
+          "Couldn't reach the configured OpenCode server at http://127.0.0.1:9999. Check that the server is running and the URL is correct.",
+        );
+      }
+    }),
+  );
+
   it.effect("surfaces a friendly connection error for configured servers", () =>
     Effect.gen(function* () {
       runtimeMock.state.inventoryError = new Error(

@@ -98,6 +98,7 @@ function formatOpenCodeProbeError(input: {
     }
 
     if (
+      lower.includes("couldn't reach the opencode server") ||
       lower.includes("econnrefused") ||
       lower.includes("enotfound") ||
       lower.includes("fetch failed") ||

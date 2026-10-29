@@ -8,7 +8,7 @@ import {
 
 import packageJson from "../../package.json" with { type: "json" };
 import { BUNDLED_MODEL_MANIFEST, type ModelManifestData } from "./ModelManifest.ts";
-import { isUnsupportedOpenCodeMajor, MINIMUM_OPENCODE_VERSION } from "./openCodeVersion.ts";
+import { MINIMUM_OPENCODE_VERSION, openCodeVersionFloor } from "./openCodeVersion.ts";
 import {
   applyProviderCompatibility,
   compatibilityPoliciesOf,
@@ -310,7 +310,7 @@ describe("bundled OpenCode policy drift guard", () => {
     ] as const;
     for (const [version, status] of cases) {
       expect(ratePolicy(policy!, version).status, version).toBe(status);
-      expect(isUnsupportedOpenCodeMajor(version), version).toBe(status === "unsupported");
+      expect(openCodeVersionFloor(version) !== undefined, version).toBe(status === "unsupported");
     }
   });
 });
