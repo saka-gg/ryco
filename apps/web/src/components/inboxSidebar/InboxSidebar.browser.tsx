@@ -78,7 +78,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set([`${ENVIRONMENT_ID}:Pinned task`]),
       onOpenThread: vi.fn(),
@@ -136,7 +135,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -175,7 +173,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -240,7 +237,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -314,7 +310,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -409,7 +404,6 @@ describe("Inbox sidebar rendering and settlement", () => {
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),
@@ -448,7 +442,6 @@ describe("Inbox sidebar rendering and settlement", () => {
     "preserves inbox detail and settlement (worktree: %s)",
     async (isWorktree) => {
       await page.viewport(1_280, 800);
-      const now = Date.now();
       const performThreadMenuAction = vi.fn(async () => undefined);
       const onOpenThread = vi.fn();
       const dispatchCommand = vi.fn(async (_command: unknown) => undefined);
@@ -566,19 +559,6 @@ describe("Inbox sidebar rendering and settlement", () => {
               hasPendingApprovals: false,
               hasPendingUserInput: false,
               hasActionableProposedPlan: false,
-              priority: {
-                tier: "now",
-                confidence: "high",
-                reason: "A release decision is waiting on this task.",
-                inputFingerprint: "fingerprint" as never,
-                batchId: "batch" as never,
-                modelSelection: {
-                  instanceId: ProviderInstanceId.make("codex"),
-                  model: "gpt-5.4",
-                },
-                rankedAt: new Date(now - 60_000).toISOString(),
-                usableUntil: new Date(now + 10 * 60_000).toISOString(),
-              },
             },
           ]}
           environments={[
@@ -614,7 +594,6 @@ describe("Inbox sidebar rendering and settlement", () => {
           deliveryUnknownThreadKeys={new Set()}
           localQueuedThreadKeys={new Set()}
           activeThreadKey={null}
-          aiFocusEnabled
           autoSettleAfterDays={null}
           pinnedThreadKeys={new Set()}
           onOpenThread={onOpenThread}
@@ -632,7 +611,6 @@ describe("Inbox sidebar rendering and settlement", () => {
 
       try {
         const row = page.getByTestId("inbox-thread-row");
-        expect(document.body.textContent).toContain("Focus");
         expect(getThreadWindow).not.toHaveBeenCalled();
         await row.hover();
         await vi.waitFor(() => {
@@ -712,9 +690,7 @@ describe("Inbox sidebar rendering and settlement", () => {
         expect(popup.textContent).toContain("GPT-5.4");
         expect(popup.textContent).not.toContain("Codex ·");
         expect(popup.querySelector('[aria-label="Codex"]')).not.toBeNull();
-        expect(popup.textContent).toContain("Why focused? Now.");
-        expect(popup.textContent).toContain("A release decision is waiting on this task.");
-        expect(popup.textContent).toContain("GPT-5.4 · ranked");
+        expect(popup.textContent).not.toContain("Why focused?");
         expect(getComputedStyle(popup).width).toBe("320px");
         expect(popup.getBoundingClientRect().left).toBeGreaterThanOrEqual(
           rowElement.getBoundingClientRect().right,
@@ -804,7 +780,6 @@ describe("Inbox sidebar delegated threads", () => {
     deliveryUnknownThreadKeys: new Set(),
     localQueuedThreadKeys: new Set(),
     activeThreadKey,
-    aiFocusEnabled: false,
     autoSettleAfterDays: null,
     pinnedThreadKeys: new Set(),
     onOpenThread: vi.fn(),
@@ -975,7 +950,6 @@ describe("Inbox row filters", () => {
         deliveryUnknownThreadKeys={new Set()}
         localQueuedThreadKeys={new Set()}
         activeThreadKey={null}
-        aiFocusEnabled={false}
         autoSettleAfterDays={null}
         pinnedThreadKeys={new Set()}
         onOpenThread={vi.fn()}

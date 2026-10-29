@@ -340,7 +340,6 @@ function installActionConnection(
     capabilities: {
       repositoryIdentity: false,
       threadSettlement: false,
-      threadPriorityRanking: false,
       ...(sidebarUndoCapability === undefined ? {} : { threadSidebarUndo: sidebarUndoCapability }),
     },
   });

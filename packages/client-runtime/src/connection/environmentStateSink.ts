@@ -9,8 +9,6 @@ import type {
   ThreadId,
 } from "@ryco/contracts";
 
-import type { ShellStoreUpdate } from "../state/threads/store.ts";
-
 /**
  * App-owned presentation writes performed by the connection supervisor.
  * The hosted readiness handlers deliberately do not belong here: hosted lifecycle
@@ -25,7 +23,7 @@ export interface EnvironmentStateSink {
    */
   readonly applyShellEvents: (
     environmentId: EnvironmentId,
-    events: ReadonlyArray<ShellStoreUpdate>,
+    events: ReadonlyArray<OrchestrationShellStreamEvent>,
   ) => ReadonlyArray<unknown>;
   readonly afterShellEventApplied: (
     environmentId: EnvironmentId,

@@ -70,8 +70,6 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     row.roleLabel,
     row.changeRequest?.accessibilityLabel,
     row.providerLabel ? `Provider: ${row.providerLabel}` : null,
-    row.focusTitle,
-    row.focusDetail,
   ]
     .filter(Boolean)
     .join(", ");
@@ -140,22 +138,9 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           </Text>
         </View>
       </View>
-      {row.focusTitle ? (
-        <View className="gap-0.5">
-          <Text className="font-ryco-medium text-xs text-foreground" numberOfLines={1}>
-            {row.focusTitle}
-            {row.focusAiGenerated ? " · AI" : ""}
-          </Text>
-          {row.focusDetail ? (
-            <Text className="text-xs text-foreground-muted" numberOfLines={2}>
-              {row.focusDetail}
-            </Text>
-          ) : null}
-        </View>
-      ) : null}
-      {(showStatus && !row.focusTitle) || row.roleLabel || row.snoozedUntil ? (
+      {showStatus || row.roleLabel || row.snoozedUntil ? (
         <View className="flex-row flex-wrap items-center gap-2">
-          {showStatus && !row.focusTitle ? (
+          {showStatus ? (
             <Text className={`text-xs font-ryco-medium ${statusTextClassName(row.state)}`}>
               {row.statusLabel}
             </Text>

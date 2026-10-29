@@ -18,7 +18,6 @@ const TEST_ENVIRONMENT_DESCRIPTOR: ExecutionEnvironmentDescriptor = {
   capabilities: {
     repositoryIdentity: true,
     threadSettlement: false,
-    threadPriorityRanking: false,
   },
 };
 

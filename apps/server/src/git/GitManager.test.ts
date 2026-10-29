@@ -420,7 +420,6 @@ function createTextGeneration(overrides: Partial<FakeGitTextGeneration> = {}): T
         ),
       ),
     answerSideQuestion: () => Effect.die("Unexpected side question"),
-    rankInboxThreads: () => Effect.succeed({ rankings: [] }),
     summarizeWorkspaceChanges: () => Effect.die("Unexpected workspace change summary"),
   };
 }

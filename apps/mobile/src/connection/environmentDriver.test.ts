@@ -79,7 +79,6 @@ vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
 }));
 
 import { installHostedPrimaryConnectionFactory } from "../hostedHub/primaryConnectionFactory";
-import type { HostedPrimaryConnectionDeps } from "../hostedHub/primaryConnection";
 import { useComposerDraftStore } from "../state/composerDraftStore";
 import { useMessageQueueStore } from "../state/messageQueueStore";
 import { subscribeAppStateResume } from "./appStateResume";
@@ -982,18 +981,6 @@ describe("mobile environment driver", () => {
       driver.releaseDeferredPrimaryConnection();
       expect(factory).toHaveBeenCalledOnce();
 
-      // The hosted connection receives a priority handler, so it opts into
-      // thread-priority deltas, and the handler reaches the supervisor.
-      const [primaryDeps] = factory.mock.calls[0] as unknown as [HostedPrimaryConnectionDeps];
-      const applyPriorities = vi
-        .spyOn(driver.supervisor, "applyThreadPriorities")
-        .mockImplementation(() => undefined);
-      const item = { kind: "thread-priorities" } as unknown as Parameters<
-        HostedPrimaryConnectionDeps["applyThreadPriorities"]
-      >[0];
-      primaryDeps.applyThreadPriorities(item, primaryId);
-      expect(applyPriorities).toHaveBeenCalledExactlyOnceWith(item, primaryId);
-      applyPriorities.mockRestore();
       stop();
       await driver.supervisor.remove(primaryId);
     } finally {

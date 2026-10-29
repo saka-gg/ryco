@@ -29,10 +29,6 @@ function row(key: string, overrides: Partial<InboxThreadRow> = {}): InboxThreadR
     roleLabel: null,
     providerDriver: null,
     providerLabel: null,
-    focus: { source: "pin", ranking: null },
-    focusTitle: null,
-    focusDetail: null,
-    focusAiGenerated: false,
     attentionState: "active",
     canSettle: true,
     settlementBlocker: null,
@@ -49,7 +45,7 @@ function active(rows: ReadonlyArray<InboxThreadRow>): InboxSection {
 describe("inbox row identity across rebuilds", () => {
   it("keeps every object when a rebuild produced identical content", () => {
     const previous = [active([row("a"), row("b")])];
-    // A fresh build: equal content, all-new objects (badges and focus included).
+    // A fresh build: equal content, all-new objects (badges included).
     const next = [active([row("a"), row("b")])];
     expect(stabilizeInboxSections(previous, next)).toBe(previous);
   });
@@ -68,7 +64,7 @@ describe("inbox row identity across rebuilds", () => {
     const moved = row("a");
     const previous = [active([moved, row("b")])];
     const next: InboxSection[] = [
-      { key: "focus", title: "Focus", rows: [row("a")] },
+      { key: "snoozed", title: "Snoozed", rows: [row("a")] },
       active([row("b")]),
     ];
     const stable = stabilizeInboxSections(previous, next);

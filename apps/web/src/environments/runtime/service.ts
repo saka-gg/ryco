@@ -11,7 +11,6 @@ import {
   type MessageId,
   type OrchestrationStubbedShellSnapshot,
   type OrchestrationShellStreamEvent,
-  type OrchestrationShellThreadPrioritiesItem,
   type ServerConfig,
   type ServerSettingsPatch,
   type TerminalEvent,
@@ -828,13 +827,6 @@ function createEnvironmentConnectionHandlers(
     applyShellEvent: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().applyShellEvent(event, environmentId);
-    },
-    applyThreadPriorities: (
-      item: OrchestrationShellThreadPrioritiesItem,
-      environmentId: EnvironmentId,
-    ) => {
-      if (!acceptsEvent()) return;
-      getEnvironmentSupervisor().applyThreadPriorities(item, environmentId);
     },
     syncShellSnapshot: (
       snapshot: OrchestrationStubbedShellSnapshot,

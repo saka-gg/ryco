@@ -1,5 +1,5 @@
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { applyInboxOrderHold, captureInboxOrder } from "./inboxOrderHold";
@@ -60,22 +60,10 @@ const delegatedFrom = (parent: string) => ({
     relationship: "delegated" as const,
   },
 });
-const focused: Partial<SidebarThreadSummary> = {
-  priority: {
-    tier: "now",
-    confidence: "high",
-    reason: "A release decision is waiting on this task.",
-    inputFingerprint: "fingerprint" as never,
-    batchId: "batch" as never,
-    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-    rankedAt: "2026-08-25T09:59:00.000Z",
-    usableUntil: "2026-08-25T10:09:00.000Z",
-  },
-};
 
 function model(
   threads: ReadonlyArray<SidebarThreadSummary>,
-  options: { readonly pinned?: ReadonlyArray<string>; readonly aiFocusEnabled?: boolean } = {},
+  options: { readonly pinned?: ReadonlyArray<string> } = {},
 ): InboxSidebarModel {
   return buildInboxSidebarModel({
     projects: [
@@ -107,7 +95,6 @@ function model(
     ],
     filters: { query: "", environmentId: null, status: "all" },
     pinnedThreadKeys: new Set((options.pinned ?? []).map((id) => `${ENV}:${id}`)),
-    aiFocusEnabled: options.aiFocusEnabled ?? false,
     autoSettleAfterDays: null,
     nowMs: NOW_MS,
   });
@@ -204,14 +191,6 @@ describe("applyInboxOrderHold", () => {
     ]);
   });
 
-  it("holds an AI Focus re-rank", () => {
-    const before = model([thread("f1", focused), thread("r1")], { aiFocusEnabled: true });
-    const live = model([thread("f1"), thread("r1", focused)], { aiFocusEnabled: true });
-    expect(layout(before)).toEqual(["focus: f1", "recent: r1"]);
-    expect(layout(live)).toEqual(["focus: r1", "recent: f1"]);
-    expect(layout(hold(before, live))).toEqual(["focus: f1", "recent: r1"]);
-  });
-
   it("places a section the hold did not show at its own rank", () => {
     const before = model([thread("a1", running), thread("r1")]);
     const live = model([
@@ -243,9 +222,7 @@ describe("applyInboxOrderHold", () => {
     const live = model(
       [
         thread("p1"),
-        thread("f1", focused),
         thread("a1", running),
-        // A ready plan, unlike an approval, is not in Focus.
         thread("q1", {
           interactionMode: "plan",
           hasActionableProposedPlan: true,
@@ -258,11 +235,10 @@ describe("applyInboxOrderHold", () => {
         }),
         thread("s1", { settledOverride: "settled", settledAt: "2026-08-25T09:40:00.000Z" }),
       ],
-      { pinned: ["p1"], aiFocusEnabled: true },
+      { pinned: ["p1"] },
     );
     expect(live.sections.map((section) => section.key)).toEqual([
       "pinned",
-      "focus",
       "active",
       "needs-input",
       "recent",

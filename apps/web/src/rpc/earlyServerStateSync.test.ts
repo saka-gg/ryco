@@ -96,7 +96,6 @@ function welcome(threadId: string): ServerLifecycleWelcomePayload {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
     cwd: "/tmp/workspace",

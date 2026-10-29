@@ -6,11 +6,7 @@ import { type CursorSettings, type ModelSelection } from "@ryco/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@ryco/shared/git";
 
 import { TextGenerationError } from "@ryco/contracts";
-import {
-  type ThreadTitleGenerationResult,
-  type TextGenerationShape,
-  validateRankInboxThreadsResult,
-} from "./TextGeneration.ts";
+import { type ThreadTitleGenerationResult, type TextGenerationShape } from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -18,7 +14,6 @@ import {
   buildIssueContentTitlePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
-  buildThreadPriorityPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
@@ -47,7 +42,6 @@ function mapCursorAcpError(
     | "generateBranchName"
     | "generateThreadTitle"
     | "generateIssueContent"
-    | "rankInboxThreads"
     | "summarizeWorkspaceChanges",
   detail: string,
   cause: unknown,
@@ -93,7 +87,6 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads"
       | "summarizeWorkspaceChanges";
     cwd: string;
     prompt: string;
@@ -331,22 +324,6 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     }
   });
 
-  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
-    "CursorTextGeneration.rankInboxThreads",
-  )(function* (input) {
-    const { prompt, outputSchema } = buildThreadPriorityPrompt({
-      serializedCandidates: input.chunk.serializedCandidates,
-    });
-    const generated = yield* runCursorJson({
-      operation: "rankInboxThreads",
-      cwd: input.cwd,
-      prompt,
-      outputSchemaJson: outputSchema,
-      modelSelection: input.modelSelection,
-    });
-    return yield* validateRankInboxThreadsResult(input, generated.rankings);
-  });
-
   const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
     "CursorTextGeneration.summarizeWorkspaceChanges",
   )(function* (input) {
@@ -368,7 +345,6 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     generateBranchName,
     generateThreadTitle,
     generateIssueContent,
-    rankInboxThreads,
     summarizeWorkspaceChanges,
     answerSideQuestion: (_input: Parameters<TextGenerationShape["answerSideQuestion"]>[0]) =>
       Effect.fail(

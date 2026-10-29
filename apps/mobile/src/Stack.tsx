@@ -189,7 +189,7 @@ const SettingsSheetStack = createNativeStackNavigator({
     SettingsInbox: createNativeStackScreen({
       screen: SettingsInboxRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking,
-      options: settingsRouteOptions("SettingsInbox", "Inbox and AI Focus"),
+      options: settingsRouteOptions("SettingsInbox", "Inbox"),
     }),
     SettingsAccount: createNativeStackScreen({
       screen: HostedAccountRouteScreen,

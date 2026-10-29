@@ -222,7 +222,6 @@ function serveProjectIcon(sample: ArtworkSample) {
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: true,
-      threadPriorityRanking: false,
       projectIcons: true,
     },
   };

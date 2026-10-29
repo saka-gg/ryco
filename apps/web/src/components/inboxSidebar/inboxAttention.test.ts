@@ -1,5 +1,5 @@
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -59,18 +59,6 @@ const delegatedFrom = (parent: string) => ({
     relationship: "delegated" as const,
   },
 });
-const focused: Partial<SidebarThreadSummary> = {
-  priority: {
-    tier: "now",
-    confidence: "high",
-    reason: "A release decision is waiting on this task.",
-    inputFingerprint: "fingerprint" as never,
-    batchId: "batch" as never,
-    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-    rankedAt: "2026-08-25T09:59:00.000Z",
-    usableUntil: "2026-08-25T10:09:00.000Z",
-  },
-};
 
 function environment(
   environmentId: EnvironmentId,
@@ -210,19 +198,6 @@ describe("buildInboxAttentionCandidates", () => {
       thread("returned", { ...delegatedFrom("host"), ...turn("completed", 20) }),
     ]);
     expect(walkOrder(input)).toEqual(["asking", "host"]);
-  });
-
-  it("puts Focus rows first, in Focus order, only with AI Focus on", () => {
-    const threads = [
-      thread("newer", turn("completed", 30)),
-      thread("ranked", { ...turn("completed", 10), ...focused }),
-    ];
-    expect(walkOrder(inbox(threads))).toEqual(["newer", "ranked"]);
-    expect(buildInboxAttentionCandidates(inbox(threads)).map((entry) => entry.focusIndex)).toEqual([
-      null,
-      null,
-    ]);
-    expect(walkOrder(inbox(threads, { aiFocusEnabled: true }))).toEqual(["ranked", "newer"]);
   });
 });
 

@@ -30,10 +30,6 @@ import {
   resolveThreadPullRequestLink,
   type WorktreePullRequestLink,
 } from "@ryco/shared/worktreePullRequests";
-import {
-  partitionThreadPriorities,
-  type ThreadPriorityFocusMetadata,
-} from "@ryco/shared/threadPriority";
 
 import type { ThreadCapabilitySupport } from "../../rpc/environmentServerConfigs.ts";
 import { scopeThreadRef, scopedProjectKey, scopedThreadKey } from "../../scoped.ts";
@@ -130,7 +126,6 @@ export interface ThreadInboxEntry {
   readonly current: boolean;
   readonly isDraft: boolean;
   readonly canSnooze: boolean;
-  readonly focus: ThreadPriorityFocusMetadata | null;
 }
 
 /** Why settling a thread, or moving it back to Active, cannot run. */
@@ -180,14 +175,12 @@ export interface BuildThreadInboxInput {
   readonly drafts?: ReadonlyArray<ThreadInboxDraftSummary> | undefined;
   readonly filters?: ThreadInboxFilters | undefined;
   readonly currentThreadKey?: string | null | undefined;
-  readonly aiFocusEnabled?: boolean | undefined;
   /** This client's rule, for environments whose node states none of its own. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly nowMs: number;
 }
 
 export interface ThreadInboxModel {
-  readonly focus: ThreadInboxEntry[];
   readonly active: ThreadInboxEntry[];
   readonly settled: ThreadInboxEntry[];
   readonly snoozed: ThreadInboxEntry[];
@@ -639,7 +632,6 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       current: input.currentThreadKey === key,
       isDraft: false,
       canSnooze: awakeSnoozeBlocker(environment, blocker, snoozeEligibility.blocker) === null,
-      focus: null,
     });
   }
 
@@ -688,7 +680,6 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       current: input.currentThreadKey === key,
       isDraft: true,
       canSnooze: false,
-      focus: null,
     });
   }
 
@@ -703,21 +694,6 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         { scopedKey: right.key, pinned: right.pinned, createdAt: right.createdAt },
       ),
     );
-  const priorityPartition = partitionThreadPriorities({
-    active,
-    enabled: input.aiFocusEnabled ?? false,
-    nowMs: input.nowMs,
-    toCandidate: (entry) => ({
-      scopedKey: entry.key,
-      pinned: entry.pinned,
-      serverOwned: !entry.isDraft,
-      hasPendingApprovals: entry.thread?.hasPendingApprovals ?? false,
-      hasPendingUserInput: entry.thread?.hasPendingUserInput ?? false,
-      latestTurn: entry.thread?.latestTurn ?? null,
-      latestUserMessageAt: entry.thread?.latestUserMessageAt ?? null,
-      priority: entry.thread?.priority,
-    }),
-  });
 
   return {
     snoozed: visibleEntries
@@ -725,8 +701,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       .toSorted((left, right) =>
         (left.thread?.snoozedUntil ?? "").localeCompare(right.thread?.snoozedUntil ?? ""),
       ),
-    focus: priorityPartition.focus.map(({ value, focus }) => ({ ...value, focus })),
-    active: [...priorityPartition.active],
+    active,
     settled: visibleEntries
       .filter((entry) => entry.lifecycle.classification === "settled")
       .toSorted((left, right) =>

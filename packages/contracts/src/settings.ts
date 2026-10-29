@@ -80,12 +80,6 @@ export const SourceControlRefreshMode = Schema.Literals(["automatic", "reduced",
 export type SourceControlRefreshMode = typeof SourceControlRefreshMode.Type;
 export const DEFAULT_SOURCE_CONTROL_REFRESH_MODE: SourceControlRefreshMode = "automatic";
 
-export const AiFocusRefreshIntervalMs = Schema.Literals([
-  0, 300_000, 600_000, 1_800_000, 3_600_000, 21_600_000, 86_400_000,
-]);
-export type AiFocusRefreshIntervalMs = typeof AiFocusRefreshIntervalMs.Type;
-export const DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS: AiFocusRefreshIntervalMs = 600_000;
-
 /**
  * What Enter does with a message sent while a turn runs: `queue` waits for the turn to finish,
  * `steer` adds it to the running turn when the provider supports steering. Mod+Enter does the
@@ -120,10 +114,6 @@ export type ModelFavorite = typeof ModelFavorite.Type;
 export const ClientSettingsSchema = Schema.Struct({
   // Local lifecycle metadata. Optional so restoring default preferences preserves it.
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
-  aiFocusEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  aiFocusRefreshIntervalMs: AiFocusRefreshIntervalMs.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS)),
-  ),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -746,9 +736,6 @@ export const ServerSettings = Schema.Struct({
   pullRequestInstructions: GitWritingInstructions.pipe(
     Schema.withDecodingDefault(Effect.succeed("")),
   ),
-  inboxPriorityModelSelection: Schema.NullOr(ModelSelection).pipe(
-    Schema.withDecodingDefault(Effect.succeed(null)),
-  ),
   // The node's automatic settlement rule, the same on every client that lists its threads.
   // Absent until someone sets it (the shared default applies); null turns it off. Named apart
   // from the client's `sidebarAutoSettleAfterDays`, which older nodes still leave to clients.
@@ -922,7 +909,6 @@ export const ServerSettingsPatch = Schema.Struct({
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   commitMessageInstructions: Schema.optionalKey(GitWritingInstructions),
   pullRequestInstructions: Schema.optionalKey(GitWritingInstructions),
-  inboxPriorityModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelectionPatch)),
   threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
   /**
    * Applies the patch only while the node's rule is still this (`"absent"`: never set), so of
@@ -967,8 +953,6 @@ export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
-  aiFocusEnabled: Schema.optionalKey(Schema.Boolean),
-  aiFocusRefreshIntervalMs: Schema.optionalKey(AiFocusRefreshIntervalMs),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),

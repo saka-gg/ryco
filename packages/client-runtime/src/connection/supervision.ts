@@ -3,7 +3,6 @@ import type {
   MessageId,
   OrchestrationStubbedShellSnapshot,
   OrchestrationShellStreamEvent,
-  OrchestrationShellThreadPrioritiesItem,
   OrchestrationThreadHistoryCollection,
   OrchestrationThreadHistoryLimits,
   OrchestrationThreadHistoryPage,
@@ -23,7 +22,6 @@ import {
 import { recordEnvironmentShellSettlementPolicy } from "../rpc/environmentServerConfigs.ts";
 import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
 import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
-import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import {
   planThreadBodyResidency,
   THREAD_BODY_RECENT_ACCESS_MS,
@@ -350,11 +348,6 @@ export interface EnvironmentConnectionSupervisor {
    * events around it, so a resume does not replay it.
    */
   readonly skipShellEvent: (sequence: number, environmentId: EnvironmentId) => void;
-  /** Buffers a thread-priority ranking behind the shell events before it. */
-  readonly applyThreadPriorities: (
-    item: OrchestrationShellThreadPrioritiesItem,
-    environmentId: EnvironmentId,
-  ) => void;
   /** Commits buffered shell items now (tests, teardown). */
   readonly flushShellEvents: () => void;
   readonly resetShellProjection: (environmentId: EnvironmentId) => void;
@@ -1309,37 +1302,34 @@ export function createEnvironmentConnectionSupervisor<
     });
   /**
    * Applies one environment's buffered shell items: the events the projection
-   * does not hold yet, and every priority ranking, land in one store commit;
+   * does not hold yet land in one store commit;
    * the after-hooks then run per event against the applied state.
    */
   const applyShellBatch = (
     environmentId: EnvironmentId,
-    updates: ReadonlyArray<ShellStoreUpdate | SkippedShellEvent>,
+    updates: ReadonlyArray<OrchestrationShellStreamEvent | SkippedShellEvent>,
   ) => {
-    const accepted: ShellStoreUpdate[] = [];
+    const accepted: OrchestrationShellStreamEvent[] = [];
     for (const update of updates) {
       if (update.kind === SKIPPED_SHELL_EVENT) {
         projectionTracker.markEvent(environmentId, update.sequence);
         continue;
       }
-      if (update.kind !== "thread-priorities") {
-        if (
-          !shouldApplyProjectionEvent({
-            current: projectionTracker.read(environmentId),
-            sequence: update.sequence,
-          })
-        ) {
-          continue;
-        }
-        projectionTracker.markEvent(environmentId, update.sequence);
+      if (
+        !shouldApplyProjectionEvent({
+          current: projectionTracker.read(environmentId),
+          sequence: update.sequence,
+        })
+      ) {
+        continue;
       }
+      projectionTracker.markEvent(environmentId, update.sequence);
       accepted.push(update);
     }
     if (accepted.length === 0) return;
     const contexts = input.stateSink.applyShellEvents(environmentId, accepted);
     for (let index = 0; index < accepted.length; index += 1) {
       const event = accepted[index]!;
-      if (event.kind === "thread-priorities") continue;
       input.stateSink.afterShellEventApplied(environmentId, event, contexts[index]);
       const shellThreadIds = shellThreadIdsByEnvironment.get(environmentId);
       if (shellThreadIds === undefined) continue;
@@ -1352,17 +1342,16 @@ export function createEnvironmentConnectionSupervisor<
       }
     }
     if (shellAcceptanceListeners.size === 0) return;
-    const events = accepted.filter(
-      (update): update is OrchestrationShellStreamEvent => update.kind !== "thread-priorities",
-    );
-    if (events.length > 0) emitShellAcceptance({ kind: "events", environmentId, events });
+    emitShellAcceptance({ kind: "events", environmentId, events: accepted });
   };
   // Shell items arrive one WebSocket chunk at a time (a thread upsert per
   // streaming tick). They wait for the next frame and land as one store commit
   // per environment. The batcher is a store mutation barrier, so any other
   // store write applies them first; snapshots, resets and resume reads flush
   // them explicitly, since those consult the projection tracker first.
-  const shellBatcher = createEnvironmentEventBatcher<ShellStoreUpdate | SkippedShellEvent>({
+  const shellBatcher = createEnvironmentEventBatcher<
+    OrchestrationShellStreamEvent | SkippedShellEvent
+  >({
     apply: applyShellBatch,
     ...(input.scheduleShellFrame === undefined ? {} : { scheduleFrame: input.scheduleShellFrame }),
   });
@@ -1371,10 +1360,6 @@ export function createEnvironmentConnectionSupervisor<
     shellBatcher.enqueue(environmentId, event);
   const skipShellEvent = (sequence: number, environmentId: EnvironmentId) =>
     shellBatcher.enqueue(environmentId, { kind: SKIPPED_SHELL_EVENT, sequence });
-  const applyThreadPriorities = (
-    item: OrchestrationShellThreadPrioritiesItem,
-    environmentId: EnvironmentId,
-  ) => shellBatcher.enqueue(environmentId, item);
   const syncShellSnapshot = (
     snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
@@ -1607,7 +1592,6 @@ export function createEnvironmentConnectionSupervisor<
     cancelPendingSavedEnvironmentConnection,
     applyShellEvent,
     skipShellEvent,
-    applyThreadPriorities,
     flushShellEvents,
     resetShellProjection: (environmentId) => {
       // What the old subscription delivered applies before its baseline goes.

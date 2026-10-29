@@ -129,7 +129,6 @@ function props(): InboxSidebarProps {
     deliveryUnknownThreadKeys: new Set(),
     localQueuedThreadKeys: new Set(),
     activeThreadKey: null,
-    aiFocusEnabled: false,
     autoSettleAfterDays: null,
     pinnedThreadKeys: new Set(),
     onOpenThread: vi.fn(),

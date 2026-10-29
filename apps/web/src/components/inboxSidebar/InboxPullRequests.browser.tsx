@@ -144,7 +144,6 @@ it.each([null, "/repo/worktrees/feature"])(
       deliveryUnknownThreadKeys: new Set(),
       localQueuedThreadKeys: new Set(),
       activeThreadKey: null,
-      aiFocusEnabled: false,
       autoSettleAfterDays: null,
       pinnedThreadKeys: new Set(),
       onOpenThread: vi.fn(),

@@ -74,7 +74,6 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
-        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -269,7 +268,6 @@ function buildFixture(): TestFixture {
         capabilities: {
           repositoryIdentity: true,
           threadSettlement: false,
-          threadPriorityRanking: false,
         },
       },
       cwd: "/repo/project",

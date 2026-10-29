@@ -9,7 +9,6 @@ const environment: ServerConfig["environment"] = {
   serverVersion: "1",
   capabilities: {
     repositoryIdentity: false,
-    threadPriorityRanking: false,
     threadSettlement: false,
   },
 };

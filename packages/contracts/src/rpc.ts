@@ -324,11 +324,6 @@ import {
 } from "./nodeUpdate.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
-  ThreadPriorityEnsureCurrentInput,
-  ThreadPriorityEnsureCurrentResult,
-  ThreadPriorityRpcError,
-} from "./threadPriority.ts";
-import {
   SourceControlGetChangeRequestFilesViewedInput,
   SourceControlChangeRequestFilesViewed,
   SourceControlSetChangeRequestFileViewedInput,
@@ -510,7 +505,6 @@ export const WS_METHODS = {
 
   // Thread search methods
   searchThreadMessages: "threads.searchMessages",
-  threadPriorityEnsureCurrent: "threadPriority.ensureCurrent",
 
   // Terminal methods
   terminalOpen: "terminal.open",
@@ -1972,12 +1966,6 @@ export const WsSearchThreadMessagesRpc = Rpc.make(WS_METHODS.searchThreadMessage
   error: Schema.Union([AuthRpcError]),
 });
 
-export const WsThreadPriorityEnsureCurrentRpc = Rpc.make(WS_METHODS.threadPriorityEnsureCurrent, {
-  payload: ThreadPriorityEnsureCurrentInput,
-  success: ThreadPriorityEnsureCurrentResult,
-  error: Schema.Union([ThreadPriorityRpcError, AuthRpcError]),
-});
-
 export const WsWorktreesSetManualPositionRpc = Rpc.make(WS_METHODS.worktreesSetManualPosition, {
   payload: WorktreesSetManualPositionInput,
   success: EmptyRpcResult,
@@ -2637,7 +2625,6 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsThreadsForkRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
-  | typeof WsThreadPriorityEnsureCurrentRpc
   | typeof WsWorktreesSetManualPositionRpc
   | typeof WsProjectsInitializeGitRpc
   | typeof WsProjectsPromoteChatPreviewRpc
@@ -2859,7 +2846,6 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsThreadsForkRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,
-  WsThreadPriorityEnsureCurrentRpc,
   WsWorktreesSetManualPositionRpc,
   WsProjectsInitializeGitRpc,
   WsProjectsPromoteChatPreviewRpc,

@@ -44,7 +44,7 @@ export function buildInboxAttentionCandidates(
   const candidates: ThreadAttentionCandidate[] = [];
   for (const section of model.sections) {
     if (section.key === "settled" || section.key === "snoozed") continue;
-    for (const [index, row] of section.rows.entries()) {
+    for (const row of section.rows) {
       const reason = resolveThreadAttentionReason({
         state: row.placementState,
         attention: row.attention,
@@ -56,7 +56,6 @@ export function buildInboxAttentionCandidates(
       candidates.push({
         key: row.key,
         reason,
-        focusIndex: section.key === "focus" ? index : null,
         recencyMs: Date.parse(row.updatedAt),
       });
     }
