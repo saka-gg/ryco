@@ -54,6 +54,20 @@ export const UsageTokenTotals = Schema.Struct({
 });
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
+/**
+ * Estimated cost split by token type at the billed speed; sums to the split part of
+ * `estimatedCostUsd` (provider-reported cost without a published rate stays unsplit).
+ */
+export const UsageCostBreakdown = Schema.Struct({
+  inputUsd: NonNegativeFinite,
+  cacheReadUsd: NonNegativeFinite,
+  cacheWriteUsd: NonNegativeFinite,
+  outputUsd: NonNegativeFinite,
+  /** Included in the four above: what fast/ultrafast tiers added over standard rates. Absent = 0. */
+  speedPremiumUsd: Schema.optional(NonNegativeFinite),
+});
+export type UsageCostBreakdown = typeof UsageCostBreakdown.Type;
+
 export const UsageDailyBucket = Schema.Struct({
   sourceId: TrimmedNonEmptyString,
   // Cursor exports retain only anonymized event/session identity for overlap dedupe.
@@ -68,6 +82,8 @@ export const UsageDailyBucket = Schema.Struct({
   sessionCount: NonNegativeInt,
   estimatedCostUsd: Schema.optional(NonNegativeFinite),
   estimatedCacheSavingsUsd: Schema.optional(NonNegativeFinite),
+  // Additive: older clients drop it, older nodes omit it (the cost then shows unsplit).
+  costBreakdown: Schema.optional(UsageCostBreakdown),
   pricedTokenCount: NonNegativeFinite,
   unpricedTokenCount: NonNegativeFinite,
   costSource: UsageCostSource,

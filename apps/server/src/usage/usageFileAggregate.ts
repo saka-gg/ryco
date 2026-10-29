@@ -8,7 +8,8 @@
  * multiple of 15 minutes, so a slot never straddles a local midnight and the per-day result
  * matches per-record bucketing in every time zone (only pre-1980 timestamps in zones with
  * irregular historical offsets could differ). Pricing is linear in tokens per (model, speed),
- * so a slot is priced once from its sums; USD totals match per-record pricing up to
+ * so a slot is priced once from its sums; USD totals and their split by token type (reported
+ * cost is split per bucket, see `UsageCostBreakdownSum`) match per-record pricing up to
  * floating-point summation order.
  *
  * Responses with a cross-file identity (`dedupeKey`, which providers copy into other
@@ -18,7 +19,7 @@
  */
 import type { UsageCalendarDate, UsageCostSource, UsageDailyBucket } from "@ryco/contracts";
 
-import { makeUsageDayFormatter } from "./usageAggregation.ts";
+import { makeUsageDayFormatter, UsageCostBreakdownSum } from "./usageAggregation.ts";
 import {
   lookupUsageModelRate,
   priceUsageSlot,
@@ -209,6 +210,7 @@ interface MutableBucket {
   estimatedCacheSavingsUsd: number;
   hasCost: boolean;
   hasCacheSavings: boolean;
+  costBreakdown: UsageCostBreakdownSum;
   pricedTokenCount: number;
   unpricedTokenCount: number;
   costSources: Set<Exclude<UsageCostSource, "mixed">>;
@@ -297,6 +299,7 @@ export class UsageSlotAggregator {
         estimatedCacheSavingsUsd: 0,
         hasCost: false,
         hasCacheSavings: false,
+        costBreakdown: new UsageCostBreakdownSum(),
         pricedTokenCount: 0,
         unpricedTokenCount: 0,
         costSources: new Set(),
@@ -324,6 +327,7 @@ export class UsageSlotAggregator {
       bucket.estimatedCacheSavingsUsd += price.estimatedCacheSavingsUsd;
       bucket.hasCacheSavings = true;
     }
+    bucket.costBreakdown.add(price);
     bucket.pricedTokenCount += price.pricedTokenCount;
     bucket.unpricedTokenCount += price.unpricedTokenCount;
     bucket.costSources.add(price.costSource);
@@ -336,6 +340,7 @@ export class UsageSlotAggregator {
     const buckets: UsageDailyBucket[] = [];
     for (const bucket of this.#buckets.values()) {
       const { reasoningTokens, ...tokens } = bucket.tokens;
+      const costBreakdown = bucket.costBreakdown.finish();
       buckets.push({
         sourceId: this.#options.sourceId,
         date: bucket.date,
@@ -348,6 +353,7 @@ export class UsageSlotAggregator {
         ...(bucket.hasCacheSavings
           ? { estimatedCacheSavingsUsd: bucket.estimatedCacheSavingsUsd }
           : {}),
+        ...(costBreakdown === undefined ? {} : { costBreakdown }),
         pricedTokenCount: bucket.pricedTokenCount,
         unpricedTokenCount: bucket.unpricedTokenCount,
         costSource:

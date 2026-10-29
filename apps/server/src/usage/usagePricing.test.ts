@@ -1,8 +1,11 @@
+import type { UsageCostBreakdown } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { UsageRecord } from "./usageRecord.ts";
 import {
   encodeUsageRateTable,
+  estimateUsageCost,
+  estimateUsageCostParts,
   lookupUsageModelRate,
   normalizeUsageModelName,
   parseUsageRateTable,
@@ -163,4 +166,71 @@ it("applies Claude's published fast multiplier and retains explicit zero cache p
     priceUsageRecord(parsed, { ...record, model: "model", speed: "fast" }).estimatedCostUsd,
   ).toBeCloseTo(base.estimatedCostUsd! * 6);
   expect(lookupUsageModelRate(parsed, "model")?.cacheReadCostPerToken).toBe(0);
+});
+
+describe("usage cost by token type", () => {
+  const sum = (
+    split: Pick<UsageCostBreakdown, "inputUsd" | "cacheReadUsd" | "cacheWriteUsd" | "outputUsd">,
+  ) => split.inputUsd + split.cacheReadUsd + split.cacheWriteUsd + split.outputUsd;
+  const tiered = parseUsageRateTable({
+    model: {
+      ...canonical,
+      input_cost_per_token_priority: 0.000008,
+      output_cost_per_token_priority: 0.00004,
+    },
+  });
+
+  it("splits an estimate into parts that sum to the estimate", () => {
+    for (const model of ["claude-sonnet-4-5-20250929", "no-cache-rates"]) {
+      const rate = lookupUsageModelRate(rates, model)!;
+      const parts = estimateUsageCostParts(rate, record.totals);
+      expect(Math.abs(sum(parts) - estimateUsageCost(rate, record.totals))).toBeLessThan(1e-12);
+      const priced = priceUsageRecord(rates, { ...record, model });
+      expect(priced.listCostBreakdown).toEqual(parts);
+      expect(priced.estimatedCostUsd).toBe(sum(parts));
+    }
+    // Cache tokens without a published cache rate cost the input rate.
+    expect(
+      estimateUsageCostParts(lookupUsageModelRate(rates, "no-cache-rates")!, record.totals),
+    ).toEqual({
+      inputUsd: 100 * 0.00001,
+      cacheReadUsd: 1000 * 0.00001,
+      cacheWriteUsd: 10 * 0.00001,
+      outputUsd: 50 * 0.00005,
+    });
+  });
+
+  it("prices fast tokens at the priority tier and reports the premium over standard rates", () => {
+    const standard = priceUsageRecord(tiered, { ...record, model: "model" });
+    const fast = priceUsageRecord(tiered, { ...record, model: "model", speed: "fast" });
+    const fastRate = lookupUsageModelRate(tiered, "model")!.fast!;
+    expect(fast.listCostBreakdown).toMatchObject(estimateUsageCostParts(fastRate, record.totals));
+    expect(fast.listCostBreakdown?.speedPremiumUsd).toBeCloseTo(
+      fast.estimatedCostUsd! - standard.estimatedCostUsd!,
+      12,
+    );
+    expect(fast.listCostBreakdown?.speedPremiumUsd).toBeGreaterThan(0);
+    expect(standard.listCostBreakdown).not.toHaveProperty("speedPremiumUsd");
+  });
+
+  it("bills a speed without its own tier at standard rates without a premium", () => {
+    const standard = priceUsageRecord(tiered, { ...record, model: "model" });
+    for (const speed of ["ultrafast", "standard"] as const) {
+      const priced = priceUsageRecord(tiered, { ...record, model: "model", speed });
+      expect(priced.listCostBreakdown).toEqual(standard.listCostBreakdown);
+      expect(priced.listCostBreakdown).not.toHaveProperty("speedPremiumUsd");
+    }
+  });
+
+  it("keeps the list split of a reported cost and leaves unknown models unsplit", () => {
+    const reported = priceUsageRecord(rates, { ...record, reportedCostUsd: 1.25 });
+    expect(reported.estimatedCostUsd).toBe(1.25);
+    expect(reported.listCostBreakdown).toEqual(priceUsageRecord(rates, record).listCostBreakdown);
+    for (const model of ["kimi-k3", "sonnet"]) {
+      expect(priceUsageRecord(rates, { ...record, model }).listCostBreakdown).toBeNull();
+      expect(
+        priceUsageRecord(rates, { ...record, model, reportedCostUsd: 1.25 }).listCostBreakdown,
+      ).toBeNull();
+    }
+  });
 });

@@ -108,10 +108,17 @@ function expectSameBuckets(
     estimatedCostUsd: bucket.estimatedCostUsd,
     estimatedCacheSavingsUsd: bucket.estimatedCacheSavingsUsd,
   });
-  const exact = ({ estimatedCostUsd, estimatedCacheSavingsUsd, ...rest }: UsageDailyBucket) => ({
+  const exact = ({
+    estimatedCostUsd,
+    estimatedCacheSavingsUsd,
+    costBreakdown,
+    ...rest
+  }: UsageDailyBucket) => ({
     ...rest,
     hasCost: estimatedCostUsd !== undefined,
     hasSavings: estimatedCacheSavingsUsd !== undefined,
+    hasBreakdown: costBreakdown !== undefined,
+    hasSpeedPremium: costBreakdown?.speedPremiumUsd !== undefined,
   });
   expect(actual.map(exact)).toEqual(expected.map(exact));
   for (const [index, bucket] of actual.entries()) {
@@ -125,8 +132,25 @@ function expectSameBuckets(
         true,
       );
     }
+    const wantSplit = expected[index]!.costBreakdown;
+    for (const field of SPLIT_FIELDS) {
+      if (wantSplit?.[field] === undefined) continue;
+      // Emitted at 1e-8 USD: a summation-order difference may round to the neighbouring step.
+      expect(Math.abs(bucket.costBreakdown![field]! - wantSplit[field]) <= 1.5e-8).toBe(true);
+    }
   }
 }
+
+const SPLIT_FIELDS = [
+  "inputUsd",
+  "cacheReadUsd",
+  "cacheWriteUsd",
+  "outputUsd",
+  "speedPremiumUsd",
+] as const;
+
+const splitSum = (split: NonNullable<UsageDailyBucket["costBreakdown"]>) =>
+  split.inputUsd + split.cacheReadUsd + split.cacheWriteUsd + split.outputUsd;
 
 describe("usage file aggregates", () => {
   it.each([
@@ -182,6 +206,22 @@ describe("usage file aggregates", () => {
         expect([...actual.unrecognizedModels].toSorted()).toEqual([...unrecognized].toSorted());
         expect(expected.buckets.length).toBeGreaterThan(0);
         expectSameBuckets(actual.buckets, expected.buckets);
+        // The data exercises every split path: fast premiums, reported cost split by list
+        // prices, and reported cost of unknown models left unsplit.
+        const split = actual.buckets.filter((bucket) => bucket.costBreakdown !== undefined);
+        expect(split.some((bucket) => bucket.costBreakdown?.speedPremiumUsd)).toBe(true);
+        expect(split.some((bucket) => bucket.costSource !== "litellm")).toBe(true);
+        expect(
+          actual.buckets.some(
+            (bucket) => bucket.estimatedCostUsd !== undefined && bucket.costBreakdown === undefined,
+          ),
+        ).toBe(true);
+        for (const bucket of split) {
+          // Rate-priced models split all of their cost, reported or not.
+          expect(Math.abs(splitSum(bucket.costBreakdown!) - bucket.estimatedCostUsd!)).toBeLessThan(
+            1e-7,
+          );
+        }
       }
     },
   );

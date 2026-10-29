@@ -1,7 +1,7 @@
 import "../../../index.css";
 import { useState } from "react";
-import { EnvironmentId, type UsageImportedMetric } from "@ryco/contracts";
-import type { MergedUsageSummary } from "@ryco/client-runtime/usage";
+import { EnvironmentId, type UsageCostBreakdown, type UsageImportedMetric } from "@ryco/contracts";
+import type { MergedUsageBucket, MergedUsageSummary } from "@ryco/client-runtime/usage";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
@@ -60,6 +60,70 @@ function fixture(imports: readonly UsageImportedMetric[] = []): MergedUsageSumma
     environmentOnlyDeduplicationWarning: false,
   };
 }
+function costBucket(
+  date: string,
+  model: string,
+  estimatedCostUsd: number,
+  costBreakdown?: UsageCostBreakdown,
+): MergedUsageBucket {
+  return {
+    date,
+    provider: "claude",
+    model,
+    tokens: {
+      uncachedInputTokens: 1_000,
+      cachedInputTokens: 3_000,
+      cacheCreationInputTokens: 1_000,
+      outputTokens: 500,
+      totalTokens: 5_500,
+    },
+    responseCount: 4,
+    sessionCount: 1,
+    estimatedCostUsd,
+    ...(costBreakdown === undefined ? {} : { costBreakdown }),
+    pricedTokenCount: 5_500,
+    unpricedTokenCount: 0,
+    costSource: costBreakdown === undefined ? "provider-reported" : "litellm",
+    sourceIds: ["claude-home"],
+  };
+}
+/** $10: $8 split by type ($1.25 of it Fast-mode premium), $2 reported without a rate. */
+function costFixture(split = true): MergedUsageSummary {
+  const base = fixture();
+  return {
+    ...base,
+    buckets: [
+      costBucket(
+        "2026-08-09",
+        "claude-opus-4-1",
+        8,
+        split
+          ? {
+              inputUsd: 2,
+              cacheReadUsd: 1,
+              cacheWriteUsd: 0.5,
+              outputUsd: 4.5,
+              speedPremiumUsd: 1.25,
+            }
+          : undefined,
+      ),
+      costBucket("2026-08-10", "claude-preview-x", 2),
+    ],
+    sources: [
+      {
+        ...base.sources[0]!,
+        sourceId: "claude-home",
+        provider: "claude",
+        deduplicationKind: "physical",
+        status: "complete",
+        transcriptFileCount: 2,
+        parsedFileCount: 2,
+        distinctSessionCount: 1,
+        distinctResponseCount: 8,
+      },
+    ],
+  };
+}
 function Harness() {
   const [search, setSearch] = useState(parseStatisticsSearch({}));
   return (
@@ -98,6 +162,33 @@ describe("usage provider history", () => {
         }),
       )
       .toBeVisible();
+  });
+  it("splits the estimated cost by token type with the Fast-mode premium and an Other note", async () => {
+    state.merged = costFixture();
+    await render(<Harness />);
+    const types = page.getByRole("list", { name: "Cost by type" });
+    await expect.element(types).toBeVisible();
+    const rows = types.getByRole("listitem");
+    await expect.element(rows.nth(0)).toMatchTextContent(/Input\s*\$2\.00\s*20%/u);
+    await expect.element(rows.nth(1)).toMatchTextContent(/Cache read\s*\$1\.00\s*10%/u);
+    await expect.element(rows.nth(2)).toMatchTextContent(/Cache write\s*\$0\.50\s*5%/u);
+    await expect.element(rows.nth(3)).toMatchTextContent(/Output\s*\$4\.50\s*45%/u);
+    await expect.element(rows.nth(4)).toMatchTextContent(/Other\s*\$2\.00\s*20%/u);
+    expect(rows.elements()).toHaveLength(5);
+    await expect.element(page.getByText("Fast-mode premium (included)")).toBeVisible();
+    await expect.element(page.getByText("$1.25", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Some cost could not be split", { exact: false }))
+      .toBeVisible();
+    // The rail's cache-read share: 3,000 of 5,000 input tokens per bucket.
+    await expect.element(page.getByText("60%", { exact: true })).toBeVisible();
+  });
+  it("leaves the cost unsplit when no node split it", async () => {
+    state.merged = costFixture(false);
+    await render(<Harness />);
+    await expect.element(page.getByText("$10.00", { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("list", { name: "Cost by type" })).not.toBeInTheDocument();
+    await expect.element(page.getByText("Fast-mode premium (included)")).not.toBeInTheDocument();
   });
   it("paginates billed metadata separately and applies Cursor filters without inventing token buckets", async () => {
     state.merged = fixture(

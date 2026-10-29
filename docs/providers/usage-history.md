@@ -4,9 +4,11 @@ Statistics reads provider-recorded counters, including sessions outside Ryco. Fi
 merging, currency totals and coverage use the shared client runtime on desktop, web
 and native. Missing tokens, reasoning, price or history are unavailable, not zero.
 Pricing estimates are API equivalents; provider-reported model cost takes precedence.
-The usage contract is version 2. The shared transport checks the node’s advertised
-usage version before sending a request; older connected nodes show an update
-instruction instead of a decoding error. Update Ryco on both clients and nodes.
+The usage contract is version 2. A request is sent without a capability round trip;
+when the node speaks another usage version, the client recognizes the rejected answer
+and shows an update instruction instead of a decoding error. Fields added within a
+version are optional: older clients ignore them and older nodes omit them. Update
+Ryco on both clients and nodes.
 
 ## Pricing and history coverage
 
@@ -22,6 +24,15 @@ input rate is used; cached tokens are never silently free. Cache savings measure
 discount on cache reads. Cache writes are charged, and a missing write rate cannot
 hide known read savings. Provider-reported model cost still takes precedence.
 This arithmetic is checked against [T3 Code's pricing implementation](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/usage/usagePricing.ts).
+
+Estimated cost is also split by token type: input, cache read, cache write and output,
+each at the billed speed. The fast-mode premium is the part of those amounts that a
+fast or ultrafast tier added over standard rates; a speed without its own published
+tier is billed at standard rates and adds none. Provider-reported cost of a model with
+a published rate is split in proportion to the list cost of the same tokens, summed
+per day and model, so the parts still add up to the reported cost. Reported cost
+without a rate, and cost from nodes that predate the split, cannot be divided and is
+shown as "Other".
 
 History includes disabled configured accounts. Codex and Claude instances resolve
 stores with the same home and environment precedence as their runtime, including

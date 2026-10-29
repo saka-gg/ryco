@@ -1,8 +1,10 @@
+import type { UsageDailyBucket } from "@ryco/contracts";
 import type { UsageRecord } from "./usageRecord.ts";
 
 import { describe, expect, it } from "vite-plus/test";
 
 import { UsageAggregator } from "./usageAggregation.ts";
+import { parseUsageRateTable, priceUsageRecord } from "./usagePricing.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -81,6 +83,7 @@ describe("UsageAggregator", () => {
       price: (item) => ({
         estimatedCostUsd: 0.5,
         estimatedCacheSavingsUsd: 0.75,
+        listCostBreakdown: { inputUsd: 0.1, cacheReadUsd: 0.1, cacheWriteUsd: 0, outputUsd: 0.3 },
         pricedTokenCount: item.totals.totalTokens,
         unpricedTokenCount: 0,
         costSource: "litellm",
@@ -91,6 +94,12 @@ describe("UsageAggregator", () => {
 
     expect(bucket?.estimatedCostUsd).toBe(0.5);
     expect(bucket?.estimatedCacheSavingsUsd).toBe(0.75);
+    expect(bucket?.costBreakdown).toEqual({
+      inputUsd: 0.1,
+      cacheReadUsd: 0.1,
+      cacheWriteUsd: 0,
+      outputUsd: 0.3,
+    });
     expect(bucket?.costSource).toBe("litellm");
   });
 
@@ -113,5 +122,103 @@ describe("UsageAggregator", () => {
           endDate: "2026-08-31",
         }),
     ).toThrow();
+  });
+});
+
+describe("UsageAggregator cost by token type", () => {
+  // List cost of `record()`: input 0.001, cache read 0.001, cache write 0.000125, output 0.0025.
+  const rates = parseUsageRateTable({
+    "claude-sonnet-4-5-20250929": {
+      input_cost_per_token: 0.00001,
+      output_cost_per_token: 0.00005,
+      cache_read_input_token_cost: 0.000001,
+      cache_creation_input_token_cost: 0.0000125,
+      provider_specific_entry: { fast: 2 },
+    },
+  });
+  const priced = (records: readonly UsageRecord[]) => {
+    const aggregator = new UsageAggregator({
+      sourceId: "source-a",
+      timeZone: "UTC",
+      endDate: "2026-08-31",
+      price: (item) => priceUsageRecord(rates, item),
+    });
+    for (const item of records) aggregator.add(item);
+    return aggregator.finish().buckets;
+  };
+  const partsSum = (bucket: UsageDailyBucket | undefined) => {
+    const split = bucket?.costBreakdown;
+    return split === undefined
+      ? undefined
+      : split.inputUsd + split.cacheReadUsd + split.cacheWriteUsd + split.outputUsd;
+  };
+
+  it("splits a provider-reported cost in proportion to list prices", () => {
+    const [bucket] = priced([record({ reportedCostUsd: 0.00925 })]);
+    expect(bucket?.costSource).toBe("provider-reported");
+    expect(bucket?.costBreakdown).toEqual({
+      inputUsd: 0.002,
+      cacheReadUsd: 0.002,
+      cacheWriteUsd: 0.00025,
+      outputUsd: 0.005,
+    });
+    expect(partsSum(bucket)).toBeCloseTo(bucket!.estimatedCostUsd!, 12);
+  });
+
+  it("scales the fast-mode premium of a reported cost with its parts", () => {
+    // Fast list cost is 0.00925, of which 0.004625 is the premium; the provider reported twice that.
+    const [bucket] = priced([record({ speed: "fast", reportedCostUsd: 0.0185 })]);
+    expect(bucket?.costBreakdown).toEqual({
+      inputUsd: 0.004,
+      cacheReadUsd: 0.004,
+      cacheWriteUsd: 0.0005,
+      outputUsd: 0.01,
+      speedPremiumUsd: 0.00925,
+    });
+  });
+
+  it("adds rate-based estimates to the reported split of the same bucket", () => {
+    const [bucket] = priced([
+      record({ speed: "fast" }),
+      record({ reportedCostUsd: 0.00925 }),
+      record(),
+    ]);
+    expect(bucket?.costSource).toBe("mixed");
+    expect(bucket?.estimatedCostUsd).toBeCloseTo(0.00925 + 0.00925 + 0.004625, 12);
+    expect(partsSum(bucket)).toBeCloseTo(bucket!.estimatedCostUsd!, 7);
+    expect(bucket?.costBreakdown?.speedPremiumUsd).toBe(0.004625);
+    // Emitted values are rounded to 1e-8 USD.
+    for (const value of Object.values(bucket!.costBreakdown!))
+      expect(Math.round(value! * 1e8) / 1e8).toBe(value);
+  });
+
+  it("leaves reported cost without a rate or list cost unsplit", () => {
+    const buckets = priced([
+      record({ reportedCostUsd: 1.25, model: "kimi-k3" }),
+      record({ model: "kimi-k3", timestampMs: Date.parse("2026-08-08T00:00:00Z") }),
+      record(),
+    ]);
+    const bySource = (source: UsageDailyBucket["costSource"]) =>
+      buckets.find((bucket) => bucket.costSource === source);
+    expect(bySource("provider-reported")?.estimatedCostUsd).toBe(1.25);
+    expect(bySource("provider-reported")?.costBreakdown).toBeUndefined();
+    expect(bySource("unpriced")?.costBreakdown).toBeUndefined();
+    expect(partsSum(bySource("litellm"))).toBeCloseTo(0.004625, 12);
+
+    const zeroTokens = record({
+      reportedCostUsd: 0.5,
+      totals: {
+        uncachedInputTokens: 0,
+        cachedInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+      },
+    });
+    expect(priced([zeroTokens])[0]?.costBreakdown).toBeUndefined();
+    // The default pricer knows no rates.
+    expect(
+      aggregate([record({ reportedCostUsd: 1.25 })]).buckets[0]?.costBreakdown,
+    ).toBeUndefined();
   });
 });

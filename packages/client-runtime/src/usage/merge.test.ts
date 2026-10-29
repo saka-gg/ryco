@@ -252,3 +252,62 @@ it("counts an OpenCode store once across implicit/explicit configurations and en
   expect(merged?.duplicateSourceCount).toBe(1);
   expect(merged?.buckets[0]?.tokens.totalTokens).toBe(1160);
 });
+
+describe("cost breakdown merging", () => {
+  const split = (speedPremiumUsd?: number) => ({
+    inputUsd: 0.1,
+    cacheReadUsd: 0.05,
+    cacheWriteUsd: 0.05,
+    outputUsd: 0.3,
+    ...(speedPremiumUsd === undefined ? {} : { speedPremiumUsd }),
+  });
+
+  it("sums splits and premiums across environments and skips duplicate sources", () => {
+    const merged = mergeUsageEnvironmentResults([
+      environment(
+        "environment-a",
+        [source("source-a"), source("shared")],
+        [
+          bucket("source-a", { costBreakdown: split(0.2) }),
+          bucket("shared", { costBreakdown: split(0.2) }),
+        ],
+      ),
+      environment(
+        "environment-b",
+        [source("source-b"), source("shared", { status: "partial" })],
+        [
+          bucket("source-b", { costBreakdown: split() }),
+          bucket("shared", { costBreakdown: split(0.2) }),
+        ],
+      ),
+    ]);
+
+    expect(merged?.duplicateSourceCount).toBe(1);
+    expect(merged?.buckets).toHaveLength(1);
+    expect(merged?.buckets[0]?.estimatedCostUsd).toBeCloseTo(1.5);
+    const costBreakdown = merged?.buckets[0]?.costBreakdown;
+    expect(costBreakdown?.inputUsd).toBeCloseTo(0.3);
+    expect(costBreakdown?.cacheReadUsd).toBeCloseTo(0.15);
+    expect(costBreakdown?.cacheWriteUsd).toBeCloseTo(0.15);
+    expect(costBreakdown?.outputUsd).toBeCloseTo(0.9);
+    expect(costBreakdown?.speedPremiumUsd).toBeCloseTo(0.4);
+  });
+
+  it("keeps the cost of older nodes' buckets unsplit and omits a zero premium", () => {
+    const merged = mergeUsageEnvironmentResults([
+      environment("environment-a", [source("source-a")], [bucket("source-a")]),
+      environment(
+        "environment-b",
+        [source("source-b")],
+        [bucket("source-b", { costBreakdown: split() })],
+      ),
+    ]);
+    expect(merged?.buckets[0]?.estimatedCostUsd).toBe(1);
+    expect(merged?.buckets[0]?.costBreakdown).toEqual(split());
+
+    const older = mergeUsageEnvironmentResults([
+      environment("environment-a", [source("source-a")], [bucket("source-a")]),
+    ]);
+    expect(older?.buckets[0]).not.toHaveProperty("costBreakdown");
+  });
+});

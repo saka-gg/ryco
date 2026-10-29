@@ -3,7 +3,9 @@ import {
   USAGE_PROVIDER_COLORS,
   USAGE_PROVIDER_LABELS,
   filterUsageImports,
+  sumUsageCostBreakdown,
   sumUsageImports,
+  usageCacheReadShare,
   type MergedUsageSummary,
 } from "@ryco/client-runtime/usage";
 import type { UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
@@ -37,6 +39,7 @@ import { SeriesAreaChart } from "../charts";
 import { EnvironmentSelect } from "../EnvironmentSelect";
 import type { StatisticsSearch } from "../statisticsSearch";
 import { useUsageSummary } from "../useUsageSummary";
+import { CostByTypeBar } from "./CostByTypeBar";
 import {
   buildUsageBreakdown,
   buildUsageDaySeries,
@@ -63,6 +66,7 @@ export function UsageView({
       buckets,
       imports: filterUsageImports(merged, search.providers),
       totals: sumUsageTotals(merged, buckets),
+      costByType: sumUsageCostBreakdown(buckets),
       days: buildUsageDaySeries(merged, buckets),
       breakdown: buildUsageBreakdown(buckets, search.usageBreakdown),
     };
@@ -96,16 +100,12 @@ export function UsageView({
     );
   }
 
-  const { totals, days, breakdown } = derived;
+  const { totals, costByType, days, breakdown } = derived;
   const pricedShare =
     totals.pricedTokenCount + totals.unpricedTokenCount > 0
       ? totals.pricedTokenCount / (totals.pricedTokenCount + totals.unpricedTokenCount)
       : 0;
-  const cacheShare =
-    totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationInputTokens > 0
-      ? totals.cachedInputTokens /
-        (totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationInputTokens)
-      : 0;
+  const cacheShare = usageCacheReadShare(totals) ?? 0;
   const pendingLabels = result.pendingEnvironmentIds.flatMap((environmentId) => {
     const label = result.availableEnvironments.find(
       (environment) => environment.environmentId === environmentId,
@@ -185,9 +185,13 @@ export function UsageView({
                   label="Provider-recorded tokens"
                   value={formatInteger(totals.totalTokens)}
                 />
+                {costByType === null ? null : (
+                  <CostByTypeBar totals={costByType} className="border-t border-border/65 pt-4" />
+                )}
               </div>
             </div>
-            <div className="min-w-0 p-4 sm:p-6">
+            {/* The chart fills what the cost column's breakdown adds to the card's height. */}
+            <div className="flex min-w-0 flex-col p-4 sm:p-6">
               <div className="mb-2 flex items-center justify-between gap-3 px-1">
                 <div>
                   <h2 className="text-sm font-semibold">Usage over time</h2>
@@ -410,7 +414,7 @@ function UsageAreaChart({
   );
   return (
     <SeriesAreaChart
-      className="h-[300px]"
+      className="min-h-[300px] flex-1"
       label="Usage over time"
       dates={dates}
       series={series}

@@ -150,3 +150,71 @@ it("accepts anonymous export buckets and keeps unavailable reasoning absent", ()
   expect(decoded.tokens.reasoningTokens).toBeUndefined();
   expect(decoded.exportRecordId).toBe("event-hash");
 });
+
+describe("usage cost breakdown", () => {
+  const bucket = {
+    sourceId: "source-1",
+    date: "2026-08-10",
+    provider: "codex",
+    model: "gpt-5.4",
+    tokens,
+    responseCount: 1,
+    sessionCount: 1,
+    estimatedCostUsd: 0.42,
+    costBreakdown: {
+      inputUsd: 0.1,
+      cacheReadUsd: 0.02,
+      cacheWriteUsd: 0,
+      outputUsd: 0.3,
+      speedPremiumUsd: 0.21,
+    },
+    pricedTokenCount: 265,
+    unpricedTokenCount: 0,
+    costSource: "litellm",
+  } as const;
+  const summary = {
+    contractVersion: USAGE_CONTRACT_VERSION,
+    endDate: "2026-08-10",
+    timeZone: "UTC",
+    generatedAt: "2026-08-10T12:00:00.000Z",
+    scanDurationMs: 18,
+    buckets: [bucket],
+    sources: [],
+    pricing: { state: "live", recognizedModelCount: 1, unrecognizedModelCount: 0 },
+  } as const;
+
+  it("decodes a split with an optional speed premium and rejects negative parts", () => {
+    expect(Schema.decodeUnknownSync(UsageDailyBucket)(bucket).costBreakdown).toEqual(
+      bucket.costBreakdown,
+    );
+    const { speedPremiumUsd: _, ...standard } = bucket.costBreakdown;
+    expect(
+      Schema.decodeUnknownSync(UsageDailyBucket)({ ...bucket, costBreakdown: standard })
+        .costBreakdown?.speedPremiumUsd,
+    ).toBeUndefined();
+    expect(() =>
+      Schema.decodeUnknownSync(UsageDailyBucket)({
+        ...bucket,
+        costBreakdown: { ...bucket.costBreakdown, outputUsd: -0.1 },
+      }),
+    ).toThrow();
+  });
+
+  it("stays readable by clients built before the split", () => {
+    // The previous bucket schema: no version bump, the new field is dropped on decode.
+    const { costBreakdown: _, ...previousFields } = UsageDailyBucket.fields;
+    const PreviousSummary = Schema.Struct({
+      ...UsageSummary.fields,
+      buckets: Schema.Array(Schema.Struct(previousFields)),
+    });
+    const decoded = Schema.decodeUnknownSync(PreviousSummary)(summary);
+    expect(decoded.buckets[0]?.estimatedCostUsd).toBe(0.42);
+    expect(decoded.buckets[0]).not.toHaveProperty("costBreakdown");
+    // A summary from a node built before the split decodes without one.
+    const { costBreakdown: __, ...previousBucket } = bucket;
+    expect(
+      Schema.decodeUnknownSync(UsageSummary)({ ...summary, buckets: [previousBucket] }).buckets[0]
+        ?.costBreakdown,
+    ).toBeUndefined();
+  });
+});

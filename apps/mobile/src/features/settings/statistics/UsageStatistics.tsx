@@ -17,7 +17,9 @@ import {
   buildUsageBreakdown,
   buildUsageDaySeries,
   filterUsageBuckets,
+  sumUsageCostBreakdown,
   sumUsageTotals,
+  usageCacheReadShare,
   type MergedUsageSummary,
 } from "@ryco/client-runtime/usage";
 import { AppText as Text } from "../../../components/AppText";
@@ -32,6 +34,7 @@ import {
   dayLabel,
   useStatisticsPalette,
 } from "./StatisticsParts";
+import { UsageCostByType } from "./UsageCostByType";
 import { UsageProviderChart } from "./UsageProviderChart";
 import type { UsageProviderKind } from "@ryco/contracts";
 
@@ -42,6 +45,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
   const [breakdown, setBreakdown] = useState("model");
   const buckets = filterUsageBuckets(summary, providers);
   const totals = sumUsageTotals(summary, buckets);
+  const costByType = sumUsageCostBreakdown(buckets);
   const series = buildUsageDaySeries(summary, buckets);
   const imports = filterUsageImports(summary, providers);
   const importTotals = sumUsageImports(imports);
@@ -55,8 +59,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
           (totals.pricedTokenCount / (totals.pricedTokenCount + totals.unpricedTokenCount)) * 100,
         )
       : 0;
-  const cacheInput =
-    totals.cachedInputTokens + totals.uncachedInputTokens + totals.cacheCreationInputTokens;
+  const cacheReadShare = usageCacheReadShare(totals) ?? 0;
   const included = summary.sources.filter(
     (source) => source.included && providers.includes(source.provider),
   );
@@ -297,6 +300,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
                     </Text>
                   </View>
                 ))}
+                {costByType ? <UsageCostByType totals={costByType} /> : null}
               </View>
             </View>
             <View style={{ padding: 16 }}>
@@ -343,10 +347,7 @@ export function UsageStatistics({ summary }: { summary: MergedUsageSummary }) {
               ["Total tokens", compact(totals.totalTokens)],
               ["Sessions", integer(totals.distinctSessionCount)],
               ["Responses", integer(totals.responseCount)],
-              [
-                "Cache read",
-                `${cacheInput ? Math.round((totals.cachedInputTokens / cacheInput) * 100) : 0}%`,
-              ],
+              ["Cache read", `${Math.round(cacheReadShare * 100)}%`],
               [
                 "Reasoning",
                 totals.reasoningTokens === null ? "Unavailable" : compact(totals.reasoningTokens),
