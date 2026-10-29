@@ -32,6 +32,12 @@ export function browserForApp(id: string): ComputerBrowser | null {
   return null;
 }
 
+/**
+ * How long a turn's claim on a target lasts after its last use. Another turn cannot claim the
+ * target before then, and the Ryco browser keeps a tab the agent used live and unthrottled as long.
+ */
+export const COMPUTER_TARGET_CLAIM_MS = 60_000;
+
 export const DEFAULT_COMPUTER_POLICY: ComputerUsePolicy = {
   enabled: false,
   foregroundEnabled: false,
@@ -123,7 +129,7 @@ export class ComputerPolicyController {
       throw new Error("Computer-use session history is full. Restart Ryco before continuing.");
     this.seenTurns.add(turn);
     for (const [target, claim] of this.claims)
-      if (Date.now() - claim.seen >= 60_000) this.claims.delete(target);
+      if (Date.now() - claim.seen >= COMPUTER_TARGET_CLAIM_MS) this.claims.delete(target);
     const controller = new AbortController();
     const abort = () => {
       controller.abort();
@@ -205,7 +211,11 @@ export class ComputerPolicyController {
       claim: (target) => {
         check();
         const existing = this.claims.get(target);
-        if (existing && existing.turn !== turn && Date.now() - existing.seen < 60_000)
+        if (
+          existing &&
+          existing.turn !== turn &&
+          Date.now() - existing.seen < COMPUTER_TARGET_CLAIM_MS
+        )
           throw new Error(
             "Another Ryco turn is using this target. Release it or wait for its lease to expire.",
           );

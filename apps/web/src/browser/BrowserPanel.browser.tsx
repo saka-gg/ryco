@@ -243,3 +243,36 @@ it("offers explicit one-use popup consent, blocked recovery and cancellation", a
   await view.getByRole("button", { name: "Allow sign-in popup" }).click();
   await expect.element(view.getByRole("alert")).toMatchTextContent("Show and focus");
 });
+
+it("marks suspended tabs and reloads them by showing them", async () => {
+  await page.viewport(1200, 900);
+  const api = setup();
+  const view = await render(
+    <div style={{ display: "flex", height: 600, width: 800 }}>
+      <BrowserPanel environmentId={null} cwd="/project" />
+    </div>,
+  );
+  await view.getByRole("textbox", { name: "Browser address" }).fill("localhost:3000");
+  await view.getByRole("button", { name: "Go", exact: true }).click();
+  await expect.poll(() => api.surface.mock.calls.at(-1)?.[0].tab).toBe("tab-1");
+  // The desktop suspended another tab of this project to save memory.
+  const [live] = useBrowserUi.getState().native.tabs;
+  if (!live) throw new Error("No browser tab.");
+  useBrowserUi.setState({
+    native: {
+      tabs: [
+        live,
+        { ...live, id: "tab-2", title: "Docs", url: "http://localhost:3000/docs", suspended: true },
+      ],
+    },
+  });
+  const suspended = view.getByRole("tab", { name: /suspended/ });
+  await expect.element(suspended).toBeVisible();
+  await expect
+    .element(suspended)
+    .toHaveAttribute("title", "Suspended to save memory. Reloads when you open it.");
+  await expect.element(view.getByRole("tab", { name: "Fixture" })).not.toHaveAttribute("title");
+  // Showing it is what reloads it: the desktop revives a tab when it is surfaced.
+  await suspended.click();
+  await expect.poll(() => api.surface.mock.calls.at(-1)?.[0].tab).toBe("tab-2");
+});

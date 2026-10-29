@@ -12,6 +12,14 @@ import {
   resetFakeElectron,
 } from "./embeddedBrowser.fixtures.ts";
 import { EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
+import {
+  BROWSER_IDLE_SUSPEND_MS,
+  BROWSER_LIVE_TAB_LIMIT,
+  BROWSER_PREVIEW_HOLD_MS,
+  BROWSER_REVIVE_WAIT_MS,
+  BROWSER_TAB_LIMIT,
+} from "./browserTabBudget.ts";
+import { COMPUTER_TARGET_CLAIM_MS } from "./policy.ts";
 
 const browsers: EmbeddedComputerBrowser[] = [];
 function newBrowser(): EmbeddedComputerBrowser {
@@ -71,7 +79,8 @@ it("opens each tab in its own hidden host with today's isolation settings", asyn
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
-      backgroundThrottling: false,
+      // A user's hidden tab is throttled in the background (browser-tab-budget).
+      backgroundThrottling: true,
       focusOnNavigation: false,
     });
     expect(host.options).toEqual({
@@ -187,6 +196,8 @@ describe("agent CDP", () => {
         "Emulation.setFocusEmulationEnabled",
         "Page.reload",
       ]);
+      // Only the memory budget's timer is left, and dispose() clears it.
+      browser.dispose();
       expect(vi.getTimerCount()).toBe(0);
     },
   );
@@ -232,6 +243,8 @@ describe("agent CDP", () => {
       "Emulation.setFocusEmulationEnabled",
       "Page.reload",
     ]);
+    // Only the memory budget's timer is left, and dispose() clears it.
+    browser.dispose();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -503,4 +516,726 @@ it("ignores the late events of a page the tab no longer shows", async () => {
     "Emulation.setFocusEmulationEnabled",
     "Page.reload",
   ]);
+});
+
+describe("memory budget", () => {
+  const MINUTE = 60_000;
+  /** Fake time and timeouts; setImmediate and microtasks stay real (the fake debugger and flush use them). */
+  const fakeTime = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+  const tabState = (browser: EmbeddedComputerBrowser, id: string) =>
+    browser.state().tabs.find((tab) => tab.id === id);
+  const suspended = (browser: EmbeddedComputerBrowser, id: string) =>
+    tabState(browser, id)?.suspended === true;
+  const surface = (
+    browser: EmbeddedComputerBrowser,
+    owner: ReturnType<typeof fakeOwnerWindow>,
+    tab: string | null,
+  ) =>
+    browser.surface(
+      { owner: "owner", tab, x: 0, y: 0, width: 800, height: 600 },
+      owner as unknown as BrowserWindow,
+    );
+  /** The newest page's view: a revived tab's page (fakeTab() finds a tab's first page). */
+  const newestView = () => fakeElectronState.views.at(-1)!;
+
+  it("suspends an idle hidden tab after 10 minutes and keeps its id, title and address", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/page", false, signal(), "project");
+    const { contents, host } = fakeTab(tab.id);
+    contents.title = "Example";
+    contents.emit("page-title-updated", fakeEvent(), "Example");
+    const destroyHost = vi.spyOn(host, "destroy");
+    await advance(BROWSER_IDLE_SUSPEND_MS - 1);
+    expect(suspended(browser, tab.id)).toBe(false);
+    const published = vi.fn();
+    browser.onState(published);
+    await advance(1);
+    expect(browser.state().tabs).toEqual([
+      {
+        id: tab.id,
+        project: "project",
+        title: "Example",
+        url: "https://example.com/page",
+        loading: false,
+        canGoBack: false,
+        canGoForward: false,
+        zoom: 1,
+        presentation: "background",
+        error: null,
+        signInPopup: "idle",
+        suspended: true,
+      },
+    ]);
+    expect(published).toHaveBeenCalledTimes(1);
+    expect(contents.close).toHaveBeenCalledWith({ waitForBeforeUnload: false });
+    expect(destroyHost).toHaveBeenCalledTimes(1);
+    await expect(browser.tabs(signal())).resolves.toEqual([
+      { id: tab.id, title: "Example", url: "https://example.com/page", suspended: true },
+    ]);
+    // The old page's late events cannot remove the tab.
+    host.emit("closed");
+    contents.emit("destroyed");
+    expect(browser.state().tabs.map(({ id, suspended }) => ({ id, suspended }))).toEqual([
+      { id: tab.id, suspended: true },
+    ]);
+    // Nothing is left to plan.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("suspends the least recently used hidden tab past the live limit", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tabs = [];
+    for (let index = 0; index <= BROWSER_LIVE_TAB_LIMIT; index++) {
+      tabs.push(await browser.open(`https://example.com/${index}`, false, signal(), `p${index}`));
+      await advance(10);
+    }
+    expect(tabs.map((tab) => suspended(browser, tab.id))).toEqual([
+      true,
+      ...Array.from({ length: BROWSER_LIVE_TAB_LIMIT }, () => false),
+    ]);
+  });
+
+  it.each([
+    [
+      "mounted",
+      (browser: EmbeddedComputerBrowser, id: string) => {
+        surface(browser, fakeOwnerWindow(), id);
+        // surface() also makes it the last-shown tab; clear that to test the mounted exemption alone.
+        (browser as unknown as { lastShown: string | null }).lastShown = null;
+      },
+    ],
+    [
+      "last-shown",
+      (browser: EmbeddedComputerBrowser, id: string) => {
+        // Ryco hid the panel (window hidden or covered): the tab is unmounted but still the one shown.
+        const owner = fakeOwnerWindow();
+        surface(browser, owner, id);
+        surface(browser, owner, null);
+      },
+    ],
+    [
+      "popped-out",
+      async (browser: EmbeddedComputerBrowser, id: string) => {
+        await browser.command({ tab: id, action: "popout" });
+      },
+    ],
+    [
+      "DevTools",
+      (_browser: EmbeddedComputerBrowser, id: string) => {
+        fakeTab(id).contents.devToolsOpened = true;
+      },
+    ],
+    [
+      "audible",
+      (_browser: EmbeddedComputerBrowser, id: string) => {
+        fakeTab(id).contents.audible = true;
+      },
+    ],
+  ] as const)("never suspends a %s tab", async (kind, pin) => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const other = await browser.open("https://example.org/", false, signal(), "project");
+    await pin(browser, tab.id);
+    await advance(11 * MINUTE);
+    expect(suspended(browser, tab.id)).toBe(false);
+    expect(suspended(browser, other.id)).toBe(true);
+    if (kind === "DevTools" || kind === "audible") {
+      // Closing DevTools or going silent makes the tab eligible again at once.
+      const { contents } = fakeTab(tab.id);
+      contents.devToolsOpened = false;
+      contents.audible = false;
+      contents.emit(kind === "DevTools" ? "devtools-closed" : "audio-state-changed", fakeEvent());
+      await advance(0);
+      expect(suspended(browser, tab.id)).toBe(true);
+    }
+  });
+
+  it("never suspends a tab while its sign-in grant is armed", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS - 10_000);
+    // The grant itself needs a focused tab (command "allow-sign-in"); arm it directly here.
+    (browser as unknown as { signIn: { arm(tab: string): void } }).signIn.arm(tab.id);
+    await advance(20_000);
+    expect(tabState(browser, tab.id)?.signInPopup).toBe("armed");
+    expect(suspended(browser, tab.id)).toBe(false);
+    // The grant expires after 30 s; the idle tab is then suspended.
+    await advance(10_000);
+    // The expiry notifies on a microtask; a timeout set during a fake tick runs 1 ms later.
+    await advance(1);
+    expect(tabState(browser, tab.id)?.signInPopup).toBe("idle");
+    expect(suspended(browser, tab.id)).toBe(true);
+  });
+
+  it("keeps a tab an agent used live for the claim window and idle time", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(9 * MINUTE);
+    await browser.send(tab.id, "Page.reload", {}, signal());
+    // The agent's use restarts the idle clock.
+    await advance(BROWSER_IDLE_SUSPEND_MS - 1);
+    expect(suspended(browser, tab.id)).toBe(false);
+    await advance(1);
+    expect(suspended(browser, tab.id)).toBe(true);
+  });
+
+  it("suspends the least recently used agent tab past the warm limit once its hold ends", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    // Agent-opened tabs (no project) form their own scope and start inside the claim window.
+    const tabs = [];
+    for (let index = 0; index < 7; index++) {
+      tabs.push(await browser.open(`https://example.com/${index}`, false, signal()));
+      await advance(10);
+    }
+    await advance(COMPUTER_TARGET_CLAIM_MS - 70 - 1);
+    expect(tabs.map((tab) => suspended(browser, tab.id))).toEqual(Array(7).fill(false));
+    await advance(1);
+    expect(tabs.map((tab) => suspended(browser, tab.id))).toEqual([true, ...Array(6).fill(false)]);
+    // Back at the warm limit, the other six wait for the idle time.
+    await advance(5 * MINUTE);
+    expect(tabs.filter((tab) => suspended(browser, tab.id))).toHaveLength(1);
+  });
+
+  it("keeps an agent-held tab over the live limit and suspends the next one instead", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const held = await browser.open("https://example.com/held", false, signal(), "p-held");
+    await browser.send(held.id, "Page.reload", {}, signal());
+    await advance(10);
+    const others = [];
+    for (let index = 0; index < BROWSER_LIVE_TAB_LIMIT; index++) {
+      others.push(await browser.open(`https://example.com/${index}`, false, signal(), `p${index}`));
+      await advance(10);
+    }
+    expect(suspended(browser, held.id)).toBe(false);
+    expect(others.map((tab) => suspended(browser, tab.id))).toEqual([
+      true,
+      ...Array.from({ length: BROWSER_LIVE_TAB_LIMIT - 1 }, () => false),
+    ]);
+  });
+
+  it("throttles hidden tabs unless an agent used them in the last 60 s", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    expect(contents.getBackgroundThrottling()).toBe(true);
+    await browser.send(tab.id, "Page.reload", {}, signal());
+    expect(contents.getBackgroundThrottling()).toBe(false);
+    await advance(COMPUTER_TARGET_CLAIM_MS - 1);
+    expect(contents.getBackgroundThrottling()).toBe(false);
+    await advance(1);
+    expect(contents.getBackgroundThrottling()).toBe(true);
+    await browser.send(tab.id, "Page.reload", {}, signal());
+    expect(contents.getBackgroundThrottling()).toBe(false);
+    // Emergency stop drops the agent's hold at once.
+    browser.stop();
+    expect(contents.getBackgroundThrottling()).toBe(true);
+    // An agent-opened tab starts unthrottled.
+    const agentTab = await browser.open("https://example.org/", false, signal());
+    expect(fakeTab(agentTab.id).view.options.webPreferences?.backgroundThrottling).toBe(false);
+    expect(fakeTab(agentTab.id).contents.getBackgroundThrottling()).toBe(false);
+  });
+
+  it("ends the agent's focus emulation with its hold and turns it on again for its next command", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    const focus = (enabled: boolean) => ({
+      method: "Emulation.setFocusEmulationEnabled",
+      params: { enabled },
+    });
+    const evaluate = { method: "Runtime.evaluate", params: {} };
+    await browser.send(tab.id, "Runtime.evaluate", {}, signal());
+    await advance(COMPUTER_TARGET_CLAIM_MS - 1);
+    expect(contents.debugger.commands).toEqual([focus(true), evaluate]);
+    // In Chromium, focus emulation keeps a hidden page visible and painting whatever its
+    // throttling, so it ends with the hold. The session stays (other units keep state in it).
+    await advance(1);
+    await flush();
+    expect(contents.getBackgroundThrottling()).toBe(true);
+    expect(contents.debugger.commands).toEqual([focus(true), evaluate, focus(false)]);
+    expect(contents.debugger.isAttached()).toBe(true);
+    await browser.send(tab.id, "Runtime.evaluate", {}, signal());
+    expect(contents.debugger.commands).toEqual([
+      focus(true),
+      evaluate,
+      focus(false),
+      focus(true),
+      evaluate,
+    ]);
+    // A thumbnail hold on a page without a session sends nothing when it ends.
+    const other = await browser.open("https://example.org/", false, signal(), "project");
+    await browser.capture(other.id);
+    await advance(BROWSER_PREVIEW_HOLD_MS);
+    expect(fakeTab(other.id).contents.getBackgroundThrottling()).toBe(true);
+    expect(fakeTab(other.id).contents.debugger.commands).toEqual([]);
+  });
+
+  it("surface() revives a suspended tab at its last address and mounts it", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/a", false, signal(), "project");
+    const old = fakeTab(tab.id);
+    old.contents.url = "https://example.com/b"; // The page navigated since.
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    expect(suspended(browser, tab.id)).toBe(true);
+    const owner = fakeOwnerWindow();
+    const views = fakeElectronState.views.length;
+    surface(browser, owner, tab.id);
+    expect(fakeElectronState.views).toHaveLength(views + 1);
+    const fresh = newestView();
+    expect(fresh.webContents.loadURL).toHaveBeenCalledTimes(1);
+    expect(fresh.webContents.loadURL).toHaveBeenCalledWith("https://example.com/b");
+    expect(fresh.options.webPreferences).toMatchObject({
+      session: fakeSession,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      focusOnNavigation: false,
+    });
+    expect(owner.contentView.children).toEqual([fresh]);
+    expect(fresh.firstParent?.isVisible()).toBe(false);
+    expect(tabState(browser, tab.id)).toMatchObject({ id: tab.id, presentation: "panel" });
+    expect(tabState(browser, tab.id)).not.toHaveProperty("suspended");
+    // The old page's late events reach neither the tab nor its new page.
+    old.host.emit("closed");
+    old.contents.emit("destroyed");
+    await flush();
+    expect(tabState(browser, tab.id)).toMatchObject({ id: tab.id, presentation: "panel" });
+    expect(owner.contentView.children).toEqual([fresh]);
+    expect(fresh.webContents.isDestroyed()).toBe(false);
+    // The agent hears about a reload the user caused, once. It had finished: "earlier".
+    await expect(browser.wake(tab.id, signal())).resolves.toBe("earlier");
+    await expect(browser.wake(tab.id, signal())).resolves.toBe(null);
+    expect(fakeElectronState.views).toHaveLength(views + 1);
+  });
+
+  it("send revives a suspended tab before the CDP command and keeps its id", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/f", false, signal(), "project");
+    await browser.send(tab.id, "Page.reload", {}, signal());
+    const old = fakeTab(tab.id).contents;
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    expect(suspended(browser, tab.id)).toBe(true);
+    // Suspension tears the page down through teardownPage: its session ended first.
+    expect(old.debugger.detach).toHaveBeenCalledTimes(1);
+    expect(old.debugger.detach.mock.invocationCallOrder[0]).toBeLessThan(
+      old.close.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(old.debugger.listenerCount("message")).toBe(0);
+    expect(old.debugger.listenerCount("detach")).toBe(0);
+    expect(old.isDestroyed()).toBe(true);
+    await expect(browser.send(tab.id, "Runtime.evaluate", {}, signal())).resolves.toEqual({});
+    const fresh = newestView().webContents;
+    expect(fresh).not.toBe(old);
+    expect(fresh.loadURL).toHaveBeenCalledWith("https://example.com/f");
+    expect(fresh.loadURL.mock.invocationCallOrder[0]).toBeLessThan(
+      fresh.debugger.attach.mock.invocationCallOrder[0] ?? 0,
+    );
+    // The new page's session gets focus emulation again; it started unthrottled.
+    expect(fresh.debugger.commands.map(({ method }) => method)).toEqual([
+      "Emulation.setFocusEmulationEnabled",
+      "Runtime.evaluate",
+    ]);
+    expect(fresh.webPreferences.backgroundThrottling).toBe(false);
+    expect(browser.state().tabs.map(({ id }) => id)).toEqual([tab.id]);
+    expect(suspended(browser, tab.id)).toBe(false);
+    // The driver's wake() reports the reload once (send itself reports nothing); the reload had
+    // finished before this wake.
+    await expect(browser.wake(tab.id, signal())).resolves.toBe("earlier");
+    await expect(browser.wake(tab.id, signal())).resolves.toBe(null);
+  });
+
+  it("wake() waits for the reload, then reports it", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    let finish!: () => void;
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    let woke = false;
+    const waking = browser.wake(tab.id, signal()).then((revived) => {
+      woke = true;
+      return revived;
+    });
+    await flush();
+    expect(woke).toBe(false);
+    expect(tabState(browser, tab.id)).not.toHaveProperty("suspended");
+    finish();
+    await expect(waking).resolves.toBe("now");
+    // Reported once.
+    await expect(browser.wake(tab.id, signal())).resolves.toBe(null);
+    // An abort ends the wait without failing the reload or losing the report.
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    expect(suspended(browser, tab.id)).toBe(true);
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(() => new Promise<void>(() => {}));
+    const controller = new AbortController();
+    const aborted = browser.wake(tab.id, controller.signal);
+    controller.abort(new Error("stopped"));
+    await expect(aborted).rejects.toThrow("stopped");
+    // A load that never ends stops being waited for after 30 s in total.
+    const slow = browser.wake(tab.id, signal());
+    await advance(BROWSER_REVIVE_WAIT_MS);
+    await expect(slow).resolves.toBe("now");
+    let again: string | null | undefined;
+    void browser.wake(tab.id, signal()).then((revived) => {
+      again = revived;
+    });
+    await flush();
+    expect(again).toBe(null);
+  });
+
+  it("wake() reports a reload the user started and that is still running as now", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    let finish!: () => void;
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    surface(browser, fakeOwnerWindow(), tab.id);
+    const waking = browser.wake(tab.id, signal());
+    await flush();
+    finish();
+    // The page was just loaded from its address: the driver skips a reload and refuses history.
+    await expect(waking).resolves.toBe("now");
+  });
+
+  it("re-checks the sign-in rules after waiting for a revival", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    let finish!: () => void;
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    const sending = browser.send(tab.id, "Runtime.evaluate", {}, signal());
+    await flush();
+    // The user shows the reloading tab and allows a sign-in while the agent's command waits.
+    (browser as unknown as { signIn: { arm(tab: string): void } }).signIn.arm(tab.id);
+    await flush();
+    expect(tabState(browser, tab.id)?.signInPopup).toBe("armed");
+    finish();
+    await sending;
+    await flush();
+    // The agent's command cancelled the grant before it reached the page.
+    expect(tabState(browser, tab.id)?.signInPopup).toBe("idle");
+  });
+
+  it("capture keeps a previewed tab live and revives a suspended one", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    await expect(browser.capture(tab.id)).resolves.toBe("data:image/png;base64,");
+    expect(contents.getBackgroundThrottling()).toBe(false);
+    await advance(BROWSER_PREVIEW_HOLD_MS - 1);
+    expect(contents.getBackgroundThrottling()).toBe(false);
+    await advance(1);
+    expect(contents.getBackgroundThrottling()).toBe(true);
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    expect(suspended(browser, tab.id)).toBe(true);
+    await expect(browser.capture(tab.id)).rejects.toThrow("This browser tab is reloading.");
+    const fresh = newestView().webContents;
+    expect(fresh.loadURL).toHaveBeenCalledWith("https://example.com/");
+    expect(fresh.getBackgroundThrottling()).toBe(false);
+    expect(suspended(browser, tab.id)).toBe(false);
+    await flush();
+    await expect(browser.capture(tab.id)).resolves.toBe("data:image/png;base64,");
+    expect(fresh.capturePage).toHaveBeenCalledTimes(1);
+  });
+
+  it("capture stops refusing a revival whose load never settles after the revival wait", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    // A hanging subresource: Electron's loadURL never settles.
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(() => new Promise<void>(() => {}));
+    await expect(browser.capture(tab.id)).rejects.toThrow("This browser tab is reloading.");
+    fakeElectronState.onView = null;
+    const fresh = newestView().webContents;
+    await advance(BROWSER_REVIVE_WAIT_MS - 1);
+    await expect(browser.capture(tab.id)).rejects.toThrow("This browser tab is reloading.");
+    await advance(1);
+    // The preview shows whatever the page has painted so far.
+    await expect(browser.capture(tab.id)).resolves.toBe("data:image/png;base64,");
+    expect(fresh.capturePage).toHaveBeenCalledTimes(1);
+  });
+
+  it("capture waits for the first frame of a hidden page it unthrottles", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    // Electron: a hidden page that unthrottling shows has no frame for a few frames.
+    contents.capturePage.mockRejectedValueOnce(new Error("UnknownVizError"));
+    const throttling = vi.spyOn(contents, "setBackgroundThrottling");
+    const capturing = browser.capture(tab.id);
+    await advance(50);
+    await expect(capturing).resolves.toBe("data:image/png;base64,");
+    expect(contents.capturePage).toHaveBeenCalledTimes(2);
+    expect(throttling.mock.calls).toEqual([[false]]);
+  });
+
+  it("capture shows a hidden page that loaded unthrottled, and gives up on one that never paints", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    // An agent-opened tab loads inside the agent's hold: unthrottled, so Electron never showed it.
+    const tab = await browser.open("https://example.com/", false, signal());
+    const { contents } = fakeTab(tab.id);
+    const noFrame = new Error("Current display surface not available for capture");
+    contents.capturePage.mockRejectedValueOnce(noFrame);
+    const throttling = vi.spyOn(contents, "setBackgroundThrottling");
+    const capturing = browser.capture(tab.id);
+    await advance(50);
+    await expect(capturing).resolves.toBe("data:image/png;base64,");
+    // Throttling and unthrottling it again shows it.
+    expect(throttling.mock.calls).toEqual([[true], [false]]);
+    expect(contents.getBackgroundThrottling()).toBe(false);
+    contents.capturePage.mockClear();
+    contents.capturePage.mockRejectedValue(noFrame);
+    const failing = expect(browser.capture(tab.id)).rejects.toThrow(noFrame.message);
+    await advance(19 * 50);
+    await failing;
+    expect(contents.capturePage).toHaveBeenCalledTimes(20);
+  });
+
+  it("a revival whose load never settles is protected only for the revival wait", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    for (let index = 0; index < BROWSER_LIVE_TAB_LIMIT; index++) {
+      const tab = await browser.open(`https://example.com/${index}`, false, signal(), `p${index}`);
+      await browser.command({ tab: tab.id, action: "popout" });
+    }
+    const tab = await browser.open("https://example.com/hang", false, signal(), "p-hang");
+    await advance(0);
+    // The only eligible tab past the live limit.
+    expect(suspended(browser, tab.id)).toBe(true);
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(() => new Promise<void>(() => {}));
+    await browser.command({ tab: tab.id, action: "reload" });
+    fakeElectronState.onView = null;
+    await advance(BROWSER_REVIVE_WAIT_MS - 1);
+    expect(suspended(browser, tab.id)).toBe(false);
+    await advance(1);
+    // Still loading, but no longer pinned: the live limit applies again.
+    expect(suspended(browser, tab.id)).toBe(true);
+  });
+
+  it("an emergency stop during a revival reports the blank page instead of a loaded one", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            // Electron rejects the stopped load with ERR_ABORTED, and did-fail-load (-3) is ignored.
+            view.webContents.stop.mockImplementationOnce(() =>
+              reject(Object.assign(new Error("ERR_ABORTED (-3)"), { errno: -3 })),
+            );
+          }),
+      );
+    surface(browser, fakeOwnerWindow(), tab.id);
+    fakeElectronState.onView = null;
+    const fresh = newestView().webContents;
+    const published = vi.fn();
+    browser.onState(published);
+    browser.stop();
+    expect(fresh.stop).toHaveBeenCalledTimes(1);
+    expect(published).toHaveBeenCalled();
+    await flush();
+    expect(tabState(browser, tab.id)).toMatchObject({
+      url: "https://example.com/",
+      loading: false,
+      error: "Loading was stopped. Reload to recover.",
+    });
+    expect(suspended(browser, tab.id)).toBe(false);
+    // The user's reload clears it.
+    fresh.emit("did-start-loading");
+    expect(tabState(browser, tab.id)?.error).toBeNull();
+  });
+
+  it("zooms a suspended tab once its revived page commits", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    await browser.command({ tab: tab.id, action: "zoom", zoom: 1.5 });
+    const fresh = newestView().webContents;
+    expect(fresh.loadURL).toHaveBeenCalledWith("https://example.com/");
+    // Chromium drops a zoom set before the new page's frame is live.
+    expect(fresh.getZoomFactor()).toBe(1);
+    const published = vi.fn();
+    browser.onState(published);
+    fresh.emit("did-navigate", fakeEvent(), "https://example.com/", 200, "OK");
+    expect(fresh.getZoomFactor()).toBe(1.5);
+    expect(tabState(browser, tab.id)?.zoom).toBe(1.5);
+    expect(published.mock.calls.at(-1)?.[0].tabs[0].zoom).toBe(1.5);
+  });
+
+  it("an agent action's commands cost no budget pass while its hold lasts", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(0);
+    const passes = vi.spyOn(browser as unknown as { applyBudget(): void }, "applyBudget");
+    for (let index = 0; index < 4; index++)
+      await browser.send(tab.id, "Runtime.evaluate", {}, signal());
+    await advance(0);
+    expect(passes).not.toHaveBeenCalled();
+    const { contents } = fakeTab(tab.id);
+    expect(contents.getBackgroundThrottling()).toBe(false);
+    // One pass when the hold ends, which throttles the page again.
+    await advance(COMPUTER_TARGET_CLAIM_MS);
+    expect(passes).toHaveBeenCalledTimes(1);
+    expect(contents.getBackgroundThrottling()).toBe(true);
+  });
+
+  it("a tab still loading is not the LRU victim", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    for (let index = 0; index < BROWSER_LIVE_TAB_LIMIT; index++) {
+      const tab = await browser.open(`https://example.com/${index}`, false, signal(), `p${index}`);
+      await browser.command({ tab: tab.id, action: "popout" });
+    }
+    let finish!: () => void;
+    fakeElectronState.onView = (view) =>
+      view.webContents.loadURL.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    const opening = browser.open("https://example.com/loading", false, signal(), "p-loading");
+    fakeElectronState.onView = null;
+    await advance(0);
+    const id = String(newestView().webContents.id);
+    expect(suspended(browser, id)).toBe(false);
+    finish();
+    await opening;
+    await advance(0);
+    // The only eligible tab past the live limit once its load settled.
+    expect(suspended(browser, id)).toBe(true);
+    expect(browser.state().tabs.filter((tab) => tab.suspended)).toHaveLength(1);
+  });
+
+  it("showing another tab ends the last-shown exemption", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const a = await browser.open("https://example.com/a", false, signal(), "project");
+    const b = await browser.open("https://example.com/b", false, signal(), "project");
+    const owner = fakeOwnerWindow();
+    surface(browser, owner, a.id);
+    surface(browser, owner, b.id);
+    surface(browser, owner, null);
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    expect(suspended(browser, a.id)).toBe(true);
+    expect(suspended(browser, b.id)).toBe(false);
+    // Closing the last-shown tab clears it.
+    await browser.close(b.id, signal());
+    expect(browser.state().tabs.map(({ id }) => id)).toEqual([a.id]);
+  });
+
+  it("handles commands on a suspended tab", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    const views = fakeElectronState.views.length;
+    for (const action of ["back", "forward", "stop", "dock", "cancel-sign-in"] as const)
+      await browser.command({ tab: tab.id, action });
+    expect(fakeElectronState.views).toHaveLength(views);
+    expect(suspended(browser, tab.id)).toBe(true);
+    await expect(browser.command({ tab: tab.id, action: "zoom", zoom: 9 })).rejects.toThrow(
+      "Invalid zoom.",
+    );
+    // A suspended tab is never the focused tab a sign-in grant needs: refused without a reload.
+    await expect(browser.command({ tab: tab.id, action: "allow-sign-in" })).rejects.toThrow(
+      "Show and focus this browser tab before allowing sign-in.",
+    );
+    expect(fakeElectronState.views).toHaveLength(views);
+    // navigate reloads at the new address with one page and one load.
+    await browser.command({ tab: tab.id, action: "navigate", url: "https://example.org/next" });
+    expect(fakeElectronState.views).toHaveLength(views + 1);
+    const fresh = newestView().webContents;
+    expect(fresh.loadURL).toHaveBeenCalledTimes(1);
+    expect(fresh.loadURL).toHaveBeenCalledWith("https://example.org/next");
+    await flush();
+    expect(tabState(browser, tab.id)).toMatchObject({ url: "https://example.org/next" });
+    expect(suspended(browser, tab.id)).toBe(false);
+    // popout revives, then pops the new page out.
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    expect(suspended(browser, tab.id)).toBe(true);
+    await browser.command({ tab: tab.id, action: "popout" });
+    expect(tabState(browser, tab.id)?.presentation).toBe("window");
+    expect(newestView().firstParent?.isVisible()).toBe(true);
+    await browser.command({ tab: tab.id, action: "dock" });
+    await flush();
+    // close removes a suspended tab.
+    await advance(BROWSER_IDLE_SUSPEND_MS);
+    expect(suspended(browser, tab.id)).toBe(true);
+    await browser.command({ tab: tab.id, action: "close" });
+    expect(browser.state().tabs).toEqual([]);
+    await expect(browser.send(tab.id, "Page.reload", {}, signal())).rejects.toThrow(
+      "Browser tab closed.",
+    );
+  });
+
+  it("the 24-tab limit counts suspended tabs", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    for (let index = 0; index < BROWSER_TAB_LIMIT; index++)
+      await browser.open(`https://example.com/${index}`, false, signal(), `p${index}`);
+    await advance(0);
+    expect(browser.state().tabs.filter((tab) => tab.suspended)).toHaveLength(
+      BROWSER_TAB_LIMIT - BROWSER_LIVE_TAB_LIMIT,
+    );
+    await expect(browser.open("https://example.com/25", false, signal(), "p25")).rejects.toThrow(
+      "Close a browser tab before opening another (24 tab limit).",
+    );
+  });
+
+  it("dispose clears the budget timer", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    await browser.open("https://example.com/", false, signal(), "project");
+    expect(vi.getTimerCount()).toBe(1);
+    browser.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    const views = fakeElectronState.views.length;
+    await advance(11 * MINUTE);
+    expect(fakeElectronState.views).toHaveLength(views);
+    expect(browser.state().tabs).toEqual([]);
+  });
 });

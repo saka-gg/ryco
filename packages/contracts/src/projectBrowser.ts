@@ -13,6 +13,8 @@ export const ProjectBrowserTab = Schema.Struct({
   presentation: Schema.Literals(["background", "panel", "window"]),
   error: Schema.NullOr(text),
   signInPopup: Schema.optionalKey(Schema.Literals(["idle", "armed", "open", "blocked", "failed"])),
+  /** The page was unloaded to save memory; showing or using the tab reloads its URL. */
+  suspended: Schema.optionalKey(Schema.Boolean),
 });
 export type ProjectBrowserTab = typeof ProjectBrowserTab.Type;
 export const ProjectBrowserState = Schema.Struct({ tabs: Schema.Array(ProjectBrowserTab) });
