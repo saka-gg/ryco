@@ -724,7 +724,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.updateThread,
     description:
-      "Update thread title, model and options, interaction mode, token mode, archive state, or persistent goal. Archiving and runtime permission changes require approval; other changes execute asynchronously.",
+      'Update thread title, model and options, interaction mode, token mode, archive state, or persistent goal. goalStatus reports on your own thread\'s goal: "complete" when the whole objective is verified done, "blocked" when the same outside blocker has stopped progress for three goal turns; either ends Ryco\'s automatic goal turns. Archiving and runtime permission changes require approval; other changes execute asynchronously.',
     inputSchema: {
       type: "object",
       properties: {
@@ -733,6 +733,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
         title: { type: "string", minLength: 1, maxLength: 200 },
         archived: { type: "boolean" },
         persistentGoal: { anyOf: [{ type: "string", maxLength: 4000 }, { type: "null" }] },
+        goalStatus: { type: "string", enum: ["complete", "blocked"] },
         modelSelection: modelSelectionSchema,
         runtimeMode: {
           type: "string",

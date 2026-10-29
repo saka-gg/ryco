@@ -192,6 +192,7 @@ import { AgentControlExternalInstallationServiceLive } from "./agentControl/Laye
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { OrchestrationCommandApplicationLive } from "./orchestration/Layers/OrchestrationCommandApplication.ts";
 import { UsageLimitRecoveryLive } from "./orchestration/Layers/UsageLimitRecovery.ts";
+import { GoalContinuationLive } from "./orchestration/Layers/GoalContinuation.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -690,6 +691,11 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
   UsageLimitRecoveryLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
+  ),
+  // The next turn toward a thread's goal, behind the same wake fence as delegated results.
+  GoalContinuationLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),

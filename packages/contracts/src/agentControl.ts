@@ -442,6 +442,10 @@ export const AgentControlProjectPreferences = Schema.Struct({
 });
 export type AgentControlProjectPreferences = typeof AgentControlProjectPreferences.Type;
 
+/** What an agent may report about its own thread's goal. */
+export const AgentControlGoalStatusUpdate = Schema.Literals(["complete", "blocked"]);
+export type AgentControlGoalStatusUpdate = typeof AgentControlGoalStatusUpdate.Type;
+
 export const AgentControlUpdateThreadPlan = Schema.Struct({
   kind: Schema.Literal("updateThread"),
   threadId: ThreadId,
@@ -454,6 +458,8 @@ export const AgentControlUpdateThreadPlan = Schema.Struct({
       TrimmedNonEmptyString.check(Schema.isMaxLength(AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS)),
     ),
   ),
+  /** The caller marks its own thread's goal finished or blocked, which ends goal continuation. */
+  goalStatus: Schema.optional(AgentControlGoalStatusUpdate),
 }).pipe(rejectExcessProperties);
 export type AgentControlUpdateThreadPlan = typeof AgentControlUpdateThreadPlan.Type;
 

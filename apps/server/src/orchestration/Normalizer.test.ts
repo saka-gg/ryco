@@ -787,7 +787,11 @@ it.effect("refuses a client's turn start or steer that uses an id the server min
         interactionMode: "default",
         createdAt: "2026-10-29T00:00:00.000Z",
       }) as unknown as Parameters<typeof refuseServerMintedMessageId>[0];
-    for (const id of ["delegation-result:child", "message-agent-control-op-send-message"]) {
+    for (const id of [
+      "delegation-result:child",
+      "message-agent-control-op-send-message",
+      "goal-continuation:thread-1:turn-1",
+    ]) {
       const refused = yield* Effect.flip(refuseServerMintedMessageId(start(id)));
       expect(refused.message).toBe("This message id is reserved for messages Ryco sends.");
     }

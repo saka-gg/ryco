@@ -135,6 +135,20 @@ describe("buildAgentControlProposalCardModel", () => {
       "Archive thread",
       "Clear persistent goal",
     ]);
+
+    const goalReport = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: {
+          kind: "updateThread",
+          threadId: ThreadId.make("thread-target-5678"),
+          goalStatus: "blocked",
+        },
+      }),
+    );
+    expect(goalReport.detailSections[0]?.lines).toEqual([
+      "Thread: thread-target-5678",
+      "Mark goal blocked",
+    ]);
   });
 
   it("shows exact project and allowlisted settings plans", () => {

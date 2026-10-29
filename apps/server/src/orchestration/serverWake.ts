@@ -1,6 +1,6 @@
 /**
  * Server wakes: queued turn starts the server sends on its own, with no person at the keyboard
- * (delegated results today, pull request watch updates next). Pure rules and wording shared by
+ * (delegated results, pull request watch updates, goal continuations). Pure rules and wording shared by
  * every wake source, the decider and the provider reactor. The stateful part (pending-start
  * sightings, the cold-start budget) is `ServerWakeFence`.
  *
@@ -141,6 +141,24 @@ export const SERVER_WAKE_COPY: Record<ServerWakeSource, ServerWakeCopy> = {
       summary: "Pull request update delivery unconfirmed",
       detail:
         "Ryco restarted while sending this pull request update. It may have reached the agent. Check the chat before acting on it again.",
+    },
+  },
+  "goal-continuation": {
+    originChanged: "The chat changed before the goal's next turn started.",
+    usageLimited: "The chat hit its usage limit. The goal continues after it is resumed.",
+    handoffRefused: {
+      summary: "Goal turn was not started",
+      detail: "The goal's next turn cannot start a model handoff. Nothing was sent to the agent.",
+    },
+    notSent: {
+      summary: "Goal turn was not started",
+      detail:
+        "Ryco restarted before the goal's next turn reached the agent. Nothing was sent. Send a message to keep working toward the goal.",
+    },
+    uncertain: {
+      summary: "Goal turn delivery unconfirmed",
+      detail:
+        "Ryco restarted while starting the goal's next turn. It may have reached the agent. Check the chat before continuing.",
     },
   },
 };

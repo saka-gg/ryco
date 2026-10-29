@@ -2018,10 +2018,14 @@ export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 /**
  * What a server wake (a queued turn start the server sends on its own) delivers: a delegated
- * result, or a pull request watch update. Only the wording of its rejections and restart
- * notices depends on it; both pass the same fence.
+ * result, a pull request watch update, or the next turn toward the thread's goal. Only the
+ * wording of its rejections and restart notices depends on it; all pass the same fence.
  */
-export const ServerWakeSource = Schema.Literals(["delegation-return", "pull-request-watch"]);
+export const ServerWakeSource = Schema.Literals([
+  "delegation-return",
+  "pull-request-watch",
+  "goal-continuation",
+]);
 export type ServerWakeSource = typeof ServerWakeSource.Type;
 
 /**
@@ -2085,16 +2089,20 @@ export type TurnOrigin = typeof TurnOrigin.Type;
 
 /**
  * Message ids the server mints for user-role messages no person typed: a delegated task's
- * result waking its parent (`delegation-result:`) and Agent Control sends
+ * result waking its parent (`delegation-result:`), Agent Control sends
  * (`message-agent-control-<operation>-<step>`; `-send-message` is an agent's message to an
- * existing thread). Clients render them by origin and may never send them.
+ * existing thread) and the next turn toward a thread's goal (`goal-continuation:`). Clients
+ * render them by origin and may never send them.
  */
 export const DELEGATION_RESULT_MESSAGE_ID_PREFIX = "delegation-result:";
 export const AGENT_CONTROL_MESSAGE_ID_PREFIX = "message-agent-control-";
 export const AGENT_SENT_MESSAGE_ID_SUFFIX = "-send-message";
+/** The server's goal continuation module keeps its own copy (it imports no values). */
+export const GOAL_CONTINUATION_MESSAGE_ID_PREFIX = "goal-continuation:";
 export const SERVER_MINTED_MESSAGE_ID_PREFIXES: ReadonlyArray<string> = [
   DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   AGENT_CONTROL_MESSAGE_ID_PREFIX,
+  GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
 ];
 
 /** How many other threads one user message may mention for its agent to read. */

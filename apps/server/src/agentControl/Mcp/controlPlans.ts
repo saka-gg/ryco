@@ -58,6 +58,7 @@ export const updateThreadPlan = (
   ...(input.title === undefined ? {} : { title: input.title }),
   ...(input.archived === undefined ? {} : { archived: input.archived }),
   ...(input.persistentGoal === undefined ? {} : { persistentGoal: input.persistentGoal }),
+  ...(input.goalStatus === undefined ? {} : { goalStatus: input.goalStatus }),
   ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
   ...(input.runtimeMode === undefined ? {} : { runtimeMode: input.runtimeMode }),
   ...(input.interactionMode === undefined ? {} : { interactionMode: input.interactionMode }),

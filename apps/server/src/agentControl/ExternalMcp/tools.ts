@@ -322,6 +322,17 @@ const internalInputSchema = (name: string): Readonly<Record<string, unknown>> =>
   return descriptor.inputSchema;
 };
 
+/**
+ * The internal schema, without what only a provider session may send: `goalStatus` reports on the
+ * caller's own thread's goal, and an external integration has no thread of its own.
+ */
+const externalInputSchema = (name: string): Readonly<Record<string, unknown>> => {
+  const schema = internalInputSchema(name);
+  if (name !== AGENT_CONTROL_EXTERNAL_MCP_TOOLS.updateThread) return schema;
+  const { goalStatus: _goalStatus, ...properties } = schema.properties as Record<string, unknown>;
+  return { ...schema, properties };
+};
+
 /** Standalone inspection omits terminal output, the likeliest carrier of secrets. */
 const EXTERNAL_INSPECT_SECTIONS = ["info", "agents", "activities", "plans", "review"] as const;
 
@@ -419,7 +430,7 @@ const controlDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
       "Request approval for the exact plan returned by ryco_plan_workspace_lifecycle. Conversations are never deleted without an explicit sessions: delete plan. Reuse requestId for retries.",
     ],
   ] as const
-).map(([name, description]) => ({ name, description, inputSchema: internalInputSchema(name) }));
+).map(([name, description]) => ({ name, description, inputSchema: externalInputSchema(name) }));
 
 const toolCapability = (name: string): AgentControlCapability | null => {
   switch (name) {

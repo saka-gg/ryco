@@ -312,6 +312,9 @@ function planPresentation(proposal: AgentControlProposal): {
           plan.persistentGoal === null ? "Clear persistent goal" : `Goal: ${plan.persistentGoal}`,
         );
       }
+      if (plan.goalStatus !== undefined) {
+        changes.push(plan.goalStatus === "complete" ? "Mark goal complete" : "Mark goal blocked");
+      }
       return {
         actionLabel: "Update thread",
         targetLabel: `thread ${shortId(plan.threadId)}`,

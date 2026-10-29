@@ -1654,6 +1654,36 @@ it.effect("executes model and interaction preferences through orchestration exac
   }),
 );
 
+it.effect("reports on the thread's goal through the same goal update a person makes", () =>
+  Effect.gen(function* () {
+    const nextPlan = { kind: "updateThread" as const, threadId, goalStatus: "complete" as const };
+    const proposal = {
+      ...approvedProposal,
+      plan: nextPlan,
+      planDigest: computeAgentControlPlanDigest(nextPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const commands: Array<{ type: string; status?: string }> = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: { getThreadShellById: () => Effect.succeed(Option.some(target)) },
+      commandApplication: {
+        apply: (command: { type: string; status?: string }) => {
+          commands.push(command);
+          return Effect.succeed({ sequence: commands.length });
+        },
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.deepStrictEqual(
+      commands.map((command) => [command.type, command.status]),
+      [["thread.goal.set", "complete"]],
+    );
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+  }),
+);
+
 it.effect("executes only the captured non-secret setting and rejects stale before values", () =>
   Effect.gen(function* () {
     const settings = yield* ServerSettingsService;
