@@ -67,6 +67,7 @@ import {
   readCheckpointRevertPhase,
   revertKeptChangesDiscardedBy,
   selectConversationRevertSupported,
+  selectFilesRevertSupported,
   subscribeCheckpointReverts,
   type PendingApproval,
   type TimelineEntry,
@@ -86,6 +87,7 @@ import {
   createThreadForkAttemptController,
   defaultThreadForkBaseRef,
   deriveForkableReplyMessageIds,
+  deriveUndoTurnCountByTurnId,
   isArchivedThreadStub,
   readThreadForkApi,
   CONTINUE_AFTER_FAILURE_PROMPT,
@@ -183,6 +185,7 @@ import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { sendThreadTurn } from "./sendThreadTurn";
+import { runUndoFileChanges } from "./undoFileChanges";
 import {
   compactThreadNow,
   interruptThreadTurn,
@@ -271,13 +274,16 @@ function TimelineRow(props: {
   readonly onForkFromMessage?: ((message: ChatMessage) => void) | undefined;
   /** Present only on a sent message the thread can be rewound to before right now. */
   readonly onEditFromMessage?: ((message: ChatMessage) => void) | undefined;
+  /** Present only on a reply whose turn's file changes can be undone right now. */
+  readonly onUndoFileChangesOfReply?: ((reply: ChatMessage) => void) | undefined;
   /** The blank reply a page row stands in for; its fork starts from that reply. */
   readonly forkReply?: ChatMessage | undefined;
   readonly onOpenThread: (threadId: ThreadId, messageId: MessageId | null) => void;
   /** The message a link opened this thread at. */
   readonly highlighted?: boolean | undefined;
 }) {
-  const { entry, onForkFromMessage, onEditFromMessage, forkReply } = props;
+  const { entry, onForkFromMessage, onEditFromMessage, onUndoFileChangesOfReply, forkReply } =
+    props;
   if (entry.kind === "message") {
     const message = (
       <ThreadMessage
@@ -289,6 +295,11 @@ function TimelineRow(props: {
           onForkFromMessage ? () => onForkFromMessage(forkReply ?? entry.message) : undefined
         }
         onEditFromHere={onEditFromMessage ? () => onEditFromMessage(entry.message) : undefined}
+        onUndoFileChanges={
+          onUndoFileChangesOfReply
+            ? () => onUndoFileChangesOfReply(forkReply ?? entry.message)
+            : undefined
+        }
       />
     );
     return props.highlighted ? <View className="bg-primary/10">{message}</View> : message;
@@ -1077,6 +1088,32 @@ export function ThreadDetailScreen(props: {
     [revertOffered, revertTurnCountByUserMessageId],
   );
   const conversationRevertSupported = selectConversationRevertSupported(environmentServerConfig);
+  // "Undo file changes": the checkpoint before each reply's turn, offered like "Edit from here"
+  // on a node that restores files without rewinding the chat.
+  const filesRevertOffered = revertOffered && selectFilesRevertSupported(environmentServerConfig);
+  const undoTurnCountByReplyId = useMemo(() => {
+    if (!filesRevertOffered || !threadTurnDiffSummaries) return NO_REVERT_TARGETS;
+    const byTurnId = deriveUndoTurnCountByTurnId({
+      turnDiffSummaries: threadTurnDiffSummaries,
+      inferredCheckpointTurnCountByTurnId:
+        inferCheckpointTurnCountByTurnId(threadTurnDiffSummaries),
+    });
+    return new Map(
+      threadTurnDiffSummaries.flatMap((summary) => {
+        const turnCount = byTurnId.get(summary.turnId);
+        return summary.assistantMessageId && turnCount !== undefined
+          ? [[summary.assistantMessageId, turnCount] as const]
+          : [];
+      }),
+    );
+  }, [filesRevertOffered, threadTurnDiffSummaries]);
+  const undoableMessageIds = useMemo(
+    () =>
+      undoTurnCountByReplyId.size > 0
+        ? new Set(undoTurnCountByReplyId.keys())
+        : NO_FORKABLE_MESSAGES,
+    [undoTurnCountByReplyId],
+  );
   // A link to another thread of this environment (a fork's source link), optionally at one of
   // its messages: back to it when it is the previous screen (pointing it at the message first),
   // otherwise pushed so Back returns here.
@@ -1412,6 +1449,48 @@ export function ThreadDetailScreen(props: {
       threadId,
     ],
   );
+  // Restores the files of a reply's turn to how they were before it, keeping the chat (or,
+  // when the agent can forget turns and the user asks, reverting the thread too).
+  const undoFileChanges = useCallback(
+    (reply: ChatMessage) => {
+      const turnCount = undoTurnCountByReplyId.get(reply.id);
+      if (turnCount === undefined || revertPhase !== null || !thread) return;
+      const providerInstanceId =
+        thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+      const threadRef = scopeThreadRef(environmentId, threadId);
+      setSendError(null);
+      void runUndoFileChanges({
+        api: environmentApi ?? null,
+        environmentId,
+        threadId,
+        turnCount,
+        environmentUnavailable: connectionUiState !== "connected",
+        turnInProgress: sessionPhase === "running" || sendBusy,
+        providerRefusal: checkpointRevertUnsupportedMessage(
+          providers.find((provider) => provider.instanceId === providerInstanceId),
+        ),
+        keptChangesTurnCount: revertKeptChangesDiscardedBy(thread.activities, turnCount),
+        readThread: () => selectThreadByRef(useStore.getState(), threadRef),
+        subscribe: (listener) => useStore.subscribe(listener),
+      }).then((result) => {
+        if (result.error) setSendError(result.error);
+        // The revert's own row stays out of the timeline, so its note shows here.
+        if (result.notice) Alert.alert(result.notice.title, result.notice.detail);
+      });
+    },
+    [
+      connectionUiState,
+      environmentApi,
+      environmentId,
+      providers,
+      revertPhase,
+      sendBusy,
+      sessionPhase,
+      thread,
+      threadId,
+      undoTurnCountByReplyId,
+    ],
+  );
   // Takes what "Edit from here" returned into the composer: right away, or once this thread's
   // screen is back if it was closed while the node reverted.
   const takeReturnedMessages = useCallback(() => {
@@ -1446,6 +1525,13 @@ export function ThreadDetailScreen(props: {
   }, [editFromHere]);
   const onEditFromMessage = useCallback((message: ChatMessage) => {
     editFromHereRef.current(message);
+  }, []);
+  const undoFileChangesRef = useRef(undoFileChanges);
+  useEffect(() => {
+    undoFileChangesRef.current = undoFileChanges;
+  }, [undoFileChanges]);
+  const onUndoFileChangesOfReply = useCallback((reply: ChatMessage) => {
+    undoFileChangesRef.current(reply);
   }, []);
 
   const pasteImages = useCallback(
@@ -1888,9 +1974,17 @@ export function ThreadDetailScreen(props: {
       annotateRows(timelineRows, {
         forkableMessageIds,
         editableMessageIds,
+        undoableMessageIds,
         highlightedMessageId,
       }),
-    [annotateRows, editableMessageIds, forkableMessageIds, highlightedMessageId, timelineRows],
+    [
+      annotateRows,
+      editableMessageIds,
+      forkableMessageIds,
+      highlightedMessageId,
+      timelineRows,
+      undoableMessageIds,
+    ],
   );
 
   const renderItem = ({ item }: LegendListRenderItemProps<ThreadListRow>) =>
@@ -1909,6 +2003,7 @@ export function ThreadDetailScreen(props: {
         turnHtmlRenders={item.turnHtmlRenders}
         onForkFromMessage={item.forkable ? openForkSheet : undefined}
         onEditFromMessage={item.editable ? onEditFromMessage : undefined}
+        onUndoFileChangesOfReply={item.undoable ? onUndoFileChangesOfReply : undefined}
         forkReply={item.forkReply}
         highlighted={item.highlighted}
         onOpenThread={openThread}

@@ -50,6 +50,7 @@ import {
   keptChangesRestoreNote,
   revertKeptChangesDiscardedBy,
   selectConversationRevertSupported,
+  selectFilesRevertSupported,
 } from "@ryco/client-runtime/state/session";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
@@ -269,7 +270,6 @@ import type { ReadingPositionOutcome } from "./chat/useTimelineReadingPosition";
 import { openForkThreadDialog, useCanForkThread } from "./chat/forkThreadDialogStore";
 import {
   deriveRevertTurnCountByUserMessageId,
-  deriveUndoTurnCountByTurnId,
   type TimelineForkRequest,
   pinTimelineToEnd,
 } from "./chat/MessagesTimeline.logic";
@@ -319,6 +319,7 @@ import {
   CONTINUE_AFTER_FAILURE_PROMPT,
   applicableUsageLimit,
   deriveThreadSnoozeEligibility,
+  deriveUndoTurnCountByTurnId,
   isMaterializableCheckpointSummary,
   resolveThreadReferenceCopyTarget,
   resolveThreadWorkspacePullRequestLink,
@@ -4308,6 +4309,10 @@ export default function ChatView(props: ChatViewProps) {
     environmentId,
     selectConversationRevertSupported,
   );
+  const filesRevertSupported = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectFilesRevertSupported,
+  );
   const revertChoice = useCheckpointRevertChoice();
   const requestRevertChoice = revertChoice.requestChoice;
   const settleRevertChoice = revertChoice.settle;
@@ -4345,7 +4350,8 @@ export default function ChatView(props: ChatViewProps) {
     phase,
   ]);
 
-  // "Undo" on a turn's changed files: the files go back, after a confirmation.
+  // "Undo" on a turn's changed files: the files go back, keeping the chat or not.
+  // An older machine only reverts the thread with them, after a confirmation.
   const onUndoToTurnCount = useCallback(
     async (turnCount: number) => {
       const preconditions = resolveRevertPreconditions();
@@ -4354,6 +4360,20 @@ export default function ChatView(props: ChatViewProps) {
         preconditions.thread?.activities ?? [],
         turnCount,
       );
+      if (filesRevertSupported) {
+        await revertToTurnCount({
+          ...preconditions,
+          turnCount,
+          keepChatAvailable: true,
+          choose: () =>
+            requestRevertChoice({
+              kind: "undo-files",
+              revertThreadAvailable: preconditions.providerRefusal === null,
+              keptChangesTurnCount,
+            }),
+        });
+        return;
+      }
       await revertToTurnCount({
         ...preconditions,
         turnCount,
@@ -4374,7 +4394,7 @@ export default function ChatView(props: ChatViewProps) {
         },
       });
     },
-    [resolveRevertPreconditions, revertToTurnCount],
+    [filesRevertSupported, requestRevertChoice, resolveRevertPreconditions, revertToTurnCount],
   );
 
   /**
@@ -4450,6 +4470,7 @@ export default function ChatView(props: ChatViewProps) {
         turnCount,
         choose: () =>
           requestRevertChoice({
+            kind: "edit-from-here",
             keepFilesAvailable: conversationRevertSupported,
             keptChangesTurnCount: revertKeptChangesDiscardedBy(thread.activities, turnCount),
           }),

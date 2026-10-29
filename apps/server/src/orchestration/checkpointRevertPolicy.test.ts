@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   CHECKPOINT_REVERT_PENDING_STALE_MS,
+  checkpointRevertFromTurnCount,
+  checkpointRevertLeftDroppedChangesAt,
   isCheckpointRevertPending,
   latestCheckpointRevert,
   makeCheckpointRevertActivity,
@@ -109,6 +111,63 @@ describe("latestCheckpointRevert", () => {
         },
       ]),
     ).toBeNull();
+  });
+});
+
+describe("checkpointRevertFromTurnCount", () => {
+  it("keeps a files-only revert's count where an older server's recovery does not look", () => {
+    const phase = (rollbackConversation?: false) =>
+      latestCheckpointRevert([
+        makeCheckpointRevertActivity({
+          revertRequestId: CommandId.make("cmd-from"),
+          turnCount: 1,
+          fromTurnCount: 3,
+          status: "restoring-files",
+          ...(rollbackConversation === false ? { rollbackConversation } : {}),
+          createdAt: "2026-10-28T10:00:00.000Z",
+        }),
+      ])!.payload;
+    const full = phase();
+    expect(full).toMatchObject({ fromTurnCount: 3 });
+    expect(full).not.toHaveProperty("filesFromTurnCount");
+    expect(checkpointRevertFromTurnCount(full)).toBe(3);
+
+    const filesOnly = phase(false);
+    expect(filesOnly).toMatchObject({ filesFromTurnCount: 3, rollbackConversation: false });
+    expect(filesOnly).not.toHaveProperty("fromTurnCount");
+    expect(checkpointRevertFromTurnCount(filesOnly)).toBe(3);
+  });
+});
+
+describe("checkpointRevertLeftDroppedChangesAt", () => {
+  const entry = (
+    status: "completed" | "failed" | "files-not-restored",
+    scope: { readonly restoreFiles?: false; readonly rollbackConversation?: false } = {},
+  ) => {
+    const row = makeCheckpointRevertActivity({
+      revertRequestId: CommandId.make("cmd-scope"),
+      turnCount: 1,
+      status,
+      createdAt: "2026-10-28T10:00:00.000Z",
+      ...scope,
+    });
+    return latestCheckpointRevert([row]);
+  };
+
+  it("counts a revert that changed the checkout without a turn", () => {
+    // A full revert put the files and the conversation back together.
+    expect(checkpointRevertLeftDroppedChangesAt(entry("completed"))).toBeNull();
+    expect(checkpointRevertLeftDroppedChangesAt(entry("failed"))).toBeNull();
+    expect(checkpointRevertLeftDroppedChangesAt(entry("completed", { restoreFiles: false }))).toBe(
+      "2026-10-28T10:00:00.000Z",
+    );
+    expect(checkpointRevertLeftDroppedChangesAt(entry("files-not-restored"))).toBe(
+      "2026-10-28T10:00:00.000Z",
+    );
+    // A files-only undo rewrote the checkout and kept every turn.
+    expect(
+      checkpointRevertLeftDroppedChangesAt(entry("completed", { rollbackConversation: false })),
+    ).toBe("2026-10-28T10:00:00.000Z");
   });
 });
 

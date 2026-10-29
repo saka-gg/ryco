@@ -36,10 +36,28 @@ turn runs or waits for your answer, or when the revert would cross a model switc
 [context handoffs](context-handoffs.md)). A revert never undoes actions outside the checkout or
 memory the provider keeps elsewhere.
 
-**Undo** on a turn's changed files is the files revert alone: it asks for a confirmation and
-does not return the prompt. A turn after **Revert and keep changes** starts from that checkpoint,
-so its changes include the kept edits and its Undo discards them too; the confirmation, like
-**Revert files too**, says so.
+**Undo** on a turn's changed files (on mobile, **Undo file changes** under the turn's reply)
+puts the checkout's files back to how they were before that turn and does not return the prompt.
+Ryco asks how far to go:
+
+- **Undo file changes** restores only the files. Every message and turn stays, and the agent is
+  not told; it also works with agents that cannot forget turns. The later turns keep their
+  checkpoints, so their diffs still show what they changed, and the next turn's changes count from
+  the newest checkpoint, so they include this restore. Another thread in the same checkout counts
+  the restore as a change made at that time.
+- **Revert thread too** also makes the agent forget that turn and everything after it, like
+  **Revert files too**.
+
+Both replace uncommitted edits made since that turn, including your own, and are refused in a
+checkout another thread would lose work in. A turn after **Revert and keep changes** starts from
+that checkpoint, so its changes include the kept edits and its Undo discards them too; the
+confirmation, like **Revert files too**, says so.
+
+Before any revert rewrites files, Ryco saves the checkout into a hidden git ref
+(`refs/ryco/checkpoints/<thread>/revert-rescue/<revert>`); when it cannot, nothing is changed. When
+the checkout already matches the checkpoint, nothing is rewritten. If restoring fails part way,
+Ryco puts the saved files back and deletes the ref. If that fails too, the ref is kept and the
+revert's message names it, so `git restore --source=<ref> --worktree -- .` brings the files back.
 
 ## Compatibility
 
@@ -48,6 +66,15 @@ advertise the `conversationRevert` capability only offers **Revert files**, and 
 rejects the command rather than restoring files. Ryco reads the outcome from the revert's journal
 row; a node from before that journal (v0.1.30 and older) is followed by watching the thread
 rewind or its failure row. If Ryco stops in the middle of a revert, startup recovery finishes it
-the way you chose: a revert that keeps the files never restores them.
+the way you chose: a revert that keeps the files never restores them, and one that keeps the chat
+never rewinds it. A restore that recovery resumes keeps the files saved before the first attempt
+and also saves the checkout as it found it (`…/revert-rescue/<revert>.recovery`); if the restore
+fails, that newer save is put back, so edits made after the crash survive, and the older one is
+kept and named. A files-only revert is journaled so that an older node, after a downgrade, ends
+it instead of finishing it as a full revert.
+
+Restoring only the files is a command of its own too, `thread.files.revert`, offered on nodes that
+advertise `filesRevert`; on older nodes **Undo** reverts the thread with the files, after a
+confirmation.
 
 To branch off without rewinding this thread, use [Fork from here](thread-forks.md) on a reply.

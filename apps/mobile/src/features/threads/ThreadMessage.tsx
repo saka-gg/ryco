@@ -13,6 +13,7 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import {
   EDIT_FROM_HERE_COPY,
+  UNDO_FILE_CHANGES_COPY,
   readHtmlRenderAttachment,
   type HtmlRenderAttachment,
 } from "@ryco/client-runtime/state/session";
@@ -285,6 +286,8 @@ export function ThreadMessage(props: {
   readonly onForkFromHere?: (() => void) | undefined;
   /** Present only on a sent message the thread can be rewound to before, right now. */
   readonly onEditFromHere?: (() => void) | undefined;
+  /** Present only on a reply whose turn's file changes can be undone right now. */
+  readonly onUndoFileChanges?: (() => void) | undefined;
 }) {
   const isUser = props.message.role === "user";
   // A delegated result or another agent's message reads as one line until opened.
@@ -581,25 +584,47 @@ export function ThreadMessage(props: {
             </Pressable>
           ) : null}
         </View>
-      ) : props.message.role === "assistant" && props.onForkFromHere ? (
+      ) : props.message.role === "assistant" &&
+        (props.onForkFromHere || props.onUndoFileChanges) ? (
         <View className="mt-1 flex-row items-center pl-1">
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={THREAD_FORK_COPY.action}
-            hitSlop={8}
-            onPress={props.onForkFromHere}
-            className="h-7 flex-row items-center gap-1 rounded-full px-2 active:bg-subtle"
-          >
-            <SymbolView
-              name="arrow.triangle.branch"
-              size={12}
-              tintColor={metadataColor}
-              type="monochrome"
-            />
-            <Text className="text-2xs font-ryco-medium text-foreground-tertiary">
-              {THREAD_FORK_COPY.action}
-            </Text>
-          </Pressable>
+          {props.onForkFromHere ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={THREAD_FORK_COPY.action}
+              hitSlop={8}
+              onPress={props.onForkFromHere}
+              className="h-7 flex-row items-center gap-1 rounded-full px-2 active:bg-subtle"
+            >
+              <SymbolView
+                name="arrow.triangle.branch"
+                size={12}
+                tintColor={metadataColor}
+                type="monochrome"
+              />
+              <Text className="text-2xs font-ryco-medium text-foreground-tertiary">
+                {THREAD_FORK_COPY.action}
+              </Text>
+            </Pressable>
+          ) : null}
+          {props.onUndoFileChanges ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={UNDO_FILE_CHANGES_COPY.action}
+              hitSlop={8}
+              onPress={props.onUndoFileChanges}
+              className="h-7 flex-row items-center gap-1 rounded-full px-2 active:bg-subtle"
+            >
+              <SymbolView
+                name="arrow.uturn.backward"
+                size={12}
+                tintColor={metadataColor}
+                type="monochrome"
+              />
+              <Text className="text-2xs font-ryco-medium text-foreground-tertiary">
+                {UNDO_FILE_CHANGES_COPY.action}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
     </View>

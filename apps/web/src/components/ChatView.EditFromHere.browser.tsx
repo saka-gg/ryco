@@ -157,7 +157,10 @@ const REPO_STATUS = {
   pr: null,
 } as const;
 
-async function mountThread(input: { readonly conversationRevert: boolean }) {
+async function mountThread(input: {
+  readonly conversationRevert: boolean;
+  readonly filesRevert?: boolean;
+}) {
   setGitStatusForTests(REPO_STATUS);
   const mounted = await mountChatView({
     viewport: DEFAULT_VIEWPORT,
@@ -170,6 +173,7 @@ async function mountThread(input: { readonly conversationRevert: boolean }) {
           capabilities: {
             ...nextFixture.serverConfig.environment.capabilities,
             ...(input.conversationRevert ? { conversationRevert: true } : {}),
+            ...(input.filesRevert ? { filesRevert: true } : {}),
           },
         },
       };
@@ -207,7 +211,8 @@ function interceptNode() {
       commands.filter(
         (command) =>
           command.type === "thread.conversation.revert" ||
-          command.type === "thread.checkpoint.revert",
+          command.type === "thread.checkpoint.revert" ||
+          command.type === "thread.files.revert",
       ),
   };
 }
@@ -215,19 +220,21 @@ function interceptNode() {
 let windowSequence = 100;
 /**
  * The node finishes the revert: the dropped turn leaves, and its journal row says how it
- * ended. A node from before the journal (`journal: false`) only rewinds the thread.
+ * ended. A node from before the journal (`journal: false`) only rewinds the thread. A
+ * files-only revert (`rollbackConversation: false`) keeps every turn.
  */
 function emitRevertOutcome(
   commandId: string,
   status: "completed" | "failed",
   options: {
     readonly restoreFiles?: false;
+    readonly rollbackConversation?: false;
     readonly detail?: string;
     readonly journal?: false;
   } = {},
 ) {
   const thread = fixture.snapshot.threads[0]!;
-  const reverted = status === "completed";
+  const reverted = status === "completed" && options.rollbackConversation !== false;
   windowSequence += 1;
   rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThreadWindow, {
     kind: "snapshot",
@@ -244,15 +251,23 @@ function emitRevertOutcome(
           : [
               {
                 id: EventId.make(`checkpoint-revert:${commandId}`),
-                tone: reverted ? "info" : "error",
+                tone: status === "completed" ? "info" : "error",
                 kind: "checkpoint.revert",
-                summary: reverted ? "Reverted to checkpoint 1" : "Revert failed",
+                summary:
+                  status !== "completed"
+                    ? "Revert failed"
+                    : reverted
+                      ? "Reverted to checkpoint 1"
+                      : "Restored files from checkpoint 1",
                 payload: {
                   schemaVersion: 1,
                   revertRequestId: commandId,
                   turnCount: 1,
                   status,
                   ...(options.restoreFiles === false ? { restoreFiles: false } : {}),
+                  ...(options.rollbackConversation === false
+                    ? { rollbackConversation: false }
+                    : {}),
                   ...(options.detail ? { detail: options.detail } : {}),
                 },
                 turnId: null,
@@ -427,6 +442,65 @@ describe("Edit from here (full app)", () => {
       // A node from before the revert journal only rewinds the thread; that is its verdict.
       emitRevertOutcome(node.reverts()[0]!.commandId, "completed", { journal: false });
       await vi.waitFor(() => expect(composerDraft()?.prompt).toBe("Now split the auth module"));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+});
+
+describe("Undo file changes (full app)", () => {
+  setupChatViewBrowserSuite();
+
+  async function openUndo() {
+    const button = await waitForElement(
+      () =>
+        document
+          .querySelector(`[data-message-id="${REPLY_2}"]`)
+          ?.querySelector<HTMLButtonElement>('button[data-changed-files-undo="true"]') ?? null,
+      "Unable to find the changed files' Undo.",
+    );
+    await clickEnabledButton(button, "Undo stayed disabled.");
+    await expect.element(page.getByText("Undo file changes?")).toBeVisible();
+  }
+
+  it("restores the turn's files and keeps the chat", async () => {
+    const mounted = await mountThread({ conversationRevert: true, filesRevert: true });
+    try {
+      const node = interceptNode();
+      await openUndo();
+      await expect
+        .element(
+          page.getByText("Uncommitted edits made since then, including your own, are replaced."),
+        )
+        .toBeVisible();
+      await page.getByRole("button", { name: "Undo file changes", exact: true }).click();
+
+      await vi.waitFor(() => expect(node.reverts()).toHaveLength(1));
+      const [command] = node.reverts();
+      // Turn 2's files go back to checkpoint 1.
+      expect(command).toMatchObject({ type: "thread.files.revert", turnCount: 1 });
+      emitRevertOutcome(command!.commandId, "completed", {
+        rollbackConversation: false,
+        detail: "The chat was kept as it is.",
+      });
+      await expect.element(page.getByText("The chat was kept as it is.")).toBeVisible();
+      // The chat stays, and nothing returns to the composer.
+      expect(document.querySelector(`[data-message-id="${USER_2}"]`)).not.toBeNull();
+      expect(composerDraft()?.prompt ?? "").toBe("");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("reverts the thread too when asked", async () => {
+    const mounted = await mountThread({ conversationRevert: true, filesRevert: true });
+    try {
+      const node = interceptNode();
+      await openUndo();
+      await page.getByRole("button", { name: "Revert thread too" }).click();
+
+      await vi.waitFor(() => expect(node.reverts()).toHaveLength(1));
+      expect(node.reverts()[0]).toMatchObject({ type: "thread.checkpoint.revert", turnCount: 1 });
     } finally {
       await mounted.cleanup();
     }

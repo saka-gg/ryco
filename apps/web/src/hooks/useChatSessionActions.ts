@@ -40,6 +40,8 @@ export interface RevertToTurnCountInput<TPrepared> {
   readonly environmentUnavailableLabel: string | null;
   readonly turnInProgress: boolean;
   readonly providerRefusal: string | null;
+  /** `choose` may offer "keep-chat", which a provider that cannot forget turns still allows. */
+  readonly keepChatAvailable?: boolean | undefined;
   /** Asks the user how to revert; null cancels. */
   readonly choose: () => Promise<CheckpointRevertMode | null>;
   /** Runs after the choice, before the revert is sent; a throw reverts nothing. */
@@ -213,6 +215,7 @@ export function useChatSessionActions(input: {
         environmentUnavailableLabel: input.environmentUnavailableLabel,
         turnInProgress: input.turnInProgress,
         providerRefusal: input.providerRefusal,
+        keepChatAvailable: input.keepChatAvailable,
         choose: async () => {
           const mode = await input.choose();
           if (mode !== null) setThreadError(threadId, null);

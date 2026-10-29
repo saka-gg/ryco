@@ -17,6 +17,8 @@ export type ThreadListRow = ThreadTimelineRow & {
   readonly forkable?: true;
   /** The sent message offers "Edit from here". */
   readonly editable?: true;
+  /** The reply offers "Undo file changes" for its turn's files. */
+  readonly undoable?: true;
   /** The message a link opened this thread at, highlighted briefly. */
   readonly highlighted?: true;
 };
@@ -25,6 +27,8 @@ export interface ThreadListRowFlags {
   readonly forkableMessageIds: ReadonlySet<MessageId>;
   /** Sent messages the thread can be rewound to before right now. */
   readonly editableMessageIds?: ReadonlySet<MessageId> | undefined;
+  /** Replies whose turn's file changes can be undone right now. */
+  readonly undoableMessageIds?: ReadonlySet<MessageId> | undefined;
   readonly highlightedMessageId: MessageId | null;
 }
 
@@ -43,7 +47,10 @@ function messagesOfRow(row: ThreadTimelineRow): TimelineRowMessages {
   };
 }
 
-/** The reply a row's "Fork from here" forks from: its own message, or the reply it stands in for. */
+/**
+ * The reply a row's "Fork from here" forks from (and "Undo file changes" undoes the turn of):
+ * its own message, or the reply it stands in for.
+ */
 function forkMessageIdOfRow(row: ThreadTimelineRow): MessageId | null {
   return row.kind === "entry" && row.forkReply ? row.forkReply.id : messageIdOfRow(row);
 }
@@ -66,13 +73,16 @@ export function createThreadListRowAnnotator(): (
       const forkable = forkMessageId !== null && flags.forkableMessageIds.has(forkMessageId);
       const messageId = messageIdOfRow(row);
       const editable = messageId !== null && flags.editableMessageIds?.has(messageId) === true;
+      const undoable =
+        forkMessageId !== null && flags.undoableMessageIds?.has(forkMessageId) === true;
       const highlighted = timelineRowShowsMessage(messagesOfRow(row), flags.highlightedMessageId);
-      if (!forkable && !editable && !highlighted) return row;
+      if (!forkable && !editable && !undoable && !highlighted) return row;
       const kept = annotated.get(row);
       if (
         kept &&
         (kept.forkable === true) === forkable &&
         (kept.editable === true) === editable &&
+        (kept.undoable === true) === undoable &&
         (kept.highlighted === true) === highlighted
       ) {
         return kept;
@@ -81,6 +91,7 @@ export function createThreadListRowAnnotator(): (
         ...row,
         ...(forkable ? { forkable: true as const } : {}),
         ...(editable ? { editable: true as const } : {}),
+        ...(undoable ? { undoable: true as const } : {}),
         ...(highlighted ? { highlighted: true as const } : {}),
       };
       annotated.set(row, next);

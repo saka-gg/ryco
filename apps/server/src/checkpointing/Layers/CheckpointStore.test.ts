@@ -1552,6 +1552,34 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
     );
   });
 
+  describe("sameCheckpointTree", () => {
+    it.effect("compares the files two checkpoints hold, not their commits", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const threadId = ThreadId.make("thread-same-tree");
+        const first = checkpointRefForThreadTurn(threadId, 1);
+        const again = checkpointRefForThreadTurn(threadId, 2);
+        const changed = checkpointRefForThreadTurn(threadId, 3);
+        yield* writeTextFile(path.join(tmp, "work.txt"), "turn one\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: first });
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: again });
+        yield* writeTextFile(path.join(tmp, "work.txt"), "turn two\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: changed });
+
+        const same = (leftRef: typeof first, rightRef: typeof first) =>
+          checkpointStore.sameCheckpointTree({ cwd: tmp, leftRef, rightRef });
+        expect(yield* same(first, again)).toBe(true);
+        expect(yield* same(first, changed)).toBe(false);
+        // A missing ref matches nothing, not even another missing ref.
+        const missing = checkpointRefForThreadTurn(threadId, 9);
+        expect(yield* same(first, missing)).toBe(false);
+        expect(yield* same(missing, missing)).toBe(false);
+      }),
+    );
+  });
+
   describe("resolveCommit and pinRef", () => {
     it.effect("resolves refs to full commit ids and refuses option-like refs", () =>
       Effect.gen(function* () {

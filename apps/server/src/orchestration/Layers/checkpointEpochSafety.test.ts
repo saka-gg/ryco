@@ -11,7 +11,7 @@ import {
 } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { providerRollbackEpochViolation } from "./CheckpointReactor.ts";
+import { providerRollbackEpochViolation } from "../checkpointRevertSaga.ts";
 
 const now = "2026-08-04T00:00:00.000Z";
 
