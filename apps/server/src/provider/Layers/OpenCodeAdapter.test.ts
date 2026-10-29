@@ -1858,6 +1858,45 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("does not count OpenCode's background Task reports as turns", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-rollback-report");
+      const adapter = yield* startRollbackSession(threadId);
+      const [u1, a1a, a1b, u2, a2] = rollbackMessages();
+      // OpenCode stores a finished background Task's report as a user message of synthetic text.
+      runtimeMock.state.messages = [
+        u1!,
+        a1a!,
+        {
+          info: { id: "report", role: "user" },
+          parts: [
+            {
+              id: "report:text:0",
+              sessionID: ROOT_SESSION_ID,
+              messageID: "report",
+              type: "text",
+              synthetic: true,
+              text: '<task id="child" state="completed">\n<task_result>\nDone\n</task_result>\n</task>',
+            },
+          ],
+        },
+        a1b!,
+        u2!,
+        a2!,
+      ];
+
+      yield* adapter.rollbackThread(threadId, {
+        numTurns: 2,
+        targetTurnId: null,
+        droppedTurnIds: [],
+      });
+
+      assert.deepEqual(runtimeMock.state.forkCalls, [
+        { sessionID: ROOT_SESSION_ID, messageID: "u1" },
+      ]);
+    }),
+  );
+
   it.effect("refuses to drop more turns than OpenCode's conversation has", () =>
     Effect.gen(function* () {
       const threadId = asThreadId("thread-rollback-short");

@@ -14,6 +14,11 @@ licensed under the MIT License.
 `apps/web/src/markdown-incremental.ts` is adapted from PR #11193 at commit
 `a9dabbf100d1f6c0b2ed7b5e879d469ac14fd186`, under the same copyright and license.
 
+The OpenCode 2 recordings in `apps/server/src/provider/__fixtures__/opencode2/` (sessions recorded
+against OpenCode 2.0.18) are copied from
+`apps/server/src/orchestration-v2/testkit/fixtures/opencode2_*/opencode_transcript.ndjson` at
+commit `91992bd5d464d6a01b2a5c1e7926e68ad09ea40e`, under the same copyright and license.
+
 ### MIT License
 
 Copyright (c) 2026 T3 Tools Inc.
@@ -72,6 +77,10 @@ shim, and expected agent input matching (`apps/desktop/src/computerUse/browserDi
 (`apps/desktop/src/computerUse/browserUploads.ts` and
 `apps/server/src/agentControl/Mcp/browserUploadStaging.ts`) from `workspaceUpload.ts` of the same
 Synara commit `8f6521a67`.
+The OpenCode 2 client and mappings in `apps/server/src/provider/openCodeV2Client.ts`,
+`openCodeV2Mapping.ts` and `openCodeV2Events.ts` are adapted from Synara's `openCodeV2Client.ts`,
+`openCodeV2Mapping.ts` and `openCodeV2Messages.ts` at commit
+`ea912dcf14a38c12f30ebc3bfdf80af6ca446bea`, under the same license.
 
 ### MIT License
 

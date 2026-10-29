@@ -147,6 +147,8 @@ describe("server boot import boundaries", () => {
     // Provider SDKs load with their driver's adapter (chat forks read resume cursors from the
     // SDK-free cursor modules).
     expect(graph.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
+    // The OpenCode 2 client loads with the 2.x facade.
+    expect(graph.externals.filter((specifier) => specifier.startsWith("@opencode/"))).toEqual([]);
     // Protocol schemas load with the Codex/ACP features that use them. The error classes are
     // schema-free (chat forks classify Codex request failures with them).
     expect(
@@ -239,6 +241,9 @@ describe("server boot import boundaries", () => {
     // Merge proofs for checkout removal (squash-merged pull requests, the remote default
     // branch) load with the first checkout whose branch the project HEAD lacks.
     expect(reached(/^apps\/server\/src\/sourceControl\/checkoutMergeProver\.ts$/u)).toEqual([]);
+    // OpenCode 2.x support (facade, mappings, event translation) loads once a server is detected
+    // as 2.x.
+    expect(reached(/^apps\/server\/src\/provider\/openCodeV2\w*\.ts$/u)).toEqual([]);
     // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
     // with the first Diagnostics snapshot.
     expect(
@@ -444,6 +449,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(/^\/\/#region src\/provider\/acp\/AcpRegistryCatalog\.ts$/mu);
       // Loaded with the first chunked PDF or image preview.
       expect(source).not.toMatch(/^\/\/#region src\/workspace\/previewFileChunk\.ts$/mu);
+      // Loaded once an OpenCode server is detected as 2.x.
+      expect(source).not.toMatch(/^\/\/#region .*@opencode\//mu);
+      expect(source).not.toMatch(/^\/\/#region src\/provider\/openCodeV2\w*\.ts$/mu);
     }
   });
 });
@@ -512,19 +520,30 @@ describe.skipIf(!hasCurrentBuild)("built thread git metadata chunks", () => {
   });
 });
 
+/** Every specifier the built chunks import, statically or through `import()`. */
+function builtImports(): ReadonlySet<string> {
+  const distDir = path.join(serverRoot, "dist");
+  const imports = new Set<string>();
+  for (const file of readdirSync(distDir)) {
+    if (!file.endsWith(".mjs")) continue;
+    const source = readFileSync(path.join(distDir, file), "utf8");
+    for (const match of source.matchAll(CHUNK_STATIC_IMPORT)) imports.add((match[1] ?? match[2])!);
+    for (const match of source.matchAll(DYNAMIC_IMPORT)) imports.add(match[1]!);
+  }
+  return imports;
+}
+
 describe.skipIf(!hasCurrentBuild)("built server bundle imports", () => {
   it("leaves no import of a patch-added export to the installed package", () => {
     const patchAdded = patchAddedExports();
-    const distDir = path.join(serverRoot, "dist");
-    const external = new Set<string>();
-    for (const file of readdirSync(distDir)) {
-      if (!file.endsWith(".mjs")) continue;
-      const source = readFileSync(path.join(distDir, file), "utf8");
-      for (const match of source.matchAll(CHUNK_STATIC_IMPORT))
-        external.add((match[1] ?? match[2])!);
-      for (const match of source.matchAll(DYNAMIC_IMPORT)) external.add(match[1]!);
-    }
-    expect([...external].filter((specifier) => patchAdded.has(specifier))).toEqual([]);
+    expect([...builtImports()].filter((specifier) => patchAdded.has(specifier))).toEqual([]);
+  });
+
+  it("bundles the OpenCode 2 client instead of importing the package", () => {
+    // `@opencode/*` are build-time dependencies: the published package does not install them.
+    expect([...builtImports()].filter((specifier) => specifier.startsWith("@opencode/"))).toEqual(
+      [],
+    );
   });
 });
 

@@ -2873,8 +2873,16 @@ export function makeOpenCodeAdapter(
           (yield* runOpenCodeSdk("session.messages", () =>
             context.client.session.messages({ sessionID: rootSessionId }),
           ).pipe(Effect.mapError(toRequestError))).data ?? [];
-        // One root user message per Ryco turn.
-        const users = messages.filter((entry) => entry.info.role === "user");
+        // One root user message per Ryco turn. OpenCode adds user messages of its own made only of
+        // synthetic text (a finished background Task's report); Ryco never sends synthetic text.
+        const users = messages.filter(
+          (entry) =>
+            entry.info.role === "user" &&
+            !(
+              entry.parts.length > 0 &&
+              entry.parts.every((part) => part.type === "text" && part.synthetic === true)
+            ),
+        );
         if (remainingTurns > users.length) {
           return yield* refuse(
             "OpenCode's conversation is shorter than this thread's history; it may already be reverted.",
