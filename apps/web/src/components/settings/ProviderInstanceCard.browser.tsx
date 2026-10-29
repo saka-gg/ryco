@@ -6,6 +6,8 @@ import {
   ProviderInstanceId,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
+  type ServerProvider,
+  type ServerProviderRateLimits,
 } from "@ryco/contracts";
 import { useEffect, useState } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -274,5 +276,88 @@ describe("ProviderInstanceCard environment variables", () => {
       .element(page.getByText("Enter the value again to rename this stored secret."))
       .not.toBeInTheDocument();
     expect(published).toEqual([]);
+  });
+});
+
+describe("ProviderInstanceCard usage limits", () => {
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const liveProvider = (rateLimits: ServerProviderRateLimits): ServerProvider => ({
+    instanceId: ProviderInstanceId.make("claude_instance"),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    enabled: true,
+    installed: true,
+    version: "2.1.296",
+    status: "ready",
+    auth: { status: "authenticated", label: "Claude Max Subscription" },
+    // The full probe ran long before the usage re-read below.
+    checkedAt: minutesAgo(100),
+    models: [],
+    slashCommands: [],
+    skills: [],
+    rateLimits,
+  });
+  const renderCard = (provider: ServerProvider) =>
+    render(
+      <ProviderInstanceCard
+        instanceId={provider.instanceId}
+        instance={{ driver: provider.driver }}
+        driverOption={undefined}
+        liveProvider={provider}
+        usageAvailable
+        isDefault={false}
+        onUpdate={() => {}}
+        hiddenModels={[]}
+        favoriteModels={[]}
+        modelOrder={[]}
+        onHiddenModelsChange={() => {}}
+        onFavoriteModelsChange={() => {}}
+        onModelOrderChange={() => {}}
+      />,
+    );
+
+  it("lists every reported window and judges pace at the usage read", async () => {
+    const observedAtMs = Date.now() - 1_000;
+    await renderCard(
+      liveProvider({
+        primary: { usedPercent: 23, windowDurationMins: 300 },
+        windows: [
+          {
+            id: "five_hour",
+            usedPercent: 23,
+            windowDurationMins: 300,
+            // Half of the window has passed at the read.
+            resetsAt: (observedAtMs + 150 * 60_000) / 1000,
+          },
+          { id: "seven_day_opus", scope: "Opus", usedPercent: 12, windowDurationMins: 10_080 },
+        ],
+        observedAt: new Date(observedAtMs).toISOString(),
+      }),
+    );
+
+    await expect.element(page.getByText("Usage limits", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("5h", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Weekly · Opus", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: /27 percentage points below even pace/ }))
+      .toBeVisible();
+    expect(document.body.textContent).not.toContain("Usage from");
+  });
+
+  it("renders the legacy slots and notes re-served usage", async () => {
+    await renderCard(
+      liveProvider({
+        primary: { usedPercent: 40 },
+        secondary: { usedPercent: 60, windowDurationMins: 10_080 },
+        observedAt: minutesAgo(12),
+        stale: true,
+        staleReason: "rateLimited",
+      }),
+    );
+
+    await expect.element(page.getByText("Short window", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Weekly", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Usage from 12m ago; the provider is limiting usage reads."))
+      .toBeVisible();
   });
 });

@@ -24,8 +24,9 @@ import {
 } from "./cliProxy.ts";
 import {
   clampUsedPercent,
-  describeRateLimitWindow,
   isRateLimitSnapshotAvailable,
+  rateLimitsObservedAt,
+  rateLimitWindowList,
   type LabelledLimitWindow,
   type PooledLimitWindow,
 } from "./limits.ts";
@@ -41,20 +42,9 @@ export function subscriptionProviderForDriver(driver: string): string {
   return DRIVER_PROVIDERS[driver] ?? driver;
 }
 
-/** An instance's reported windows; one without a valid duration takes its slot's name. */
+/** An instance's reported windows, labelled (`rateLimitWindowList`). */
 export function providerLimitWindows(provider: ServerProvider): LabelledLimitWindow[] {
-  const limits = provider.rateLimits;
-  if (!limits) return [];
-  const slots = [
-    [limits.primary, "Short window"],
-    [limits.secondary, "Weekly"],
-    [limits.tertiary, "Monthly"],
-  ] as const;
-  return slots.flatMap(([window, fallback]) => {
-    if (!window) return [];
-    const { label } = describeRateLimitWindow(window);
-    return [{ label: label === "Window" ? fallback : label, window }];
-  });
+  return rateLimitWindowList(provider.rateLimits);
 }
 
 /** When the soonest of these windows resets after `nowMs`, in epoch ms; null when none will. */
@@ -91,6 +81,10 @@ export interface DirectAccountLocation {
   /** Whether the instance is signed in; reset redemption gates on this, not on `available`. */
   readonly authenticated: boolean;
   readonly checkedAt: string;
+  /** When its limits were read (`rateLimitsObservedAt`), which may differ from `checkedAt`. */
+  readonly observedAt: string;
+  /** Whether its limits are the last good numbers, re-served after a throttled or failed read. */
+  readonly stale: boolean;
 }
 
 /** An account provider instances sign in to themselves, counted once across environments. */
@@ -184,17 +178,22 @@ function directAccountKeyResolver(
   };
 }
 
-/** A read's time in ms; an unparsable one is older than any other. */
-function checkedAtMs(location: DirectAccountLocation): number {
-  const ms = Date.parse(location.checkedAt);
+/** A usage read's time in ms; an unparsable one is older than any other. */
+function observedAtMs(location: DirectAccountLocation): number {
+  const ms = Date.parse(location.observedAt);
   return Number.isNaN(ms) ? -Infinity : ms;
 }
 
-/** Available beats unavailable, then the newer read. */
+/**
+ * Available beats unavailable, then the newer usage read (not the newer probe: re-served numbers
+ * keep their old read time), then a fresh read over re-served numbers of the same time.
+ */
 function isFresher(candidate: DirectAccountLocation, current: DirectAccountLocation): boolean {
+  if (candidate.available !== current.available) return candidate.available;
+  const candidateMs = observedAtMs(candidate);
+  const currentMs = observedAtMs(current);
   return (
-    (candidate.available && !current.available) ||
-    (candidate.available === current.available && checkedAtMs(candidate) > checkedAtMs(current))
+    candidateMs > currentMs || (candidateMs === currentMs && current.stale && !candidate.stale)
   );
 }
 
@@ -205,7 +204,9 @@ function newestResetCredits(
   let newest: DirectInstance | undefined;
   for (const instance of instances) {
     if (instance.provider.rateLimits?.resetCredits === undefined) continue;
-    if (!newest || checkedAtMs(instance.location) > checkedAtMs(newest.location)) newest = instance;
+    if (!newest || observedAtMs(instance.location) > observedAtMs(newest.location)) {
+      newest = instance;
+    }
   }
   return newest?.provider.rateLimits?.resetCredits;
 }
@@ -248,6 +249,8 @@ export function listDirectProviderAccounts(
         available: isRateLimitSnapshotAvailable(provider, environment.connected),
         authenticated: provider.auth.status === "authenticated",
         checkedAt: provider.checkedAt,
+        observedAt: rateLimitsObservedAt(provider),
+        stale: provider.rateLimits?.stale === true,
       };
       const slug = subscriptionProviderForDriver(provider.driver);
       const hub = findCliProxyRouteForInstance(environment.hubs, provider.instanceId);

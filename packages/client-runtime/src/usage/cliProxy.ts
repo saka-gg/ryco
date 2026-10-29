@@ -7,7 +7,6 @@ import type {
   CliProxyAccount,
   CliProxyApiKeyUsage,
   CliProxyHubSnapshot,
-  CliProxyQuotaWindow,
   CliProxyRequestCounts,
   ProviderInstanceId,
 } from "@ryco/contracts";
@@ -15,7 +14,7 @@ import { isLoopbackHost } from "@ryco/shared/cliProxyHubUrl";
 
 import {
   clampUsedPercent,
-  describeRateLimitWindow,
+  limitWindowLabel,
   poolLimitWindows,
   type LabelledLimitWindow,
   type PooledLimitWindow,
@@ -57,12 +56,8 @@ export function formatCliProxyPlan(planType: string | undefined): string | undef
   return planType ? titleCase(planType) : undefined;
 }
 
-/** `5h`, `Weekly`, `Weekly · Opus`, or just the scope for windows without a duration. */
-export function cliProxyWindowLabel(window: CliProxyQuotaWindow): string {
-  if (window.windowDurationMins === undefined) return window.scope ?? "Window";
-  const cadence = describeRateLimitWindow(window).label;
-  return window.scope ? `${cadence} · ${window.scope}` : cadence;
-}
+/** A hub window's label; hub and direct windows are labelled alike (`limitWindowLabel`). */
+export const cliProxyWindowLabel = limitWindowLabel;
 
 export type CliProxyAccountHealth =
   | { readonly kind: "ready" }

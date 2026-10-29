@@ -14,7 +14,10 @@ import {
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
 import { OPENCODE_NON_JSON_HEALTH_MESSAGE } from "../openCodeVersion.ts";
-import { checkOpenCodeProviderStatus, OPENCODE_V2_LOCAL_DATA_NOTE } from "./OpenCodeProvider.ts";
+import {
+  checkOpenCodeProviderStatus as checkOpenCodeProviderStatusWith,
+  OPENCODE_V2_LOCAL_DATA_NOTE,
+} from "./OpenCodeProvider.ts";
 import type { OpenCodeInventory } from "../opencodeRuntime.ts";
 
 const DEFAULT_VERSION_STDOUT = "opencode 1.14.19\n";
@@ -131,6 +134,16 @@ const makeOpenCodeSettings = (overrides?: Partial<OpenCodeSettings>): OpenCodeSe
     customModels: [],
     ...overrides,
   });
+
+// A test reads usage only through the probe it passes: the real one would read the OpenCode
+// CLI's auth.json under this machine's home and call the Go usage API with its key.
+const checkOpenCodeProviderStatus = (
+  settings: OpenCodeSettings,
+  cwd: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  probeUsage: Parameters<typeof checkOpenCodeProviderStatusWith>[3] = () =>
+    Effect.succeed(undefined),
+) => checkOpenCodeProviderStatusWith(settings, cwd, environment, probeUsage);
 
 it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
   it.effect("shows a codex-style missing binary message", () =>

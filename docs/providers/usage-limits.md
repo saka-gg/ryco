@@ -28,6 +28,22 @@ through a hub show a note instead of their own limits, and direct accounts never
 pooled average. The iOS app's Limits tab lists accounts the same way, naming the devices each is
 signed in on, with a banked-reset block for each device's Codex instance.
 
+Every surface lists each window a provider reports, labelled the same way for direct and hub
+accounts. A direct Claude account shows its 5-hour and weekly windows, its model-scoped weekly
+windows such as **Weekly · Opus**, and its cloud session credits; older nodes report only the
+5-hour and weekly windows. Ryco re-reads usage between full provider checks, so pace is judged
+at the time the usage was read, not at the provider's last check.
+
+When Claude or OpenCode Go throttles a usage read (HTTP 429) or the read fails, Ryco keeps
+showing the last good numbers with the time they were read and a note that they are not current.
+It does not ask that provider again until the cooldown ends: the provider's `Retry-After`, kept
+between 1 and 15 minutes (5 without one), or 1 minute after a failure. Numbers older than an hour
+and windows that have reset since are not shown. On Statistics → Limits, a full window in
+re-served numbers still marks the account **Limit reached**, next to the note. Ryco never uses
+re-served numbers to work out when a chat stopped by a usage limit can resume; only a fresh read
+does that. A rejected login (401/403) or another account clears them at once. Codex reads its
+limits through its app-server, which handles retries itself.
+
 Claude instances with a separate home use that home's credential file for usage reads. They do not
 fall back to the default account's global macOS Keychain entry. Refreshes are persisted only to the
 credential store that supplied the account. Missing separate-home credentials mean usage is unavailable.

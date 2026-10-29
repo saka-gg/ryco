@@ -158,6 +158,42 @@ describe("native provider limits", () => {
     expect(panels(html)).toBe(0);
   });
 
+  it("lists every reported window and judges pace at the usage read", () => {
+    const observedAt = new Date(now).toISOString();
+    const claude = {
+      ...provider,
+      // The full probe ran 100 minutes before this usage re-read.
+      checkedAt: new Date(now - 100 * 60_000).toISOString(),
+      rateLimits: {
+        primary: provider.rateLimits!.primary,
+        windows: [
+          { id: "five_hour", ...provider.rateLimits!.primary },
+          { id: "seven_day_opus", scope: "Opus", usedPercent: 12, windowDurationMins: 10_080 },
+        ],
+        observedAt,
+      },
+    } as ServerProvider;
+    const html = render([node("M5", [claude])]);
+    expect(html).toContain("5h: 60% left");
+    expect(html).toContain("Weekly · Opus: 88% left");
+    // Measured from the read, 3 of the 5 hours have passed: 40% used is 20 points below.
+    expect(html).toContain("20 percentage points below even pace");
+    expect(html).not.toContain("Usage from");
+  });
+
+  it("says when the shown usage is the last good read of a throttled provider", () => {
+    const observedAt = new Date(now - 12 * 60_000).toISOString();
+    const stale = {
+      ...provider,
+      rateLimits: { ...provider.rateLimits, observedAt, stale: true, staleReason: "rateLimited" },
+    } as ServerProvider;
+    const html = render([node("M5", [stale])]);
+    expect(html).toContain(
+      `Usage from ${new Date(observedAt).toLocaleString()}; the provider is limiting usage reads.`,
+    );
+    expect(html).not.toContain("Checked ");
+  });
+
   it("says when no provider is enabled", () => {
     const disabled = { ...provider, enabled: false };
     expect(render([node("M5", [disabled])])).toContain("No enabled providers on this device.");

@@ -18,7 +18,6 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import type { ServerProviderRateLimits } from "@ryco/contracts";
-import { probeOpenCodeGoUsageRateLimits } from "./OpenCodeGoUsage.ts";
 import {
   describeUnsupportedOpenCodeVersion,
   OPENCODE_UNKNOWN_CLI_VERSION_MESSAGE,
@@ -359,10 +358,11 @@ export const makePendingOpenCodeProvider = (
 export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatus")(function* (
   openCodeSettings: OpenCodeSettings,
   cwd: string,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv,
+  // The instance's Go usage read (`OpenCodeDriver` passes its gated one).
   probeUsage: (
     probeEnvironment: NodeJS.ProcessEnv,
-  ) => Effect.Effect<ServerProviderRateLimits | undefined> = probeOpenCodeGoUsageRateLimits,
+  ) => Effect.Effect<ServerProviderRateLimits | undefined>,
 ): Effect.fn.Return<ServerProviderDraft, never, OpenCodeRuntime> {
   const openCodeRuntime = yield* OpenCodeRuntime;
   const checkedAt = new Date().toISOString();

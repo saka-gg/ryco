@@ -94,4 +94,41 @@ describe("usageLimitStateFromServerRateLimits", () => {
       ),
     ).toEqual({ exhausted: false, resetAt: null });
   });
+
+  it("never treats re-served stale limits as exhausted", () => {
+    const exhausted = {
+      primary: { usedPercent: 100, resetsAt: seconds(NOW_MS + 2 * hour) },
+      secondary: { usedPercent: 100, resetsAt: seconds(NOW_MS + 30 * hour) },
+    };
+    expect(
+      usageLimitStateFromServerRateLimits(
+        { ...exhausted, stale: true, staleReason: "rateLimited" },
+        NOW_MS,
+      ),
+    ).toEqual({ exhausted: false, resetAt: null });
+    expect(usageLimitStateFromServerRateLimits({ ...exhausted, stale: false }, NOW_MS)).toEqual({
+      exhausted: true,
+      resetAt: new Date(NOW_MS + 30 * hour).toISOString(),
+    });
+  });
+
+  it("counts only the account-wide slots, not model-scoped windows", () => {
+    expect(
+      usageLimitStateFromServerRateLimits(
+        {
+          primary: { usedPercent: 40, resetsAt: seconds(NOW_MS + 2 * hour) },
+          windows: [
+            { id: "five_hour", usedPercent: 40, resetsAt: seconds(NOW_MS + 2 * hour) },
+            {
+              id: "seven_day_opus",
+              scope: "Opus",
+              usedPercent: 100,
+              resetsAt: seconds(NOW_MS + 30 * hour),
+            },
+          ],
+        },
+        NOW_MS,
+      ),
+    ).toEqual({ exhausted: false, resetAt: null });
+  });
 });

@@ -6,9 +6,16 @@ import * as NodePath from "node:path";
 
 import type { ServerProviderRateLimits } from "@ryco/contracts";
 import { claudeNonLoginCredentialSource } from "@ryco/shared/claudeCredentialVariables";
-import { Cache, type Duration, Effect } from "effect";
+import { Cache, Clock, type Duration, Effect } from "effect";
 
 import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
+import {
+  requestUsage,
+  usageAccountKey,
+  type UsageReadGate,
+  type UsageReadOutcome,
+  type UsageReadPlan,
+} from "../usageReadGate.ts";
 import {
   CLAUDE_OAUTH_BETA_HEADER,
   CLAUDE_OAUTH_USAGE_URL,
@@ -28,6 +35,7 @@ const USAGE_REQUEST_TIMEOUT_MS = 10_000;
 interface ClaudeCredentials {
   readonly claudeAiOauth?: {
     readonly accessToken?: string;
+    readonly refreshToken?: string;
     readonly expiresAt?: string | number;
     readonly subscriptionType?: string;
     readonly rateLimitTier?: string;
@@ -180,8 +188,12 @@ function claudeUsageUserAgent(version: string | null): string {
   return version ? `claude-code/${version}` : "claude-code";
 }
 
-async function callUsageApi(accessToken: string, version: string | null): Promise<Response> {
-  return fetch(CLAUDE_OAUTH_USAGE_URL, {
+function callUsageApi(
+  fetchImpl: typeof globalThis.fetch,
+  accessToken: string,
+  version: string | null,
+): Promise<Response> {
+  return fetchImpl(CLAUDE_OAUTH_USAGE_URL, {
     signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -203,9 +215,14 @@ function rateLimitWindow(window: ClaudeUsageWindow) {
   };
 }
 
+/**
+ * The usage response as rate limits, read at `nowMs`. The account-wide five-hour and weekly
+ * windows fill the legacy slots; `windows` also carries the model-scoped ones and credit pools.
+ */
 export function parseClaudeUsageRateLimits(
-  data: Record<string, unknown>,
+  data: unknown,
   plan: string | null | undefined,
+  nowMs: number,
 ): ServerProviderRateLimits | undefined {
   const windows = parseClaudeUsageWindows(data);
   const fiveHour = windows.find((window) => window.id === "five_hour");
@@ -220,57 +237,66 @@ export function parseClaudeUsageRateLimits(
     ...(plan ? { limitName: plan, planType: plan } : {}),
     ...(fiveHour ? { primary: rateLimitWindow(fiveHour) } : {}),
     ...(sevenDay ? { secondary: rateLimitWindow(sevenDay) } : {}),
+    windows,
+    observedAt: new Date(nowMs).toISOString(),
   };
 }
 
-async function fetchClaudeUsageRateLimits(
+/**
+ * The usage read of the login in `store` (resolve it with `resolveClaudeLoginStore`): its account
+ * key and the one usage request, or undefined when the store holds no login. An expired token
+ * clears usage without a request; Claude Code refreshes its own tokens.
+ */
+export const planClaudeUsageRead = Effect.fn("planClaudeUsageRead")(function* (
   store: ClaudeCredentialStore,
   version: string | null,
-): Promise<ServerProviderRateLimits | undefined> {
-  const selected = await readClaudeCredentials(store);
-  if (!selected) return undefined;
-  const { credentials } = selected;
-  const oauth = credentials.claudeAiOauth;
-  if (!oauth?.accessToken) return undefined;
+  fetchImpl: typeof globalThis.fetch = fetch,
+): Effect.fn.Return<UsageReadPlan | undefined> {
+  const selected = yield* Effect.tryPromise(() => readClaudeCredentials(store)).pipe(
+    Effect.orElseSucceed(() => null),
+  );
+  const oauth = selected?.credentials.claudeAiOauth;
+  const accessToken = oauth?.accessToken;
+  if (!oauth || !accessToken) return undefined;
+
+  // Keyed on the login's token too, so another login in the same store never gets these
+  // numbers; a token rotation only starts a fresh read state.
+  const accountKey = usageAccountKey(
+    "claude",
+    store.credentialsPath,
+    store.keychain?.service ?? "",
+    oauth.refreshToken ?? accessToken,
+  );
+  const nowMs = yield* Clock.currentTimeMillis;
+  const expiresAt = parseExpiresAtMs(oauth.expiresAt);
+  if (expiresAt !== undefined && nowMs > expiresAt - TOKEN_EXPIRY_SKEW_MS) {
+    return { accountKey, fetch: Effect.succeed<UsageReadOutcome>({ _tag: "Cleared" }) };
+  }
 
   const plan = oauth.subscriptionType ?? oauth.rateLimitTier ?? null;
-  const expiresAt = parseExpiresAtMs(oauth.expiresAt);
-  if (expiresAt !== undefined && Date.now() > expiresAt - TOKEN_EXPIRY_SKEW_MS) {
-    return undefined;
-  }
-
-  const response = await callUsageApi(oauth.accessToken, version);
-  if (!response.ok) {
-    return undefined;
-  }
-
-  const data = (await response.json()) as Record<string, unknown>;
-  return parseClaudeUsageRateLimits(data, plan);
-}
-
-/** Usage of the login in `store`; resolve it with `resolveClaudeLoginStore`. */
-export const probeClaudeUsageRateLimits = Effect.fn("probeClaudeUsageRateLimits")(function* (
-  store: ClaudeCredentialStore,
-  version: string | null,
-): Effect.fn.Return<ServerProviderRateLimits | undefined> {
-  return yield* Effect.tryPromise({
-    try: () => fetchClaudeUsageRateLimits(store, version),
-    catch: () => undefined,
-  }).pipe(Effect.orElseSucceed(() => undefined));
+  return {
+    accountKey,
+    fetch: requestUsage(
+      () => callUsageApi(fetchImpl, accessToken, version),
+      (body, nowMs) => parseClaudeUsageRateLimits(body, plan, nowMs),
+    ),
+  };
 });
 
 /**
- * `probeClaudeUsageRateLimits` behind a cache keyed on the credential store as well as the CLI
- * version, so usage read for one login is never served for another.
+ * Usage reads of this instance's login through its `gate`, behind a cache keyed on the
+ * credential store as well as the CLI version, so usage read for one login is never served for
+ * another.
  */
 export const makeCachedClaudeUsageProbe = Effect.fn("makeCachedClaudeUsageProbe")(function* (
   timeToLive: Duration.Input,
+  gate: UsageReadGate,
 ) {
   const cache = yield* Cache.make({
     capacity: 1,
     timeToLive,
     lookup: (key: ClaudeCredentialStore & { readonly version: string | null }) =>
-      probeClaudeUsageRateLimits(key, key.version),
+      gate.read(planClaudeUsageRead(key, key.version)),
   });
   return (store: ClaudeCredentialStore, version: string | null) =>
     Cache.get(cache, { ...store, version });

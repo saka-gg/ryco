@@ -233,6 +233,73 @@ describe("ContextWindowMeter account details", () => {
     await expect.element(page.getByText("Short window", { exact: true })).toBeVisible();
   });
 
+  it("lists every window the provider reported, model-scoped ones included", async () => {
+    mounted = await render(
+      <ContextWindowMeter
+        usage={deriveContextWindowUsage([], "200k")}
+        rateLimits={{
+          primary: { usedPercent: 42, windowDurationMins: 300 },
+          secondary: { usedPercent: 7, windowDurationMins: 10_080 },
+          windows: [
+            { id: "five_hour", usedPercent: 42, windowDurationMins: 300 },
+            { id: "seven_day", usedPercent: 7, windowDurationMins: 10_080 },
+            { id: "seven_day_opus", scope: "Opus", usedPercent: 12, windowDurationMins: 10_080 },
+            { id: "cloud_session_credits", scope: "Cloud session credits", usedPercent: 4 },
+          ],
+          observedAt: minutesAgo(1),
+        }}
+        checkedAt={minutesAgo(1)}
+        available
+        account={account({ checkCliProxyRoute: false })}
+      />,
+    );
+    await open();
+
+    for (const label of ["5h", "Weekly", "Weekly · Opus", "Cloud session credits"]) {
+      await expect.element(page.getByText(label, { exact: true })).toBeVisible();
+    }
+    await expect.element(page.getByText("12% used")).toBeVisible();
+    // Fresh numbers carry no stale note.
+    expect(document.body.textContent).not.toContain("Last read");
+  });
+
+  it("notes when the shown limits are the last good read of a throttled provider", async () => {
+    const stale: ServerProviderRateLimits = {
+      primary: { usedPercent: 42, windowDurationMins: 300 },
+      observedAt: minutesAgo(12),
+      stale: true,
+      staleReason: "rateLimited",
+    };
+    mounted = await render(
+      <ContextWindowMeter
+        usage={deriveContextWindowUsage([], "200k")}
+        rateLimits={stale}
+        checkedAt={minutesAgo(1)}
+        available
+        account={account({ checkCliProxyRoute: false })}
+      />,
+    );
+    await open();
+
+    await expect.element(page.getByText("42% used")).toBeVisible();
+    await expect
+      .element(page.getByText("Last read 12m ago; the provider is limiting usage reads."))
+      .toBeVisible();
+
+    await mounted.rerender(
+      <ContextWindowMeter
+        usage={deriveContextWindowUsage([], "200k")}
+        rateLimits={{ ...stale, staleReason: "unreachable" }}
+        checkedAt={minutesAgo(1)}
+        available
+        account={account({ checkCliProxyRoute: false })}
+      />,
+    );
+    await expect
+      .element(page.getByText("Last read 12m ago; the latest usage read failed."))
+      .toBeVisible();
+  });
+
   it("keeps realistic and long emails inside the popup", async () => {
     const usage = deriveContextWindowUsage([], "200k");
     mounted = await render(
