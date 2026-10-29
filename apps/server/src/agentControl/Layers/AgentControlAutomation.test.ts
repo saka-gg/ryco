@@ -475,6 +475,106 @@ layer("AgentControlAutomationService", (it) => {
     }),
   );
 
+  it.effect("runs a calendar schedule at its local time and coalesces missed days", () =>
+    Effect.gen(function* () {
+      const repository = yield* AgentControlAutomationRepository;
+      const automations = yield* AgentControlAutomationService;
+      const base = makeAutomation("automation-calendar", new Date().toISOString());
+      const definition = {
+        ...base.definition,
+        schedule: {
+          kind: "calendar" as const,
+          timeZone: "UTC",
+          localTime: "00:00",
+          weekdays: [0, 1, 2, 3, 4, 5, 6],
+          startsAt: new Date(Date.now() + 60_000).toISOString(),
+          endsAt: new Date(Date.now() + 20 * 24 * 60 * 60_000).toISOString(),
+        },
+      };
+      yield* automations.validateDefinition(definition, new Date().toISOString());
+      const proposal = (id: string, value: typeof definition): AgentControlProposal => ({
+        proposalId: AgentControlProposalId.make(`proposal-${id}`),
+        requestId: AgentControlRequestId.make(`request-${id}`),
+        principal,
+        planVersion: 1,
+        plan: {
+          kind: "createAutomation",
+          automationId: AgentControlAutomationId.make(id),
+          definition: value,
+        },
+        planDigest: "c".repeat(64),
+        riskTags: [AGENT_CONTROL_RISK_TAGS.createsAutomation],
+        promptSummary: "Create schedule definition",
+        status: "executing",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        decidedAt: new Date().toISOString(),
+        result: null,
+      });
+      const stored = yield* automations.applyLifecycle(proposal("automation-calendar", definition));
+      // The first run is the next UTC midnight after the start.
+      const nextMidnight = new Date(Date.parse(definition.schedule.startsAt));
+      nextMidnight.setUTCHours(24, 0, 0, 0);
+      assert.strictEqual(stored.nextRunAt, nextMidnight.toISOString());
+
+      // Three midnights later, the missed ones coalesce into one run.
+      assert.isTrue(
+        yield* repository.replaceAutomation({
+          automation: {
+            ...stored,
+            nextRunAt: new Date(Date.now() - 3 * 24 * 60 * 60_000 - 1_000).toISOString(),
+          },
+          expectedRevision: stored.revision,
+          expectedCancelled: false,
+        }),
+      );
+      assert.strictEqual(yield* automations.materializeDue, 1);
+      const [run] = yield* repository.listRuns({ automationId: stored.automationId, limit: 1 });
+      assert.strictEqual(run?.coalescedOccurrences, 3);
+      const after = Option.getOrThrow(yield* repository.getAutomation(stored.automationId));
+      assert.isTrue(Date.parse(after.nextRunAt!) > Date.now());
+      assert.strictEqual(new Date(after.nextRunAt!).getUTCHours(), 0);
+    }),
+  );
+
+  it.effect("refuses a calendar schedule with an unknown zone or no run before its end", () =>
+    Effect.gen(function* () {
+      const automations = yield* AgentControlAutomationService;
+      const now = new Date().toISOString();
+      const base = makeAutomation("automation-calendar-invalid", now).definition;
+      const schedule = {
+        kind: "calendar" as const,
+        timeZone: "UTC",
+        localTime: "09:00",
+        weekdays: [1],
+        startsAt: new Date(Date.now() + 60_000).toISOString(),
+        endsAt: new Date(Date.now() + 30 * 24 * 60 * 60_000).toISOString(),
+      };
+      const reasons = [];
+      for (const bad of [
+        { ...schedule, timeZone: "Mars/Olympus" },
+        { ...schedule, weekdays: [1, 1] },
+        // Runs only three days from now but ends in two minutes: no run fits.
+        {
+          ...schedule,
+          weekdays: [(new Date().getUTCDay() + 3) % 7],
+          endsAt: new Date(Date.now() + 2 * 60_000).toISOString(),
+        },
+      ]) {
+        const failure = yield* Effect.flip(
+          automations.validateDefinition({ ...base, schedule: bad }, now),
+        );
+        reasons.push(failure.detail);
+      }
+      assert.deepStrictEqual(reasons, [
+        "The schedule's time zone is not known.",
+        "The schedule's weekdays must be distinct, 0 to 6.",
+        "No run falls between the schedule's start and end.",
+      ]);
+    }),
+  );
+
   it.effect("hides automations outside the exact project/provider scope", () =>
     Effect.gen(function* () {
       const repository = yield* AgentControlAutomationRepository;

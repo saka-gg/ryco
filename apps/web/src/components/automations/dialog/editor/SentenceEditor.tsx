@@ -16,11 +16,17 @@ import { useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from "rea
 
 import { DeviceIcon } from "../../../DeviceIcon";
 import { IntervalPicker } from "../../pickers/IntervalPicker";
+import { PickerRadioRow, type PickerRadioOption } from "../../pickers/PickerRadioRow";
 import { UntilPicker, type UntilVia } from "../../pickers/UntilPicker";
 import { WhenField, type WhenVia } from "../../pickers/WhenField";
 import { Tip } from "../dialogControls";
 import { animateSentenceChange } from "./editorMotion";
-import type { EditorTokenKind, SentenceWords } from "./editorModel.logic";
+import {
+  calendarChoiceOf,
+  type CalendarChoice,
+  type EditorTokenKind,
+  type SentenceWords,
+} from "./editorModel.logic";
 import { RefToken } from "./RefToken";
 import { TokenMenu, TokenPopover } from "./tokenPopups";
 
@@ -62,6 +68,8 @@ export interface SentenceEditorProps {
   /** Where the branch list is read (the checkout's folder on its device). */
   readonly refSource: { readonly environmentId: EnvironmentId; readonly cwd: string } | null;
   readonly onInterval: (ms: number) => void;
+  /** Repeat on the calendar instead of an interval (weekdays at the first run's time). */
+  readonly onCalendar: (choice: CalendarChoice) => void;
   readonly onStart: (ms: number) => void;
   readonly onEnd: (ms: number) => void;
   readonly onDevice: (key: string) => void;
@@ -97,6 +105,13 @@ function Pair(props: {
     </span>
   );
 }
+
+/** Repeat at the first run's time of day, on these days; it holds the wall-clock time. */
+const CALENDAR_OPTIONS: ReadonlyArray<PickerRadioOption<CalendarChoice>> = [
+  { value: "daily", label: "Every day", ariaLabel: "Every day at this time" },
+  { value: "weekdays", label: "Weekdays", ariaLabel: "Weekdays at this time" },
+  { value: "weekly", label: "Weekly", ariaLabel: "Weekly on this day at this time" },
+];
 
 export function SentenceEditor(props: SentenceEditorProps) {
   const { editorId, draft, words, open } = props;
@@ -164,12 +179,27 @@ export function SentenceEditor(props: SentenceEditorProps) {
             </button>
           }
         >
-          <IntervalPicker
-            valueMs={draft.intervalMs}
-            label="Repeat every"
-            onChange={props.onInterval}
-            onCommit={() => props.onPicked("interval")}
-          />
+          <div className="pk flex min-w-0 flex-col items-start gap-2">
+            <PickerRadioRow
+              label="At this time"
+              options={CALENDAR_OPTIONS}
+              value={calendarChoiceOf(draft)}
+              onSelect={(choice, how) => {
+                props.onCalendar(choice);
+                if (how === "click") props.onPicked("interval");
+              }}
+            />
+            <IntervalPicker
+              valueMs={draft.intervalMs}
+              label="Repeat every"
+              unselected={draft.kind === "calendar"}
+              onChange={props.onInterval}
+              onCommit={(ms) => {
+                props.onInterval(ms);
+                props.onPicked("interval");
+              }}
+            />
+          </div>
         </TokenPopover>
       </Pair>{" "}
       <Pair>

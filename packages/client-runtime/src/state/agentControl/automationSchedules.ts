@@ -45,6 +45,7 @@ import {
   floorMinute,
   formatDate,
   isoFromMs,
+  localTimeZone,
   nextRun,
   rollForward,
   scheduleLabel,
@@ -57,6 +58,7 @@ import {
   type ScheduleErrors,
   type ScheduleMs,
 } from "@ryco/shared/automationSchedule";
+import { localDateTime } from "@ryco/shared/automationCalendar";
 import { getModelDisplayName, sameModelSelection } from "@ryco/shared/model";
 
 // ── Run status ───────────────────────────────────────────────────────
@@ -243,6 +245,15 @@ const samePhase = (a: AgentControlAutomationSchedule, b: AgentControlAutomationS
   const y = scheduleToMs(b);
   if (x.kind === "once" || y.kind === "once")
     return x.kind === y.kind && firstRun(x) === firstRun(y);
+  if (x.kind === "calendar" || y.kind === "calendar")
+    return (
+      x.kind === "calendar" &&
+      y.kind === "calendar" &&
+      x.timeZone === y.timeZone &&
+      x.minutes === y.minutes &&
+      x.weekdays.join() === y.weekdays.join() &&
+      x.endsAt === y.endsAt
+    );
   return (
     x.intervalMs === y.intervalMs &&
     x.endsAt === y.endsAt &&
@@ -924,10 +935,14 @@ export interface ScheduleDraft {
   readonly baseRef: string;
   /** Carried through unchanged; the editor does not offer it. */
   readonly tokenMode: AgentTokenMode | null;
-  readonly kind: "once" | "fixed-interval";
-  /** The run (once) or the first run (repeats). */
+  readonly kind: "once" | "fixed-interval" | "calendar";
+  /** The run (once) or the first run (repeats). A calendar schedule runs at its time of day. */
   readonly start: number;
   readonly intervalMs: number;
+  /** Calendar schedules: the weekdays it runs on (0 = Sunday). */
+  readonly weekdays: ReadonlyArray<number>;
+  /** Calendar schedules: the zone its time of day is read in (the reader's own for a new one). */
+  readonly timeZone: string;
   readonly endsAt: number;
   readonly enabled: boolean;
   /**
@@ -948,7 +963,7 @@ export function draftFromDefinition(
 ): ScheduleDraft {
   const ex = definition.execution;
   const s = scheduleToMs(definition.schedule);
-  const start = s.kind === "once" ? s.runAt : s.startsAt;
+  const start = firstRun(s);
   return {
     id: options.id ?? null,
     projectId: ex.projectId,
@@ -961,23 +976,36 @@ export function draftFromDefinition(
     tokenMode: ex.tokenMode ?? null,
     kind: s.kind,
     start,
-    intervalMs: s.kind === "once" ? DAY_MS : s.intervalMs,
+    intervalMs: s.kind === "fixed-interval" ? s.intervalMs : DAY_MS,
+    weekdays: s.kind === "calendar" ? s.weekdays : [],
+    timeZone: s.kind === "calendar" ? s.timeZone : localTimeZone(),
     endsAt: s.kind === "once" ? addDays(start, 7) : s.endsAt,
     enabled: definition.enabled,
     runWithoutAsking: definition.runPolicy === "run-without-asking",
   };
 }
 
-/** The draft's schedule in milliseconds. */
+/** The draft's schedule in milliseconds. A calendar schedule runs at its first run's time of day. */
 export function draftSchedule(draft: ScheduleDraft): ScheduleMs {
-  return draft.kind === "once"
-    ? { kind: "once", runAt: draft.start }
-    : {
-        kind: "fixed-interval",
-        startsAt: draft.start,
-        intervalMs: draft.intervalMs,
-        endsAt: draft.endsAt,
-      };
+  if (draft.kind === "once") return { kind: "once", runAt: draft.start };
+  if (draft.kind === "calendar") {
+    return {
+      kind: "calendar",
+      startsAt: draft.start,
+      endsAt: draft.endsAt,
+      timeZone: draft.timeZone,
+      minutes: Number.isFinite(draft.start)
+        ? localDateTime(draft.start, draft.timeZone).minutes
+        : Number.NaN,
+      weekdays: draft.weekdays,
+    };
+  }
+  return {
+    kind: "fixed-interval",
+    startsAt: draft.start,
+    intervalMs: draft.intervalMs,
+    endsAt: draft.endsAt,
+  };
 }
 
 /** The contract definition a draft saves as (title and prompt trimmed). */
@@ -1034,6 +1062,8 @@ export function blankScheduleDraft(input: {
     kind: "fixed-interval",
     start,
     intervalMs: DAY_MS,
+    weekdays: [],
+    timeZone: localTimeZone(),
     endsAt: start + 30 * DAY_MS,
     enabled: true,
     runWithoutAsking: false,

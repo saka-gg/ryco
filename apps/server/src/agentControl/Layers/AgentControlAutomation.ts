@@ -45,12 +45,17 @@ const revisionState = (automation: AgentControlAutomation) => ({
   updatedAt: automation.updatedAt,
 });
 
-const nextRunAt = (definition: AgentControlAutomationDefinition): string | null => {
-  if (!definition.enabled) return null;
-  return definition.schedule.kind === "once"
-    ? definition.schedule.runAt
-    : definition.schedule.startsAt;
-};
+/** Calendar schedule rules, loaded the first time one is checked so they stay off boot. */
+const loadCalendarSchedules = Effect.promise(() => import("../calendarSchedules.ts"));
+
+/** The first run: a calendar schedule's first time at or after its start. */
+const firstRunAt = (schedule: AgentControlAutomationDefinition["schedule"]) =>
+  schedule.kind === "calendar"
+    ? loadCalendarSchedules.pipe(Effect.map((calendar) => calendar.firstCalendarRun(schedule)))
+    : Effect.succeed(schedule.kind === "once" ? schedule.runAt : schedule.startsAt);
+
+const nextRunAt = (definition: AgentControlAutomationDefinition) =>
+  definition.enabled ? firstRunAt(definition.schedule) : Effect.succeed(null);
 
 const exactState = (left: unknown, right: unknown): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
@@ -110,31 +115,38 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
       const validateDefinition: AgentControlAutomationShape["validateDefinition"] = (
         definition,
         now,
-      ) => {
-        const nowMs = Date.parse(now);
-        const schedule = definition.schedule;
-        const firstMs = Date.parse(schedule.kind === "once" ? schedule.runAt : schedule.startsAt);
-        const endMs = Date.parse(schedule.kind === "once" ? schedule.runAt : schedule.endsAt);
-        if (!Number.isFinite(firstMs) || firstMs <= nowMs) {
-          return invalid("schedule-invalid", "The first scheduled run must be in the future.");
-        }
-        if (endMs < firstMs || endMs > nowMs + AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS) {
-          return invalid(
-            "schedule-invalid",
-            "The schedule must end at or before the server scheduling horizon.",
-          );
-        }
-        if (
-          schedule.kind === "fixed-interval" &&
-          schedule.intervalMs < AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS
-        ) {
-          return invalid(
-            "schedule-invalid",
-            `Recurring intervals must be at least ${AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS}ms.`,
-          );
-        }
-        return Effect.void;
-      };
+      ) =>
+        Effect.gen(function* () {
+          const nowMs = Date.parse(now);
+          const schedule = definition.schedule;
+          if (schedule.kind === "calendar") {
+            const problem = (yield* loadCalendarSchedules).calendarScheduleProblem(schedule);
+            if (problem !== null) return yield* invalid("schedule-invalid", problem);
+          }
+          const firstMs = Date.parse((yield* firstRunAt(schedule)) ?? "");
+          const endMs = Date.parse(schedule.kind === "once" ? schedule.runAt : schedule.endsAt);
+          if (!Number.isFinite(firstMs) || firstMs <= nowMs) {
+            return yield* invalid(
+              "schedule-invalid",
+              "The first scheduled run must be in the future.",
+            );
+          }
+          if (endMs < firstMs || endMs > nowMs + AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS) {
+            return yield* invalid(
+              "schedule-invalid",
+              "The schedule must end at or before the server scheduling horizon.",
+            );
+          }
+          if (
+            schedule.kind === "fixed-interval" &&
+            schedule.intervalMs < AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS
+          ) {
+            return yield* invalid(
+              "schedule-invalid",
+              `Recurring intervals must be at least ${AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS}ms.`,
+            );
+          }
+        });
 
       const get: AgentControlAutomationShape["get"] = (automationId, scope) =>
         repository.getAutomation(automationId).pipe(
@@ -321,7 +333,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
               enabled: plan.definition.enabled,
               cancelled: false,
               cancelledAt: null,
-              nextRunAt: nextRunAt(plan.definition),
+              nextRunAt: yield* nextRunAt(plan.definition),
               createdAt: now,
               updatedAt: now,
             };
@@ -344,7 +356,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
                   definition: plan.after,
                   revision: current.value.revision + 1,
                   enabled: plan.after.enabled,
-                  nextRunAt: nextRunAt(plan.after),
+                  nextRunAt: yield* nextRunAt(plan.after),
                   updatedAt: now,
                 }
               : {

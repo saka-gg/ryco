@@ -649,6 +649,26 @@ export const AgentControlAutomationSchedule = Schema.Union([
     /** Required finite end: recurring schedules are never unbounded. */
     endsAt: IsoDateTime,
   }).pipe(rejectExcessProperties),
+  /**
+   * Runs at one wall-clock time on chosen weekdays in a named zone, from the first such
+   * time at or after `startsAt` until `endsAt` (`@ryco/shared/automationCalendar`). A
+   * time a clock change skips is skipped that day; a repeated time runs once.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("calendar"),
+    /** IANA zone, e.g. "Europe/Berlin". */
+    timeZone: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+    /** 24-hour "HH:MM". */
+    localTime: TrimmedNonEmptyString.check(Schema.isPattern(/^([01]\d|2[0-3]):[0-5]\d$/)),
+    /** 0 = Sunday … 6 = Saturday; at least one. */
+    weekdays: Schema.Array(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 6 }))).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(7),
+    ),
+    startsAt: IsoDateTime,
+    /** Required finite end, like a fixed interval's. */
+    endsAt: IsoDateTime,
+  }).pipe(rejectExcessProperties),
 ]);
 export type AgentControlAutomationSchedule = typeof AgentControlAutomationSchedule.Type;
 

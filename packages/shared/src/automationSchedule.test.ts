@@ -606,3 +606,81 @@ describe("validateScheduleDefinition", () => {
     ).toEqual({});
   });
 });
+
+describe("calendar schedules (Europe/Berlin)", () => {
+  // Thu 2026-10-22 08:00 local; the clocks go back on Sun Oct 25.
+  const now = new Date(2026, 9, 22, 8, 0).getTime();
+  const weekdays9 = {
+    kind: "calendar" as const,
+    timeZone: "Europe/Berlin",
+    localTime: "09:00",
+    weekdays: [1, 2, 3, 4, 5],
+    startsAt: new Date(2026, 9, 22, 8, 30).toISOString(),
+    endsAt: new Date(2026, 10, 3, 12, 0).toISOString(),
+  };
+
+  it("keeps the wall-clock time across the clock change and skips the weekend", () => {
+    const runs = runPreviewWindow(weekdays9, now)!;
+    expect(runs.next.map((ms) => formatDateTime(ms, now))).toEqual([
+      formatDateTime(new Date(2026, 9, 22, 9, 0).getTime(), now),
+      formatDateTime(new Date(2026, 9, 23, 9, 0).getTime(), now),
+      formatDateTime(new Date(2026, 9, 26, 9, 0).getTime(), now),
+      formatDateTime(new Date(2026, 9, 27, 9, 0).getTime(), now),
+      formatDateTime(new Date(2026, 9, 28, 9, 0).getTime(), now),
+    ]);
+    expect(runs.next.every((ms) => formatTime(ms) === "09:00")).toBe(true);
+    // Oct 22, 23, 26–30, Nov 2, 3: nine weekdays.
+    expect(countRuns(weekdays9, now)).toBe(9);
+    expect(firstRun(weekdays9)).toBe(new Date(2026, 9, 22, 9, 0).getTime());
+    expect(lastRun(weekdays9)).toBe(new Date(2026, 10, 3, 9, 0).getTime());
+    expect(nextRun(weekdays9, new Date(2026, 9, 23, 9, 0).getTime())).toBe(
+      new Date(2026, 9, 26, 9, 0).getTime(),
+    );
+    expect(dstShift(weekdays9, now)).toBeNull();
+    expect(clockChange(weekdays9, now)).toBeNull();
+  });
+
+  it("says when it runs in plain words", () => {
+    expect(cadence(weekdays9, now)).toBe("Every weekday at 09:00");
+    expect(scheduleLabel(weekdays9, now)).toBe(
+      `Every weekday at 09:00 · until ${formatDate(Date.parse(weekdays9.endsAt), now)}`,
+    );
+    expect(phrase(weekdays9, now)).toBe(
+      `every weekday at 09:00 from ${formatDay(new Date(2026, 9, 22, 9, 0).getTime(), now)} until ${formatDate(Date.parse(weekdays9.endsAt), now)}`,
+    );
+  });
+
+  it("round-trips through milliseconds and rolls a past start forward to a run", () => {
+    expect(scheduleToContract(scheduleToMs(weekdays9))).toEqual(weekdays9);
+    const later = new Date(2026, 9, 24, 12, 0).getTime();
+    const rolled = rollForward(weekdays9, later);
+    expect(rolled.kind === "calendar" && rolled.startsAt).toBe(
+      new Date(2026, 9, 26, 9, 0).getTime(),
+    );
+  });
+
+  it("validates its days and that a run fits", () => {
+    const definition = (schedule: typeof weekdays9) => ({
+      execution: {
+        title: "Digest",
+        prompt: "Summarise.",
+        modelSelection: { instanceId: "codex", model: "gpt-5.6" },
+      },
+      schedule,
+      enabled: true,
+    });
+    expect(
+      validateScheduleDefinition(definition(weekdays9) as never, now).errors.interval,
+    ).toBeUndefined();
+    expect(
+      validateScheduleDefinition(
+        definition({
+          ...weekdays9,
+          weekdays: [6],
+          endsAt: new Date(2026, 9, 23, 12, 0).toISOString(),
+        }) as never,
+        now,
+      ).errors.interval,
+    ).toBe("No run falls between the start and the end.");
+  });
+});

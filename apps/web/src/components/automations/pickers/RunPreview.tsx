@@ -75,7 +75,9 @@ export function RunPreview(props: RunPreviewProps) {
     ? ""
     : scheduleMs.kind === "once"
       ? `once|${scheduleMs.runAt}`
-      : `interval|${scheduleMs.startsAt}|${scheduleMs.intervalMs}|${scheduleMs.endsAt}`;
+      : scheduleMs.kind === "calendar"
+        ? `calendar|${scheduleMs.startsAt}|${scheduleMs.timeZone}|${scheduleMs.minutes}|${scheduleMs.weekdays.join()}|${scheduleMs.endsAt}`
+        : `interval|${scheduleMs.startsAt}|${scheduleMs.intervalMs}|${scheduleMs.endsAt}`;
 
   const rows: PreviewRow[] = (preview?.next ?? []).map((ms, index, next) => {
     const previous = index > 0 ? next[index - 1] : undefined;

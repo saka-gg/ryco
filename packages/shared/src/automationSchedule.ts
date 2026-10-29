@@ -39,6 +39,14 @@ import {
   type ProviderOptionSelection,
 } from "@ryco/contracts/model";
 
+import {
+  calendarRuns,
+  calendarWords,
+  countCalendarRuns,
+  formatLocalTime,
+  parseLocalTime,
+  type CalendarRule,
+} from "./automationCalendar.ts";
 import { getModelDisplayName } from "./model.ts";
 
 // ── Units and limits ─────────────────────────────────────────────────
@@ -71,7 +79,15 @@ export type ScheduleMs =
       readonly startsAt: number;
       readonly intervalMs: number;
       readonly endsAt: number;
-    };
+    }
+  | ({
+      /** Wall-clock time on weekdays in a zone (`automationCalendar`). */
+      readonly kind: "calendar";
+      readonly startsAt: number;
+      readonly endsAt: number;
+    } & CalendarRule);
+
+type CalendarScheduleMs = Extract<ScheduleMs, { kind: "calendar" }>;
 
 /** A schedule as the contracts carry it (ISO) or in milliseconds. */
 export type ScheduleInput = ScheduleMs | AgentControlAutomationSchedule;
@@ -90,6 +106,18 @@ export function isoFromMs(ms: number): string {
 
 export function scheduleToMs(schedule: ScheduleInput): ScheduleMs {
   if (schedule.kind === "once") return { kind: "once", runAt: toMs(schedule.runAt) };
+  if (schedule.kind === "calendar") {
+    const minutes =
+      "minutes" in schedule ? schedule.minutes : (parseLocalTime(schedule.localTime) ?? Number.NaN);
+    return {
+      kind: "calendar",
+      startsAt: toMs(schedule.startsAt),
+      endsAt: toMs(schedule.endsAt),
+      timeZone: schedule.timeZone,
+      minutes,
+      weekdays: [...schedule.weekdays],
+    };
+  }
   return {
     kind: "fixed-interval",
     startsAt: toMs(schedule.startsAt),
@@ -102,6 +130,16 @@ export function scheduleToMs(schedule: ScheduleInput): ScheduleMs {
 export function scheduleToContract(schedule: ScheduleInput): AgentControlAutomationSchedule {
   const s = scheduleToMs(schedule);
   if (s.kind === "once") return { kind: "once", runAt: isoFromMs(s.runAt) };
+  if (s.kind === "calendar") {
+    return {
+      kind: "calendar",
+      timeZone: s.timeZone,
+      localTime: formatLocalTime(s.minutes),
+      weekdays: [...s.weekdays],
+      startsAt: isoFromMs(s.startsAt),
+      endsAt: isoFromMs(s.endsAt),
+    };
+  }
   return {
     kind: "fixed-interval",
     startsAt: isoFromMs(s.startsAt),
@@ -111,6 +149,8 @@ export function scheduleToContract(schedule: ScheduleInput): AgentControlAutomat
 }
 
 // ── Local calendar math ──────────────────────────────────────────────
+
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -353,9 +393,24 @@ export function rel(ms: TimeInput, nowMs: number): string {
 
 // ── Schedule math ────────────────────────────────────────────────────
 
-/** The first run: `runAt` or `startsAt`. */
+/** A calendar schedule's runs in [fromMs, untilMs] inside its own window. */
+function calendarOccurrences(
+  s: CalendarScheduleMs,
+  fromMs: number,
+  untilMs: number,
+  limit: number,
+): number[] {
+  if (!Number.isFinite(s.startsAt) || !Number.isFinite(s.endsAt) || !Number.isFinite(s.minutes))
+    return [];
+  return calendarRuns(s, Math.max(fromMs, s.startsAt), Math.min(untilMs, s.endsAt), limit);
+}
+
+/** The first run: `runAt`, `startsAt`, or a calendar's first time at or after `startsAt`. */
 export function firstRun(schedule: ScheduleInput): number {
   const s = scheduleToMs(schedule);
+  if (s.kind === "calendar") {
+    return calendarOccurrences(s, s.startsAt, s.endsAt, 1)[0] ?? s.startsAt;
+  }
   return s.kind === "once" ? s.runAt : s.startsAt;
 }
 
@@ -363,6 +418,9 @@ export function firstRun(schedule: ScheduleInput): number {
 export function lastRun(schedule: ScheduleInput): number {
   const s = scheduleToMs(schedule);
   if (s.kind === "once") return s.runAt;
+  if (s.kind === "calendar") {
+    return calendarOccurrences(s, s.startsAt, s.endsAt, 1_000).at(-1) ?? s.startsAt;
+  }
   if (!(s.intervalMs > 0) || s.endsAt < s.startsAt) return s.startsAt;
   return s.startsAt + Math.floor((s.endsAt - s.startsAt) / s.intervalMs) * s.intervalMs;
 }
@@ -378,6 +436,7 @@ export function scheduleOccurrences(
   const s = scheduleToMs(schedule);
   if (s.kind === "once")
     return s.runAt >= fromMs && s.runAt <= untilMs && limit > 0 ? [s.runAt] : [];
+  if (s.kind === "calendar") return calendarOccurrences(s, fromMs, untilMs, limit);
   const { startsAt, intervalMs, endsAt } = s;
   if (!(intervalMs > 0) || !Number.isFinite(startsAt) || !Number.isFinite(endsAt)) return [];
   const out: number[] = [];
@@ -405,6 +464,9 @@ export function countRuns(
   if (!schedule) return 0;
   const s = scheduleToMs(schedule);
   if (s.kind === "once") return s.runAt >= fromMs ? 1 : 0;
+  if (s.kind === "calendar") {
+    return countCalendarRuns(s, Math.max(fromMs, s.startsAt), s.endsAt);
+  }
   if (!(s.intervalMs > 0) || !(s.endsAt >= s.startsAt)) return 0;
   const k0 = fromMs > s.startsAt ? Math.ceil((fromMs - s.startsAt) / s.intervalMs) : 0;
   const kN = Math.floor((s.endsAt - s.startsAt) / s.intervalMs);
@@ -442,7 +504,9 @@ export function dstShift(
 ): { readonly at: number; readonly from: string; readonly to: string } | null {
   if (!schedule) return null;
   const s = scheduleToMs(schedule);
-  if (s.kind === "once" || s.intervalMs % HOUR_MS !== 0 || s.intervalMs < DAY_MS) return null;
+  // A calendar schedule keeps its wall-clock time; only elapsed intervals drift.
+  if (s.kind !== "fixed-interval" || s.intervalMs % HOUR_MS !== 0 || s.intervalMs < DAY_MS)
+    return null;
   const occ = scheduleOccurrences(s, fromMs, Number.POSITIVE_INFINITY, 120);
   for (let i = 1; i < occ.length; i++) {
     const a = formatTime(occ[i - 1]!);
@@ -475,7 +539,7 @@ export function clockChange(
 ): ClockChange | null {
   if (!schedule) return null;
   const s = scheduleToMs(schedule);
-  if (s.kind === "once" || !dstShift(s, nowMs)) return null;
+  if (s.kind !== "fixed-interval" || !dstShift(s, nowMs)) return null;
   const occ = scheduleOccurrences(s, nowMs, Number.POSITIVE_INFINITY, 160);
   const i = occ.findIndex((t, k) => k > 0 && formatTime(t) !== formatTime(occ[k - 1]!));
   if (i < 1) return null;
@@ -525,6 +589,7 @@ export function cadence(schedule: ScheduleInput | null | undefined, nowMs: numbe
   if (!schedule) return "";
   const s = scheduleToMs(schedule);
   if (s.kind === "once") return "Once";
+  if (s.kind === "calendar") return capitalize(calendarWords(s, localTimeZone()));
   const i = s.intervalMs;
   if (i % DAY_MS === 0) {
     const ref = anchorOf(s, nowMs);
@@ -562,6 +627,11 @@ export function phrase(
     if (n === 0) return `once, today at ${t}`;
     if (n === 1) return `once, tomorrow at ${t}`;
     return `once, on ${formatDay(s.runAt)} at ${t}`;
+  }
+  if (s.kind === "calendar") {
+    const first = firstRun(s);
+    const from = first > nowMs ? ` from ${formatDay(first, nowMs)}` : "";
+    return `${calendarWords(s, localTimeZone())}${from} until ${formatDate(s.endsAt, nowMs)}`;
   }
   const i = s.intervalMs;
   const ahead = s.startsAt > nowMs;
@@ -745,6 +815,8 @@ export function runPreviewNote(
   if (approvals === false) return "";
   if (s.kind === "once")
     return approvals === true ? "It waits up to 15 min for your approval when it's due." : "";
+  if (s.kind === "calendar")
+    return approvals === true ? "Each run waits up to 15 min for your approval." : "";
   const perDay = DAY_MS / s.intervalMs;
   if (perDay > 8 && w.count > 8)
     return `About ${Math.round(perDay)} runs a day — each waits up to 15 min for your approval.`;
@@ -961,7 +1033,12 @@ export function validateScheduleDefinition(
       if (!Number.isFinite(s.startsAt)) errors.start = "Pick when the first run happens.";
       else if (s.startsAt <= nowMs)
         errors.start = `The first run has to be in the future — after ${dayTime(nowMs, nowMs)}.`;
-      if (!Number.isFinite(s.intervalMs) || s.intervalMs <= 0)
+      if (s.kind === "calendar") {
+        if (s.weekdays.length === 0 || !Number.isFinite(s.minutes))
+          errors.interval = "Pick the days and time it runs.";
+        else if (Number.isFinite(s.startsAt) && countRuns(s, s.startsAt) === 0)
+          errors.interval = "No run falls between the start and the end.";
+      } else if (!Number.isFinite(s.intervalMs) || s.intervalMs <= 0)
         errors.interval = "Pick how often it runs.";
       else if (s.intervalMs < L.minIntervalMs)
         errors.interval = "Runs can be at most every 15 minutes.";

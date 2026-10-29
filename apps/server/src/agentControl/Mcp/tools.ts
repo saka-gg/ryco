@@ -283,6 +283,20 @@ const automationScheduleSchema = {
       required: ["kind", "startsAt", "intervalMs", "endsAt"],
       additionalProperties: false,
     },
+    {
+      // localTime "HH:MM" on weekdays (0 = Sunday) in an IANA timeZone; the contract checks it.
+      type: "object",
+      properties: {
+        kind: { const: "calendar" },
+        timeZone: { type: "string" },
+        localTime: { type: "string" },
+        weekdays: { type: "array", items: { type: "integer" } },
+        startsAt: { type: "string" },
+        endsAt: { type: "string" },
+      },
+      required: ["kind", "timeZone", "localTime", "weekdays", "startsAt", "endsAt"],
+      additionalProperties: false,
+    },
   ],
 } as const;
 
@@ -863,7 +877,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeAutomationCreate,
     description:
-      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request.",
+      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request. A calendar schedule runs at localTime (HH:MM) on weekdays (0 = Sunday) in an IANA timeZone.",
     inputSchema: {
       type: "object",
       properties: {

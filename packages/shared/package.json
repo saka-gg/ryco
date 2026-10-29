@@ -525,6 +525,10 @@
       "types": "./src/textQuoteSelector.ts",
       "import": "./src/textQuoteSelector.ts"
     },
+    "./automationCalendar": {
+      "types": "./src/automationCalendar.ts",
+      "import": "./src/automationCalendar.ts"
+    },
     "./automationSchedule": {
       "types": "./src/automationSchedule.ts",
       "import": "./src/automationSchedule.ts"
