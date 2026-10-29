@@ -64,19 +64,22 @@ describe("preferencesStore persistence", () => {
     expect(prefs.codeWordBreak).toBe(true);
   });
 
-  it("drops the removed AI Focus preferences a device saved earlier", async () => {
+  it("persists only supported AI Focus intervals", async () => {
+    updatePreferences({ aiFocusEnabled: true, aiFocusRefreshIntervalMs: 600_000 });
+    await flush();
+    expect(getPreferencesSnapshot()).toMatchObject({
+      aiFocusEnabled: true,
+      aiFocusRefreshIntervalMs: 600_000,
+    });
+
     kvStore.set(
       "ryco.preferences",
-      JSON.stringify({
-        aiFocusEnabled: true,
-        aiFocusRefreshIntervalMs: 600_000,
-        codeWordBreak: true,
-      }),
+      JSON.stringify({ aiFocusEnabled: true, aiFocusRefreshIntervalMs: 86_400_001 }),
     );
     resetPreferencesStoreForTests();
     hydratePreferences();
     await flush();
-    expect(getPreferencesSnapshot()).toEqual({ codeWordBreak: true });
+    expect(getPreferencesSnapshot().aiFocusRefreshIntervalMs).toBeUndefined();
   });
 
   it("persists Off and supported auto-settle presets while rejecting arbitrary days", async () => {

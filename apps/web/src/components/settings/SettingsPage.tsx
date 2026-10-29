@@ -113,7 +113,7 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   {
     id: "inbox",
     icon: SparklesIcon,
-    description: "How the inbox settles inactive tasks.",
+    description: "What the inbox surfaces and the models that summarize it.",
   },
   {
     id: "appearance",
@@ -240,8 +240,8 @@ const LazyAccountSettingsPanel = preloadableLazy(() =>
 const LazyProvidersSettingsPanel = preloadableLazy(() =>
   import("./ProvidersSettingsPanel").then((module) => module.ProvidersSettingsPanel),
 );
-const LazyInboxSettings = preloadableLazy(() =>
-  import("./InboxSettings").then((module) => module.InboxSettings),
+const LazyAiFocusSettings = preloadableLazy(() =>
+  import("./AiFocusSettings").then((module) => module.AiFocusSettings),
 );
 const LazyOpinionatedPluginsSettingsPanel = preloadableLazy(() =>
   import("./OpinionatedPluginsSettings").then((module) => module.OpinionatedPluginsSettingsPanel),
@@ -278,7 +278,7 @@ const LazyDiagnosticsSettings = preloadableLazy(() =>
 
 const LAZY_SECTION_PANELS: Partial<Record<SettingsSectionId, PreloadableModule>> = {
   account: LazyAccountSettingsPanel,
-  inbox: LazyInboxSettings,
+  inbox: LazyAiFocusSettings,
   providers: LazyProvidersSettingsPanel,
   "opinionated-plugins": LazyOpinionatedPluginsSettingsPanel,
   "mcp-servers": LazyMcpServersSettings,
@@ -311,7 +311,7 @@ function SectionPanel({ section }: { section: SettingsSectionId }) {
     case "general":
       return <GeneralSettingsPanel />;
     case "inbox":
-      return <LazyInboxSettings />;
+      return <LazyAiFocusSettings />;
     case "providers":
       return <LazyProvidersSettingsPanel />;
     case "opinionated-plugins":

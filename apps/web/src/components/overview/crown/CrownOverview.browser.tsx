@@ -222,6 +222,7 @@ function serveProjectIcon(sample: ArtworkSample) {
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: true,
+      threadPriorityRanking: false,
       projectIcons: true,
     },
   };
@@ -380,6 +381,30 @@ describe("CrownOverview", () => {
     await userEvent.keyboard("{Escape}");
     await expect.poll(() => crown.island().dataset.mode).toBe("dot");
     await expect.poll(() => document.activeElement).toBe(crown.railButton("checks"));
+  });
+
+  it("leaves Escape to a popup opened from the card before it takes focus", async () => {
+    // Base UI focuses a popup's input one frame after it opens; an Escape in
+    // that frame still lands in the card and must close only the popup.
+    const branchPicker = (expanded: boolean) => (
+      <button type="button" aria-haspopup="dialog" aria-expanded={expanded}>
+        Branch picker
+      </button>
+    );
+    const crown = await mountCrown(crownProps({ branchControl: branchPicker(true) }));
+    await page.getByRole("button", { name: "Ship", exact: true }).click();
+    await expect.poll(() => crown.island().dataset.mode).toBe("card");
+
+    for (const name of ["Branch picker", "Collapse overview"]) {
+      page.getByRole("button", { name }).element().focus();
+      await userEvent.keyboard("{Escape}");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(crown.island().dataset.mode).toBe("card");
+    }
+
+    await crown.update({ branchControl: branchPicker(false) });
+    await userEvent.keyboard("{Escape}");
+    await expect.poll(() => crown.island().dataset.mode).toBe("dot");
   });
 
   it("ignores Escape in a split pane that does not have focus", async () => {

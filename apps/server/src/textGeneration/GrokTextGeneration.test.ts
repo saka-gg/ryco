@@ -19,6 +19,7 @@ import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeGrokTextGeneration } from "./GrokTextGeneration.ts";
 import { waitForAcpPromptRequest } from "./acpMockAgentTestUtils.ts";
+import { makeThreadPriorityTestInput } from "../threadPriority/threadPriorityTestFixtures.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -155,6 +156,40 @@ it.layer(GrokTextGenerationTestLayer)("GrokTextGeneration", (it) => {
       }),
     ),
   );
+
+  it.effect("ranks inbox threads through tool-disabled Grok ACP", () => {
+    const requestLogDir = mkdtempSync(path.join(os.tmpdir(), "ryco-grok-rank-log-"));
+    const requestLogPath = path.join(requestLogDir, "requests.ndjson");
+    return withFakeAcpGrok(
+      {
+        RYCO_ACP_REQUEST_LOG_PATH: requestLogPath,
+        RYCO_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+          rankings: [
+            {
+              candidateId: "candidate-0001",
+              tier: "now",
+              confidence: "medium",
+              reason: "A recent failure needs follow-up",
+            },
+          ],
+        }),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.rankInboxThreads(
+            makeThreadPriorityTestInput(ProviderInstanceId.make("grok"), "grok-build"),
+          );
+          expect(result.rankings).toMatchObject([
+            { threadId: "thread-priority-test", tier: "now", confidence: "medium" },
+          ]);
+          const requests = readJsonRpcRequests(requestLogPath);
+          expect(
+            requests.find((request) => request.method === "initialize")?.params?.clientCapabilities,
+          ).toMatchObject({ fs: { readTextFile: false, writeTextFile: false }, terminal: false });
+          rmSync(requestLogDir, { recursive: true, force: true });
+        }),
+    );
+  });
 
   it.effect("uses ACP with disabled tool capabilities and forwards the requested model id", () => {
     const requestLogDir = mkdtempSync(path.join(os.tmpdir(), "ryco-grok-text-log-"));

@@ -39,6 +39,7 @@ import {
   buildPrimaryInboxSidebarEnvironment,
   buildSavedInboxSidebarEnvironment,
   createInboxSidebarModelSharing,
+  describeInboxFocus,
   resolveCurrentThreadLifecycle,
   sameInboxProviderCatalogs,
   threadLifecycleDisabledReason,
@@ -218,6 +219,7 @@ function build(input: {
   environments?: ReadonlyArray<InboxSidebarEnvironment>;
   filters?: InboxSidebarFilters;
   worktrees?: ReadonlyArray<SidebarWorktreeSummary>;
+  aiFocusEnabled?: boolean;
   autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   pinnedThreadKeys?: ReadonlySet<string>;
   primaryEnvironmentId?: EnvironmentId | null;
@@ -230,6 +232,7 @@ function build(input: {
     threads: input.threads,
     environments: input.environments ?? [environment(ENV_A), environment(ENV_B)],
     filters: input.filters ?? ALL_FILTERS,
+    ...(input.aiFocusEnabled !== undefined ? { aiFocusEnabled: input.aiFocusEnabled } : {}),
     ...(input.autoSettleAfterDays !== undefined
       ? { autoSettleAfterDays: input.autoSettleAfterDays }
       : {}),
@@ -692,12 +695,78 @@ describe("buildInboxSidebarSections", () => {
     });
   });
 
-  it("keeps a separate Pinned section", () => {
+  it("renders Focus above Active and removes every focused row from its old section", () => {
     const sections = build({
+      aiFocusEnabled: true,
+      pinnedThreadKeys: new Set(["machine-a:pinned"]),
+      nowMs: Date.parse("2026-08-25T10:00:00.000Z"),
+      threads: [
+        thread("pinned"),
+        thread("working", { backgroundLiveness: "working" }),
+        thread("ai-now", {
+          priority: {
+            tier: "now",
+            confidence: "high",
+            reason: "A release decision is waiting on this task.",
+            inputFingerprint: "fingerprint" as never,
+            batchId: "batch" as never,
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+            rankedAt: "2026-08-25T09:59:00.000Z",
+            usableUntil: "2026-08-25T10:09:00.000Z",
+          },
+        }),
+      ],
+    });
+
+    expect(sections.map((section) => section.key)).toEqual(["pinned", "focus", "active"]);
+    expect(sections[0]?.rows.map((row) => row.threadId)).toEqual(["pinned"]);
+    expect(sections[1]?.rows.map((row) => row.threadId)).toEqual(["ai-now"]);
+    expect(sections[2]?.rows.map((row) => row.threadId)).toEqual(["working"]);
+    const allKeys = sections.flatMap((section) => section.rows.map((row) => row.key));
+    expect(new Set(allKeys).size).toBe(allKeys.length);
+  });
+
+  it("keeps a separate Pinned section when AI Focus is disabled", () => {
+    const sections = build({
+      aiFocusEnabled: false,
       pinnedThreadKeys: new Set(["machine-a:pinned"]),
       threads: [thread("pinned")],
     });
     expect(sections.map((section) => section.key)).toEqual(["pinned"]);
+    expect(sections[0]?.rows[0]?.focus).toBeNull();
+  });
+});
+
+describe("describeInboxFocus", () => {
+  it("never describes deterministic focus as AI-generated", () => {
+    expect(describeInboxFocus({ source: "pin", ranking: null })).toEqual({
+      title: "Pinned",
+      detail: "Pinned by you.",
+      aiGenerated: false,
+    });
+    expect(describeInboxFocus({ source: "approval", ranking: null }).aiGenerated).toBe(false);
+  });
+
+  it("uses the bounded projected tier and reason for AI focus", () => {
+    expect(
+      describeInboxFocus({
+        source: "ai",
+        ranking: {
+          tier: "soon",
+          confidence: "medium",
+          reason: "A review should happen next.",
+          inputFingerprint: "fingerprint" as never,
+          batchId: "batch" as never,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          rankedAt: "2026-08-25T09:59:00.000Z",
+          usableUntil: "2026-08-25T10:09:00.000Z",
+        },
+      }),
+    ).toEqual({
+      title: "Soon",
+      detail: "A review should happen next.",
+      aiGenerated: true,
+    });
   });
 });
 
@@ -813,6 +882,7 @@ describe("hosted inbox capability resolution", () => {
           repositoryIdentity: true,
           threadSettlement: true,
           threadSnooze: true,
+          threadPriorityRanking: false,
         },
       },
       providers: [],
@@ -864,6 +934,7 @@ describe("hosted inbox capability resolution", () => {
           capabilities: {
             repositoryIdentity: false,
             threadSettlement: false,
+            threadPriorityRanking: false,
           },
         },
         serverConfig: null,
@@ -1533,14 +1604,32 @@ describe("delegated thread folding", () => {
     expect(section(recentChild, "settled")?.rows[0]?.delegatedChildren).toEqual([]);
   });
 
-  it("keeps a pinned child in Pinned", () => {
+  it("keeps pinned and focused children in Pinned and Focus", () => {
     const sections = build({
+      aiFocusEnabled: true,
       pinnedThreadKeys: new Set(["machine-a:pinned-child"]),
       nowMs: Date.parse("2026-08-25T10:00:00.000Z"),
       autoSettleAfterDays: null,
-      threads: [thread("parent"), thread("pinned-child", { lineage: delegatedFrom("parent") })],
+      threads: [
+        thread("parent"),
+        thread("pinned-child", { lineage: delegatedFrom("parent") }),
+        thread("focused-child", {
+          lineage: delegatedFrom("parent"),
+          priority: {
+            tier: "now",
+            confidence: "high",
+            reason: "A release decision is waiting on this task.",
+            inputFingerprint: "fingerprint" as never,
+            batchId: "batch" as never,
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+            rankedAt: "2026-08-25T09:59:00.000Z",
+            usableUntil: "2026-08-25T10:09:00.000Z",
+          },
+        }),
+      ],
     });
     expect(ids(section(sections, "pinned")?.rows)).toEqual(["pinned-child"]);
+    expect(ids(section(sections, "focus")?.rows)).toEqual(["focused-child"]);
     expect(section(sections, "recent")?.rows[0]?.delegatedChildren).toEqual([]);
   });
 

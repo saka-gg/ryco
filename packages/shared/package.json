@@ -371,6 +371,14 @@
       "types": "./src/worktreePullRequests.ts",
       "import": "./src/worktreePullRequests.ts"
     },
+    "./threadPriority": {
+      "types": "./src/threadPriority.ts",
+      "import": "./src/threadPriority.ts"
+    },
+    "./aiFocusSettings": {
+      "types": "./src/aiFocusSettings.ts",
+      "import": "./src/aiFocusSettings.ts"
+    },
     "./providerCapabilities": {
       "types": "./src/providerCapabilities.ts",
       "import": "./src/providerCapabilities.ts"

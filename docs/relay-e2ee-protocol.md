@@ -1378,7 +1378,8 @@ and timing, and it can close channels at will.
   messages containing both the secret and fresh attacker content get delivered.
 - **What the Hub can force.** Closing a channel makes the client reconnect and re-subscribe. A
   reconnect within the server's replay window resumes instead of re-sending the snapshot; a Hub
-  that stalls reconnects past that window forces a full snapshot each time. Re-delivering
+  that stalls reconnects past that window forces a full snapshot each time. Clients that do not
+  take thread-priority deltas also receive a full snapshot on every priority change. Re-delivering
   unchanged content repeats the same length and teaches nothing, so each new guess still needs new
   attacker-controlled content inside the same message, for shell pages through thread titles or
   goals an attacker can steer.

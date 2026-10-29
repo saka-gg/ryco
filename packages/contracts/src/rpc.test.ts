@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { AtlassianSaveProjectLinkInput } from "./atlassian.ts";
 import { CONTEXT_HANDOFF_WS_METHODS, ORCHESTRATION_WS_METHODS } from "./orchestration.ts";
 import { SideQuestionInput, SideQuestionResult, WS_METHODS, WsRpcGroup } from "./rpc.ts";
+import { ThreadPriorityEnsureCurrentInput } from "./threadPriority.ts";
 import { StatisticsSnapshot } from "./statistics.ts";
 import { USAGE_CONTRACT_VERSION } from "./usage.ts";
 import { WorkItemGetInput } from "./workItems.ts";
@@ -66,6 +67,16 @@ describe("WS_METHODS Atlassian and work item names", () => {
         jiraConnectionId: null,
       }),
     ).toThrow();
+  });
+});
+
+describe("thread priority RPC", () => {
+  it("exposes a stable ensure-current method with normal and forced refresh", () => {
+    expect(WS_METHODS.threadPriorityEnsureCurrent).toBe("threadPriority.ensureCurrent");
+    expect(Schema.decodeUnknownSync(ThreadPriorityEnsureCurrentInput)({}).force).toBe(false);
+    expect(Schema.decodeUnknownSync(ThreadPriorityEnsureCurrentInput)({ force: true }).force).toBe(
+      true,
+    );
   });
 });
 

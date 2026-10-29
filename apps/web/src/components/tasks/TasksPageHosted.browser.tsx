@@ -170,6 +170,7 @@ function selectingNode() {
       capabilities: {
         repositoryIdentity: false,
         threadSettlement: false,
+        threadPriorityRanking: false,
         localTasks: true,
       },
     };

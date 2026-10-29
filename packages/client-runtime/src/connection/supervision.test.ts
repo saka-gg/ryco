@@ -2304,10 +2304,12 @@ describe("shell frame batching", () => {
     let applied = 0;
     const sink = {
       applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<any>) => {
-        calls.push(`commit:${events.map((event) => event.sequence).join(",")}`);
+        calls.push(
+          `commit:${events.map((event) => (event.kind === "thread-priorities" ? "priorities" : event.sequence)).join(",")}`,
+        );
         return events.map((event) => {
           applied += 1;
-          return `context:${event.sequence}`;
+          return `context:${event.kind === "thread-priorities" ? "priorities" : event.sequence}`;
         });
       },
       afterShellEventApplied: (_environmentId: EnvironmentId, event: any, context: unknown) => {
@@ -2343,19 +2345,20 @@ describe("shell frame batching", () => {
 
     supervisor.applyShellEvent(upsert(1), remote);
     supervisor.applyShellEvent(upsert(2), remote);
+    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
     supervisor.applyShellEvent(upsert(3), remote);
     expect(calls).toEqual([]);
 
     frames.splice(0).forEach((frame) => frame());
     expect(calls).toEqual([
-      "commit:1,2,3",
-      "after:1:context:1:applied=3",
-      "after:2:context:2:applied=3",
-      "after:3:context:3:applied=3",
+      "commit:1,2,priorities,3",
+      "after:1:context:1:applied=4",
+      "after:2:context:2:applied=4",
+      "after:3:context:3:applied=4",
     ]);
   });
 
-  it("drops events the projection already holds", () => {
+  it("drops events the projection already holds but always applies a ranking", () => {
     const { sink, calls } = recordingSink();
     const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
       stateSink: sink,
@@ -2365,10 +2368,11 @@ describe("shell frame batching", () => {
     calls.length = 0;
 
     supervisor.applyShellEvent(upsert(4), remote);
+    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
     supervisor.applyShellEvent(upsert(6), remote);
     supervisor.flushShellEvents();
 
-    expect(calls).toEqual(["commit:6", "after:6:context:6:applied=1"]);
+    expect(calls).toEqual(["commit:priorities,6", "after:6:context:6:applied=2"]);
   });
 
   it("moves the shell's sequence past an event a newer node added, in order", () => {
@@ -2480,6 +2484,7 @@ describe("shell acceptance", () => {
 
     supervisor.applyShellEvent(upsert(4), remote);
     supervisor.applyShellEvent(upsert(6), remote);
+    supervisor.applyThreadPriorities({ kind: "thread-priorities", priorities: [] }, remote);
     supervisor.skipShellEvent(7, remote);
     supervisor.applyShellEvent(
       { kind: "thread-removed", sequence: 8, threadId: "thread-1" } as never,
@@ -2487,7 +2492,7 @@ describe("shell acceptance", () => {
     );
     supervisor.flushShellEvents();
 
-    expect(calls).toEqual(["commit:2", "after:6", "after:8", "accepted:6,8"]);
+    expect(calls).toEqual(["commit:3", "after:6", "after:8", "accepted:6,8"]);
   });
 
   it("keeps applying the shell and telling other listeners when one throws", () => {

@@ -17,6 +17,10 @@ import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { isChatProject } from "@ryco/shared/projectKind";
 import type { ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
+import {
+  describeThreadPriorityFocus,
+  type ThreadPriorityFocusMetadata,
+} from "@ryco/shared/threadPriority";
 
 import { buildChangeRequestBadge, type ChangeRequestBadge } from "../../lib/changeRequestBadge";
 import {
@@ -103,6 +107,10 @@ export interface InboxThreadRow {
   /** Current provider brand for the task; null renders the neutral mark. */
   readonly providerDriver: string | null;
   readonly providerLabel: string | null;
+  readonly focus: ThreadPriorityFocusMetadata | null;
+  readonly focusTitle: string | null;
+  readonly focusDetail: string | null;
+  readonly focusAiGenerated: boolean;
   readonly attentionState: "active" | "settled" | "snoozed";
   readonly snoozedUntil?: string | null;
   readonly canSnooze?: boolean;
@@ -114,8 +122,8 @@ export interface InboxThreadRow {
 }
 
 export interface InboxSection {
-  readonly key: "active" | "settled" | "snoozed";
-  readonly title: "Active" | "Settled" | "Snoozed";
+  readonly key: "focus" | "active" | "settled" | "snoozed";
+  readonly title: "Focus" | "Active" | "Settled" | "Snoozed";
   readonly rows: ReadonlyArray<InboxThreadRow>;
 }
 
@@ -130,6 +138,7 @@ export interface BuildInboxInput {
   readonly deliveryUnknownThreadIds?: ReadonlySet<string>;
   readonly localQueuedThreadIds?: ReadonlySet<string>;
   readonly pinnedThreadKeys?: ReadonlySet<string> | ReadonlyArray<string>;
+  readonly aiFocusEnabled?: boolean;
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly nowMs?: number;
 }
@@ -225,6 +234,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     localQueuedThreadKeys: input.localQueuedThreadIds,
     deliveryUnknownThreadKeys: deliveryUnknown,
     pinnedThreadKeys: input.pinnedThreadKeys,
+    aiFocusEnabled: input.aiFocusEnabled ?? false,
     autoSettleAfterDays: input.autoSettleAfterDays,
     filters: {
       ...(input.nodeScope ? { environmentIds: [input.nodeScope] } : {}),
@@ -254,6 +264,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       thread.session?.provider ??
       thread.providerDriver ??
       builtInProviderDriverForInstanceId(thread.modelSelection?.instanceId);
+    const focusExplanation = entry.focus === null ? null : describeThreadPriorityFocus(entry.focus);
     return {
       key: entry.key,
       environmentId: thread.environmentId,
@@ -278,6 +289,10 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
       providerDriver,
       providerLabel: providerDisplayLabel(providerDriver),
+      focus: entry.focus,
+      focusTitle: focusExplanation?.title ?? null,
+      focusDetail: focusExplanation?.detail ?? null,
+      focusAiGenerated: focusExplanation?.aiGenerated ?? false,
       attentionState: entry.lifecycle.classification,
       snoozedUntil:
         entry.lifecycle.classification === "snoozed" ? (thread.snoozedUntil ?? null) : null,
@@ -294,11 +309,13 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
     };
   };
 
+  const focus = inbox.focus.map(toRow);
   const active = inbox.active.map(toRow);
   const settled = inbox.settled.map(toRow);
   const snoozed = inbox.snoozed.map(toRow);
 
   const sections: InboxSection[] = [];
+  if (focus.length > 0) sections.push({ key: "focus", title: "Focus", rows: focus });
   if (active.length > 0) sections.push({ key: "active", title: "Active", rows: active });
   if (snoozed.length > 0) sections.push({ key: "snoozed", title: "Snoozed", rows: snoozed });
   if (settled.length > 0) sections.push({ key: "settled", title: "Settled", rows: settled });
@@ -324,7 +341,7 @@ export function resolveInboxEmptyState(input: {
 
 /**
  * Structural equality for row field values, bounded in depth. Row fields are
- * primitives or small plain records (badge, the store's
+ * primitives or small plain records (badge, focus metadata, the store's
  * project record); anything deeper than `depth` compares by identity.
  */
 function rowValueEqual(left: unknown, right: unknown, depth: number): boolean {

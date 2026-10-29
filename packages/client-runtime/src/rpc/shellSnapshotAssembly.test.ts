@@ -251,10 +251,12 @@ describe("wsRpcClient shell subscription", () => {
   it("asks for paged snapshots and keeps the other inputs", () => {
     const harness = makeClient();
     harness.client.orchestration.subscribeShell(() => undefined, {
+      threadPriorities: "delta",
       resumeFromSequence: () => 4,
     });
     expect(harness.connect()).toEqual({
       resumeFromSequence: 4,
+      threadPriorities: "delta",
       snapshotDelivery: "paged",
     });
   });

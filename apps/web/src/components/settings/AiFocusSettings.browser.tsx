@@ -4,7 +4,7 @@ import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import { AutoSettleSettingsSection } from "./InboxSettings";
+import { AutoSettleSettingsSection } from "./AiFocusSettings";
 
 describe("AutoSettleSettingsSection", () => {
   let mounted: Awaited<ReturnType<typeof render>> | null = null;

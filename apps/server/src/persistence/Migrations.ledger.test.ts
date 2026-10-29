@@ -189,7 +189,6 @@ const undoRepairEffect: Record<string, string | ReadonlyArray<string>> = {
   "local-task-delegations": "DROP TABLE local_task_delegations",
   "unused-orchestration-indexes":
     "CREATE INDEX idx_orch_events_command_id ON orchestration_events(command_id)",
-  "drop-thread-priority-tables": "CREATE TABLE thread_priority_batches (slot INTEGER)",
 };
 
 it.effect("finds exactly the repair whose effect a database from before the records lacks", () =>

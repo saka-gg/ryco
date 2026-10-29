@@ -64,6 +64,7 @@ function baseConfig(chats: ServerChatsCapability | undefined): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     },
     auth: {

@@ -110,10 +110,17 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "inbox",
-    title: "Auto-settle inactive tasks",
+    title: "AI Focus",
     owner: "client",
-    description: "Move inactive tasks to Settled after their last message or turn.",
-    keywords: "housekeeping settled archive inactive threads days",
+    description: "Prioritize the Inbox with bounded, environment-local model ranking.",
+    keywords: "priority sort active threads model ranking focus refresh",
+  },
+  {
+    section: "inbox",
+    title: "AI Focus models",
+    owner: "node",
+    description: "Choose or inherit the ranking model for each connected environment.",
+    keywords: "provider node disclosure privacy data",
   },
   {
     section: "general",

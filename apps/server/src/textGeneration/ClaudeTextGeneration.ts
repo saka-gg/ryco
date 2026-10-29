@@ -22,7 +22,7 @@ import { type ClaudeSettings, type ModelSelection } from "@ryco/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@ryco/shared/git";
 
 import { TextGenerationError } from "@ryco/contracts";
-import type { TextGenerationShape } from "./TextGeneration.ts";
+import { type TextGenerationShape, validateRankInboxThreadsResult } from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -30,6 +30,7 @@ import {
   buildIssueContentTitlePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildThreadPriorityPrompt,
   buildSideQuestionPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
@@ -118,6 +119,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
+      | "rankInboxThreads"
       | "answerSideQuestion"
       | "summarizeWorkspaceChanges";
     cwd: string;
@@ -462,6 +464,23 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       }),
     );
 
+  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
+    "ClaudeTextGeneration.rankInboxThreads",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildThreadPriorityPrompt({
+      serializedCandidates: input.chunk.serializedCandidates,
+    });
+    const generated = yield* runClaudeJson({
+      operation: "rankInboxThreads",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      modelSelection: input.modelSelection,
+      toolsEnabled: false,
+    });
+    return yield* validateRankInboxThreadsResult(input, generated.rankings);
+  });
+
   const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
     "ClaudeTextGeneration.summarizeWorkspaceChanges",
   )(function* (input) {
@@ -482,6 +501,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     generateBranchName,
     generateThreadTitle,
     generateIssueContent,
+    rankInboxThreads,
     answerSideQuestion,
     summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;

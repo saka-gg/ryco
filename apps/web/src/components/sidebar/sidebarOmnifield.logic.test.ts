@@ -141,6 +141,7 @@ describe("buildOmnifieldSuggestions", () => {
       "Mac Studio",
       "build-box",
       "Pinned",
+      "Focus",
       "Active now",
       "Needs input",
       "Recent",
@@ -155,8 +156,8 @@ describe("buildOmnifieldSuggestions", () => {
       label: "Needs input",
       meta: "3",
     });
-    expect(suggestions({ value: "is:sno" }).find((row) => row.type === "option")).toMatchObject({
-      label: "Snoozed",
+    expect(suggestions({ value: "is:foc" }).find((row) => row.type === "option")).toMatchObject({
+      label: "Focus",
       meta: "0",
     });
     const hidden = suggestions({ value: "is:ne", statusCounts: null });

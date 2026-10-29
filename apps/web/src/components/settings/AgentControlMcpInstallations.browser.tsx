@@ -87,6 +87,7 @@ describe("AgentControlMcpInstallations", () => {
       capabilities: {
         repositoryIdentity: false,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     });
     vi.clearAllMocks();

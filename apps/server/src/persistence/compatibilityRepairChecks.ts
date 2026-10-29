@@ -30,7 +30,6 @@ import { LEGACY_ACTIVITY_PAYLOADS_REPAIR_KEY } from "./Migrations/088_LegacyActi
 import { LINK_COLUMNS } from "./Migrations/090_AuthAccessLinks.ts";
 import { GUARD, TRIGGER_NAME } from "./Migrations/091_GuardedLatestCompletedTurnTrigger.ts";
 import { UNUSED_INDEXES } from "./Migrations/093_DropUnusedOrchestrationIndexes.ts";
-import { THREAD_PRIORITY_TABLES } from "./Migrations/DropThreadPriorityTables.ts";
 
 /** A repair's effect is present (true), missing (false), or cannot be read exactly. */
 export type RepairApplied = boolean | "unknown";
@@ -245,8 +244,6 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
         c.object("index", name)?.table ?? "",
       ),
     ),
-  "drop-thread-priority-tables": (c) =>
-    !THREAD_PRIORITY_TABLES.some((name) => c.has("table", name)),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

@@ -80,6 +80,7 @@ function seed() {
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: true,
+      threadPriorityRanking: false,
       localTasks: true,
     },
   };

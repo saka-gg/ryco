@@ -76,6 +76,7 @@ describe("ExternalIntegrationsSettings", () => {
       capabilities: {
         repositoryIdentity: false,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     });
     vi.clearAllMocks();

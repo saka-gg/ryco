@@ -211,6 +211,7 @@ describe("hosted browser lifecycle integration", () => {
       capabilities: {
         repositoryIdentity: false,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     });
     const localApi = readLocalApi();

@@ -142,7 +142,6 @@ import Migration0092, {
 import Migration0093, {
   dropUnusedOrchestrationIndexes,
 } from "./Migrations/093_DropUnusedOrchestrationIndexes.ts";
-import { dropThreadPriorityTables } from "./Migrations/DropThreadPriorityTables.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -611,14 +610,6 @@ export const repairUnusedOrchestrationIndexes = Effect.fn("repairUnusedOrchestra
   },
 );
 
-// The removed inbox ranking's tables (053). An unnumbered repair: dropping them needs no id
-// against the ones parallel branches claim. One catalog lookup per boot once they are gone.
-export const repairThreadPriorityTables = Effect.fn("repairThreadPriorityTables")(function* () {
-  if (yield* dropThreadPriorityTables) {
-    yield* Effect.log("Dropped thread priority ranking tables");
-  }
-});
-
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -798,13 +789,6 @@ const compatibilityRepairs = [
   },
   { key: "local-task-delegations", since: 92, run: () => repairLocalTaskDelegationsTable() },
   { key: "unused-orchestration-indexes", since: 93, run: () => repairUnusedOrchestrationIndexes() },
-  // Applies on top of 093; the tables come from 053.
-  {
-    key: "drop-thread-priority-tables",
-    since: 93,
-    unnumbered: true,
-    run: () => repairThreadPriorityTables(),
-  },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

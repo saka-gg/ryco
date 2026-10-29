@@ -68,6 +68,7 @@ export interface InboxSidebarProps {
   readonly deliveryUnknownThreadKeys: ReadonlySet<string>;
   readonly localQueuedThreadKeys: ReadonlySet<string>;
   readonly activeThreadKey: string | null;
+  readonly aiFocusEnabled: boolean;
   readonly autoSettleAfterDays: SidebarAutoSettleAfterDays;
   readonly pinnedThreadKeys: ReadonlySet<string>;
   /** Rows on other machines are labelled; this one is implicit. */
@@ -144,6 +145,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
           deliveryUnknownThreadKeys: props.deliveryUnknownThreadKeys,
           localQueuedThreadKeys: props.localQueuedThreadKeys,
           activeThreadKey: props.activeThreadKey,
+          aiFocusEnabled: props.aiFocusEnabled,
           autoSettleAfterDays: props.autoSettleAfterDays,
           pinnedThreadKeys: props.pinnedThreadKeys,
           primaryEnvironmentId: props.primaryEnvironmentId ?? null,
@@ -158,6 +160,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
       projectKeys,
       props.primaryEnvironmentId,
       props.activeThreadKey,
+      props.aiFocusEnabled,
       props.autoSettleAfterDays,
       props.deliveryUnknownThreadKeys,
       props.environments,
@@ -188,6 +191,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
     environmentId,
     project?.logicalKey ?? null,
     nestDelegated,
+    props.aiFocusEnabled,
   ]);
   const [heldOrder, setHeldOrder] = useState<InboxOrderSnapshot | null>(null);
   if (holdLogic ? heldOrder?.holdKey !== holdKey : heldOrder !== null) {

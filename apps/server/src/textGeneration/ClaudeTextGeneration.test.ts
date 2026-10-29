@@ -17,6 +17,7 @@ import {
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { sanitizeThreadTitle } from "./TextGenerationUtils.ts";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
+import { makeThreadPriorityTestInput } from "../threadPriority/threadPriorityTestFixtures.ts";
 
 const ClaudeTextGenerationTestLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "ryco-claude-text-generation-test-",
@@ -215,6 +216,40 @@ function withFakeClaudeEnv<A, E, R>(
 }
 
 it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
+  it.effect("ranks inbox threads with the requested Claude model", () =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output: {
+            rankings: [
+              {
+                candidateId: "candidate-0001",
+                tier: "soon",
+                confidence: "medium",
+                reason: "Useful next work",
+              },
+            ],
+          },
+        }),
+        stdinMustContain: "Untrusted candidate data (JSON)",
+        argsMustContain: "--model claude-sonnet-4-5",
+        argsMustNotContain: "--dangerously-skip-permissions",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.rankInboxThreads(
+            makeThreadPriorityTestInput(
+              ProviderInstanceId.make("claudeAgent"),
+              "claude-sonnet-4-5",
+            ),
+          );
+          expect(result.rankings).toMatchObject([
+            { threadId: "thread-priority-test", tier: "soon", confidence: "medium" },
+          ]);
+        }),
+    ),
+  );
+
   it.effect("forwards Claude thinking settings for Haiku without passing effort", () =>
     withFakeClaudeEnv(
       {

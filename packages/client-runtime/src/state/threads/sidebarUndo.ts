@@ -112,6 +112,7 @@ export function sidebarUndoThreadRevision(thread: SidebarThreadOrStub): string {
     thread.manualStatusBucket,
     thread.manualPosition,
     thread.latestUserMessageAt,
+    thread.priority,
     // The existing sorter uses updatedAt only when no user message provides recency.
     thread.latestUserMessageAt == null ? thread.updatedAt : null,
   ]);

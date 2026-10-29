@@ -45,6 +45,7 @@ function item(
     threadId: ThreadId.make(threadId),
     lineage: null,
     pinned: false,
+    focused: false,
     urgency: "recent",
     ...overrides,
   };
@@ -113,12 +114,14 @@ describe("planDelegatedNesting", () => {
     expect(hostOf(plan, "grandchild")).toBeNull();
   });
 
-  it("keeps pinned children top-level", () => {
+  it("keeps pinned and focused children top-level", () => {
     const plan = planDelegatedNesting([
       item("parent"),
       item("pinned", { lineage: delegated("parent"), pinned: true }),
+      item("focused", { lineage: delegated("parent"), focused: true, urgency: "needs-input" }),
     ]);
     expect(hostOf(plan, "pinned")).toBeNull();
+    expect(hostOf(plan, "focused")).toBeNull();
   });
 
   it("flattens a grandchild to the topmost visible host", () => {

@@ -38,6 +38,7 @@ describe("versionSkew", () => {
           capabilities: {
             repositoryIdentity: true,
             threadSettlement: false,
+            threadPriorityRanking: false,
           },
         },
       }),

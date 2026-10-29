@@ -225,6 +225,7 @@ function createBaseServerConfig(): ServerConfig {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     },
     auth: {
@@ -487,6 +488,7 @@ const createDesktopBridgeStub = (overrides?: {
       capabilities: {
         repositoryIdentity: true,
         threadSettlement: false,
+        threadPriorityRanking: false,
       },
     }),
     bootstrapSshBearerSession: vi.fn().mockResolvedValue({

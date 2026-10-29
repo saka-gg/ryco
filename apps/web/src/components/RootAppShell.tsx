@@ -62,6 +62,7 @@ import {
   usePrimaryEnvironmentId,
 } from "../environments/primary";
 import { ServerStateBootstrap } from "./ServerStateBootstrap";
+import { ThreadPriorityRefreshBridge } from "./ThreadPriorityRefreshBridge";
 import { MessageQueueDrainBridge } from "./MessageQueueDrainBridge";
 import { ThreadAlertsBootstrap } from "../notifications/ThreadAlertsBootstrap";
 import { getRoutedHostedNode } from "../hostedHub/nodeRoutes";
@@ -141,6 +142,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
           <ServerStateBootstrap />
         ) : null}
         <EnvironmentConnectionManagerBootstrap />
+        {primaryEnvironmentAuthenticated ? <ThreadPriorityRefreshBridge /> : null}
         {chatAvailable || hostedCachedRunsOwner(authGateState.status, "messageQueueDrain") ? (
           <MessageQueueDrainBridge />
         ) : null}

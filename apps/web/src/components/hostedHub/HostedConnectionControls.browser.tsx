@@ -204,6 +204,7 @@ function renderThreadHeader(environmentId: EnvironmentId) {
     capabilities: {
       repositoryIdentity: false,
       threadSettlement: false,
+      threadPriorityRanking: false,
     },
   });
   return render(

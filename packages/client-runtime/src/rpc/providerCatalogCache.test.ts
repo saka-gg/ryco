@@ -62,6 +62,7 @@ const config = (providers: ReadonlyArray<ServerProvider>): ServerConfig => ({
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: false,
+      threadPriorityRanking: false,
     },
   },
   auth: {
