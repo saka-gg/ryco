@@ -1,5 +1,16 @@
 import { useAtomValue } from "@effect/atom-react";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
+import {
+  findPullRequestWatch,
+  pullRequestWatchEndedLabel,
+  pullRequestWatchErrorMessage,
+  pullRequestWatchInput,
+  pullRequestWatchView,
+  type PullRequestWatchAction,
+  type PullRequestWatchTarget,
+  type PullRequestWatchView,
+} from "@ryco/client-runtime/state/threads";
+import { WS_METHODS } from "@ryco/contracts";
 import type {
   ChangeRequest,
   ChangeRequestActivity,
@@ -19,11 +30,20 @@ import type {
   SourceControlWorkflowJobLogResult,
   SourceControlWorkflowRunJobsResult,
   SourceControlWorkflowRunListResult,
+  ServerConfig,
+  ThreadId,
+  ThreadPullRequestWatchShell,
 } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
+import { stackedThreadToast, toastManager } from "~/components/ui/toast";
+import { readEnvironmentApi } from "~/environmentApi";
 import { requireEnvironmentConnection } from "~/environments/runtime";
+import { useHostedRpcCapability } from "~/hostedHub/capabilities";
+import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
+import { usePresentationTier } from "~/hooks/usePresentationTier";
 import { useSettings } from "~/hooks/useSettings";
+import { useWsConnectionStatusForEnvironment } from "./wsConnectionState";
 import {
   changeRequestActivityBinding,
   changeRequestDetailBinding,
@@ -514,6 +534,157 @@ export function useDismissWorktreePullRequestMutation(input: {
       environmentId,
     ).client.sourceControl.dismissWorktreePullRequest(payload);
   });
+}
+
+export interface SetPullRequestWatchPayload extends PullRequestWatchTarget {
+  readonly threadId: ThreadId;
+  readonly action: PullRequestWatchAction;
+}
+
+/**
+ * Turns Auto-fix CI on or off for a thread's pull request, or stops watching
+ * it. The watch's state arrives back in the thread's shell, so nothing is
+ * written here.
+ */
+export function useSetPullRequestWatchMutation(input: {
+  readonly environmentId: EnvironmentId | null;
+}) {
+  const { environmentId } = input;
+  return useSourceControlMutation(({ action, ...target }: SetPullRequestWatchPayload) => {
+    const send =
+      environmentId === null
+        ? undefined
+        : readEnvironmentApi(environmentId)?.sourceControl.setPullRequestWatch;
+    if (send === undefined) {
+      return Promise.reject(new Error("This thread's environment is not connected."));
+    }
+    return send(pullRequestWatchInput(target, action));
+  });
+}
+
+export interface PullRequestWatchControl {
+  /**
+   * The node watches pull requests and this surface offers the control: a
+   * thread and a pull request to watch, and not the frozen phone tier.
+   */
+  readonly supported: boolean;
+  /** …and a change goes through right now (the environment accepts mutations). */
+  readonly ready: boolean;
+  /**
+   * The Auto-fix CI switch is shown: a watch is on, or the pull request may
+   * still be watched (a merged or closed one cannot start a watch).
+   */
+  readonly switchOffered: boolean;
+  /** The pull request's active watch on the thread, null when there is none. */
+  readonly view: PullRequestWatchView | null;
+  /** Why its latest watch ended (shells keep that for a day), when none is active. */
+  readonly endedLabel: string | null;
+  /** The Auto-fix CI switch: the request in flight, else the watch's own state. */
+  readonly autoFixChecked: boolean;
+  readonly pending: boolean;
+  readonly run: (action: PullRequestWatchAction) => void;
+}
+
+/** A switch change in flight: what the switch shows until the thread's shell answers. */
+interface RequestedAutoFix {
+  readonly key: string;
+  readonly autoFix: boolean;
+  /** The watches the click saw: once the request went through, a newer shell is the answer. */
+  readonly watches: ThreadPullRequestWatchShell | null | undefined;
+  readonly settled: boolean;
+}
+
+const selectPullRequestWatchAvailable = (config: ServerConfig | null): boolean =>
+  config?.pullRequestWatch?.available === true;
+
+/**
+ * One thread's server-side watch of one pull request, for the pull request
+ * page's rail and the Crown: what to show, the Auto-fix CI switch and Stop.
+ * Here, beside its RPC, because both surfaces load this module already (a
+ * module of their own would be a chunk of its own). Unsupported on nodes
+ * without watches (older nodes send no `pullRequestWatch`) and inert until the
+ * environment accepts mutations, the same readiness as linking.
+ */
+export function usePullRequestWatchControl(input: {
+  readonly environmentId: EnvironmentId | null;
+  readonly threadId: ThreadId | null;
+  readonly target: PullRequestWatchTarget | null;
+  readonly watches: ThreadPullRequestWatchShell | null | undefined;
+  /** The pull request is known to be merged or closed. */
+  readonly closed: boolean;
+}): PullRequestWatchControl {
+  const { environmentId, threadId, target, watches, closed } = input;
+  const presentationTier = usePresentationTier();
+  const available = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectPullRequestWatchAvailable,
+  );
+  const connection = useWsConnectionStatusForEnvironment(environmentId);
+  const capability = useHostedRpcCapability(
+    WS_METHODS.sourceControlSetPullRequestWatch,
+    environmentId,
+  );
+  const mutation = useSetPullRequestWatchMutation({ environmentId });
+  // The switch follows a request at once; the server's answer arrives in the shell.
+  const [requested, setRequested] = useState<RequestedAutoFix | null>(null);
+
+  const supported =
+    available &&
+    presentationTier !== "phone" &&
+    environmentId !== null &&
+    threadId !== null &&
+    target !== null;
+  const ready = supported && connection.phase === "connected" && capability.allowed;
+  const found = target ? findPullRequestWatch(watches, target) : null;
+  const view = found?.kind === "active" ? pullRequestWatchView(found.watch) : null;
+  const autoFixOn = view?.autoFixOn ?? false;
+  const key = `${environmentId ?? ""}|${threadId ?? ""}|${target?.number ?? ""}`;
+  const requestedAutoFix = requested?.key === key ? requested.autoFix : null;
+  // The watch's own state shows again once the shell agrees, the request failed, or the
+  // request went through and the shell moved since the click (say the watch ended meanwhile).
+  if (
+    requested !== null &&
+    (requested.key !== key ||
+      requestedAutoFix === autoFixOn ||
+      (requested.settled && requested.watches !== watches))
+  ) {
+    setRequested(null);
+  }
+
+  const run = (action: PullRequestWatchAction) => {
+    if (!ready || mutation.isPending || threadId === null || target === null) return;
+    const number = target.number;
+    if (action !== "stop") {
+      setRequested({ key, autoFix: action !== "auto-fix-off", watches, settled: false });
+    }
+    mutation.mutateAsync({ threadId, ...target, action }).then(
+      () => setRequested((current) => (current === null ? null : { ...current, settled: true })),
+      (error: unknown) => {
+        setRequested(null);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title:
+              action === "stop"
+                ? `Couldn't stop watching #${number}`
+                : `Couldn't change Auto-fix CI for #${number}`,
+            description: pullRequestWatchErrorMessage(error) ?? undefined,
+          }),
+        );
+      },
+    );
+  };
+
+  return {
+    supported,
+    ready,
+    switchOffered: view !== null || !closed,
+    view,
+    endedLabel: found?.kind === "ended" ? pullRequestWatchEndedLabel(found.ended.reason) : null,
+    autoFixChecked: requestedAutoFix ?? autoFixOn,
+    pending: mutation.isPending,
+    run,
+  };
 }
 
 interface CommentMutationInput {

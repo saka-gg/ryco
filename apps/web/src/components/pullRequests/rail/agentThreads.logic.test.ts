@@ -5,6 +5,7 @@ import {
   findPullRequestWorktree,
   linkedAgentThreads,
   localHeadBranch,
+  pullRequestWatchThread,
   resolveHandoffWorkLocation,
 } from "./agentThreads.logic";
 
@@ -152,5 +153,63 @@ describe("resolveHandoffWorkLocation", () => {
     expect(
       resolveHandoffWorkLocation({ worktree: null, projectBranch: "main", link: forkLink }),
     ).toEqual({ kind: "new-worktree" });
+  });
+});
+
+describe("pullRequestWatchThread", () => {
+  const target = { number: 703, url: "https://github.com/o/r/pull/703" };
+  const watchingShell = {
+    active: [
+      {
+        watchId: "github.com/o/r#703",
+        number: 703,
+        url: target.url,
+        worktreeId: "w",
+        startedAt: "2026-10-01T10:00:00.000Z",
+        startedBy: "user" as const,
+        news: false,
+        autoFix: { status: "watching" as const, pauseReason: null, attempts: 0, maxAttempts: 3 },
+        headSha: "abc",
+        failingChecks: 0,
+        passed: false,
+        conflicting: false,
+        delivering: false,
+        lastChangeAt: null,
+      },
+    ],
+    ended: [],
+  } as unknown as NonNullable<
+    Parameters<typeof pullRequestWatchThread>[0]["threads"][number]["pullRequestWatches"]
+  >;
+  const worktrees = [worktree("w", { prNumber: 703 })];
+  const byBranch = thread("branch", { branch: link.headRefName });
+  const inWorkspace = thread("workspace", { worktreeId: "w" } as never);
+  const watching = thread("watching", { pullRequestWatches: watchingShell } as never);
+
+  it("prefers the thread already watching, then one whose workspace carries the pull request", () => {
+    expect(
+      pullRequestWatchThread({ threads: [byBranch, inWorkspace, watching], worktrees, target })?.id,
+    ).toBe("watching");
+    expect(
+      pullRequestWatchThread({ threads: [byBranch, inWorkspace], worktrees, target })?.id,
+    ).toBe("workspace");
+  });
+
+  it("falls back to the newest linked thread, and to none without threads", () => {
+    expect(pullRequestWatchThread({ threads: [byBranch], worktrees, target })?.id).toBe("branch");
+    expect(pullRequestWatchThread({ threads: [], worktrees, target })).toBeNull();
+  });
+
+  it("passes over threads the user settled while an active one is linked", () => {
+    const settledInWorkspace = thread("settled", {
+      worktreeId: "w",
+      settledOverride: "settled",
+    } as never);
+    expect(
+      pullRequestWatchThread({ threads: [settledInWorkspace, byBranch], worktrees, target })?.id,
+    ).toBe("branch");
+    expect(pullRequestWatchThread({ threads: [settledInWorkspace], worktrees, target })?.id).toBe(
+      "settled",
+    );
   });
 });
