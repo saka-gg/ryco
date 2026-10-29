@@ -115,6 +115,8 @@ import {
   type ProviderRuntimeActivity,
 } from "../../provider/Services/ProviderService.ts";
 import { findThreadSession } from "../../provider/threadSessionLookup.ts";
+import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { resolveReadyTextGenerationSelection } from "../../serverSettings.ts";
 import { ProviderSessionPrewarm } from "../Services/ProviderSessionPrewarm.ts";
 import {
   projectStartSystemPrompt,
@@ -482,6 +484,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
   // Optional: without it a turn whose completion was lost on a live runtime waits for a reopen.
   const runtimeIngestion = yield* Effect.serviceOption(ProviderRuntimeIngestionService);
+  // Optional: without provider snapshots, generation runs on the configured provider as set.
+  const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
   const reactorScope = yield* Effect.scope;
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
@@ -1637,8 +1641,22 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       );
       if (Option.isNone(settings)) return;
-      const { textGenerationModelSelection: modelSelection, worktreeBranchChangeTypes } =
-        settings.value;
+      const { textGenerationModelSelection, worktreeBranchChangeTypes } = settings.value;
+      // A signed-out or failing provider would only retry its errors in the
+      // background: generation moves to a ready provider, or is skipped.
+      const modelSelection = Option.isSome(providerRegistry)
+        ? resolveReadyTextGenerationSelection(
+            textGenerationModelSelection,
+            yield* providerRegistry.value.getProviders,
+          )
+        : textGenerationModelSelection;
+      if (modelSelection === null) {
+        yield* Effect.logDebug("provider command reactor skipped first-turn generation", {
+          threadId,
+          reason: "no ready text generation provider",
+        });
+        return;
+      }
       // The temporary branch was named with the project's effective prefix.
       const worktreeBranchPrefix = resolveProjectPreferences({
         settings: settings.value,

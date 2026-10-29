@@ -11,10 +11,12 @@ import {
   type RuntimeSessionId,
   type ThreadId,
 } from "@ryco/contracts";
+import { isProviderKnownUnusable } from "@ryco/shared/providerCapabilities";
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
+import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { findThreadSession } from "../../provider/threadSessionLookup.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -71,6 +73,8 @@ export const makeProviderSessionPrewarm = Effect.fnUntraced(function* (
 ) {
   const providerService = yield* ProviderService;
   const snapshots = yield* ProjectionSnapshotQuery;
+  // Optional: without provider snapshots, any enabled instance is prewarmed.
+  const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
   const scope = yield* Effect.scope;
   const idleTimeout = Duration.fromInputUnsafe(options?.idleTimeout ?? Duration.minutes(2));
   const perInstanceLimit = Math.max(1, options?.perInstanceLimit ?? 2);
@@ -206,6 +210,13 @@ export const makeProviderSessionPrewarm = Effect.fnUntraced(function* (
       .getInstanceInfo(modelSelection.instanceId)
       .pipe(Effect.option);
     if (Option.isNone(info) || !info.value.enabled) return "provider instance unavailable";
+    // The cached snapshot only: a signed-out or failing provider would just retry its errors.
+    if (Option.isSome(providerRegistry)) {
+      const snapshot = (yield* providerRegistry.value.getProviders).find(
+        (provider) => provider.instanceId === modelSelection.instanceId,
+      );
+      if (snapshot && isProviderKnownUnusable(snapshot)) return "provider not ready";
+    }
     const driverKind = info.value.driverKind;
     if (!Schema.is(ProviderDriverKind)(driverKind)) return "unknown provider driver";
     // A resume elsewhere (another instance, a moved directory) is the turn start's decision.

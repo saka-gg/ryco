@@ -1,7 +1,7 @@
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
-  initialDraftModelSelection,
   readEffectiveProjectPreferences,
+  resolveNewDraftModelSelection,
 } from "@ryco/client-runtime/state/settings";
 import {
   DEFAULT_RUNTIME_MODE,
@@ -184,9 +184,12 @@ async function readDraftDefaults(
       config,
       projectId: projectRef.projectId,
     });
-    const fallback = effective?.initialModelSelection.value;
     return {
-      modelSelection: fallback ? initialDraftModelSelection({ effective, fallback }) : null,
+      modelSelection: resolveNewDraftModelSelection({
+        effective,
+        sticky: useComposerDraftStore.getState(),
+        providers: config.providers,
+      }),
       tokenMode: config.settings.defaultAgentTokenMode,
     };
   } catch {

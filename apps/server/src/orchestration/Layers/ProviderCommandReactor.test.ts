@@ -30,6 +30,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ServerProvider,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import {
@@ -282,6 +283,8 @@ describe("ProviderCommandReactor", () => {
     ) => ProviderEffectIntentRepositoryShape;
     /** Runs the real session prewarm service with these options. */
     readonly prewarm?: ProviderSessionPrewarmOptions;
+    /** The provider status snapshots the node last probed; omitted, none are known. */
+    readonly providerSnapshots?: ReadonlyArray<ServerProvider>;
     /** Provider history recovery as the reactor sees it; omitted, there is none. */
     readonly reconcileThread?: ProviderRuntimeIngestionShape["reconcileThread"];
   }) {
@@ -673,8 +676,15 @@ describe("ProviderCommandReactor", () => {
           drain: Effect.void,
         })
       : Layer.empty;
+    const providerRegistryLayer = input?.providerSnapshots
+      ? Layer.mock(ProviderRegistry)({
+          getProviders: Effect.succeed(input.providerSnapshots),
+          streamChanges: Stream.empty,
+        })
+      : Layer.empty;
     const layer = reactorLayer.pipe(
       Layer.provideMerge(prewarmLayer),
+      Layer.provideMerge(providerRegistryLayer),
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(checkpointLayer),
       Layer.provideMerge(contextHandoffLayer),
@@ -1788,6 +1798,112 @@ describe("ProviderCommandReactor", () => {
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.title).toBe("Generated title");
     expect(attempts).toBe(2);
+  });
+
+  describe("first-turn generation on a provider that cannot run", () => {
+    const snapshot = (
+      instanceId: string,
+      driver: string,
+      state: Partial<ServerProvider> = {},
+    ): ServerProvider => ({
+      instanceId: ProviderInstanceId.make(instanceId),
+      driver: ProviderDriverKind.make(driver),
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: new Date().toISOString(),
+      models: [],
+      slashCommands: [],
+      skills: [],
+      ...state,
+    });
+    const signedOutCodex = snapshot("codex", "codex", {
+      status: "error",
+      auth: { status: "unauthenticated" },
+    });
+    const startFirstTurn = async (harness: Awaited<ReturnType<typeof createHarness>>) => {
+      const titleSeed = "Fix the flaky reconnect test.";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-title-seed-signed-out"),
+          threadId: ThreadId.make("thread-1"),
+          title: titleSeed,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-signed-out"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-signed-out"),
+            role: "user",
+            text: titleSeed,
+            attachments: [],
+          },
+          titleSeed,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    };
+
+    it("titles the thread with a ready provider when the configured one is signed out", async () => {
+      const harness = await createHarness({
+        providerSnapshots: [signedOutCodex, snapshot("cursor", "cursor")],
+      });
+      await startFirstTurn(harness);
+      await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
+      expect(harness.generateThreadTitle.mock.calls[0]?.[0].modelSelection).toEqual({
+        instanceId: ProviderInstanceId.make("cursor"),
+        model: "composer-2",
+      });
+    });
+
+    it("skips title generation when no provider is ready", async () => {
+      const harness = await createHarness({ providerSnapshots: [signedOutCodex] });
+      await startFirstTurn(harness);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+    });
+
+    it("keeps the configured provider while its status is not known yet", async () => {
+      const harness = await createHarness({
+        providerSnapshots: [
+          snapshot("codex", "codex", {
+            status: "warning",
+            installed: false,
+            auth: { status: "unknown" },
+          }),
+          snapshot("cursor", "cursor"),
+        ],
+      });
+      await startFirstTurn(harness);
+      await waitFor(() => harness.generateThreadTitle.mock.calls.length >= 1);
+      expect(harness.generateThreadTitle.mock.calls[0]?.[0].modelSelection.instanceId).toBe(
+        ProviderInstanceId.make("codex"),
+      );
+    });
+
+    it("does not prewarm a session for a signed-out provider", async () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-prewarm-"));
+      const harness = await createHarness({
+        baseDir,
+        workspaceRoot: baseDir,
+        prewarm: {},
+        providerSnapshots: [signedOutCodex, snapshot("cursor", "cursor")],
+      });
+      expect(
+        await harness.run(harness.prewarm!.prewarm({ threadId: ThreadId.make("thread-1") })),
+      ).toEqual({ status: "skipped", reason: "provider not ready" });
+      expect(harness.startSession).not.toHaveBeenCalled();
+    });
   });
 
   it("does not overwrite an existing custom thread title on the first turn", async () => {

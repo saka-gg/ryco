@@ -33,8 +33,10 @@ import {
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
+  type ServerProvider,
   type StorageRetentionPolicy,
 } from "@ryco/contracts";
+import { isProviderKnownUnusable, isProviderReady } from "@ryco/shared/providerCapabilities";
 import {
   Cache,
   Deferred,
@@ -483,18 +485,50 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
   if (!fallback) {
     return settings;
   }
-  const defaultOptions = DEFAULT_GIT_TEXT_GENERATION_OPTIONS_BY_PROVIDER[fallback];
-
   return {
     ...settings,
-    textGenerationModelSelection: {
-      instanceId: ProviderInstanceId.make(fallback),
-      model:
-        DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[fallback] ??
-        DEFAULT_GIT_TEXT_GENERATION_MODEL,
-      ...(defaultOptions ? { options: defaultOptions } : {}),
-    } satisfies ModelSelection,
+    textGenerationModelSelection: defaultTextGenerationSelection(
+      ProviderInstanceId.make(fallback),
+      fallback,
+      DEFAULT_GIT_TEXT_GENERATION_MODEL,
+    ),
   };
+}
+
+function defaultTextGenerationSelection(
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  fallbackModel: string,
+): ModelSelection {
+  const defaultOptions = DEFAULT_GIT_TEXT_GENERATION_OPTIONS_BY_PROVIDER[driver];
+  return {
+    instanceId,
+    model: DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[driver] ?? fallbackModel,
+    ...(defaultOptions ? { options: defaultOptions } : {}),
+  };
+}
+
+/**
+ * The selection background text generation (thread titles, branch names) runs
+ * with. The settings' choice stands unless the provider's last status probe
+ * says it cannot run (signed out, failing, disabled); then, like a disabled
+ * choice, it falls back to the first ready provider's default, and to null
+ * (skip the generation) when none is ready. A provider not probed yet keeps it.
+ */
+export function resolveReadyTextGenerationSelection(
+  selection: ModelSelection,
+  providers: ReadonlyArray<ServerProvider>,
+): ModelSelection | null {
+  const selected = providers.find((provider) => provider.instanceId === selection.instanceId);
+  if (!selected || !isProviderKnownUnusable(selected)) return selection;
+  const ready = providers.find(
+    (provider) =>
+      isProviderReady(provider) &&
+      (DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[provider.driver] ?? provider.models[0]),
+  );
+  return ready
+    ? defaultTextGenerationSelection(ready.instanceId, ready.driver, ready.models[0]?.slug ?? "")
+    : null;
 }
 
 // Values under these keys are compared as a whole — never stripped field-by-field.
