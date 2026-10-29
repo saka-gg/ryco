@@ -56,6 +56,17 @@ removing the checkout end its watches in the same command.
 - **Crown**: the Checks card has the same switch, status line and buttons for the thread the Crown
   belongs to; its hover preview shows the status line only. Branch-only CI (no pull request) has
   none.
+- **Mobile app**: while a watch is on, the task's header shows a chip beside its pull request badge
+  ("Watching", "Auto-fix on", "Fixing 2/3", "Auto-fix paused"; "#77 Watching" for another pull
+  request than the badge's; muted while the task shows cached content; a screen reader hears the
+  whole status line with the header). The task sheet (tap the header) has a "Pull request #12"
+  section with the same Auto-fix CI switch, status line, **Resume** and **Stop watching**, for the
+  pull request the task watches (its own workspace's first), else its workspace's open one; for an
+  open one nobody watches yet it says "Starts a fix turn in this task when checks fail. Never
+  merges." A task that watches another workspace's pull request (a delegated chat's) gets no switch
+  for it: Auto-fix CI runs only in the chat's own checkout. Archived and settled tasks start no
+  watch. The section changes nothing until the node takes changes (connected, not read-only, not a
+  cached view).
 - The controls appear only on nodes that watch pull requests and outside the frozen phone layout,
   and they change nothing until the connection accepts changes (the same readiness as linking a
   pull request). The switch follows a click at once; the watch's own state takes over when the

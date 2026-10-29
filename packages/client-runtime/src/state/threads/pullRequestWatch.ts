@@ -22,6 +22,8 @@ export type PullRequestWatchTone = "muted" | "active" | "warning";
 export interface PullRequestWatchView {
   /** The status line, e.g. "Fixing CI · attempt 2 of 3". */
   readonly label: string;
+  /** The same in a word or two, for a chip beside the pull request: "Fixing 2/3". */
+  readonly shortLabel: string;
   readonly tone: PullRequestWatchTone;
   /** A second, quieter line; null when the status line says it all. */
   readonly detail: string | null;
@@ -45,6 +47,7 @@ export function pullRequestWatchView(summary: ThreadPullRequestWatchSummary): Pu
   if (autoFix === null) {
     return {
       label: `Watching · ${WATCHING_NEWS}`,
+      shortLabel: "Watching",
       tone: "muted",
       detail: null,
       autoFixOn: false,
@@ -56,6 +59,7 @@ export function pullRequestWatchView(summary: ThreadPullRequestWatchSummary): Pu
     case "fixing":
       return {
         label: `Fixing CI · attempt ${autoFix.attempts} of ${autoFix.maxAttempts}`,
+        shortLabel: `Fixing ${autoFix.attempts}/${autoFix.maxAttempts}`,
         tone: "active",
         detail: summary.delivering ? "Starting the fix turn" : "Waiting for the fix to be pushed",
         autoFixOn: true,
@@ -64,6 +68,7 @@ export function pullRequestWatchView(summary: ThreadPullRequestWatchSummary): Pu
     case "paused":
       return {
         label: PAUSE_LABEL[autoFix.pauseReason ?? "attempt-limit"](autoFix.maxAttempts),
+        shortLabel: "Auto-fix paused",
         tone: "warning",
         detail: alsoNews,
         autoFixOn: true,
@@ -73,6 +78,7 @@ export function pullRequestWatchView(summary: ThreadPullRequestWatchSummary): Pu
       return {
         // The switch beside it already says Auto-fix CI is on.
         label: "Watching the checks",
+        shortLabel: "Auto-fix on",
         tone: "muted",
         detail:
           alsoNews ??
@@ -208,6 +214,101 @@ export function setPullRequestWatch(
   action: PullRequestWatchAction,
 ): Promise<SourceControlSetPullRequestWatchResult> {
   return api.sourceControl.setPullRequestWatch(pullRequestWatchInput(input, action));
+}
+
+/** The title of the notice a refused or failed change shows. */
+export function pullRequestWatchFailureTitle(
+  action: PullRequestWatchAction,
+  number: number,
+): string {
+  return action === "stop"
+    ? `Couldn't stop watching #${number}`
+    : `Couldn't change Auto-fix CI for #${number}`;
+}
+
+/**
+ * An Auto-fix CI switch change in flight. The switch shows it at once, and the
+ * server's answer arrives later in the thread's shell.
+ */
+export interface PullRequestWatchSwitchRequest {
+  /** The control that sent it (`pullRequestWatchControlKey`); another one ignores it. */
+  readonly key: string;
+  readonly autoFix: boolean;
+  /** The watches the change saw: once the request went through, a newer shell is the answer. */
+  readonly watches: ThreadPullRequestWatchShell | null | undefined;
+  /** The server took the request. */
+  readonly settled: boolean;
+}
+
+/** One control of one thread's watch of one pull request, on one environment. */
+export function pullRequestWatchControlKey(input: {
+  readonly environmentId: string | null;
+  readonly threadId: string | null;
+  readonly number: number | null;
+}): string {
+  return `${input.environmentId ?? ""}|${input.threadId ?? ""}|${input.number ?? ""}`;
+}
+
+/** The switch request an action makes; Stop moves no switch. */
+export function pullRequestWatchSwitchRequest(
+  action: PullRequestWatchAction,
+  key: string,
+  watches: ThreadPullRequestWatchShell | null | undefined,
+): PullRequestWatchSwitchRequest | null {
+  return action === "stop"
+    ? null
+    : { key, autoFix: action !== "auto-fix-off", watches, settled: false };
+}
+
+/** What a watch control shows: the same rules on every client. */
+export interface PullRequestWatchControlState {
+  /** The pull request's active watch on the thread, null when there is none. */
+  readonly view: PullRequestWatchView | null;
+  /** Why its latest watch ended (shells keep that for a day), when none is active. */
+  readonly endedLabel: string | null;
+  /** The Auto-fix CI switch is shown: a watch is on, or one may start. */
+  readonly switchOffered: boolean;
+  /** The Auto-fix CI switch: the request in flight, else the watch's own state. */
+  readonly autoFixChecked: boolean;
+  /**
+   * The request no longer decides the switch, so the control drops it: the shell
+   * agrees, it belongs to another control, or it went through and the shell moved
+   * since (say the watch ended meanwhile). A failed request is dropped by its caller.
+   */
+  readonly requestDone: boolean;
+}
+
+export function pullRequestWatchControlState(input: {
+  readonly watches: ThreadPullRequestWatchShell | null | undefined;
+  readonly target: PullRequestWatchTarget | null;
+  /** A watch may start: the pull request is open, and the thread takes one. */
+  readonly startable: boolean;
+  /**
+   * Auto-fix CI can run for this thread: the pull request is its own workspace's (a fix turn
+   * edits the chat's own checkout, so the server refuses one on a pull request another
+   * workspace checks out). Unknown counts as yes; the server has the last word.
+   */
+  readonly autoFixHere?: boolean;
+  readonly key: string;
+  readonly request: PullRequestWatchSwitchRequest | null;
+}): PullRequestWatchControlState {
+  const found = input.target ? findPullRequestWatch(input.watches, input.target) : null;
+  const view = found?.kind === "active" ? pullRequestWatchView(found.watch) : null;
+  const autoFixOn = view?.autoFixOn ?? false;
+  const { request } = input;
+  const requestDone =
+    request !== null &&
+    (request.key !== input.key ||
+      request.autoFix === autoFixOn ||
+      (request.settled && request.watches !== input.watches));
+  return {
+    view,
+    endedLabel: found?.kind === "ended" ? pullRequestWatchEndedLabel(found.ended.reason) : null,
+    // A switch that is on always shows, so it can be turned off.
+    switchOffered: (view !== null || input.startable) && (input.autoFixHere !== false || autoFixOn),
+    autoFixChecked: request === null || requestDone ? autoFixOn : request.autoFix,
+    requestDone,
+  };
 }
 
 /** The server's reason for refusing a watch change, else the error's own message. */

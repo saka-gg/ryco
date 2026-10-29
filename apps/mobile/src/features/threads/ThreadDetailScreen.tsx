@@ -83,6 +83,7 @@ import {
   createThreadForkAttemptController,
   defaultThreadForkBaseRef,
   deriveForkableReplyMessageIds,
+  isArchivedThreadStub,
   readThreadForkApi,
   restartInterruptionNotice,
   threadForkBoundaryQuote,
@@ -696,6 +697,14 @@ export function ThreadDetailScreen(props: {
     selectThreadDeliveryRecord(state.selectedNodes, environmentId),
   );
   const deliveryNotice = useMemo(() => buildThreadDeliveryNotice(deliveryRecord), [deliveryRecord]);
+  // THIS environment's config (the active-environment atom nulls on switch): capabilities such
+  // as forking and pull request watches are the node's own.
+  const environmentServerConfig = useEnvironmentServerConfigs().get(environmentId) ?? null;
+  const pullRequestWatchAvailable = environmentServerConfig?.pullRequestWatch?.available === true;
+  const pullRequestWatches =
+    sidebarThread && !isArchivedThreadStub(sidebarThread)
+      ? sidebarThread.pullRequestWatches
+      : undefined;
   const headerModel = useMemo(
     () =>
       thread
@@ -707,6 +716,10 @@ export function ThreadDetailScreen(props: {
             hasPendingApproval: pendingApprovals.length > 0,
             hasPendingUserInput: pendingUserInputs.length > 0,
             forcedOffline: cachedView.headerForcedOffline,
+            pullRequestWatch: {
+              available: pullRequestWatchAvailable,
+              watches: pullRequestWatches,
+            },
             ...(settlementEntry
               ? {
                   settlement: {
@@ -729,6 +742,8 @@ export function ThreadDetailScreen(props: {
       pendingApprovals.length,
       pendingUserInputs.length,
       project,
+      pullRequestWatchAvailable,
+      pullRequestWatches,
       settlementEntry,
       thread,
       worktree,
@@ -879,7 +894,6 @@ export function ThreadDetailScreen(props: {
   // "Fork from here": offered on the terminal reply of a completed turn while this node can fork
   // right now. Capability and chats availability come from THIS environment's config, not the
   // active-environment atom, which nulls on switch.
-  const environmentServerConfig = useEnvironmentServerConfigs().get(environmentId) ?? null;
   // Subscribed, not read in render: a screen opened before its node connected
   // offers the fork as soon as the connection registers.
   const environmentApi = useEnvironmentApi(environmentId);
@@ -2118,8 +2132,10 @@ export function ThreadDetailScreen(props: {
       {headerModel ? (
         <ThreadActionsSheet
           environmentId={environmentId}
+          threadId={threadId}
           visible={actionsVisible}
           model={headerModel}
+          mutationReady={(environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled}
           // Rename / stop / archive all call ensureEnvironmentApi, which throws
           // without a connection, so the sheet's rows are disabled rather than
           // left to surface an internal error. The sheet still opens: node,

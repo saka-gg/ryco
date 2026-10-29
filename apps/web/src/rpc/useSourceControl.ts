@@ -1,12 +1,14 @@
 import { useAtomValue } from "@effect/atom-react";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import {
-  findPullRequestWatch,
-  pullRequestWatchEndedLabel,
+  pullRequestWatchControlKey,
+  pullRequestWatchControlState,
   pullRequestWatchErrorMessage,
+  pullRequestWatchFailureTitle,
   pullRequestWatchInput,
-  pullRequestWatchView,
+  pullRequestWatchSwitchRequest,
   type PullRequestWatchAction,
+  type PullRequestWatchSwitchRequest,
   type PullRequestWatchTarget,
   type PullRequestWatchView,
 } from "@ryco/client-runtime/state/threads";
@@ -585,15 +587,6 @@ export interface PullRequestWatchControl {
   readonly run: (action: PullRequestWatchAction) => void;
 }
 
-/** A switch change in flight: what the switch shows until the thread's shell answers. */
-interface RequestedAutoFix {
-  readonly key: string;
-  readonly autoFix: boolean;
-  /** The watches the click saw: once the request went through, a newer shell is the answer. */
-  readonly watches: ThreadPullRequestWatchShell | null | undefined;
-  readonly settled: boolean;
-}
-
 const selectPullRequestWatchAvailable = (config: ServerConfig | null): boolean =>
   config?.pullRequestWatch?.available === true;
 
@@ -626,7 +619,7 @@ export function usePullRequestWatchControl(input: {
   );
   const mutation = useSetPullRequestWatchMutation({ environmentId });
   // The switch follows a request at once; the server's answer arrives in the shell.
-  const [requested, setRequested] = useState<RequestedAutoFix | null>(null);
+  const [requested, setRequested] = useState<PullRequestWatchSwitchRequest | null>(null);
 
   const supported =
     available &&
@@ -635,28 +628,25 @@ export function usePullRequestWatchControl(input: {
     threadId !== null &&
     target !== null;
   const ready = supported && connection.phase === "connected" && capability.allowed;
-  const found = target ? findPullRequestWatch(watches, target) : null;
-  const view = found?.kind === "active" ? pullRequestWatchView(found.watch) : null;
-  const autoFixOn = view?.autoFixOn ?? false;
-  const key = `${environmentId ?? ""}|${threadId ?? ""}|${target?.number ?? ""}`;
-  const requestedAutoFix = requested?.key === key ? requested.autoFix : null;
-  // The watch's own state shows again once the shell agrees, the request failed, or the
-  // request went through and the shell moved since the click (say the watch ended meanwhile).
-  if (
-    requested !== null &&
-    (requested.key !== key ||
-      requestedAutoFix === autoFixOn ||
-      (requested.settled && requested.watches !== watches))
-  ) {
-    setRequested(null);
-  }
+  const key = pullRequestWatchControlKey({
+    environmentId,
+    threadId,
+    number: target?.number ?? null,
+  });
+  const state = pullRequestWatchControlState({
+    watches,
+    target,
+    startable: !closed,
+    key,
+    request: requested,
+  });
+  if (state.requestDone) setRequested(null);
 
   const run = (action: PullRequestWatchAction) => {
     if (!ready || mutation.isPending || threadId === null || target === null) return;
     const number = target.number;
-    if (action !== "stop") {
-      setRequested({ key, autoFix: action !== "auto-fix-off", watches, settled: false });
-    }
+    const request = pullRequestWatchSwitchRequest(action, key, watches);
+    if (request !== null) setRequested(request);
     mutation.mutateAsync({ threadId, ...target, action }).then(
       () => setRequested((current) => (current === null ? null : { ...current, settled: true })),
       (error: unknown) => {
@@ -664,10 +654,7 @@ export function usePullRequestWatchControl(input: {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title:
-              action === "stop"
-                ? `Couldn't stop watching #${number}`
-                : `Couldn't change Auto-fix CI for #${number}`,
+            title: pullRequestWatchFailureTitle(action, number),
             description: pullRequestWatchErrorMessage(error) ?? undefined,
           }),
         );
@@ -678,10 +665,10 @@ export function usePullRequestWatchControl(input: {
   return {
     supported,
     ready,
-    switchOffered: view !== null || !closed,
-    view,
-    endedLabel: found?.kind === "ended" ? pullRequestWatchEndedLabel(found.ended.reason) : null,
-    autoFixChecked: requestedAutoFix ?? autoFixOn,
+    switchOffered: state.switchOffered,
+    view: state.view,
+    endedLabel: state.endedLabel,
+    autoFixChecked: state.autoFixChecked,
     pending: mutation.isPending,
     run,
   };

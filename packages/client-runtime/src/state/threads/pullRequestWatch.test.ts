@@ -11,9 +11,13 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   findPullRequestWatch,
   isPullRequestWatchedIn,
+  pullRequestWatchControlKey,
+  pullRequestWatchControlState,
   pullRequestWatchEndedLabel,
   pullRequestWatchErrorMessage,
+  pullRequestWatchFailureTitle,
   pullRequestWatchInput,
+  pullRequestWatchSwitchRequest,
   pullRequestWatchView,
   samePullRequestUrl,
   setPullRequestWatch,
@@ -61,6 +65,7 @@ describe("pullRequestWatchView", () => {
       pullRequestWatchView(summary({ news: true, autoFix: null, startedBy: "agent" })),
     ).toEqual({
       label: "Watching · wakes the agent on failures, reviews and conflicts",
+      shortLabel: "Watching",
       tone: "muted",
       detail: null,
       autoFixOn: false,
@@ -71,6 +76,7 @@ describe("pullRequestWatchView", () => {
   it("words Auto-fix CI waiting for checks, with and without news", () => {
     expect(pullRequestWatchView(summary())).toEqual({
       label: "Watching the checks",
+      shortLabel: "Auto-fix on",
       tone: "muted",
       detail: "Starts a fix turn when checks fail, up to 3 attempts",
       autoFixOn: true,
@@ -87,6 +93,7 @@ describe("pullRequestWatchView", () => {
   it("words a fix turn in progress", () => {
     expect(pullRequestWatchView(summary({ autoFix: autoFix("fixing", { attempts: 2 }) }))).toEqual({
       label: "Fixing CI · attempt 2 of 3",
+      shortLabel: "Fixing 2/3",
       tone: "active",
       detail: "Waiting for the fix to be pushed",
       autoFixOn: true,
@@ -108,6 +115,7 @@ describe("pullRequestWatchView", () => {
       );
     expect(paused("attempt-limit")).toEqual({
       label: "Auto-fix paused: checks still fail after 3 fix attempts",
+      shortLabel: "Auto-fix paused",
       tone: "warning",
       detail: null,
       autoFixOn: true,
@@ -249,5 +257,121 @@ describe("pullRequestWatchInput and setPullRequestWatch", () => {
     ).toBe("Another chat already runs Auto-fix CI on #12.");
     expect(pullRequestWatchErrorMessage(new Error("Socket closed"))).toBe("Socket closed");
     expect(pullRequestWatchErrorMessage("nope")).toBeNull();
+  });
+});
+
+describe("pullRequestWatchControlState", () => {
+  const target = { number: 12, url: URL_12 };
+  const key = pullRequestWatchControlKey({ environmentId: "env", threadId, number: 12 });
+  const watched: ThreadPullRequestWatchShell = { active: [summary()], ended: [] };
+  const unwatched: ThreadPullRequestWatchShell = { active: [], ended: [] };
+  const state = (
+    watches: ThreadPullRequestWatchShell | undefined,
+    request: Parameters<typeof pullRequestWatchControlState>[0]["request"] = null,
+    startable = true,
+  ) => pullRequestWatchControlState({ watches, target, startable, key, request });
+
+  it("shows the watch, or why it ended, and offers the switch while a watch may start", () => {
+    expect(state(watched)).toMatchObject({
+      view: { label: "Watching the checks", autoFixOn: true },
+      endedLabel: null,
+      switchOffered: true,
+      autoFixChecked: true,
+      requestDone: false,
+    });
+    const ended = {
+      active: [],
+      ended: [
+        {
+          watchId: "w",
+          number: 12,
+          reason: "merged" as const,
+          endedAt: "2026-10-28T11:00:00.000Z",
+        },
+      ],
+    };
+    expect(state(ended, null, false)).toMatchObject({
+      view: null,
+      endedLabel: "Stopped watching: merged",
+      switchOffered: false,
+      autoFixChecked: false,
+    });
+    // A watch that is on keeps its switch, even where a new one could not start.
+    expect(state(watched, null, false).switchOffered).toBe(true);
+    expect(
+      pullRequestWatchControlState({
+        watches: watched,
+        target: null,
+        startable: true,
+        key,
+        request: null,
+      }).view,
+    ).toBeNull();
+  });
+
+  it("offers no switch for another workspace's pull request unless Auto-fix CI is on", () => {
+    const news: ThreadPullRequestWatchShell = {
+      active: [summary({ news: true, autoFix: null })],
+      ended: [],
+    };
+    const elsewhere = (watches: ThreadPullRequestWatchShell) =>
+      pullRequestWatchControlState({
+        watches,
+        target,
+        startable: true,
+        autoFixHere: false,
+        key,
+        request: null,
+      });
+    expect(elsewhere(news)).toMatchObject({
+      view: { shortLabel: "Watching" },
+      switchOffered: false,
+    });
+    expect(elsewhere(watched).switchOffered).toBe(true);
+  });
+
+  it("follows a switch change at once and lets the shell take over when it agrees", () => {
+    const turningOn = pullRequestWatchSwitchRequest("auto-fix-on", key, unwatched);
+    expect(turningOn).toEqual({ key, autoFix: true, watches: unwatched, settled: false });
+    expect(state(unwatched, turningOn)).toMatchObject({ autoFixChecked: true, requestDone: false });
+    expect(state(watched, turningOn)).toMatchObject({ autoFixChecked: true, requestDone: true });
+    const turningOff = pullRequestWatchSwitchRequest("auto-fix-off", key, watched);
+    expect(state(watched, turningOff)).toMatchObject({ autoFixChecked: false, requestDone: false });
+    expect(pullRequestWatchSwitchRequest("resume", key, watched)?.autoFix).toBe(true);
+    expect(pullRequestWatchSwitchRequest("stop", key, watched)).toBeNull();
+  });
+
+  it("drops a request once it went through and the shell moved without agreeing", () => {
+    const sent = {
+      ...pullRequestWatchSwitchRequest("auto-fix-on", key, unwatched)!,
+      settled: true,
+    };
+    // The same shell: the answer has not arrived yet.
+    expect(state(unwatched, sent)).toMatchObject({ autoFixChecked: true, requestDone: false });
+    // A newer shell without the watch (say it ended at once): the shell decides.
+    const ended: ThreadPullRequestWatchShell = {
+      active: [],
+      ended: [
+        { watchId: "w", number: 12, reason: "unreadable", endedAt: "2026-10-28T11:00:00.000Z" },
+      ],
+    };
+    expect(state(ended, sent)).toMatchObject({ autoFixChecked: false, requestDone: true });
+  });
+
+  it("ignores another control's request", () => {
+    const other = pullRequestWatchSwitchRequest(
+      "auto-fix-on",
+      pullRequestWatchControlKey({ environmentId: "env", threadId, number: 13 }),
+      unwatched,
+    );
+    expect(state(unwatched, other)).toMatchObject({ autoFixChecked: false, requestDone: true });
+    expect(pullRequestWatchControlKey({ environmentId: null, threadId: null, number: null })).toBe(
+      "||",
+    );
+  });
+
+  it("titles a failed change", () => {
+    expect(pullRequestWatchFailureTitle("stop", 12)).toBe("Couldn't stop watching #12");
+    expect(pullRequestWatchFailureTitle("resume", 12)).toBe("Couldn't change Auto-fix CI for #12");
   });
 });

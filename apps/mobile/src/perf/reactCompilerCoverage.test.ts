@@ -764,6 +764,13 @@ describe("mobile React Compiler coverage", () => {
     ["src/features/threads/ThreadDetailScreen.tsx", ["ThreadDetailScreen", "TimelineRow"]],
     ["src/features/threads/ThreadComposer.tsx", ["ThreadComposer"]],
     ["src/features/threads/useThreadChecks.ts", ["useThreadChecks"]],
+    // The header and task sheet re-render with every watch change the shell brings.
+    ["src/features/threads/ThreadContextBar.tsx", ["ThreadContextBar", "PullRequestWatchChip"]],
+    [
+      "src/features/threads/ThreadActionsSheet.tsx",
+      ["ThreadActionsSheet", "PullRequestWatchSection"],
+    ],
+    ["src/features/threads/usePullRequestWatchControl.ts", ["usePullRequestWatchControl"]],
     ["src/features/threads/ThreadActivityFoldRow.tsx", ["ThreadActivityFoldRow"]],
     ["src/features/threads/PendingApprovalCard.tsx", ["PendingApprovalCard"]],
     ["src/features/threads/PendingUserInputCard.tsx", ["PendingUserInputCard"]],
