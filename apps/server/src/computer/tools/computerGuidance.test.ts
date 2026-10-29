@@ -83,6 +83,20 @@ describe("computer guidance", () => {
     expect(browser).toContain("never automatically repeat input");
   });
 
+  it("keeps the attachments chapter on preserved paste and workspace files", () => {
+    const attachments = COMPUTER_HELP_SECTIONS.attachments;
+    expect(attachments.length).toBeLessThanOrEqual(900);
+    expect(attachments).toContain("image_path");
+    expect(attachments).toContain("file_path");
+    expect(attachments).toContain("canonical workspace");
+    expect(attachments).toContain("refuses when preservation is unavailable");
+    expect(attachments).toContain("computer_browser_upload");
+    expect(attachments).toContain("Never substitute");
+    expect(COMPUTER_HELP_INDEX).toContain("attachments —");
+    // On demand only: the active prompt stays inside its budget.
+    expect(computerToolInstructions()).not.toContain("image_path");
+  });
+
   it("keeps the visibility chapter about explicit user-requested controls", () => {
     const hidden = COMPUTER_HELP_SECTIONS.hidden;
     expect(hidden).toContain("Explicit visibility controls");

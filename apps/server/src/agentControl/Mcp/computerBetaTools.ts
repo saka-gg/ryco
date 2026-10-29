@@ -177,20 +177,23 @@ export function withComputerBetaTools(
   const resolveForegroundAuthorization = async (context: ToolContext) => ({
     userRequestedVisibleUse: active.get(context.callerThreadId)?.plan.foregroundAuthorized === true,
   });
+  // The caller thread's worktree, else its project root: the one boundary for
+  // browser file transfer and native image/file paste.
+  const resolveWorkspaceRoot = (context: ToolContext): Effect.Effect<string | null> =>
+    deps.projections.getThreadCheckpointContext(ThreadId.make(context.callerThreadId)).pipe(
+      Effect.map(
+        Option.match({
+          onNone: () => null,
+          onSome: (value) => value.worktreePath ?? value.workspaceRoot,
+        }),
+      ),
+      Effect.catch(() => Effect.succeed(null)),
+    );
   const browserTools = makeAgentGatewayComputerBrowserTools({
     manager,
     authorizeAction,
     resolveForegroundAuthorization,
-    resolveWorkspaceRoot: (context) =>
-      deps.projections.getThreadCheckpointContext(ThreadId.make(context.callerThreadId)).pipe(
-        Effect.map(
-          Option.match({
-            onNone: () => null,
-            onSome: (value) => value.worktreePath ?? value.workspaceRoot,
-          }),
-        ),
-        Effect.catch(() => Effect.succeed(null)),
-      ),
+    resolveWorkspaceRoot,
   });
   const entries = [
     ...makeAgentGatewayComputerTools({
@@ -198,6 +201,7 @@ export function withComputerBetaTools(
       authorizeAction,
       resolveForegroundAuthorization,
       relatedTools: browserTools,
+      resolveWorkspaceRoot,
     }),
     ...browserTools,
   ];
