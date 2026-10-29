@@ -126,7 +126,7 @@ import * as SourceControlRepositoryService from "./sourceControl/SourceControlRe
 import { ProjectSetupScriptRunnerLive } from "./project/Layers/ProjectSetupScriptRunner.ts";
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts";
-import { UsageServiceLive } from "./usage/UsageService.ts";
+import { UsageServiceDeferredLive } from "./usage/UsageServiceDeferred.ts";
 import { CliProxyServiceLive } from "./cliProxy/CliProxyService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
@@ -581,7 +581,7 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
 
 const RuntimeCoreBaseWithSettingsLive = Layer.mergeAll(
   RuntimeCoreBaseDependenciesLive,
-  UsageServiceLive,
+  UsageServiceDeferredLive,
   CliProxyServiceLive,
 ).pipe(Layer.provideMerge(ServerSettingsLive));
 

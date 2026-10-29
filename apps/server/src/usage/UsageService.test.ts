@@ -20,7 +20,14 @@ import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TranscriptReader from "./usageTranscriptReader.ts";
-import { UsageService, UsageServiceLive } from "./UsageService.ts";
+import {
+  makeUsageService,
+  UsageService,
+  UsageServiceLive,
+  type UsageServiceOptions,
+} from "./UsageService.ts";
+import { UsageServiceDeferredLive } from "./UsageServiceDeferred.ts";
+import { USAGE_RATES_WARM_DELAY_MS } from "./UsageServiceTag.ts";
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await FS.rm(root, { recursive: true, force: true });
@@ -33,8 +40,9 @@ function testLayer(
     request: Parameters<Parameters<typeof HttpClient.make>[0]>[0],
   ) => ReturnType<Parameters<typeof HttpClient.make>[0]> = (request) =>
     Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(document))),
+  layer: typeof UsageServiceLive = UsageServiceLive,
 ) {
-  return UsageServiceLive.pipe(
+  return layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         NodeServices.layer,
@@ -596,6 +604,60 @@ it("lets a slow rates download finish once its headers arrived in time", async (
   );
 });
 
+it("refreshes stale cached rates 30 s after construction, or not at all when built without a warm-up", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-rates-warm-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  const state = usageStateDir(root);
+  await FS.mkdir(state, { recursive: true });
+  await FS.writeFile(
+    join(state, "pricing-cache.json"),
+    JSON.stringify({
+      version: 2,
+      fetchedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000,
+      revision: "stale",
+      document: rateDocument,
+    }),
+  );
+  const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  const cases: ReadonlyArray<readonly [UsageServiceOptions, number]> = [
+    [{}, 1],
+    // What the deferred layer builds for a summary, which refreshes stale rates itself.
+    [{ ratesWarmDelayMs: null }, 0],
+  ];
+  for (const [options, expectedFetches] of cases) {
+    let fetches = 0;
+    const hanging = () => {
+      fetches += 1;
+      return Effect.never;
+    };
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* UsageService;
+        yield* settle;
+        yield* TestClock.adjust(Duration.millis(USAGE_RATES_WARM_DELAY_MS - 1));
+        yield* settle;
+        expect(fetches).toBe(0);
+        yield* TestClock.adjust(Duration.millis(1));
+        for (let attempt = 0; attempt < 10 && fetches < Math.max(1, expectedFetches); attempt++)
+          yield* settle;
+        expect(fetches).toBe(expectedFetches);
+      }).pipe(
+        Effect.provide(
+          testLayer(
+            root,
+            claudeSettings(claudeHome, root),
+            {},
+            hanging,
+            Layer.effect(UsageService, makeUsageService(options)),
+          ).pipe(Layer.provideMerge(TestClock.layer())),
+        ),
+        Effect.scoped,
+      ),
+    );
+  }
+});
+
 it("reuses an unchanged source's result, re-reads it after a change, and shares identical scans", async () => {
   const root = await FS.mkdtemp(join(tmpdir(), "ryco-memo-summary-"));
   roots.push(root);
@@ -650,6 +712,36 @@ it("reuses an unchanged source's result, re-reads it after a change, and shares 
       expect(summary.buckets[0]?.responseCount).toBe(3);
     }).pipe(Effect.provide(testLayer(root, claudeSettings(claudeHome, root))), Effect.scoped),
   );
+});
+
+it("serves the pipeline loaded on first use and flushes its scan cache with the server", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-deferred-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  await FS.mkdir(join(claudeHome, "projects"), { recursive: true });
+  await FS.writeFile(join(claudeHome, "projects", "a.jsonl"), claudeLine("a"));
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const summary = yield* (yield* UsageService).readSummary(summaryRequest);
+      expect(summary.pricing.state).toBe("live");
+      expect(summary.buckets[0]?.responseCount).toBe(1);
+      expect(summary.buckets[0]?.estimatedCostUsd).toBe(8);
+    }).pipe(
+      Effect.provide(
+        testLayer(
+          root,
+          claudeSettings(claudeHome, root),
+          rateDocument,
+          undefined,
+          UsageServiceDeferredLive,
+        ),
+      ),
+      Effect.scoped,
+    ),
+  );
+  // The pipeline's finalizers run with the layer that loaded it.
+  const shards = await FS.readdir(join(usageStateDir(root), "scan-cache"));
+  expect(shards.some((name) => name.endsWith(".json"))).toBe(true);
 });
 
 it("drops a queued scan once every caller has gone away", async () => {

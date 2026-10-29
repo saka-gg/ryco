@@ -201,6 +201,14 @@ describe("server boot import boundaries", () => {
         /^apps\/server\/src\/(?:observability\/(?:OtelEnvironmentResolver|OtlpExporters)|cliTrace\/(?:traceRun|traceSummary))\.ts$/u,
       ),
     ).toEqual([]);
+    // The usage pipeline loads with the first usage summary, or shortly after boot on a node that
+    // has downloaded rates before. Storage cleanup protects provider history paths eagerly.
+    expect(reached(/^apps\/server\/src\/usage\//u).toSorted()).toEqual([
+      "apps/server/src/usage/UsageServiceDeferred.ts",
+      "apps/server/src/usage/UsageServiceTag.ts",
+      "apps/server/src/usage/usageDay.ts",
+      "apps/server/src/usage/usageProtectedPaths.ts",
+    ]);
   });
 });
 
@@ -300,6 +308,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
         /^\/\/#region .*\/effect\/dist\/observability\/internal\/\w+\.js$/mu,
       );
       expect(source).not.toMatch(/^\/\/#region src\/cliTrace\/traceSummary\.ts$/mu);
+      // Loaded with the first usage summary (UsageServiceDeferred.ts).
+      expect(source).not.toMatch(/^\/\/#region src\/usage\/UsageService\.ts$/mu);
     }
   });
 });

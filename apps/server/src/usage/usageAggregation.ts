@@ -1,4 +1,3 @@
-// @effect-diagnostics globalDate:off
 import type {
   UsageCalendarDate,
   UsageCostSource,
@@ -6,7 +5,10 @@ import type {
   UsageTokenTotals,
 } from "@ryco/contracts";
 
+import { makeUsageDayFormatter } from "./usageDay.ts";
 import { addUsageTokenTotals, EMPTY_USAGE_TOKEN_TOTALS, type UsageRecord } from "./usageRecord.ts";
+
+export { makeUsageDayFormatter };
 
 export interface UsageRecordPrice {
   readonly estimatedCostUsd: number | null;
@@ -47,16 +49,6 @@ interface MutableBucket {
   pricedTokenCount: number;
   unpricedTokenCount: number;
   costSources: Set<Exclude<UsageCostSource, "mixed">>;
-}
-
-export function makeUsageDayFormatter(timeZone: string): (timestampMs: number) => string {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  return (timestampMs) => formatter.format(new Date(timestampMs));
 }
 
 function defaultPrice(record: UsageRecord): UsageRecordPrice {
