@@ -67,6 +67,9 @@ export const SERVER_TIMING_TEST_FILES = [
   "src/provider/detachedDeadline.test.ts",
   // A hanging shutdown-hint write is cut off after 2 s, within 6 s overall.
   "src/serverRuntimeStartup.test.ts",
+  // A quarantined removal of a 9,092-entry tree finishes within its proportional
+  // deadline (3 s + 20 ms per entry).
+  "src/storage/filesystem.test.ts",
   // Shutdown flushes analytics within 2 s.
   "src/telemetry/Layers/AnalyticsService.test.ts",
   // Usage summaries answer within 2 s while the rates download hangs.

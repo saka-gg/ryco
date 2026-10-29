@@ -1,5 +1,5 @@
 import { lstatSync, type Stats } from "node:fs";
-import { lstat, readdir, readFile, stat as statAsync } from "node:fs/promises";
+import { lstat, readFile, stat as statAsync } from "node:fs/promises";
 import path from "node:path";
 
 import { Data, Duration, Effect, Exit } from "effect";
@@ -10,9 +10,10 @@ import type {
   ProjectId,
   WorktreeId,
 } from "@ryco/contracts";
-import { parseWorktreeStatus, type ParsedWorktreeStatus } from "@ryco/shared/workspaceLifecycle";
+import { parseWorktreeStatus } from "@ryco/shared/workspaceLifecycle";
 
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import { type CheckoutStatus, withoutEmptyIgnoredDirectories } from "./checkoutStatus.ts";
 import type { WorkspaceAccessPolicyShape } from "./Services/WorkspaceAccessPolicy.ts";
 
 /** A checkout could not be inspected safely. The detail is user-facing. */
@@ -31,11 +32,6 @@ const normalized = (value: string) => {
 export const samePath = (a: string, b: string) => normalized(a) === normalized(b);
 export const containsPath = (a: string, b: string) =>
   samePath(a, b) || normalized(b).startsWith(normalized(a) + path.sep);
-
-export interface CheckoutStatus extends ParsedWorktreeStatus {
-  /** Output exceeded its bound: treated as blocking, never as clean. */
-  readonly truncated: boolean;
-}
 
 export interface CheckoutFacts {
   readonly rootIdentity: string;
@@ -71,69 +67,6 @@ export interface ProjectGitFacts {
    */
   readonly unmergedBranches?: ReadonlySet<string> | undefined;
 }
-
-/** Bound on directory entries visited while deciding ignored directories are empty. */
-const IGNORED_DIRECTORY_SCAN_LIMIT = 4_096;
-
-/**
- * Whether `directory` holds anything but (nested) empty directories. Files,
- * symlinks and unreadable directories count as content; null when the bound
- * runs out first (callers keep the entry protected).
- */
-async function directoryHoldsContent(
-  directory: string,
-  budget: { remaining: number },
-): Promise<boolean | null> {
-  const pending = [directory];
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    let entries;
-    try {
-      entries = await readdir(current, { withFileTypes: true });
-    } catch {
-      return true;
-    }
-    for (const entry of entries) {
-      budget.remaining -= 1;
-      if (budget.remaining < 0) return null;
-      if (!entry.isDirectory()) return true;
-      pending.push(path.join(current, entry.name));
-    }
-  }
-  return false;
-}
-
-/**
- * `--ignored=matching` lists an ignored directory even when it holds only
- * empty directories, which traditional mode never reported: nothing there can
- * be lost, so such entries are not protected content.
- */
-export const dropEmptyIgnoredDirectories = (
-  checkout: string,
-  status: ParsedWorktreeStatus,
-): Effect.Effect<ParsedWorktreeStatus> =>
-  Effect.promise(async () => {
-    if (!status.protectedIgnored.some((entry) => entry.endsWith("/"))) return status;
-    const budget = { remaining: IGNORED_DIRECTORY_SCAN_LIMIT };
-    const protectedIgnored: string[] = [];
-    for (const entry of status.protectedIgnored) {
-      if (
-        entry.endsWith("/") &&
-        (await directoryHoldsContent(path.join(checkout, entry), budget)) === false
-      ) {
-        continue;
-      }
-      protectedIgnored.push(entry);
-    }
-    return { ...status, protectedIgnored };
-  });
-
-/** Anything Git would refuse to discard, or ignored content that is not a known cache. */
-export const checkoutHasBlockingChanges = (status: CheckoutStatus): boolean =>
-  status.truncated ||
-  status.modified > 0 ||
-  status.untracked > 0 ||
-  status.protectedIgnored.length > 0;
 
 /**
  * Reuses a checkout's Git reads across listings. Each read has one slot
@@ -552,7 +485,9 @@ export const inspectCheckout = (
                     new CheckoutInspectionError({ detail: `Git status failed: ${cause.message}` }),
                 ),
                 Effect.flatMap((result) =>
-                  dropEmptyIgnoredDirectories(directory, parseWorktreeStatus(result.stdout)).pipe(
+                  Effect.promise(() =>
+                    withoutEmptyIgnoredDirectories(directory, parseWorktreeStatus(result.stdout)),
+                  ).pipe(
                     Effect.map((parsed): CheckoutStatus =>
                       Object.assign(parsed, {
                         truncated: result.stdoutTruncated || result.stderrTruncated,

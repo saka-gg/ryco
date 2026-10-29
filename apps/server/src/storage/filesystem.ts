@@ -8,7 +8,14 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
+import { parseWorktreeStatus } from "@ryco/shared/workspaceLifecycle";
 import { runProcess } from "../processRunner.ts";
+import {
+  checkoutChangeBlockers,
+  ignoredCacheDirectories,
+  withoutEmptyIgnoredDirectories,
+  withRegenerableByOwnNameOnly,
+} from "../workspace/checkoutStatus.ts";
 
 export interface ScanBudget {
   remaining: number;
@@ -22,9 +29,31 @@ export interface MeasuredSize {
   bytes: number | null;
   sizeStatus: "complete" | "bounded" | "unknown";
   unsafe: boolean;
+  /** Entries visited (files, directories and the root); all of them when complete. */
+  entries?: number;
   fingerprint?: string;
   manifest?: readonly ManifestEntry[];
 }
+
+/**
+ * Most entries (files, directories and the root) one quarantined removal takes on; a checkout
+ * of Ryco without dependencies has about 8,700. Bigger trees stay protected instead of being
+ * cut off half-way through their removal.
+ */
+export const MAX_QUARANTINE_REMOVAL_ENTRIES = 12_000;
+
+/**
+ * The removal's own budget grows with its manifest. It checks every file against its parents
+ * twice: measured at 0.5 to 6 ms per entry on an 18-core Mac, the slow end at load average 30
+ * with other processes busy on the same disk. 3 s plus 20 ms per entry only stops a stalled
+ * filesystem: running out leaves a half-removed quarantine for manual recovery, so a slow one
+ * must be allowed to finish.
+ */
+export const quarantineRemovalBudget = (entries: number, now = Date.now()): ScanBudget => ({
+  // Parent checks: two per file, one per directory.
+  remaining: 3 * entries + 16,
+  deadline: now + 3_000 + 20 * entries,
+});
 
 /** Apparent bytes, with a shared node-wide budget; never follows links or mounts. */
 export async function measureDirectory(
@@ -35,6 +64,7 @@ export async function measureDirectory(
   rootCtime?: number,
 ): Promise<MeasuredSize> {
   let bytes = 0;
+  let entries = 0;
   const identities: string[] = [];
   const manifest: ManifestEntry[] = [];
   let unsafe = false;
@@ -57,6 +87,7 @@ export async function measureDirectory(
         bounded = true;
         continue;
       }
+      entries++;
       if (captureManifest) {
         manifest.push({ relativePath: path.relative(root, current), stat });
         identities.push(
@@ -125,6 +156,7 @@ export async function measureDirectory(
       bytes,
       sizeStatus: bounded ? "bounded" : "complete",
       unsafe,
+      entries,
       ...(captureManifest && !bounded && !unsafe
         ? {
             manifest,
@@ -256,7 +288,15 @@ export async function captureWorktreeIdentity(
   };
 }
 
-/** Fresh status includes ignored files; an ignored archive may still be real user work. */
+/**
+ * Fresh status with ignored files, classified by the shared rule (`classifyIgnoredPath`, the
+ * one the workspace lifecycle uses) in its unattended form (`withRegenerableByOwnNameOnly`):
+ * modified, untracked and ignored files that are not a known cache (credentials, databases,
+ * unknown outputs) keep the checkout, with the lifecycle's own reasons. Ignored files that are
+ * regenerable by their own name (`*.tsbuildinfo`, `.DS_Store`) are ordinary entries of the
+ * removal manifest. Ignored cache folders (`node_modules/`, `dist/`) keep it too: Git lists such
+ * a folder as one entry, so nothing inside it has been checked.
+ */
 export async function assertCleanWorktree(candidate: string, repository: string): Promise<void> {
   const gitFile = await readSmallFile(path.join(candidate, ".git"));
   const match = /^gitdir: (.+)\r?\n?$/.exec(gitFile);
@@ -273,18 +313,34 @@ export async function assertCleanWorktree(candidate: string, repository: string)
       "--porcelain=v1",
       "-z",
       "--untracked-files=all",
-      "--ignored",
+      // One entry per ignored folder instead of every file in it: a checkout with
+      // dependencies stays within the output bound and answers in milliseconds.
+      "--ignored=matching",
       "--ignore-submodules=none",
     ],
     {
       cwd: candidate,
       timeoutMs: 5000,
       maxBufferBytes: 256 * 1024,
+      outputMode: "truncate",
       env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
     },
   );
-  if (result.stdout.length !== 0)
-    throw new Error("Dirty, untracked or ignored files are protected.");
+  const status = await withoutEmptyIgnoredDirectories(
+    candidate,
+    withRegenerableByOwnNameOnly(parseWorktreeStatus(result.stdout)),
+    { includeRegenerable: true },
+  );
+  const blockers = checkoutChangeBlockers({
+    ...status,
+    truncated: result.stdoutTruncated === true || result.stderrTruncated === true,
+  });
+  const caches = ignoredCacheDirectories(status);
+  if (caches.length > 0)
+    blockers.push(
+      `Ignored cache folders are protected (${caches.slice(0, 3).join(", ")}). Remove checkout on the Projects page can delete them.`,
+    );
+  if (blockers.length > 0) throw new Error(blockers.join(" "));
   const base = await runProcess("git", ["rev-parse", "--verify", "HEAD"], {
     cwd: repository,
     timeoutMs: 5000,
@@ -320,12 +376,16 @@ export async function removeQuarantinedTemporaryDirectory(
   validateQuarantine?: (candidate: string) => Promise<void>,
   assertAdmission?: () => void,
 ): Promise<void> {
-  const budget = () => ({ remaining: 30_000, deadline: Date.now() + 3000 });
+  // Measurements at the boundary: the entry bound is the scan's, but time only guards against a
+  // stalled filesystem, because running out after the claim leaves a manual recovery.
+  const budget = () => ({ remaining: 30_000, deadline: Date.now() + 30_000 });
   await assertCanonicalPath(source);
   await assertCanonicalPath(path.dirname(quarantine));
   const before = await measureDirectory(source, budget(), new Set(), true);
   if (!before.manifest || before.fingerprint !== expectedFingerprint)
     throw new Error("Temporary data changed at the removal boundary; preserved at " + source);
+  if (before.manifest.length > MAX_QUARANTINE_REMOVAL_ENTRIES)
+    throw new Error("Too many files to remove safely in one pass; nothing was moved.");
   const originalRoot = before.manifest.find((entry) => entry.relativePath === "")!.stat;
   // Destination names are unique and outside every producer allocation. Do not
   // overwrite a previous recovery directory, even on an interrupted attempt.
@@ -361,7 +421,7 @@ export async function removeQuarantinedTemporaryDirectory(
     const directoryIdentities = new Map(
       directories.map((entry) => [path.join(quarantine, entry.relativePath), entry.stat]),
     );
-    const removalBudget = budget();
+    const removalBudget = quarantineRemovalBudget(after.manifest.length);
     const assertParents = async (candidate: string) => {
       if (removalBudget.remaining-- <= 0 || Date.now() >= removalBudget.deadline)
         throw new Error("Quarantine removal budget exhausted.");

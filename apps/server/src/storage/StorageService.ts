@@ -44,6 +44,7 @@ import {
   assertCanonicalPath,
   assertCleanWorktree,
   captureWorktreeIdentity,
+  MAX_QUARANTINE_REMOVAL_ENTRIES,
   measureDirectory,
   removeQuarantinedTemporaryDirectory,
   type ScanBudget,
@@ -268,12 +269,42 @@ export function makeStorageService(deps: {
       };
     });
 
-  const inspect = (
-    row: OwnedStorageRow,
-    context: Effect.Success<ReturnType<typeof inventory>>,
-    budget: ScanBudget,
-    alreadyMeasured?: MeasuredSize,
-  ) =>
+  type InventoryContext = Effect.Success<ReturnType<typeof inventory>>;
+  type EntryBase = Pick<StorageEntry, "id" | "projectId" | "category" | "label" | "path">;
+  /** Why a row is not removable now. */
+  type Refusal = {
+    readonly eligible: false;
+    readonly reason: string;
+    /** Null when nothing was measured yet: display measures it with what is left. */
+    readonly size: MeasuredSize | null;
+  };
+  type Verification = { readonly eligible: true; readonly entry: StorageEntry } | Refusal;
+  type Classification =
+    | { readonly kind: "protected"; readonly base: EntryBase; readonly refusal: Refusal }
+    | {
+        readonly kind: "candidate";
+        readonly base: EntryBase;
+        readonly project: InventoryContext["projectRoots"][number]["project"];
+        /** A session references the path (else it is abandoned Ryco-owned data). */
+        readonly associated: boolean;
+        /** When the retention clock starts. */
+        readonly completedAt: string;
+      };
+  const UNKNOWN_SIZE: MeasuredSize = { bytes: null, sizeStatus: "unknown", unsafe: true };
+  const UNAVAILABLE = "Path is unavailable or unreadable; size and safety are unknown.";
+  const INCOMPLETE =
+    "Scan budget, symbolic link, mount or unreadable entry prevents a complete safety check.";
+  /** One scan's shared budget, or one entry's own when it is previewed, retained or removed. */
+  const measurementBudget = (): ScanBudget => ({ remaining: 30_000, deadline: Date.now() + 3000 });
+  /** The later of two ISO instants (`fallback` when `value` is absent or unreadable). */
+  const later = (value: string | null | undefined, fallback: string) =>
+    value && Date.parse(value) > Date.parse(fallback) ? value : fallback;
+
+  /**
+   * Ownership, project and activity rules for one ledger row, from the inventory alone: no
+   * filesystem traversal and no Git. Rows it protects never spend a measurement budget.
+   */
+  const classify = (row: OwnedStorageRow, context: InventoryContext) =>
     Effect.gen(function* () {
       const root = yield* attempt(() => canonical(row.path));
       const matchingProjects = context.projectRoots.filter((item) =>
@@ -284,49 +315,33 @@ export function makeStorageService(deps: {
       );
       const project = matchingProjects.length === 1 ? matchingProjects[0]!.project : null;
       const projectId = project?.id ?? (row.project_id ? ProjectId.make(row.project_id) : null);
-      const base = {
+      const base: EntryBase = {
         id: row.id,
         projectId,
         category: row.category,
         label: path.basename(row.path),
         path: row.path,
       };
-      const providerReason = !context.protectedPaths
-        ? "Provider history/export locations could not be verified on this node; cleanup is protected."
-        : context.protectedPaths.some(
-              (protectedPath) => contains(root, protectedPath) || contains(protectedPath, root),
-            )
-          ? "Checkout/data overlaps a declared provider archive, export, home or credential location; protected."
-          : null;
-      if (providerReason)
-        return {
-          ...base,
-          bytes: null,
-          sizeStatus: "unknown",
-          eligible: false,
-          reason: providerReason,
-        } satisfies StorageEntry;
-      const size: MeasuredSize =
-        alreadyMeasured ??
-        (yield* policy.assertExistingPath({ path: row.path, operation: "storage.scan" }).pipe(
-          Effect.andThen(
-            attempt(() =>
-              measureDirectory(row.path, budget, new Set(), row.category === "temporary"),
-            ),
-          ),
-          Effect.orElseSucceed(() => ({
-            bytes: null,
-            sizeStatus: "unknown" as const,
-            unsafe: true,
-          })),
-        ));
-      const protect = (reason: string): StorageEntry => ({
-        ...base,
-        bytes: size.bytes,
-        sizeStatus: size.sizeStatus,
-        eligible: false,
-        reason,
+      // Provider sources are never traversed, not even for display.
+      const protect = (reason: string, measure = true): Classification => ({
+        kind: "protected",
+        base,
+        refusal: { eligible: false, reason, size: measure ? null : UNKNOWN_SIZE },
       });
+      if (!context.protectedPaths)
+        return protect(
+          "Provider history/export locations could not be verified on this node; cleanup is protected.",
+          false,
+        );
+      if (
+        context.protectedPaths.some(
+          (protectedPath) => contains(root, protectedPath) || contains(protectedPath, root),
+        )
+      )
+        return protect(
+          "Checkout/data overlaps a declared provider archive, export, home or credential location; protected.",
+          false,
+        );
       if (context.incomplete)
         return protect(
           "Lifecycle inventory exceeds its bounds. Ownership/active state cannot be established safely.",
@@ -342,12 +357,6 @@ export function makeStorageService(deps: {
         return protect(
           "Interrupted cleanup or removed checkout; inspect on disk before retrying. No automatic retry." +
             (row.last_error ? ` ${row.last_error}` : ""),
-        );
-      if (size.sizeStatus === "unknown")
-        return protect("Path is unavailable or unreadable; size and safety are unknown.");
-      if (size.unsafe || size.sizeStatus !== "complete")
-        return protect(
-          "Scan budget, symbolic link, mount or unreadable entry prevents a complete safety check.",
         );
       const associatedRows = context.worktreePaths.filter((item) => item.root === root);
       if (
@@ -431,87 +440,203 @@ export function makeStorageService(deps: {
         )
       )
         return protect("A terminal or subprocess still uses this checkout.");
+      // A checkout recreated after its thread was archived (Restore) starts a new clock:
+      // the ledger's `created_at` is reset whenever Ryco creates the checkout again.
       const completedAt =
         row.category === "temporary"
           ? row.completed_at
-          : (associated[0]?.thread.archivedAt ?? row.created_at);
+          : later(associated[0]?.thread.archivedAt, row.created_at);
       if (!completedAt) return protect("Temporary staging has not been explicitly completed.");
       if (associated.length === 0 && Date.now() - Date.parse(row.created_at) < 86_400_000)
         return protect("New abandoned checkouts have a 24-hour safety grace period.");
-      const safety = yield* Effect.gen(function* () {
-        yield* policy.assertExistingPath({ path: row.path, operation: "storage.cleanup" });
-        yield* policy.assertExistingPath({
-          path: project.workspaceRoot,
-          operation: "storage.cleanup",
-        });
-        yield* attempt(() => assertCanonicalPath(row.path));
-        if (row.category === "worktree") {
-          if (!row.repository_path)
-            return yield* new StorageError({ detail: "Ownership repository is missing." });
-          const current = yield* attempt(() =>
-            captureWorktreeIdentity(row.repository_path!, row.path),
-          );
-          if (JSON.stringify(current) !== row.identity_json)
-            return yield* new StorageError({ detail: "Worktree ownership identity changed." });
-          const registered = yield* git.listWorktreePaths(project.workspaceRoot);
-          if (!registered.includes(row.path))
-            return yield* new StorageError({
-              detail: "Git no longer registers this exact checkout.",
-            });
-          yield* attempt(() => assertCleanWorktree(row.path, row.repository_path!));
-        } else {
-          const temporaryRoot = yield* attempt(() =>
-            assertCanonicalPath(path.join(config.stateDir, "storage-temporary")),
-          );
-          if (path.dirname(row.path) !== temporaryRoot)
-            return yield* new StorageError({
-              detail: "Temporary data is outside Ryco's dedicated staging directory.",
-            });
-          const gitMarker = yield* attempt(() =>
-            fs
-              .lstat(path.join(row.path, ".git"))
-              .then(() => true)
-              .catch((cause) => {
-                if (cause.code === "ENOENT") return false;
-                throw cause;
-              }),
-          );
-          if (gitMarker)
-            return yield* new StorageError({
-              detail: "Temporary directory contains a repository; protected.",
-            });
-          const stat = yield* attempt(() => fs.lstat(row.path));
-          const identity = yield* Effect.try({
-            try: () =>
-              JSON.parse(row.identity_json) as {
-                device: number;
-                inode: number;
-                fingerprint?: string;
-              },
-            catch: failure,
-          });
-          if (
-            identity.device !== stat.dev ||
-            identity.inode !== stat.ino ||
-            !identity.fingerprint ||
-            identity.fingerprint !== size.fingerprint
-          )
-            return yield* new StorageError({
-              detail: "Completed temporary data changed; external or unfinished work is protected.",
-            });
-        }
-      }).pipe(Effect.match({ onSuccess: () => null, onFailure: detail }));
-      if (safety) return protect(safety);
-      yield* sql`UPDATE storage_owned_entries SET project_id = ${projectId}, completed_at = ${completedAt} WHERE id = ${row.id}`;
       return {
-        ...base,
-        bytes: size.bytes,
-        sizeStatus: size.sizeStatus,
+        kind: "candidate",
+        base,
+        project,
+        associated: associated.length > 0,
+        completedAt,
+      } satisfies Classification;
+    });
+
+  /** Apparent size for display only; protected rows are never eligible whatever it says. */
+  const displaySize = (row: OwnedStorageRow, budget: ScanBudget) =>
+    policy.assertExistingPath({ path: row.path, operation: "storage.scan" }).pipe(
+      Effect.andThen(attempt(() => measureDirectory(row.path, budget))),
+      Effect.orElseSucceed(() => UNKNOWN_SIZE),
+    );
+
+  /** Ownership, Git and filesystem checks that must hold right before a row is removed. */
+  const safetyChecks = (
+    row: OwnedStorageRow,
+    project: Extract<Classification, { kind: "candidate" }>["project"],
+  ) =>
+    Effect.gen(function* () {
+      yield* policy.assertExistingPath({ path: row.path, operation: "storage.cleanup" });
+      yield* policy.assertExistingPath({
+        path: project.workspaceRoot,
+        operation: "storage.cleanup",
+      });
+      yield* attempt(() => assertCanonicalPath(row.path));
+      if (row.category === "worktree") {
+        if (!row.repository_path)
+          return yield* new StorageError({ detail: "Ownership repository is missing." });
+        const current = yield* attempt(() =>
+          captureWorktreeIdentity(row.repository_path!, row.path),
+        );
+        if (JSON.stringify(current) !== row.identity_json)
+          return yield* new StorageError({ detail: "Worktree ownership identity changed." });
+        const registered = yield* git.listWorktreePaths(project.workspaceRoot);
+        if (!registered.includes(row.path))
+          return yield* new StorageError({
+            detail: "Git no longer registers this exact checkout.",
+          });
+        yield* attempt(() => assertCleanWorktree(row.path, row.repository_path!));
+      } else {
+        const temporaryRoot = yield* attempt(() =>
+          assertCanonicalPath(path.join(config.stateDir, "storage-temporary")),
+        );
+        if (path.dirname(row.path) !== temporaryRoot)
+          return yield* new StorageError({
+            detail: "Temporary data is outside Ryco's dedicated staging directory.",
+          });
+        const gitMarker = yield* attempt(() =>
+          fs
+            .lstat(path.join(row.path, ".git"))
+            .then(() => true)
+            .catch((cause) => {
+              if (cause.code === "ENOENT") return false;
+              throw cause;
+            }),
+        );
+        if (gitMarker)
+          return yield* new StorageError({
+            detail: "Temporary directory contains a repository; protected.",
+          });
+      }
+    });
+
+  /** Completed staging data must still match the manifest pinned at completion. */
+  const assertTemporaryUnchanged = (row: OwnedStorageRow, size: MeasuredSize) =>
+    Effect.gen(function* () {
+      const stat = yield* attempt(() => fs.lstat(row.path));
+      const identity = yield* Effect.try({
+        try: () =>
+          JSON.parse(row.identity_json) as {
+            device: number;
+            inode: number;
+            fingerprint?: string;
+          },
+        catch: failure,
+      });
+      if (
+        identity.device !== stat.dev ||
+        identity.inode !== stat.ino ||
+        !identity.fingerprint ||
+        identity.fingerprint !== size.fingerprint
+      )
+        return yield* new StorageError({
+          detail: "Completed temporary data changed; external or unfinished work is protected.",
+        });
+    });
+
+  /**
+   * Whether a candidate can be removed now. The checks that need no traversal (ownership,
+   * Git registration, the classified Git status, merge state) run first, so a checkout they
+   * protect is never walked; then the whole tree is measured within `budget` and must be
+   * complete, link-free and small enough for one quarantined removal. A spent `budget` (a
+   * scan's shared one) refuses before any Git process starts, so it bounds those checks too.
+   */
+  const verify = (
+    row: OwnedStorageRow,
+    candidate: Extract<Classification, { kind: "candidate" }>,
+    budget: ScanBudget,
+  ) =>
+    Effect.gen(function* () {
+      const refuse = (reason: string, size: MeasuredSize | null = null): Refusal => ({
+        eligible: false,
+        reason,
+        size,
+      });
+      const present = yield* policy
+        .assertExistingPath({ path: row.path, operation: "storage.scan" })
+        .pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+      if (!present) return refuse(UNAVAILABLE, UNKNOWN_SIZE);
+      if (budget.remaining <= 0 || Date.now() >= budget.deadline) return refuse(INCOMPLETE);
+      const unsafe = yield* safetyChecks(row, candidate.project).pipe(
+        Effect.match({ onSuccess: () => null, onFailure: detail }),
+      );
+      if (unsafe) return refuse(unsafe);
+      const size = yield* attempt(() =>
+        measureDirectory(row.path, budget, new Set(), row.category === "temporary"),
+      ).pipe(Effect.orElseSucceed(() => UNKNOWN_SIZE));
+      if (size.sizeStatus === "unknown") return refuse(UNAVAILABLE, size);
+      if (size.unsafe || size.sizeStatus !== "complete") return refuse(INCOMPLETE, size);
+      if ((size.entries ?? 0) > MAX_QUARANTINE_REMOVAL_ENTRIES)
+        return refuse(
+          `Too many files to remove safely in one pass (more than ${MAX_QUARANTINE_REMOVAL_ENTRIES.toLocaleString("en-US")}).`,
+          size,
+        );
+      if (row.category === "temporary") {
+        const changed = yield* assertTemporaryUnchanged(row, size).pipe(
+          Effect.match({ onSuccess: () => null, onFailure: detail }),
+        );
+        if (changed) return refuse(changed, size);
+      }
+      yield* sql`UPDATE storage_owned_entries SET project_id = ${candidate.base.projectId}, completed_at = ${candidate.completedAt} WHERE id = ${row.id}`;
+      return {
         eligible: true,
-        reason: associated.length
-          ? "Archived, stopped session; owned and clean checkout."
-          : "Abandoned Ryco-owned data; no session references this path.",
-      } satisfies StorageEntry;
+        entry: {
+          ...candidate.base,
+          bytes: size.bytes,
+          sizeStatus: size.sizeStatus,
+          eligible: true,
+          reason: candidate.associated
+            ? "Archived, stopped session; owned and clean checkout."
+            : "Abandoned Ryco-owned data; no session references this path.",
+        },
+      } satisfies Verification;
+    });
+
+  /**
+   * The entry for a row: as verified, or protected. A refusal shows what verification measured;
+   * with a `displayBudget` (scans) an unmeasured one is measured for display, else its size
+   * stays unknown (preview and removal only need the verdict).
+   */
+  const presentEntry = (
+    row: OwnedStorageRow,
+    base: EntryBase,
+    verdict: Verification,
+    displayBudget: ScanBudget | null,
+  ) =>
+    verdict.eligible
+      ? Effect.succeed(verdict.entry)
+      : Effect.map(
+          verdict.size
+            ? Effect.succeed(verdict.size)
+            : displayBudget
+              ? displaySize(row, displayBudget)
+              : Effect.succeed(UNKNOWN_SIZE),
+          (measured): StorageEntry => ({
+            ...base,
+            bytes: measured.bytes,
+            sizeStatus: measured.sizeStatus,
+            eligible: false,
+            reason: verdict.reason,
+          }),
+        );
+
+  /** Classifies and verifies one row for preview and removal (no display measurement). */
+  const inspect = (row: OwnedStorageRow, context: InventoryContext, budget: ScanBudget) =>
+    Effect.gen(function* () {
+      const classified = yield* classify(row, context);
+      const verdict =
+        classified.kind === "candidate"
+          ? yield* verify(row, classified, budget)
+          : classified.refusal;
+      return yield* presentEntry(row, classified.base, verdict, null);
     });
 
   const scanInventory = (projectId?: ProjectId, cursor?: string) =>
@@ -519,14 +644,27 @@ export function makeStorageService(deps: {
       Effect.gen(function* () {
         const context = yield* inventory();
         const rows = yield* ownedRows(projectId, cursor);
-        const budget = { remaining: 30_000, deadline: Date.now() + 3000 };
+        const budget = measurementBudget();
         const entries: StorageEntry[] = [];
         // A single shared budget bounds all node I/O. No startup scan, no repository globbing.
+        // Candidates are verified first, so protected rows earlier in the ledger never use
+        // the budget a removable one needs; protected rows are measured with what is left.
+        const classified: { row: OwnedStorageRow; classification: Classification }[] = [];
         for (const row of rows.slice(0, 256)) {
           if (projectId && row.project_id && row.project_id !== projectId) continue;
-          const entry = yield* inspect(row, context, budget);
-          if (!projectId || entry.projectId === projectId) entries.push(entry);
+          const classification = yield* classify(row, context);
+          if (!projectId || classification.base.projectId === projectId)
+            classified.push({ row, classification });
         }
+        const verdicts: Verification[] = [];
+        for (const { row, classification } of classified)
+          verdicts.push(
+            classification.kind === "candidate"
+              ? yield* verify(row, classification, budget)
+              : classification.refusal,
+          );
+        for (const [index, { row, classification }] of classified.entries())
+          entries.push(yield* presentEntry(row, classification.base, verdicts[index]!, budget));
         const registeredOwnership = yield* sql<{
           path: string;
         }>`SELECT path FROM storage_owned_entries WHERE ${sql.in(
@@ -628,7 +766,7 @@ export function makeStorageService(deps: {
               context.protectedPaths?.some((root) => contains(root, entry.path))) ||
             (entry.category === "repository" && accountingIncomplete);
           const size = protectedSource
-            ? { bytes: null, sizeStatus: "unknown" as const, unsafe: true }
+            ? UNKNOWN_SIZE
             : yield* policy
                 .assertExistingPath({ path: entry.path, operation: "storage.scan" })
                 .pipe(
@@ -641,11 +779,7 @@ export function makeStorageService(deps: {
                       ),
                     ),
                   ),
-                  Effect.orElseSucceed(() => ({
-                    bytes: null,
-                    sizeStatus: "unknown" as const,
-                    unsafe: true,
-                  })),
+                  Effect.orElseSucceed(() => UNKNOWN_SIZE),
                 );
           const shown = protectedSource ? size : yield* sizeOnDisk(entry, size);
           entries.push({
@@ -715,7 +849,7 @@ export function makeStorageService(deps: {
     );
 
   // On every page, not only the first: a page replaces the shown snapshot, and the report is a
-  // few header reads. Retention scans use `scanInventory`; nobody sees their report.
+  // few header reads. Retention passes do not scan (see `runRetention`), so only shown scans pay it.
   const scan = (projectId?: ProjectId, cursor?: string) =>
     scanInventory(projectId, cursor).pipe(
       Effect.flatMap((snapshot) =>
@@ -736,8 +870,9 @@ export function makeStorageService(deps: {
       const rows =
         yield* sql<OwnedStorageRow>`SELECT * FROM storage_owned_entries WHERE ${sql.in("id", entryIds)}`;
       const entries: StorageEntry[] = [];
-      const budget = { remaining: 30_000, deadline: Date.now() + 3000 };
-      for (const row of rows) entries.push(yield* inspect(row, context, budget));
+      // Each entry gets its own budget, as at removal: entries selected from different scan
+      // pages each fit their page's budget, not necessarily one shared one.
+      for (const row of rows) entries.push(yield* inspect(row, context, measurementBudget()));
       if (
         new Set(entryIds).size !== entryIds.length ||
         entries.length !== entryIds.length ||
@@ -784,10 +919,7 @@ export function makeStorageService(deps: {
           status: "protected" as const,
           detail: "Provider archive/source configuration changed. Preview again.",
         };
-      const fresh = yield* inspect(row, context, {
-        remaining: 30_000,
-        deadline: Date.now() + 3000,
-      });
+      const fresh = yield* inspect(row, context, measurementBudget());
       if (!fresh.eligible || fresh.path !== entry.path || fresh.projectId !== entry.projectId)
         return { id: entry.id, status: "protected" as const, detail: fresh.reason };
       let settingsLease: ReturnType<typeof acquireStorageSettingsLease> | null = null;
@@ -851,20 +983,10 @@ export function makeStorageService(deps: {
       // Persistent refusal state now owns this path. Long I/O runs outside the admission lock.
       // Normal turn/bootstrap/editor/terminal admissions all refuse this path until completion.
       const finalContext = yield* inventory();
-      const revalidated = yield* inspect(row, finalContext, {
-        remaining: 30_000,
-        deadline: Date.now() + 3000,
-      });
+      const revalidated = yield* inspect(row, finalContext, measurementBudget());
       const deletionManifest =
         row.category === "worktree"
-          ? yield* attempt(() =>
-              measureDirectory(
-                row.path,
-                { remaining: 30_000, deadline: Date.now() + 3000 },
-                new Set(),
-                true,
-              ),
-            )
+          ? yield* attempt(() => measureDirectory(row.path, measurementBudget(), new Set(), true))
           : null;
       // Read authoritative settings AFTER the final filesystem inspection. Resolve
       // source declarations again, including aliases/missing leaves, under admission.
@@ -1076,7 +1198,16 @@ export function makeStorageService(deps: {
       );
     });
 
+  // Where the next retention pass continues in the ledger (by id); wraps to the start.
   let retentionCursor: string | undefined;
+  /**
+   * One retention pass. No inventory scan: classification needs no traversal, and each due
+   * candidate is verified with its own fresh budget against the pass's inventory, so protected
+   * or large rows earlier in the ledger never use up what a due one needs. Only eligible ones go
+   * to `remove`, which takes a fresh inventory and verifies them again. A pass removes at most
+   * 20 entries and verifies at most 64 due candidates; the next pass continues after the last
+   * one it checked, so candidates that stay protected never keep the ones after them waiting.
+   */
   const runRetention = Effect.gen(function* () {
     const currentSettings = yield* settings.getSettings;
     if (
@@ -1086,33 +1217,53 @@ export function makeStorageService(deps: {
       ].some((value) => value?.automatic)
     )
       return;
-    const snapshot = yield* scanInventory(undefined, retentionCursor);
-    retentionCursor = snapshot.nextCursor ?? undefined;
-    const rows = yield* sql<OwnedStorageRow>`SELECT * FROM storage_owned_entries WHERE ${sql.in(
-      "id",
-      snapshot.entries.filter((entry) => entry.eligible).map((entry) => entry.id),
-    )}`;
-    for (const entry of snapshot.entries
-      .filter((entry) => {
-        const row = rows.find((row) => row.id === entry.id);
-        return (
-          entry.eligible &&
-          row?.completed_at &&
-          retentionDue(
-            resolveStorageRetentionPolicy(currentSettings, entry.projectId),
-            row.category,
-            row.completed_at,
-            Date.now(),
-          )
+    const context = yield* inventory();
+    let cursor = retentionCursor;
+    let verified = 0;
+    let removals = 0;
+    // 8 pages of 256 rows: the ledger accounting bound (2,048 rows) per pass.
+    for (let page = 0; page < 8; page++) {
+      const rows = yield* ownedRows(undefined, cursor);
+      for (const row of rows.slice(0, 256)) {
+        cursor = row.id;
+        const classified = yield* classify(row, context).pipe(
+          Effect.tapError((cause) =>
+            Effect.logWarning("storage retention could not classify an entry", cause),
+          ),
+          Effect.option,
         );
-      })
-      .slice(0, 20)) {
-      yield* remove(
-        entry,
-        resolveStorageRetentionPolicy(currentSettings, entry.projectId),
-        true,
-      ).pipe(Effect.ignore({ log: true }));
+        if (Option.isNone(classified) || classified.value.kind !== "candidate") continue;
+        const candidate = classified.value;
+        const retention = resolveStorageRetentionPolicy(currentSettings, candidate.base.projectId);
+        if (!retentionDue(retention, row.category, candidate.completedAt, Date.now())) continue;
+        const verdict = yield* verify(row, candidate, measurementBudget()).pipe(
+          Effect.tapError((cause) =>
+            Effect.logWarning("storage retention could not verify an entry", cause),
+          ),
+          Effect.option,
+        );
+        if (Option.isSome(verdict) && verdict.value.eligible) {
+          const status = yield* remove(verdict.value.entry, retention, true).pipe(
+            Effect.map((result) => result.status),
+            Effect.tapError((cause) =>
+              Effect.logWarning("storage retention could not remove an entry", cause),
+            ),
+            Effect.orElseSucceed(() => "failed" as const),
+          );
+          // Only removals that started count toward the operation cap; refusals cost a check.
+          if (status !== "protected") removals++;
+        }
+        if (++verified >= 64 || removals >= 20) {
+          retentionCursor = cursor;
+          return;
+        }
+      }
+      if (rows.length <= 256) {
+        cursor = undefined;
+        break;
+      }
     }
+    retentionCursor = cursor;
   }).pipe(Effect.mapError(failure));
 
   /** Only this allocator makes temporary data eligible. Existing caches/archives are never adopted. */
@@ -1144,12 +1295,7 @@ export function makeStorageService(deps: {
         if (JSON.stringify({ device: stat.dev, inode: stat.ino }) !== row.identity_json)
           return yield* new StorageError({ detail: "Staging allocation identity changed." });
         const size = yield* attempt(() =>
-          measureDirectory(
-            row.path,
-            { remaining: 30_000, deadline: Date.now() + 3000 },
-            new Set(),
-            true,
-          ),
+          measureDirectory(row.path, measurementBudget(), new Set(), true),
         );
         if (size.unsafe || size.sizeStatus !== "complete" || !size.fingerprint)
           return yield* new StorageError({
